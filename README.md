@@ -11,6 +11,7 @@ Think Discord / TeamSpeak — but it runs on *your* server, on *one* `docker com
 ![Platforms](https://img.shields.io/badge/clients-web%20%C2%B7%20windows%20%C2%B7%20android-informational)
 ![No tracking](https://img.shields.io/badge/telemetry-none-success)
 ![Self-hosted](https://img.shields.io/badge/self--hosted-one%20compose-blue)
+[![Boosty](https://img.shields.io/badge/Boosty-support-F15F2C?logo=boosty&logoColor=white)](https://boosty.to/glebbuster)
 
 </div>
 
@@ -110,6 +111,10 @@ Download the desktop or Android app from the **[Releases page](https://github.co
 | Update backups | `./.gusvoice-backups/<timestamp>/` |
 
 To reconfigure from scratch, delete `.env` and re-run `./install.sh`. To run behind **your own** reverse proxy (Nginx Proxy Manager / nginx / Traefik) instead of the bundled Caddy, the installer asks — see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
+
+## Support
+
+GusVoice is free to self-host and built in the open. If it's useful to you, you can support development on **[Boosty](https://boosty.to/glebbuster)** — it helps cover servers, signing certificates and build hardware. Thank you 🪿
 
 ## License
 

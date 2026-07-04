@@ -11,6 +11,7 @@
 ![Platforms](https://img.shields.io/badge/clients-web%20%C2%B7%20windows%20%C2%B7%20android-informational)
 ![No tracking](https://img.shields.io/badge/telemetry-none-success)
 ![Self-hosted](https://img.shields.io/badge/self--hosted-one%20compose-blue)
+[![Boosty](https://img.shields.io/badge/Boosty-поддержать-F15F2C?logo=boosty&logoColor=white)](https://boosty.to/glebbuster)
 
 </div>
 
@@ -110,6 +111,10 @@ cd gusvoice
 | Бэкапы обновлений | `./.gusvoice-backups/<метка-времени>/` |
 
 Чтобы настроить с нуля, удали `.env` и перезапусти `./install.sh`. Чтобы работать за **своим** обратным прокси (Nginx Proxy Manager / nginx / Traefik) вместо встроенного Caddy — установщик спросит; подробности в [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
+
+## Поддержать
+
+GusVoice бесплатен для self-host и делается в открытую. Если он тебе полезен — поддержи разработку на **[Boosty](https://boosty.to/glebbuster)**: это помогает оплачивать серверы, сертификаты подписи и железо для сборок. Спасибо 🪿
 
 ## Лицензия
 
