@@ -30,6 +30,11 @@ say()  { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 info() { printf '  \033[0;90m%s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Colours for the final "point X at Y" summary — each kind of value gets its own so the dense block
+# is scannable: IP addresses (cyan), the service ports a reverse proxy targets (yellow), and the ports
+# you forward/open DIRECTLY at the router/firewall for LiveKit media + TLS (magenta).
+C_IP=$'\033[1;36m'; C_PORT=$'\033[1;33m'; C_FWD=$'\033[1;35m'; C_OFF=$'\033[0m'
+
 gen_secret() { # 32 random bytes as hex — openssl if present, else /dev/urandom (no openssl dep)
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
   else head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
@@ -269,12 +274,12 @@ LAN="${LOCAL_IP:-<this-machine-LAN-IP>}"
 
 upstreams() { # $1 = address — print the 6 reverse-proxy hosts pointing at it
   cat <<EOF
-       voice.${BASE_DOMAIN}     ->  ${1}:8080
-       api.${BASE_DOMAIN}       ->  ${1}:4000    (enable WebSockets)
-       presence.${BASE_DOMAIN}  ->  ${1}:4001    (enable WebSockets)
-       lk.${BASE_DOMAIN}        ->  ${1}:7880    (enable WebSockets)
-       media.${BASE_DOMAIN}     ->  ${1}:9000
-       ntfy.${BASE_DOMAIN}      ->  ${1}:8082
+       voice.${BASE_DOMAIN}     ->  ${C_IP}${1}${C_OFF}:${C_PORT}8080${C_OFF}
+       api.${BASE_DOMAIN}       ->  ${C_IP}${1}${C_OFF}:${C_PORT}4000${C_OFF}    (enable WebSockets)
+       presence.${BASE_DOMAIN}  ->  ${C_IP}${1}${C_OFF}:${C_PORT}4001${C_OFF}    (enable WebSockets)
+       lk.${BASE_DOMAIN}        ->  ${C_IP}${1}${C_OFF}:${C_PORT}7880${C_OFF}    (enable WebSockets)
+       media.${BASE_DOMAIN}     ->  ${C_IP}${1}${C_OFF}:${C_PORT}9000${C_OFF}
+       ntfy.${BASE_DOMAIN}      ->  ${C_IP}${1}${C_OFF}:${C_PORT}8082${C_OFF}
 EOF
 }
 
@@ -290,28 +295,28 @@ if [ "${USE_CADDY:-1}" = "1" ]; then
   1) DNS — point these at this server (a wildcard *.${BASE_DOMAIN} covers them all):
        voice.${BASE_DOMAIN}   api.${BASE_DOMAIN}   presence.${BASE_DOMAIN}
        lk.${BASE_DOMAIN}      media.${BASE_DOMAIN}   ntfy.${BASE_DOMAIN}
-     ->  ${PUB}
-  2) Firewall — open  80/tcp, 443/tcp  +  7881/tcp, 7882/udp  (LiveKit media, direct).
+     ->  ${C_IP}${PUB}${C_OFF}
+  2) Firewall — open  ${C_FWD}80/tcp${C_OFF}, ${C_FWD}443/tcp${C_OFF}  +  ${C_FWD}7881/tcp${C_OFF}, ${C_FWD}7882/udp${C_OFF}  (LiveKit media, direct).
 EOF
   if [ "$BEHIND_NAT" = "1" ]; then
     cat <<EOF
-     ⚠ This box is behind NAT (LAN ${LAN}, WAN ${PUB}). On your ROUTER, forward
-       80/tcp 443/tcp 7881/tcp 7882/udp  ->  ${LAN}  — otherwise nothing is reachable from outside.
+     ⚠ This box is behind NAT (LAN ${C_IP}${LAN}${C_OFF}, WAN ${C_IP}${PUB}${C_OFF}). On your ROUTER, forward
+       ${C_FWD}80/tcp${C_OFF} ${C_FWD}443/tcp${C_OFF} ${C_FWD}7881/tcp${C_OFF} ${C_FWD}7882/udp${C_OFF}  ->  ${C_IP}${LAN}${C_OFF}  — otherwise nothing is reachable from outside.
 EOF
   fi
 elif [ "$BIND_ADDR" = "0.0.0.0" ] && [ "$BEHIND_NAT" = "1" ]; then
   # own proxy on ANOTHER host AND this box is behind NAT — upstream depends on WHERE the proxy runs
   cat <<EOF
 
-  TLS: your OWN reverse proxy (no Caddy). This box is behind NAT (LAN ${LAN}, WAN ${PUB}), so the
+  TLS: your OWN reverse proxy (no Caddy). This box is behind NAT (LAN ${C_IP}${LAN}${C_OFF}, WAN ${C_IP}${PUB}${C_OFF}), so the
   upstream address depends on where your proxy runs:
-       • proxy in the SAME LAN            ->  use  ${LAN}      (this box's LAN IP)
-       • proxy OUTSIDE (other host / DC)  ->  use  ${PUB}   (+ forward that TCP port on your router)
+       • proxy in the SAME LAN            ->  use  ${C_IP}${LAN}${C_OFF}      (this box's LAN IP)
+       • proxy OUTSIDE (other host / DC)  ->  use  ${C_IP}${PUB}${C_OFF}   (+ forward that TCP port on your router)
   Map each host to <that-IP>:port —
-       voice :8080    api :4000 (WS)    presence :4001 (WS)
-       lk :7880 (WS)  media :9000       ntfy :8082
+       voice :${C_PORT}8080${C_OFF}    api :${C_PORT}4000${C_OFF} (WS)    presence :${C_PORT}4001${C_OFF} (WS)
+       lk :${C_PORT}7880${C_OFF} (WS)  media :${C_PORT}9000${C_OFF}       ntfy :${C_PORT}8082${C_OFF}
   1) DNS — point the 6 names at your proxy.
-  2) LiveKit media — forward  7881/tcp + 7882/udp  from the router (WAN ${PUB}) to ${LAN}
+  2) LiveKit media — forward  ${C_FWD}7881/tcp${C_OFF} + ${C_FWD}7882/udp${C_OFF}  from the router (WAN ${C_IP}${PUB}${C_OFF}) to ${C_IP}${LAN}${C_OFF}
      (clients reach media DIRECTLY from the internet, not through the proxy).
 EOF
 else
@@ -325,14 +330,14 @@ EOF
   upstreams "$UPSTREAM"
   cat <<EOF
   1) DNS — point those 6 names at your proxy.
-  2) Firewall — open the ports above to your proxy  +  7881/tcp, 7882/udp  (LiveKit media, direct).
+  2) Firewall — open the ports above to your proxy  +  ${C_FWD}7881/tcp${C_OFF}, ${C_FWD}7882/udp${C_OFF}  (LiveKit media, direct).
 EOF
 fi
 
 if [ "$CGNAT" = "1" ]; then
   cat <<EOF
 
-  ⚠ CGNAT DETECTED — your public IP ${PUB} is in the 100.64.0.0/10 carrier-grade-NAT range.
+  ⚠ CGNAT DETECTED — your public IP ${C_IP}${PUB}${C_OFF} is in the 100.64.0.0/10 carrier-grade-NAT range.
     Inbound connections from the internet can't reach this box directly (port-forwarding won't help).
     Use an outbound tunnel instead — e.g. Cloudflare Tunnel or Tailscale Funnel.
 EOF

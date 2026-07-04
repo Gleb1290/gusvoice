@@ -92,6 +92,10 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       MAIL_FROM: ${MAIL_FROM:-GusVoice <noreply@localhost>}
+      # Anti-bot registration (#135): purge abandoned unverified accounts older than N days (0 = off),
+      # and an instance-wide signups/hour ceiling on top of the per-IP limit. Both have safe defaults.
+      UNVERIFIED_TTL_DAYS: ${UNVERIFIED_TTL_DAYS:-7}
+      REGISTER_GLOBAL_MAX: ${REGISTER_GLOBAL_MAX:-100}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-}
       MINIO_PORT: ${MINIO_PORT:-9000}
       MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
