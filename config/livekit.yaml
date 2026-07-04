@@ -1,0 +1,75 @@
+# =============================================================================
+# LiveKit SFU configuration — single node, single host.
+#
+# This file contains NO secrets. The API key/secret pair is injected at runtime
+# via the LIVEKIT_KEYS environment variable (see docker-compose.yml + .env).
+#
+# All media (voice, video, screen-share) is forwarded through this SFU. LiveKit
+# has no peer-to-peer mode, so the "server-relayed only" requirement is satisfied
+# by the architecture itself — there is nothing to disable.
+# =============================================================================
+
+port: 7880 # HTTP API + WebSocket signaling. NPM reverse-proxies this as wss://.
+log_level: info
+# Prometheus metrics (rooms/participants, packet loss, bytes in/out). Scrape target
+# :6789/metrics — compose maps it to ${BIND_ADDR} (LAN-only; nothing port-forwards it).
+# Ready-made Grafana dashboard: grafana.com id 15237 ("LiveKit Metrics").
+prometheus_port: 6789
+
+rtc:
+  tcp_port: 7881 # ICE/TCP fallback, used when a client's network blocks UDP.
+  udp_port: 7882 # Single-port UDP mux for ALL RTC media (no 50000-60000 range needed).
+  use_external_ip: true # Discover & advertise the host's public IP via STUN (set node_ip below if wrong).
+  allow_tcp_fallback: true # let clients fall back to ICE/TCP 7881 when UDP can't establish.
+  # NOTE: keep the livekit-server image version in sync with the client SDK (livekit-client /
+  # @livekit/components-react). A too-old server makes the modern client hit the new /rtc/v1
+  # signalling path, get a 404, fall back, then fail negotiation -> an endless ~15s reconnect
+  # loop for EVERY client (this bit us hard: server was v1.8.4 / proto 15, client 2.20.0 / proto 17;
+  # fixed by upgrading the server image — NOT a NAT/firewall problem). See docker-compose.yml.
+  # node_ip: 203.0.113.10   # Set explicitly instead if STUN guesses wrong (e.g. 1:1 NAT).
+
+# The presence service consumes these webhooks over the internal docker network
+# (never through NPM). `api_key` must name one of the keys provided via
+# LIVEKIT_KEYS — the NAME is not a secret; keep it equal to LIVEKIT_API_KEY.
+webhook:
+  api_key: gusvoice
+  urls:
+    - http://presence:4001/livekit/webhook
+
+# A single LiveKit node does not need Redis. Uncomment to scale to multiple nodes.
+# redis:
+#   address: redis:6379
+
+room:
+  # Auto-close an empty voice room shortly after the last participant leaves.
+  empty_timeout: 120
+  max_participants: 0 # 0 = unlimited
+
+# NOTE (2026-06): the speaking RING no longer depends on this block. The client computes the ring
+# from a LOCAL Web-Audio level meter per track (own published mic + each peer), see VoiceConnection.tsx
+# — instant attack, no SFU round-trip, no word-gap flicker. This server detection is now only a
+# graceful-degradation fallback (used if a participant's analyser fails to init). So DO NOT chase the
+# ring by re-tuning the knobs below — it won't move the ring. Left as-is for the fallback / future use.
+#
+# Active-speaker (speaking-ring) detection. TOP-LEVEL block (not under room:).
+# Goal: snappy ONSET, lights at normal volume, no FLICKER during continuous speech.
+# Tuning history (each restart = a data point — directions confirmed empirically):
+#   defaults (500 / smooth 4 / pct 40) → lights at normal volume, STABLE, but ~2s LAG.
+#   (150 / smooth 2 / pct 40)          → snappy + lights normally, but FLICKERED (smooth 2 too low).
+#   (120 / smooth 4 / pct 15)          → only SHOUTING registered.
+#   (150 / smooth 2 / pct 10)          → only SHOUTING registered.
+# Lessons (note: opposite of what the field NAMES suggest):
+#   * min_percentile: HIGHER = MORE sensitive (lights easier). Default 40 lights at normal volume;
+#     dropping it only made the ring need shouting. KEEP at 40.
+#   * smooth_intervals: provides STABILITY (anti-flicker). LOW (2) flickers. KEEP near the default 4.
+#   * update_interval: the safe LAG knob — lower = snappier, without touching sensitivity/stability.
+# So: keep the DEFAULT sensitivity+stability (pct 40 / smooth 4) and just lower update_interval.
+# Effective onset window ≈ smooth_intervals × update_interval = 4 × 150 = ~600ms (vs ~2s default).
+# FINAL: keep the SENSITIVE+snappy detector (smooth 2 lit at normal volume; smooth 4 needed
+# shouting). Its only flaw — flicker in word gaps — is now absorbed CLIENT-side by a 400ms
+# speaking-ring hold (VoiceConnection recompute), which is robust regardless of this detector's quirks.
+audio:
+  active_level: 30 # default; 0-127, lower = louder threshold to count as active
+  min_percentile: 40 # default — higher = more sensitive; do not lower (10/15 needed shouting)
+  update_interval: 150 # default 500 — lower = snappier onset
+  smooth_intervals: 2 # LOW = sensitive onset; the client-side hold smooths the resulting flicker

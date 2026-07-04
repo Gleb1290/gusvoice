@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/build
+**/.git
+**/.gitea
+**/target
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+!**/.env.example
+README.md
+docs

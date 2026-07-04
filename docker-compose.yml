@@ -1,0 +1,253 @@
+# =============================================================================
+# GusVoice — full stack on ONE host, one compose file.
+#
+#   postgres + redis + livekit (SFU) + backend + presence + client
+#
+# TLS / public hostnames are terminated by your EXISTING Nginx Proxy Manager,
+# which sits in front of this stack (see README "Reverse proxy / NPM").
+#
+# Port-binding strategy (BIND_ADDR, default 127.0.0.1):
+#   * Services that NPM proxies (client/backend/presence/livekit-signaling) bind to
+#     ${BIND_ADDR}. Default 127.0.0.1 suits local dev or NPM on the SAME host. When
+#     NPM runs on a DIFFERENT host, set BIND_ADDR=0.0.0.0 so it can reach them.
+#   * LiveKit media ports 7881/tcp + 7882/udp always bind 0.0.0.0 — clients reach
+#     them DIRECTLY at the host's public IP (NPM does not proxy media).
+# =============================================================================
+
+name: gusvoice
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  livekit:
+    image: livekit/livekit-server:v1.13.1
+    restart: unless-stopped
+    command: ['--config', '/etc/livekit.yaml']
+    environment:
+      # "<key-name>: <secret>" — name must match webhook.api_key in livekit.yaml.
+      LIVEKIT_KEYS: '${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}'
+    volumes:
+      - ./config/livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:7880:7880' # signaling (NPM → wss)
+      - '7881:7881' # TCP media fallback (public)
+      - '7882:7882/udp' # UDP media mux (public)
+      - '${BIND_ADDR:-127.0.0.1}:6789:6789' # Prometheus metrics (LAN-only; see livekit.yaml)
+    networks: [internal]
+
+  backend:
+    image: ${REGISTRY:-gusvoice}/backend:${TAG:-local}
+    build:
+      context: .
+      dockerfile: packages/backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      BACKEND_PORT: '4000'
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_URL_INTERNAL: http://livekit:7880
+      LIVEKIT_URL_EXTERNAL: ${LIVEKIT_URL_EXTERNAL}
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN}
+      SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-GusVoice <noreply@localhost>}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-}
+      MINIO_PORT: ${MINIO_PORT:-9000}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-}
+      # Self-hosted F-Droid repo — the in-app Android install tab reads these (authed) for the QR + link.
+      # FDROID_ADD_URL is the full URL-encoded credentialed add-link (encoded so no literal `$` for
+      # compose .env interpolation to mangle). Empty => install tab shows "недоступно". Values in .env.
+      FDROID_REPO_URL: ${FDROID_REPO_URL:-}
+      FDROID_FINGERPRINT: ${FDROID_FINGERPRINT:-}
+      FDROID_ADD_URL: ${FDROID_ADD_URL:-}
+      # Self-hosted ntfy push gateway (VM 118). Backend POSTs UnifiedPush wake payloads to devices'
+      # endpoints (validated to be on NTFY_BASE_URL) with NTFY_TOKEN. Empty => push disabled. Values in .env.
+      NTFY_BASE_URL: ${NTFY_BASE_URL:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:4000:4000'
+    # node images carry no curl/wget for sure — node's built-in fetch is always there.
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [internal]
+
+  presence:
+    image: ${REGISTRY:-gusvoice}/presence:${TAG:-local}
+    build:
+      context: .
+      dockerfile: packages/presence/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PRESENCE_PORT: '4001'
+      REDIS_URL: redis://redis:6379
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_URL_INTERNAL: http://livekit:7880
+      BACKEND_URL_INTERNAL: http://backend:4000
+      JWT_SECRET: ${JWT_SECRET}
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN}
+    depends_on:
+      redis: { condition: service_healthy }
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:4001:4001'
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [internal]
+
+  client:
+    image: ${REGISTRY:-gusvoice}/client:${TAG:-local}
+    build:
+      context: .
+      dockerfile: apps/client/Dockerfile
+    restart: unless-stopped
+    environment:
+      # Injected into /config.js + /config.json at container start (runtime config + discovery doc).
+      VITE_API_URL: ${VITE_API_URL}
+      VITE_PRESENCE_WS: ${VITE_PRESENCE_WS}
+      VITE_PUSH_GATEWAY: ${VITE_PUSH_GATEWAY:-}
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:8080:80'
+    networks: [internal]
+
+  # ===========================================================================
+  # TURNKEY BUNDLED SERVICES (opt-in via compose profiles — OFF by default, so an
+  # existing external-proxy / external-S3 / external-ntfy deploy is unaffected).
+  # `install.sh` enables the profiles it needs. Runtime-verified at P8 (clean VPS).
+  # ===========================================================================
+
+  # Reverse proxy with automatic HTTPS (Let's Encrypt). Profile "caddy". Reaches the
+  # internal services by docker DNS (client:80, backend:4000, …) regardless of host binds.
+  caddy:
+    image: caddy:2.8.4-alpine
+    profiles: [caddy]
+    restart: unless-stopped
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3
+    networks: [internal]
+
+  # Bundled S3 (media: avatars/attachments/sounds/icons). Profile "storage". Not published
+  # to the host — Caddy serves it at media.<domain>. Console :9001 stays internal.
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z # TODO(P8): confirm/pin latest stable tag
+    profiles: [storage]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-gusvoice}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-change-me-minio-secret}
+    volumes:
+      - miniodata:/data
+    networks: [internal]
+
+  # One-shot: wait for minio, create the public-read bucket (idempotent; backend also
+  # ensures it, this just wins the startup race on first boot). Profile "storage".
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z # TODO(P8): confirm/pin latest stable tag
+    profiles: [storage]
+    restart: 'no'
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-gusvoice}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change-me-minio-secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY; do echo 'waiting for minio'; sleep 2; done;
+      mc mb -p local/$$MINIO_BUCKET || true;
+      mc anonymous set download local/$$MINIO_BUCKET;
+      echo 'minio bucket ready';
+      "
+    networks: [internal]
+
+  # Bundled push gateway (UnifiedPush over ntfy). Profile "push". anon=read-only (embedded
+  # distributor subscribes); the backend publishes with NTFY_TOKEN (created by install.sh).
+  ntfy:
+    image: binwiederhier/ntfy:v2.25.0
+    profiles: [push]
+    restart: unless-stopped
+    command: serve
+    environment:
+      NTFY_BASE_URL: https://ntfy.${BASE_DOMAIN:-localhost}
+      NTFY_LISTEN_HTTP: ':80'
+      NTFY_BEHIND_PROXY: 'true'
+      NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      NTFY_AUTH_DEFAULT_ACCESS: 'read-only'
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_ATTACHMENT_CACHE_DIR: /var/lib/ntfy/attachments
+    volumes:
+      - ntfydata:/var/lib/ntfy
+    networks: [internal]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  ntfydata:
+  caddydata:
+  caddyconfig:
+
+networks:
+  internal:
+    driver: bridge

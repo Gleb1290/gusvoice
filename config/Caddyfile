@@ -1,0 +1,49 @@
+# =============================================================================
+# GusVoice — bundled Caddy reverse proxy (compose profile "caddy").
+# Automatic HTTPS via Let's Encrypt (HTTP-01) for each subdomain. Caddy reaches the
+# internal services over the docker network by name (client/backend/presence/...).
+#
+# SUBDOMAIN MODE (this file). Point these DNS records at the host (one wildcard
+# A-record `*.<domain>` + the apex works too):
+#   voice.<domain> api.<domain> presence.<domain> lk.<domain> media.<domain> ntfy.<domain>
+#
+# Media ports 7881/tcp + 7882/udp (LiveKit RTC) are NOT proxied — they go straight to
+# the host's public IP; open them on the firewall / forward them.
+#
+# SINGLE-NAME MODE (everything under one host by path) is a separate Caddyfile —
+# pending P8 runtime testing (LiveKit under a subpath is the finicky bit).
+# =============================================================================
+
+{
+	email {$ACME_EMAIL}
+}
+
+# Web client (static SPA + /config.js + /config.json discovery doc).
+voice.{$BASE_DOMAIN} {
+	reverse_proxy client:80
+}
+
+# Backend REST + /gateway WebSocket. Caddy proxies WebSocket upgrades transparently.
+api.{$BASE_DOMAIN} {
+	reverse_proxy backend:4000
+}
+
+# Presence WebSocket.
+presence.{$BASE_DOMAIN} {
+	reverse_proxy presence:4001
+}
+
+# LiveKit signaling (wss). Media (7881/7882) bypasses Caddy — direct to the host IP.
+lk.{$BASE_DOMAIN} {
+	reverse_proxy livekit:7880
+}
+
+# Media (MinIO public-read bucket): browsers load avatars/attachments from here.
+media.{$BASE_DOMAIN} {
+	reverse_proxy minio:9000
+}
+
+# Push gateway (ntfy): the embedded distributor subscribes; the backend publishes.
+ntfy.{$BASE_DOMAIN} {
+	reverse_proxy ntfy:80
+}

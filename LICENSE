@@ -1,0 +1,33 @@
+GusVoice — Self-Hosting License (DRAFT — review before publishing; not legal advice)
+
+Copyright (c) 2026 The GusVoice authors. All rights reserved.
+
+This is a source-available-later, free-to-self-host license for the GusVoice
+distribution (the docker-compose stack, installer, configuration templates, and the
+prebuilt Web, Windows, and Android client binaries — collectively "the Software").
+
+1. Grant. You are granted a worldwide, royalty-free, non-exclusive license to download,
+   install, run, and self-host the Software for any purpose, personal or commercial,
+   free of charge, and to operate it as a service for your own users.
+
+2. No redistribution of binaries. You may not redistribute, resell, sublicense, or
+   rehost the prebuilt client binaries or docker images as your own product. Link people
+   to the official Releases instead.
+
+3. No reverse engineering. You may not decompile, disassemble, or reverse-engineer the
+   prebuilt binaries, except to the extent this restriction is prohibited by law.
+
+4. Trademarks. "GusVoice" and its logo are not licensed for use in a way that implies
+   endorsement. You may run an unmodified instance under the name; forks must rebrand.
+
+5. Future open source. The authors intend to release the full source code under the GNU
+   Affero General Public License v3.0 (AGPLv3) in a future release. Until then this
+   license governs the distribution above.
+
+6. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+   FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS BE LIABLE
+   FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+Third-party components (LiveKit, ntfy, MinIO, Caddy, Postgres, Redis, and others) are
+distributed under their own licenses; nothing here overrides them.

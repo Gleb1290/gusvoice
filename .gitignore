@@ -1,0 +1,4 @@
+# Self-hosters: never commit your generated secrets
+.env
+.env.*
+!.env.example
