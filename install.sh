@@ -30,7 +30,10 @@ say()  { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 info() { printf '  \033[0;90m%s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
-gen_secret() { openssl rand -hex 32; }
+gen_secret() { # 32 random bytes as hex — openssl if present, else /dev/urandom (no openssl dep)
+  if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
+  else head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
+}
 
 ask() { # ask "Prompt" "default" -> echoes the answer. Reads /dev/tty so a piped
         # `curl … | bash` (where stdin IS the script text) still prompts the real terminal.
@@ -64,7 +67,6 @@ fi
 
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
 say "GusVoice installer"
-command -v openssl >/dev/null 2>&1 || die "openssl is required (e.g. apt install -y openssl)"
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   info "Docker (Engine + Compose v2) was not found on this machine."
   command -v curl >/dev/null 2>&1 || die "curl is needed to install Docker (apt install -y curl) — or install Docker yourself: https://docs.docker.com/engine/install/"
