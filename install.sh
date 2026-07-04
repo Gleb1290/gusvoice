@@ -216,44 +216,55 @@ if ! grep -q '^NTFY_TOKEN=..' .env; then
 fi
 
 # --- Done -------------------------------------------------------------------
+set +e   # the final instructions must ALWAYS print — never let a stray non-zero swallow them
 BASE_DOMAIN="$(grep '^BASE_DOMAIN=' .env | cut -d= -f2)"
-BIND_ADDR="$(grep '^BIND_ADDR=' .env | cut -d= -f2 || echo 127.0.0.1)"; BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
-SUPERADMIN="$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2 || echo admin)"
-PUBLIC_IP="${PUBLIC_IP:-<your-server-public-IP>}"
-say "GusVoice is up."
+BIND_ADDR="$(grep '^BIND_ADDR=' .env | cut -d= -f2)";            BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
+SUPERADMIN="$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2)"; SUPERADMIN="${SUPERADMIN:-admin}"
+SMTP_HOST="$(grep '^SMTP_HOST=' .env | cut -d= -f2)"
+PUBLIC_IP="${PUBLIC_IP:-<this-server-public-IP>}"
+# What a reverse proxy should target: its own host (127.0.0.1) or this box's public IP.
+if [ "$BIND_ADDR" = "0.0.0.0" ]; then UPSTREAM="$PUBLIC_IP"; else UPSTREAM="127.0.0.1"; fi
+
+printf '\n\033[1;32m═════════════════════════════════════════════════════════\033[0m\n'
+printf   '\033[1;32m  ✅  GusVoice is UP — a few manual steps to finish:\033[0m\n'
+printf   '\033[1;32m═════════════════════════════════════════════════════════\033[0m\n'
 if [ "${USE_CADDY:-1}" = "1" ]; then
   cat <<EOF
 
-  Bundled Caddy is handling TLS. Two manual steps remain:
+  TLS: the bundled Caddy handles it (automatic Let's Encrypt).
 
-  1) DNS — point these at your server (a wildcard A-record *.${BASE_DOMAIN} covers them all):
+  1) DNS — point these at this server (a wildcard *.${BASE_DOMAIN} covers them all):
        voice.${BASE_DOMAIN}   api.${BASE_DOMAIN}   presence.${BASE_DOMAIN}
        lk.${BASE_DOMAIN}      media.${BASE_DOMAIN}   ntfy.${BASE_DOMAIN}
      -> ${PUBLIC_IP}
-
-  2) Ports — open on your firewall:
-       80/tcp, 443/tcp     (web + HTTPS, Caddy)
-       7881/tcp, 7882/udp  (LiveKit media — direct, NOT proxied)
+  2) Firewall — open  80/tcp, 443/tcp  +  7881/tcp, 7882/udp  (LiveKit media, direct).
 EOF
 else
   cat <<EOF
 
-  Behind YOUR reverse proxy — no Caddy was started. Add these proxy hosts (upstream host ${BIND_ADDR}):
-       voice.${BASE_DOMAIN}     ->  ${BIND_ADDR}:8080
-       api.${BASE_DOMAIN}       ->  ${BIND_ADDR}:4000
-       presence.${BASE_DOMAIN}  ->  ${BIND_ADDR}:4001    (enable WebSockets)
-       lk.${BASE_DOMAIN}        ->  ${BIND_ADDR}:7880    (enable WebSockets)
-       media.${BASE_DOMAIN}     ->  ${BIND_ADDR}:9000
-       ntfy.${BASE_DOMAIN}      ->  ${BIND_ADDR}:8082
-  Give each host an HTTPS cert in your proxy. Then:
-
-  1) DNS — point voice/api/presence/lk/media/ntfy.${BASE_DOMAIN} (or *.${BASE_DOMAIN}) at your proxy.
-  2) Ports — open 7881/tcp + 7882/udp on THIS host (LiveKit media — direct, NOT proxied).
+  TLS: your OWN reverse proxy (no Caddy started). Add these hosts to it — each with an HTTPS
+  cert — upstream = this server:
+       voice.${BASE_DOMAIN}     ->  ${UPSTREAM}:8080
+       api.${BASE_DOMAIN}       ->  ${UPSTREAM}:4000    (enable WebSockets)
+       presence.${BASE_DOMAIN}  ->  ${UPSTREAM}:4001    (enable WebSockets)
+       lk.${BASE_DOMAIN}        ->  ${UPSTREAM}:7880    (enable WebSockets)
+       media.${BASE_DOMAIN}     ->  ${UPSTREAM}:9000
+       ntfy.${BASE_DOMAIN}      ->  ${UPSTREAM}:8082
+  1) DNS — point those 6 names at your proxy.
+  2) Firewall — open the ports above to your proxy  +  7881/tcp, 7882/udp  (LiveKit media, direct).
 EOF
 fi
 cat <<EOF
 
-  Then open  https://voice.${BASE_DOMAIN}  and register the "${SUPERADMIN:-admin}" account.
-  Desktop/Android clients: download from the project's Releases, then enter  voice.${BASE_DOMAIN}  at login.
+  Then open  https://voice.${BASE_DOMAIN}  and register  "${SUPERADMIN}".
+EOF
+if [ -z "$SMTP_HOST" ]; then
+  cat <<EOF
+  No SMTP configured — read the e-mail verification code from the logs (run in $(pwd)):
+       docker compose logs backend | grep -i "verification code"
+EOF
+fi
+cat <<EOF
+  Clients: download desktop/Android from the project's Releases, then enter  voice.${BASE_DOMAIN}  at login.
 
 EOF
