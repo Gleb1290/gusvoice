@@ -80,6 +80,9 @@ services:
       LIVEKIT_URL_EXTERNAL: ${LIVEKIT_URL_EXTERNAL}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN}
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-}
+      # First-boot: backend seeds a pre-verified super-admin from these (install.sh sets them).
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE:-false}

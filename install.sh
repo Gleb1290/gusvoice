@@ -44,6 +44,16 @@ ask() { # ask "Prompt" "default" -> echoes the answer. Reads /dev/tty so a piped
 yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
   local ans; ans="$(ask "$1" "${2:-N}")"; case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
 }
+ask_secret() { # ask_secret "Prompt" -> echoes a min-6 secret, entered twice (silent). Prompts to /dev/tty.
+  local prompt="$1" a b
+  while :; do
+    printf '  %s: ' "$prompt" >/dev/tty; read -rs a </dev/tty; printf '\n' >/dev/tty
+    printf '  repeat: '        >/dev/tty; read -rs b </dev/tty; printf '\n' >/dev/tty
+    [ "$a" = "$b" ] || { printf '  ✗ they do not match — try again\n' >/dev/tty; continue; }
+    [ "${#a}" -ge 6 ] || { printf '  ✗ min 6 characters — try again\n' >/dev/tty; continue; }
+    printf '%s' "$a"; return 0
+  done
+}
 
 # --- Self-bootstrap: fetch the repo if the stack files aren't here ----------
 # Run via `curl … | bash`, ONLY this script exists — docker-compose.yml + config/ do
@@ -93,7 +103,10 @@ else
   say "A few questions (press Enter to accept defaults):"
   BASE_DOMAIN="$(ask 'Your base domain (e.g. example.com)' 'example.com')"
   ACME_EMAIL="$(ask 'Email for Let'\''s Encrypt (TLS certs)' "admin@${BASE_DOMAIN}")"
-  SUPERADMIN="$(ask 'Super-admin username (the account granted full access)' 'admin')"
+  say "Super-admin account — created for you at first boot; you'll just log in with it (no signup):"
+  SUPERADMIN="$(ask '  Super-admin login (username)' 'admin')"
+  SUPERADMIN_EMAIL="$(ask '  Super-admin email' "admin@${BASE_DOMAIN}")"
+  SUPERADMIN_PASSWORD="$(ask_secret 'Super-admin password (min 6)')"
 
   info "Domain mode: subdomains (voice/api/presence/lk/media/ntfy.${BASE_DOMAIN})."
   info "Single-name mode (everything under one host) is coming — subdomains for now."
@@ -141,8 +154,13 @@ POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 POSTGRES_DB=gusvoice
 
 JWT_SECRET=${JWT_SECRET}
+# Super-admin: the backend seeds this PRE-VERIFIED account on first boot (see packages/backend seed).
+# You log in with USERNAME + PASSWORD. Safe to remove SUPERADMIN_PASSWORD after the first login.
 SUPERADMIN_USERNAME=${SUPERADMIN}
-ADMIN_EMAIL=
+SUPERADMIN_EMAIL=${SUPERADMIN_EMAIL}
+SUPERADMIN_PASSWORD=${SUPERADMIN_PASSWORD}
+# Where operational alerts (brute-force lockouts) are e-mailed — defaults to the super-admin's address.
+ADMIN_EMAIL=${SUPERADMIN_EMAIL}
 
 MINIO_ENDPOINT=minio
 MINIO_PORT=9000
@@ -261,12 +279,13 @@ EOF
 fi
 cat <<EOF
 
-  Then open  https://voice.${BASE_DOMAIN}  and register  "${SUPERADMIN}".
+  Then open  https://voice.${BASE_DOMAIN}  and LOG IN as  "${SUPERADMIN}"  — the account is already
+  created (use the password you set). No signup, no e-mail code.
 EOF
 if [ -z "$SMTP_HOST" ]; then
   cat <<EOF
-  No SMTP configured — read the e-mail verification code from the logs (run in $(pwd)):
-       docker compose logs backend | grep -i "verification code"
+  (No SMTP set: any ADDITIONAL users who sign up won't get an e-mail code — read theirs from the logs,
+   in $(pwd):   docker compose logs backend | grep -i "verification code")
 EOF
 fi
 cat <<EOF
