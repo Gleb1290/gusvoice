@@ -2,6 +2,8 @@
 
 # 🪿 GusVoice
 
+**English** · [Русский](README.ru.md)
+
 **Self-hosted voice, video, screen-share & text chat for you and your friends.**
 Think Discord / TeamSpeak — but it runs on *your* server, on *one* `docker compose`, with every secret generated for you.
 
