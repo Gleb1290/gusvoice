@@ -16,8 +16,11 @@
 # =============================================================================
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$DIR"
+# From a file (git clone / download) → work in the script's own dir. Piped (`curl | bash`)
+# → BASH_SOURCE is unset under `set -u`, so stay in the current directory (the self-fetch
+# below pulls the repo into ./gusvoice).
+src="${BASH_SOURCE[0]:-}"
+if [ -n "$src" ] && [ -f "$src" ]; then cd "$(dirname "$src")"; fi
 
 # Public prebuilt images (GHCR). Override the registry/tag with the REGISTRY / TAG env vars.
 REGISTRY_DEFAULT="${REGISTRY:-ghcr.io/gleb1290/gusvoice}"
@@ -40,16 +43,23 @@ yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
 }
 
 # --- Self-bootstrap: fetch the repo if the stack files aren't here ----------
-# Run via `curl … | bash`, ONLY this script exists — docker-compose.yml + config/
-# do not. Clone the repo and continue from inside it, so one piped command really
-# installs everything. (Running ./install.sh from a git clone skips this.)
+# Run via `curl … | bash`, ONLY this script exists — docker-compose.yml + config/ do
+# not. Download the repo tarball (curl + tar — NO git needed) and continue from inside
+# it, so one piped command really installs everything. (./install.sh from a checkout
+# already has the files and skips this.)
 if [ ! -f docker-compose.yml ]; then
-  command -v git >/dev/null 2>&1 || die "git is required to fetch GusVoice (e.g. apt install -y git), then re-run."
   TARGET="${GUSVOICE_DIR:-gusvoice}"
-  say "Fetching GusVoice into ./${TARGET} …"
-  if [ -d "$TARGET/.git" ]; then ( cd "$TARGET" && git pull --ff-only ) || info "(using existing ./$TARGET as-is)"
-  else git clone --depth 1 https://github.com/Gleb1290/gusvoice.git "$TARGET" || die "git clone failed — check the network."; fi
-  cd "$TARGET"
+  if [ -f "$TARGET/docker-compose.yml" ]; then
+    say "Using existing ./$TARGET"; cd "$TARGET"
+  else
+    command -v curl >/dev/null 2>&1 || die "curl is required to fetch GusVoice."
+    command -v tar  >/dev/null 2>&1 || die "tar is required to fetch GusVoice."
+    say "Fetching GusVoice…"
+    tmp="$(mktemp -d)"
+    curl -fsSL "https://github.com/Gleb1290/gusvoice/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp" || die "download failed — check the network."
+    rm -rf "$TARGET"; mv "$tmp"/gusvoice-* "$TARGET"; rm -rf "$tmp"
+    cd "$TARGET"
+  fi
 fi
 
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
