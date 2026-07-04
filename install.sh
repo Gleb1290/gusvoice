@@ -63,6 +63,11 @@ if [ ! -f docker-compose.yml ]; then
     rm -rf "$TARGET"; mv "$tmp"/gusvoice-* "$TARGET"; rm -rf "$tmp"
     cd "$TARGET"
   fi
+  # Re-run FROM THE FILE. Under `curl | bash` the script is read from stdin, and the docker/compose
+  # commands below ALSO read stdin — they'd consume the rest of the script and silently drop the
+  # final summary. Re-exec'ing from disk makes bash read the script off the file instead. (The
+  # compose file now exists, so this self-fetch block is skipped on the re-run — no loop.)
+  exec bash install.sh
 fi
 
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
