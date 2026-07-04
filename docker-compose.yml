@@ -185,13 +185,16 @@ services:
       - '443:443/udp' # HTTP/3
     networks: [internal]
 
-  # Bundled S3 (media: avatars/attachments/sounds/icons). Profile "storage". Not published
-  # to the host — Caddy serves it at media.<domain>. Console :9001 stays internal.
+  # Bundled S3 (media: avatars/attachments/sounds/icons). Profile "storage". The S3 API (9000) is
+  # bound to ${BIND_ADDR} so an EXTERNAL reverse proxy can serve media.<domain>; the bundled Caddy
+  # reaches it by docker DNS instead. Console :9001 stays internal.
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z # TODO(P8): confirm/pin latest stable tag
     profiles: [storage]
     restart: unless-stopped
     command: server /data --console-address ":9001"
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:9000:9000' # S3 API for an external proxy (media.<domain>)
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-gusvoice}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-change-me-minio-secret}
@@ -223,11 +226,14 @@ services:
 
   # Bundled push gateway (UnifiedPush over ntfy). Profile "push". anon=read-only (embedded
   # distributor subscribes); the backend publishes with NTFY_TOKEN (created by install.sh).
+  # Port 80 is bound to ${BIND_ADDR}:8082 so an EXTERNAL reverse proxy can serve ntfy.<domain>.
   ntfy:
     image: binwiederhier/ntfy:v2.25.0
     profiles: [push]
     restart: unless-stopped
     command: serve
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:8082:80' # HTTP for an external proxy (ntfy.<domain>)
     environment:
       NTFY_BASE_URL: https://ntfy.${BASE_DOMAIN:-localhost}
       NTFY_LISTEN_HTTP: ':80'
