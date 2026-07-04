@@ -39,6 +39,19 @@ yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
   local ans; ans="$(ask "$1" "${2:-N}")"; case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- Self-bootstrap: fetch the repo if the stack files aren't here ----------
+# Run via `curl … | bash`, ONLY this script exists — docker-compose.yml + config/
+# do not. Clone the repo and continue from inside it, so one piped command really
+# installs everything. (Running ./install.sh from a git clone skips this.)
+if [ ! -f docker-compose.yml ]; then
+  command -v git >/dev/null 2>&1 || die "git is required to fetch GusVoice (e.g. apt install -y git), then re-run."
+  TARGET="${GUSVOICE_DIR:-gusvoice}"
+  say "Fetching GusVoice into ./${TARGET} …"
+  if [ -d "$TARGET/.git" ]; then ( cd "$TARGET" && git pull --ff-only ) || info "(using existing ./$TARGET as-is)"
+  else git clone --depth 1 https://github.com/Gleb1290/gusvoice.git "$TARGET" || die "git clone failed — check the network."; fi
+  cd "$TARGET"
+fi
+
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
 say "GusVoice installer"
 command -v openssl >/dev/null 2>&1 || die "openssl is required (e.g. apt install -y openssl)"
