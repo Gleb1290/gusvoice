@@ -18,7 +18,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
 # Public prebuilt images (set to the project's GHCR path at P5). Override with REGISTRY/TAG env.
-REGISTRY_DEFAULT="${REGISTRY:-ghcr.io/Gleb1290/gusvoice}"
+REGISTRY_DEFAULT="${REGISTRY:-ghcr.io/gleb1290/gusvoice}"
 TAG_DEFAULT="${TAG:-latest}"
 
 say()  { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
