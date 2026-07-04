@@ -22,7 +22,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # fail-closed: never boot Postgres with an empty/guessable password (P0, #133).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — run ./install.sh or set it in .env}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -52,7 +53,8 @@ services:
     command: ['--config', '/etc/livekit.yaml']
     environment:
       # "<key-name>: <secret>" — name must match webhook.api_key in livekit.yaml.
-      LIVEKIT_KEYS: '${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}'
+      # fail-closed: an empty secret would mint forgeable room tokens (P0, #133).
+      LIVEKIT_KEYS: '${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required — run ./install.sh or set it in .env}'
     volumes:
       - ./config/livekit.yaml:/etc/livekit.yaml:ro
     ports:
@@ -73,7 +75,8 @@ services:
       BACKEND_PORT: '4000'
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET}
+      # fail-closed: an empty JWT secret makes every session token forgeable (P0, #133).
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — run ./install.sh or set it in .env}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       LIVEKIT_URL_INTERNAL: http://livekit:7880
@@ -200,7 +203,8 @@ services:
       - '${BIND_ADDR:-127.0.0.1}:9000:9000' # S3 API for an external proxy (media.<domain>)
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-gusvoice}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-change-me-minio-secret}
+      # fail-closed: no usable default — a known weak secret is the first thing scanners try (P0, #133).
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
     volumes:
       - miniodata:/data
     networks: [internal]
@@ -216,7 +220,8 @@ services:
         condition: service_started
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-gusvoice}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change-me-minio-secret}
+      # fail-closed: same secret as the minio service above — must be set, never a weak default (P0, #133).
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
       MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}
     entrypoint: >
       /bin/sh -c "

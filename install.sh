@@ -35,6 +35,19 @@ gen_secret() { # 32 random bytes as hex — openssl if present, else /dev/urando
   else head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
 }
 
+# --- Network topology helpers (so we advise the RIGHT address behind NAT) ----
+priv_ip()  { # RFC1918 / link-local — a private (non-internet-routable) address
+  case "$1" in 10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) return 0 ;; *) return 1 ;; esac
+}
+cgnat_ip() { # 100.64.0.0/10 — carrier-grade NAT (no inbound; needs a tunnel)
+  case "$1" in 100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;; *) return 1 ;; esac
+}
+local_ip() { # this machine's own LAN address = the source IP for outbound traffic
+  local ip; ip="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}')"
+  [ -z "$ip" ] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  printf '%s' "$ip"
+}
+
 ask() { # ask "Prompt" "default" -> echoes the answer. Reads /dev/tty so a piped
         # `curl … | bash` (where stdin IS the script text) still prompts the real terminal.
   local prompt="$1" def="${2:-}" ans
@@ -102,26 +115,28 @@ if [ -f .env ]; then
 else
   say "A few questions (press Enter to accept defaults):"
   BASE_DOMAIN="$(ask 'Your base domain (e.g. example.com)' 'example.com')"
-  ACME_EMAIL="$(ask 'Email for Let'\''s Encrypt (TLS certs)' "admin@${BASE_DOMAIN}")"
-  say "Super-admin account — created for you at first boot; you'll just log in with it (no signup):"
-  SUPERADMIN="$(ask '  Super-admin login (username)' 'admin')"
-  SUPERADMIN_EMAIL="$(ask '  Super-admin email' "admin@${BASE_DOMAIN}")"
-  SUPERADMIN_PASSWORD="$(ask_secret 'Super-admin password (min 6)')"
-
   info "Domain mode: subdomains (voice/api/presence/lk/media/ntfy.${BASE_DOMAIN})."
   info "Single-name mode (everything under one host) is coming — subdomains for now."
 
   # --- Reverse proxy / TLS: bundled Caddy vs your own proxy ------------------
+  # Asked BEFORE the ACME e-mail on purpose: that e-mail is only for the bundled Caddy's
+  # Let's Encrypt. With your own proxy it's never used, so we don't even ask for it.
   say "Reverse proxy / TLS:"
   info "GusVoice needs HTTPS on those subdomains. It can bundle Caddy (automatic Let's"
   info "Encrypt on ports 80/443), OR stay behind a reverse proxy you already run"
   info "(Nginx Proxy Manager / nginx / Traefik) so nothing fights over 80/443."
   if yes_no 'Do you ALREADY run your own reverse proxy on 80/443 (NPM/nginx/Traefik)?' 'N'; then
-    USE_CADDY=0
+    USE_CADDY=0; ACME_EMAIL=""   # your proxy issues the certs — no Let's Encrypt e-mail needed here
     if yes_no 'Is that proxy on a DIFFERENT host than this one?' 'N'; then BIND_ADDR_VAL=0.0.0.0; else BIND_ADDR_VAL=127.0.0.1; fi
   else
     USE_CADDY=1; BIND_ADDR_VAL=127.0.0.1
+    ACME_EMAIL="$(ask 'Email for Let'\''s Encrypt (bundled Caddy TLS)' "admin@${BASE_DOMAIN}")"
   fi
+
+  say "Super-admin account — created for you at first boot; you'll just log in with it (no signup):"
+  SUPERADMIN="$(ask '  Super-admin login (username)' 'admin')"
+  SUPERADMIN_EMAIL="$(ask '  Super-admin email' "admin@${BASE_DOMAIN}")"
+  SUPERADMIN_PASSWORD="$(ask_secret 'Super-admin password (min 6)')"
 
   SMTP_HOST=""; SMTP_USER=""; SMTP_PASS=""; MAIL_FROM="GusVoice <noreply@${BASE_DOMAIN}>"
   if yes_no 'Configure SMTP for email verification?' 'N'; then
@@ -137,10 +152,6 @@ else
   POSTGRES_PASSWORD="$(gen_secret)"
   MINIO_ACCESS_KEY="gusvoice"
   MINIO_SECRET_KEY="$(gen_secret)"
-
-  # --- Public IP (for LiveKit ICE) ------------------------------------------
-  PUBLIC_IP="$(curl -fsSL https://api.ipify.org 2>/dev/null || echo '')"
-  [ -n "$PUBLIC_IP" ] && info "Detected public IP: $PUBLIC_IP (LiveKit will advertise it via STUN)."
 
   # --- Write .env -----------------------------------------------------------
   say "Writing .env…"
@@ -244,13 +255,33 @@ BASE_DOMAIN="$(grep '^BASE_DOMAIN=' .env | cut -d= -f2)"
 BIND_ADDR="$(grep '^BIND_ADDR=' .env | cut -d= -f2)";            BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
 SUPERADMIN="$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2)"; SUPERADMIN="${SUPERADMIN:-admin}"
 SMTP_HOST="$(grep '^SMTP_HOST=' .env | cut -d= -f2)"
-PUBLIC_IP="${PUBLIC_IP:-<this-server-public-IP>}"
-# What a reverse proxy should target: its own host (127.0.0.1) or this box's public IP.
-if [ "$BIND_ADDR" = "0.0.0.0" ]; then UPSTREAM="$PUBLIC_IP"; else UPSTREAM="127.0.0.1"; fi
+
+# Network topology — advise the RIGHT address. A VPS in a DC has its public IP on the interface
+# (LAN==WAN); a home box behind a router has a private LAN IP + a separate WAN IP → the upstream a
+# proxy should target differs (LAN IP if the proxy is on the same network, public IP + a router
+# port-forward if it's outside), and LiveKit media must be forwarded from the router either way.
+LOCAL_IP="$(local_ip)"
+PUBLIC_IP="$(curl -fsSL https://api.ipify.org 2>/dev/null || echo '')"
+BEHIND_NAT=0; { [ -n "$LOCAL_IP" ]  && priv_ip  "$LOCAL_IP";  } && BEHIND_NAT=1
+CGNAT=0;      { [ -n "$PUBLIC_IP" ] && cgnat_ip "$PUBLIC_IP"; } && CGNAT=1
+PUB="${PUBLIC_IP:-<this-server-public-IP>}"
+LAN="${LOCAL_IP:-<this-machine-LAN-IP>}"
+
+upstreams() { # $1 = address — print the 6 reverse-proxy hosts pointing at it
+  cat <<EOF
+       voice.${BASE_DOMAIN}     ->  ${1}:8080
+       api.${BASE_DOMAIN}       ->  ${1}:4000    (enable WebSockets)
+       presence.${BASE_DOMAIN}  ->  ${1}:4001    (enable WebSockets)
+       lk.${BASE_DOMAIN}        ->  ${1}:7880    (enable WebSockets)
+       media.${BASE_DOMAIN}     ->  ${1}:9000
+       ntfy.${BASE_DOMAIN}      ->  ${1}:8082
+EOF
+}
 
 printf '\n\033[1;32m═════════════════════════════════════════════════════════\033[0m\n'
 printf   '\033[1;32m  ✅  GusVoice is UP — a few manual steps to finish:\033[0m\n'
 printf   '\033[1;32m═════════════════════════════════════════════════════════\033[0m\n'
+
 if [ "${USE_CADDY:-1}" = "1" ]; then
   cat <<EOF
 
@@ -259,24 +290,54 @@ if [ "${USE_CADDY:-1}" = "1" ]; then
   1) DNS — point these at this server (a wildcard *.${BASE_DOMAIN} covers them all):
        voice.${BASE_DOMAIN}   api.${BASE_DOMAIN}   presence.${BASE_DOMAIN}
        lk.${BASE_DOMAIN}      media.${BASE_DOMAIN}   ntfy.${BASE_DOMAIN}
-     -> ${PUBLIC_IP}
+     ->  ${PUB}
   2) Firewall — open  80/tcp, 443/tcp  +  7881/tcp, 7882/udp  (LiveKit media, direct).
 EOF
-else
+  if [ "$BEHIND_NAT" = "1" ]; then
+    cat <<EOF
+     ⚠ This box is behind NAT (LAN ${LAN}, WAN ${PUB}). On your ROUTER, forward
+       80/tcp 443/tcp 7881/tcp 7882/udp  ->  ${LAN}  — otherwise nothing is reachable from outside.
+EOF
+  fi
+elif [ "$BIND_ADDR" = "0.0.0.0" ] && [ "$BEHIND_NAT" = "1" ]; then
+  # own proxy on ANOTHER host AND this box is behind NAT — upstream depends on WHERE the proxy runs
   cat <<EOF
 
-  TLS: your OWN reverse proxy (no Caddy started). Add these hosts to it — each with an HTTPS
-  cert — upstream = this server:
-       voice.${BASE_DOMAIN}     ->  ${UPSTREAM}:8080
-       api.${BASE_DOMAIN}       ->  ${UPSTREAM}:4000    (enable WebSockets)
-       presence.${BASE_DOMAIN}  ->  ${UPSTREAM}:4001    (enable WebSockets)
-       lk.${BASE_DOMAIN}        ->  ${UPSTREAM}:7880    (enable WebSockets)
-       media.${BASE_DOMAIN}     ->  ${UPSTREAM}:9000
-       ntfy.${BASE_DOMAIN}      ->  ${UPSTREAM}:8082
+  TLS: your OWN reverse proxy (no Caddy). This box is behind NAT (LAN ${LAN}, WAN ${PUB}), so the
+  upstream address depends on where your proxy runs:
+       • proxy in the SAME LAN            ->  use  ${LAN}      (this box's LAN IP)
+       • proxy OUTSIDE (other host / DC)  ->  use  ${PUB}   (+ forward that TCP port on your router)
+  Map each host to <that-IP>:port —
+       voice :8080    api :4000 (WS)    presence :4001 (WS)
+       lk :7880 (WS)  media :9000       ntfy :8082
+  1) DNS — point the 6 names at your proxy.
+  2) LiveKit media — forward  7881/tcp + 7882/udp  from the router (WAN ${PUB}) to ${LAN}
+     (clients reach media DIRECTLY from the internet, not through the proxy).
+EOF
+else
+  # own proxy: same host (127.0.0.1), or a VPS with a direct public IP (no NAT)
+  if [ "$BIND_ADDR" = "0.0.0.0" ]; then UPSTREAM="$PUB"; else UPSTREAM="127.0.0.1"; fi
+  cat <<EOF
+
+  TLS: your OWN reverse proxy (no Caddy). Add these hosts — each with an HTTPS cert,
+  upstream = this server:
+EOF
+  upstreams "$UPSTREAM"
+  cat <<EOF
   1) DNS — point those 6 names at your proxy.
   2) Firewall — open the ports above to your proxy  +  7881/tcp, 7882/udp  (LiveKit media, direct).
 EOF
 fi
+
+if [ "$CGNAT" = "1" ]; then
+  cat <<EOF
+
+  ⚠ CGNAT DETECTED — your public IP ${PUB} is in the 100.64.0.0/10 carrier-grade-NAT range.
+    Inbound connections from the internet can't reach this box directly (port-forwarding won't help).
+    Use an outbound tunnel instead — e.g. Cloudflare Tunnel or Tailscale Funnel.
+EOF
+fi
+
 cat <<EOF
 
   Then open  https://voice.${BASE_DOMAIN}  and LOG IN as  "${SUPERADMIN}"  — the account is already

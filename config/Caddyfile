@@ -13,37 +13,58 @@
 # SINGLE-NAME MODE (everything under one host by path) is a separate Caddyfile —
 # pending P8 runtime testing (LiveKit under a subpath is the finicky bit).
 # =============================================================================
-
 {
 	email {$ACME_EMAIL}
 }
 
+# --- Edge security headers (P0 hardening, #133) ------------------------------
+# Caddy sends NO HSTS/nosniff by default — set them at the TLS edge (the client's
+# own nginx also sends CSP/frame/referrer, which pass through reverse_proxy untouched).
+# HSTS starts SHORT on purpose: `preload` is near-irreversible and includeSubDomains
+# would pin every sub-domain, so we roll out with max-age=86400 (1 day) first and only
+# raise to `63072000; includeSubDomains; preload` once the deployment is confirmed healthy.
+(sec) {
+	header {
+		Strict-Transport-Security "max-age=86400"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
 # Web client (static SPA + /config.js + /config.json discovery doc).
 voice.{$BASE_DOMAIN} {
+	import sec
 	reverse_proxy client:80
 }
 
 # Backend REST + /gateway WebSocket. Caddy proxies WebSocket upgrades transparently.
 api.{$BASE_DOMAIN} {
+	import sec
 	reverse_proxy backend:4000
 }
 
 # Presence WebSocket.
 presence.{$BASE_DOMAIN} {
+	import sec
 	reverse_proxy presence:4001
 }
 
 # LiveKit signaling (wss). Media (7881/7882) bypasses Caddy — direct to the host IP.
 lk.{$BASE_DOMAIN} {
+	import sec
 	reverse_proxy livekit:7880
 }
 
 # Media (MinIO public-read bucket): browsers load avatars/attachments from here.
+# nosniff here is the key bit — it stops a stored SVG/HTML object from rendering inline.
 media.{$BASE_DOMAIN} {
+	import sec
 	reverse_proxy minio:9000
 }
 
 # Push gateway (ntfy): the embedded distributor subscribes; the backend publishes.
 ntfy.{$BASE_DOMAIN} {
+	import sec
 	reverse_proxy ntfy:80
 }
