@@ -114,7 +114,7 @@ To reconfigure from scratch, delete `.env` and re-run `./install.sh`. To run beh
 
 ## Support
 
-GusVoice is free to self-host and built in the open. If it's useful to you, you can support development on **[Boosty](https://boosty.to/glebbuster)** — it helps cover servers, signing certificates and build hardware. Thank you 🪿
+GusVoice is free to self-host and built in the open. If it's useful to you, you can support development on **[Boosty](https://boosty.to/glebbuster)** — it helps cover servers and build hardware. Thank you 🪿
 
 ## License
 
