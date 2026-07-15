@@ -59,17 +59,17 @@ When it's done, open `https://voice.<your-domain>` and log in as the super-admin
 
 ## Update
 
-Grab the newest server images and stack files. Run it from your install directory:
+Grab the newest server images and stack files — one line, from anywhere:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gleb1290/gusvoice/main/update.sh | bash
+```
+
+or, from inside your install directory:
 
 ```bash
 cd gusvoice
 ./update.sh
-```
-
-or as a one-liner from anywhere:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Gleb1290/gusvoice/main/update.sh | bash
 ```
 
 `update.sh` backs up your current `docker-compose.yml` + `config/`, refreshes them to the latest release, pulls the new images, and recreates only the containers that changed. **Your `.env` and all data are left untouched**, and the backend runs any pending database migrations automatically on boot.

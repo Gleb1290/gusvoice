@@ -96,6 +96,17 @@ else
   info "--images-only: keeping your current docker-compose.yml + config/ as-is."
 fi
 
+# --- 1.5) Back-compat: keep MINIO_ACCESS_KEY in .env -------------------------
+# The current compose fail-closes on MINIO_ACCESS_KEY (no weak default — a known key is the first thing
+# scanners try). Installs from before that relied on the compose default and never wrote it to .env, so
+# the freshly-pulled compose would abort this very update. Backfill the exact legacy value their MinIO
+# volume was created with, so the update just works — no data touched. New installs already carry a
+# random key from install.sh and are left alone (this only fires when the line is genuinely absent).
+if ! grep -q '^MINIO_ACCESS_KEY=' .env; then
+  echo 'MINIO_ACCESS_KEY=gusvoice' >> .env
+  warn "backfilled MINIO_ACCESS_KEY into .env (legacy default your MinIO already uses; the hardened compose now requires it explicitly)"
+fi
+
 # --- 2) Pull the newest images ----------------------------------------------
 say "Pulling images…"
 docker compose "${PROFILES[@]}" pull
