@@ -103,6 +103,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
       MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}
       MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-}
+      # Tauri updater feed (latest.json) — the public /download/{latest,windows} endpoints read it to
+      # hand a fresh user the current signed Windows installer. Empty => /download returns 503. Value in .env.
+      UPDATE_FEED_URL: ${UPDATE_FEED_URL:-}
       # Self-hosted F-Droid repo — the in-app Android install tab reads these (authed) for the QR + link.
       # FDROID_ADD_URL is the full URL-encoded credentialed add-link (encoded so no literal `$` for
       # compose .env interpolation to mangle). Empty => install tab shows "недоступно". Values in .env.
@@ -113,6 +116,11 @@ services:
       # endpoints (validated to be on NTFY_BASE_URL) with NTFY_TOKEN. Empty => push disabled. Values in .env.
       NTFY_BASE_URL: ${NTFY_BASE_URL:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # Steam game-activity source (#40 Phase 1B). STEAM_API_KEY from steamcommunity.com/dev (empty =>
+      # feature OFF). STEAM_API_PUBLIC_URL = the API's own public origin (where Steam OpenID returns) —
+      # defaults to the client-facing VITE_API_URL. Values in .env.
+      STEAM_API_KEY: ${STEAM_API_KEY:-}
+      STEAM_API_PUBLIC_URL: ${STEAM_API_PUBLIC_URL:-${VITE_API_URL:-}}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -166,6 +174,7 @@ services:
       VITE_API_URL: ${VITE_API_URL}
       VITE_PRESENCE_WS: ${VITE_PRESENCE_WS}
       VITE_PUSH_GATEWAY: ${VITE_PUSH_GATEWAY:-}
+      VITE_NTFY_SERVER: ${VITE_NTFY_SERVER:-}
     ports:
       - '${BIND_ADDR:-127.0.0.1}:8080:80'
     networks: [internal]
@@ -206,7 +215,7 @@ services:
     ports:
       - '${BIND_ADDR:-127.0.0.1}:9000:9000' # S3 API for an external proxy (media.<domain>)
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-gusvoice}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required — run ./install.sh or set it in .env}
       # fail-closed: no usable default — a known weak secret is the first thing scanners try (P0, #133).
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
     volumes:
@@ -223,7 +232,7 @@ services:
       minio:
         condition: service_started
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-gusvoice}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required — run ./install.sh or set it in .env}
       # fail-closed: same secret as the minio service above — must be set, never a weak default (P0, #133).
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
       MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}

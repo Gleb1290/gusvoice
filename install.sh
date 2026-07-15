@@ -155,7 +155,7 @@ else
   JWT_SECRET="$(gen_secret)"
   LIVEKIT_API_SECRET="$(gen_secret)"
   POSTGRES_PASSWORD="$(gen_secret)"
-  MINIO_ACCESS_KEY="gusvoice"
+  MINIO_ACCESS_KEY="$(gen_secret)"
   MINIO_SECRET_KEY="$(gen_secret)"
 
   # --- Write .env -----------------------------------------------------------
