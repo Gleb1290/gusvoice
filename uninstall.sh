@@ -48,6 +48,20 @@ fi
 command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 \
   || die "Docker + Compose v2 are required to remove the stack."
 
+# `docker compose version` above is CLIENT-only — it passes even when we can't reach the daemon
+# socket. Probe the daemon FOR REAL now, so a non-root user gets a clear error HERE instead of
+# typing "yes" to the --purge warning below and only then failing at `docker compose down`.
+if ! docker info >/dev/null 2>&1; then
+  derr="$(docker info 2>&1 >/dev/null || true)"
+  if [ "$(id -u)" -ne 0 ] && printf '%s' "$derr" | grep -qi 'permission denied'; then
+    die "Can't reach the Docker daemon as '$(id -un)' — you're not in the 'docker' group.
+  Re-run with sudo (e.g.  sudo ./uninstall.sh --purge ), or activate the group first:  newgrp docker"
+  fi
+  die "Can't reach the Docker daemon.
+  ${derr:-unknown error}
+  Is it running?  Start it with:  sudo systemctl start docker"
+fi
+
 # --- Reconstruct the same compose profiles so ALL services are targeted ------
 USE_CADDY=1
 [ -f .env ] && { USE_CADDY="$(grep -E '^USE_CADDY=' .env | cut -d= -f2 || true)"; USE_CADDY="${USE_CADDY:-1}"; }

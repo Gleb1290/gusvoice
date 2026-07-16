@@ -107,10 +107,50 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
     say "Installing Docker…"
     curl -fsSL https://get.docker.com | sh || die "Docker install failed — install it manually: https://docs.docker.com/engine/install/"
     docker compose version >/dev/null 2>&1 || die "Docker installed, but 'docker compose' is still missing — check the installation."
-    info "Docker installed. (Not root? Log out/in so your user joins the 'docker' group, then re-run this.)"
+    info "Docker installed."
   else
     die "Docker + Compose v2 are required. See https://docs.docker.com/engine/install/"
   fi
+fi
+
+# --- Docker daemon reachability (the turnkey gotcha) ------------------------
+# `docker compose version` above is a CLIENT-only check — it passes even when we can't talk to the
+# daemon socket. And get.docker.com does NOT add you to the 'docker' group, so a non-root user used
+# to sail past every check and only fail at the first `docker compose pull`. Probe the daemon FOR
+# REAL now, and fix / explain BEFORE asking any questions or writing anything.
+if ! docker info >/dev/null 2>&1; then
+  docker_err="$(docker info 2>&1 >/dev/null || true)"
+  me="$(id -un)"
+  if [ "$(id -u)" -ne 0 ] && printf '%s' "$docker_err" | grep -qi 'permission denied'; then
+    # A socket permission error means the 'docker' group. Join it (get.docker.com never does), so
+    # that a NEXT login actually works — before this, re-logging in never helped because nothing had
+    # added the user to the group at all.
+    if ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      if command -v sudo >/dev/null 2>&1; then
+        say "Adding '$me' to the 'docker' group (the Docker installer doesn't do this)…"
+        sudo usermod -aG docker "$me" || info "(couldn't add automatically — run:  sudo usermod -aG docker $me)"
+      else
+        info "You're not in the 'docker' group and sudo isn't available. As root run:  usermod -aG docker $me"
+      fi
+    fi
+    # Group membership only applies to a NEW session, so THIS shell still can't continue. Stop
+    # cleanly (exit 0 — nothing is broken / half-written) instead of failing at the image pull later.
+    cat >&2 <<EOF
+
+${C_PORT}Docker is installed, but this shell can't reach it yet.${C_OFF}
+'$me' is now in the 'docker' group — that only takes effect in a NEW session.
+
+  Do ONE of these, then re-run this installer:
+     • log out and back in        (fresh SSH session), or
+     • run:  newgrp docker        (activate the group in this shell), or
+     • run:  sudo ./install.sh    (run the installer as root instead)
+
+EOF
+    exit 0
+  fi
+  die "Can't reach the Docker daemon.
+  ${docker_err:-unknown error}
+  Is it running?  Start it with:  sudo systemctl start docker"
 fi
 
 # --- Config: a fresh run asks; an existing .env is reused -------------------
