@@ -55,9 +55,12 @@ local_ip() { # this machine's own LAN address = the source IP for outbound traff
 
 ask() { # ask "Prompt" "default" -> echoes the answer. Reads /dev/tty so a piped
         # `curl … | bash` (where stdin IS the script text) still prompts the real terminal.
+  # `${ans%$'\r'}` strips a trailing CR: some SSH clients (esp. from Windows) send the line as
+  # "answer\r\n", so `read` captures "answer\r". Unstripped, it silently poisons every value —
+  # e.g. BASE_DOMAIN=example.com\r → broken subdomains + Caddy can't get certs.
   local prompt="$1" def="${2:-}" ans
-  if [ -n "$def" ]; then read -r -p "$prompt [$def]: " ans </dev/tty || ans=""; echo "${ans:-$def}"
-  else read -r -p "$prompt: " ans </dev/tty || ans=""; echo "$ans"; fi
+  if [ -n "$def" ]; then read -r -p "$prompt [$def]: " ans </dev/tty || ans=""; ans="${ans%$'\r'}"; echo "${ans:-$def}"
+  else read -r -p "$prompt: " ans </dev/tty || ans=""; ans="${ans%$'\r'}"; echo "$ans"; fi
 }
 yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
   local ans; ans="$(ask "$1" "${2:-N}")"; case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
@@ -65,8 +68,8 @@ yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
 ask_secret() { # ask_secret "Prompt" -> echoes a min-6 secret, entered twice (silent). Prompts to /dev/tty.
   local prompt="$1" a b
   while :; do
-    printf '  %s: ' "$prompt" >/dev/tty; read -rs a </dev/tty; printf '\n' >/dev/tty
-    printf '  repeat: '        >/dev/tty; read -rs b </dev/tty; printf '\n' >/dev/tty
+    printf '  %s: ' "$prompt" >/dev/tty; read -rs a </dev/tty; printf '\n' >/dev/tty; a="${a%$'\r'}"
+    printf '  repeat: '        >/dev/tty; read -rs b </dev/tty; printf '\n' >/dev/tty; b="${b%$'\r'}"
     [ "$a" = "$b" ] || { printf '  ✗ they do not match — try again\n' >/dev/tty; continue; }
     [ "${#a}" -ge 6 ] || { printf '  ✗ min 6 characters — try again\n' >/dev/tty; continue; }
     printf '%s' "$a"; return 0

@@ -78,6 +78,7 @@ if [ "$PURGE" = "1" ]; then
   if [ "$ASSUME_YES" != "1" ]; then
     printf '\n  Type \033[1;31myes\033[0m to confirm total deletion: '
     read -r ans </dev/tty || ans=""
+    ans="${ans%$'\r'}"   # strip a trailing CR — some SSH clients send "yes\r", which != "yes"
     [ "$ans" = "yes" ] || { info "Aborted — nothing was deleted."; exit 0; }
   fi
   say "Removing containers, network and DATA volumes…"
