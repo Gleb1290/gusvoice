@@ -345,6 +345,8 @@ EOF
     cat <<EOF
      ⚠ This box is behind NAT (LAN ${C_IP}${LAN}${C_OFF}, WAN ${C_IP}${PUB}${C_OFF}). On your ROUTER, forward
        ${C_FWD}80/tcp${C_OFF} ${C_FWD}443/tcp${C_OFF} ${C_FWD}7881/tcp${C_OFF} ${C_FWD}7882/udp${C_OFF}  ->  ${C_IP}${LAN}${C_OFF}  — otherwise nothing is reachable from outside.
+     ↳ On a CLOUD VM (Yandex Cloud / AWS / GCP / Hetzner / …) there's no router to touch: the provider
+       already 1:1-NATs the public IP to this box, so just OPEN those ports in its firewall / security group.
 EOF
   fi
 elif [ "$BIND_ADDR" = "0.0.0.0" ] && [ "$BEHIND_NAT" = "1" ]; then
@@ -361,6 +363,7 @@ elif [ "$BIND_ADDR" = "0.0.0.0" ] && [ "$BEHIND_NAT" = "1" ]; then
   1) DNS — point the 6 names at your proxy.
   2) LiveKit media — forward  ${C_FWD}7881/tcp${C_OFF} + ${C_FWD}7882/udp${C_OFF}  from the router (WAN ${C_IP}${PUB}${C_OFF}) to ${C_IP}${LAN}${C_OFF}
      (clients reach media DIRECTLY from the internet, not through the proxy).
+     ↳ Cloud VM (Yandex Cloud / AWS / GCP / …): no router — just OPEN those ports in the provider's firewall / security group.
 EOF
 else
   # own proxy: same host (127.0.0.1), or a VPS with a direct public IP (no NAT)
