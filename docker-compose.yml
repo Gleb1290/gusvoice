@@ -16,6 +16,19 @@
 
 name: gusvoice
 
+# Docker's json-file driver keeps logs FOREVER by default (no max-size/max-file), and LiveKit is very
+# chatty — it writes ~56 MB/day of per-packet rtpstats telemetry, so its log hit 394 MB in under a week
+# on the prod VM. Left alone this eventually fills the disk and takes the whole stack down. Cap it:
+# 50 MB × 3 files = 150 MB ceiling per service. Applied to the two services that actually grow
+# (livekit + backend, both ~50 MB/day); postgres/redis/presence/client write 1-4 MB/week, so they're
+# left alone to keep the blast radius of a compose change small (adding `logging:` recreates the
+# container). Add `logging: *capped-logs` to any service that starts getting noisy.
+x-logging: &capped-logs
+  driver: json-file
+  options:
+    max-size: '50m'
+    max-file: '3'
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -50,6 +63,7 @@ services:
   livekit:
     image: livekit/livekit-server:v1.13.1
     restart: unless-stopped
+    logging: *capped-logs
     command: ['--config', '/etc/livekit.yaml']
     environment:
       # "<key-name>: <secret>" — name must match webhook.api_key in livekit.yaml.
@@ -66,6 +80,7 @@ services:
 
   backend:
     image: ${REGISTRY:-gusvoice}/backend:${TAG:-local}
+    logging: *capped-logs
     build:
       context: .
       dockerfile: packages/backend/Dockerfile
