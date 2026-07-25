@@ -136,6 +136,9 @@ services:
       # defaults to the client-facing VITE_API_URL. Values in .env.
       STEAM_API_KEY: ${STEAM_API_KEY:-}
       STEAM_API_PUBLIC_URL: ${STEAM_API_PUBLIC_URL:-${VITE_API_URL:-}}
+      # Импорт стикеров из Telegram (#68). Токен бота от @BotFather; пустой => импорт выключен.
+      # Бот подойдёт любой: набор читается публичным getStickerSet, состоять где-либо ему не нужно.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
