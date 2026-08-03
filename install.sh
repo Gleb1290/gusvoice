@@ -40,6 +40,17 @@ gen_secret() { # 32 random bytes as hex — openssl if present, else /dev/urando
   else head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
 }
 
+# Docker Compose expands `$VAR` INSIDE .env values, so anything a human typed with a dollar in it
+# arrives at the container silently mangled: a password `Ab$CFq$V25h` loses both `$CF` and `$V25h`
+# (compose warns "The CF variable is not set" and substitutes a blank), and the super-admin is then
+# seeded with a password that is NOT the one that was entered — you simply cannot log in, with no
+# hint why. Compose reads `$$` as a literal `$`, so every free-text value gets escaped on the way in.
+# Generated secrets are hex and never contain `$`; this is only about what a person types.
+# ⚠️ Safe because nothing `source`s .env — the scripts only `grep|cut` it (see env_unesc at the end,
+# used where an escaped value is read back for display).
+env_esc()   { printf '%s' "$1" | sed 's/\$/$$/g'; }
+env_unesc() { printf '%s' "$1" | sed 's/\$\$/$/g'; }
+
 # --- Network topology helpers (so we advise the RIGHT address behind NAT) ----
 priv_ip()  { # RFC1918 / link-local — a private (non-internet-routable) address
   case "$1" in 10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) return 0 ;; *) return 1 ;; esac
@@ -193,6 +204,18 @@ else
     SMTP_PASS="$(ask 'SMTP password' '')"
   fi
 
+  # Escape everything a HUMAN typed before it goes into .env (see env_esc). Domains and e-mails
+  # can't contain a dollar, but escaping them is harmless — and a field left out would be another
+  # silently mangled value, so every free-text field goes through it.
+  SUPERADMIN="$(env_esc "$SUPERADMIN")"
+  SUPERADMIN_EMAIL="$(env_esc "$SUPERADMIN_EMAIL")"
+  SUPERADMIN_PASSWORD="$(env_esc "$SUPERADMIN_PASSWORD")"
+  SMTP_HOST="$(env_esc "$SMTP_HOST")"
+  SMTP_USER="$(env_esc "$SMTP_USER")"
+  SMTP_PASS="$(env_esc "$SMTP_PASS")"
+  MAIL_FROM="$(env_esc "$MAIL_FROM")"
+  ACME_EMAIL="$(env_esc "$ACME_EMAIL")"
+
   # --- Generated secrets ----------------------------------------------------
   say "Generating secrets…"
   JWT_SECRET="$(gen_secret)"
@@ -301,8 +324,9 @@ fi
 set +e   # the final instructions must ALWAYS print — never let a stray non-zero swallow them
 BASE_DOMAIN="$(grep '^BASE_DOMAIN=' .env | cut -d= -f2)"
 BIND_ADDR="$(grep '^BIND_ADDR=' .env | cut -d= -f2)";            BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
-SUPERADMIN="$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2)"; SUPERADMIN="${SUPERADMIN:-admin}"
-SMTP_HOST="$(grep '^SMTP_HOST=' .env | cut -d= -f2)"
+# Read back from .env — the value there is ESCAPED (`$$`); print it as the person typed it.
+SUPERADMIN="$(env_unesc "$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2)")"; SUPERADMIN="${SUPERADMIN:-admin}"
+SMTP_HOST="$(env_unesc "$(grep '^SMTP_HOST=' .env | cut -d= -f2)")"
 
 # Network topology — advise the RIGHT address. A VPS in a DC has its public IP on the interface
 # (LAN==WAN); a home box behind a router has a private LAN IP + a separate WAN IP → the upstream a
