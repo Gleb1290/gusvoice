@@ -105,11 +105,22 @@ if [ ! -f docker-compose.yml ]; then
     rm -rf "$TARGET"; mv "$tmp"/gusvoice-* "$TARGET"; rm -rf "$tmp"
     cd "$TARGET"
   fi
-  # Re-run FROM THE FILE. Under `curl | bash` the script is read from stdin, and the docker/compose
-  # commands below ALSO read stdin — they'd consume the rest of the script and silently drop the
-  # final summary. Re-exec'ing from disk makes bash read the script off the file instead. (The
-  # compose file now exists, so this self-fetch block is skipped on the re-run — no loop.)
-  exec bash install.sh
+fi
+
+# Re-run FROM THE FILE when we're being piped. Under `curl | bash` bash reads this script from
+# stdin, and the docker commands below have stdin attached too — docker drains the pipe, taking the
+# REST OF THE SCRIPT with it, and everything after silently never runs. Re-exec'ing from disk makes
+# bash read the script off the file instead.
+#
+# 🔴 This check used to live INSIDE the self-fetch above, so it only fired when docker-compose.yml
+# was absent. Piping into a directory that already had one — i.e. re-running the installer over an
+# existing install, the most likely way to re-run it — skipped the whole block and lost the final
+# summary with the reverse-proxy targets and ports. The condition is "am I on stdin", not "did I
+# just fetch"; those are different questions and only the first one is the one that matters here.
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ ! -f "${BASH_SOURCE[0]:-}" ]; then
+  if [ -f install.sh ]; then exec bash install.sh; fi
+  # No file to re-exec from (piped into a stack dir without install.sh). The </dev/null redirects on
+  # every docker call below are what keep this case working.
 fi
 
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
@@ -290,9 +301,12 @@ else
   PROFILES=(--profile storage --profile push)   # no bundled Caddy — your proxy fronts it
 fi
 say "Pulling images…"
-docker compose "${PROFILES[@]}" pull --quiet || info "(pull skipped — building locally or images not published yet)"
+# ⚠️ Every docker call gets </dev/null: with stdin attached docker DRAINS it, and under `curl | bash`
+# that pipe is the rest of this script. The re-exec above normally prevents that; these redirects are
+# the second layer, for the case where there was no file to re-exec from.
+docker compose "${PROFILES[@]}" pull --quiet </dev/null || info "(pull skipped — building locally or images not published yet)"
 say "Starting the stack…"
-docker compose "${PROFILES[@]}" up -d
+docker compose "${PROFILES[@]}" up -d </dev/null
 
 # --- Create the ntfy publish token (once) -----------------------------------
 # The backend needs a write token to publish wake payloads. anon stays read-only.
@@ -300,20 +314,20 @@ docker compose "${PROFILES[@]}" up -d
 if ! grep -q '^NTFY_TOKEN=..' .env; then
   say "Provisioning the ntfy publish token…"
   sleep 5
-  if docker compose "${PROFILES[@]}" exec -T ntfy ntfy user list 2>/dev/null | grep -q gusvoice; then
+  if docker compose "${PROFILES[@]}" exec -T ntfy ntfy user list </dev/null 2>/dev/null | grep -q gusvoice; then
     info "ntfy user already exists."
   else
     NTFY_PW="$(gen_secret)"
     NTFY_PASSWORD="$NTFY_PW" docker compose "${PROFILES[@]}" exec -T -e NTFY_PASSWORD="$NTFY_PW" ntfy \
-      ntfy user add --role=user gusvoice >/dev/null 2>&1 || info "(ntfy user add failed — provision the token manually)"
-    docker compose "${PROFILES[@]}" exec -T ntfy ntfy access gusvoice 'up*' write >/dev/null 2>&1 || true
+      ntfy user add --role=user gusvoice </dev/null >/dev/null 2>&1 || info "(ntfy user add failed — provision the token manually)"
+    docker compose "${PROFILES[@]}" exec -T ntfy ntfy access gusvoice 'up*' write </dev/null >/dev/null 2>&1 || true
   fi
-  TOKEN="$(docker compose "${PROFILES[@]}" exec -T ntfy ntfy token add gusvoice 2>/dev/null | grep -oE 'tk_[A-Za-z0-9]+' | head -n1 || true)"
+  TOKEN="$(docker compose "${PROFILES[@]}" exec -T ntfy ntfy token add gusvoice </dev/null 2>/dev/null | grep -oE 'tk_[A-Za-z0-9]+' | head -n1 || true)"
   if [ -n "$TOKEN" ]; then
     # Portable in-place edit (BSD/GNU sed differ) — rewrite the line.
     grep -v '^NTFY_TOKEN=' .env > .env.tmp && echo "NTFY_TOKEN=${TOKEN}" >> .env.tmp && mv .env.tmp .env
     chmod 600 .env
-    docker compose "${PROFILES[@]}" up -d backend
+    docker compose "${PROFILES[@]}" up -d backend </dev/null
     info "ntfy token stored; backend restarted with push enabled."
   else
     info "Could not auto-create the ntfy token — push is off until you set NTFY_TOKEN in .env."
