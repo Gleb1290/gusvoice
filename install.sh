@@ -107,21 +107,20 @@ if [ ! -f docker-compose.yml ]; then
   fi
 fi
 
-# Re-run FROM THE FILE when we're being piped. Under `curl | bash` bash reads this script from
-# stdin, and the docker commands below have stdin attached too — docker drains the pipe, taking the
-# REST OF THE SCRIPT with it, and everything after silently never runs. Re-exec'ing from disk makes
-# bash read the script off the file instead.
+# 🔴 There is deliberately NO "re-exec myself from disk" here, and it must not come back.
 #
-# 🔴 This check used to live INSIDE the self-fetch above, so it only fired when docker-compose.yml
-# was absent. Piping into a directory that already had one — i.e. re-running the installer over an
-# existing install, the most likely way to re-run it — skipped the whole block and lost the final
-# summary with the reverse-proxy targets and ports. The condition is "am I on stdin", not "did I
-# just fetch"; those are different questions and only the first one is the one that matters here.
-if [ -z "${BASH_SOURCE[0]:-}" ] || [ ! -f "${BASH_SOURCE[0]:-}" ]; then
-  if [ -f install.sh ]; then exec bash install.sh; fi
-  # No file to re-exec from (piped into a stack dir without install.sh). The </dev/null redirects on
-  # every docker call below are what keep this case working.
-fi
+# Under `curl | bash` bash reads this script from stdin, and docker (stdin attached) drains that pipe
+# together with the part of the script that hasn't run yet — everything after it silently never runs.
+# The obvious-looking cure is `exec bash install.sh`, so bash reads the script off the file instead.
+# It was tried and it caused a WORSE bug: `install.sh` on disk is whatever version happens to be
+# lying in that directory. Someone who pipes the freshly published installer into a folder holding an
+# older copy silently runs the OLD one — the download is discarded, and every fix they curl'd for is
+# quietly absent. That's how the dollar-escaping fix (#105) came back from the dead (#107).
+#
+# The stdin problem is fully solved by giving every command that could drain the pipe its own
+# `</dev/null` (see the docker calls below). Two mechanisms for one problem, where the second can
+# silently run different code, is worse than one that just works. Prompts already read /dev/tty, so
+# they are unaffected.
 
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
 say "GusVoice installer"
