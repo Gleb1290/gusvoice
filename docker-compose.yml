@@ -111,6 +111,10 @@ services:
       # and an instance-wide signups/hour ceiling on top of the per-IP limit. Both have safe defaults.
       UNVERIFIED_TTL_DAYS: ${UNVERIFIED_TTL_DAYS:-7}
       REGISTER_GLOBAL_MAX: ${REGISTER_GLOBAL_MAX:-100}
+      # Diagnostics (#113). ONE variable for backend AND client so the route gate and what the client
+      # believes can't drift apart. Default OFF on purpose: an instance must not start collecting data
+      # about its users' machines just because it was updated. See .env.example.
+      DIAG_ENABLED: ${DIAG_ENABLED:-false}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-}
       MINIO_PORT: ${MINIO_PORT:-9000}
       MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
@@ -193,6 +197,7 @@ services:
       VITE_PRESENCE_WS: ${VITE_PRESENCE_WS}
       VITE_PUSH_GATEWAY: ${VITE_PUSH_GATEWAY:-}
       VITE_NTFY_SERVER: ${VITE_NTFY_SERVER:-}
+      DIAG_ENABLED: ${DIAG_ENABLED:-false}
     ports:
       - '${BIND_ADDR:-127.0.0.1}:8080:80'
     networks: [internal]
