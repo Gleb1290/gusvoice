@@ -306,11 +306,16 @@ services:
   # One-shot: move media from the OLD bundled MinIO volume (boxes installed before versitygw) into
   # `storage`, verify every file, then exit. Fresh installs and already-moved boxes exit at once.
   # It lives HERE and not in update.sh because an existing box's first update is performed by its OLD
-  # update.sh, which only runs `up -d --remove-orphans` on this file. The image is the last MinIO the
-  # box shipped (it also carries `mc`), pinned by digest; the script is config/storage-migrate.sh.
-  # The old volume is never deleted automatically.
+  # update.sh, which only runs `up -d --remove-orphans` on this file. The script is
+  # config/storage-migrate.sh. The old volume is never deleted automatically.
+  # The image is OUR OWN COPY of the last MinIO the box shipped (it also carries `mc`), pinned by the
+  # very digest the upstream image has: MinIO is archived, its images are already gone from Docker Hub,
+  # and this one-time move has to keep working if quay.io follows. Byte-identical copy of
+  # quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z (same digest); MinIO is AGPLv3, so redistributing
+  # the unmodified image is allowed — its sources are at https://github.com/minio/minio, tag
+  # RELEASE.2024-12-18T13-15-44Z.
   storage-migrate:
-    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3
+    image: ghcr.io/gleb1290/gusvoice/minio-legacy:RELEASE.2024-12-18T13-15-44Z@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3
     profiles: [storage]
     restart: 'no'
     entrypoint: ['/bin/bash', '/migrate/storage-migrate.sh']
