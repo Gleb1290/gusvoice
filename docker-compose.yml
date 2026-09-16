@@ -31,7 +31,9 @@ x-logging: &capped-logs
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # Exact version + the digest already running in production (О5, 15.09): a floating `16-alpine` re-pulled a different
+    # build on every update. Bump deliberately: change BOTH the tag and the digest.
+    image: postgres:16.14-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -48,7 +50,9 @@ services:
     networks: [internal]
 
   redis:
-    image: redis:7-alpine
+    # Exact version + digest, as for postgres. Redis 7.4+ is licensed RSALv2/SSPL (not OSI open source); the box does not
+    # redistribute it — Docker pulls the official image — so it stays (decision 2026-09-16).
+    image: redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
     volumes:
@@ -101,6 +105,12 @@ services:
       # First-boot: backend seeds a pre-verified super-admin from these (install.sh sets them).
       SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
+      # Setup code for the first-run web wizard (install.sh generates and prints it). While no super-admin
+      # exists, https://voice.<domain> opens the wizard only with this code. Empty => no wizard (as before).
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      # Where brute-force alerts are e-mailed. Empty => the super-admin's own address. (Was missing from this
+      # list, so the value in .env never reached the backend and alerts were only logged.)
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE:-false}
@@ -115,6 +125,17 @@ services:
       # believes can't drift apart. Default OFF on purpose: an instance must not start collecting data
       # about its users' machines just because it was updated. See .env.example.
       DIAG_ENABLED: ${DIAG_ENABLED:-false}
+      ECONOMY_ENABLED: ${ECONOMY_ENABLED:-false}
+      # Closed preview of the economy: comma-separated user IDs it is visible to while the feature is
+      # under wraps. EMPTY = no restriction (normal behaviour) -- a forgotten variable must mean "as
+      # before", never "hide it from everyone". Backend only: the client learns it from its own
+      # profile, so the list is never published to the browser.
+      ECONOMY_PREVIEW_USERS: ${ECONOMY_PREVIEW_USERS:-}
+      # Voice-presence statistics (GusCoins economy, step 0). Records raw seconds spent in voice --
+      # no coins are granted and nothing is shown to users. Default OFF for the same reason as
+      # DIAG_ENABLED: this is data about how long your people sit in voice, and an instance must not
+      # start collecting it just because it was updated. See .env.example.
+      ECONOMY_STATS_ENABLED: ${ECONOMY_STATS_ENABLED:-false}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-}
       MINIO_PORT: ${MINIO_PORT:-9000}
       MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
@@ -143,9 +164,24 @@ services:
       # Импорт стикеров из Telegram (#68). Токен бота от @BotFather; пустой => импорт выключен.
       # Бот подойдёт любой: набор читается публичным getStickerSet, состоять где-либо ему не нужно.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # Update button in the admin panel: where the backend learns the newest release (asked only when the super-admin
+      # opens the "Instance" tab, cached for 6 h). Empty => no check. The version of THIS backend is baked into the image.
+      GV_RELEASES_URL: ${GV_RELEASES_URL-https://api.github.com/repos/Gleb1290/gusvoice/releases/latest}
+    # Update button: the backend never touches Docker. It drops a request into ./run/request, a systemd watcher on the
+    # host runs `update.sh --from-panel` (installed by `update.sh --install-updater`), which reports progress into
+    # ./run/status — READ-ONLY here, so the backend can't plant anything the host (root) would write through.
+    volumes:
+      - ./run/request:/app/run/request
+      - ./run/status:/app/run/status:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      # Bundled storage only (profile "storage"): start after old MinIO media has been moved, so the
+      # backend doesn't come up next to a half-filled store. `required: false` = no such wait when the
+      # profile is off (external S3). Side effect, on purpose: if the move FAILS the backend still
+      # starts — chat and voice keep working, old files stay unavailable until the move is re-run
+      # (update.sh reports it). Needs Docker Compose 2.20+.
+      storage-migrate: { condition: service_completed_successfully, required: false }
     ports:
       - '${BIND_ADDR:-127.0.0.1}:4000:4000'
     # node images carry no curl/wget for sure — node's built-in fetch is always there.
@@ -198,6 +234,7 @@ services:
       VITE_PUSH_GATEWAY: ${VITE_PUSH_GATEWAY:-}
       VITE_NTFY_SERVER: ${VITE_NTFY_SERVER:-}
       DIAG_ENABLED: ${DIAG_ENABLED:-false}
+      ECONOMY_ENABLED: ${ECONOMY_ENABLED:-false}
     ports:
       - '${BIND_ADDR:-127.0.0.1}:8080:80'
     networks: [internal]
@@ -227,45 +264,65 @@ services:
       - '443:443/udp' # HTTP/3
     networks: [internal]
 
-  # Bundled S3 (media: avatars/attachments/sounds/icons). Profile "storage". The S3 API (9000) is
-  # bound to ${BIND_ADDR} so an EXTERNAL reverse proxy can serve media.<domain>; the bundled Caddy
-  # reaches it by docker DNS instead. Console :9001 stays internal.
-  minio:
-    image: minio/minio:RELEASE.2024-12-18T13-15-44Z # TODO(P8): confirm/pin latest stable tag
+  # Bundled S3 (media: avatars/attachments/sounds/icons). Profile "storage". versitygw keeps objects
+  # as plain files (headers in extended attributes) — MinIO, used before, is archived and its images
+  # are gone from Docker Hub. The S3 API stays on port 9000 and answers to the old name `minio` too,
+  # so existing .env files (MINIO_ENDPOINT=minio) and proxies pointing at :9000 keep working as they
+  # are. It is bound to ${BIND_ADDR} so an EXTERNAL reverse proxy can serve media.<domain>; the bundled
+  # Caddy reaches it by docker DNS. The backend creates the bucket and its public-read policy itself.
+  storage:
+    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
     profiles: [storage]
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    # The data directories must exist before versitygw starts (it exits with "chdir: no such file").
+    entrypoint: ['/bin/sh', '-c', 'mkdir -p /data/s3 /data/iam && exec /usr/local/bin/docker-entrypoint.sh']
     ports:
       - '${BIND_ADDR:-127.0.0.1}:9000:9000' # S3 API for an external proxy (media.<domain>)
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required — run ./install.sh or set it in .env}
+      ROOT_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required — run ./install.sh or set it in .env}
       # fail-closed: no usable default — a known weak secret is the first thing scanners try (P0, #133).
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
+      ROOT_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
+      VGW_BACKEND: posix
+      VGW_BACKEND_ARGS: /data/s3
+      VGW_IAM_DIR: /data/iam
+      VGW_PORT: ':9000'
+      # OFF by default in versitygw — without it browsers can't read media cross-origin (the web client
+      # and the desktop app live on other origins). Media is public-read anyway, so `*` exposes nothing.
+      VGW_CORS_ALLOW_ORIGIN: '*'
+      VGW_HEALTH: /health
+      VGW_QUIET: 'true'
     volumes:
-      - miniodata:/data
-    networks: [internal]
+      - s3data:/data
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9000/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      internal:
+        aliases: [minio]
 
-  # One-shot: wait for minio, create the public-read bucket (idempotent; backend also
-  # ensures it, this just wins the startup race on first boot). Profile "storage".
-  minio-init:
-    image: minio/mc:RELEASE.2024-11-21T17-21-54Z # TODO(P8): confirm/pin latest stable tag
+  # One-shot: move media from the OLD bundled MinIO volume (boxes installed before versitygw) into
+  # `storage`, verify every file, then exit. Fresh installs and already-moved boxes exit at once.
+  # It lives HERE and not in update.sh because an existing box's first update is performed by its OLD
+  # update.sh, which only runs `up -d --remove-orphans` on this file. The image is the last MinIO the
+  # box shipped (it also carries `mc`), pinned by digest; the script is config/storage-migrate.sh.
+  # The old volume is never deleted automatically.
+  storage-migrate:
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3
     profiles: [storage]
     restart: 'no'
-    depends_on:
-      minio:
-        condition: service_started
+    entrypoint: ['/bin/bash', '/migrate/storage-migrate.sh']
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required — run ./install.sh or set it in .env}
-      # fail-closed: same secret as the minio service above — must be set, never a weak default (P0, #133).
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
-      MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY; do echo 'waiting for minio'; sleep 2; done;
-      mc mb -p local/$$MINIO_BUCKET || true;
-      mc anonymous set download local/$$MINIO_BUCKET;
-      echo 'minio bucket ready';
-      "
+      S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required — run ./install.sh or set it in .env}
+      S3_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required — run ./install.sh or set it in .env}
+    volumes:
+      - miniodata:/old
+      - s3data:/new
+      - ./config/storage-migrate.sh:/migrate/storage-migrate.sh:ro
+    depends_on:
+      storage: { condition: service_healthy }
     networks: [internal]
 
   # Bundled push gateway (UnifiedPush over ntfy). Profile "push". anon=read-only (embedded
@@ -293,7 +350,8 @@ services:
 volumes:
   pgdata:
   redisdata:
-  miniodata:
+  s3data: # media (versitygw)
+  miniodata: # media of boxes installed before versitygw — read once by storage-migrate, then kept until you remove it
   ntfydata:
   caddydata:
   caddyconfig:

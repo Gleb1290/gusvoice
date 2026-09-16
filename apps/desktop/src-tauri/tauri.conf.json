@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GusVoice",
+  "version": "0.6.62",
+  "identifier": "tech.gusik.gusvoice",
+  "build": {
+    "frontendDist": "../../client/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm --filter @gusvoice/client dev",
+    "beforeBuildCommand": "pnpm --filter @gusvoice/client build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "GusVoice",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 940,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "certificateThumbprint": "4F8586CF4B40BFC298F3432BFC843DA377EA119C",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "tsp": true
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/Gleb1290/gusvoice/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5MzlBMUU2NkFBQjEyMjQKUldRa0VxdHE1cUU1aVVmVkZPQTd5ckdLd3ZYL0FxamVEbDNXUkc3RHZKcm5pdlZoUVFiZFVzTE0K",
+      "windows": { "installMode": "passive" }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+# The LiveKit/libwebrtc prebuilt static lib is compiled with the STATIC MSVC CRT (/MT). Rust
+# defaults to the dynamic CRT (/MD) on windows-msvc, which causes LNK2038 RuntimeLibrary mismatch
+# when the webrtc C++ objects are linked. Force static CRT so both sides match.
+# (Applies only to the Windows MSVC target; other targets are unaffected.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]

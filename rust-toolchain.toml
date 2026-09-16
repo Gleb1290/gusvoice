@@ -1,0 +1,14 @@
+# Pins the Rust toolchain for GusVoice's native build (apps/desktop — the only Rust in the repo).
+#
+# Why this exists: the Android APK runner (VM118) is a SHARED builder whose GLOBAL rustup default is
+# Rust 1.75 — kept old for rustdesk-custom, which pins 1.75 via its own per-directory override. 1.75 is
+# too old for transitive deps that now require Cargo's `edition2024` feature (e.g. dlopen2_derive ≥0.4.3,
+# Unix/Android-only), which is why the v0.5.56 APK build failed with "feature edition2024 is required".
+#
+# Pinning HERE isolates GusVoice from the shared default WITHOUT changing it: rustup auto-installs this
+# toolchain for our checkout only, so we don't elbow rustdesk (stays 1.75) or anything else on the box.
+# 1.96.0 == the Windows desktop runner's toolchain (the .exe already builds green on it), so the desktop
+# build is unchanged and both targets are consistent. Bump this line explicitly to move the toolchain
+# (no silent `stable` drift — matches the repo's pin-exact-versions rule).
+[toolchain]
+channel = "1.96.0"

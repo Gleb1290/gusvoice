@@ -1,0 +1,45 @@
+{
+  "name": "@gusvoice/backend",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "bundle": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:studio": "drizzle-kit studio",
+    "test": "tsx --test src/economyDefaults.test.ts src/accountRules.test.ts src/activityRules.test.ts src/audienceRules.test.ts src/authRules.test.ts src/coinRules.test.ts src/diagRules.test.ts src/diagSchema.test.ts src/dmRules.test.ts src/gatewayRules.test.ts src/gooseRules.test.ts src/instanceUpdateRules.test.ts src/inviteRules.test.ts src/levelRules.test.ts src/livekitRules.test.ts src/ogParse.test.ts src/pokeRules.test.ts src/polls.test.ts src/pushRules.test.ts src/roleRules.test.ts src/safeFetch.test.ts src/shopRules.test.ts src/soundboardRules.test.ts src/statusRules.test.ts src/storageRules.test.ts src/superAdminRules.test.ts src/streakRules.test.ts src/tipRules.test.ts src/totp.test.ts src/voiceActivityRules.test.ts src/voiceRules.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "10.1.0",
+    "@fastify/multipart": "9.4.0",
+    "@fastify/websocket": "11.2.0",
+    "@gusvoice/shared": "workspace:*",
+    "bcryptjs": "2.4.3",
+    "minio": "8.0.7",
+    "qrcode": "1.5.4",
+    "drizzle-orm": "0.45.2",
+    "fastify": "5.8.5",
+    "ioredis": "5.11.1",
+    "jsonwebtoken": "9.0.3",
+    "livekit-server-sdk": "2.15.5",
+    "nodemailer": "9.1.0",
+    "pg": "8.22.0",
+    "tsx": "4.22.4",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "2.4.6",
+    "@types/jsonwebtoken": "9.0.10",
+    "@types/node": "20.19.43",
+    "@types/nodemailer": "8.0.1",
+    "@types/pg": "8.20.0",
+    "@types/qrcode": "1.5.6",
+    "drizzle-kit": "0.28.1",
+    "esbuild": "0.24.2",
+    "typescript": "5.9.3"
+  }
+}

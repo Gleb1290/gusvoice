@@ -1,0 +1,28 @@
+{
+  "name": "gusvoice",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Self-hosted Discord/TeamSpeak-style voice + screenshare + text platform on a self-hosted LiveKit SFU. Single-host docker-compose.",
+  "packageManager": "pnpm@9.12.3",
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "overrides": {
+      "fast-uri": "3.1.6",
+      "fast-xml-parser": "5.10.1",
+      "find-my-way": "9.7.0"
+    }
+  },
+  "scripts": {
+    "build:shared": "pnpm --filter @gusvoice/shared build",
+    "build": "pnpm --filter @gusvoice/shared build && pnpm -r --filter !@gusvoice/shared build",
+    "dev:backend": "pnpm --filter @gusvoice/backend dev",
+    "dev:presence": "pnpm --filter @gusvoice/presence dev",
+    "dev:client": "pnpm --filter @gusvoice/client dev",
+    "compose:up": "docker compose up -d --build",
+    "compose:down": "docker compose down",
+    "check:tests": "node scripts/check-tests-listed.mjs"
+  }
+}

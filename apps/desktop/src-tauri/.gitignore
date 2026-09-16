@@ -1,0 +1,12 @@
+# Rust build output
+/target
+
+# Tauri generated schemas (regenerated each build). The Android project (gen/android) IS
+# tracked so manifest/permission/Kotlin customizations persist; its own gen/android/.gitignore
+# excludes Gradle build artifacts.
+/gen/schemas
+/gen/apple
+
+# Generated icon set (produced from app-icon.png via `pnpm --filter @gusvoice/desktop icons`).
+# CI regenerates these before building; the source app-icon.png IS committed.
+/icons

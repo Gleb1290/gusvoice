@@ -1,0 +1,42 @@
+{
+  "name": "@gusvoice/client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/cardGesture.test.ts src/memberRoles.test.ts src/pendingWatch.test.ts src/hoverHold.test.ts src/relativeTime.test.ts src/layersOff.test.ts src/profilePatch.test.ts src/deviceWatch.test.ts src/hintPlacement.test.ts src/deviceLoss.test.ts src/auditText.test.ts src/gatewaySubs.test.ts src/crashReport.test.ts src/soundboardPick.test.ts src/toastRules.test.ts src/overlayHints.test.ts src/coinNotifyRules.test.ts src/economyVisible.test.ts src/lightboxZoom.test.ts src/ledgerCsv.test.ts src/afk.test.ts src/avatarCropRules.test.ts src/browserShortcuts.test.ts src/cameraSettings.test.ts src/channelRules.test.ts src/channelSidebarRules.test.ts src/coinsCue.test.ts src/configRules.test.ts src/contextMenuRules.test.ts src/diagConsent.test.ts src/diagRules.test.ts src/economyExplain.test.ts src/effects.test.ts src/featherFall.test.ts src/emojiSearch.test.ts src/emojiShortcodes.test.ts src/gameDetect.test.ts src/gateWorklet.test.ts src/hotkeys.test.ts src/instanceScopeRules.test.ts src/memberName.test.ts src/messagePaneRules.test.ts src/messageText.test.ts src/micProcessorRules.test.ts src/nativeShareCore.test.ts src/notifyRules.test.ts src/occupancy.test.ts src/pollTime.test.ts src/popover.test.ts src/serverSettingsTabs.test.ts src/socketHealth.test.ts src/status.test.ts src/streamAudio.test.ts src/streamCue.test.ts src/streamPreviewPublisher.test.ts src/streamSettings.test.ts src/textEdit.test.ts src/tgs.test.ts src/streakView.test.ts src/tipHints.test.ts src/tipMode.test.ts src/voiceCueRules.test.ts",
+    "gen:emoji": "node scripts/gen-emoji.mjs"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "5.2.8",
+    "@fontsource/manrope": "5.2.8",
+    "@gusvoice/shared": "workspace:*",
+    "@livekit/components-react": "2.9.21",
+    "@livekit/components-styles": "1.2.0",
+    "@sapphi-red/web-noise-suppressor": "0.3.5",
+    "@tauri-apps/plugin-global-shortcut": "2.3.2",
+    "@tauri-apps/plugin-notification": "2.3.3",
+    "@tauri-apps/plugin-process": "2.3.1",
+    "@tauri-apps/plugin-updater": "2.10.1",
+    "deepfilternet3-noise-filter": "1.2.1",
+    "livekit-client": "2.20.0",
+    "lottie-web": "5.13.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zustand": "5.0.14"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.7.0",
+    "emojibase-data": "17.0.0",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3",
+    "vite": "5.4.21"
+  }
+}

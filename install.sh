@@ -35,6 +35,14 @@ die()  { printf '\n\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 # you forward/open DIRECTLY at the router/firewall for LiveKit media + TLS (magenta).
 C_IP=$'\033[1;36m'; C_PORT=$'\033[1;33m'; C_FWD=$'\033[1;35m'; C_OFF=$'\033[0m'
 
+gen_setup_token() { # 12 chars from 32 unambiguous symbols (no 0/O, 1/I), grouped XXXX-XXXX-XXXX (~60 bits)
+  local alphabet='ABCDEFGHJKLMNPQRSTUVWXYZ23456789' out='' n i=0
+  for n in $(od -An -N12 -tu1 /dev/urandom); do   # 256 is a multiple of 32 → no modulo bias
+    out="${out}${alphabet:$((n % 32)):1}"; i=$((i + 1))
+    if [ "$i" -eq 4 ] || [ "$i" -eq 8 ]; then out="${out}-"; fi
+  done
+  printf '%s' "$out"
+}
 gen_secret() { # 32 random bytes as hex — openssl if present, else /dev/urandom (no openssl dep)
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
   else head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
@@ -75,16 +83,6 @@ ask() { # ask "Prompt" "default" -> echoes the answer. Reads /dev/tty so a piped
 }
 yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
   local ans; ans="$(ask "$1" "${2:-N}")"; case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
-}
-ask_secret() { # ask_secret "Prompt" -> echoes a min-6 secret, entered twice (silent). Prompts to /dev/tty.
-  local prompt="$1" a b
-  while :; do
-    printf '  %s: ' "$prompt" >/dev/tty; read -rs a </dev/tty; printf '\n' >/dev/tty; a="${a%$'\r'}"
-    printf '  repeat: '        >/dev/tty; read -rs b </dev/tty; printf '\n' >/dev/tty; b="${b%$'\r'}"
-    [ "$a" = "$b" ] || { printf '  ✗ they do not match — try again\n' >/dev/tty; continue; }
-    [ "${#a}" -ge 6 ] || { printf '  ✗ min 6 characters — try again\n' >/dev/tty; continue; }
-    printf '%s' "$a"; return 0
-  done
 }
 
 # --- Self-bootstrap: fetch the repo if the stack files aren't here ----------
@@ -202,17 +200,21 @@ else
     ACME_EMAIL="$(ask 'Email for Let'\''s Encrypt (bundled Caddy TLS)' "admin@${BASE_DOMAIN}")"
   fi
 
-  say "Super-admin account — created for you at first boot; you'll just log in with it (no signup):"
-  SUPERADMIN="$(ask '  Super-admin login (username)' 'admin')"
-  SUPERADMIN_EMAIL="$(ask '  Super-admin email' "admin@${BASE_DOMAIN}")"
-  SUPERADMIN_PASSWORD="$(ask_secret 'Super-admin password (min 6)')"
-
-  SMTP_HOST=""; SMTP_USER=""; SMTP_PASS=""; MAIL_FROM="GusVoice <noreply@${BASE_DOMAIN}>"
-  if yes_no 'Configure SMTP for email verification?' 'N'; then
-    SMTP_HOST="$(ask 'SMTP host' '')"
-    SMTP_USER="$(ask 'SMTP username' "noreply@${BASE_DOMAIN}")"
-    SMTP_PASS="$(ask 'SMTP password' '')"
+  # The super-admin, e-mail (SMTP) and registration rules are set in the browser — the setup wizard at
+  # https://voice.<domain>, opened with the setup code printed at the end. Nothing personal is typed here.
+  # Unattended installs (Proxmox scripts, Ansible) may still pre-seed the admin: export SUPERADMIN_USERNAME,
+  # SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD (and optionally SMTP_*) before running — then no wizard is needed.
+  SUPERADMIN="${SUPERADMIN_USERNAME:-}"
+  SUPERADMIN_EMAIL="${SUPERADMIN_EMAIL:-}"
+  SUPERADMIN_PASSWORD="${SUPERADMIN_PASSWORD:-}"
+  if [ -n "$SUPERADMIN" ] || [ -n "$SUPERADMIN_EMAIL" ] || [ -n "$SUPERADMIN_PASSWORD" ]; then
+    { [ -n "$SUPERADMIN" ] && [ -n "$SUPERADMIN_EMAIL" ] && [ "${#SUPERADMIN_PASSWORD}" -ge 8 ]; } \
+      || die "SUPERADMIN_USERNAME, SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD (min 8 chars) must be set together — or unset all three and use the web setup wizard."
+    info "Super-admin \"$SUPERADMIN\" comes from the environment — the web setup wizard will be skipped."
   fi
+  SMTP_HOST="${SMTP_HOST:-}"; SMTP_USER="${SMTP_USER:-}"; SMTP_PASS="${SMTP_PASS:-}"
+  MAIL_FROM="${MAIL_FROM:-GusVoice <noreply@${BASE_DOMAIN}>}"
+  ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 
   # Escape everything a HUMAN typed before it goes into .env (see env_esc). Domains and e-mails
   # can't contain a dollar, but escaping them is harmless — and a field left out would be another
@@ -224,10 +226,12 @@ else
   SMTP_USER="$(env_esc "$SMTP_USER")"
   SMTP_PASS="$(env_esc "$SMTP_PASS")"
   MAIL_FROM="$(env_esc "$MAIL_FROM")"
+  ADMIN_EMAIL="$(env_esc "$ADMIN_EMAIL")"
   ACME_EMAIL="$(env_esc "$ACME_EMAIL")"
 
   # --- Generated secrets ----------------------------------------------------
   say "Generating secrets…"
+  SETUP_TOKEN="$(gen_setup_token)"
   JWT_SECRET="$(gen_secret)"
   LIVEKIT_API_SECRET="$(gen_secret)"
   POSTGRES_PASSWORD="$(gen_secret)"
@@ -246,13 +250,15 @@ POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 POSTGRES_DB=gusvoice
 
 JWT_SECRET=${JWT_SECRET}
-# Super-admin: the backend seeds this PRE-VERIFIED account on first boot (see packages/backend seed).
-# You log in with USERNAME + PASSWORD. Safe to remove SUPERADMIN_PASSWORD after the first login.
+# Setup code: open https://voice.${BASE_DOMAIN} and enter it to create the admin account in the web setup
+# wizard. It stops working once the admin exists — safe to delete this line afterwards.
+SETUP_TOKEN=${SETUP_TOKEN}
+# Optional, for unattended installs only: a PRE-VERIFIED super-admin seeded on first boot (then no wizard).
 SUPERADMIN_USERNAME=${SUPERADMIN}
 SUPERADMIN_EMAIL=${SUPERADMIN_EMAIL}
 SUPERADMIN_PASSWORD=${SUPERADMIN_PASSWORD}
-# Where operational alerts (brute-force lockouts) are e-mailed — defaults to the super-admin's address.
-ADMIN_EMAIL=${SUPERADMIN_EMAIL}
+# Where operational alerts (brute-force lockouts) are e-mailed. Empty = the super-admin's own address.
+ADMIN_EMAIL=${ADMIN_EMAIL}
 
 MINIO_ENDPOINT=minio
 MINIO_PORT=9000
@@ -301,10 +307,13 @@ else
 fi
 say "Pulling images…"
 # ⚠️ Every docker call gets </dev/null: with stdin attached docker DRAINS it, and under `curl | bash`
-# that pipe is the rest of this script. The re-exec above normally prevents that; these redirects are
-# the second layer, for the case where there was no file to re-exec from.
+# that pipe is the rest of this script. These redirects are the ONLY guard — there is deliberately no
+# re-exec from disk (see the note after the self-bootstrap above).
 docker compose "${PROFILES[@]}" pull --quiet </dev/null || info "(pull skipped — building locally or images not published yet)"
 say "Starting the stack…"
+# The admin panel's update request/status folders (see update.sh --install-updater). Created here so they belong to
+# this user — left to Docker they'd appear owned by root.
+mkdir -p run/request run/status
 docker compose "${PROFILES[@]}" up -d </dev/null
 
 # --- Create the ntfy publish token (once) -----------------------------------
@@ -333,12 +342,27 @@ if ! grep -q '^NTFY_TOKEN=..' .env; then
   fi
 fi
 
+# --- "Update" button in the admin panel (systemd watcher) -------------------
+# Needs systemd and root once. Enabled silently when we ARE root or sudo needs no password; otherwise one line at the
+# end says how — no extra question here.
+UPDATER_HINT=0
+if [ -d /run/systemd/system ]; then
+  if [ "$(id -u)" -eq 0 ]; then
+    bash ./update.sh --install-updater </dev/null || UPDATER_HINT=1
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true </dev/null 2>/dev/null; then
+    sudo -n bash ./update.sh --install-updater </dev/null || UPDATER_HINT=1
+  else
+    UPDATER_HINT=1
+  fi
+fi
+
 # --- Done -------------------------------------------------------------------
 set +e   # the final instructions must ALWAYS print — never let a stray non-zero swallow them
 BASE_DOMAIN="$(grep '^BASE_DOMAIN=' .env | cut -d= -f2)"
 BIND_ADDR="$(grep '^BIND_ADDR=' .env | cut -d= -f2)";            BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
 # Read back from .env — the value there is ESCAPED (`$$`); print it as the person typed it.
-SUPERADMIN="$(env_unesc "$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2)")"; SUPERADMIN="${SUPERADMIN:-admin}"
+SUPERADMIN="$(env_unesc "$(grep '^SUPERADMIN_USERNAME=' .env | cut -d= -f2)")"
+SETUP_TOKEN="$(grep '^SETUP_TOKEN=' .env | cut -d= -f2 || true)"
 SMTP_HOST="$(env_unesc "$(grep '^SMTP_HOST=' .env | cut -d= -f2)")"
 
 # Network topology — advise the RIGHT address. A VPS in a DC has its public IP on the interface
@@ -426,12 +450,25 @@ if [ "$CGNAT" = "1" ]; then
 EOF
 fi
 
-cat <<EOF
+if [ -n "$SUPERADMIN" ]; then
+  cat <<EOF
 
   Then open  https://voice.${BASE_DOMAIN}  and LOG IN as  "${SUPERADMIN}"  — the account is already
   created (use the password you set). No signup, no e-mail code.
 EOF
-if [ -z "$SMTP_HOST" ]; then
+else
+  cat <<EOF
+
+  3) Open  ${C_IP}https://voice.${BASE_DOMAIN}${C_OFF}  and enter the setup code:
+
+         ${C_PORT}${SETUP_TOKEN:-<SETUP_TOKEN from .env>}${C_OFF}
+
+     A short web wizard creates your admin account, then name + icon, e-mail (optional), who may
+     register, and a first server with an invite link for friends. Nothing to do here in the console.
+     (Lost the code? It's SETUP_TOKEN in $(pwd)/.env. It stops working once the admin account exists.)
+EOF
+fi
+if [ -z "$SMTP_HOST" ] && [ -n "$SUPERADMIN" ]; then
   cat <<EOF
   (No SMTP set: any ADDITIONAL users who sign up won't get an e-mail code — read theirs from the logs,
    in $(pwd):   docker compose logs backend | grep -i "verification code")
@@ -439,5 +476,11 @@ EOF
 fi
 cat <<EOF
   Clients: download desktop/Android from the project's Releases, then enter  voice.${BASE_DOMAIN}  at login.
-
 EOF
+if [ "$UPDATER_HINT" = "1" ]; then
+  cat <<EOF
+  Updates: run  ./update.sh  here. To update from the admin panel instead, enable its button once:
+           sudo ./update.sh --install-updater
+EOF
+fi
+printf '\n'

@@ -68,6 +68,20 @@ USE_CADDY=1
 if [ "$USE_CADDY" = "1" ]; then PROFILES=(--profile caddy --profile storage --profile push)
 else PROFILES=(--profile storage --profile push); fi
 
+# The admin panel's update watcher (update.sh --install-updater) — only if it belongs to THIS install.
+remove_updater() {
+  local unit=/etc/systemd/system/gusvoice-update.path
+  [ -f "$unit" ] && grep -q "^PathExists=$(pwd -P)/run/request/update\$" "$unit" || return 0
+  if [ "$(id -u)" -ne 0 ]; then
+    warn "The admin panel's update watcher stays installed — remove it with:  sudo ./uninstall.sh"
+    return 0
+  fi
+  systemctl disable --now gusvoice-update.path >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/gusvoice-update.path /etc/systemd/system/gusvoice-update.service
+  systemctl daemon-reload || true
+  ok "admin panel update watcher removed (systemd: gusvoice-update.*)"
+}
+
 if [ "$PURGE" = "1" ]; then
   say "⚠  FULL UNINSTALL (--purge)  ·  $(pwd)"
   warn "This DELETES ALL GusVoice data — PERMANENTLY:"
@@ -85,7 +99,11 @@ if [ "$PURGE" = "1" ]; then
   docker compose "${PROFILES[@]}" down -v --remove-orphans
   rm -f .env
   ok "containers + data volumes + .env removed"
+  remove_updater
   say "✅  GusVoice fully removed."
+  if ls .gusvoice-backups/db-*.sql.gz >/dev/null 2>&1; then
+    warn "Database copies made by ./update.sh are still in ./.gusvoice-backups/ — deleting the folder below removes them."
+  fi
   info "The install folder ($(pwd)) can now be deleted:  cd .. && rm -rf \"$(basename "$(pwd)")\""
   info "Downloaded desktop/Android apps (if any) are separate — uninstall them the usual way."
 else
@@ -93,6 +111,7 @@ else
   say "Stopping and removing containers…"
   docker compose "${PROFILES[@]}" down --remove-orphans
   ok "containers + network removed"
+  remove_updater
   say "✅  GusVoice stopped."
   info "Your data is PRESERVED in Docker volumes and .env still holds your secrets."
   info "Bring it back anytime:   ./install.sh     (or ./update.sh)"

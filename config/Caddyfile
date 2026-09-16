@@ -56,11 +56,11 @@ lk.{$BASE_DOMAIN} {
 	reverse_proxy livekit:7880
 }
 
-# Media (MinIO public-read bucket): browsers load avatars/attachments from here.
+# Media (S3 public-read bucket, bundled versitygw): browsers load avatars/attachments from here.
 # nosniff here is the key bit — it stops a stored SVG/HTML object from rendering inline.
 media.{$BASE_DOMAIN} {
 	import sec
-	reverse_proxy minio:9000
+	reverse_proxy storage:9000
 }
 
 # Push gateway (ntfy): the embedded distributor subscribes; the backend publishes.

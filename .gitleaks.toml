@@ -1,0 +1,31 @@
+# GusVoice — gitleaks config (used by the CI `sast` gate). Extends gitleaks' built-in rules,
+# then narrowly allowlists a known false positive so the gate stays a real signal.
+title = "GusVoice gitleaks config"
+
+[extend]
+useDefault = true
+
+# `generic-api-key` is a high-entropy heuristic; it trips on the hotkey example strings in the
+# keyboard-code map (e.g. "Ctrl+Shift+KeyD"), which are UI labels, not secrets. Scope the
+# allowlist to THAT file AND THAT rule so genuine secrets anywhere else still hard-fail.
+[[allowlists]]
+description = "hotkey example strings in the keycode map are not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''apps/client/src/hotkeys\.ts''']
+
+# The TOTP test pins the SIX PUBLISHED test vectors of RFC 6238; its shared secret
+# (base32 of the ASCII string "12345678901234567890") is printed in the RFC itself. A secret
+# invented for the test instead would make the vectors unverifiable — being public IS the point.
+# Same narrow scope: this file AND this rule only.
+[[allowlists]]
+description = "RFC 6238 published test vector, not a real secret"
+targetRules = ["generic-api-key"]
+paths = ['''packages/backend/src/totp\.test\.ts''']
+
+# The placeholder-secret test needs ONE value that looks like a real secret — that is the whole point
+# of the check ("not a placeholder, leave it alone"). That hex string is invented for the test and
+# opens nothing. Same narrow scope: this file AND this rule only.
+[[allowlists]]
+description = "invented not-a-placeholder value in the secret-rules test"
+targetRules = ["generic-api-key"]
+paths = ['''packages/shared/src/secretRules\.test\.ts''']

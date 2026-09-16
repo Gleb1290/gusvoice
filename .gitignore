@@ -1,5 +1,59 @@
-# Self-hosters: never commit your generated secrets
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# tauri / rust
+apps/desktop/src-tauri/target/
+# Ignore only the regenerated schemas / iOS scaffold; the Android project (gen/android) IS tracked
+# so manifest/permission/Kotlin customizations persist (its own gen/android/.gitignore excludes build output).
+apps/desktop/src-tauri/gen/schemas/
+apps/desktop/src-tauri/gen/apple/
+
+# update button (О2б): request/status files shared between the backend container and the host
+/run/
+
+# secrets & local env — NEVER commit real secrets
 .env
 .env.*
 !.env.example
-.gusvoice-backups/
+
+# deploy tokens / PATs / credentials dropped into the project folder — never commit
+gusvoce-deploy.txt
+*-deploy.txt
+*.token
+smtp.txt
+*-secret.txt
+runtok.txt
+
+# signing key material — NEVER commit (real keys live in S:\gusvoice-keys, off-repo).
+# These patterns are a safety net in case a key is ever dropped into the project folder.
+*.keystore
+*.jks
+*.pfx
+*.p12
+SECRETS.txt
+*.b64.txt
+gusvoice-keys/
+# Android release signing config holds keystore passwords — local only, CI uses ANDROID_KEYSTORE_* secrets.
+keystore.properties
+
+# Claude Code local session dir
+.claude/
+
+# Public-bundle sanitizer staging output (scripts/publish-public.sh)
+.public-stage/
+
+# logs & misc
+*.log
+npm-debug.log*
+coverage/
+.DS_Store
+Thumbs.db
+*.local
+minio.md
+*-info.md

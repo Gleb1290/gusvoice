@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Voice + camera in LiveKit WebRTC (getUserMedia inside the WebView). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Keep the voice call alive when the screen locks / app is backgrounded (#89). FGS_MICROPHONE
+         (API 34+) requires RECORD_AUDIO (above); POST_NOTIFICATIONS (API 33+) shows the FGS notice.
+         FGS_MEDIA_PLAYBACK: the mic type only tells the OS we RECORD in the background (upstream) — it
+         does NOT protect audio OUTPUT, so aggressive OEMs (Xiaomi/MIUI/HyperOS, Oppo, Vivo) suspend
+         background playback ~40s after backgrounding and remote voices go silent while the mic keeps
+         flowing. Declaring mediaPlayback too tells the OS we also PLAY audio in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Embedded push distributor: a data-sync FGS holds the socket to the instance's ntfy so DMs /
+         @mentions wake the app when it's closed, with no separate distributor app. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <!-- Mic/camera are optional features so the app isn't filtered off devices that lack them. -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.gusvoice"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Voice-call foreground service (#89). Not exported — only our own JS bridge starts it.
+             Dual type: microphone (keep recording in bg) + mediaPlayback (keep OUR audio OUTPUT alive
+             in bg so aggressive OEMs don't mute remote voices ~40s after backgrounding). -->
+        <service
+            android:name=".VoiceForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- UnifiedPush receiver — the ntfy distributor broadcasts push events here (DM / @mention wake),
+             firing even when GusVoice's own process is dead. Exported so the external distributor reaches it.
+             Declaring it with the proper intent-filter makes the connector library use THIS receiver. -->
+        <receiver
+            android:name=".UnifiedPushReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+                <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+                <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+                <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Embedded push distributor: foreground service holding the WebSocket to the instance's ntfy
+             (the multi-instance path — no separate ntfy app). Not exported; started from our JS bridge. -->
+        <service
+            android:name=".PushDistributorService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Restart the embedded push distributor after reboot (only if it was enabled). -->
+        <receiver
+            android:name=".PushBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+          android:name="androidx.core.content.FileProvider"
+          android:authorities="${applicationId}.fileprovider"
+          android:exported="false"
+          android:grantUriPermissions="true">
+          <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

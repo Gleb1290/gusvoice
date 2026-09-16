@@ -1,0 +1,108 @@
+[package]
+name = "gusvoice"
+version = "0.6.62"
+description = "GusVoice desktop client"
+license = "AGPL-3.0-only"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "gusvoice_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Сбор диагностики с машины пользователя (#113).
+#
+# 🔴 ВЫКЛЮЧЕНА ПО УМОЛЧАНИЮ, и направление тут принципиально: забытый флаг должен давать сборку БЕЗ
+# сбора, а не «сбор уехал в паблик». Обратное умолчание однажды протечёт, и узнаем мы об этом от
+# чужих людей. Наш хоумлаб-билд включает её явно (`--features diag` в build.yaml), публичный —
+# собирается отдельной командой и её не передаёт, поэтому в нём этого кода нет вовсе.
+#
+# ⚠️ Модуль `gpu_nvml` под фичу НЕ уходит: из него берётся поколение видеокарты для защиты от
+# падения показа на Pascal (#112). Спрятав его целиком, мы вместе со сбором вырезали бы из публичной
+# сборки защиту от вылета — под фичей только `snapshot()`, то есть сама телеметрия.
+diag = []
+
+[dependencies]
+# `devtools` keeps F12 / Inspect working in RELEASE builds too (handy for on-device debugging).
+# `tray-icon` enables the system-tray icon/menu (close-to-tray behaviour).
+tauri = { version = "2", features = ["devtools", "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Desktop-only plugins: global hotkeys + auto-updater + relaunch + OS notifications.
+# (notification DOES support mobile, but we gate it desktop-side for now — Android
+# notifications come with the RuStore push work.)
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# Одиночный запуск (#108): без него клик по ярлыку поднимает ВТОРОЙ процесс вместо того, чтобы
+# показать уже работающий из трея. Два экземпляра входят в LiveKit с одной identity (= userId), и
+# сервер вышибает первый — со стороны выглядит как «клиент замолчал сам».
+tauri-plugin-single-instance = "2.4.3"
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-notification = "2.3.3"
+# Native folder picker for the downloads directory (Settings → Десктоп, and the first-download ask).
+# Used from JS only (`plugin:dialog|open` with directory:true) — no Rust-side dialog code, so the COM
+# apartment/modal-loop handling stays the plugin's problem, not ours.
+tauri-plugin-dialog = "2.7.2"
+
+# WebView2 mic/camera permission grant (Windows). Pinned to Tauri/wry's transitive version.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+# Native screen-share audio: WASAPI process-loopback that EXCLUDES the GusVoice process tree, so
+# the stream carries system/game audio without our own voice output (no echo). windows 0.61 matches
+# the version webview2-com/wry already pull in.
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_System_Threading",
+  # Авто-«отошёл» уровня ОС: GetTickCount — вторая половина пары к GetLastInputInfo.
+  "Win32_System_SystemInformation",
+  "Win32_Media_Audio",
+  "Win32_UI_WindowsAndMessaging",
+  # Global keyboard hotkey hook (hotkey_key.rs): GetAsyncKeyState + VK_* virtual-key codes.
+  "Win32_UI_Input_KeyboardAndMouse",
+  # Диагностика: рабочий набор процессов и их перечисление.
+  # 🔴 Фичи "Win32_System_Performance" здесь СОЗНАТЕЛЬНО НЕТ. Она раздувает генерируемый код так,
+  # что в РЕЛИЗНОЙ сборке rustc падает со STATUS_STACK_BUFFER_OVERRUN (кончается стек) — десктоп
+  # перестаёт собираться, причём `cargo check` этого не показывает, там нет оптимизации. Нужные
+  # шесть функций PDH объявлены вручную в src/diag.rs.
+  "Win32_System_ProcessStatus",
+  "Win32_System_Diagnostics_ToolHelp",
+  # Overlay app-picker: enumerate running windows + extract each exe's icon to a PNG.
+  "Win32_UI_Shell",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+] }
+windows-core = "0.61"
+
+# Native screen-share publish (Plan B): LiveKit Rust SDK = native libwebrtc capture + encode +
+# publish, replacing the WebView2 getDisplayMedia picker (which can't be intercepted). A companion
+# participant "<userId>#screen" publishes the natively-captured screen. REQUIRES +crt-static (see
+# .cargo/config.toml) — the prebuilt libwebrtc is built with the static MSVC CRT (/MT).
+# rustls-tls-native-roots = TLS for wss:// using the OS cert store. Windows-only for now.
+livekit = { version = "0.7.49", features = ["rustls-tls-native-roots"] }
+# Прямая зависимость на webrtc-sys — ради переключателя WGC при захвате ОКНА (утечка в
+# explorer, см. screenshare.rs). Версия та же, что тянет livekit; `[patch.crates-io]` ниже
+# подменяет её нашим вендоренным форком, так что оба пути ведут в один и тот же код.
+webrtc-sys = "0.3.35"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Source-picker thumbnails: PNG-encode one captured frame per source into a data-URL.
+png = "0.17"
+base64 = "0.22"
+
+# NVENC hardware H.264/H.265: build the GusVoice-patched webrtc-sys (Windows NVENC
+# encoder enabled) instead of the published 0.3.35. The fork compiles the (otherwise
+# Linux-gated) nvidia encoder sources on Windows; it needs env GV_CUDA_DIR pointing at
+# a cuda_cudart redist (cuda.h + cuda.lib) — CI downloads it (see build.yaml). Without
+# GV_CUDA_DIR the fork falls back to software OpenH264, identical to upstream.
+# Vendored under apps/desktop/vendor/webrtc-sys; see docs/native-screenshare-plan.md.
+[patch.crates-io]
+webrtc-sys = { path = "../vendor/webrtc-sys" }

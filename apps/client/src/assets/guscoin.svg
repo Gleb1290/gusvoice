@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <defs>
+    <radialGradient id="field" cx="32%" cy="24%" r="78%">
+      <stop stop-color="#FFE869"/>
+      <stop offset=".56" stop-color="#F6B814"/>
+      <stop offset="1" stop-color="#B95C06"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="17" y1="10" x2="79" y2="92" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF6A9"/>
+      <stop offset=".25" stop-color="#FFC82E"/>
+      <stop offset=".67" stop-color="#E88E09"/>
+      <stop offset="1" stop-color="#944004"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="29" y1="21" x2="71" y2="79" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#258BFF"/>
+      <stop offset=".52" stop-color="#0754E5"/>
+      <stop offset="1" stop-color="#062D9C"/>
+    </linearGradient>
+  </defs>
+  <circle cx="50" cy="50" r="48" fill="#06194E"/>
+  <circle cx="50" cy="50" r="45.5" fill="url(#rim)"/>
+  <circle cx="50" cy="50" r="37.5" fill="url(#field)" stroke="#834305" stroke-width="2"/>
+  <path d="M67 22C48 18 29 30 26 48c-3 19 10 33 29 33 16 0 25-11 21-25-3-11-15-14-23-8-7 5-8 16 0 20 7 4 15-1 13-9" stroke="#03195D" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M67 22C48 18 29 30 26 48c-3 19 10 33 29 33 16 0 25-11 21-25-3-11-15-14-23-8-7 5-8 16 0 20 7 4 15-1 13-9" stroke="url(#blue)" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M59 30C45 28 34 38 33 51c-1 13 8 23 21 23 11 0 19-8 18-18-1-7-8-10-14-7" stroke="#FFF5D5" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M20 21C28 12 39 8 51 8" stroke="#FFFDE0" stroke-width="2.4" stroke-linecap="round" opacity=".78"/>
+</svg>

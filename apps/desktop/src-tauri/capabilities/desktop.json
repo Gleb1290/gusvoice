@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Desktop-only plugin permissions (global-shortcut, updater, process, dialog). Scoped to desktop platforms so the Android/iOS build — which does not compile these plugins (cfg(not(any(android, ios)))) — doesn't fail capability validation.",
+  "windows": ["main"],
+  "platforms": ["windows", "linux", "macOS"],
+  "permissions": [
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "updater:default",
+    "process:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify",
+    "dialog:allow-open"
+  ]
+}

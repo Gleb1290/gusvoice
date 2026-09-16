@@ -1,0 +1,24 @@
+{
+  "name": "@gusvoice/shared",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/animatedAvatar.test.ts src/clientIp.test.ts src/economyPreview.test.ts src/emojiRules.test.ts src/mentions.test.ts src/permissions.test.ts src/pollDraft.test.ts src/secretRules.test.ts src/stickerRules.test.ts src/streamPreview.test.ts src/voiceMessage.test.ts src/voiceQuality.test.ts src/ws.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "tsx": "4.22.4",
+    "@types/node": "20.19.43"
+  }
+}
