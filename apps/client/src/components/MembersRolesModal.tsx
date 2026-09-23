@@ -4,10 +4,12 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { useStore } from '../store';
+import { confirmAction } from '../confirm';
 import { Avatar } from './Avatar';
 import { HelpDot } from './HelpDot';
 import { Icon } from './Icon';
 import { Toggle } from './Toggle';
+import { Select } from './Select';
 
 const ROLE_COLORS = [0xf2b33d, 0x3fb97a, 0xe0574e, 0x3f7fb9, 0xc95e8c, 0x5e9c8c, 0x9c97a8, 0xb07ad8];
 
@@ -206,8 +208,21 @@ export function MembersRolesModal({
   // A self-service role must not carry admin-level perms (the backend rejects it) — disable the toggle.
   const roleHasAdminPerms =
     hasBit(perms, Permission.ADMINISTRATOR) || hasBit(perms, Permission.MANAGE_ROLES) || hasBit(perms, Permission.MANAGE_SERVER);
-  const roleMembers = selected && !selected.isEveryone ? members.filter((m) => m.roleIds.includes(selected.id)) : [];
-  const roleNonMembers = selected && !selected.isEveryone ? members.filter((m) => !m.roleIds.includes(selected.id)) : [];
+  /**
+   * Кто в роли. У «Гостей» (§5.9) состав считается ПО ПРИЗНАКУ гостя, а не по строкам выдачи: роль
+   * системная, руками не выдаётся, и список по `roleIds` был бы всегда пуст — окно уверяло бы, что
+   * ограничивать некого, стоя рядом с живыми гостями сервера.
+   */
+  const systemRole = !!selected && (selected.isEveryone || !!selected.isGuests);
+  const roleMembers = !selected
+    ? []
+    : selected.isGuests
+      ? members.filter((m) => !!m.user.homeInstance)
+      : selected.isEveryone
+        ? []
+        : members.filter((m) => m.roleIds.includes(selected.id));
+  // Добавлять в системную роль нечего: в «Гостей» попадают сами, в `@everyone` — все.
+  const roleNonMembers = selected && !systemRole ? members.filter((m) => !m.roleIds.includes(selected.id)) : [];
 
   // Display highest-first ("выше = больше прав"); @everyone always sits at the bottom.
   const sortableRoles = roles.filter((r) => !r.isEveryone).sort((a, b) => b.position - a.position);
@@ -270,7 +285,13 @@ export function MembersRolesModal({
   }
 
   async function deleteRole(r: Role) {
-    if (!confirm(`Удалить роль «${r.name}»?`)) return;
+    const ok = await confirmAction({
+      title: `Удалить роль «${r.name}»?`,
+      body: 'Права, которые она давала, пропадут у всех, кто её носит.',
+      tone: 'danger',
+      confirmLabel: 'Удалить роль',
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await api.deleteRole(r.id);
@@ -301,7 +322,13 @@ export function MembersRolesModal({
   }
 
   async function kick(userId: string, label: string) {
-    if (!confirm(`Кикнуть ${label} с сервера?`)) return;
+    const ok = await confirmAction({
+      title: `Кикнуть ${label} с сервера?`,
+      body: 'Сообщения останутся. Вернуться можно по новому приглашению.',
+      tone: 'danger',
+      confirmLabel: 'Кикнуть',
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await api.kickMember(serverId, userId);
@@ -313,7 +340,8 @@ export function MembersRolesModal({
     }
   }
 
-  const assignableRoles = roles.filter((r) => !r.isEveryone);
+  // «Гости» в выдачу не попадают: бэкенд такую выдачу отклоняет, а местному она дала бы прав.
+  const assignableRoles = roles.filter((r) => !r.isEveryone && !r.isGuests);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -398,6 +426,7 @@ export function MembersRolesModal({
                   <button type="button" className="role-item" onClick={() => selectRole(r)}>
                     <span className="role-dot" style={{ background: r.color ? colorToHex(r.color) : '#888' }} />
                     {r.isEveryone ? '@everyone' : r.name}
+                    {r.isGuests && <span className="muted"> · системная</span>}
                   </button>
                   {canManageRoles && !r.isEveryone && (
                     <span className="role-reorder">
@@ -425,7 +454,17 @@ export function MembersRolesModal({
                 <>
                   <label className="field">
                     Название
-                    <input value={name} onChange={(e) => setName(e.target.value)} disabled={!canManageRoles || selected.isEveryone} />
+                    {/* Системную роль не переименовываем: её имя — часть правила, а не украшение. */}
+                    <input value={name} onChange={(e) => setName(e.target.value)} disabled={!canManageRoles || systemRole} />
+                    {/* 🔴 Объяснение жило только в комментарии кода — человек видел просто серое
+                        поле и не знал, он ли что-то делает не так. Образец «как надо» был тут же
+                        рядом, у тумблера самовыдачи. */}
+                    {systemRole && (
+                      <span className="muted field-why">
+                        Эту роль нельзя переименовать: её имя — часть правил сервера, на него
+                        ссылаются права и упоминания.
+                      </span>
+                    )}
                   </label>
 
                   <div className="field" style={{ gap: 8 }}>
@@ -449,7 +488,7 @@ export function MembersRolesModal({
                     <span>Упоминаемая — @роль уведомляет участников</span>
                     <Toggle
                       checked={mentionable}
-                      disabled={!canManageRoles || selected.isEveryone}
+                      disabled={!canManageRoles || systemRole}
                       onChange={setMentionable}
                     />
                   </div>
@@ -465,7 +504,8 @@ export function MembersRolesModal({
                     </span>
                     <Toggle
                       checked={membersCanAssign && !roleHasAdminPerms}
-                      disabled={!canManageRoles || selected.isEveryone || roleHasAdminPerms}
+                      // «Гостей» руками не выдают вовсе, поэтому и самовыдача к ней неприменима.
+                      disabled={!canManageRoles || systemRole || roleHasAdminPerms}
                       onChange={setMembersCanAssign}
                     />
                   </div>
@@ -489,7 +529,9 @@ export function MembersRolesModal({
 
                   {!selected.isEveryone && (
                     <div className="role-members">
-                      <div className="cat-name">Участники роли · {roleMembers.length}</div>
+                      <div className="cat-name">
+                        {selected.isGuests ? 'Гости сервера' : 'Участники роли'} · {roleMembers.length}
+                      </div>
                       <div className="role-mchips">
                         {roleMembers.map((m) => (
                           <span
@@ -499,35 +541,42 @@ export function MembersRolesModal({
                           >
                             <Avatar url={m.user.avatarUrl} name={m.user.displayName} size={18} />
                             {m.user.displayName}
-                            {canManageRoles && (
+                            {/* Из «Гостей» не убирают: человек в ней, пока он гость (§5.9). Крестик
+                                тут был бы кнопкой, которая всегда отвечает отказом. */}
+                            {canManageRoles && !selected.isGuests && (
                               <button type="button" onClick={() => toggleMemberRole(m.user.id, selected.id, false)} disabled={busy}>
                                 ×
                               </button>
                             )}
                           </span>
                         ))}
-                        {roleMembers.length === 0 && <span className="muted">пока никого нет в этой роли</span>}
+                        {roleMembers.length === 0 && (
+                          <span className="muted">
+                            {selected.isGuests ? 'гостей с других инстансов на сервере нет' : 'пока никого нет в этой роли'}
+                          </span>
+                        )}
                       </div>
                       {canManageRoles && roleNonMembers.length > 0 && (
-                        <select
+                        <Select
                           value=""
                           disabled={busy}
-                          onChange={(e) => e.target.value && toggleMemberRole(e.target.value, selected.id, true)}
-                        >
-                          <option value="">+ добавить участника в роль</option>
-                          {roleNonMembers.map((m) => (
-                            <option key={m.user.id} value={m.user.id}>
-                              {m.user.displayName}
-                            </option>
-                          ))}
-                        </select>
+                          placeholder="+ добавить участника в роль"
+                          ariaLabel="Добавить участника в роль"
+                          title="Добавить участника в роль"
+                          searchPlaceholder="Поиск участника"
+                          onChange={(v) => v && toggleMemberRole(v, selected.id, true)}
+                          options={roleNonMembers.map((m) => ({ value: m.user.id, label: m.user.displayName }))}
+                        />
                       )}
                     </div>
                   )}
 
                   {canManageRoles && (
                     <div className="modal-actions">
-                      {!selected.isEveryone && (
+                      {/* Удалить системную роль нельзя (бэкенд отвечает отказом): без «Гостей»
+                          ограничивать гостей станет нечем, а её переопределения каналов молча
+                          перестанут действовать. */}
+                      {!systemRole && (
                         <button type="button" className="danger-text" onClick={() => deleteRole(selected)} disabled={busy}>
                           Удалить роль
                         </button>
@@ -588,18 +637,15 @@ export function MembersRolesModal({
                           </span>
                         ))}
                         {canManageRoles && addable.length > 0 && (
-                          <select
+                          <Select
                             value=""
                             disabled={busy}
-                            onChange={(e) => e.target.value && toggleMemberRole(m.user.id, e.target.value, true)}
-                          >
-                            <option value="">+ роль</option>
-                            {addable.map((r) => (
-                              <option key={r.id} value={r.id}>
-                                {r.name}
-                              </option>
-                            ))}
-                          </select>
+                            placeholder="+ роль"
+                            ariaLabel="Добавить роль участнику"
+                            title="Добавить роль"
+                            onChange={(v) => v && toggleMemberRole(m.user.id, v, true)}
+                            options={addable.map((r) => ({ value: r.id, label: r.name, dot: r.color ? colorToHex(r.color) : undefined }))}
+                          />
                         )}
                       </div>
                     </div>

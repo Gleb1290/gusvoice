@@ -38,7 +38,7 @@ const KEY = 'gv_audio';
 // installs — a stored preference always wins in getAudioSettings().
 const MOBILE = isMobile();
 
-const DEFAULTS: AudioSettings = {
+export const AUDIO_DEFAULTS: AudioSettings = {
   inputDeviceId: '',
   outputDeviceId: '',
   cameraDeviceId: '',
@@ -67,14 +67,14 @@ export function getAudioSettings(): AudioSettings {
   try {
     const raw = localStorage.getItem(KEY);
     const parsed = raw ? (JSON.parse(raw) as Partial<AudioSettings>) : {};
-    const merged = { ...DEFAULTS, ...parsed };
+    const merged = { ...AUDIO_DEFAULTS, ...parsed };
     // Migrate pre-selector users: a stored noiseSuppression:false becomes the 'off' filter.
     if (raw && parsed.noiseFilter === undefined) {
       merged.noiseFilter = parsed.noiseSuppression === false ? 'off' : 'system';
     }
     cache = merged;
   } catch {
-    cache = { ...DEFAULTS };
+    cache = { ...AUDIO_DEFAULTS };
   }
   return cache;
 }

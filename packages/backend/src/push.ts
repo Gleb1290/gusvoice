@@ -1,4 +1,6 @@
-import { mentionedNames } from '@gusvoice/shared';
+import { BROADCAST_MENTIONS, mentionedHandles } from '@gusvoice/shared';
+import { instanceIdByDomain } from './federation/instanceLabels.js';
+import { getChannelAudience } from './permissions.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { pushDevices, pushMutes, serverMembers, users } from './db/schema.js';
@@ -22,6 +24,14 @@ export interface PushPayload {
   dmId?: string;
   channelId?: string;
   serverId?: string;
+  /**
+   * На каком инстансе это случилось (#139, F5, требование 33) — `instance_id` федерации.
+   *
+   * Пусто — у нас же, как было всегда. Заполнено — пуш приехал с ЧУЖОГО инстанса через дом, и по
+   * тапу приложение обязано перейти туда: серверов и каналов с такими идентификаторами у дома нет,
+   * и без этого поля тап привёл бы в пустоту.
+   */
+  instanceId?: string;
 }
 
 export type PushMuteScope = 'server' | 'dm_user';
@@ -77,7 +87,6 @@ export async function sendPushToUsers(
   payload: PushPayload,
   source?: PushSource,
 ): Promise<void> {
-  if (!NTFY_BASE || !NTFY_TOKEN) return; // push not configured
   let ids = [...new Set(recipientIds)];
   if (ids.length === 0) return;
   if (source) {
@@ -97,6 +106,38 @@ export async function sendPushToUsers(
       if (ids.length === 0) return;
     }
   }
+  /**
+   * 🔴 Гостей будим ЧЕРЕЗ ИХ ДОМ (требование 33). Устройство гостя зарегистрировано в пушах дома, а
+   * не у нас: своей рассылкой мы до его телефона не достучимся в принципе — раньше он просто не
+   * узнавал, что его позвали, пока сам не открывал приложение.
+   *
+   * ⚠️ Содержимое сообщения дому НЕ уходит: он получает «вашего человека позвали там-то» и будит
+   * телефон своим пушем. Текст клиент забирает у нас, когда человек откроет приложение.
+   */
+  const rows = await db
+    .select({ id: users.id, homeInstanceId: users.homeInstanceId, homeUserId: users.homeUserId })
+    .from(users)
+    .where(inArray(users.id, ids));
+  const guests = rows.filter((r) => r.homeInstanceId && r.homeUserId);
+  if (guests.length > 0) {
+    void import('./federation/guestPush.js')
+      .then(({ notifyGuestHomes }) =>
+        notifyGuestHomes(
+          guests.map((g) => ({ instanceId: g.homeInstanceId!, homeUserId: g.homeUserId! })),
+          payload,
+        ),
+      )
+      .catch(() => {
+        /* дом недоступен — событие осталось в очереди и уедет само */
+      });
+    const guestIds = new Set(guests.map((g) => g.id));
+    ids = ids.filter((uid) => !guestIds.has(uid));
+    if (ids.length === 0) return;
+  }
+
+  // Своим — как раньше, напрямую через наш ntfy. ⚠️ Проверка настройки стоит ЗДЕСЬ, а не в начале:
+  // инстанс без своих пушей всё равно обязан разбудить гостя через его дом.
+  if (!NTFY_BASE || !NTFY_TOKEN) return;
   const devices = await db.select().from(pushDevices).where(inArray(pushDevices.userId, ids));
   if (devices.length === 0) return;
   const body = JSON.stringify(payload);
@@ -135,15 +176,65 @@ export async function resolveMentionedMembers(
   content: string,
   serverId: string,
   authorId: string,
+  /** Канал сообщения — по нему считается, кого будит `@everyone`. Без него `@everyone` пуш не шлёт. */
+  channelId?: string,
 ): Promise<string[]> {
-  const names = mentionedNames(content);
-  if (names.length === 0) return [];
-  const rows = await db
-    .select({ id: users.id })
-    .from(users)
-    .innerJoin(serverMembers, and(eq(serverMembers.userId, users.id), eq(serverMembers.serverId, serverId)))
-    .where(inArray(sql`lower(${users.username})`, names));
-  return rows.map((r) => r.id).filter((uid) => uid !== authorId);
+  const handles = mentionedHandles(content);
+  if (handles.length === 0) return [];
+  const isBroadcast = (name: string) => (BROADCAST_MENTIONS as readonly string[]).includes(name);
+  const names = handles.filter((h) => h.domain === null && !isBroadcast(h.name)).map((h) => h.name);
+  const guests = handles.filter((h) => h.domain !== null);
+
+  const found: string[] = [];
+
+  /**
+   * `@everyone` (#76, мегаприёмка 23.09): раньше уходил в поиск пользователя с именем «everyone» и не
+   * будил никого, хотя звук и значок у людей в приложении срабатывали. Будим всех, кто ВИДИТ канал, —
+   * ту же аудиторию, что получает само сообщение (`getChannelAudience`), и только настоящих участников:
+   * супер-админ входит в аудиторию любого канала виртуально, и пуш с чужих серверов ему не нужен.
+   *
+   * ⚠️ `@here` пуш не шлёт намеренно: он про тех, кто сейчас в приложении, а они получают звук и значок
+   * живьём. Разбудить телефон спящему — ровно то, чем `@here` отличается от `@everyone`.
+   */
+  if (channelId && handles.some((h) => h.domain === null && h.name === 'everyone')) {
+    const audience = await getChannelAudience(channelId);
+    if (audience && audience.serverId === serverId && audience.userIds.length > 0) {
+      const rows = await db
+        .select({ id: serverMembers.userId })
+        .from(serverMembers)
+        .where(and(eq(serverMembers.serverId, serverId), inArray(serverMembers.userId, audience.userIds)));
+      found.push(...rows.map((r) => r.id));
+    }
+  }
+  if (names.length > 0) {
+    const rows = await db
+      .select({ id: users.id })
+      .from(users)
+      .innerJoin(serverMembers, and(eq(serverMembers.userId, users.id), eq(serverMembers.serverId, serverId)))
+      .where(inArray(sql`lower(${users.username})`, names));
+    found.push(...rows.map((r) => r.id));
+  }
+
+  /**
+   * Гость (#139, F4, §5.5): к нему обращаются `@ник@домен`, и найти его можно только по ПАРЕ.
+   *
+   * 🔴 По одному нику искать нельзя: на сервере бывает свой Вася и Вася с соседнего инстанса, и
+   * поиск по имени позвонил бы не тому — ровно поэтому домен в обращении и появился.
+   * ⚠️ Домен → инстанс берём из кеша связок: имя инстанса меняется раз в недели, а сообщения идут
+   * потоком, и лишний запрос в базу на каждое упоминание тут ни к чему.
+   */
+  for (const h of guests) {
+    const instanceId = instanceIdByDomain(h.domain!);
+    if (!instanceId) continue;
+    const rows = await db
+      .select({ id: users.id })
+      .from(users)
+      .innerJoin(serverMembers, and(eq(serverMembers.userId, users.id), eq(serverMembers.serverId, serverId)))
+      .where(and(eq(users.homeInstanceId, instanceId), eq(sql`lower(${users.homeUsername})`, h.name)));
+    found.push(...rows.map((r) => r.id));
+  }
+
+  return [...new Set(found)].filter((uid) => uid !== authorId);
 }
 
 /** List a user's active push-mute rules (for bootstrap / settings UI). */

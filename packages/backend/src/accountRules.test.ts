@@ -18,6 +18,8 @@ const CLEARED_USER_FK_TABLES = [
   'diag_reports',
   'dm_reads',
   'email_verifications',
+  'federation_guest_grants',
+  'federation_memberships',
   'member_roles',
   'password_resets',
   'push_devices',
@@ -38,12 +40,17 @@ const RETAINED_USER_FKS = [
   'dm_channels.user_b',
   'dm_message_reactions.user_id',
   'dm_messages.author_id',
+  // Журнал запретов на инстанс (F3, §5.11) переживает уход модератора: решение принимал ИНСТАНС,
+  // и «кем поставлен» — подпись в журнале, а не связь с живым аккаунтом.
+  'instance_bans.created_by',
+  'instance_bans.removed_by',
   'invites.inviter_id',
   'message_reactions.user_id',
   'messages.author_id',
   'poll_votes.user_id',
   'season_results.user_id',
   'server_emojis.created_by',
+  'server_members.invited_by',
   'server_soundboard.created_by',
   'sticker_packs.created_by',
   'voice_activity.user_id',
@@ -80,6 +87,11 @@ describe('удаление аккаунта обезличивает, а не с
       steamPersona: null,
       showGameActivity: false,
       approvedAt: null,
+      hiddenFromPeers: false,
+      directoryUpdatedAt: now,
+      homeUsername: null,
+      homeAvatarHash: null,
+      homeGen: 0,
       deletedAt: now,
     });
   });
@@ -88,7 +100,9 @@ describe('удаление аккаунта обезличивает, а не с
     // Ловит новый персональный столбец схемы, для которого при удалении забыли принять решение.
     const schemaColumns = Object.keys(getTableColumns(dbSchema.users)).sort();
     const rowAnonymized = Object.keys(fields);
-    const retained = ['id', 'createdAt'];
+    // `homeInstanceId`/`homeUserId` сохраняются намеренно (F3, §5.6.2): значок инстанса остаётся у
+    // обезличенного гостя, и по этой же паре действует запрет на инстанс.
+    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId'];
     const invalidatedAfterTransaction = ['tokenGeneration'];
     assert.deepEqual(schemaColumns, [...rowAnonymized, ...retained, ...invalidatedAfterTransaction].sort());
   });

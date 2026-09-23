@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { addInstance, fetchDiscovery, normalizeServerInput, restartApp, setActiveInstance } from '../config';
+import { addInstance, fetchDiscovery, normalizeServerInput } from '../config';
+import { adoptActiveInstance } from '../instanceSwitch';
 import { Icon } from './Icon';
 
 /**
@@ -23,10 +24,10 @@ export function AddInstanceModal({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       const cfg = await fetchDiscovery(input);
-      const inst = addInstance(cfg, { activate: true });
-      setActiveInstance(inst.id);
-      // Restart → the app resolves the new (token-less) instance → Login screen for it.
-      await restartApp();
+      addInstance(cfg, { activate: true });
+      // Новый инстанс без токена — принимаем его как активный, и `App` показывает экран входа в
+      // него. Раньше здесь был перезапуск приложения; §5.7 сделала переход мягким.
+      await adoptActiveInstance();
     } catch {
       setError('Не удалось подключиться. Проверьте адрес сервера.');
       setBusy(false);

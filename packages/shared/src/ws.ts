@@ -53,6 +53,40 @@ export type GatewayServerMessage =
    */
   | { t: 'self.status'; status: PresenceStatus; statusAuto: boolean }
   /**
+   * Сервер закрыт для гостей (#139, F3, §5.3.1) — держатель снял федеративный доступ.
+   *
+   * 🔴 Уходит В ЛИЧНЫЕ подключения гостя, а не всему серверу: остальным участникам знать, что
+   * кого-то выставили, незачем. Требование 16 — закрывать НЕ молча: человек,
+   * сидящий в канале, видит окно с причиной и контактами держателя, а не «сервер пропал».
+   */
+  | {
+      t: 'server.access_closed';
+      serverId: string;
+      reason: string;
+      contacts: { kind: string; label: string; value: string }[];
+    }
+  /**
+   * Доступ гостю ВЕРНУЛИ: держатель снова поставил галочку федеративного доступа (§5.3.1).
+   *
+   * 🔴 Без этого события закрытие доезжало живьём, а открытие — нет: на стенде 18.09 гость
+   * оставался с замком в рейле и окном «сервер закрыт» до перезагрузки страницы, хотя членство на
+   * хосте уже было восстановлено. `server.invalidate`, который слался вместо него, отметку о
+   * закрытии не снимает — да и снимать её по нему нельзя: он приходит по десятку других поводов.
+   */
+  | { t: 'server.access_restored'; serverId: string }
+  /**
+   * Что-то изменилось в связках федерации (#139, F1) — вкладке «Федерация» пора перечитать себя.
+   *
+   * 🔴 Без полезной нагрузки НАМЕРЕННО: событие говорит «посмотри заново», а не «вот новое
+   * состояние». Связки читает только супер-админ, и читает целиком одной ручкой; слать сюда сами
+   * строки значило бы держать второй способ их сериализовать — и однажды разойтись с первым.
+   *
+   * Уходит ТОЛЬКО собственным подключениям супер-админа (`publishToUser`): кто с кем связан —
+   * не дело остальных. Повод: заявка соседа, его подтверждение, пауза, разрыв, потеря доверия.
+   * До него держатель, выдавший код, сидел перед экраном и жал F5, чтобы увидеть «Подтвердить».
+   */
+  | { t: 'federation.links' }
+  /**
    * Мой кошелёк на сервере изменился. Уходит ТОЛЬКО собственным подключениям человека
    * (`publishToUser`): чужой баланс — не их дело (#117).
    *
@@ -106,6 +140,21 @@ export type GatewayServerMessage =
   | { t: 'dm.delete'; channelId: string; messageId: string }
   // A reaction was added/removed on a DM message; both participants apply the delta.
   | { t: 'dm.reaction'; channelId: string; messageId: string; emoji: string; userId: string; op: 'add' | 'remove' }
+  /**
+   * «Я прочитал это у себя» — адресно ВСЕМ СВОИМ соединениям (`publishToUser`), больше никому.
+   *
+   * Заводилось под находку 20.09: человек читает канал с телефона, а на компьютере значок
+   * непрочитанного продолжает гореть — отметка прочтения писалась в базу и никому не рассылалась.
+   * Между вкладками одного браузера это решал `BroadcastChannel`, между УСТРОЙСТВАМИ помочь мог
+   * только сервер.
+   *
+   * ⚠️ Адресация строго по `userId`: через канал сервера такое событие ушло бы всем подписчикам,
+   * а «что и когда я прочитал» — сведения только мои.
+   * `serverId` передаётся, чтобы получатель погасил и значок сервера: он считается отдельно от
+   * каналов и иначе остаётся гореть (эти грабли уже ловились на согласовании вкладок).
+   */
+  | { t: 'read.channel'; channelId: string; serverId?: string; at: string }
+  | { t: 'read.dm'; dmId: string; at: string }
   // Someone is typing in a channel or DM (the recipient resolves the display name locally).
   | { t: 'typing'; channelId?: string; dmId?: string; userId: string }
   // «Тебя ткнули» — адресно ОДНОМУ человеку (publishToUser). Эфемерно: не дошло — значит не было,
@@ -213,6 +262,9 @@ const SERVER_MESSAGE_TYPES: Record<GatewayServerMessage['t'], true> = {
   'online.update': true,
   'user.status': true,
   'self.status': true,
+  'server.access_closed': true,
+  'server.access_restored': true,
+  'federation.links': true,
   'economy.wallet': true,
   'economy.tipsFull': true,
   'user.update': true,
@@ -225,6 +277,8 @@ const SERVER_MESSAGE_TYPES: Record<GatewayServerMessage['t'], true> = {
   'dm.update': true,
   'dm.delete': true,
   'dm.reaction': true,
+  'read.channel': true,
+  'read.dm': true,
   typing: true,
   poke: true,
   'mega-poke': true,

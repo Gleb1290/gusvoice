@@ -1,0 +1,18 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "now": 1758002000000,
+  "revocations": [
+    {
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+      "kind": "sessions",
+      "gen": 7,
+      "created_at": 1758001200000
+    },
+    {
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6c",
+      "kind": "revoked",
+      "gen": null,
+      "created_at": 1758001800000
+    }
+  ]
+}

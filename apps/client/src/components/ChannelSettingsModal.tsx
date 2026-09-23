@@ -13,9 +13,11 @@ import { useRef, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
+import { confirmAction } from '../confirm';
 import { ChannelPermissionsEditor } from './ChannelPermissionsEditor';
 import { ChannelSoundsPanel } from './ChannelSoundsPanel';
 import { ChannelGlyph, Icon, isCustomIcon, type IconName } from './Icon';
+import { Select } from './Select';
 
 export function ChannelSettingsModal({
   channel,
@@ -124,7 +126,13 @@ export function ChannelSettingsModal({
   }
 
   async function remove() {
-    if (!confirm(`Удалить канал «${channel.name}»? Это необратимо.`)) return;
+    const ok = await confirmAction({
+      title: `Удалить канал «${channel.name}»?`,
+      body: 'Сообщения канала исчезнут вместе с ним. Отменить это нельзя.',
+      tone: 'danger',
+      confirmLabel: 'Удалить канал',
+    });
+    if (!ok) return;
     setBusy(true);
     setError(null);
     try {
@@ -185,13 +193,17 @@ export function ChannelSettingsModal({
             {channel.type === 'voice' && (
               <label className="field">
                 Качество звука
-                <select value={voiceBitrate} onChange={(e) => setVoiceBitrate(Number(e.target.value))}>
-                  {VOICE_BITRATES.map((b) => (
-                    <option key={b} value={b}>
-                      {b} кбит/с{b === DEFAULT_VOICE_BITRATE ? ' — обычное' : ''}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  value={String(voiceBitrate)}
+                  onChange={(v) => setVoiceBitrate(Number(v))}
+                  ariaLabel="Битрейт голоса"
+                  title="Битрейт голоса"
+                  options={VOICE_BITRATES.map((b) => ({
+                    value: String(b),
+                    label: `${b} кбит/с`,
+                    hint: b === DEFAULT_VOICE_BITRATE ? 'обычное' : undefined,
+                  }))}
+                />
                 {/* Цифра, а не «низкое/высокое»: решение принимается по трафику того, у кого узкий
                     канал, и без числа его принять нельзя. Считаем на СЛУШАТЕЛЯ — платит он, а не тот,
                     кто говорит: SFU шлёт ему каждый голос отдельным потоком. */}
@@ -206,14 +218,16 @@ export function ChannelSettingsModal({
             {categories.length > 0 && (
               <label className="field">
                 Категория
-                <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-                  <option value="">— без категории —</option>
-                  {categories.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  value={categoryId}
+                  onChange={setCategoryId}
+                  ariaLabel="Категория"
+                  title="Категория"
+                  options={[
+                    { value: '', label: '— без категории —' },
+                    ...categories.map((c) => ({ value: c.id, label: c.name })),
+                  ]}
+                />
               </label>
             )}
 
@@ -346,19 +360,22 @@ function ChannelGeneralTab({
           <div className="cat-name" style={{ marginTop: 12 }}>
             Генерал
           </div>
-          <select
-            className="settings-select"
+          <Select
             value={channel.generalUserId ?? ''}
-            onChange={(e) => void setGeneral(e.target.value || null)}
+            onChange={(v) => void setGeneral(v || null)}
             disabled={busy}
-          >
-            <option value="">— не назначен —</option>
-            {members.map((m) => (
-              <option key={m.user.id} value={m.user.id}>
-                {m.nickname || m.user.displayName} (@{m.user.username})
-              </option>
-            ))}
-          </select>
+            ariaLabel="Генерал канала"
+            title="Генерал канала"
+            searchPlaceholder="Поиск участника"
+            options={[
+              { value: '', label: '— не назначен —' },
+              ...members.map((m) => ({
+                value: m.user.id,
+                label: m.nickname || m.user.displayName,
+                hint: `@${m.user.username}`,
+              })),
+            ]}
+          />
         </>
       )}
 

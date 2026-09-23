@@ -18,6 +18,26 @@
 /** Ключ в `instance_settings`: `{ userId }`. */
 export const SUPERADMIN_ID_KEY = 'superadmin_user_id';
 
+declare const userIdBrand: unique symbol;
+
+/**
+ * Идентификатор ЧЕЛОВЕКА. Обычная строка, но помеченная, и пометка эта — вся суть #140.
+ *
+ * Типы `id` и `username` в базе одинаковые, поэтому компилятор раньше не мешал передать в проверку
+ * прав логин вместо id — именно так дыра и появилась. Теперь прикладная проверка (`isSuperAdmin`
+ * в `auth.ts`) принимает `UserId`, а пометить строку можно только вслух, через `asUserId`: такое
+ * место видно и на ревью, и грепом.
+ *
+ * ⚠️ Нижние `isSuperAdminId` / `claimsAreSuperAdmin` намеренно берут обычную строку: они сравнивают
+ * два значения, которые им дали, и защищать надо ВХОД в приложение, а не это сравнение.
+ */
+export type UserId = string & { readonly [userIdBrand]: true };
+
+/** Пометить строку как id человека. Только там, где точно id (первичный ключ `users.id`, `sub` токена). */
+export function asUserId(value: string): UserId {
+  return value as UserId;
+}
+
 export interface BindingInput {
   /** id из `instance_settings`, если запись есть. */
   storedId: string | null;
@@ -126,4 +146,69 @@ export function isSuperAdminId(userId: string | null | undefined, superAdminId: 
  */
 export function claimsAreSuperAdmin(claims: { sub: string; username?: string }, superAdminId: string | null): boolean {
   return isSuperAdminId(claims.sub, superAdminId);
+}
+
+/**
+ * Привязка супер-админа целиком — чтение, решение, запись, объявление в лог (#143).
+ *
+ * Здесь нет ни базы, ни env: всё приходит зависимостями, поэтому порядок шагов и то, ЧТО именно
+ * записывается, проверяются тестом. Решение по-прежнему принимает `decideSuperAdminBinding`.
+ *
+ * ⚠️ Поиск по логину делается ТОЛЬКО когда записи нет вовсе (не «id не прочитался»): битая запись —
+ * fail-closed, иначе смена `SUPERADMIN_USERNAME` отдала бы инстанс другому человеку.
+ */
+export interface BindingIo {
+  /** Сырое значение записи `SUPERADMIN_ID_KEY` или `undefined`, если строки нет. */
+  readStored(): Promise<{ value: unknown } | undefined>;
+  /** Есть ли в базе пользователь с таким id. */
+  userExists(userId: string): Promise<boolean>;
+  /** id пользователя с логином РОВНО таким (регистр важен) или `null`. */
+  findIdByUsername(username: string): Promise<string | null>;
+  /** Записать первую привязку (не перетирая чужую запись). */
+  persist(userId: string): Promise<void>;
+  /** `SUPERADMIN_USERNAME` из env как есть. */
+  envUsername: string;
+  /** Куда объявить решение. */
+  log(level: 'info' | 'warn', message: string): void;
+}
+
+export async function bindSuperAdminWith(io: BindingIo): Promise<BindingDecision> {
+  const stored = await io.readStored();
+  const rawId = (stored?.value as { userId?: unknown } | undefined)?.userId;
+  const storedId = typeof rawId === 'string' && rawId.trim() !== '' ? rawId : null;
+  // Строка есть, а id в ней не читается — это НЕ «записи нет» (fail-closed, см. decideSuperAdminBinding).
+  const storedMalformed = !!stored && storedId === null;
+
+  const storedExists = storedId ? await io.userExists(storedId) : false;
+  const envUsername = io.envUsername.trim();
+  const usernameMatchId = !stored && envUsername ? await io.findIdByUsername(envUsername) : null;
+
+  const decision = decideSuperAdminBinding({
+    storedId,
+    storedMalformed,
+    storedExists,
+    envUsername,
+    usernameMatchId,
+  });
+
+  if (decision.persist && decision.superAdminId) await io.persist(decision.superAdminId);
+  if (decision.log) io.log(decision.log.level, decision.log.message);
+  return decision;
+}
+
+/**
+ * Порядок первого запуска: сначала создать аккаунт супер-админа, потом привязать права к его id.
+ *
+ * Порядок здесь не косметика: `bind` ищет аккаунт, которого до `seed` ещё нет, и перепутанные шаги
+ * дали бы свежую коробку без супер-админа до второго перезапуска. Поэтому он выражен отдельной
+ * функцией, а не двумя вызовами подряд в `index.ts`, где его легко переставить.
+ *
+ * ⚠️ Упал сид — привязку НЕ делаем: это отказ старта, а не «продолжим как получится».
+ */
+export async function bootstrapIdentity(steps: {
+  seedSuperAdmin(): Promise<void>;
+  bindSuperAdmin(): Promise<void>;
+}): Promise<void> {
+  await steps.seedSuperAdmin();
+  await steps.bindSuperAdmin();
 }

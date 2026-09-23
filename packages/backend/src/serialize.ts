@@ -14,10 +14,13 @@ import type {
   Role,
   Server,
   User,
+  UserBrief,
 } from '@gusvoice/shared';
 import { previewAllows } from '@gusvoice/shared';
 import { isSuperAdmin } from './auth.js';
+import { asUserId } from './superAdminRules.js';
 import { env } from './env.js';
+import { instanceLabel } from './federation/instanceLabels.js';
 import { statusFieldsOf } from './statusRules.js';
 import { animatedAvatarFor, avatarRentalActive } from './shopRules.js';
 
@@ -35,6 +38,9 @@ type UserRow = {
   animatedAvatarUntil?: Date | null;
   economyWelcomeSeenAt?: Date | null;
   totpEnabled?: boolean;
+  /** Теневая строка гостя (§5.5): чей он и как его зовут дома. У местного — пусто. */
+  homeInstanceId?: string | null;
+  homeUsername?: string | null;
   presenceStatus?: string | null;
   presenceAuto?: boolean | null;
   customStatusEmoji?: string | null;
@@ -53,12 +59,20 @@ export { statusFieldsOf } from './statusRules.js';
 export function serializeUser(u: UserRow): User {
   return {
     id: u.id,
-    username: u.username,
+    /**
+     * 🔴 У ГОСТЯ наружу уходит его ДОМАШНИЙ ник, а не служебный логин теневой строки (#139, F4).
+     * Служебный — это `<id>@<instance_id>`: он существует ради того, чтобы никогда не столкнуться с
+     * настоящим логином (§5.5), и человеку показывать его нельзя ни в профиле, ни в упоминании.
+     * ⚠️ Отсюда следствие: по этому полю НЕЛЬЗЯ искать человека в базе — только показывать.
+     */
+    username: u.homeUsername || u.username,
+    /** Откуда он, если гость. Значок инстанса рисуется по этому полю (§5.7). */
+    homeInstance: u.homeInstanceId ? instanceLabel(u.homeInstanceId) : null,
     email: u.email ?? null,
     verified: u.verified ?? false,
     // Только если строку выбирали целиком: у урезанных выборок (автор сообщения) поля нет — и не врём «не одобрен».
     approved: u.approvedAt === undefined ? undefined : !!u.approvedAt,
-    superAdmin: isSuperAdmin(u.id),
+    superAdmin: isSuperAdmin(asUserId(u.id)),
     canCreateServers: u.canCreateServers ?? false,
     displayName: u.displayName,
     avatarUrl: u.avatarUrl,
@@ -81,6 +95,12 @@ export function serializeUser(u: UserRow): User {
      * ⚠️ Едет только в СВОЁМ профиле и в админке: участников сервера сериализует `servers.ts`.
      */
     economyPreview: env.economyEnabled && previewAllows(env.economyPreviewUsers, u.id),
+    /**
+     * 🔴 Собирает ли инстанс диагностику. То же лекарство, что у `economyPreview`, и по той же
+     * причине: клиент запоминает флаги инстанса в момент ДОБАВЛЕНИЯ сервера и больше их не
+     * перечитывает, поэтому новый флаг до установленного десктопа не доезжает никогда.
+     */
+    diagPreview: env.diagEnabled,
     twoFactorEnabled: u.totpEnabled ?? false,
     ...statusFieldsOf(u, Date.now()),
     // Только себе: `serializeUser` вызывается для собственного профиля и админ-панели, участников
@@ -140,6 +160,30 @@ export function serializeChannel(c: {
   };
 }
 
+/**
+ * Человек для списков без ростера: баны, журнал действий, кто как голосовал.
+ *
+ * 🔴 Собирать эти три объекта руками — ровно та ошибка, из-за которой в списке банов на стенде
+ * 18.09 у гостя вместо ника стоял технический `<uuid>@<instance_id>`: правила гостя (домашний ник
+ * и значок инстанса) живут в `serializeUser`, и всякий, кто пишет поля сам, их теряет.
+ */
+export function serializeUserBrief(u: {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  homeInstanceId?: string | null;
+  homeUsername?: string | null;
+}): UserBrief {
+  return {
+    id: u.id,
+    username: u.homeUsername || u.username,
+    displayName: u.displayName,
+    avatarUrl: u.avatarUrl,
+    homeInstance: u.homeInstanceId ? instanceLabel(u.homeInstanceId) : null,
+  };
+}
+
 export function serializeRole(r: {
   id: string;
   serverId: string;
@@ -149,6 +193,7 @@ export function serializeRole(r: {
   position: number;
   hoist: boolean;
   isEveryone: boolean;
+  isGuests?: boolean;
   mentionable?: boolean;
   membersCanAssign?: boolean;
 }): Role {
@@ -161,6 +206,9 @@ export function serializeRole(r: {
     position: r.position,
     hoist: r.hoist,
     isEveryone: r.isEveryone,
+    // Клиент прячет «Гостей» из списка выдачи по этому полю (§5.9): без него роль стояла там
+    // наравне с обычными, и любой клик кончался бы отказом бэкенда.
+    isGuests: r.isGuests ?? false,
     mentionable: r.mentionable ?? false,
     membersCanAssign: r.membersCanAssign ?? false,
   };

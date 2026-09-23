@@ -28,3 +28,16 @@ export function stripInviteParam(search: string): string {
 export function inviteLink(origin: string, code: string): string {
   return `${origin.replace(/\/+$/, '')}/?invite=${encodeURIComponent(code)}`;
 }
+
+/**
+ * Код из ПУТИ страницы перехода `/i/<код>` (§4.2.2).
+ *
+ * ⚠️ Та же проверка, что и для `?invite=`: путь приходит из адресной строки, то есть от кого угодно,
+ * и «всё, что после /i/» пускать внутрь нельзя.
+ */
+export function inviteCodeFromPath(pathname: string): string | null {
+  const m = /^\/i\/([^/?#]+)/.exec(pathname);
+  if (!m) return null;
+  const code = decodeURIComponent(m[1]).trim();
+  return INVITE_CODE_RE.test(code) ? code : null;
+}

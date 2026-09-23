@@ -8,6 +8,7 @@ import {
   RoomEvent,
   Track,
   type TrackPublication,
+  VideoQuality,
 } from 'livekit-client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getAudioSettings, subscribeAudioSettings } from '../audioSettings';
@@ -29,12 +30,23 @@ import { createStreamCue } from '../streamCue';
 import { grabPreview } from '../streamPreviewGrab';
 import { createPreviewPublisher } from '../streamPreviewPublisher';
 import { getStreamSettings } from '../streamSettings';
+import { getStreamQuality, onStreamQuality, wantedLayer, type StreamLayer } from '../streamQuality';
 import { config } from '../config';
 import { diagDecision, getDiagConsent } from '../diagConsent';
+import { diagVisible } from '../diagVisible';
+import { noteVadTick } from '../uiMeters';
+import { isWindowCovered, onWindowCovered } from '../windowCovered';
 import { DiagConsentDialog } from './DiagConsent';
 import { api } from '../api';
 import { setSelfMuted } from '../voiceSelf';
 import { GRACE_MS, touchVoiceSession } from '../voiceSession';
+
+/** Слой показа → качество в терминах LiveKit (#191). */
+const LAYER_QUALITY: Record<StreamLayer, VideoQuality> = {
+  high: VideoQuality.HIGH,
+  medium: VideoQuality.MEDIUM,
+  low: VideoQuality.LOW,
+};
 
 /**
  * Owns a single LiveKit Room instance for the active voice connection. The Room is
@@ -50,9 +62,18 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   const leaveVoice = useStore((s) => s.leaveVoice);
   const setLiveVoice = useStore((s) => s.setLiveVoice);
   const [state, setState] = useState<string>('connecting');
-  // Спрашивать ли про диагностику. Считается ОДИН раз на монтирование: решение человека внутри
-  // сессии меняется только через это же окно, а перечитывать хранилище на каждый рендер незачем.
-  const [askDiag, setAskDiag] = useState(() => diagDecision(config.diagEnabled, getDiagConsent()) === 'ask');
+  // Спрашивать ли про диагностику. Ответ человека читаем ОДИН раз на монтирование: внутри сессии он
+  // меняется только через это же окно, а перечитывать хранилище на каждый рендер незачем. А вот
+  // разрешение ИНСТАНСА берём из профиля (`diagVisible`) и следим за ним: до 20.09 здесь стоял
+  // запомненный флаг реестра, из-за чего вопрос не задавался вообще никому.
+  const askDiagEnabled = useStore((s) => diagVisible(s.user?.diagPreview, config.diagEnabled));
+  const [askDiag, setAskDiag] = useState(() => diagDecision(askDiagEnabled, getDiagConsent()) === 'ask');
+  // Профиль мог приехать ПОЗЖЕ монтирования (перезаход, обновление токена). Пока признака нет,
+  // спрашивать не о чем; сказал сервер «собираю» — вопрос должен появиться, а не ждать следующего
+  // захода в голос.
+  useEffect(() => {
+    if (diagDecision(askDiagEnabled, getDiagConsent()) === 'ask') setAskDiag(true);
+  }, [askDiagEnabled]);
   // Mic-mute / deafen are GLOBAL intent in the store (persisted) — they survive channel switches,
   // reconnects and app restarts, drive the always-visible bar, and are applied to the live room by the
   // "apply self voice" effect below. The toggles live in voiceSelf.ts so any surface can flip them.
@@ -586,6 +607,44 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     };
   }, [room]);
 
+  // Слой чужого показа (#191): выбор зрителя, а пока окно не видно или показ не открыт — нижний
+  // (`streamQuality.wantedLayer`). Здесь, а не в окне просмотра, по той же причине, что громкость
+  // выше: окно просмотра размонтируется при уходе в текстовый канал, а поток продолжает идти.
+  // ⚠️ `setVideoQuality` действует только на ПОДПИСАННОЙ публикации, поэтому повтор на каждой подписке:
+  // превью подписывается раз в минуту заново, открытие показа — тоже новая подписка.
+  useEffect(() => {
+    const apply = () => {
+      const { watchedStreams } = useStore.getState();
+      const windowHidden = isWindowCovered() || document.visibilityState === 'hidden';
+      const pref = getStreamQuality();
+      for (const p of room.remoteParticipants.values()) {
+        for (const pub of p.trackPublications.values()) {
+          if (pub.source !== Track.Source.ScreenShare || !pub.isSubscribed) continue;
+          const watched = watchedStreams.some((w) => w === p.identity || ownerOf(w) === p.identity);
+          const layer = wantedLayer(pref, { windowHidden, watched });
+          try {
+            (pub as { setVideoQuality?: (q: VideoQuality) => void }).setVideoQuality?.(LAYER_QUALITY[layer]);
+          } catch {
+            /* слой — пожелание серверу, не повод ронять дерево */
+          }
+        }
+      }
+    };
+    apply();
+    const unsubStore = useStore.subscribe(apply);
+    const unCovered = onWindowCovered(apply);
+    const unPref = onStreamQuality(apply);
+    document.addEventListener('visibilitychange', apply);
+    room.on(RoomEvent.TrackSubscribed, apply);
+    return () => {
+      unsubStore();
+      unCovered();
+      unPref();
+      document.removeEventListener('visibilitychange', apply);
+      room.off(RoomEvent.TrackSubscribed, apply);
+    };
+  }, [room]);
+
   // Apply the unified mic-processing chain (input gain → neural filter → noise gate) to the published
   // mic. The chain is only attached when the user changed something from the cheap defaults; input
   // gain + gate threshold update live in-chain, and only a change of "shape" (filter / needed)
@@ -717,6 +776,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     const CLOSE = 0.01; // stay-speaking floor (hysteresis kills boundary chatter; still > idle 0.006)
     const HOLD = 500; // ms to keep the ring on after the level drops — bridges gaps between words
     const TICK = 50; // ms poll (20 Hz) — smooth and cheap; store only updates on actual change
+    const COVERED_TICK = 300; // окно под игрой: обводку никто не видит, хватит редкого шага
     // Re-read each tick so `localStorage.gvVad='1'` takes effect live, without rejoining the call.
     const readDebug = () => {
       try {
@@ -896,7 +956,23 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
 
     sync();
     tick();
-    const timer = setInterval(tick, TICK);
+    // Меряем стоимость тика для диагностики (#193): 20 раз в секунду на каждого участника — главный
+    // подозреваемый в том, что интерфейс съедает ядро, пока человек смотрит в игру.
+    const timedTick = () => {
+      const t0 = performance.now();
+      tick();
+      noteVadTick(performance.now() - t0, mons.size);
+    };
+    // 🔴 Пока окно накрыто игрой, частый тик не нужен: обводку говорящего никто не видит, а на
+    // четырёх ядрах каждый процент на счету (#193). Возврат к обычному шагу — мгновенный, по
+    // событию от оболочки, поэтому человек разницы не замечает.
+    let timer = setInterval(timedTick, TICK);
+    const retick = (covered: boolean) => {
+      clearInterval(timer);
+      timer = setInterval(timedTick, covered ? COVERED_TICK : TICK);
+    };
+    const unCovered = onWindowCovered(retick);
+    if (isWindowCovered()) retick(true);
     const onChange = () => sync();
     room
       .on(RoomEvent.TrackSubscribed, onChange)
@@ -910,6 +986,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       .on(RoomEvent.ConnectionStateChanged, onChange);
     return () => {
       clearInterval(timer);
+      unCovered();
       room
         .off(RoomEvent.TrackSubscribed, onChange)
         .off(RoomEvent.TrackUnsubscribed, onChange)

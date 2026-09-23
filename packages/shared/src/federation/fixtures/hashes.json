@@ -1,0 +1,19 @@
+{
+  "v1/directory-page.json": "5ddcd01be3814410ee8c652ad8aa1caf",
+  "v1/event-instance-updated.json": "d5d1e2c1066c0b9246f2274ba4a36688",
+  "v1/event-membership-changed.json": "79a4f8afe6f81dc501c71838206b7aff",
+  "v1/event-report-create.json": "81225716ab971f472e5812c23a2d3491",
+  "v1/event-server-updated.json": "ade4daf06faf11a12a39a1def62082dc",
+  "v1/event-sessions-revoked.json": "bfb141d6600f2c0919b35e733f0ede9e",
+  "v1/event-user-updated.json": "fa8d8db27b3dff567b1f8d9f3f1c1754",
+  "v1/guest-session.json": "c4f9bfcc809f70f57587bd011dfb3edb",
+  "v1/host-contacts.json": "70e6218f1e93f349098bc147fe4d4f2e",
+  "v1/instance-document.json": "4175818bc5233da1542daf2a1456433f",
+  "v1/invite-preview.json": "e34551bb75b5a73bc9bb3c172921a80c",
+  "v1/key-revoked.json": "b3d933d70b7664c4b5de8d66ad29c89c",
+  "v1/link-confirmed.json": "24299fa3454524a0cb5da498850a7d82",
+  "v1/link-request.json": "f064336baf109280db06d9b255ff23b7",
+  "v1/memberships-page.json": "188a1e6f831d644f9d4ab9b8c0575aaf",
+  "v1/revocations-page.json": "32a049d9c04edf355fb5e7d3acfffa25",
+  "v1/server-page.json": "0638f8d345ec13366a8c039607e8f01c"
+}

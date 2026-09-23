@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { api } from '../api';
 import { config } from '../config';
 import { getDiagConsent, setDiagConsent } from '../diagConsent';
+import { diagVisible } from '../diagVisible';
+import { useStore } from '../store';
 import { isDesktop } from '../hotkeys';
 import { toast, toastError } from '../toast';
 import { Toggle } from './Toggle';
@@ -113,8 +115,10 @@ export function DiagSettingsSection() {
   const [consent, setConsent] = useState(getDiagConsent());
   const [more, setMore] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Свежий ответ сервера важнее запомненного флага инстанса — разбор в `diagVisible`.
+  const diagEnabledHere = useStore((s) => diagVisible(s.user?.diagPreview, config.diagEnabled));
 
-  if (!isDesktop() || !config.diagEnabled) return null;
+  if (!isDesktop() || !diagEnabledHere) return null;
 
   const flip = (v: boolean) => {
     setDiagConsent(v ? 'yes' : 'no');

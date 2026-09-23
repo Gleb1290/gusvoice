@@ -49,6 +49,15 @@ function emit(userId: string) {
   for (const l of listeners) l(userId);
 }
 
+/**
+ * Забыть кеш под ДРУГОЙ инстанс (§5.7): здесь громкости по id людей, а люди принадлежат инстансу.
+ * Слушателям говорим пустым id — «изменилось всё», это их же соглашение для общих пересчётов.
+ */
+export function reloadUserAudio(): void {
+  cache = null;
+  emit('');
+}
+
 export function getUserVolume(userId: string): number {
   return load()[userId]?.volume ?? 1;
 }

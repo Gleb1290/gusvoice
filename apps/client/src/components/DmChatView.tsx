@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { DmChannel, Message } from '@gusvoice/shared';
-import { lastSeenAt, markChannelSeen } from '../channelPrefs';
+import { useChannelVisit } from '../channelVisit';
 import { api } from '../api';
 import { sendTyping } from '../sockets';
 import { useStore } from '../store';
@@ -25,18 +25,15 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
     .filter((uid) => uid === dm.otherUser.id)
     .map(() => ({ id: dm.otherUser.id, name: dm.otherUser.displayName }));
 
-  // «Новые сообщения» divider (#15): freeze the last-visit mark on entry, and move it forward on the
-  // way out — so the line stays where reading stopped instead of chasing incoming messages.
-  const [newSince, setNewSince] = useState<number | null>(null);
-  useEffect(() => {
-    const id = dm.id;
-    setNewSince(lastSeenAt(id));
-    return () => markChannelSeen(id);
-  }, [dm.id]);
+  /* Та же метка визита, что и в канале сервера (#15) — правила и телефонная ловушка описаны в
+     `channelVisit.ts`. */
+  const { newSince, visitKey } = useChannelVisit(dm.id, 'dm');
 
   return (
     <MessagePane
       newSince={newSince}
+      scrollKey={visitKey}
+      feedId={dm.id}
       title={
         <span className="dm-title">
           <Avatar url={dm.otherUser.avatarUrl} name={dm.otherUser.displayName} size={24} fallback="icon" />

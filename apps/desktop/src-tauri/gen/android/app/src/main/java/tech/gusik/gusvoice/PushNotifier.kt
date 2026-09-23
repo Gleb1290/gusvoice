@@ -45,6 +45,9 @@ object PushNotifier {
     val dmId = payload?.optString("dmId").orEmpty()
     val channelId = payload?.optString("channelId").orEmpty()
     val serverId = payload?.optString("serverId").orEmpty()
+    // Пусто — событие у нас же, как было всегда. Заполнено — у другого инстанса, и тап обязан
+    // привести туда: сервера с таким идентификатором в домашнем инстансе просто нет.
+    val instanceId = payload?.optString("instanceId").orEmpty()
 
     ensureChannel(context)
 
@@ -52,6 +55,7 @@ object PushNotifier {
     if (dmId.isNotEmpty()) openIntent.putExtra(UnifiedPushReceiver.EXTRA_DM, dmId)
     if (channelId.isNotEmpty()) openIntent.putExtra(UnifiedPushReceiver.EXTRA_CHANNEL, channelId)
     if (serverId.isNotEmpty()) openIntent.putExtra(UnifiedPushReceiver.EXTRA_SERVER, serverId)
+    if (instanceId.isNotEmpty()) openIntent.putExtra(UnifiedPushReceiver.EXTRA_INSTANCE, instanceId)
     val pi = PendingIntent.getActivity(
       context,
       (dmId + channelId + title).hashCode(),

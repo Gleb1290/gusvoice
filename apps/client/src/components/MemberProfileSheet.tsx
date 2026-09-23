@@ -3,9 +3,11 @@ import { MAX_VOLUME, useUserAudio } from '../localUserAudio';
 import { customStatusVisible, effectiveDot } from '../status';
 import { useStore } from '../store';
 import { toastError } from '../toast';
+import { dmBlockText } from '../dmRules';
 import { Avatar } from './Avatar';
 import { AvatarZoom } from './AvatarZoom';
 import { BottomSheet } from './BottomSheet';
+import { GuestLine } from './GuestMark';
 import { Icon } from './Icon';
 import { ProfileEconomy } from './ProfileEconomy';
 import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
@@ -49,6 +51,10 @@ export function MemberProfileSheet({ member, onClose }: { member: ServerMemberIn
   const volFill = audio.muted ? 0 : (audio.volume / MAX_VOLUME) * 100;
   const volTrack = `linear-gradient(90deg, var(--accent) ${volFill}%, var(--bg-3) ${volFill}%)`;
 
+  // Одно правило на все места, где предлагается написать (§5.8): запрет двусторонний, и гостю
+  // нужен СВОЙ текст — он про него самого, а не про собеседника.
+  const dmBlocked = dmBlockText(me?.homeInstance, member.user.homeInstance);
+
   const dm = () => {
     onClose();
     openDmWith(member.user.id).catch((e: Error) => toastError(e));
@@ -79,6 +85,7 @@ export function MemberProfileSheet({ member, onClose }: { member: ServerMemberIn
           {isSelf && <span className="mps-badge">это вы</span>}
         </div>
         <div className="mps-handle">@{member.user.username}</div>
+        <GuestLine home={member.user.homeInstance} />
         {custom && (
           <div className="mps-custom">
             {custom.emoji && <span className="mps-custom-emoji">{custom.emoji}</span>}
@@ -155,6 +162,10 @@ export function MemberProfileSheet({ member, onClose }: { member: ServerMemberIn
             >
               <Icon name="edit" size={18} /> Изменить профиль
             </button>
+          ) : dmBlocked ? (
+            /* 🔴 Личка с людьми других инстансов выключена до #141 (§5.8). Кнопку не прячем молча:
+               человек ищет её глазами и, не найдя, решит, что не туда нажал. Пишем словами. */
+            <div className="mps-dm-off">{dmBlocked}</div>
           ) : (
             <button type="button" className="mps-cta" onClick={dm}>
               <Icon name="mail" size={18} /> Написать в ЛС

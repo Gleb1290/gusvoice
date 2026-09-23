@@ -1,24 +1,38 @@
-import type { AdminServer, AdminUser } from '@gusvoice/shared';
+import type { AdminServer, AdminUser, FederationDirectoryView } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { toast, toastError } from '../toast';
 import { Icon } from './Icon';
+import { FederationPanel } from './FederationPanel';
 import { InstanceSettingsPanel } from './InstanceSettingsForms';
+import { PeerServersGroup, PeerUsersGroup, ServerFederationCell } from './AdminPeerGroups';
 import { SmtpForm } from './SmtpForm';
 import { Toggle } from './Toggle';
+import { guestAtLines, guestAtSummary } from '../guestAtMark';
+import { confirmAction } from '../confirm';
+import { ADMIN_SECTIONS, adminSectionLabel, adminSectionOf, type AdminSectionKey } from '../adminNav';
+import { pushBackHandler } from '../androidBack';
 
-type AdminTab = 'users' | 'servers' | 'instance' | 'smtp' | 'economy';
-const ADMIN_TABS: AdminTab[] = ['users', 'servers', 'instance', 'smtp', 'economy'];
+const ADMIN_TABS: AdminSectionKey[] = ADMIN_SECTIONS.map((s) => s.key);
 
 export function AdminPanel({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<AdminTab>('users');
+  const [tab, setTab] = useState<AdminSectionKey>('users');
+  // Телефон: сперва список разделов, тап — экран раздела (тот же list→detail, что в настройках).
+  const [picked, setPicked] = useState(false);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [servers, setServers] = useState<AdminServer[]>([]);
+  // Каталоги соседей (F2). `null` — ещё не читали; `enabled: false` — федерация выключена, и тогда
+  // вкладки выглядят ровно как раньше, без разговоров про соседей.
+  const [fed, setFed] = useState<FederationDirectoryView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useDialogChrome<HTMLDivElement>(onClose);
   const onTabsKey = tabListKeyDown(ADMIN_TABS, tab, setTab, (k) => `admin-tab-${k}`);
+  const currentSection = adminSectionOf(tab);
+  // Федеративные части вкладок показываем только когда федерация включена И связки есть: иначе это
+  // колонки и заголовки про то, чего у держателя нет.
+  const fedOn = (fed?.enabled ?? false) && (fed?.peers.length ?? 0) > 0;
 
   async function load() {
     setLoading(true);
@@ -27,6 +41,12 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
       const [u, s] = await Promise.all([api.adminUsers(), api.adminServers()]);
       setUsers(u);
       setServers(s);
+      // Каталоги соседей читаем отдельно и не роняем ими вкладку: список СВОИХ людей не должен
+      // зависеть от того, доступна ли федерация.
+      api
+        .federationDirectory()
+        .then(setFed)
+        .catch(() => setFed({ enabled: false, peers: [] }));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -37,6 +57,29 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     load();
   }, []);
+
+  /**
+   * Системная «назад» на телефоне: из раздела — к списку разделов, и только потом закрытие окна.
+   * Без этого один жест закрывал окно целиком (найдено на живом устройстве).
+   */
+  useEffect(() => {
+    if (!picked) return;
+    return pushBackHandler(() => {
+      setPicked(false);
+      return true;
+    });
+  }, [picked]);
+
+
+  async function toggleHidden(u: AdminUser) {
+    try {
+      const upd = await api.adminSetUserHidden(u.id, !u.hiddenFromPeers);
+      setUsers((list) => list.map((x) => (x.id === upd.id ? upd : x)));
+      toast('success', upd.hiddenFromPeers ? 'Скрыт от соседей' : 'Виден соседям');
+    } catch (e) {
+      toastError((e as Error).message);
+    }
+  }
 
   async function toggleCreate(u: AdminUser) {
     try {
@@ -62,12 +105,15 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
   // Delete a user — mainly for "stuck" accounts (registered with a bogus e-mail, can't log in, but
   // the username/email stay taken). Irreversible; confirmed first.
   async function deleteUser(u: AdminUser) {
-    if (
-      !window.confirm(
-        `Удалить аккаунт @${u.username}? Логин и почта освободятся, сообщения останутся с подписью «Удалённый пользователь». Действие необратимо.`,
-      )
-    )
-      return;
+    const ok = await confirmAction({
+      title: `Удалить аккаунт @${u.username}?`,
+      body: 'Логин и почта освободятся, сообщения останутся с подписью «Удалённый пользователь». Отменить это нельзя.',
+      tone: 'danger',
+      confirmLabel: 'Удалить аккаунт',
+      // Набрать логин: это чужой аккаунт и обратной дороги нет.
+      requireText: u.username,
+    });
+    if (!ok) return;
     try {
       await api.adminDeleteUser(u.id);
       setUsers((list) => list.filter((x) => x.id !== u.id));
@@ -80,7 +126,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className="modal admin"
+        className={`modal admin rail-modal admin-rail${picked ? ' picked' : ''}`}
         onClick={(e) => e.stopPropagation()}
         ref={dialogRef}
         role="dialog"
@@ -88,84 +134,66 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
         aria-labelledby="admin-title"
         tabIndex={-1}
       >
-        <div className="admin-head">
-          <h2 id="admin-title">Админ-панель</h2>
-          <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-            <Icon name="close" size={18} />
-          </button>
-        </div>
-
-        <div className="admin-tabs">
-          {/* «обновить» sits in the same row but is NOT a tab, so the tablist wraps only the three tabs.
-              display:contents keeps them direct flex children of .admin-tabs — no visual change. */}
-          <div role="tablist" aria-label="Разделы админ-панели" style={{ display: 'contents' }} onKeyDown={onTabsKey}>
-            <button
-              type="button"
-              role="tab"
-              id="admin-tab-users"
-              aria-selected={tab === 'users'}
-              aria-controls="admin-panel-body"
-              tabIndex={tab === 'users' ? 0 : -1}
-              className={tab === 'users' ? 'active' : ''}
-              onClick={() => setTab('users')}
-            >
-              Пользователи ({users.length})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="admin-tab-servers"
-              aria-selected={tab === 'servers'}
-              aria-controls="admin-panel-body"
-              tabIndex={tab === 'servers' ? 0 : -1}
-              className={tab === 'servers' ? 'active' : ''}
-              onClick={() => setTab('servers')}
-            >
-              Серверы ({servers.length})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="admin-tab-instance"
-              aria-selected={tab === 'instance'}
-              aria-controls="admin-panel-body"
-              tabIndex={tab === 'instance' ? 0 : -1}
-              className={tab === 'instance' ? 'active' : ''}
-              onClick={() => setTab('instance')}
-            >
-              Инстанс
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="admin-tab-smtp"
-              aria-selected={tab === 'smtp'}
-              aria-controls="admin-panel-body"
-              tabIndex={tab === 'smtp' ? 0 : -1}
-              className={tab === 'smtp' ? 'active' : ''}
-              onClick={() => setTab('smtp')}
-            >
-              Почта
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="admin-tab-economy"
-              aria-selected={tab === 'economy'}
-              aria-controls="admin-panel-body"
-              tabIndex={tab === 'economy' ? 0 : -1}
-              className={tab === 'economy' ? 'active' : ''}
-              onClick={() => setTab('economy')}
-            >
-              Экономика
+        {/* Рельс разделов — тот же приём, что в настройках (#153): у каждого раздела появилась
+            строка пояснения, которой в строке вкладок помещаться было негде. */}
+        <div className="set-rail">
+          <div className="set-rail-title">
+            <span>Админ-панель</span>
+            {/* Крестик виден только на телефоне: там список разделов — отдельный экран, и другой
+                кнопки закрытия на нём нет (на десктопе она в шапке раздела справа). */}
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
             </button>
           </div>
-          {tab !== 'smtp' && tab !== 'economy' && tab !== 'instance' && (
-            <button type="button" className="link refresh" onClick={load}>
-              ⟳ обновить
-            </button>
-          )}
+          <div
+            className="set-rail-list"
+            role="tablist"
+            aria-label="Разделы админ-панели"
+            aria-orientation="vertical"
+            onKeyDown={onTabsKey}
+          >
+            {ADMIN_SECTIONS.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                role="tab"
+                id={`admin-tab-${s.key}`}
+                aria-selected={tab === s.key}
+                aria-controls="admin-panel-body"
+                tabIndex={tab === s.key ? 0 : -1}
+                className={`set-rail-item${tab === s.key ? ' active' : ''}`}
+                onClick={() => {
+                  setTab(s.key);
+                  setPicked(true);
+                }}
+              >
+                <Icon name={s.icon} size={16} />
+                <span>
+                  {adminSectionLabel(s, { users: loading ? undefined : users.length, servers: loading ? undefined : servers.length })}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
+
+        <div className="set-main">
+          <div className="set-head">
+            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
+              <Icon name="chevron-left" size={18} />
+            </button>
+            <div className="set-head-text">
+              <h2 id="admin-title">{currentSection.label}</h2>
+              <div className="set-head-sub">{currentSection.sub}</div>
+            </div>
+            {currentSection.refreshable && (
+              <button type="button" className="link refresh" onClick={load}>
+                ⟳ обновить
+              </button>
+            )}
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
+            </button>
+          </div>
 
         {error && (
           <div className="error" role="alert">
@@ -177,6 +205,10 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-instance">
             <InstanceSettingsPanel />
           </div>
+        ) : tab === 'federation' ? (
+          <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-federation">
+            <FederationPanel />
+          </div>
         ) : tab === 'smtp' ? (
           <SmtpTab />
         ) : tab === 'economy' ? (
@@ -187,6 +219,9 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           </div>
         ) : tab === 'users' ? (
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby={`admin-tab-${tab}`}>
+            {/* Заголовок группы «этот инстанс» появляется только вместе с соседями: без них он был бы
+                лишней строкой над единственным списком. */}
+            {fedOn && <div className="fed-group-self">Этот инстанс ({users.length})</div>}
             <table className="admin-table">
               <thead>
                 <tr>
@@ -194,6 +229,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
                   <th>Email</th>
                   <th>Подтв.</th>
                   <th>Создание серверов</th>
+                  {fedOn && <th title="Виден ли человек в каталоге, который отдаётся связанным инстансам">Виден соседям</th>}
                   <th>Роль</th>
                   <th></th>
                 </tr>
@@ -201,11 +237,13 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
               <tbody>
                 {users.map((u) => (
                   <tr key={u.id}>
-                    <td>
+                    <td className="cell-name">
                       {u.displayName} <span className="muted">@{u.username}</span>
                     </td>
-                    <td className="muted">{u.email || '—'}</td>
-                    <td>
+                    <td className="muted" data-label="Email">
+                      {u.email || '—'}
+                    </td>
+                    <td data-label="Подтв.">
                       {u.verified && u.approved !== false ? (
                         '✓'
                       ) : (
@@ -219,15 +257,39 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
                         </button>
                       )}
                     </td>
-                    <td>
+                    <td data-label="Создание серверов">
                       {u.superAdmin ? (
                         <span className="muted">всегда</span>
                       ) : (
                         <Toggle checked={u.canCreateServers} onChange={() => toggleCreate(u)} title="Создание серверов" />
                       )}
                     </td>
-                    <td>{u.superAdmin ? <span className="badge">super-admin</span> : 'user'}</td>
-                    <td>
+                    {fedOn && (
+                      <td data-label="Виден соседям">
+                        {/* Скрытие убирает человека только из каталога: уже вошедшего к соседу по ссылке
+                            оно не выгоняет — там он остаётся обычным участником (§5.2.1). */}
+                        <Toggle
+                          checked={!u.hiddenFromPeers}
+                          onChange={() => toggleHidden(u)}
+                          title="Виден соседям в каталоге"
+                        />
+                        {/* 🔴 Отметка «скрыт, но виден» (требование 14): без неё переключатель врёт
+                            держателю — говорит «не видно», хотя на серверах соседа человек виден
+                            всем. Клик ведёт во вкладку «Федерация», где видны сами связки. */}
+                        {guestAtSummary(u.guestAt) && (
+                          <button
+                            type="button"
+                            className="link gm-mark"
+                            title={guestAtLines(u.guestAt).join('\n')}
+                            onClick={() => setTab('federation')}
+                          >
+                            <Icon name="eye" size={12} /> {guestAtSummary(u.guestAt)}
+                          </button>
+                        )}
+                      </td>
+                    )}
+                    <td data-label="Роль">{u.superAdmin ? <span className="badge">super-admin</span> : 'user'}</td>
+                    <td className="cell-act">
                       {!u.superAdmin && (
                         <button type="button" className="link admin-del" onClick={() => deleteUser(u)} title="Удалить аккаунт">
                           Удалить
@@ -238,9 +300,13 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
                 ))}
               </tbody>
             </table>
+            {fed?.peers.map((peer) => (
+              <PeerUsersGroup key={peer.instanceId} peer={peer} />
+            ))}
           </div>
         ) : (
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby={`admin-tab-${tab}`}>
+            {fedOn && <div className="fed-group-self">Этот инстанс ({servers.length})</div>}
             <table className="admin-table">
               <thead>
                 <tr>
@@ -249,29 +315,53 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
                   <th>Каналы</th>
                   <th>Голосовых</th>
                   <th>Участников</th>
+                  {fedOn && (
+                    <th title="Видят ли сервер связанные инстансы и можно ли приглашать на него людей оттуда">
+                      Федеративный доступ
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody>
                 {servers.map((s) => (
                   <tr key={s.id}>
-                    <td>{s.name}</td>
-                    <td className="muted">@{s.ownerUsername || s.ownerId}</td>
-                    <td>{s.channels}</td>
-                    <td>{s.voiceChannels}</td>
-                    <td>{s.members}</td>
+                    <td className="cell-name">{s.name}</td>
+                    <td className="muted" data-label="Владелец">
+                      @{s.ownerUsername || s.ownerId}
+                    </td>
+                    <td data-label="Каналы">{s.channels}</td>
+                    <td data-label="Голосовых">{s.voiceChannels}</td>
+                    <td data-label="Участников">{s.members}</td>
+                    {fedOn && (
+                      <td data-label="Федеративный доступ">
+                        <ServerFederationCell
+                          server={s}
+                          peers={fed?.peers ?? []}
+                          onChanged={(federatedAccess, federationExclusions) =>
+                            setServers((list) =>
+                              list.map((x) => (x.id === s.id ? { ...x, federatedAccess, federationExclusions } : x)),
+                            )
+                          }
+                        />
+                      </td>
+                    )}
                   </tr>
                 ))}
                 {servers.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="muted">
+                    <td colSpan={fedOn ? 6 : 5} className="muted">
                       Пока нет серверов
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
+            {fed?.peers.map((peer) => (
+              <PeerServersGroup key={peer.instanceId} peer={peer} />
+            ))}
           </div>
         )}
+        </div>
       </div>
     </div>
   );

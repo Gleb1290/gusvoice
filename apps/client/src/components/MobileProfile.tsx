@@ -1,6 +1,9 @@
 import type { PresenceStatus } from '@gusvoice/shared';
 import { useState } from 'react';
 import { api } from '../api';
+import { activeInstanceId, instances } from '../config';
+import { adminTarget } from '../configRules';
+import { openOwnAdmin } from '../instanceSwitch';
 import { STATUS_LABEL, STATUS_OPTIONS, STATUS_SUBTITLE } from '../status';
 import { useStore } from '../store';
 import { toastError } from '../toast';
@@ -20,7 +23,6 @@ export function MobileProfile() {
   const animatedOn = useAnimatedAvatarsEnabled();
   const setAuth = useStore((s) => s.setAuth);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
-  const setAdminOpen = useStore((s) => s.setAdminOpen);
   const setMobileProfileOpen = useStore((s) => s.setMobileProfileOpen);
   const logout = useStore((s) => s.logout);
   const [statusSheet, setStatusSheet] = useState(false);
@@ -28,6 +30,9 @@ export function MobileProfile() {
 
   if (!user) return null;
 
+  // Та же развилка, что у кнопки в рейле (`adminTarget`, 23.09): стоя гостем у соседа, вход в админку
+  // своего инстанса не пропадает, а ведёт домой.
+  const admin = adminTarget(instances(), activeInstanceId(), !!user.superAdmin);
   const custom = user.customStatus;
   const statusLine = custom?.text
     ? `${custom.emoji ? `${custom.emoji} ` : ''}${custom.text}`
@@ -86,8 +91,8 @@ export function MobileProfile() {
         {/* Admin panel — super-admin only. The desktop rail's admin icon is hidden on mobile, so this is
             the ONLY way a phone operator reaches user-approval / SMTP setup (e.g. verify a registration
             manually when the instance has no e-mail configured). */}
-        {user.superAdmin && (
-          <button type="button" className="prof-row" onClick={() => setAdminOpen(true)}>
+        {admin && (
+          <button type="button" className="prof-row" onClick={() => void openOwnAdmin(admin.homeId).catch(toastError)}>
             <Icon name="lock" size={20} />
             <span className="prof-row-label">Админ-панель</span>
             <Icon name="chevron-right" size={18} />

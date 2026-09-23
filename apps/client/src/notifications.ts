@@ -9,6 +9,9 @@ import type { OsNotifyLevel } from './notifyRules';
 
 const KEY = 'gv_os_notify';
 
+/** Заводской уровень — «упоминания и ЛС» (см. пояснение ниже). */
+export const OS_NOTIFY_DEFAULT: OsNotifyLevel = 'mentions';
+
 /**
  * Уровень системных уведомлений (#77). Раньше это был булев тумблер, и «включено» означало
  * «упоминания и ЛС» — обычные сообщения канала не уведомляли вообще.
@@ -23,7 +26,7 @@ export function osNotifyLevel(): OsNotifyLevel {
   // получалось, что уведомлений нет ни у кого, кто про настройку не знал: фича есть, а мессенджер
   // молчит, и выглядит это сломанной фичей, а не выбором. Умолчание — «упоминания и ЛС»:
   // так ведёт себя любой мессенджер, и оно не спамит. «Все сообщения» и «выключить» — в настройках.
-  return 'mentions';
+  return OS_NOTIFY_DEFAULT;
 }
 
 export function setOsNotifyLevel(level: OsNotifyLevel): void {
@@ -31,6 +34,9 @@ export function setOsNotifyLevel(level: OsNotifyLevel): void {
 }
 
 const COIN_KEY = 'gv_coin_notify';
+
+/** Заводской уровень монетных уведомлений — «когда типают/щипают меня». */
+export const COIN_NOTIFY_DEFAULT: CoinNotifyLevel = 'mine';
 
 /**
  * Уровень уведомлений про монеты — СВОЙ, независимый от уведомлений о сообщениях (запрос
@@ -40,7 +46,7 @@ const COIN_KEY = 'gv_coin_notify';
 export function coinNotifyLevel(): CoinNotifyLevel {
   const raw = localStorage.getItem(COIN_KEY);
   if (raw === 'off' || raw === 'mine' || raw === 'all') return raw;
-  return 'mine';
+  return COIN_NOTIFY_DEFAULT;
 }
 
 export function setCoinNotifyLevel(level: CoinNotifyLevel): void {

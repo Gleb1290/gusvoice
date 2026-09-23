@@ -14,7 +14,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/animatedAvatar.test.ts src/clientIp.test.ts src/economyPreview.test.ts src/emojiRules.test.ts src/mentions.test.ts src/permissions.test.ts src/pollDraft.test.ts src/secretRules.test.ts src/stickerRules.test.ts src/streamPreview.test.ts src/voiceMessage.test.ts src/voiceQuality.test.ts src/ws.test.ts"
+    "test": "tsx --test src/animatedAvatar.test.ts src/clientIp.test.ts src/economyPreview.test.ts src/emojiRules.test.ts src/federation/directory.test.ts src/federation/events.test.ts src/federation/guest.test.ts src/federation/inviteLink.test.ts src/federation/protocol.test.ts src/federation/textGuards.test.ts src/mentions.test.ts src/permissions.test.ts src/pollDraft.test.ts src/secretRules.test.ts src/stickerRules.test.ts src/streamPreview.test.ts src/voiceMessage.test.ts src/voiceQuality.test.ts src/ws.test.ts"
   },
   "devDependencies": {
     "typescript": "5.9.3",

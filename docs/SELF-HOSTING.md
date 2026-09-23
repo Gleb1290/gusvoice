@@ -154,7 +154,62 @@ gunzip -c .gusvoice-backups/db-<time>.sql.gz | docker compose exec -T postgres s
 
 Then set `TAG` in `.env` to that version and start it: `./update.sh --images-only --no-db-backup`.
 
-## 8. Troubleshooting
+## 8. Federation (linking with another instance)
+
+Federation lets two independent instances see each other: people from a linked instance can be
+invited to your servers as guests, keeping their own name, avatar and account at home. It is **off
+by default** — an instance that never links stays exactly as it was.
+
+Turn it on in `.env`:
+
+```bash
+FEDERATION_ENABLED=true
+FEDERATION_KEY_PASSPHRASE=<a long random passphrase>   # encrypts the instance key at rest
+FEDERATION_DATA_DIR=/var/lib/gusvoice/federation       # where that key lives (default)
+```
+
+On the first start the instance creates its **identity**: a key pair whose fingerprint is what
+neighbours recognise you by. ⚙ → «Федерация» shows it.
+
+### 🔴 Back up the key and the passphrase TOGETHER
+
+The key file and `FEDERATION_KEY_PASSPHRASE` are two halves of one thing. Lose either and the
+identity is gone — not «reset», gone: every neighbour sees a different instance at your address and
+refuses to talk to it (that is the whole point of the check). Recovering means asking each holder to
+re-link by hand, sharing a new code and comparing fingerprints out loud.
+
+```bash
+# include BOTH in your backup, and keep the passphrase somewhere other than the server
+docker compose exec backend tar -c /var/lib/gusvoice/federation > fed-keys-$(date +%F).tar
+```
+
+Restoring onto a new machine: put the directory back, set the same passphrase, start. The fingerprint
+in ⚙ → «Федерация» must match the one your neighbours have.
+
+### Linking
+
+One side issues a code (⚙ → «Федерация» → «Создать код связки»), the other pastes it. Both sides then
+confirm, and the link becomes `active`. Compare fingerprints over a channel that is not the link
+itself — a phone call, a chat — that is what makes the link trustworthy.
+
+Both instances need **public HTTPS addresses**: requests to private networks are refused on purpose
+(SSRF protection), so two boxes in the same LAN will not link without real domains.
+
+### Alerts
+
+The instance tells you when something breaks: a link stopped answering, the signing key is about to
+expire, a neighbour needs a different protocol version, a burst of bad signatures, trust lost, a
+complaint about one of your people. Channels are set in ⚙ → «Федерация» → «Оповещения»: e-mail (to
+`ADMIN_EMAIL`, or the super-admin's address) and an [ntfy](https://ntfy.sh) topic. Whatever the
+channels, the alerts always show as a banner at the top of that tab.
+
+### Guests and disk space
+
+Files uploaded by guests live in **your** storage and count against a per-link quota (2 GB by
+default, changed in the link's row). Storage-wise a guest is an ordinary member; the quota exists so
+one neighbour cannot fill your disk.
+
+## 9. Troubleshooting
 
 | Symptom | Check |
 |---------|-------|

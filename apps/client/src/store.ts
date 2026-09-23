@@ -15,7 +15,11 @@ import type {
 } from '@gusvoice/shared';
 import { create } from 'zustand';
 import { api, setToken, type PushMuteScope } from './api';
-import { applyUnread, historyLoadPlan, seedReads } from './channelRules';
+import { activeInstanceId, logoutFamily, rememberInstanceServers } from './config';
+import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads } from './channelRules';
+import { markChannelSeen } from './channelPrefs';
+import { rememberPlace } from './lastPlace';
+import { onTabEvent, publishTabEvent } from './tabSync';
 import type { EconomyView } from './economy';
 import { isMobile } from './hotkeys';
 import { stopPushRegistration } from './nativeUnifiedPush';
@@ -23,6 +27,7 @@ import { setChannelSounds, setCustomSounds } from './sounds';
 import { addTipHint, pruneTipHints, TIP_HINT_MS, type TipHint } from './tipHints';
 import { addToastEvent, pruneToastEvents, TOAST_MS, type ToastEvent, type ToastKind } from './toastRules';
 import type { Occupancy } from './occupancy';
+import type { AccessNotice } from './accessClosed';
 import type { PendingWatch } from './pendingWatch';
 import { applyUserProfilePatch } from './profilePatch';
 import { scopedGetItem, scopedSetItem } from './instanceScope';
@@ -120,6 +125,41 @@ interface State {
   /** Намерение «зайти в канал и открыть показ вот этого человека» — клик по кадру в карточке
    *  наведения. Почему намерение, а не сразу запись в `watchedStreams`, — в `pendingWatch.ts`. */
   pendingWatch: PendingWatch | null;
+  /**
+   * Серверы, закрытые для нас держателем (#139, F4, §5.3.1) — по id сервера.
+   *
+   * 🔴 Держим В СТОРЕ, а не показываем одно окно и забываем: членство остаётся (`closed_by_host`),
+   * сервер остаётся в рейле, и человек будет жать на него снова. Без памяти он каждый раз получал
+   * бы «не найдено» и решил бы, что приложение сломалось.
+   */
+  closedServers: Record<string, AccessNotice>;
+  /** Какое окно «сервер закрыт» показать прямо сейчас. `null` — никакое. */
+  accessNotice: AccessNotice | null;
+  /**
+   * Счётчик изменений в связках федерации (#139, F1). Растёт по событию `federation.links`.
+   *
+   * 🔴 Счётчик, а не сами связки: их читает только вкладка «Федерация» и только целиком, одной
+   * ручкой. Держать их ещё и в сторе значило бы иметь две копии одной правды и выбирать между ними.
+   * Вкладка просто смотрит на это число и перечитывает себя, когда оно сдвинулось.
+   */
+  federationRev: number;
+  /**
+   * Поколение активного инстанса (§5.7). Растёт на каждом переходе между инстансами.
+   *
+   * 🔴 На него подписан `App`: переход больше не перезапускает приложение, поэтому кто-то обязан
+   * заново пройти «узнать себя → загрузить серверы → поднять сокеты». Это делает эффект на это
+   * число — один вход в загрузку и для старта, и для перехода, чтобы они не разъехались.
+   */
+  instanceEpoch: number;
+  /**
+   * Идёт переход между инстансами (§5.7).
+   *
+   * 🔴 Ставится СИНХРОННО вместе со сбросом стора, и в этом весь смысл. `switchedInstance()`
+   * обнуляет `user`, а «идёт загрузка» включал эффект `App` — то есть уже ПОСЛЕ отрисовки. В этот
+   * один кадр `user === null` и загрузки ещё нет, и React честно рисовал ЭКРАН ВХОДА: при каждом
+   * переходе приложение моргало формой входа. Снимается там же, где заканчивается загрузка.
+   */
+  switching: boolean;
 
   // direct messages
   view: AppView;
@@ -163,6 +203,15 @@ interface State {
   patchChannelSound: (channelId: string, event: string, url: string | null) => void;
   loadMembers: (serverId: string) => Promise<void>;
   openChannel: (channelId: string) => Promise<void>;
+  /** Отметить прочитанным, НЕ открывая: на телефоне уход из ленты в список — тоже «дочитал». */
+  readChannelNow: (channelId: string) => void;
+  readDmNow: (dmId: string) => void;
+  /** Прочитано на ДРУГОМ моём устройстве — погасить у себя (событие `read.channel`/`read.dm`). */
+  applyRemoteRead: (e: { channelId?: string; dmId?: string; serverId?: string; at?: string }) => void;
+  /** Подтянуть порцию более старых сообщений. Возвращает, есть ли смысл просить ещё. */
+  loadOlderMessages: (channelId: string) => Promise<boolean>;
+  /** Слушать соседние вкладки: прочитанное там гаснет и здесь. Возвращает отписку. */
+  listenTabs: () => () => void;
   joinVoice: (channelId: string) => Promise<void>;
   refreshVoiceToken: () => Promise<void>;
   /** keepSession: don't clear the persisted voice session — used by the reconnect-grace visual leave so
@@ -242,6 +291,20 @@ interface State {
   unwatchStream: (id: string) => void;
   clearWatchedStreams: () => void;
   setPendingWatch: (p: PendingWatch) => void;
+  /** Запомнить отказ и показать окно. Зовётся и по событию, и по отказу при открытии сервера. */
+  noteAccessClosed: (n: AccessNotice) => void;
+  clearAccessNotice: () => void;
+  /** Связки изменились — разбудить вкладку «Федерация», если она открыта. */
+  bumpFederationRev: () => void;
+  /**
+   * Забыть всё, что принадлежало прежнему инстансу, и объявить новое поколение (§5.7).
+   *
+   * ⚠️ Токен НЕ трогаем, в отличие от `logout`: он принадлежит записи реестра, которую мы просто
+   * покинули, и человек в неё вернётся одним кликом по её серверу.
+   */
+  switchedInstance: () => void;
+  /** Доступ вернули — снимаем замок, чтобы сервер снова открывался без перезагрузки. */
+  clearAccessClosed: (serverId: string) => void;
   clearPendingWatch: () => void;
   /** Единственный способ «оказаться в голосовом канале»: зайти (если ещё не там) и открыть его
    *  вид. Заведён, чтобы это знание не жило в двух местах — в сайдбаре и в карточке наведения. */
@@ -302,6 +365,11 @@ export const useStore = create<State>((set, get) => ({
   mutedStreams: [],
   streamVolumes: readStreamVolumes(),
   pendingWatch: null,
+  closedServers: {},
+  accessNotice: null,
+  federationRev: 0,
+  instanceEpoch: 0,
+  switching: false,
 
   view: 'server',
   dms: [],
@@ -355,6 +423,10 @@ export const useStore = create<State>((set, get) => ({
     // re-authenticates from the stored gv_token on the reload that follows logout()
     // (the button "did nothing" — it reloaded straight back into the app).
     setToken(null);
+    // 🔴 И у ДОМА, и у всех его гостевых записей: гостевая сессия живёт поручительством дома, и
+    // «выйти» означает выйти из своего аккаунта, а не только с чужого инстанса. Без этого выход из
+    // гостей возвращал человека домой вошедшим — то есть «кнопка не сработала» (найдено 19.09).
+    logoutFamily(activeInstanceId());
     clearVoiceSession();
     setCustomSounds({});
     setChannelSounds({});
@@ -413,6 +485,13 @@ export const useStore = create<State>((set, get) => ({
   loadServers: async () => {
     const servers = await api.listServers();
     set({ servers });
+    /**
+     * Снимок в реестр (§5.7): рейл обязан показывать серверы ЭТОГО инстанса и тогда, когда живой
+     * шлюз открыт у другого. Пишется здесь, а не в рейле, потому что здесь единственное место, где
+     * список приходит с сервера, — рейл его только рисует.
+     */
+    const id = activeInstanceId();
+    if (id) rememberInstanceServers(id, servers.map((x) => ({ id: x.id, name: x.name, iconUrl: x.iconUrl ?? null })));
   },
 
   openServer: async (serverId) => {
@@ -515,6 +594,131 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  /**
+   * Подтянуть порцию более старых сообщений канала.
+   *
+   * 🔴 До 19.09 клиент звал `listMessages` РОВНО ОДИН раз и без курсора: человек видел последние
+   * 50 сообщений и упирался в потолок, хотя сервер всё это время умел отдавать историю порциями
+   * (`before` + `limit`, `routes/messages.ts`). То есть переписка глубже одного экрана была
+   * недостижима — не «медленно», а никак.
+   *
+   * Возвращает, есть ли смысл просить ещё: пустой ответ или неполная порция означают дно.
+   */
+  /**
+   * Подписка на соседние вкладки (`tabSync.ts`): там прочитали — гасим и у себя.
+   *
+   * ⚠️ Только гасим. Обратное («у соседа появилось непрочитанное») сюда не идёт: счётчики растут от
+   * событий шлюза, и дублировать их через вкладки значило бы считать одно и то же дважды.
+   */
+  listenTabs: () =>
+    onTabEvent((e) => {
+      set((s) => {
+        if (e.kind === 'read-channel') {
+          const { [e.channelId]: _m, ...mentionCounts } = s.mentionCounts;
+          const { [e.channelId]: _u, ...unreadCounts } = s.unreadCounts;
+          if (!e.serverId) return { mentionCounts, unreadCounts };
+          // Значок сервера считается отдельно от каналов — гасим и его, иначе он останется гореть.
+          const { [e.serverId]: _su, ...unreadServers } = s.unreadServers;
+          const { [e.serverId]: _sm, ...mentionServers } = s.mentionServers;
+          return { mentionCounts, unreadCounts, unreadServers, mentionServers };
+        }
+        return {
+          unreadDms: s.unreadDms.filter((x) => x !== e.dmId),
+          dms: s.dms.map((d) => (d.id === e.dmId ? { ...d, unread: 0 } : d)),
+        };
+      });
+    }),
+
+  loadOlderMessages: async (channelId) => {
+    const list = get().messagesByChannel[channelId] ?? [];
+    const oldest = list[0];
+    if (!oldest) return false;
+    const older = await api.listMessages(channelId, new Date(oldest.createdAt).toISOString());
+    if (older.length === 0) return false;
+    set((s) => {
+      const cur = s.messagesByChannel[channelId] ?? [];
+      // ⚠️ Склейка по id: пока шёл запрос, кто-то мог прислать сообщение, а порция могла
+      // пересечься с уже загруженным. Дубликат в ленте заметнее, чем лишняя проверка.
+      const have = new Set(cur.map((m) => m.id));
+      const fresh = older.filter((m) => !have.has(m.id));
+      return { messagesByChannel: { ...s.messagesByChannel, [channelId]: [...fresh, ...cur] } };
+    });
+    return older.length >= 50;
+  },
+
+  /**
+   * 🔴 Уход из ленты = прочитано (20.09, поймано на телефоне).
+   *
+   * На компьютере лента всегда на экране, поэтому «открыл канал» и «читаю канал» — одно и то же, и
+   * гашение счётчика при открытии закрывало вопрос. На телефоне это разные вещи: человек уходит в
+   * список, лента остаётся выбранной, и пришедшие сообщения копятся в счётчике, который НЕ виден
+   * (значок прячется у «текущего» канала). Вернувшись, он не узнает, что пропустил сотню строк.
+   *
+   * Поэтому: значок считается по каналу, который ВИДНО (`ChannelSidebar`), а на выходе из ленты
+   * счётчик гасится здесь — вместе с отметкой на сервере и сигналом соседним вкладкам.
+   */
+  readChannelNow: (channelId) => {
+    const s0 = get();
+    if (!s0.unreadCounts[channelId] && !s0.mentionCounts[channelId]) return;
+    const isText = s0.bootstrap?.channels.find((c) => c.id === channelId)?.type === 'text';
+    set((s) => {
+      const { [channelId]: _clearedM, ...mentionCounts } = s.mentionCounts;
+      const { [channelId]: _clearedU, ...unreadCounts } = s.unreadCounts;
+      return { unreadCounts, mentionCounts };
+    });
+    if (isText) void api.markChannelRead(channelId).catch(() => {});
+    publishTabEvent({ kind: 'read-channel', channelId, serverId: get().currentServerId ?? undefined });
+  },
+
+  /**
+   * 🔴 Прочитано на другом СВОЁМ устройстве (20.09). Между вкладками одного браузера это решал
+   * `BroadcastChannel` (`tabSync.ts`), между устройствами — только сервер: ручка отметки теперь
+   * рассылает `read.channel`/`read.dm` всем моим соединениям.
+   *
+   * ⚠️ Метку визита (черту «Новые сообщения») двигаем ТОЛЬКО если этой ленты нет на глазах: иначе
+   * черта исчезла бы прямо под читающим — он смотрит историю здесь, а телефон в кармане отметил
+   * канал прочитанным.
+   * ⚠️ Только гасим. Рост счётчиков идёт от событий шлюза; дублировать его отметками значило бы
+   * считать одно и то же дважды (тот же довод, что и у согласования вкладок).
+   */
+  applyRemoteRead: ({ channelId, dmId, serverId, at }) => {
+    const s0 = get();
+    const id = channelId ?? dmId;
+    if (!id) return;
+    const onScreen = isFeedOnScreen({
+      id,
+      currentId: channelId ? s0.currentChannelId : s0.currentDmId,
+      mobile: isMobile(),
+      mobilePane: s0.mobilePane,
+    });
+    if (!onScreen) markChannelSeen(id, at ? Date.parse(at) : Date.now());
+    set((s) => {
+      if (channelId) {
+        const { [channelId]: _m, ...mentionCounts } = s.mentionCounts;
+        const { [channelId]: _u, ...unreadCounts } = s.unreadCounts;
+        if (!serverId) return { mentionCounts, unreadCounts };
+        const { [serverId]: _sm, ...mentionServers } = s.mentionServers;
+        const { [serverId]: _su, ...unreadServers } = s.unreadServers;
+        return { mentionCounts, unreadCounts, mentionServers, unreadServers };
+      }
+      return {
+        unreadDms: s.unreadDms.filter((x) => x !== id),
+        dms: s.dms.map((d) => (d.id === id ? { ...d, unread: 0 } : d)),
+      };
+    });
+  },
+
+  readDmNow: (dmId) => {
+    const s0 = get();
+    if (!s0.unreadDms.includes(dmId) && !s0.dms.find((d) => d.id === dmId)?.unread) return;
+    set((s) => ({
+      unreadDms: s.unreadDms.filter((x) => x !== dmId),
+      dms: s.dms.map((d) => (d.id === dmId ? { ...d, unread: 0 } : d)),
+    }));
+    void api.markDmRead(dmId).catch(() => {});
+    publishTabEvent({ kind: 'read-dm', dmId });
+  },
+
   openChannel: async (channelId) => {
     const channel = get().bootstrap?.channels.find((c) => c.id === channelId);
     set((s) => {
@@ -529,6 +733,11 @@ export const useStore = create<State>((set, get) => ({
     });
     // Persist the read mark (migration 0018) — fire-and-forget, unread must never block opening.
     if (channel?.type === 'text') void api.markChannelRead(channelId).catch(() => {});
+    // Соседние вкладки гасят у себя тот же счётчик: человек один, прочитано — значит прочитано.
+    publishTabEvent({ kind: 'read-channel', channelId, serverId: get().currentServerId ?? undefined });
+    // Запоминаем место, чтобы перезагрузка вернула сюда же, а не на «Выбери сервер» (lastPlace.ts).
+    const inst = activeInstanceId();
+    if (inst) rememberPlace({ instanceId: inst, serverId: get().currentServerId ?? undefined, channelId });
     // Решение «идти ли в сеть и ждать ли ответ» — в `channelRules.historyLoadPlan` (чистое, под
     // тестами); здесь только сам поход. Разбор, почему рефетчим ВСЕГДА, — там же.
     const plan = historyLoadPlan({ channelType: channel?.type, hasCache: !!get().messagesByChannel[channelId] });
@@ -711,6 +920,9 @@ export const useStore = create<State>((set, get) => ({
       mobilePane: 'content',
     }));
     void api.markDmRead(dmId).catch(() => {});
+    publishTabEvent({ kind: 'read-dm', dmId });
+    const instDm = activeInstanceId();
+    if (instDm) rememberPlace({ instanceId: instDm, dmId });
     if (!get().dmMessages[dmId]) {
       const messages = await api.listDmMessages(dmId);
       set((s) => ({ dmMessages: { ...s.dmMessages, [dmId]: messages } }));
@@ -995,6 +1207,72 @@ export const useStore = create<State>((set, get) => ({
   clearWatchedStreams: () => set((s) => (s.watchedStreams.length === 0 ? {} : { watchedStreams: [] })),
 
   setPendingWatch: (pendingWatch) => set({ pendingWatch }),
+  noteAccessClosed: (n) =>
+    set((s) => ({ closedServers: { ...s.closedServers, [n.serverId]: n }, accessNotice: n })),
+  clearAccessNotice: () => set((s) => (s.accessNotice === null ? {} : { accessNotice: null })),
+  bumpFederationRev: () => set((s) => ({ federationRev: s.federationRev + 1 })),
+
+  switchedInstance: () => {
+    // Звуки сервера — ссылки на файлы ПРЕЖНЕГО инстанса: оставь их, и новый сервер зазвучит чужими.
+    setCustomSounds({});
+    setChannelSounds({});
+    set((s) => ({
+      user: null,
+      servers: [],
+      currentServerId: null,
+      bootstrap: null,
+      currentChannelId: null,
+      messagesByChannel: {},
+      members: [],
+      presence: {},
+      onlineUsers: [],
+      userStatuses: {},
+      userActivities: {},
+      unreadCounts: {},
+      mentionCounts: {},
+      unreadServers: {},
+      mentionServers: {},
+      occupancy: {},
+      voice: null,
+      liveVoice: {},
+      voiceState: 'disconnected',
+      economy: {},
+      incomingPoke: null,
+      watchedStreams: [],
+      mutedStreams: [],
+      // Громкости стримов лежат ПО ИНСТАНСУ — перечитываем под уже переключённую запись.
+      streamVolumes: readStreamVolumes(),
+      pendingWatch: null,
+      closedServers: {},
+      accessNotice: null,
+      tipHints: [],
+      toastEvents: [],
+      view: 'server',
+      dms: [],
+      currentDmId: null,
+      dmMessages: {},
+      unreadDms: [],
+      pushMutedServers: [],
+      pushMutedDmUsers: [],
+      mentionRequest: null,
+      // Окна прежнего инстанса закрываем: настройки сервера, админка и поиск говорили о том, чего
+      // здесь уже нет.
+      settingsOpen: false,
+      adminOpen: false,
+      searchOpen: false,
+      mobileMembersOpen: false,
+      mobileProfileOpen: false,
+      mobilePane: 'list',
+      instanceEpoch: s.instanceEpoch + 1,
+      switching: true,
+    }));
+  },
+  clearAccessClosed: (serverId) =>
+    set((s) => {
+      if (!(serverId in s.closedServers)) return {};
+      const { [serverId]: _gone, ...rest } = s.closedServers;
+      return { closedServers: rest, accessNotice: s.accessNotice?.serverId === serverId ? null : s.accessNotice };
+    }),
   clearPendingWatch: () => set((s) => (s.pendingWatch === null ? {} : { pendingWatch: null })),
 
   enterVoiceChannel: async (channelId) => {

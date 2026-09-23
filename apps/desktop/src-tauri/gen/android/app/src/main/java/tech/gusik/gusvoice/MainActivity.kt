@@ -8,6 +8,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 
@@ -20,10 +21,31 @@ class MainActivity : TauriActivity() {
   private val requestPerms =
     registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
+  // The WebView we hand the back gesture to. Captured in onWebViewCreate; null until the shell builds it.
+  private var webViewRef: WebView? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     installRendererGoneGuard()
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+
+    // 🔴 Back gesture (#157). Without this the system back left the app from ANY screen — inside a
+    // channel, inside settings, anywhere — because nothing claimed it. On Android that gesture is how
+    // people go back, so the app felt foreign.
+    //
+    // The DECISION belongs to the web client: only it knows which sheet/panel/pane is open. We just
+    // hand the gesture over; if the client has nothing to close it calls exitApp() itself. That also
+    // sidesteps evaluateJavascript being async — we never need its answer.
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val wv = webViewRef
+        if (wv == null) {
+          moveTaskToBack(true)
+          return
+        }
+        wv.evaluateJavascript("window.__gvBack && window.__gvBack()", null)
+      }
+    })
 
     // NB: do NOT force AudioManager.MODE_IN_COMMUNICATION here. On Samsung it routes the mic through
     // the VoIP capture path with aggressive HARDWARE ECNS (echo-cancel + noise-suppress), which mutes
@@ -92,13 +114,34 @@ class MainActivity : TauriActivity() {
     stashDeepLink(intent)
   }
 
-  /** Encode a notification's deep-link extras into prefs: "dm:<id>" or "ch:<serverId>:<channelId>". */
+  /** Encode a deep-link into prefs: "dm:<id>", "ch:<serverId>:<channelId>" or "invite:<url>". */
   private fun stashDeepLink(intent: Intent?) {
+    /*
+     * Ссылка-приглашение (#139, F4, §4.2.2): `gusvoice://join?invite=https://host/i/CODE`.
+     * Кладём её в ТЕ ЖЕ prefs, что и переход по пушу: путь до клиента уже есть и проверен, а два
+     * механизма «отложенного намерения» однажды разошлись бы в поведении.
+     * ⚠️ Разбор адреса — на стороне клиента (`deepLinkInvite.ts`): здесь только передаём строку.
+     * Решать, что считать годной ссылкой, должно одно место, а не Kotlin и TypeScript по-разному.
+     */
+    val data = intent?.data
+    if (data != null && data.scheme.equals("gusvoice", ignoreCase = true)) {
+      getSharedPreferences(UnifiedPushReceiver.PREFS, MODE_PRIVATE)
+        .edit().putString(UnifiedPushReceiver.KEY_DEEPLINK, "invite:" + data.toString()).apply()
+      return
+    }
     val dmId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_DM).orEmpty()
     val channelId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_CHANNEL).orEmpty()
     val serverId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_SERVER).orEmpty()
+    val instanceId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_INSTANCE).orEmpty()
+    /*
+     * Отдельный вид ссылки, а не лишнее поле в существующей (#139, F5): у старых сборок клиента
+     * "fed:…" просто не совпадёт ни с одним разбором и будет пропущен, тогда как четвёртая часть в
+     * "ch:…" увела бы их в несуществующий канал. Правило то же, что во всём протоколе: добавлять
+     * так, чтобы сторона постарше молча не поняла, а не поняла неправильно.
+     */
     val link = when {
       dmId.isNotEmpty() -> "dm:$dmId"
+      channelId.isNotEmpty() && instanceId.isNotEmpty() -> "fed:$instanceId:$serverId:$channelId"
       channelId.isNotEmpty() -> "ch:$serverId:$channelId"
       else -> return
     }
@@ -110,6 +153,7 @@ class MainActivity : TauriActivity() {
   // We ADD one (via wry's official onWebViewCreate hook) — nothing existing is replaced. Grant only
   // the media-capture resources the page requests; the OS grant above is the real gate.
   override fun onWebViewCreate(webView: WebView) {
+    webViewRef = webView
     webView.webChromeClient = object : WebChromeClient() {
       override fun onPermissionRequest(request: PermissionRequest) {
         runOnUiThread {
@@ -140,6 +184,14 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun stopVoiceService() {
       VoiceForegroundService.stop(this@MainActivity)
+    }
+
+    // Back gesture (#157): the client calls this when it has nothing left to close. Задача уходит В
+    // ФОН, а не закрывается: голос переживает сворачивание (микрофонная служба переднего плана), и
+    // человек, нажавший «назад» на списке каналов, не должен вылетать из разговора.
+    @JavascriptInterface
+    fun exitApp() {
+      runOnUiThread { moveTaskToBack(true) }
     }
 
     // --- Push (UnifiedPush) --- driven by the web client on mobile boot. registerForPush kicks off

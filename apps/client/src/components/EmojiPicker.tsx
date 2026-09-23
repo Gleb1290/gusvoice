@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ServerEmoji } from '@gusvoice/shared';
 import { loadedIndex, loadEmojiIndex, type EmojiIndex } from '../emojiIndex';
 import { type Emoji, rankEmoji, withSkinTone } from '../emojiSearch';
 import { EMOJI_SHORTCODES } from '../emojiAliases';
 import { codeForEmoji } from '../emojiShortcodes';
 import { clampAxis, placeByAnchor, toLayoutRect, viewport } from '../popover';
+import { exprAutoFocus } from './ExprTabs';
 
 const RECENT_KEY = 'gv_emoji_recent';
 const TONE_KEY = 'gv_emoji_tone';
@@ -61,11 +62,14 @@ export function EmojiPicker({
   onPick,
   onClose,
   custom,
+  footer,
 }: {
   anchor: DOMRect;
   /** Юникодный символ, либо (для кастомного) сам символ-заглушка + запись эмодзи вторым аргументом. */
   onPick: (emoji: string, custom?: ServerEmoji) => void;
   onClose: () => void;
+  /** Нижняя полоса вкладок «Эмодзи | Стикеры» (`ExprTabs`) — только в строке ввода, где есть стикеры. */
+  footer?: ReactNode;
   /**
    * Кастомные эмодзи сервера. НЕ передаются в подборе статуса и в ЛС: статус хранит юникодный
    * символ, а в личке серверных эмодзи нет по определению (#18).
@@ -208,7 +212,7 @@ export function EmojiPicker({
     <>
       <div className="emoji-backdrop" onClick={onClose} />
       <div
-        className="emoji-pop"
+        className={`emoji-pop${footer ? ' expr' : ''}`}
         ref={popRef}
         // Hidden for the first paint only: placement needs the rendered size, so there is one frame
         // where we don't know where it goes — showing it at 0,0 first would read as a jump.
@@ -217,7 +221,7 @@ export function EmojiPicker({
       >
         <div className="emoji-search">
           <input
-            autoFocus
+            autoFocus={exprAutoFocus(footer)}
             value={query}
             placeholder="Поиск: огонь, кот, пицца…"
             aria-label="Поиск эмодзи"
@@ -302,6 +306,7 @@ export function EmojiPicker({
             <div className="emoji-empty muted">{query ? 'Ничего не нашлось' : 'Пока пусто'}</div>
           )}
         </div>
+        {footer}
       </div>
       {/* Sibling, not a child: `.emoji-pop` clips its overflow, so a tooltip inside it would be cut. */}
       {hint && (

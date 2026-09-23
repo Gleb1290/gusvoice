@@ -20,6 +20,20 @@ export function captureInviteFromUrl(): void {
   window.history.replaceState({}, '', window.location.pathname + stripInviteParam(window.location.search) + window.location.hash);
 }
 
+/**
+ * Запомнить код, пришедший НЕ строкой запроса, — например, с адреса `/i/<код>` (§4.2.2).
+ *
+ * ⚠️ Тот же ключ и тот же срок жизни, что у `?invite=`: два хранилища для одного и того же кода
+ * однажды разошлись бы, и «вступить после входа» срабатывало бы через раз.
+ */
+export function rememberInvite(code: string): void {
+  try {
+    localStorage.setItem(KEY, code);
+  } catch {
+    /* приватный режим — код не переживёт перезагрузку */
+  }
+}
+
 export function pendingInvite(): string | null {
   try {
     return localStorage.getItem(KEY);

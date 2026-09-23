@@ -17,19 +17,30 @@ import { TipToast } from './components/TipToast';
 import './styles.css';
 import { applyTheme, getTheme } from './theme';
 import { applyUiPrefs } from './uiPrefs';
+import { installAndroidBack } from './androidBack';
 import { initPushRegistration } from './nativeUnifiedPush';
 import { ensureNotifyPermission } from './notifications';
 import { notifyIfJustUpdated, runDesktopUpdateCheck, startUpdatePolling } from './updater';
+import { watchWindowCovered } from './windowCovered';
+import { httpsUpgradeUrl } from './configRules';
+import { isTauri } from './hotkeys';
 
 applyTheme(getTheme());
 applyUiPrefs();
+// Системная «назад» на Android: без этого жест выбрасывал из приложения с любого экрана (#157).
+installAndroidBack();
 
 const root = createRoot(document.getElementById('root')!);
 
 // The desktop in-game overlay runs in a SEPARATE always-on-top window that loads the same bundle with
 // `?window=overlay`. There it renders just the voice widget (transparent bg) — no app, no updater/push.
 const gvWindow = new URLSearchParams(location.search).get('window');
-if (gvWindow === 'overlay') {
+// Открыли по http://, а API на https:// — уводим на https ДО всего (22.09, правило и «почему» — `configRules`):
+// CORS пускает только https-источник клиента, и со страницы по http не работал ни один запрос, даже регистрация.
+const httpsUrl = httpsUpgradeUrl(location, window.__GUSVOICE_CONFIG__?.apiUrl, isTauri());
+if (httpsUrl) {
+  location.replace(httpsUrl);
+} else if (gvWindow === 'overlay') {
   document.documentElement.classList.add('overlay-window');
   // silent: экран ошибки поверх чужой игры хуже, чем пропавший виджет (см. ErrorBoundary).
   root.render(
@@ -103,4 +114,9 @@ if (gvWindow === 'overlay') {
   // Android only (no-op elsewhere): register this device for UnifiedPush push so DMs/@mentions wake it
   // even when the app is closed. Re-attempts on foreground (covers logging in after boot).
   initPushRegistration();
+
+  // Desktop only: узнаём у оболочки, когда наше окно целиком накрыто чужим (игрой), и замораживаем
+  // анимации — рисовать невидимое незачем (#193). Решение принимается по геометрии окон, поэтому на
+  // втором мониторе, где окно видно, ничего не замирает.
+  watchWindowCovered();
 }

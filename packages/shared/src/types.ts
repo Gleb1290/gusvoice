@@ -46,10 +46,35 @@ export interface User {
   avatarUrl: string | null;
   /**
    * Анимированный аватар (#117): ОТДЕЛЬНО от статичного, а не вместо него.
-   * ⚠️ Списки и оверлей рисуют `avatarUrl` всегда — анимация показывается по наведению и в
-   * карточке профиля. `prefers-reduced-motion` сам по себе анимацию картинки не останавливает.
+   * ⚠️ Показывается ВЕЗДЕ, куда её передали, — и в списках тоже (решение 01.09; прежний показ
+   * только по наведению отменён). Без анимации остаётся ОВЕРЛЕЙ: он висит поверх чужой игры.
+   * `prefers-reduced-motion` сам по себе анимацию картинки не останавливает.
    */
   animatedAvatarUrl: string | null;
+  /**
+   * Откуда человек, если он ГОСТЬ с другого инстанса (#139, F4, §5.7). `null`/нет поля — свой.
+   *
+   * 🔴 Значок инстанса нужен ВЕЗДЕ, где видно человека: в списке участников, в шапке сообщения, в
+   * списке голосового канала. Иначе гость неотличим от своего — а отличие принципиальное: его
+   * профиль, ник и аватар живут на другом инстансе, ЛС с ним пока нет, и однажды он может исчезнуть
+   * вместе со связкой.
+   *
+   * ⚠️ Едет в РОСТЕРЕ (`ServerMemberInfo`), а не в каждом сообщении: все поверхности читают человека
+   * оттуда — тем же приёмом, что и анимированный аватар.
+   */
+  homeInstance?: {
+    instanceId: string;
+    name: string | null;
+    domain: string;
+    /**
+     * Принимает ли этот инстанс жалобы (`reports` в его `features`, §5.11).
+     *
+     * ⚠️ Едет вместе со значком намеренно: галочку «Пожаловаться» рисует окно бана, а открыть его
+     * может любой, у кого есть право банить, — ходить за возможностями связки отдельным запросом
+     * ему нельзя (это знание держателя). Ложь тут дешёвая: галочка неактивна с подсказкой.
+     */
+    reports?: boolean;
+  } | null;
   /** Куплено ли право загрузить анимацию. Глобально: аватар виден на всех серверах. */
   animatedAvatarUnlocked: boolean;
   /**
@@ -70,6 +95,13 @@ export interface User {
    * — не их дело.
    */
   economyPreview?: boolean;
+  /**
+   * Собирает ли этот инстанс диагностику (#113) — свежий ответ сервера, а не запомненный флаг.
+   * ⚠️ Необязательное: инстанс старой версии поля не пришлёт, и тогда клиент падает на флаг записи
+   * реестра. Заведено 20.09 после того, как выяснилось, что у десктопов, добавивших сервер до
+   * 28.08, диагностика была выключена НАВСЕГДА — см. `diagVisible.ts`.
+   */
+  diagPreview?: boolean;
   /** True only for the single configured super-admin (SUPERADMIN_USERNAME). */
   superAdmin: boolean;
   /** Whether this user may create new servers (granted by the super-admin). */
@@ -99,7 +131,35 @@ export interface User {
 }
 
 /** Row in the admin panel's user list. */
-export interface AdminUser extends User {}
+export interface AdminUser extends User {
+  /**
+   * Скрыт от соседей по федерации (F2, §5.2.1) — решение АДМИНА ИНСТАНСА, а не самого человека.
+   * Поля нет у обычного `User` намеренно: это знание админ-панели, а не каждого клиента.
+   */
+  hiddenFromPeers?: boolean;
+  /**
+   * Где этот человек ГОСТЬ прямо сейчас (F3, §5.2.1) — приходит только для скрытых от соседей.
+   *
+   * 🔴 Скрытие убирает из каталога, но не выгоняет уже вошедшего по ссылке: админ, который скрывал,
+   * обязан видеть, что человек всё равно виден на серверах соседа, — иначе он решает по неверной
+   * картине («у соседей его нет»).
+   */
+  guestAt?: {
+    instance: string;
+    serverName: string;
+    method: string | null;
+    /** Кто позвал — идентификатор в пространстве ХОСТА (у нас такой строки нет). */
+    invitedBy: string | null;
+    /**
+     * Его же имя, если нашлось в кеше каталога соседа.
+     *
+     * ⚠️ Отдельным полем, а не подменой `invitedBy`: id — это то, что прислал хост, и по нему
+     * держатель может спросить соседа. Имя — наша догадка из кеша, и она может устареть.
+     */
+    invitedByName?: string | null;
+    at: number;
+  }[];
+}
 
 /** Row in the admin panel's server list. */
 export interface AdminServer {
@@ -111,6 +171,10 @@ export interface AdminServer {
   voiceChannels: number;
   members: number;
   createdAt: string;
+  /** Галочка «Разрешить федеративный доступ» (F2, §5.3) — ставит только админ инстанса. */
+  federatedAccess?: boolean;
+  /** Связки, которым этот сервер закрыт отдельно (требование 32). Пусто = открыт всем связкам. */
+  federationExclusions?: string[];
 }
 
 export interface Server {
@@ -188,6 +252,15 @@ export interface Role {
   position: number;
   hoist: boolean;
   isEveryone: boolean;
+  /**
+   * Системная роль «Гости» (#139, §5.9): базовые права людей С ДРУГИХ инстансов, у гостя она
+   * заменяет `@everyone`.
+   *
+   * 🔴 Руками не выдаётся и не снимается: гость получает её ПО ПРИЗНАКУ гостя, а не строкой в
+   * `member_roles`. Интерфейс обязан убрать её из списка выдачи — выданная местному, она добавила
+   * бы ему прав поверх `@everyone` вместо того, чтобы кого-то ограничить.
+   */
+  isGuests?: boolean;
   /** Whether @mentioning this role notifies its members. */
   mentionable: boolean;
   /** Self-service: a member holding this role may grant it to others without MANAGE_ROLES (add-only). */
@@ -272,12 +345,22 @@ export const AUDIT_ACTIONS = [
 /** Тип выводится ИЗ списка, а не пишется рядом — см. предупреждение выше. */
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
+/**
+ * Человек в коротком виде — для списков, где ростера нет: баны, журнал действий, кто как голосовал.
+ *
+ * 🔴 `homeInstance` здесь ОБЯЗАТЕЛЕН по той же причине, по какой он есть в ростере: у гостя
+ * `username` в базе технический (`<uuid>@<instance>`), и место, которое собирает человека руками,
+ * показывает его именно так. На приёмке 18.09 в списке банов вместо ника и значка инстанса стояли
+ * сорок символов служебного идентификатора.
+ */
+export type UserBrief = Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance'>;
+
 /** One entry in a server's moderation audit trail (read gated by VIEW_AUDIT_LOG). */
 export interface AuditLogEntry {
   id: string;
   serverId: string;
   /** The member who performed the action (null if the user account was since deleted). */
-  actor: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'> | null;
+  actor: UserBrief | null;
   /**
    * Что произошло. ⚠️ Тип закрытый (`AuditAction`) намеренно — см. комментарий у него.
    * В базе лежат и старые записи, поэтому разбор всё равно обязан пережить незнакомую строку.
@@ -292,7 +375,7 @@ export interface AuditLogEntry {
    * отключение, перемещение) остаются без имени: они кладут в `data` только канал, и журнал читался
    * как «замьютил участника» — видно кто, не видно кого. Соединение чинит и УЖЕ НАКОПЛЕННЫЕ записи.
    */
-  target: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'> | null;
+  target: UserBrief | null;
   /** Free-form details for display (names, before/after, channel ids, …). */
   data: Record<string, unknown>;
   createdAt: string;
@@ -301,13 +384,14 @@ export interface AuditLogEntry {
 /** A server member with their user info, for the members management list. */
 export interface ServerMemberInfo {
   /**
-   * ⚠️ `animatedAvatarUrl` едет в ростере, потому что карточку профиля открывают из списка
-   * участников, а отдельный запрос ради одного поля означал бы поход к серверу на каждое открытие.
-   * Списки его НЕ рисуют — только карточка и плитка сцены (см. `Avatar`).
+   * 🔴 `animatedAvatarUrl` едет в ростере, и ростер — ЕДИНСТВЕННЫЙ его источник в клиенте: в
+   * метаданные LiveKit анимация не кладётся вовсе (#129), а в DTO автора сообщения её нет. Всякая
+   * поверхность, рисующая движущийся аватар, читает его отсюда (`useAnimatedAvatarUrl`).
+   * ⚠️ Отдельный запрос ради одного поля означал бы поход к серверу на каждое открытие карточки.
    */
   user: Pick<
     User,
-    'id' | 'username' | 'displayName' | 'avatarUrl' | 'animatedAvatarUrl' | 'status' | 'customStatus'
+    'id' | 'username' | 'displayName' | 'avatarUrl' | 'animatedAvatarUrl' | 'homeInstance' | 'status' | 'customStatus'
   >;
   nickname: string | null;
   roleIds: string[];
@@ -316,7 +400,7 @@ export interface ServerMemberInfo {
 
 /** A server ban entry, for the bans management tab. */
 export interface BanInfo {
-  user: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'>;
+  user: UserBrief;
   reason: string | null;
   bannedBy: string | null;
   createdAt: string;
@@ -388,7 +472,7 @@ export interface Poll {
 /** Кто за что проголосовал — только для ПУБЛИЧНОГО опроса и только после своего голоса. */
 export interface PollVoters {
   optionId: string;
-  users: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'>[];
+  users: UserBrief[];
 }
 
 export interface Message {
@@ -491,6 +575,15 @@ export interface InstanceInfo {
   name: string | null;
   iconUrl: string | null;
   registration: RegistrationPolicy;
+  /**
+   * Работает ли на этом инстансе федерация (F4, #139).
+   *
+   * 🔴 Клиенту это нужно не ради красоты: маршрутов федерации на выключенном инстансе НЕТ ВОВСЕ
+   * (404), и без признака окно проверки ссылки узнавало бы об этом только отказом — то есть
+   * показывало бы человеку поломку там, где её нет. Необязательное: инстанс постарше поля не
+   * пришлёт, и это честно читается как «выключена» (`docs/federation-compat.md`).
+   */
+  federation?: boolean;
 }
 
 /** `GET /api/setup/status` — нужен ли мастер первичной настройки. */
@@ -654,6 +747,19 @@ export interface MessageSticker {
   emoji: string;
   url: string;
   format: StickerFormat;
+}
+
+/**
+ * Сводка непрочитанного по всему инстансу — для значков в рейле, когда шлюз к инстансу открыт, а
+ * человек смотрит на другой (#139, §5.7). Считается тем же правилом, что `reads` в bootstrap.
+ */
+export interface UnreadSummary {
+  /** serverId → сколько непрочитанных сообщений и сколько из них упоминают меня. */
+  servers: Record<string, { unread: number; mentions: number }>;
+  /** Сколько бесед в личке с непрочитанным (значок у самой личке — про беседы, а не про сообщения). */
+  dms: number;
+  /** Сколько непрочитанных сообщений в личке всего. */
+  dmUnread: number;
 }
 
 export interface ServerBootstrap {

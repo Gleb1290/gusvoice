@@ -12,6 +12,11 @@ import type {
 import type {
   AdminServer,
   AdminUser,
+  FederationAlertSettings,
+  FederationAuditRow,
+  FederationBanRow,
+  FederationDirectoryView,
+  FederationReportRow,
   Attachment,
   AuditLogEntry,
   AuthResponse,
@@ -22,8 +27,12 @@ import type {
   Channel,
   Category,
   DmChannel,
+  FederationOverview,
   GameActivity,
   InstanceInfo,
+  GuestPlacesView,
+  InvitePreviewView,
+  InviteScopeView,
   Invite,
   Message,
   PermissionOverwrite,
@@ -45,7 +54,9 @@ import type {
   VoiceTestToken,
   VoiceTokenResponse,
 } from '@gusvoice/shared';
+import { mirrorToBg } from './bgGateways';
 import { activeInstance, config, updateActiveInstance } from './config';
+import { measureImageFile } from './imageSize';
 
 /** A push-mute source: 'server' suppresses a server's @mention pushes; 'dm_user' a person's DM pushes. */
 export type PushMuteScope = 'server' | 'dm_user';
@@ -85,6 +96,31 @@ let token: string | null = activeInstance()?.token ?? localStorage.getItem('gv_t
 export function getToken(): string | null {
   return token;
 }
+
+/**
+ * Номер «поколения» активного инстанса (§5.7). Растёт на каждом переходе между инстансами.
+ *
+ * 🔴 Зачем. Переход перестал быть перезапуском приложения, а запросы к прежнему инстансу в этот
+ * момент могут быть в полёте. Их ответы придут уже после перехода — с чужими серверами, чужими
+ * людьми и чужими непрочитанными, и запишутся в стор нового инстанса. Один счётчик в ОДНОМ месте
+ * (`req`) закрывает это для всего REST разом: проверять эпоху в каждом действии стора значило бы
+ * забыть её ровно там, где она нужна.
+ */
+let epoch = 0;
+
+/** Ошибка «ответ пришёл не тому инстансу» — её глушит `toastError`, человеку показывать нечего. */
+export function switchedAway(): Error & { switched: true } {
+  return Object.assign(new Error('инстанс сменился'), { switched: true as const });
+}
+
+/**
+ * Перечитать токен активной записи после перехода между инстансами и объявить новое поколение.
+ * ⚠️ Зовётся ПОСЛЕ `setActiveInstance`, иначе перечитается прежний токен.
+ */
+export function reloadToken(): void {
+  token = activeInstance()?.token ?? null;
+  epoch++;
+}
 export function setToken(t: string | null): void {
   token = t;
   // Write into the active instance's record; keep the legacy mirror so any stray reader still works.
@@ -111,6 +147,7 @@ function absorbRefresh(res: Response): void {
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const sent = epoch;
   const res = await fetch(`${config.apiUrl}/api${path}`, {
     method,
     headers: {
@@ -119,6 +156,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // Пока ходили, человек перешёл в другой инстанс — ответ относится к прежнему, и место ему в
+  // мусоре, а не в сторе. 401 от покинутого инстанса тем более не должен никого разлогинивать.
+  if (sent !== epoch) throw switchedAway();
   absorbRefresh(res);
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
@@ -128,11 +168,16 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     const err = new Error((data as { error?: string }).error || `HTTP ${res.status}`) as Error & {
       status?: number;
       reason?: string;
+      contacts?: { kind: string; label: string; value: string }[];
     };
     err.status = res.status;
     // ⚠️ Машинная причина отказа, если сервер её прислал. Текст предназначен человеку и меняется;
     // ветвиться по нему в коде — значит однажды сломаться от правки формулировки.
     err.reason = (data as { reason?: string }).reason;
+    // ⚠️ Контакты держателя приезжают вместе с отказом «сервер закрыт для гостей» (§5.3.1): окно
+    // обязано показать, к кому идти, а второй запрос за ними идти уже некуда — нас туда не пускают.
+    const contacts = (data as { contacts?: unknown }).contacts;
+    if (Array.isArray(contacts)) err.contacts = contacts as { kind: string; label: string; value: string }[];
     throw err;
   }
   return data as T;
@@ -170,9 +215,20 @@ export const api = {
      */
     auto?: boolean;
     customStatus?: { emoji: string | null; text: string | null; clearAfterMinutes: number | null } | null;
-  }) => req<User>('PATCH', '/users/me/status', body),
+  }) => {
+    // 🔴 Статус — про человека, а не про инстанс (§5.7): «не беспокоить», поставленное дома, обязано
+    // действовать и там, где он гость. Иначе у соседа он остаётся зелёным «в сети» — то есть просьба
+    // не стучаться до тех людей, которые её и должны увидеть, не доходит.
+    mirrorToBg('PATCH', '/users/me/status', body);
+    return req<User>('PATCH', '/users/me/status', body);
+  },
   // Game activity (#40): report what I'm playing (`game: null` clears it); fetch everyone's snapshot.
-  setActivity: (game: GameActivity | null) => req<{ ok: true }>('PATCH', '/users/me/activity', { game }),
+  setActivity: (game: GameActivity | null) => {
+    // «Играет в X» — по той же причине: на чужом сервере в списке участников человек стоит рядом со
+    // своими, и пустая строка там означала бы «ничем не занят», а не «мы не знаем».
+    mirrorToBg('PATCH', '/users/me/activity', { game });
+    return req<{ ok: true }>('PATCH', '/users/me/activity', { game });
+  },
   getActivities: () => req<{ activities: Record<string, GameActivity> }>('GET', '/users/activities'),
   changePassword: (currentPassword: string, newPassword: string) =>
     req<{ ok: true; token: string }>('POST', '/auth/password', { currentPassword, newPassword }),
@@ -450,6 +506,8 @@ export const api = {
     req<Message>('DELETE', `/channels/${channelId}/messages/${messageId}/pin`),
   listPins: (channelId: string) => req<Message[]>('GET', `/channels/${channelId}/pins`),
   uploadAttachment: async (channelId: string, file: File): Promise<Attachment> => {
+    // Размер картинки меряем параллельно загрузке (#194): лента оставит под неё место до скачивания.
+    const dims = measureImageFile(file);
     const fd = new FormData();
     fd.append('file', file);
     const res = await fetch(`${config.apiUrl}/api/channels/${channelId}/attachments`, {
@@ -460,7 +518,8 @@ export const api = {
     absorbRefresh(res);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
-    return data as Attachment;
+    const size = await dims;
+    return size ? { ...(data as Attachment), ...size } : (data as Attachment);
   },
   uploadChannelIcon: async (channelId: string, file: File): Promise<Channel> => {
     const fd = new FormData();
@@ -509,6 +568,17 @@ export const api = {
   /** Отчёт диагностики показа экрана (#100) — уходит на сервер по кнопке, читается там psql. */
   sendDiagReport: (body: unknown) => req<{ ok: boolean }>('POST', '/diag/report', body),
   kickMember: (serverId: string, userId: string) => req<void>('DELETE', `/servers/${serverId}/members/${userId}`),
+  /**
+   * Бан на сервере с необязательной жалобой держателю инстанса гостя (§5.11).
+   *
+   * ⚠️ Ответ РАЗНЫЙ по смыслу: без жалобы это 204, с жалобой — исход отправки. Бан при этом
+   * случился в обоих случаях: отказ жалобы его не отменяет.
+   */
+  banMemberWithReport: (
+    serverId: string,
+    userId: string,
+    body: { reason?: string; report?: boolean; evidence?: { text: string; at: number; channel: string }[] },
+  ) => req<{ ok: true; report?: { sent: boolean; problem?: string } } | void>('POST', `/servers/${serverId}/members/${userId}/ban`, body),
   banMember: (serverId: string, userId: string, reason?: string) =>
     req<void>('POST', `/servers/${serverId}/members/${userId}/ban`, { reason }),
   listBans: (serverId: string) => req<BanInfo[]>('GET', `/servers/${serverId}/bans`),
@@ -636,6 +706,8 @@ export const api = {
     req<Message>('PATCH', `/dm/${dmId}/messages/${messageId}`, { content }),
   deleteDmMessage: (dmId: string, messageId: string) => req<void>('DELETE', `/dm/${dmId}/messages/${messageId}`),
   uploadDmAttachment: async (dmId: string, file: File): Promise<Attachment> => {
+    // Размер картинки меряем параллельно загрузке (#194): лента оставит под неё место до скачивания.
+    const dims = measureImageFile(file);
     const fd = new FormData();
     fd.append('file', file);
     const res = await fetch(`${config.apiUrl}/api/dm/${dmId}/attachments`, {
@@ -646,11 +718,14 @@ export const api = {
     absorbRefresh(res);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
-    return data as Attachment;
+    const size = await dims;
+    return size ? { ...(data as Attachment), ...size } : (data as Attachment);
   },
 
   createInvite: (serverId: string, opts?: { expiresInMinutes?: number | null; maxUses?: number | null }) =>
     req<Invite>('POST', `/servers/${serverId}/invites`, opts ?? {}),
+  /** Где сработает ссылка этого сервера — для подсказки под выбором срока (§4.2). */
+  inviteScope: (serverId: string) => req<InviteScopeView>('GET', `/servers/${serverId}/invite-scope`),
   listInvites: (serverId: string) => req<Invite[]>('GET', `/servers/${serverId}/invites`),
   deleteInvite: (code: string) => req<void>('DELETE', `/invites/${code}`),
   acceptInvite: (code: string) => req<ServerBootstrap>('POST', `/invites/${code}`),
@@ -711,6 +786,113 @@ export const api = {
     req<AdminUser>('PATCH', `/admin/users/${userId}`, { canCreateServers }),
   adminVerifyUser: (userId: string) => req<AdminUser>('POST', `/admin/users/${userId}/verify`),
   adminDeleteUser: (userId: string) => req<{ ok: boolean }>('DELETE', `/admin/users/${userId}`),
+  /** «Скрыть от соседей» (F2, §5.2.1) — решение админа инстанса, не самого человека. */
+  adminSetUserHidden: (userId: string, hidden: boolean) =>
+    req<AdminUser>('PATCH', `/admin/users/${userId}/hidden`, { hidden }),
+  /** Галочка «Разрешить федеративный доступ» и список связок-исключений (F2, §5.3). */
+  adminSetServerFederation: (serverId: string, enabled: boolean, exclusions?: string[]) =>
+    req<{ federatedAccess: boolean; federationExclusions: string[] }>(
+      'PATCH',
+      `/admin/servers/${serverId}/federation`,
+      { enabled, ...(exclusions ? { exclusions } : {}) },
+    ),
+  // Федерация (#139). Все эти маршруты — только для супер-админа; выключенная федерация отвечает
+  // сводкой со `status: 'off'`, а не ошибкой: вкладка должна уметь объяснить, почему пусто.
+  federationOverview: () => req<FederationOverview>('GET', '/admin/federation'),
+  federationSetName: (name: string) => req<{ name: string | null }>('PATCH', '/admin/federation/instance', { name }),
+  federationPause: (paused: boolean) => req<{ paused: boolean }>('POST', '/admin/federation/pause', { paused }),
+  // Оповещения держателю (§5.10): куда слать и с какого молчания считать связку упавшей.
+  federationSetAlerts: (body: { ntfyTopic?: string; email?: boolean; linkDownAfterMinutes?: number }) =>
+    req<FederationAlertSettings>('PATCH', '/admin/federation/alerts', body),
+  federationIssueCode: () => req<{ code: string; expiresAt: number }>('POST', '/admin/federation/code'),
+  /**
+   * «Ключ скомпрометирован» (§5.1.3): новая личность инстанса, все связки — в «доверие потеряно». Необратимо;
+   * `confirm: true` — требование маршрута, чтобы случайный запрос этого не сделал. До 23.09 кнопки не было
+   * вовсе (прогон F-20 на стенде): держатель с украденным ключом не мог сменить его сам.
+   */
+  federationRevokeKey: () =>
+    req<{ previousInstanceId: string; newInstanceId: string; newFingerprint: string; notified: number; unreachable: number }>(
+      'POST',
+      '/admin/federation/revoke-key',
+      { confirm: true },
+    ),
+  federationRebindCode: (instanceId: string) =>
+    req<{ code: string; expiresAt: number }>('POST', `/admin/federation/links/${instanceId}/rebind-code`),
+  federationLink: (code: string) => req<{ instanceId: string; state: string }>('POST', '/admin/federation/link', { code }),
+  /** Перепривязка: код новой личности соседа вставляется на карточке ЕГО связки, не в общее поле (F-01). */
+  federationRebind: (instanceId: string, code: string) =>
+    req<{ instanceId: string; state: string }>('POST', `/admin/federation/links/${instanceId}/rebind`, { code }),
+  federationConfirm: (instanceId: string) =>
+    req<{ state: string }>('POST', `/admin/federation/links/${instanceId}/confirm`),
+  federationLinkAction: (instanceId: string, action: 'pause' | 'resume' | 'block') =>
+    req<{ state: string }>('POST', `/admin/federation/links/${instanceId}/${action}`),
+  /**
+   * Предел места под файлы гостей связки и счётчик занятого (§5.10). `bytes` — новый предел
+   * (`0` — без предела), `reset` — обнулить счётчик; можно вместе.
+   */
+  federationSetQuota: (instanceId: string, body: { bytes?: number; reset?: boolean }) =>
+    req<{ used: number; limit: number }>('PATCH', `/admin/federation/links/${instanceId}/quota`, body),
+  /** Каталоги соседей для вкладок «Пользователи» и «Серверы» — кеш со словами о свежести (F2). */
+  federationDirectory: () => req<FederationDirectoryView>('GET', '/admin/federation/directory'),
+  // ---- Запреты на инстанс и жалобы (§5.11) ------------------------------------------------------
+  federationBans: () => req<{ bans: FederationBanRow[] }>('GET', '/admin/federation/bans'),
+  /**
+   * Запретить чужому человеку вход на весь инстанс. Ключ — ГЛОБАЛЬНАЯ личность: запретить можно и
+   * того, кто ни разу не заходил, а переживает запрет и разрыв связки, и перепривязку.
+   */
+  federationBan: (b: {
+    instanceId: string;
+    userId: string;
+    reason?: string;
+    days: number | null;
+    report?: boolean;
+    evidence?: { text: string; at: number; channel: string }[];
+  }) =>
+    req<{ ok: true; servers: number; report: { sent: boolean; problem?: string } }>('POST', '/admin/federation/bans', {
+      instance_id: b.instanceId,
+      user_id: b.userId,
+      reason: b.reason,
+      days: b.days,
+      report: b.report,
+      evidence: b.evidence,
+    }),
+  federationUnban: (instanceId: string, userId: string) =>
+    req<{ ok: true }>('DELETE', `/admin/federation/bans/${instanceId}/${userId}`),
+  /** Контакты держателя соседа — показываем там, где жалобу отправить нельзя и надо писать руками. */
+  federationPeerContacts: (instanceId: string) =>
+    req<{ contacts: { kind: string; label: string; value: string }[] }>(
+      'GET',
+      `/admin/federation/links/${instanceId}/contacts`,
+    ),
+  federationReports: () => req<{ reports: FederationReportRow[] }>('GET', '/admin/federation/reports'),
+  /** Журнал федерации (F-25): события связок, гостей и потери доверия — последние 200. */
+  federationAudit: () => req<{ entries: FederationAuditRow[] }>('GET', '/admin/federation/audit'),
+  federationReplyReport: (id: string, text: string) =>
+    req<{ ok: true }>('POST', `/admin/federation/reports/${id}/reply`, { text }),
+  /** «Синхронизировать сейчас» — всегда полная сверка, дельта расхождения не находит. */
+  federationSyncNow: (instanceId: string) =>
+    req<{ directory: { ok: boolean; problem?: string }; servers: { ok: boolean; problem?: string } }>(
+      'POST',
+      `/admin/federation/links/${instanceId}/sync`,
+    ),
+  /**
+   * Попросить ХОСТ подготовить аватар человека с соседнего инстанса и отдать адрес в нашем хранилище.
+   * 🔴 Никогда не берём картинку с чужого домена напрямую: браузер оставил бы там наш адрес.
+   */
+  federationPeerAvatar: (instanceId: string, userId: string) =>
+    req<{ url: string }>('POST', `/fed/avatar/${instanceId}/${userId}`),
+
+  // ---- Федерация: человек, а не держатель (F4, §4.2.1 и §5.5) ----------------------------------
+  /**
+   * Проверить вставленную ссылку. 🔴 Спрашиваем СВОЙ бэкенд: к чужому инстансу клиент до согласия
+   * человека не ходит вовсе — иначе его адрес уезжал бы туда от одного взгляда на ссылку.
+   */
+  fedInvitePreview: (url: string) => req<InvitePreviewView>('POST', '/fed/invite-preview', { url }),
+  /** Попросить дом поручиться за нас перед хостом. Токен живёт 2 минуты и годен только этому хосту. */
+  fedIdentityToken: (instanceId: string) =>
+    req<{ token: string; expires_at: number }>('POST', '/fed/identity-token', { instance_id: instanceId }),
+  /** «Где я гость» — по индексу членств СВОЕГО инстанса: он знает это и на новом устройстве. */
+  fedMyGuest: () => req<GuestPlacesView>('GET', '/fed/my-guest'),
   adminGetSmtp: () => req<SmtpSettings>('GET', '/admin/smtp'),
   adminSetSmtp: (s: { host: string; port: number; secure: boolean; user: string; pass?: string; from: string }) =>
     req<{ ok: boolean; cleared?: boolean }>('PUT', '/admin/smtp', s),
@@ -719,6 +901,9 @@ export const api = {
   // ---- Инстанс и мастер первичной настройки (#142) ----------------------------------------------
   /** Публично, без входа: название, иконка, политика регистрации. */
   instance: () => req<InstanceInfo>('GET', '/instance'),
+  /** Публично: что предложить на странице `/i/<код>` тому, кто ещё не вошёл (§4.2.2). */
+  inviteOpen: (code: string) =>
+    req<{ known: boolean; peers: { name: string; clientOrigin: string }[] }>('GET', `/invites/${encodeURIComponent(code)}/open`),
   setupStatus: () => req<SetupStatus>('GET', '/setup/status'),
   setupCheckToken: (token: string) => req<void>('POST', '/setup/check-token', { token }),
   setupAdmin: (b: { token: string; username: string; email: string; password: string; displayName?: string }) =>

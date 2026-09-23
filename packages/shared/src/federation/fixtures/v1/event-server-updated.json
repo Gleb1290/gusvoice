@@ -1,0 +1,18 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0V4Z",
+      "seq": 45,
+      "kind": "server.updated",
+      "created_at": 1758000000000,
+      "payload": {
+        "server_id": "0193f1a2-aaaa-7e8f-9a0b-1c2d3e4f5a6b",
+        "updated_at": 1758000000000,
+        "name": "Гуси",
+        "icon_hash": null,
+        "members": 12
+      }
+    }
+  ]
+}

@@ -47,6 +47,20 @@ function emit() {
   version++;
   for (const l of listeners) l();
 }
+/**
+ * Перечитать настройки под ДРУГОЙ инстанс (§5.7).
+ *
+ * 🔴 Ключи здесь по id каналов, а id принадлежат инстансу. Раньше переход между инстансами
+ * перезапускал приложение, и модуль всегда поднимался с настройками текущего; теперь переход
+ * мягкий — и без этого сброса заглушённые каналы соседа остались бы заглушёнными у себя дома.
+ */
+export function reloadChannelPrefs(): void {
+  muted = load(MUTED_KEY);
+  collapsed = load(COLLAPSED_KEY);
+  mentionsOnly = load(MENTIONS_KEY);
+  emit();
+}
+
 export function subscribeChannelPrefs(fn: () => void): () => void {
   listeners.add(fn);
   return () => {

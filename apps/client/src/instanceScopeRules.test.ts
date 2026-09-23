@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { readScopedValue, scopedStorageKey } from './instanceScopeRules.js';
+import { createScopedStorage, readScopedValue, scopedStorageKey } from './instanceScopeRules.js';
 
 function memory(initial: Record<string, string> = {}) {
   const data = new Map(Object.entries(initial));
@@ -49,5 +49,74 @@ describe('настройки устройства по инстансам (F0, #
       '{"c1":"m1"}',
     );
     assert.equal(s.data.has('gv_channel_seen@inst-a'), false);
+  });
+});
+
+describe('обёртка хранилища активного инстанса (#143)', () => {
+  it('ключ, чтение и запись каждый раз используют текущий активный инстанс', () => {
+    // Ловит захваченный при создании id: после переключения аккаунта настройки продолжили бы течь в старый ключ.
+    const s = memory({ 'volume@a': '10', 'volume@b': '20' });
+    let active: string | null = 'a';
+    const scoped = createScopedStorage({ activeInstanceId: () => active, getItem: s.get, setItem: s.set });
+    assert.equal(scoped.key('volume'), 'volume@a');
+    assert.equal(scoped.get('volume'), '10');
+    active = 'b';
+    assert.equal(scoped.get('volume'), '20');
+    scoped.set('volume', '21');
+    assert.equal(s.data.get('volume@b'), '21');
+    active = null;
+    scoped.set('volume', 'legacy');
+    assert.equal(s.data.get('volume'), 'legacy');
+  });
+
+  it('первое чтение копирует legacy, а следующие чтения уже берут собственную копию', () => {
+    // Ловит повторную миграцию, которая перетёрла бы локальное решение изменившимся общим ключом.
+    const s = memory({ setting: 'old' });
+    const scoped = createScopedStorage({ activeInstanceId: () => 'a', getItem: s.get, setItem: s.set });
+    assert.equal(scoped.get('setting'), 'old');
+    s.data.set('setting', 'new-legacy');
+    assert.equal(scoped.get('setting'), 'old');
+  });
+
+  it('пустое собственное значение останавливает миграцию legacy', () => {
+    // Ловит проверку truthy вместо null, которая возвращала бы удалённую человеком настройку.
+    const s = memory({ setting: 'legacy', 'setting@a': '' });
+    const scoped = createScopedStorage({ activeInstanceId: () => 'a', getItem: s.get, setItem: s.set });
+    assert.equal(scoped.get('setting'), '');
+  });
+
+  it('два инстанса получают независимые копии общего значения и меняются отдельно', () => {
+    // Ловит совместную запись после миграции, из-за которой настройки одного инстанса меняли другой.
+    const s = memory({ setting: 'legacy' });
+    let active: string | null = 'a';
+    const scoped = createScopedStorage({ activeInstanceId: () => active, getItem: s.get, setItem: s.set });
+    assert.equal(scoped.get('setting'), 'legacy');
+    active = 'b';
+    assert.equal(scoped.get('setting'), 'legacy');
+    scoped.set('setting', 'only-b');
+    active = 'a';
+    assert.equal(scoped.get('setting'), 'legacy');
+    assert.equal(s.data.get('setting@b'), 'only-b');
+  });
+
+  it('ошибка чтения хранилища превращается в отсутствие настройки', () => {
+    // Ловит падение приложения, когда браузер запрещает доступ к данным сайта.
+    const scoped = createScopedStorage({
+      activeInstanceId: () => 'a',
+      getItem: () => { throw new Error('denied'); },
+      setItem: () => undefined,
+    });
+    assert.equal(scoped.get('setting'), null);
+  });
+
+  it('ошибка обычной записи выходит наружу, в отличие от миграционной копии', () => {
+    // Ловит тихую потерю явного изменения настройки при переполненном storage.
+    const scoped = createScopedStorage({
+      activeInstanceId: () => 'a',
+      getItem: (key) => (key === 'setting' ? 'legacy' : null),
+      setItem: () => { throw new Error('quota'); },
+    });
+    assert.equal(scoped.get('setting'), 'legacy');
+    assert.throws(() => scoped.set('setting', 'new'), /quota/);
   });
 });

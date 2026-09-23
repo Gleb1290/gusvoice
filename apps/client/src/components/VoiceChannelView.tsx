@@ -47,6 +47,16 @@ import { StreamTipFeed } from './StreamTipFeed';
 import { PENDING_WATCH_TIMEOUT_MS, matchPendingWatch } from '../pendingWatch';
 import { STREAM_VIEW_GRACE_MS } from '../streamCue';
 import { createWatchGrace, type WatchGrace } from '../watchGrace';
+import {
+  resolutionText,
+  setStreamQuality,
+  STREAM_QUALITY_HINT,
+  STREAM_QUALITY_LABEL,
+  STREAM_QUALITY_ORDER,
+  streamHasLayers,
+  useStreamQuality,
+} from '../streamQuality';
+import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
 
 // `ownerOf` живёт в `streamAudioRules` — там же, где правило громкости стрима. Держать здесь вторую
 // копию значило бы дать им разъехаться, а именно расхождение двух мест и дало баг #71.
@@ -160,6 +170,37 @@ function ScreenViewer({
   // Стрим может ехать со спутника `<id>#screen` — ник ищем по ВЛАДЕЛЬЦУ (#73).
   const name = nameOf(ownerOf(track.participant.identity), track.participant.name || track.participant.identity);
 
+  /**
+   * Качество показа (#191). Применяет его `VoiceConnection` — здесь только выбор и честный ответ, есть ли
+   * из чего выбирать: у показывающего слои могут быть выключены, и тогда пункты неактивны с объяснением.
+   * Что реально приходит, читаем из статистики приёма, пока меню открыто: слой меняет сервер, и число
+   * в подписи — единственное доказательство, что выбор сработал.
+   */
+  const qualityPref = useStreamQuality();
+  const pubForQuality = track.publication as RemoteTrackPublication | undefined;
+  const layered = streamHasLayers(pubForQuality);
+  const [qualityMenu, setQualityMenu] = useState<MenuPos | null>(null);
+  const [receiving, setReceiving] = useState<string | null>(null);
+  useEffect(() => {
+    if (!qualityMenu) return;
+    let alive = true;
+    const read = async () => {
+      try {
+        const t = pubForQuality?.videoTrack as RemoteVideoTrack | undefined;
+        const st = await t?.getReceiverStats();
+        if (alive) setReceiving(resolutionText(st?.frameWidth, st?.frameHeight));
+      } catch {
+        /* статистики нет — подписи не будет */
+      }
+    };
+    void read();
+    const id = window.setInterval(() => void read(), 1500);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [qualityMenu, pubForQuality]);
+
   // Watching = full live subscription. StreamCard's snapshot mode leaves streams UNsubscribed, so
   // re-subscribe here (and hold it while open) — otherwise <VideoTrack> would have no track to attach.
   const watchSid = (track.publication as RemoteTrackPublication | undefined)?.trackSid;
@@ -236,6 +277,20 @@ function ScreenViewer({
             />
           </span>
         )}
+        {!track.participant.isLocal && (
+          <button
+            type="button"
+            className="ctl"
+            title={`Качество показа: ${STREAM_QUALITY_LABEL[qualityPref]}`}
+            aria-haspopup="menu"
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setQualityMenu({ x: r.left, y: r.top });
+            }}
+          >
+            <Icon name="settings" size={18} />
+          </button>
+        )}
         <button type="button" className="ctl" title="На весь экран" onClick={toggle}>
           <Icon name="maximize" size={18} />
         </button>
@@ -243,6 +298,27 @@ function ScreenViewer({
           <Icon name="close" size={18} />
         </button>
       </div>
+      {qualityMenu && (
+        <ContextMenu pos={qualityMenu} onClose={() => setQualityMenu(null)} width={250}>
+          <MenuSection>Качество показа</MenuSection>
+          {STREAM_QUALITY_ORDER.map((q) => (
+            <MenuItem
+              key={q}
+              icon={q === qualityPref ? 'check' : undefined}
+              label={STREAM_QUALITY_LABEL[q]}
+              sub={STREAM_QUALITY_HINT[q]}
+              active={q === qualityPref}
+              disabled={!layered && q !== 'auto'}
+              onClick={() => {
+                setStreamQuality(q);
+                setQualityMenu(null);
+              }}
+            />
+          ))}
+          {!layered && <MenuSection>Показывающий шлёт один слой — понизить нельзя</MenuSection>}
+          {receiving && <MenuSection>Сейчас приходит {receiving}</MenuSection>}
+        </ContextMenu>
+      )}
     </div>
   );
 }

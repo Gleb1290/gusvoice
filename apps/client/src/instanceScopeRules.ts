@@ -26,6 +26,46 @@ export function scopedStorageKey(base: string, instanceId: string | null): strin
  * ⚠️ Копия пишется ТОЛЬКО когда своего значения нет вовсе (`null`). Пустая строка или `[]` — это уже
  * решение человека на этом инстансе, общий ключ его не перетирает.
  */
+export interface ScopedStorageDeps {
+  /** id активной записи реестра на момент обращения (может смениться за жизнь вкладки). */
+  activeInstanceId(): string | null;
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+export interface ScopedStorage {
+  /** Значение этого инстанса; недоступное хранилище — `null`, а не исключение. */
+  get(base: string): string | null;
+  /** Записать значение этого инстанса. Бросает, как `localStorage.setItem` (переполнено/запрещено). */
+  set(base: string, value: string): void;
+  /** Под каким ключом это на самом деле лежит — для отладки и переносов. */
+  key(base: string): string;
+}
+
+/**
+ * Пара «прочитать/записать» с привязкой к активному инстансу (#143).
+ *
+ * Хранилище и реестр приходят зависимостями, поэтому правило переноса со старого общего ключа
+ * проверяется тестом целиком, а не по кускам: раньше тестировался только `readScopedValue`, а то,
+ * что чтение ловит недоступное хранилище, а запись — нет, держалось на честном слове обёртки.
+ */
+export function createScopedStorage(deps: ScopedStorageDeps): ScopedStorage {
+  return {
+    key: (base) => scopedStorageKey(base, deps.activeInstanceId()),
+    get(base) {
+      try {
+        return readScopedValue(base, deps.activeInstanceId(), deps.getItem, deps.setItem);
+      } catch {
+        // Само обращение к хранилищу может бросить (данные сайта выключены) — это «настройки нет».
+        return null;
+      }
+    },
+    set(base, value) {
+      deps.setItem(scopedStorageKey(base, deps.activeInstanceId()), value);
+    },
+  };
+}
+
 export function readScopedValue(
   base: string,
   instanceId: string | null,

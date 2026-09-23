@@ -9,6 +9,7 @@ import {
   type StreamSettings,
 } from '../streamSettings';
 import { Toggle } from './Toggle';
+import { Select } from './Select';
 
 /**
  * Screen-share quality controls. Reused both in the in-call quality popover (with a
@@ -90,18 +91,14 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
       <label className="settings-group-label" htmlFor="sq-codec">
         Кодек
       </label>
-      <select
+      <Select
         id="sq-codec"
-        className="settings-select"
         value={s.codec}
-        onChange={(e) => update({ ...s, codec: e.target.value as StreamSettings['codec'] })}
-      >
-        {CODEC_OPTIONS.map((c) => (
-          <option key={c.value} value={c.value}>
-            {c.label}
-          </option>
-        ))}
-      </select>
+        onChange={(v) => update({ ...s, codec: v as StreamSettings['codec'] })}
+        ariaLabel="Кодек"
+        title="Кодек"
+        options={CODEC_OPTIONS.map((c) => ({ value: c.value, label: c.label }))}
+      />
 
       <div className="settings-row" style={{ marginTop: 10 }}>
         <span>Звук из вкладки / системы</span>

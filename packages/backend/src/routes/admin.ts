@@ -1,5 +1,5 @@
-import type { AdminInstanceSettings, AdminServer, InstanceUpdateInfo, SmtpSettings } from '@gusvoice/shared';
-import { eq, isNull } from 'drizzle-orm';
+import type { AdminInstanceSettings, AdminServer, AdminUser, InstanceUpdateInfo, SmtpSettings } from '@gusvoice/shared';
+import { eq, inArray, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { anonymizeAccount } from '../accountDelete.js';
@@ -7,7 +7,20 @@ import { requireSuperAdmin } from '../auth.js';
 import { economyStats } from '../economyStats.js';
 import { avatarPriceMinutes, INSTANCE_PRICE_MAX_MINUTES, setAvatarPriceMinutes } from '../instanceSettings.js';
 import { db } from '../db/index.js';
-import { channels, serverMembers, servers, users } from '../db/schema.js';
+import {
+  channels,
+  federationMemberships,
+  federationPeerUsers,
+  serverFederationExclusions,
+  serverMembers,
+  servers,
+  users,
+} from '../db/schema.js';
+import { closeServerForGuests, reopenServerForGuests, CLOSE_REASONS } from '../federation/guestAccess.js';
+import { announceServer, announceUser } from '../federation/directoryEvents.js';
+import { listLinks } from '../federation/links.js';
+import { linkDisplayNames } from '../federation/linkRules.js';
+import { readInstanceMeta } from '../federation/instanceMeta.js';
 import { sendTestEmail } from '../mailer.js';
 import { serializeUser } from '../serialize.js';
 import { getSmtpConfig, isSmtpConfigured, setSmtpConfig, smtpSource, type SmtpConfig } from '../settings.js';
@@ -55,18 +68,101 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.get('/admin/users', async () => {
     // Удалённые (обезличенные) аккаунты в списке не показываем: управлять там нечем (F0 #139).
     const rows = await db.select().from(users).where(isNull(users.deletedAt));
+
+    /**
+     * «Скрыт от соседей, но виден» (§5.2.1) — отметка у СКРЫТЫХ людей.
+     *
+     * 🔴 Скрытие убирает человека только из каталога; войти по ссылке он вправе, и там он обычный
+     * участник. Админ, который его скрывал, обязан это видеть — иначе он считает, что человека у
+     * соседей нет вовсе, и принимает решения по неверной картине.
+     * ⚠️ Список берётся из индекса членств (он и заводился ради этого), и ТОЛЬКО для скрытых:
+     * тянуть его для всех значило бы при каждом открытии вкладки собирать карту «кто где гостит».
+     */
+    const hiddenIds = rows.filter((r) => r.hiddenFromPeers).map((r) => r.id);
+    const guestRows = hiddenIds.length
+      ? await db
+          .select()
+          .from(federationMemberships)
+          .where(inArray(federationMemberships.userId, hiddenIds))
+      : [];
+    // С защитой от одноимённых (F-11, мегаприёмка 23.09) — как везде, где держатель видит имя соседа.
+    const links = await listLinks();
+    const shown = linkDisplayNames(links, (await readInstanceMeta()).name);
+    const names = new Map(links.map((l) => [l.instanceId, shown.get(l.instanceId) ?? l.domain]));
+    /**
+     * Кто создал ссылку — хост присылает СВОЙ идентификатор человека, и в таком виде он держателю
+     * бесполезен. Имя достаём из кеша каталога этого соседа (F2): именно для таких случаев кеш и
+     * нужен — спрашивать соседа ради одной строки в списке пользователей мы не пойдём.
+     *
+     * ⚠️ Не нашлось — оставляем пусто и показываем «вошёл по ссылке» без имени. Выдумывать
+     * «неизвестный» не за что: человека могли скрыть у соседа или удалить, и это не наша ошибка.
+     */
+    const inviterIds = [...new Set(guestRows.map((g) => g.invitedBy).filter((v): v is string => !!v))];
+    const inviterRows = inviterIds.length
+      ? await db
+          .select({
+            instanceId: federationPeerUsers.instanceId,
+            userId: federationPeerUsers.userId,
+            displayName: federationPeerUsers.displayName,
+            username: federationPeerUsers.username,
+          })
+          .from(federationPeerUsers)
+          .where(inArray(federationPeerUsers.userId, inviterIds))
+      : [];
+    const inviterName = new Map(
+      inviterRows.map((r) => [`${r.instanceId}:${r.userId}`, r.displayName || r.username]),
+    );
+    const guestAt = new Map<string, NonNullable<AdminUser['guestAt']>>();
+    for (const g of guestRows) {
+      if (g.state !== 'active') continue;
+      const list = guestAt.get(g.userId) ?? [];
+      list.push({
+        instance: names.get(g.instanceId) ?? g.instanceId,
+        serverName: g.serverName,
+        method: g.method,
+        invitedBy: g.invitedBy,
+        invitedByName: g.invitedBy ? (inviterName.get(`${g.instanceId}:${g.invitedBy}`) ?? null) : null,
+        at: g.updatedAt,
+      });
+      guestAt.set(g.userId, list);
+    }
+
     return rows
-      .map(serializeUser)
+      // «Скрыт от соседей» живёт только здесь, а не в общем `serializeUser`: это знание админ-панели,
+      // и обычным клиентам оно не нужно (F2, §5.2.1).
+      .map((row) => ({
+        ...serializeUser(row),
+        hiddenFromPeers: row.hiddenFromPeers,
+        guestAt: guestAt.get(row.id) ?? [],
+      }))
       .sort((a, b) => a.username.localeCompare(b.username));
+  });
+
+  /**
+   * «Скрыть от соседей» (F2, §5.2.1).
+   *
+   * 🔴 Скрытие убирает человека ТОЛЬКО из каталога. Уже вошедшего к соседу по ссылке оно не выгоняет:
+   * там он остаётся обычным участником, иначе у него сломались бы переписка и голос. Соседям уезжает
+   * надгробие — без ника: скрытый скрыт и от того, кто читает причину исчезновения.
+   */
+  app.patch('/admin/users/:id/hidden', async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const { hidden } = z.object({ hidden: z.boolean() }).parse(req.body);
+    const [row] = await db.update(users).set({ hiddenFromPeers: hidden }).where(eq(users.id, id)).returning();
+    if (!row) return reply.code(404).send({ error: 'user not found' });
+    // Рассылка сама двигает время правки каталога и переживает лежачего соседа (событие ляжет в очередь).
+    await announceUser(id);
+    return { ...serializeUser(row), hiddenFromPeers: hidden };
   });
 
   // All servers (guilds) with channel/voice/member counts.
   app.get('/admin/servers', async () => {
-    const [list, chans, mems, allUsers] = await Promise.all([
+    const [list, chans, mems, allUsers, exclusions] = await Promise.all([
       db.select().from(servers),
       db.select({ serverId: channels.serverId, type: channels.type }).from(channels),
       db.select({ serverId: serverMembers.serverId }).from(serverMembers),
       db.select({ id: users.id, username: users.username }).from(users),
+      db.select().from(serverFederationExclusions),
     ]);
     const usernameById = new Map(allUsers.map((u) => [u.id, u.username]));
 
@@ -79,8 +175,77 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       voiceChannels: chans.filter((c) => c.serverId === s.id && c.type === 'voice').length,
       members: mems.filter((m) => m.serverId === s.id).length,
       createdAt: s.createdAt.toISOString(),
+      federatedAccess: s.federatedAccess,
+      federationExclusions: exclusions.filter((e) => e.serverId === s.id).map((e) => e.instanceId),
     }));
     return result.sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  /**
+   * «Разрешить федеративный доступ» и исключения по связке (F2, §5.3, требования 17 и 32).
+   *
+   * 🔴 Маршрут доступен ТОЛЬКО админу инстанса — как и вся эта админка. Владелец сервера и роль с
+   * правом управлять сервером сюда не попадают вовсе: решение «пускать ли к нам чужие инстансы»
+   * принимает тот, кто держит железо, а не тот, кто завёл сервер.
+   * ⚠️ Исключения заменяются целиком, а не по одному: интерфейс показывает список галочек, и «снять
+   * одну» и «снять все, кроме одной» должны приводить к одному и тому же состоянию.
+   */
+  app.patch('/admin/servers/:id/federation', async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const body = z
+      .object({ enabled: z.boolean(), exclusions: z.array(z.string()).max(100).optional() })
+      .parse(req.body);
+    const [row] = await db
+      .update(servers)
+      .set({ federatedAccess: body.enabled })
+      .where(eq(servers.id, id))
+      .returning();
+    if (!row) return reply.code(404).send({ error: 'server not found' });
+
+    if (body.exclusions) {
+      await db.delete(serverFederationExclusions).where(eq(serverFederationExclusions.serverId, id));
+      if (body.exclusions.length > 0) {
+        await db
+          .insert(serverFederationExclusions)
+          .values(body.exclusions.map((instanceId) => ({ serverId: id, instanceId })));
+      }
+    }
+
+    /**
+     * Доступ гостям закрывается и возвращается ЗДЕСЬ ЖЕ (F3, §5.3.1), а не «когда-нибудь потом».
+     *
+     * 🔴 Держатель снял галочку — человек, сидящий сейчас в голосовом канале, обязан выпасть и
+     * увидеть окно с причиной. Иначе он продолжает говорить на сервере, куда ему уже закрыт вход, а
+     * узнаёт об этом при следующем заходе — и выглядит это как поломка, а не как чужое решение.
+     *
+     * ⚠️ Считается СОСТОЯНИЕ, а не разница с прошлым: «галочка + список исключений» полностью
+     * определяют, кто внутри. Разница потребовала бы, чтобы прошлое было верным, — а оно могло
+     * разъехаться от неудавшегося события или отката базы.
+     */
+    if (!body.enabled) {
+      await closeServerForGuests({ serverId: id, reason: CLOSE_REASONS.federationDisabled });
+    } else {
+      await reopenServerForGuests({ serverId: id });
+      const current = await db
+        .select({ instanceId: serverFederationExclusions.instanceId })
+        .from(serverFederationExclusions)
+        .where(eq(serverFederationExclusions.serverId, id));
+      for (const e of current) {
+        await closeServerForGuests({
+          serverId: id,
+          instanceId: e.instanceId,
+          reason: CLOSE_REASONS.federationDisabled,
+        });
+      }
+    }
+
+    // Каждому соседу уедет СВОЯ карточка: у исключённого — надгробие (см. `announceServer`).
+    await announceServer(id);
+    const current = await db
+      .select({ instanceId: serverFederationExclusions.instanceId })
+      .from(serverFederationExclusions)
+      .where(eq(serverFederationExclusions.serverId, id));
+    return { federatedAccess: row.federatedAccess, federationExclusions: current.map((e) => e.instanceId) };
   });
 
   // Grant / revoke a user's ability to create servers.
@@ -105,6 +270,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       .where(eq(users.id, id))
       .returning();
     if (!row) return reply.code(404).send({ error: 'user not found' });
+    // Подтверждённый аккаунт впервые попадает в каталог соседей (F2): до этого его там не было.
+    await announceUser(id);
     return serializeUser(row);
   });
 

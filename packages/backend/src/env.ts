@@ -27,6 +27,12 @@ export const env = {
     urlExternal: required('LIVEKIT_URL_EXTERNAL'),
   },
   clientOrigin: process.env.CLIENT_ORIGIN ?? 'http://localhost:8080',
+  // Дополнительные источники для CORS через запятую (аудит F-21, `corsOrigins.ts`). Обычно пусто:
+  // свой клиент, оболочки Tauri и клиенты связанных инстансов разрешены и так.
+  corsExtraOrigins: (process.env.CORS_EXTRA_ORIGINS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
   // Логин для ПЕРВОЙ привязки супер-админа (#140): при старте без привязки ищется пользователь с этим
   // логином и его id записывается в instance_settings. Дальше права — только по id; смена значения
   // в .env после привязки прав не переносит (seed.ts → bindSuperAdmin, superAdminRules.ts).
@@ -149,4 +155,20 @@ export const env = {
   // целиком (вкладка в настройках скажет, что не настроено). Бот нужен ЛЮБОЙ — набор он читает
   // публичным методом getStickerSet, состоять в чатах и что-то принимать ему не требуется.
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
+  /**
+   * Федерация инстансов (#139). 🔴 Умолчание — ВЫКЛЮЧЕНО: пока держатель сам не включил, инстанс
+   * не заводит себе печать, ничего не отдаёт соседям и вообще не регистрирует маршруты `/api/fed/*`.
+   *
+   * `keyPassphrase` — пароль от файла корневого ключа (план §5.1.3). Файл и этот пароль — ПАРА:
+   * одно без другого бесполезно, поэтому в бэкап обязаны попадать оба. Пусто при включённой
+   * федерации => она не поднимется (остальной инстанс работает), вкладка «Федерация» скажет, что чинить.
+   * `dataDir` — том с ключами; НЕ база: дамп базы не должен уносить печать инстанса.
+   * `domain` вычисляется из адреса клиента: людям он виден как адрес инстанса.
+   */
+  federation: {
+    enabled: (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true',
+    keyPassphrase: process.env.FEDERATION_KEY_PASSPHRASE ?? '',
+    dataDir: process.env.FEDERATION_DATA_DIR ?? '/var/lib/gusvoice/federation',
+    apiBase: (process.env.FEDERATION_API_BASE ?? process.env.VITE_API_URL ?? '').replace(/\/+$/, ''),
+  },
 };

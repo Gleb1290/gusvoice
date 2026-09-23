@@ -5,7 +5,17 @@ import { accountDeleteBlock, isReservedUsername } from '../accountRules.js';
 import type { FastifyInstance } from 'fastify';
 import QRCode from 'qrcode';
 import { z } from 'zod';
+import { revokeSessionsEverywhere } from '../federation/guestRevocation.js';
 import { bumpTokenGeneration, hashPassword, isSuperAdmin, requireAuth, signChallengeToken, signToken, superAdminId, verifyPassword, verifyToken } from '../auth.js';
+import { requireLocalUser } from '../guestGuard.js';
+
+/**
+ * Маршруты аккаунта — только местным (план §5.8; аудит 19.09, F-17): пароль, почта, двухфакторная и
+ * удаление у гостя живут ДОМА, а здесь у теневой строки нет ни пароля, ни почты. Гость иначе мог
+ * включить себе 2FA без пароля.
+ */
+const localOnly = { preHandler: [requireAuth, requireLocalUser] };
+import { asUserId } from '../superAdminRules.js';
 import { clearLoginFailures, clearLoginLock, clientIp, loginLockRemaining, rateHit, recordLoginFailure, retryMessage } from '../authGuard.js';
 import { db } from '../db/index.js';
 import { emailVerifications, invites, passwordResets, servers, users } from '../db/schema.js';
@@ -157,6 +167,26 @@ function findByIdentifier(identifier: string) {
         or(sql`lower(${users.username}) = ${needle}`, sql`lower(${users.email}) = ${needle}`),
       ),
     )
+    .limit(1);
+}
+
+/**
+ * Найти строку по адресу почты — РЕГИСТРОНЕЗАВИСИМО и с обрезкой пробелов, как `findByIdentifier` и
+ * как проверка занятости на регистрации.
+ *
+ * 🔴 Точное сравнение здесь стоило людям восстановления пароля. Адрес хранится так, как его набрали
+ * при регистрации, а уникальность проверяется по `lower()` — значит записавшийся как `Bob@site.com`
+ * входит по `bob@site.com` (вход ищет через `findByIdentifier`), но в «забыли пароль» не находится
+ * вовсе. И молча: ручка всегда отвечает 202, чтобы не выдавать, зарегистрирован ли адрес, поэтому
+ * промах выглядит как молчащая почта, а в журналах нет ни строки. На проде 17.09 таких строк было 4
+ * из 25.
+ */
+export function findByEmail(email: string) {
+  const needle = email.trim().toLowerCase();
+  return db
+    .select()
+    .from(users)
+    .where(and(isNull(users.deletedAt), sql`lower(${users.email}) = ${needle}`))
     .limit(1);
 }
 
@@ -363,7 +393,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   // Change password (requires the current one). Revokes every other session (token generation
   // bump) and hands back a fresh token so THIS device stays logged in.
-  app.post('/auth/password', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/password', localOnly, async (req, reply) => {
     const body = passwordBody.parse(req.body);
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row) return reply.code(404).send({ error: 'not found' });
@@ -372,6 +402,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
     await db.update(users).set({ passwordHash: await hashPassword(body.newPassword) }).where(eq(users.id, row.id));
     const gen = await bumpTokenGeneration(row.id);
+    // Смена пароля гасит сессии и на чужих инстансах (§5.6.1): угонщик не должен остаться гостем.
+    await revokeSessionsEverywhere({ userId: row.id, gen }).catch(() => {});
     return { ok: true, token: signToken({ sub: row.id, username: row.username, gen }) };
   });
 
@@ -387,6 +419,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(401).send({ error: 'неверный пароль' });
     }
     const gen = await bumpTokenGeneration(row.id);
+    /**
+     * 🔴 «Выйти везде» значит ВЕЗДЕ (требование 24, §5.6.1) — включая гостевые сессии на чужих
+     * инстансах. Без этой строки сценарий «аккаунт угнали, хозяин нажал кнопку» закрывался бы только
+     * наполовину: угонщик оставался бы гостем на серверах соседей до истечения токена.
+     *
+     * Отказ рассылки не роняет ответ: событие уже записано в журнал отзывов, и хост заберёт его сам,
+     * когда вернётся. Ронять здесь значило бы не выпустить человека даже со своего инстанса.
+     */
+    await revokeSessionsEverywhere({ userId: row.id, gen }).catch(() => {});
     return { token: signToken({ sub: row.id, username: row.username, gen }) };
   });
 
@@ -396,7 +437,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     // Per-IP ceiling (same mail-spam reasoning as /auth/resend).
     const limited = await rateHit(`forgot:${clientIp(req)}`, 5, 60 * 60);
     if (limited) return reply.code(429).send({ error: retryMessage(limited) });
-    const [user] = await db.select().from(users).where(eq(users.email, body.email)).limit(1);
+    const [user] = await findByEmail(body.email);
     if (user?.email) {
       const [pr] = await db.select().from(passwordResets).where(eq(passwordResets.userId, user.id)).limit(1);
       if (!pr || Date.now() - pr.sentAt.getTime() >= RESEND_COOLDOWN_MS) {
@@ -436,7 +477,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       .where(eq(users.id, user.id));
     await db.delete(passwordResets).where(eq(passwordResets.userId, user.id));
     // The classic stolen-session case: a reset must kill every outstanding token.
-    await bumpTokenGeneration(user.id);
+    const resetGen = await bumpTokenGeneration(user.id);
+    // И на чужих инстансах тоже (§5.6.1): сброс пароля — это ровно «аккаунт у меня отобрали».
+    await revokeSessionsEverywhere({ userId: user.id, gen: resetGen }).catch(() => {});
     // Lift any self-inflicted login lockout for this client so the owner can sign in with the new
     // password right away (a proven reset code = ownership). Clear BOTH keys — the user may have been
     // locked while typing their email OR their username (the lock is keyed by whichever they entered).
@@ -447,15 +490,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   // Change email (requires the current password) — sets the new address as UNVERIFIED and emails a
   // code there. The client then runs /auth/verify with the new email to re-verify.
-  app.post('/auth/email', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/email', localOnly, async (req, reply) => {
     const body = changeEmailBody.parse(req.body);
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row) return reply.code(404).send({ error: 'not found' });
     if (!(await verifyPassword(body.password, row.passwordHash))) {
       return reply.code(401).send({ error: 'неверный пароль' });
     }
-    if (body.newEmail === row.email) return reply.code(400).send({ error: 'это уже ваша почта' });
-    const clash = await db.select({ id: users.id }).from(users).where(eq(users.email, body.newEmail)).limit(1);
+    // Сравнения без учёта регистра (см. `findByEmail`): иначе смена `Bob@site.com` → `bob@site.com`
+    // проходила бы как смена на ЧУЖОЙ адрес и упиралась в 409 о собственной же почте.
+    if (body.newEmail.trim().toLowerCase() === (row.email ?? '').trim().toLowerCase()) {
+      return reply.code(400).send({ error: 'это уже ваша почта' });
+    }
+    const clash = await findByEmail(body.newEmail);
     if (clash.length) return reply.code(409).send({ error: 'этот email уже используется' });
     const [updated] = await db
       .update(users)
@@ -469,7 +516,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Delete own account (requires the current password). Blocked while you still own servers — transfer
   // or delete those first. 🔴 Строка НЕ стирается, а обезличивается: сообщения и ЛС остаются у
   // собеседников (F0 #139, `accountDelete.ts` / `accountRules.ts`).
-  app.post('/auth/delete', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/delete', localOnly, async (req, reply) => {
     const body = z.object({ password: z.string() }).parse(req.body);
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row || row.deletedAt) return reply.code(404).send({ error: 'not found' });
@@ -479,7 +526,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const owned = await db.select({ id: servers.id }).from(servers).where(eq(servers.ownerId, row.id));
     const block = accountDeleteBlock({
       ownedServers: owned.length,
-      isSuperAdmin: isSuperAdmin(row.id),
+      isSuperAdmin: isSuperAdmin(asUserId(row.id)),
       alreadyDeleted: !!row.deletedAt,
     });
     if (block) return reply.code(block.status).send({ error: block.error });
@@ -488,7 +535,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Begin 2FA setup: store a pending secret (not yet enabled) and return a QR to scan.
-  app.post('/auth/2fa/setup', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/2fa/setup', localOnly, async (req, reply) => {
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row) return reply.code(404).send({ error: 'not found' });
     if (row.totpEnabled) return reply.code(400).send({ error: 'двухфакторная уже включена' });
@@ -500,7 +547,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Confirm setup: verify a code against the pending secret, flip 2FA on, issue backup codes.
-  app.post('/auth/2fa/enable', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/2fa/enable', localOnly, async (req, reply) => {
     const body = codeBody.parse(req.body);
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row) return reply.code(404).send({ error: 'not found' });
@@ -518,7 +565,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Turn 2FA off — requires the current password and a valid code (TOTP or a backup code).
-  app.post('/auth/2fa/disable', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/2fa/disable', localOnly, async (req, reply) => {
     const body = disableBody.parse(req.body);
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row) return reply.code(404).send({ error: 'not found' });
@@ -536,7 +583,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Re-issue backup codes (invalidates the old set). Requires a valid TOTP code.
-  app.post('/auth/2fa/backup/regenerate', { preHandler: requireAuth }, async (req, reply) => {
+  app.post('/auth/2fa/backup/regenerate', localOnly, async (req, reply) => {
     const body = codeBody.parse(req.body);
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row || !row.totpEnabled || !row.totpSecret) return reply.code(400).send({ error: 'двухфакторная не включена' });

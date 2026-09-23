@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   hostOf,
+  httpsUpgradeUrl,
   instanceFrom,
   migrateRegistry,
   normalizeServerInput,
@@ -24,6 +25,30 @@ const instance = (id: string, order = 0): Instance => ({
 });
 
 describe('нормализация адресов инстанса', () => {
+  it('HTTP-страница рабочего домена переходит на HTTPS без потери пути, query и hash', () => {
+    // Ловит CORS-отказ регистрации и потерю текущего экрана при безопасном перенаправлении.
+    assert.equal(httpsUpgradeUrl({
+      protocol: 'http:', hostname: 'voice.example.test', href: 'http://voice.example.test/channels/42?q=1#bottom',
+    }, 'https://api.voice.example.test', false), 'https://voice.example.test/channels/42?q=1#bottom');
+  });
+
+  it('HTTPS-upgrade не трогает защищённую страницу, Tauri, локальные имена, IP и инстанс без HTTPS API', () => {
+    // Ловит цикл редиректа и поломку desktop/dev/self-hosted установок, у которых TLS намеренно нет.
+    const loc = (protocol: string, hostname: string, href = `${protocol}//${hostname}/`) => ({ protocol, hostname, href });
+    const cases: Array<[ReturnType<typeof loc>, string | undefined, boolean]> = [
+      [loc('https:', 'voice.example.test'), 'https://api.voice.example.test', false],
+      [loc('http:', 'voice.example.test'), 'https://api.voice.example.test', true],
+      [loc('http:', 'tauri.localhost'), 'https://api.voice.example.test', false],
+      [loc('http:', 'localhost'), 'https://api.voice.example.test', false],
+      [loc('http:', 'dev.localhost'), 'https://api.voice.example.test', false],
+      [loc('http:', '192.168.1.10'), 'https://api.voice.example.test', false],
+      [loc('http:', '[::1]'), 'https://api.voice.example.test', false],
+      [loc('http:', 'voice.example.test'), 'http://api.voice.example.test', false],
+      [loc('http:', 'voice.example.test'), undefined, false],
+    ];
+    for (const [location, apiUrl, tauri] of cases) assert.equal(httpsUpgradeUrl(location, apiUrl, tauri), null, location.hostname);
+  });
+
   it('хвостовые слэши срезаются, а пустые значения становятся пустой строкой', () => {
     // Ловит двойной слэш при последующей склейке API-пути и падение на optional-поле.
     assert.equal(stripSlash('https://voice.example.test///'), 'https://voice.example.test');

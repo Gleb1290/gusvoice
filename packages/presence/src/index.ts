@@ -22,6 +22,12 @@ import {
   PRESENCE_WS_LIMITS,
   visibleSnapshot,
 } from './presenceRules.js';
+import {
+  classifyVisibility,
+  createPresenceSocketSession,
+  type PresenceSession,
+  type VisibilityFetch,
+} from './presenceSession.js';
 
 const redis = new Redis(env.redisUrl);
 const pub = new Redis(env.redisUrl);
@@ -89,28 +95,44 @@ interface WsLike {
 
 interface Client {
   socket: WsLike;
-  token: string;
-  visible: Set<string>; // voice channel ids this user may VIEW
+  /** Что этот сокет уже знает о себе: токен и видимые каналы. Правила — `presenceSession.ts`. */
+  session: PresenceSession;
 }
 const clients = new Set<Client>();
 
 /**
  * Ask the backend (with the user's own token) which voice channels they may VIEW.
- * `null` — бэкенд отверг токен (401/403): сессия отозвана. Сбой сети или 5xx — пустой набор, а не `null`:
- * бэкенд в момент выкатки не должен выкидывать всех из presence.
+ * `revoked` — бэкенд отверг токен (401/403): сессия отозвана, сокет закрываем. Сбой сети или 5xx —
+ * `unavailable`: бэкенд в момент выкатки не должен ни выкидывать людей из presence, ни гасить им
+ * картину каналов (#147). Само правило — `classifyVisibility`.
  */
-async function fetchVisible(token: string): Promise<Set<string> | null> {
+async function fetchVisible(token: string): Promise<VisibilityFetch> {
+  let res: Response | null = null;
   try {
-    const res = await fetch(`${env.backendUrlInternal}/api/me/voice-visibility`, {
+    res = await fetch(`${env.backendUrlInternal}/api/me/voice-visibility`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (res.status === 401 || res.status === 403) return null;
-    if (!res.ok) return new Set();
-    const data = (await res.json()) as { channelIds: string[] };
-    return new Set(data.channelIds);
   } catch {
-    return new Set();
+    res = null; // до бэкенда не достучались
   }
+  const outcome = classifyVisibility(res ? res.status : null);
+  if (outcome !== 'ok') return { outcome };
+  try {
+    const data = (await res!.json()) as { channelIds: string[] };
+    return { outcome: 'ok', visible: new Set(data.channelIds) };
+  } catch {
+    // Ответ 2xx, но тело не разобралось — это тоже «бэкенд не смог», не отзыв и не пустой список.
+    return { outcome: 'unavailable' };
+  }
+}
+
+/** Снимок под конкретный набор видимых каналов — то, что сессия шлёт при identify и при изменении. */
+async function snapshotFor(visible: Set<string>): Promise<PresenceServerMessage> {
+  return {
+    t: 'presence.snapshot',
+    channels: visibleSnapshot(await snapshot(), visible),
+    occupied: visibleOccupied(await occupiedSnapshot(), visible),
+  };
 }
 
 const serverMuteKey = (channelId: string) => `vmute:${channelId}`;
@@ -227,7 +249,7 @@ sub.on('message', async (_channel, message) => {
   const participants = val ? (JSON.parse(val) as VoiceParticipant[]) : [];
   const occupiedMs = participants.length ? await occupiedMsOf(channelId) : null;
   const data = JSON.stringify({ t: 'presence.channel', channelId, participants, occupiedMs });
-  for (const c of clients) if (c.visible.has(channelId)) c.socket.send(data);
+  for (const c of clients) if (c.session.visible.has(channelId)) c.socket.send(data);
 });
 
 // Permissions / channels can change mid-session; refresh each client's visible set and push
@@ -235,27 +257,9 @@ sub.on('message', async (_channel, message) => {
 setInterval(() => {
   void (async () => {
     if (clients.size === 0) return;
-    const full = await snapshot();
-    for (const c of clients) {
-      if (!c.token) continue;
-      const fetched = await fetchVisible(c.token);
-      // Сессию отозвали посреди жизни сокета — закрыть: клиент переподключится и получит отказ на identify.
-      if (fetched === null) {
-        closeQuietly(c.socket);
-        continue;
-      }
-      const next = fetched;
-      const changed = next.size !== c.visible.size || [...next].some((id) => !c.visible.has(id));
-      c.visible = next;
-      if (changed)
-        c.socket.send(
-          JSON.stringify({
-            t: 'presence.snapshot',
-            channels: visibleSnapshot(full, next),
-            occupied: visibleOccupied(await occupiedSnapshot(), next),
-          }),
-        );
-    }
+    // Что значит каждый исход (и почему отозванную сессию закрываем, а недоступный бэкенд — нет) —
+    // в `presenceSession.ts`; здесь только обход клиентов.
+    for (const c of clients) await c.session.refresh();
   })();
 }, 20000);
 
@@ -345,14 +349,27 @@ app.get('/', { websocket: true }, (socket: WsLike, req: FastifyRequest) => {
   const ip = clientIpFrom(req.headers['x-forwarded-for'], req.ip);
   if (!admitSocket({ total: clients.size, fromIp: socketsByIp.get(ip) ?? 0 })) return closeQuietly(socket);
 
-  const client: Client = { socket, token: '', visible: new Set() };
+  const session = createPresenceSocketSession({
+    verifyToken: (token) => {
+      try {
+        return jwt.verify(token, env.jwtSecret) as { typ?: string };
+      } catch {
+        return null;
+      }
+    },
+    fetchVisible,
+    snapshot: snapshotFor,
+    send: (msg) => send(socket, msg),
+    close: () => closeQuietly(socket),
+  });
+  const client: Client = { socket, session };
   clients.add(client);
   socketsByIp.set(ip, (socketsByIp.get(ip) ?? 0) + 1);
   let budget = newSocketBudget(Date.now());
 
   let authTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
     authTimer = null;
-    if (!client.token) closeQuietly(socket);
+    if (!session.token) closeQuietly(socket);
   }, PRESENCE_WS_LIMITS.authDeadlineMs);
 
   socket.on('message', async (raw: Buffer) => {
@@ -373,37 +390,13 @@ app.get('/', { websocket: true }, (socket: WsLike, req: FastifyRequest) => {
     if (msg.t === 'ping') return send(socket, { t: 'pong' });
 
     if (msg.t === 'identify') {
-      let claims: { typ?: string };
-      try {
-        claims = jwt.verify(msg.token, env.jwtSecret) as { typ?: string };
-      } catch {
-        send(socket, { t: 'error', message: 'invalid token' });
-        return closeQuietly(socket);
-      }
-      // A 2FA CHALLENGE token must not open a presence socket (P3-7) — it's only for /auth/login/totp.
-      if (claims.typ === '2fa') {
-        send(socket, { t: 'error', message: 'invalid token' });
-        return closeQuietly(socket);
-      }
-      const visible = await fetchVisible(msg.token);
-      // Отозванный токен («выйти везде», смена пароля): бэкенд ответил 401 — сокет бесполезен, и держать
-      // его открытым значит раз в 20 с бить бэкенд чужим мёртвым токеном. Сеть или 5xx (выкатка) — не повод.
-      if (visible === null) {
-        send(socket, { t: 'error', message: 'invalid token' });
-        return closeQuietly(socket);
-      }
+      // Проверка токена, отказ 2FA-вызову, отозванная сессия и первый снимок — `presenceSession.ts`.
+      if ((await session.identify(msg.token)) !== 'ok') return;
       if (authTimer) {
         clearTimeout(authTimer);
         authTimer = null;
       }
       budget = { ...budget, identified: true };
-      client.token = msg.token;
-      client.visible = visible;
-      send(socket, {
-        t: 'presence.snapshot',
-        channels: visibleSnapshot(await snapshot(), client.visible),
-        occupied: visibleOccupied(await occupiedSnapshot(), client.visible),
-      });
     }
   });
 

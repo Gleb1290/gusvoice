@@ -23,6 +23,8 @@ export const UI_SCALES: { key: UiScale; label: string }[] = [
   { key: 'lg', label: 'Крупный' },
   { key: 'xl', label: 'Огромный' },
 ];
+/** Заводской масштаб — «обычный». */
+export const UI_SCALE_DEFAULT: UiScale = 'md';
 const SCALE_ZOOM: Record<UiScale, number> = { sm: 0.9, md: 1, lg: 1.15, xl: 1.3 };
 
 export function getSidebarWidth(): number {
@@ -47,7 +49,7 @@ export function setSidebarWidth(px: number): void {
 
 export function getUiScale(): UiScale {
   const v = localStorage.getItem(SCALE_KEY);
-  return v === 'sm' || v === 'lg' || v === 'xl' ? v : 'md';
+  return v === 'sm' || v === 'lg' || v === 'xl' ? v : UI_SCALE_DEFAULT;
 }
 export function applyUiScale(scale: UiScale): void {
   (document.documentElement.style as unknown as { zoom: string }).zoom = String(SCALE_ZOOM[scale]);

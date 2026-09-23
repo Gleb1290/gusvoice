@@ -1,8 +1,11 @@
 import { api, getToken } from './api';
-import { config } from './config';
+import { activeInstanceId, config, instances } from './config';
+import { switchInstance } from './instanceSwitch';
+import { setPendingOpen } from './pendingOpen';
 import { isAndroid } from './hotkeys';
 import { subscribeToServer } from './sockets';
 import { useStore } from './store';
+import { offerInviteLink } from './deepLinkInvite';
 
 /**
  * UnifiedPush registration bridge (Android). The native shell (MainActivity `GusVoiceNative`) drives
@@ -144,15 +147,50 @@ export function hasPushDistributor(): boolean {
 
 let navigating = false;
 
-/** Navigate to a deep-link target from a notification tap: "dm:<id>" or "ch:<serverId>:<channelId>". */
+/**
+ * Navigate to a deep-link target from a notification tap: "dm:<id>", "ch:<serverId>:<channelId>" или
+ * "fed:<instanceId>:<serverId>:<channelId>".
+ *
+ * 🔴 Последний вид — событие на ЧУЖОМ инстансе (#139, F5, требование 33): пуш приехал через дом,
+ * потому что телефон зарегистрирован у него, а открывать надо то место, где написали. Ищем запись
+ * реестра по `federationInstanceId` и переходим туда обычным путём — тем же, что и клик по серверу
+ * соседа в рейле.
+ */
 async function navigateDeepLink(link: string): Promise<void> {
   const s = useStore.getState();
+  if (link.startsWith('invite:')) {
+    // Ссылка-приглашение (#139, F4): открываем ОКНО ПРОВЕРКИ, а не вступаем. Решение о входе
+    // принимает человек, увидев карточку сервера, — ссылка из мессенджера этого права не даёт.
+    offerInviteLink(link.slice('invite:'.length));
+    return;
+  }
   if (link.startsWith('dm:')) {
     const dmId = link.slice(3);
     if (!dmId) return;
     // MainLayout renders the DM from the `dms` list — make sure the conversation is present first.
     await s.loadDms();
     await s.selectDm(dmId);
+  } else if (link.startsWith('fed:')) {
+    const [instanceId, serverId, channelId] = link.slice(4).split(':');
+    if (!instanceId || !channelId) return;
+    const entry = instances().find((i) => i.federationInstanceId === instanceId);
+    /**
+     * ⚠️ Записи нет — человек убрал инстанс из реестра или зашёл с другого устройства. Молчим: вести
+     * его на экран входа чужого инстанса, где ему нечего ввести, хуже, чем не сделать ничего.
+     */
+    if (!entry) return;
+    if (entry.id === activeInstanceId()) {
+      if (serverId && s.currentServerId !== serverId) {
+        await s.openServer(serverId);
+        subscribeToServer(serverId);
+      }
+      s.setView('server');
+      await s.openChannel(channelId);
+      return;
+    }
+    // Намерение «открыть именно этот канал» переживает переход: его подхватит загрузка нового инстанса.
+    setPendingOpen({ instanceId: entry.id, serverId: serverId || '', channelId });
+    await switchInstance(entry.id);
   } else if (link.startsWith('ch:')) {
     const rest = link.slice(3);
     const sep = rest.indexOf(':');

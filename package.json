@@ -24,5 +24,9 @@
     "compose:up": "docker compose up -d --build",
     "compose:down": "docker compose down",
     "check:tests": "node scripts/check-tests-listed.mjs"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "20.14.5",
+    "happy-dom": "20.14.5"
   }
 }

@@ -5,6 +5,10 @@ import { gvScreenShareStats } from './nativeScreenShare';
 import { toast } from './toast';
 import { config } from './config';
 import { diagDecision, getDiagConsent } from './diagConsent';
+import { diagVisible } from './diagVisible';
+import { takeUiMeters, watchLongTasks } from './uiMeters';
+import { isWindowCovered, windowCoverPct } from './windowCovered';
+import { useStore } from './store';
 
 /**
  * Сбор диагностики во время показа экрана (#100 — «на Win10 отваливаются Alt+Tab и клавиша Win»).
@@ -413,12 +417,39 @@ async function encodeStats(): Promise<EncodeStats | null> {
  * Начать сбор. `ctx` — настройки показа и окружение: без них цифры не с чем соотнести.
  * Первый срез снимается СРАЗУ, чтобы в отчёте была точка отсчёта, а не только «уже выросшее».
  */
+/**
+ * Чем окно рисует картинку — настоящей видеокартой или программным растеризатором.
+ *
+ * 🔴 Ключевая развилка для #193: если здесь «SwiftShader» или «Software», значит всё рисование идёт
+ * ПРОЦЕССОРОМ, и найденные 35 % машины объясняются одним этим. Лечится тогда не правкой интерфейса,
+ * а тем, как мы запускаем окно. Если же тут настоящая карта — виноват сам интерфейс, и чинить надо
+ * анимации и перерисовки.
+ *
+ * Строку даёт WebGL: расширение `WEBGL_debug_renderer_info` называет адаптер как он есть. Контекст
+ * тут же закрываем — держать его открытым означало бы занимать видеопамять ради одной строки.
+ */
+function gpuRenderer(): string {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = (canvas.getContext('webgl') ?? canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null;
+    if (!gl) return 'webgl недоступен';
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const raw = dbg
+      ? String(gl.getParameter((dbg as { UNMASKED_RENDERER_WEBGL: number }).UNMASKED_RENDERER_WEBGL))
+      : String(gl.getParameter(gl.RENDERER));
+    (gl.getExtension('WEBGL_lose_context') as { loseContext: () => void } | null)?.loseContext();
+    return raw.slice(0, 160);
+  } catch {
+    return 'не определился';
+  }
+}
+
 export async function startDiag(room?: unknown): Promise<void> {
   if (!isDesktop()) return; // счётчики есть только в нативной сборке
   // 🔴 Два разрешения — инстанса и человека (#113). Не сошлись оба — не собираем ВООБЩЕ, а не
   // «собираем и не отправляем»: человек, снявший галочку, вправе рассчитывать, что приложение
   // перестанет лазить в его систему. Разбор — в `diagConsent.ts`.
-  if (diagDecision(config.diagEnabled, getDiagConsent()) !== 'collect') return;
+  if (diagDecision(diagVisible(useStore.getState().user?.diagPreview, config.diagEnabled), getDiagConsent()) !== 'collect') return;
   if (startedAt) return; // уже идёт: повторный вход в тот же канал не начинает новую сессию
   stopDiagTimer();
   samples = [];
@@ -449,9 +480,13 @@ export async function startDiag(room?: unknown): Promise<void> {
   }
   // 🔴 Версия явным полем. Дважды за вечер я определял её КОСВЕННО, по наличию новых полей в
   // отчёте, — это работает ровно до первой ошибки.
-  context = { os, version };
+  // Адаптер спрашиваем ОДИН раз на сессию: он не меняется, а в каждом срезе была бы лишняя строка.
+  context = { os, version, renderer: gpuRenderer() };
   sendFailsRow = 0;
   sendFailsTotal = 0;
+  // ⚠️ Ровно здесь, а не на старте приложения: наблюдатель — тоже «лазание в систему», и включать
+  // его до согласия человека нельзя (#113).
+  watchLongTasks();
 
   const first = await snapshot();
   if (!first) {
@@ -522,6 +557,7 @@ async function tick(): Promise<void> {
   // Приём меряем ВСЕГДА, а не только во время показа: виновником пульсации у всего канала был
   // зритель, который сам ничего не показывал (#109).
   const sub = await subStats();
+  const coverPct = await windowCoverPct();
   // Чистим ВЕСЬ срез, а не только метрики показа: нечисловое значение где угодно (загрузка
   // видеокарты, память процесса) уезжает как пустое и отбивает срез целиком на сервере.
   samples.push(
@@ -529,6 +565,10 @@ async function tick(): Promise<void> {
       ...s,
       t: Date.now() - startedAt,
       sharing: sharing ? 1 : 0,
+      // Нагрузка интерфейса (#193). Снимается ВСЕГДА: беда видна и без показа — 26 % машины у
+      // человека, который просто сидит в голосе и смотрит в игру. Заодно — что об окне думает
+      // оболочка: без этого «заморозка не сработала» и «окно и не было накрыто» неотличимы.
+      ui: { ...takeUiMeters(), covered: isWindowCovered() ? 1 : 0, cover_pct: coverPct },
       enc: enc ?? undefined,
       cap: cap ?? undefined,
       sub: sub ?? undefined,

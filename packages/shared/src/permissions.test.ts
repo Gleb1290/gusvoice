@@ -133,6 +133,28 @@ describe('наложение в канале', () => {
   });
 });
 
+describe('базовая роль федеративного гостя', () => {
+  it('роль Гости заменяет права everyone, поэтому её можно сузить только для гостя', () => {
+    const local = basePermissions([{ permissions: Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES }]);
+    const guest = basePermissions([{ permissions: Permission.VIEW_CHANNEL }]);
+    assert.equal(has(local, Permission.SEND_MESSAGES), true);
+    assert.equal(has(guest, Permission.SEND_MESSAGES), false);
+  });
+
+  it('оверрайд роли Гости действует только на гостя, а @everyone — и на гостя тоже', () => {
+    const base = Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES;
+    const guestHidden = resolveChannelPermissions(base, {
+      roleOverwrites: [{ allow: 0n, deny: Permission.VIEW_CHANNEL }],
+    });
+    assert.equal(has(guestHidden, Permission.VIEW_CHANNEL), false);
+    assert.equal(has(base, Permission.VIEW_CHANNEL), true);
+    const everyoneHidden = resolveChannelPermissions(base, {
+      everyone: { allow: 0n, deny: Permission.VIEW_CHANNEL },
+    });
+    assert.equal(has(everyoneHidden, Permission.VIEW_CHANNEL), false);
+  });
+});
+
 describe('сериализация', () => {
   it('переживает круг через строку', () => {
     const p = VIEW_CHANNEL | SEND_MESSAGES | MANAGE_MESSAGES;

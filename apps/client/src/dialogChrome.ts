@@ -59,6 +59,8 @@ export function tabListKeyDown<K extends string>(
     e.preventDefault();
     const k = keys[next];
     pick(k);
-    requestAnimationFrame(() => document.getElementById(domId(k))?.focus());
+    // ⚠️ Таймер, а не `requestAnimationFrame`: в скрытой вкладке кадры не идут вовсе, и фокус
+    // остался бы на прошлой вкладке. Перевод фокуса — поведение, на анимацию его вешать нельзя.
+    setTimeout(() => document.getElementById(domId(k))?.focus());
   };
 }

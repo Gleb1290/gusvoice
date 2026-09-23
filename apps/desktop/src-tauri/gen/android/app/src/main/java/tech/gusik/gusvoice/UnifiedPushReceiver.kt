@@ -44,6 +44,8 @@ class UnifiedPushReceiver : MessagingReceiver() {
     const val EXTRA_DM = "gv_dm"
     const val EXTRA_CHANNEL = "gv_channel"
     const val EXTRA_SERVER = "gv_server"
+    /** Инстанс, где случилось событие (#139, F5): пуш гостю приезжает через его дом, а ведёт к хосту. */
+    const val EXTRA_INSTANCE = "gv_instance"
     private const val TAG = "GusVoicePush"
   }
 }

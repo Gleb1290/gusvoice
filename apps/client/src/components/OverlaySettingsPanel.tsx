@@ -61,7 +61,7 @@ export function OverlaySettingsPanel() {
   // and inherit its `gap: 10px` — a wrapper div swallows that gap and the toggle rows collapse together.
   return (
     <>
-      <div className="settings-group-label" style={{ marginTop: 18 }}>
+      <div className="settings-group-label" id="set-g-overlay" style={{ marginTop: 18 }}>
         Оверлей поверх игр
       </div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>

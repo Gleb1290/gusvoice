@@ -1,0 +1,19 @@
+{
+  "contacts": [
+    {
+      "kind": "email",
+      "label": "Почта",
+      "value": "admin@example.org"
+    },
+    {
+      "kind": "telegram",
+      "label": "Телеграм",
+      "value": "@example_admin"
+    },
+    {
+      "kind": "text",
+      "label": "Иначе",
+      "value": "Пишите в личку на сервере «Гуси»"
+    }
+  ]
+}

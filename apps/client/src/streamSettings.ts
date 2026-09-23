@@ -73,7 +73,7 @@ export interface StreamSettings {
 
 const KEY = 'gv_stream';
 
-const DEFAULTS: StreamSettings = {
+export const STREAM_DEFAULTS: StreamSettings = {
   resolution: '1080',
   fps: 30,
   mode: 'detail',
@@ -92,13 +92,13 @@ export function getStreamSettings(): StreamSettings {
   if (cache) return cache;
   try {
     const raw = localStorage.getItem(KEY);
-    cache = raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<StreamSettings>) } : { ...DEFAULTS };
+    cache = raw ? { ...STREAM_DEFAULTS, ...(JSON.parse(raw) as Partial<StreamSettings>) } : { ...STREAM_DEFAULTS };
   } catch {
-    cache = { ...DEFAULTS };
+    cache = { ...STREAM_DEFAULTS };
   }
   // Drop any retired codec (e.g. a saved 'h265' from v0.5.7) so it can't keep publishing an
   // unviewable stream — fall back to the default.
-  if (!VALID_CODECS.has(cache.codec)) cache = { ...cache, codec: DEFAULTS.codec };
+  if (!VALID_CODECS.has(cache.codec)) cache = { ...cache, codec: STREAM_DEFAULTS.codec };
   return cache;
 }
 

@@ -1,12 +1,14 @@
-import { checkAnimatedAvatar, isAnimatedImage } from '@gusvoice/shared';
+import { FED_ERRORS, checkAnimatedAvatar, isAnimatedImage } from '@gusvoice/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { allActivities, clearActivity, setActivity } from '../activity.js';
 import { requireAuth } from '../auth.js';
+import { isLocalUser, requireLocalUser } from '../guestGuard.js';
 import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import { broadcastUserProfile, broadcastUserStatus } from '../gateway.js';
+import { announceUser } from '../federation/directoryEvents.js';
 import { getVisibleVoiceChannelIds } from '../permissions.js';
 import { publishToUser } from '../realtime.js';
 import { serializeUser } from '../serialize.js';
@@ -25,7 +27,10 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Update own profile: display name and/or the "show my game activity" master switch (#40).
-  app.patch('/users/me', async (req) => {
+  // Имя гостя — из токена его дома (§5.8; F-17): менять его на хосте нельзя, иначе имя расходится с
+  // тем, за что поручился дом. ⚠️ Но только ИМЯ (ревью #195 п. 4): «показывать игру» и отметка окна
+  // экономики — его собственные, и закрывать весь маршрут значило бы отнять у гостя приватность.
+  app.patch('/users/me', async (req, reply) => {
     const body = z
       .object({
         displayName: z.string().min(1).max(64).optional(),
@@ -34,6 +39,9 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         economyWelcomeSeen: z.literal(true).optional(),
       })
       .parse(req.body);
+    if (body.displayName !== undefined && !(await isLocalUser(req.user!.sub))) {
+      return reply.code(403).send({ error: FED_ERRORS.guestForbidden });
+    }
     const patch: Partial<{ displayName: string; showGameActivity: boolean; economyWelcomeSeenAt: Date }> = {};
     if (body.displayName !== undefined) patch.displayName = body.displayName;
     if (body.showGameActivity !== undefined) patch.showGameActivity = body.showGameActivity;
@@ -46,6 +54,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (body.showGameActivity === false) clearActivity(req.user!.sub);
     // Tell every client about the new name so member lists / chat authors update live (no re-login).
     broadcastUserProfile(serialized.id, serialized.displayName, serialized.avatarUrl, serialized.animatedAvatarUrl);
+    // Тем же ходом — соседям по федерации: имя и аватар человека видны и у них (F2, §5.2).
+    await announceUser(serialized.id);
     return serialized;
   });
 
@@ -151,7 +161,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Upload an avatar image (multipart) -> MinIO -> set avatarUrl.
-  app.post('/users/me/avatar', async (req, reply) => {
+  app.post('/users/me/avatar', { preHandler: requireLocalUser }, async (req, reply) => {
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: 'no file' });
     if (!isSupportedImage(file.mimetype)) return reply.code(400).send({ error: 'unsupported image type (png/jpeg/webp/gif)' });
@@ -187,6 +197,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const serialized = serializeUser(row);
     // Same live broadcast as the name change — everyone's avatar of this user refreshes at once.
     broadcastUserProfile(serialized.id, serialized.displayName, serialized.avatarUrl, serialized.animatedAvatarUrl);
+    // Тем же ходом — соседям по федерации: имя и аватар человека видны и у них (F2, §5.2).
+    await announceUser(serialized.id);
     return serialized;
   });
 
@@ -203,7 +215,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
    * обычного аватара, поставивший анимацию, увидит её только там, где она показывается, — и это
    * правильнее, чем молча вырезать ему кадр из гифки.
    */
-  app.post('/users/me/avatar/animated', async (req, reply) => {
+  app.post('/users/me/avatar/animated', { preHandler: requireLocalUser }, async (req, reply) => {
     const [me] = await db
       .select({ until: users.animatedAvatarUntil })
       .from(users)
@@ -239,11 +251,16 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     // профиле, а остальные — прежнюю картинку до полного перезахода на сервер. Обычный аватар
     // рассылался с самого начала; про этот маршрут забыли, когда заводили аренду.
     broadcastUserProfile(serialized.id, serialized.displayName, serialized.avatarUrl, serialized.animatedAvatarUrl);
+    // Тем же ходом — соседям по федерации: имя и аватар человека видны и у них (F2, §5.2).
+    await announceUser(serialized.id);
     return serialized;
   });
 
-  /** Снять анимацию, оставив обычный аватар. Право покупки при этом НЕ отбирается. */
-  app.delete('/users/me/avatar/animated', async (req, reply) => {
+  /**
+   * Снять анимацию, оставив обычный аватар. Право покупки при этом НЕ отбирается.
+   * 🔴 Гостю — нельзя, как и ставить (нашёл Codex 22.09): это правка своего аккаунта, она делается дома.
+   */
+  app.delete('/users/me/avatar/animated', { preHandler: requireLocalUser }, async (req, reply) => {
     const [row] = await db
       .update(users)
       .set({ animatedAvatarUrl: null })
@@ -253,6 +270,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     // Снятие — такое же изменение профиля, как и установка: без рассылки у остальных крутилась бы
     // анимация, которой у человека уже нет.
     broadcastUserProfile(serialized.id, serialized.displayName, serialized.avatarUrl, serialized.animatedAvatarUrl);
+    // Тем же ходом — соседям по федерации: имя и аватар человека видны и у них (F2, §5.2).
+    await announceUser(serialized.id);
     return reply.send(serialized);
   });
 }

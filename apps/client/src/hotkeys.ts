@@ -28,7 +28,7 @@ export interface Hotkeys {
 
 const KEY = 'gv_hotkeys';
 
-const DEFAULTS: Hotkeys = {
+export const HOTKEY_DEFAULTS: Hotkeys = {
   mute: '',
   deafen: '',
   screenShare: '',
@@ -45,9 +45,9 @@ export function getHotkeys(): Hotkeys {
   if (cache) return cache;
   try {
     const raw = localStorage.getItem(KEY);
-    cache = raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Hotkeys>) } : { ...DEFAULTS };
+    cache = raw ? { ...HOTKEY_DEFAULTS, ...(JSON.parse(raw) as Partial<Hotkeys>) } : { ...HOTKEY_DEFAULTS };
   } catch {
-    cache = { ...DEFAULTS };
+    cache = { ...HOTKEY_DEFAULTS };
   }
   return cache;
 }

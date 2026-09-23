@@ -293,8 +293,14 @@ mod diag;
 /// Что на самом деле с видеокартой: частоты, состояние производительности, ёмкость видеопамяти,
 /// загрузка кодировщика. Без этого процент загрузки GPU нечитаем — см. шапку модуля.
 #[cfg(target_os = "windows")]
+mod gpu_mode;
+#[cfg(target_os = "windows")]
 mod gpu_nvml;
 /// In-game voice overlay window (borderless/transparent/always-on-top). Desktop-only.
+/// Видно ли окно человеку: под полноэкранной игрой рисовать незачем (#193). Только Windows —
+/// геометрию окон спрашиваем у Win32.
+#[cfg(target_os = "windows")]
+mod occlusion;
 #[cfg(desktop)]
 mod overlay;
 /// Нативная тряска ОКНА для МЕГА пока (#117). Десктоп целиком — двигать окно умеет любая из
@@ -987,8 +993,106 @@ fn purge_updater_leftovers() {
     }
 }
 
+
+/**
+ * Ссылка-приглашение из аргументов процесса (#139, F4, §4.2.2).
+ *
+ * 🔴 Берём ТОЛЬКО `gusvoice://`, и это не формальность: в аргументах приходит что угодно (ярлык,
+ * флаги обновления, путь к файлу), а всё, что мы отсюда отправим в интерфейс, откроет человеку окно
+ * входа на чужой сервер. Разбор самой ссылки — на стороне клиента, одним местом для всех платформ.
+ */
+fn deep_link_arg(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .find(|a| a.len() > 11 && a[..11].eq_ignore_ascii_case("gusvoice://"))
+        .cloned()
+}
+
+/**
+ * Ссылка, с которой нас ЗАПУСТИЛИ (холодный старт по клику в мессенджере).
+ *
+ * ⚠️ Забирается один раз: клиент спрашивает её на старте. Второй такой же вопрос вернёт пусто —
+ * иначе окно приглашения всплывало бы при каждом обновлении страницы.
+ */
+#[tauri::command]
+fn gv_take_deep_link() -> Option<String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    if TAKEN.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let argv: Vec<String> = std::env::args().collect();
+    deep_link_arg(&argv)
+}
+
+/// Накрыто ли наше окно чужим прямо сейчас (#193). На платформах без Win32 — всегда «видно»:
+/// замораживать интерфейс там не от чего.
+#[tauri::command]
+fn gv_window_covered() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        occlusion::covered_now()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Насколько окно накрыто чужим, в процентах (#193) — для диагностики.
+#[tauri::command]
+fn gv_window_cover_pct() -> u8 {
+    #[cfg(target_os = "windows")]
+    {
+        occlusion::cover_pct_now()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+/// Рисует ли окно видеокарта (#193). Вне Windows настройка ни на что не влияет.
+#[tauri::command]
+fn gv_gpu_accel_get() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        gpu_mode::enabled()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+#[tauri::command]
+fn gv_gpu_accel_set(on: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        gpu_mode::set(on)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = on;
+        Ok(())
+    }
+}
+
+/// Точка входа приложения.
+///
+/// 🔴 **Атрибут точки входа на телефоне стоит ВПЛОТНУЮ к этой функции** (починка 23.09). В v0.7.3
+/// между ним и `run()` вставились команды #193 (`gv_window_covered` и соседи) — и точкой входа
+/// Android стала `gv_window_covered`: она возвращала `false`, Tauri не запускался, окно веба не
+/// создавалось, человек видел серый фон. Компилятор это не ловит (атрибут законен на любой
+/// функции), гейт тоже — это проверяется только запуском APK на телефоне. Тот же класс ошибки, что
+/// с перехваченными `#[cfg(target_os = "windows")]` у модулей выше: новые объявления ставить НЕ
+/// между атрибутом и тем, к чему он относится.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 🔴 ПЕРВОЙ строкой: аргументы движку читаются один раз, при создании окна, и позже их не
+    // применить. Рубильник — в файле рядом с настройками (`gpu_mode`), чтобы человек с чёрным
+    // окном мог вернуть всё как было, не добираясь до настроек ВНУТРИ приложения.
+    #[cfg(windows)]
+    gpu_mode::apply_env();
     let mut builder = tauri::Builder::default();
     // Desktop-only plugins (driven from the web client via their JS APIs):
     //  * global-shortcut — mute/deafen/screen-share hotkeys fire even when GusVoice is unfocused.
@@ -1010,12 +1114,18 @@ pub fn run() {
         // Колбэк вызывается в УЖЕ РАБОТАЮЩЕМ экземпляре, когда стартует второй; второй после этого
         // завершается сам. `unminimize` перед `show` обязателен: свёрнутое окно от одного `show`
         // остаётся свёрнутым, и клик по ярлыку выглядел бы как «ничего не произошло».
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            use tauri::Manager;
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::{Emitter, Manager};
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
+                // Ссылка-приглашение (#139, F4, §4.2.2): Windows запускает нас ВТОРЫМ процессом с
+                // `gusvoice://…` в аргументах, а живёт приложение в первом — и получает адрес
+                // ровно здесь. Схему регистрирует установщик (`installer-hooks.nsh`).
+                if let Some(url) = deep_link_arg(&argv) {
+                    let _ = w.emit("gv://deep-link", url);
+                }
             }
         }));
         builder = builder
@@ -1027,6 +1137,7 @@ pub fn run() {
     }
     builder
         .invoke_handler(tauri::generate_handler![
+            gv_take_deep_link,
             gv_audio_record_wav,
             gv_stream_audio_start,
             gv_stream_audio_stop,
@@ -1077,7 +1188,11 @@ pub fn run() {
             gv_list_apps,
             gv_overlay_watch,
             gv_set_download_dir,
-            gv_close_ack
+            gv_close_ack,
+            gv_window_covered,
+            gv_window_cover_pct,
+            gv_gpu_accel_get,
+            gv_gpu_accel_set
         ])
         .setup(|_app| {
             // System tray + close-to-tray: intercept the window's X, prevent the default close, and
@@ -1087,6 +1202,9 @@ pub fn run() {
                 use tauri::{Emitter, Manager};
                 // Clean up installer temp dirs left behind by past auto-updates.
                 purge_updater_leftovers();
+                // Следим, накрыло ли наше окно чужим: под игрой рисовать незачем (#193).
+                #[cfg(windows)]
+                occlusion::watch(_app.handle());
                 setup_tray(_app)?;
                 // Create the overlay window ONCE, here — `setup` is the safe place to `build()`. Building
                 // a WebviewWindow from a sync command/event-handler deadlocks the Windows event loop

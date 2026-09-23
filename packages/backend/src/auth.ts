@@ -6,7 +6,7 @@ import { effectiveTokenGeneration, shouldRefresh, TOKEN_TTL_S } from './authRule
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { env } from './env.js';
-import { claimsAreSuperAdmin, isSuperAdminId } from './superAdminRules.js';
+import { claimsAreSuperAdmin, isSuperAdminId, type UserId } from './superAdminRules.js';
 
 // Пороги и решение о продлении — в `authRules.ts`. Реэкспорт для существующих потребителей.
 export { shouldRefresh, TOKEN_TIMING } from './authRules.js';
@@ -111,8 +111,11 @@ export function superAdminId(): string | null {
  *
  * 🔴 Принимает id, не логин. Раньше сюда передавали `username`, и совпадение строки давало права
  * инстанса. Правила и почему — в `superAdminRules.ts`.
+ *
+ * Теперь это закреплено типом: аргумент — `UserId`, и обычная строка сюда не подходит. Передать
+ * логин можно только написав `asUserId(...)` вслух — это видно и на ревью, и грепом (#143).
  */
-export function isSuperAdmin(userId: string | null | undefined): boolean {
+export function isSuperAdmin(userId: UserId | null | undefined): boolean {
   return isSuperAdminId(userId, superAdminUserId);
 }
 

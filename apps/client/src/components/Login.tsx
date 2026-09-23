@@ -5,12 +5,13 @@ import {
   activeInstance,
   instances,
   multiInstanceEnabled,
+  noteActiveSuperAdmin,
   removeInstance,
-  restartApp,
   serverHost,
-  setActiveInstance,
   updateActiveInstance,
 } from '../config';
+import { adoptActiveInstance, switchInstance } from '../instanceSwitch';
+import { takeLoginNotice } from '../loginNotice';
 import { useStore } from '../store';
 import { AddInstanceModal } from './AddInstanceModal';
 import { Goose } from './Goose';
@@ -34,15 +35,12 @@ function InstanceLoginBar() {
   if (!multiInstanceEnabled() || list.length === 0) return null;
 
   async function pick(id: string) {
-    if (id !== active?.id) {
-      setActiveInstance(id);
-      await restartApp();
-    }
+    if (id !== active?.id) await switchInstance(id);
   }
   async function cancelAdd() {
     if (active) {
       removeInstance(active.id);
-      await restartApp();
+      await adoptActiveInstance();
     }
   }
   const showCancel = !!active && active.token == null && list.length > 1;
@@ -141,6 +139,17 @@ export function Login({
   setupPending?: boolean;
 }) {
   const setAuth = useStore((s) => s.setAuth);
+  // Объяснение «почему вы вдруг здесь» — одноразовое, читается при монтировании (`loginNotice.ts`).
+  const [loginNotice] = useState(() => takeLoginNotice());
+  /**
+   * В какой инстанс идёт вход. Считается один раз: активная запись за время показа карточки не
+   * меняется, а пересчёт на каждый рендер дёргал бы разбор реестра из хранилища.
+   */
+  const [whereTo] = useState(() => {
+    if (instances().length < 2) return null;
+    const a = activeInstance();
+    return a ? { name: a.name?.trim() || serverHost(a.apiUrl), host: serverHost(a.apiUrl) } : null;
+  });
   const [mode, setMode] = useState<Mode>('login');
   // Название/иконка инстанса и политика регистрации (#142). null — старый сервер без ручки: всё как раньше.
   const [inst, setInst] = useState<InstanceInfo | null>(null);
@@ -179,6 +188,7 @@ export function Login({
       avatarUrl: user.avatarUrl ?? undefined,
       lastLogin: username || user.username,
     });
+    noteActiveSuperAdmin(!!user.superAdmin);
     startPushRegistration(); // Android: register this device for push now that we're authed (no-op elsewhere).
     await onAuthed();
   }
@@ -492,6 +502,15 @@ export function Login({
             </div>
           ) : (
             <>
+              {/**
+                * 🔴 **Куда именно человек входит** — когда инстансов в реестре больше одного.
+                * Экран входа выглядел одинаково у всех инстансов, и после молчаливого возврата
+                * домой (протухшая гостевая сессия) человек вводил пароль от СОСЕДА у себя дома и
+                * получал «неверный пароль». Авария 18.09: с виду — «не пускает с верным паролем».
+                * ⚠️ У одного инстанса строки нет: там вопроса «куда я вхожу» не существует.
+                */}
+              {loginNotice && <div className="auth-notice">{loginNotice}</div>}
+              {whereTo && <div className="auth-where">Вход в «{whereTo.name}» · {whereTo.host}</div>}
               <div className="auth-title">{isLogin ? 'С возвращением' : 'Создать аккаунт'}</div>
               <div className="auth-sub">
                 {isLogin

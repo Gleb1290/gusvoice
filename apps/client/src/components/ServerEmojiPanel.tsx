@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
+import { confirmAction } from '../confirm';
 import { Icon } from './Icon';
 
 const EMPTY: ServerEmoji[] = [];
@@ -77,12 +78,13 @@ export function ServerEmojiPanel({ serverId }: { serverId: string }) {
   }
 
   async function remove(e: ServerEmoji) {
-    if (
-      !confirm(
-        `Удалить :${e.name}:?\n\nВ старых сообщениях он снова станет текстом, а уже поставленные реакции — знаком вопроса.`,
-      )
-    )
-      return;
+    const ok = await confirmAction({
+      title: `Удалить :${e.name}:?`,
+      body: 'В старых сообщениях он снова станет текстом, а уже поставленные реакции — знаком вопроса.',
+      tone: 'danger',
+      confirmLabel: 'Удалить',
+    });
+    if (!ok) return;
     setRemoving(e.id);
     try {
       await api.deleteServerEmoji(serverId, e.id);

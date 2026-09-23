@@ -10,6 +10,7 @@ import {
 } from '../channelPrefs';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
+import { confirmAction } from '../confirm';
 import { CategoryPermissionsEditor } from './CategoryPermissionsEditor';
 import { ChannelSettingsModal } from './ChannelSettingsModal';
 import { ContextMenu, MenuDivider, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
@@ -88,7 +89,13 @@ export function useChannelContextMenu(): {
   }
 
   async function delChannel(c: Channel) {
-    if (!confirm(`Удалить канал «${c.name}»? Это необратимо.`)) return;
+    const ok = await confirmAction({
+      title: `Удалить канал «${c.name}»?`,
+      body: 'Сообщения канала исчезнут вместе с ним. Отменить это нельзя.',
+      tone: 'danger',
+      confirmLabel: 'Удалить канал',
+    });
+    if (!ok) return;
     try {
       await api.deleteChannel(c.id);
       await useStore.getState().openServer(c.serverId);
@@ -98,7 +105,13 @@ export function useChannelContextMenu(): {
   }
 
   async function delCategory(cat: Category) {
-    if (!confirm(`Удалить категорию «${cat.name}»? Каналы внутри останутся без категории.`)) return;
+    const ok = await confirmAction({
+      title: `Удалить категорию «${cat.name}»?`,
+      body: 'Каналы внутри останутся — они просто перестанут быть сгруппированы.',
+      tone: 'danger',
+      confirmLabel: 'Удалить категорию',
+    });
+    if (!ok) return;
     try {
       await api.deleteCategory(cat.id);
       await useStore.getState().openServer(cat.serverId);

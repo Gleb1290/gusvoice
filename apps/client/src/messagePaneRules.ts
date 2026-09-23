@@ -108,6 +108,44 @@ export function isFirstUnread(
 }
 
 /**
+ * Начинается ли с этого сообщения новый КАЛЕНДАРНЫЙ день — над такими рисуется дневная метка.
+ *
+ * 🔴 **Считаем по местному времени читающего, а не по серверному.** Сервер и люди у нас уже разнесены
+ * по часовым поясам, и на этом классе ошибок мы обжигались в подсчёте серий экономики: «сегодня» по
+ * московской полуночи для человека из другого пояса наступает не тогда, когда у него сегодня.
+ * `toDateString()` берёт именно местную дату браузера — то есть день ровно в том виде, в каком его
+ * проживает тот, кто читает.
+ *
+ * ⚠️ Самое первое сообщение ленты тоже начинает день: без метки над ним непонятно, к какому дню
+ * относится верх переписки.
+ */
+export function isNewDay(m: ListMessage, prev: ListMessage | undefined): boolean {
+  const day = new Date(m.createdAt).toDateString();
+  if (!prev) return true;
+  return new Date(prev.createdAt).toDateString() !== day;
+}
+
+/**
+ * Подпись дневной метки: «Сегодня», «Вчера» или дата словами.
+ *
+ * ⚠️ «Сегодня» и «Вчера» считаются от переданного «сейчас», а не берутся из `Date.now()` внутри:
+ * иначе функцию нельзя проверить тестом, не переводя часы машины.
+ */
+export function dayLabel(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  const today = now.toDateString();
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000).toDateString();
+  const day = d.toDateString();
+  if (day === today) return 'Сегодня';
+  if (day === yesterday) return 'Вчера';
+  return d.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'long',
+    year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric',
+  });
+}
+
+/**
  * Схлопывать ли сообщение с предыдущим (шапка «аватар + имя + время» показывается только у первого).
  * ⚠️ Ответ всегда начинает новый блок, иначе цитата читается как продолжение чужой мысли.
  */

@@ -167,12 +167,24 @@ services:
       # Update button in the admin panel: where the backend learns the newest release (asked only when the super-admin
       # opens the "Instance" tab, cached for 6 h). Empty => no check. The version of THIS backend is baked into the image.
       GV_RELEASES_URL: ${GV_RELEASES_URL-https://api.github.com/repos/Gleb1290/gusvoice/releases/latest}
+      # Федерация инстансов (#139). ВЫКЛЮЧЕНА по умолчанию: обновление коробки не должно само по себе
+      # заводить инстансу печать и открывать наружу маршруты /api/fed/*. Пароль — пара к файлу ключа
+      # в ./fed-keys (см. volumes ниже): одно без другого бесполезно, в бэкап нужны оба.
+      FEDERATION_ENABLED: ${FEDERATION_ENABLED:-false}
+      FEDERATION_KEY_PASSPHRASE: ${FEDERATION_KEY_PASSPHRASE:-}
+      FEDERATION_DATA_DIR: /var/lib/gusvoice/federation
+      # Публичный адрес ЭТОГО API — он уезжает в визитку инстанса, по нему сосед к нам и ходит.
+      FEDERATION_API_BASE: ${FEDERATION_API_BASE:-${VITE_API_URL:-}}
     # Update button: the backend never touches Docker. It drops a request into ./run/request, a systemd watcher on the
     # host runs `update.sh --from-panel` (installed by `update.sh --install-updater`), which reports progress into
     # ./run/status — READ-ONLY here, so the backend can't plant anything the host (root) would write through.
     volumes:
       - ./run/request:/app/run/request
       - ./run/status:/app/run/status:ro
+      # 🔴 Печать инстанса (#139, план §5.1.3) — рядом с .env НАМЕРЕННО: файл ключа и пароль из .env
+      # это пара, и копия каталога установки должна забирать обе части. В базе ключа нет, чтобы дамп
+      # базы не уносил личность инстанса. Потеря пары = потеря доверия соседей, лечится перепривязкой.
+      - ./fed-keys:/var/lib/gusvoice/federation
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

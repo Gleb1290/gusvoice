@@ -54,8 +54,8 @@ export interface ServerConfig {
 /**
  * A saved instance in the multi-instance registry (#7). Each instance is a SEPARATE backend
  * (own domain / accounts / JWT secret / servers) — a token minted by instance A is meaningless
- * on instance B. Switching instances = pick one active + restart the app (the frozen `config`
- * re-resolves from the active instance on the next module load). Token-only: we remember the
+ * on instance B. Переход между инстансами — мягкий, без перезапуска приложения (§5.7,
+ * `instanceSwitch.ts`); `config` живой и отвечает по активной записи. Token-only: we remember the
  * per-instance JWT (7-day) so a switch is instant; when it expires the instance's login screen
  * shows with the email pre-filled. NO password is stored anywhere.
  */
@@ -69,6 +69,79 @@ export interface Instance extends ServerConfig {
   lastLogin?: string; // username/email to pre-fill next login on this instance
   color?: string; // fallback icon colour
   order: number; // position in the switcher list
+  /**
+   * `instance_id` этого инстанса в федерации (#139, F4) — не путать с локальным `id` записи.
+   *
+   * ⚠️ Локальный `id` случайный и живёт только в этом браузере; сопоставлять записи с тем, что
+   * приходит от бэкенда (связки, членства гостя, отзывы), можно ТОЛЬКО по этому полю.
+   */
+  federationInstanceId?: string;
+  /**
+   * 🔴 Запись «**гость на хосте через дом**» (§5.7): локальный `id` той записи, чей человек здесь
+   * гость. Пароля у этой записи нет и быть не может — токен выдан хостом под поручительство дома,
+   * и когда он протухнет, войти заново можно опять же только через дом. Поэтому на такой записи
+   * экран входа показывать нельзя: человеку там нечего вводить.
+   */
+  guestOf?: string;
+  /** Домен хоста — им подписан значок инстанса в рейле и по нему человек узнаёт, куда попал. */
+  domain?: string;
+  /**
+   * 🔴 Снимок серверов ЭТОЙ записи — чтобы рейл показывал их, пока живой шлюз открыт у другого
+   * инстанса (§5.7).
+   *
+   * Живой инстанс в клиенте пока один, а серверы в рейле должны стоять на месте ВСЕГДА: без снимка
+   * человек, ушедший гостем к соседу, переставал видеть собственные серверы — и возвращался к ним
+   * отдельной кнопкой «вернуться в свой инстанс». Кнопки не должно быть, значит список должен
+   * помниться.
+   *
+   * ⚠️ Снимок, а не правда: пишется после каждой удачной загрузки списка на этом инстансе. Счётчиков
+   * непрочитанного здесь нет намеренно — их неоткуда взять, пока шлюз не открыт, а показывать
+   * вчерашнее число хуже, чем не показывать никакого.
+   */
+  servers?: InstanceServer[];
+  /**
+   * Аккаунт этой записи — супер-админ своего инстанса (снимок, 23.09). Пишется при каждой загрузке
+   * профиля, пока запись активна (`noteActiveSuperAdmin`).
+   *
+   * 🔴 Нужен ровно на то время, когда человек стоит гостем у соседа: живой `user` тогда — его гостевая
+   * учётка там, прав у неё нет, и кнопка админки СОБСТВЕННОГО инстанса пропадала — хотя администрирует
+   * он по-прежнему свой (находка на мегаприёмке 23.09). Правило — `adminTarget`.
+   */
+  superAdmin?: boolean;
+}
+
+/** Строка снимка серверов инстанса: ровно то, что нужно нарисовать кнопку в рейле. */
+export interface InstanceServer {
+  id: string;
+  name: string;
+  iconUrl?: string | null;
+}
+
+/**
+ * Веб-клиент открыт по `http://`, а API инстанса — на `https://` → адрес той же страницы по `https://`;
+ * иначе `null` (22.09).
+ *
+ * 🔴 CORS пускает только собственный источник клиента (аудит F-21, `corsOrigins.ts`), а это `https://…`.
+ * Со страницы по `http://` тот же домен — ДРУГОЙ источник: каждый запрос к API браузер обрывает, и
+ * человек видит «Load failed» уже на регистрации (так и случилось у первого нового человека после F-21;
+ * до F-21 CORS отражал любой источник, и http-страница работала). Возвращать http в CORS нельзя —
+ * страница по http читается и подменяется по дороге, пароль с неё не защищён. Поэтому уводим на https.
+ *
+ * Не трогаем: оболочку Tauri (Windows/Android живут на `http://tauri.localhost`), `localhost`,
+ * `*.localhost` и адреса-IP (разработка, домашняя сеть), инстансы с API по http (TLS у них нет вовсе).
+ */
+export function httpsUpgradeUrl(
+  loc: { protocol: string; hostname: string; href: string },
+  apiUrl: string | undefined,
+  tauri: boolean,
+): string | null {
+  if (tauri || loc.protocol !== 'http:') return null;
+  const host = loc.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return null;
+  if (host.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return null;
+  if (!apiUrl || !/^https:\/\//i.test(apiUrl.trim())) return null;
+  if (!/^http:\/\//i.test(loc.href)) return null;
+  return `https://${loc.href.slice('http://'.length)}`;
 }
 
 export function stripSlash(s: string | undefined | null): string {
@@ -143,6 +216,93 @@ export function instanceFrom(src: ServerConfig, token: string | null, order: num
   };
 }
 
+/**
+ * Годится ли найденная запись гостя — или её надо завести заново.
+ *
+ * 🔴 Запись, чей адрес API совпадает с адресом ДОМА, негодна всегда. Гостем у самого себя быть
+ * нельзя: связку с собой инстанс отвергает (`self-link`), поэтому такая запись — только след
+ * ошибки. На стенде 17.09 она стоила рабочего вечера: реестр говорил «ты в гостях у соседа», рейл
+ * рисовал гостевую группу, а запросы уходили ДОМОЙ и отвечали 404 на чужой id сервера. Человек
+ * видел пустой рейл и «Выбери сервер», и починить это руками было нечем — запись переиспользовалась
+ * при каждой попытке (#152).
+ *
+ * ⚠️ Сравниваем, стоя ДОМА (`home.guestOf` пуст). На гостевой записи «дом» — это сам хост, и
+ * совпадение адресов там законно.
+ */
+/**
+ * Уже заведённая гостевая запись на этом хосте: по `federationInstanceId`, иначе по сохранённому в записи
+ * `domain`, иначе по хосту адреса API.
+ *
+ * 🔴 Поиск по `domain` записи — прогон F-20 на стенде 23.09. Хост сменил ключ (новая личность) и был
+ * перепривязан: по `federationInstanceId` старая запись уже не находится, а запасной поиск сравнивал
+ * только `serverHost(apiUrl)` — у соседа с API на `api.example.org` и доменом `voice.example.org`
+ * это `example.org`, мимо. Заводилась ВТОРАЯ запись, и в рейле вставали две группы одного соседа —
+ * живая и мёртвая. Поле `domain` в записи было всё это время.
+ */
+export function findGuestEntry(list: readonly Instance[], federationInstanceId: string, domain?: string): Instance | null {
+  const guests = list.filter((i) => i.guestOf);
+  const byId = guests.find((i) => i.federationInstanceId === federationInstanceId);
+  if (byId) return byId;
+  if (!domain) return null;
+  const d = domain.trim().toLowerCase();
+  return (
+    guests.find((i) => (i.domain ?? '').trim().toLowerCase() === d) ??
+    guests.find((i) => serverHost(i.apiUrl).toLowerCase() === d) ??
+    null
+  );
+}
+
+/**
+ * Найденная запись знает ПРЕЖНЮЮ личность хоста — хост сменил ключ и был перепривязан. Её сессия выдана
+ * прежней личностью и погашена (перепривязка поднимает поколение токенов гостей): не пробуем её, а
+ * берём новую — иначе человек получал бы «сессия истекла» и нажимал второй раз.
+ */
+export function guestEntryRebound(entry: Instance, federationInstanceId: string): boolean {
+  return !!entry.federationInstanceId && entry.federationInstanceId !== federationInstanceId;
+}
+
+/**
+ * Показывать ли кнопку админки и куда она ведёт (23.09).
+ *
+ * - Стоим в своей записи — решает живой профиль (`liveSuperAdmin`), переход не нужен: `{ homeId: null }`.
+ * - Стоим гостем — решает снимок домашней записи: её аккаунт супер-админ и вход не потерян → кнопка есть
+ *   и ведёт домой (`homeId`). Админку открываем уже там: окно говорит с API активного инстанса, и у
+ *   соседа оно показало бы чужой инстанс или отказ.
+ * - Иначе `null` — кнопки нет.
+ */
+export function adminTarget(
+  list: readonly Instance[],
+  activeId: string | null,
+  liveSuperAdmin: boolean,
+): { homeId: string | null } | null {
+  const active = list.find((i) => i.id === activeId);
+  if (!active?.guestOf) return liveSuperAdmin ? { homeId: null } : null;
+  const home = list.find((i) => i.id === active.guestOf);
+  return home && !home.guestOf && home.superAdmin && home.token ? { homeId: home.id } : null;
+}
+
+/**
+ * Дом человека: активная запись, если она своя, иначе та, чьим гостем она числится (#205).
+ *
+ * 🔴 Всё, что делает ДОМ, — проверка ссылки, поручительство перед хостом, «где я гость», вступление по
+ * своей ссылке — адресуется дому, а не активной записи. Стоя гостем у соседа, клиент раньше спрашивал
+ * соседа: тот гостям такие маршруты закрывает (F-16) → 403, окно откатывалось на старый путь, хост
+ * отвечал «invalid invite» на чужой код и засчитывал промах — через пару попыток блокировка на 15 минут.
+ * Гостевая запись без живой домашней (дом удалён из реестра) — `null`: ручаться за человека некому.
+ */
+export function homeEntry(list: readonly Instance[], activeId: string | null): Instance | null {
+  const active = list.find((i) => i.id === activeId) ?? null;
+  if (!active?.guestOf) return active;
+  const home = list.find((i) => i.id === active.guestOf);
+  return home && !home.guestOf ? home : null;
+}
+
+export function usableGuestEntry(found: Instance | null, home: Instance | null): Instance | null {
+  if (!found) return null;
+  if (home && !home.guestOf && found.apiUrl === home.apiUrl) return null;
+  return found;
+}
+
 export interface RegistryState {
   instances: Instance[];
   activeId: string | null;
@@ -193,7 +353,19 @@ export function migrateRegistry(inp: MigrateInput): RegistryState {
     let idx = list.findIndex((i) => i.id === activeId);
     if (idx < 0) idx = 0;
     const cur = list[idx];
-    if (cur) {
+    /**
+     * 🔴 ГОСТЕВУЮ запись этим трогать нельзя (#152).
+     *
+     * `injected` описывает инстанс, который ОТДАЛ эту страницу, — то есть дом. Когда человек ушёл
+     * гостем на чужой хост, активна запись хоста, а страница по-прежнему домашняя: перезапись
+     * подставляла бы ей домашний адрес API. Причём при КАЖДОЙ загрузке, поэтому чинить такую
+     * запись было бессмысленно — она портилась заново.
+     *
+     * Стоило вечера на стенде 17.09: реестр говорил «ты в гостях у соседа», рейл рисовал гостевую
+     * группу, а запросы уходили домой — с токеном чужого инстанса. Дом отвечал 401, и человека
+     * просто выбрасывало из аккаунта.
+     */
+    if (cur && !cur.guestOf) {
       list[idx] = {
         ...cur,
         apiUrl: stripSlash(inp.injected.apiUrl),
@@ -208,6 +380,25 @@ export function migrateRegistry(inp: MigrateInput): RegistryState {
   list = list.map((i) =>
     i.name === hostOf(i.apiUrl) && i.name !== serverHost(i.apiUrl) ? { ...i, name: serverHost(i.apiUrl) } : i,
   );
+
+  /**
+   * Вылечить записи, уже испорченные прежним поведением (#152).
+   *
+   * Гостевая запись, чей адрес API совпал с адресом СВОЕГО ЖЕ дома, — не рабочее состояние, а
+   * мусор: гостем у самого себя быть нельзя, связку с собой инстанс отвергает. Держать её незачем,
+   * и починить её содержимое мы не можем — верный адрес знает только хост. Выбрасываем, и вход
+   * гостем заведёт запись заново, уже правильно.
+   *
+   * ⚠️ Если выброшенная запись была активной — возвращаем человека ДОМОЙ, а не на первую попавшуюся:
+   * дом у гостевой записи записан, и именно там у человека есть пароль и своя жизнь.
+   */
+  const byId = new Map(list.map((i) => [i.id, i]));
+  const broken = list.filter((i) => i.guestOf && byId.get(i.guestOf)?.apiUrl === i.apiUrl);
+  if (broken.length) {
+    const homeOfActive = broken.find((i) => i.id === activeId)?.guestOf ?? null;
+    list = list.filter((i) => !broken.includes(i));
+    if (homeOfActive && list.some((i) => i.id === homeOfActive)) activeId = homeOfActive;
+  }
 
   if (list.length && !list.some((i) => i.id === activeId)) activeId = list[0].id;
 

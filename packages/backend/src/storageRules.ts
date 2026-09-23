@@ -284,3 +284,25 @@ export function contentDisposition(mime: string, filename: string): string {
   const kind = INLINE_MIME.has(mime) ? 'inline' : 'attachment';
   return `${kind}; filename*=UTF-8''${encodeURIComponent(safeName)}`;
 }
+
+/**
+ * Тип картинки по СОДЕРЖИМОМУ — по сигнатуре первых байт (аудит 19.09, F-05).
+ *
+ * Заголовок `content-type` пишет отправитель, и для файла соседа это не доказательство: под видом
+ * `image/png` в публичный бакет иначе ложились бы любые байты. `null` — не одна из четырёх картинок,
+ * которые мы вообще принимаем (`isSupportedImage`).
+ */
+export function sniffImageMime(bytes: Uint8Array): string | null {
+  if (bytes.length < 12) return null;
+  const at = (i: number, text: string): boolean => {
+    for (let k = 0; k < text.length; k++) if (bytes[i + k] !== text.charCodeAt(k)) return false;
+    return true;
+  };
+  if (bytes[0] === 0x89 && at(1, 'PNG') && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) {
+    return 'image/png';
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (at(0, 'GIF87a') || at(0, 'GIF89a')) return 'image/gif';
+  if (at(0, 'RIFF') && at(8, 'WEBP')) return 'image/webp';
+  return null;
+}

@@ -1,0 +1,14 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "now": 1758002000000,
+  "memberships": [
+    {
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+      "server_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a70",
+      "server_name": "Кино",
+      "state": "active",
+      "method": "invite",
+      "invited_by": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6f"
+    }
+  ]
+}

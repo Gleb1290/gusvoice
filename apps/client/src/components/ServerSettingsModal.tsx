@@ -16,6 +16,8 @@ import { EconomyPanel } from './EconomyPanel';
 import { ServerSoundboardPanel } from './ServerSoundboardPanel';
 import { ServerSoundsPanel } from './ServerSoundsPanel';
 import { economyVisible } from '../economyVisible';
+import { confirmAction } from '../confirm';
+import { Select } from './Select';
 
 
 export function ServerSettingsModal({
@@ -181,7 +183,15 @@ export function ServerSettingsModal({
   }
 
   async function delServer() {
-    if (!confirm(`Удалить сервер «${server.name}» со всеми каналами и сообщениями? Необратимо.`)) return;
+    const ok = await confirmAction({
+      title: `Удалить сервер «${server.name}»?`,
+      body: 'Вместе с ним исчезнут все каналы, сообщения и роли — у всех участников. Отменить это нельзя.',
+      tone: 'danger',
+      confirmLabel: 'Удалить сервер',
+      // Самое тяжёлое действие в приложении: просим набрать имя сервера.
+      requireText: server.name,
+    });
+    if (!ok) return;
     setBusy(true);
     setError(null);
     try {
@@ -439,14 +449,19 @@ function TransferOwnershipBox({ server, onDone }: { server: Server; onDone: () =
   }
   return (
     <div className="transfer-box">
-      <select className="settings-select" value={newOwnerId} onChange={(e) => setNewOwnerId(e.target.value)}>
-        <option value="">Выберите нового владельца…</option>
-        {candidates.map((m) => (
-          <option key={m.user.id} value={m.user.id}>
-            {m.nickname || m.user.displayName} (@{m.user.username})
-          </option>
-        ))}
-      </select>
+      <Select
+        value={newOwnerId}
+        onChange={setNewOwnerId}
+        placeholder="Выберите нового владельца…"
+        ariaLabel="Новый владелец"
+        title="Новый владелец"
+        searchPlaceholder="Поиск участника"
+        options={candidates.map((m) => ({
+          value: m.user.id,
+          label: m.nickname || m.user.displayName,
+          hint: `@${m.user.username}`,
+        }))}
+      />
       <input
         className="settings-select"
         value={confirmName}

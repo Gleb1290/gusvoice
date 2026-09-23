@@ -3,7 +3,7 @@ import { hashPassword, setSuperAdminId } from './auth.js';
 import { db } from './db/index.js';
 import { instanceSettings, users } from './db/schema.js';
 import { env } from './env.js';
-import { decideSuperAdminBinding, SUPERADMIN_ID_KEY } from './superAdminRules.js';
+import { bindSuperAdminWith, SUPERADMIN_ID_KEY } from './superAdminRules.js';
 import { id } from './util.js';
 
 /**
@@ -58,39 +58,31 @@ export async function seedSuperAdmin(): Promise<void> {
  * ищет без учёта регистра, но он только СОЗДАЁТ аккаунт и прав не выдаёт.
  */
 export async function bindSuperAdmin(): Promise<void> {
-  const [stored] = await db
-    .select({ value: instanceSettings.value })
-    .from(instanceSettings)
-    .where(eq(instanceSettings.key, SUPERADMIN_ID_KEY))
-    .limit(1);
-  const rawId = (stored?.value as { userId?: unknown } | undefined)?.userId;
-  const storedId = typeof rawId === 'string' && rawId.trim() !== '' ? rawId : null;
-  // Строка есть, а id в ней не читается — это НЕ «записи нет» (fail-closed, см. superAdminRules.ts).
-  const storedMalformed = !!stored && storedId === null;
-
-  const [storedRow] = storedId
-    ? await db.select({ id: users.id }).from(users).where(eq(users.id, storedId)).limit(1)
-    : [];
-  const envUsername = env.superAdminUsername.trim();
-  const [match] = !stored && envUsername
-    ? await db.select({ id: users.id }).from(users).where(eq(users.username, envUsername)).limit(1)
-    : [];
-
-  const decision = decideSuperAdminBinding({
-    storedId,
-    storedMalformed,
-    storedExists: !!storedRow,
-    envUsername,
-    usernameMatchId: match?.id ?? null,
+  const decision = await bindSuperAdminWith({
+    envUsername: env.superAdminUsername,
+    readStored: async () => {
+      const [row] = await db
+        .select({ value: instanceSettings.value })
+        .from(instanceSettings)
+        .where(eq(instanceSettings.key, SUPERADMIN_ID_KEY))
+        .limit(1);
+      return row;
+    },
+    userExists: async (userId) => {
+      const [row] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1);
+      return !!row;
+    },
+    findIdByUsername: async (username) => {
+      const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
+      return row?.id ?? null;
+    },
+    persist: async (userId) => {
+      await db
+        .insert(instanceSettings)
+        .values({ key: SUPERADMIN_ID_KEY, value: { userId }, updatedAt: new Date() })
+        .onConflictDoNothing({ target: instanceSettings.key });
+    },
+    log: (level, message) => (level === 'warn' ? console.warn : console.log)(message),
   });
-
-  if (decision.persist && decision.superAdminId) {
-    const value = { userId: decision.superAdminId };
-    await db
-      .insert(instanceSettings)
-      .values({ key: SUPERADMIN_ID_KEY, value, updatedAt: new Date() })
-      .onConflictDoNothing({ target: instanceSettings.key });
-  }
-  if (decision.log) (decision.log.level === 'warn' ? console.warn : console.log)(decision.log.message);
   setSuperAdminId(decision.superAdminId);
 }

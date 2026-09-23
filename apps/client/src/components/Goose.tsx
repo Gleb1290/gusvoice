@@ -9,15 +9,28 @@ export type GoosePose = 'mini' | 'nap' | 'look' | 'wave' | 'honk' | 'peek' | 'he
 
 type PoseAsset = { src: string; width: number; height: number };
 
+// ⚠️ Импортом, а не `new URL(…, import.meta.url)`. Вторая форма — спецформа Vite: он её понимает и
+// подставляет адрес собранного файла, а любой другой сборщик оставляет её как есть, и картинка
+// ищется относительно страницы. Поймано на выгрузке дизайн-системы (esbuild): гусь приехал туда
+// восемью битыми рамками. Обычный импорт ассета понимают оба.
+import miniPng from '../assets/mascot/mini.png';
+import lookPng from '../assets/mascot/look.png';
+import wavePng from '../assets/mascot/wave.png';
+import honkPng from '../assets/mascot/honk.png';
+import napPng from '../assets/mascot/nap.png';
+import peekPng from '../assets/mascot/peek.png';
+import headPng from '../assets/mascot/head.png';
+import headSleepyPng from '../assets/mascot/head-sleepy.png';
+
 const POSES: Record<GoosePose, PoseAsset> = {
-  mini: { src: new URL('../assets/mascot/mini.png', import.meta.url).href, width: 192, height: 210 },
-  look: { src: new URL('../assets/mascot/look.png', import.meta.url).href, width: 168, height: 210 },
-  wave: { src: new URL('../assets/mascot/wave.png', import.meta.url).href, width: 186, height: 250 },
-  honk: { src: new URL('../assets/mascot/honk.png', import.meta.url).href, width: 183, height: 220 },
-  nap: { src: new URL('../assets/mascot/nap.png', import.meta.url).href, width: 220, height: 151 },
-  peek: { src: new URL('../assets/mascot/peek.png', import.meta.url).href, width: 164, height: 180 },
-  head: { src: new URL('../assets/mascot/head.png', import.meta.url).href, width: 104, height: 104 },
-  'head-sleepy': { src: new URL('../assets/mascot/head-sleepy.png', import.meta.url).href, width: 220, height: 220 },
+  mini: { src: miniPng, width: 192, height: 210 },
+  look: { src: lookPng, width: 168, height: 210 },
+  wave: { src: wavePng, width: 186, height: 250 },
+  honk: { src: honkPng, width: 183, height: 220 },
+  nap: { src: napPng, width: 220, height: 151 },
+  peek: { src: peekPng, width: 164, height: 180 },
+  head: { src: headPng, width: 104, height: 104 },
+  'head-sleepy': { src: headSleepyPng, width: 220, height: 220 },
 };
 
 export function Goose({ pose = 'mini', size = 96, className }: { pose?: GoosePose; size?: number; className?: string }) {

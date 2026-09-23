@@ -23,8 +23,10 @@ The whole stack — `postgres · redis · livekit · backend · presence · web 
 
 ## Highlights
 
-- 🎙️ **Voice, video & screen-share** with per-channel quality/FPS controls and a live sidebar of who's talking.
-- 💬 **Text chat** — reactions, replies, @mentions, unread/mention badges, file attachments, message search.
+- 🌐 **Federation** *(new in 0.8)* — link your instance with a friend's. Invite people from the other instance to your servers with a link: they join with **their own account**, no new sign-up, and every server they are on — at home and as a guest — sits in one sidebar with live unread badges. Both owners approve the link, each instance has its own signing key, and an owner can close a server to guests or ban a person from the whole instance at any time. **Off by default** — see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
+- 🎙️ **Voice, video & screen-share** with per-channel quality/FPS controls and a live sidebar of who's talking. On Windows the screen share is native and hardware-encoded (NVENC), viewers pick the quality they receive, and the app stops redrawing while a game covers it — it stays out of your game's way.
+- 💬 **Text chat** — reactions, replies, @mentions (including `@everyone`), unread/mention badges, file attachments, message search. Your message shows up instantly, and read state clears on all your devices at once.
+- 🪙 **Fun extras** — a per-server coin economy with a shop, a soundboard, and a "Playing …" status.
 - 🛡️ **Roles & permissions** with per-channel and per-category overrides, server-side voice moderation, and an audit log.
 - 📱 **One app, your server** — web, auto-updating **Windows** desktop, and **Android**. You type your server's address at login; switch servers anytime.
 - 🔔 **Background notifications** for DMs/@mentions on Android via UnifiedPush — no Google Play Services required.
@@ -103,7 +105,7 @@ To wipe **everything** — all accounts, messages, uploads and secrets — perma
 
 ## Clients
 
-Download the desktop or Android app from the **[Releases page](https://github.com/Gleb1290/gusvoice/releases/latest)**, launch it, and enter your server's address (e.g. `voice.example.com`). Change servers anytime from **Settings → Account → Server**. The web client is served at `https://voice.<your-domain>` — no download needed.
+Download the desktop or Android app from the **[Releases page](https://github.com/Gleb1290/gusvoice/releases/latest)**, launch it, and enter your server's address (e.g. `voice.example.com`). Add or switch servers anytime from **Settings → Federation → My instances**. The web client is served at `https://voice.<your-domain>` — no download needed.
 
 ## Where things live
 

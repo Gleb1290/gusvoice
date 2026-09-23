@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { updateWatchOutcome } from '../instanceUpdateWatch';
 import { toast, toastError } from '../toast';
+import { confirmAction } from '../confirm';
 
 /**
  * «Версия и обновление» во вкладке «Инстанс» (О2б). Сервер обновляет себя не сам: бэкенд кладёт запрос, служба на
@@ -134,13 +135,14 @@ export function InstanceUpdateCard() {
   }
 
   async function start(version: string) {
-    if (
-      !window.confirm(
-        `Обновить сервер до ${version}?\n\nВо время перезапуска (обычно около минуты) чат и голос прервутся у всех, потом переподключатся сами. Перед перезапуском сервер сохранит копию базы.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirmAction({
+      title: `Обновить сервер до ${version}?`,
+      body:
+        'Во время перезапуска (обычно около минуты) чат и голос прервутся у ВСЕХ, потом переподключатся сами.' +
+        ' Перед перезапуском сервер сохранит копию базы.',
+      confirmLabel: 'Обновить',
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await api.adminStartInstanceUpdate(version);

@@ -7,6 +7,7 @@ import {
   chooseLookupResult,
   isBlockedAddress,
   PEER_MAX_BYTES,
+  PEER_MAX_FILE_BYTES,
   resolveRedirect,
   safeFetchPage,
   safePeerRequest,
@@ -288,6 +289,14 @@ describe('запросы к соседнему инстансу (F0, #139)', () 
         s.writeHead(200, { 'content-type': 'application/json' });
         return s.end(JSON.stringify({ x: 'y'.repeat(PEER_MAX_BYTES + 10) }));
       }
+      if (q.url === '/binary') {
+        s.writeHead(200, { 'content-type': 'image/png' });
+        return s.end(Buffer.from([0xff, 0x00, 0xfe, 0x41]));
+      }
+      if (q.url === '/file-huge') {
+        s.writeHead(200, { 'content-type': 'application/octet-stream' });
+        return s.end(Buffer.alloc(PEER_MAX_FILE_BYTES + 1, 0x41));
+      }
       let body = '';
       q.on('data', (c) => (body += c));
       q.on('end', () => {
@@ -396,6 +405,36 @@ describe('запросы к соседнему инстансу (F0, #139)', () 
       // Ловит молча обрезанный документ соседа, который потом разбирается как валидный.
       await assert.rejects(
         () => safePeerRequest({ method: 'GET', url: `http://127.0.0.1:${port}/huge`, allowHosts: hosts() }, permissive),
+        /больше предела/,
+      );
+    });
+
+    it('бинарный ответ сохраняет байты, а текстовый контрфакт портит не-UTF8', async () => {
+      const binary = await safePeerRequest(
+        { method: 'GET', url: `http://127.0.0.1:${port}/binary`, allowHosts: hosts(), binary: true, maxBytes: 100 },
+        permissive,
+      );
+      const text = await safePeerRequest(
+        { method: 'GET', url: `http://127.0.0.1:${port}/binary`, allowHosts: hosts(), maxBytes: 100 },
+        permissive,
+      );
+      assert.deepEqual(binary.bytes, Buffer.from([0xff, 0x00, 0xfe, 0x41]));
+      assert.equal(binary.body, '');
+      assert.notDeepEqual(Buffer.from(text.body, 'utf8'), Buffer.from([0xff, 0x00, 0xfe, 0x41]));
+    });
+
+    it('параметр maxBytes не поднимает общий потолок файлового ответа', async () => {
+      await assert.rejects(
+        () => safePeerRequest(
+          {
+            method: 'GET',
+            url: `http://127.0.0.1:${port}/file-huge`,
+            allowHosts: hosts(),
+            binary: true,
+            maxBytes: PEER_MAX_FILE_BYTES * 2,
+          },
+          permissive,
+        ),
         /больше предела/,
       );
     });

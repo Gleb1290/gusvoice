@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useStickerPacks, useStickersEnabled } from '../serverStickers';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
+import { confirmAction } from '../confirm';
 import { Icon } from './Icon';
 import { StickerView } from './StickerView';
 
@@ -47,7 +48,13 @@ export function ServerStickerPanel({ serverId }: { serverId: string }) {
   }
 
   async function remove(p: StickerPack) {
-    if (!confirm(`Удалить набор «${p.title}»?\n\nУже отправленные стикеры в истории останутся.`)) return;
+    const ok = await confirmAction({
+      title: `Удалить набор «${p.title}»?`,
+      body: 'Уже отправленные стикеры в истории останутся.',
+      tone: 'danger',
+      confirmLabel: 'Удалить набор',
+    });
+    if (!ok) return;
     setRemoving(p.id);
     try {
       await api.deleteStickerPack(serverId, p.id);

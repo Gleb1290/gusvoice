@@ -237,6 +237,9 @@ else
   POSTGRES_PASSWORD="$(gen_secret)"
   MINIO_ACCESS_KEY="$(gen_secret)"
   MINIO_SECRET_KEY="$(gen_secret)"
+  # Пароль к печати инстанса (#139). Генерируется всегда, даже при выключенной федерации: когда её
+  # включат, ключ создастся молча и без правки .env. Пароль и файл ключа в ./fed-keys — пара.
+  FEDERATION_KEY_PASSPHRASE="$(gen_secret)"
 
   # --- Write .env -----------------------------------------------------------
   say "Writing .env…"
@@ -259,6 +262,13 @@ SUPERADMIN_EMAIL=${SUPERADMIN_EMAIL}
 SUPERADMIN_PASSWORD=${SUPERADMIN_PASSWORD}
 # Where operational alerts (brute-force lockouts) are e-mailed. Empty = the super-admin's own address.
 ADMIN_EMAIL=${ADMIN_EMAIL}
+
+# Федерация инстансов (#139): связка с соседними GusVoice. Пока выключена — включается держателем.
+# 🔴 FEDERATION_KEY_PASSPHRASE и каталог ./fed-keys — ПАРА: вместе они и есть личность инстанса.
+# Потеряете любую половину — соседи перестанут вас узнавать, и связки придётся создавать заново.
+# Бэкапьте ./fed-keys вместе с этим файлом.
+FEDERATION_ENABLED=false
+FEDERATION_KEY_PASSPHRASE=${FEDERATION_KEY_PASSPHRASE}
 
 MINIO_ENDPOINT=minio
 MINIO_PORT=9000

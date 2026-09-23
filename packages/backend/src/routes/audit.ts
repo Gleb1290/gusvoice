@@ -7,6 +7,7 @@ import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
 import { auditLog, users } from '../db/schema.js';
 import { getMemberContext } from '../permissions.js';
+import { serializeUserBrief } from '../serialize.js';
 
 export async function auditRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
@@ -43,11 +44,11 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
     return rows.map(({ a, u, t }) => ({
       id: a.id,
       serverId: a.serverId,
-      actor: u ? { id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl } : null,
+      actor: u ? serializeUserBrief(u) : null,
       action: a.action,
       targetType: a.targetType,
       targetId: a.targetId,
-      target: t ? { id: t.id, username: t.username, displayName: t.displayName, avatarUrl: t.avatarUrl } : null,
+      target: t ? serializeUserBrief(t) : null,
       data: a.data,
       createdAt: a.createdAt.toISOString(),
     }));

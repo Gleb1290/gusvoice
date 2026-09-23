@@ -16,6 +16,9 @@ import { isOwnLink, LinkConfirmModal, openLink, shouldWarnAboutLink } from '../l
  */
 const KEY = 'gv_link_preview';
 
+/** Карточки ссылок показываем, пока человек их не выключил. */
+export const LINK_PREVIEWS_DEFAULT = true;
+
 export function linkPreviewsEnabled(): boolean {
   return localStorage.getItem(KEY) !== 'off';
 }

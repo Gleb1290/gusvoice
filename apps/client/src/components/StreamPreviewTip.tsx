@@ -7,6 +7,7 @@ import {
 } from '@gusvoice/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { animatedAvatarsEnabled } from '../avatarAnimation';
 import { cardGesture } from '../cardGesture';
 import { createHoverHold, type HoverHold } from '../hoverHold';
 import { topRoles, type RoleForBadge } from '../memberRoles';
@@ -94,6 +95,17 @@ export interface StreamPreviewTarget {
 }
 
 interface Tip extends StreamPreviewTarget {
+  /**
+   * Движущийся аватар — из ОБЩЕГО ростера, а не из `target`.
+   *
+   * 🔴 В `target` его нет и не будет: карточку открывают из списка голосового канала, и аватар там
+   * приезжает МЕТАДАННЫМИ LiveKit, куда анимация не кладётся вовсе (#129). Возьми мы её оттуда —
+   * получили бы ровно то, на что пожаловались: в строке аватар движется, а в карточке по клику
+   * висит обычная картинка.
+   *
+   * ⚠️ `null`, когда зритель анимацию выключил: карточка не должна быть щелью в его выключателе.
+   */
+  animatedAvatarUrl: string | null;
   dot: DotStatus;
   username: string | null;
   custom: CustomStatus | null;
@@ -115,7 +127,7 @@ interface Tip extends StreamPreviewTarget {
  * статусы и игры ре-рендерила бы весь сайдбар на каждое их изменение у кого угодно, а карточка
  * живёт секунды — свежести на момент открытия достаточно.
  */
-function profileOf(userId: string): Pick<Tip, 'dot' | 'username' | 'custom' | 'game' | 'roles'> {
+function profileOf(userId: string): Pick<Tip, 'animatedAvatarUrl' | 'dot' | 'username' | 'custom' | 'game' | 'roles'> {
   const s = useStore.getState();
   const st: PresenceStatus = s.userStatuses[userId]?.status ?? 'online';
   const online = s.onlineUsers.includes(userId);
@@ -123,6 +135,8 @@ function profileOf(userId: string): Pick<Tip, 'dot' | 'username' | 'custom' | 'g
   const custom = s.userStatuses[userId]?.customStatus ?? null;
   const member = s.members.find((m) => m.user.id === userId);
   return {
+    // Тот же источник и тот же выключатель, что у строки, из которой карточку открыли.
+    animatedAvatarUrl: animatedAvatarsEnabled() ? (member?.user.animatedAvatarUrl ?? null) : null,
     dot: effectiveDot(st, online, isSelf),
     username: member?.user.username ?? null,
     custom: customStatusVisible(st, online, isSelf) ? custom : null,
@@ -333,7 +347,7 @@ export function useStreamPreview() {
       <div className="stream-tip-main">
       <div className="stream-tip-who">
         <span className="stream-tip-ava">
-          <Avatar url={tip.avatarUrl} name={tip.name} size={48} fallback="icon" />
+          <Avatar url={tip.avatarUrl} animatedUrl={tip.animatedAvatarUrl} name={tip.name} size={48} fallback="icon" />
           <span className="stream-tip-dot">
             <StatusDot status={tip.dot} size={14} ringColor="var(--bg-2)" />
           </span>

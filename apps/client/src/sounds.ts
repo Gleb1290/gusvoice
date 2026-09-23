@@ -121,7 +121,7 @@ function eventVolume(event: SoundEvent): number {
 
 const STORAGE_KEY = 'gv_sounds';
 
-const DEFAULTS: SoundSettings = {
+export const SOUND_DEFAULTS: SoundSettings = {
   enabled: true,
   volume: 0.6,
   events: ALL_EVENTS.reduce((acc, e) => ({ ...acc, [e]: true }), {} as Record<SoundEvent, boolean>),
@@ -130,15 +130,15 @@ const DEFAULTS: SoundSettings = {
 function load(): SoundSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS, events: { ...DEFAULTS.events } };
+    if (!raw) return { ...SOUND_DEFAULTS, events: { ...SOUND_DEFAULTS.events } };
     const parsed = JSON.parse(raw) as Partial<SoundSettings>;
     return {
-      enabled: parsed.enabled ?? DEFAULTS.enabled,
-      volume: typeof parsed.volume === 'number' ? Math.min(1, Math.max(0, parsed.volume)) : DEFAULTS.volume,
-      events: { ...DEFAULTS.events, ...(parsed.events ?? {}) },
+      enabled: parsed.enabled ?? SOUND_DEFAULTS.enabled,
+      volume: typeof parsed.volume === 'number' ? Math.min(1, Math.max(0, parsed.volume)) : SOUND_DEFAULTS.volume,
+      events: { ...SOUND_DEFAULTS.events, ...(parsed.events ?? {}) },
     };
   } catch {
-    return { ...DEFAULTS, events: { ...DEFAULTS.events } };
+    return { ...SOUND_DEFAULTS, events: { ...SOUND_DEFAULTS.events } };
   }
 }
 

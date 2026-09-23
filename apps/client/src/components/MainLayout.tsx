@@ -14,6 +14,7 @@ import { FeatherLayer } from './FeatherLayer';
 import { EffectsBench } from './EffectsBench';
 import { GooseBonusHost } from './GooseBonusHost';
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
+import { closeCheatSheet, toggleCheatSheet, useCheatSheetOpen } from '../cheatSheet';
 import { Icon } from './Icon';
 import { ImageViewerHost } from './ImageViewerHost';
 import { MobileNav } from './MobileNav';
@@ -21,6 +22,7 @@ import { ServerMembersPanel } from './ServerMembersPanel';
 import { ServerRail } from './ServerRail';
 import { SidebarResizer } from './SidebarResizer';
 import { PokeModal } from './PokeModal';
+import { ServerClosedModal } from './ServerClosedModal';
 import { ToastHost } from './ToastHost';
 import { UserSettingsModal } from './UserSettingsModal';
 import { VoiceChannelView } from './VoiceChannelView';
@@ -37,7 +39,8 @@ function orderedTextChannels(b: ServerBootstrap): Channel[] {
 }
 
 export function MainLayout() {
-  const [cheatOpen, setCheatOpen] = useState(false);
+  // Выключатель общий (`cheatSheet.ts`): к шпаргалке зовут и клавишей `?`, и кнопкой из шапки.
+  const cheatOpen = useCheatSheetOpen();
   // Стенд эффектов (#120): Ctrl+Alt+E, только супер-админу. Ничего не шлёт на сервер.
   const [benchOpen, setBenchOpen] = useState(false);
   const bootstrap = useStore((s) => s.bootstrap);
@@ -90,7 +93,7 @@ export function MainLayout() {
       // `?` → toggle the cheat sheet (Shift+/), never while typing.
       if (e.key === '?' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
-        setCheatOpen((v) => !v);
+        toggleCheatSheet();
         return;
       }
       // Ctrl/⌘+F → message search (server view only; lets the browser keep find on DMs).
@@ -133,7 +136,7 @@ export function MainLayout() {
     </div>
   ) : (
     <div className="content">
-      {!channel && <div className="center muted">Select a channel</div>}
+      {!channel && <div className="center muted">Выбери канал</div>}
       {channel?.type === 'text' && <ChatView key={channel.id} channel={channel} />}
       {channel?.type === 'voice' && <VoiceChannelView channel={channel} connected={voice?.channelId === channel.id} />}
     </div>
@@ -200,7 +203,7 @@ export function MainLayout() {
       <MobileNav />
       {settingsOpen && <UserSettingsModal onClose={() => setSettingsOpen(false)} />}
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
-      {cheatOpen && <HotkeyCheatSheet onClose={() => setCheatOpen(false)} />}
+      {cheatOpen && <HotkeyCheatSheet onClose={closeCheatSheet} />}
       {welcomeOpen && (
         <EconomyWelcome
           onClose={() => {
@@ -216,6 +219,9 @@ export function MainLayout() {
           помеха человеку в бою. Оверлей рендерит свой корень, поэтому граница держится структурно. */}
       <FeatherLayer />
       {benchOpen && <EffectsBench onClose={() => setBenchOpen(false)} />}
+      {/* «Сервер закрыт держателем» — рядом с тыком и по той же причине: человека только что
+          выставили с сервера, и узнать об этом он должен сразу, а не открыв настройки. */}
+      <ServerClosedModal />
       <ImageViewerHost />
       <ToastHost />
     </div>

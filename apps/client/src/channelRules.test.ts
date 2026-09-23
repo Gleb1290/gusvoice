@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applyUnread, historyLoadPlan, seedReads, type UnreadState } from './channelRules.js';
+import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads, type UnreadState } from './channelRules.js';
 
 const emptyState = (): UnreadState => ({
   unreadCounts: {},
@@ -14,6 +14,25 @@ const bootstrap = (
   reads: Record<string, { unread: number; mentions: number }> = {},
 ): Parameters<typeof seedReads>[1] =>
   ({ channels: channelIds.map((id) => ({ id })), reads }) as unknown as Parameters<typeof seedReads>[1];
+
+describe('видимость ленты канала', () => {
+  it('на компьютере выбранный канал всегда считается видимым', () => {
+    // Ловит перенос мобильного правила на десктоп, где список и лента видны одновременно.
+    assert.equal(isFeedOnScreen({ id: 'c1', currentId: 'c1', mobile: false, mobilePane: 'list' }), true);
+  });
+
+  it('на телефоне выбранный канал видим только на экране содержимого', () => {
+    // Ловит потерю непрочитанного, пока человек смотрит список каналов телефона.
+    assert.equal(isFeedOnScreen({ id: 'c1', currentId: 'c1', mobile: true, mobilePane: 'list' }), false);
+    assert.equal(isFeedOnScreen({ id: 'c1', currentId: 'c1', mobile: true, mobilePane: 'content' }), true);
+  });
+
+  it('другой или отсутствующий текущий канал не считается видимым', () => {
+    // Ловит отметку чужого канала прочитанным лишь из-за открытой ленты рядом.
+    assert.equal(isFeedOnScreen({ id: 'c2', currentId: 'c1', mobile: false, mobilePane: 'content' }), false);
+    assert.equal(isFeedOnScreen({ id: 'c1', currentId: null, mobile: false, mobilePane: 'content' }), false);
+  });
+});
 
 describe('учёт входящего сообщения', () => {
   it('событие старого бэкенда без serverId всё равно увеличивает канал', () => {

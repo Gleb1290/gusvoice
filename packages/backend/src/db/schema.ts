@@ -84,6 +84,35 @@ export const users = pgTable('users', {
    * отметка проставлена. Правила — `setupRules.ts`.
    */
   approvedAt: timestamp('approved_at', { withTimezone: true }),
+  /**
+   * Скрыт от соседей (миграция 0066, F2 §5.2.1) — решение АДМИНА ИНСТАНСА, а не самого человека.
+   * Убирает только из каталога: войти по ссылке скрытый может, и там он виден как обычный участник.
+   */
+  hiddenFromPeers: boolean('hidden_from_peers').notNull().default(false),
+  /**
+   * Когда запись каталога менялась последний раз (миграция 0066) — по нему строится дельта соседу.
+   * Пропущенное обновление не ломает федерацию навсегда: суточная полная сверка отдаёт состояние
+   * целиком, не глядя на это поле.
+   */
+  directoryUpdatedAt: timestamp('directory_updated_at', { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * Теневая строка гостя с другого инстанса (миграция 0067, F3 §5.5). `null` — наш собственный человек.
+   *
+   * 🔴 Гость живёт В ЭТОЙ ЖЕ таблице, а не в своей: внешние ключи на `users` стоят почти везде
+   * (сообщения, роли, монеты, тыки, итоги сезонов), и отдельная таблица означала бы вторую ветку в
+   * каждом из этих мест. Цена — каждый список «наших людей» обязан спрашивать `home_instance_id IS NULL`.
+   */
+  homeInstanceId: text('home_instance_id'),
+  homeUserId: text('home_user_id'),
+  /** Ник ДОМА без домена: домен и название инстанса дорисовываются из связки при показе (§5.5). */
+  homeUsername: text('home_username'),
+  /**
+   * Поколение сессий на доме (§5.6.1). Гостевая сессия со старым поколением мертва сразу — так
+   * «выйти везде» перестаёт кончаться на границе своего инстанса.
+   */
+  homeGen: integer('home_gen').notNull().default(0),
+  /** Отпечаток уже скачанного аватара гостя: картинка перекачивается только при его смене (§5.4). */
+  homeAvatarHash: text('home_avatar_hash'),
 });
 
 export const emailVerifications = pgTable('email_verifications', {
@@ -116,7 +145,34 @@ export const servers = pgTable('servers', {
     .notNull()
     .references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * «Разрешить федеративный доступ» (миграция 0066, F2 §5.3) — ставит ТОЛЬКО админ инстанса
+   * (требование 17), владельцу сервера видно только для чтения. Без неё сервер не виден соседям и
+   * пригласить на него человека с другого инстанса нельзя.
+   */
+  federatedAccess: boolean('federated_access').notNull().default(false),
+  /** Когда менялось то, что видит сосед: галочка, имя, иконка (миграция 0066). */
+  directoryUpdatedAt: timestamp('directory_updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Исключения федеративного доступа по связке (миграция 0066, требование 32).
+ *
+ * Галочка у сервера открывает его ВСЕМ соседям сразу; здесь перечислено, кому именно не открывать.
+ * ⚠️ Внешнего ключа на `federation_links` нет намеренно: осиротевшая строка оставляет сервер
+ * ЗАКРЫТЫМ для вернувшегося соседа (безопасная сторона ошибки), а каскад тихо открыл бы его.
+ */
+export const serverFederationExclusions = pgTable(
+  'server_federation_exclusions',
+  {
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    instanceId: text('instance_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.serverId, t.instanceId] }) }),
+);
 
 /**
  * Кастомные эмодзи сервера (#18). Файл в MinIO (`emoji/`), здесь — запись о нём.
@@ -232,6 +288,14 @@ export const roles = pgTable('roles', {
   mentionable: boolean('mentionable').notNull().default(false),
   // Self-service: members holding this role may grant it to others without MANAGE_ROLES (add-only).
   membersCanAssign: boolean('members_can_assign').notNull().default(false),
+  /**
+   * Системная роль «Гости» (миграция 0067, F3 §5.9) — как `@everyone`, но для людей с других
+   * инстансов. Удалить и выдать руками нельзя.
+   *
+   * 🔴 Для гостя ЗАМЕНЯЕТ `@everyone`, а не добавляется: роли только прибавляют права, и ограничить
+   * гостей, оставив им `@everyone`, было бы нечем.
+   */
+  isGuests: boolean('is_guests').notNull().default(false),
 });
 
 export const serverMembers = pgTable(
@@ -251,6 +315,17 @@ export const serverMembers = pgTable(
      */
     pokesOptOut: boolean('pokes_opt_out').notNull().default(false),
     joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Состояние членства (миграция 0067, F3 §5.3.1): `active` или `closed_by_host`.
+     *
+     * 🔴 Закрытие сервера для гостей НЕ удаляет членство: вернули галочку — человек снова внутри,
+     * с историей, ролями и монетами. Удаление значило бы наказывать людей за решение держателя.
+     */
+    state: text('state').notNull().default('active'),
+    /** Как попал на сервер: `invite` — по ссылке. По нему строится отметка §5.2.1 у скрывшего админа. */
+    joinMethod: text('join_method'),
+    invitedBy: text('invited_by').references(() => users.id, { onDelete: 'set null' }),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
   },
   (t) => ({ pk: primaryKey({ columns: [t.serverId, t.userId] }) }),
 );
@@ -955,4 +1030,366 @@ export const serverSoundboard = pgTable(
   // Порядок добавления — он же порядок кнопок в сетке: перетасовка между заходами убивает
   // мышечную память, ради которой саундборд и нужен.
   (t) => ({ byServer: index('server_soundboard_server_idx').on(t.serverId, t.createdAt) }),
+);
+
+/**
+ * Связки с соседними инстансами (федерация #139, миграция 0063).
+ *
+ * 🔴 Первичный ключ — `instanceId` соседа, а не домен: домен сосед может сменить, оставшись собой,
+ * а сменившийся ключ = уже другой инстанс. Здесь только ПУБЛИЧНЫЕ ключи соседей — наш собственный
+ * корневой ключ лежит отдельным зашифрованным файлом, чтобы дамп базы не уносил печать инстанса.
+ */
+export const federationLinks = pgTable(
+  'federation_links',
+  {
+    instanceId: text('instance_id').primaryKey(),
+    domain: text('domain').notNull(),
+    apiBase: text('api_base').notNull(),
+    clientOrigin: text('client_origin').notNull(),
+    rootKey: text('root_key').notNull(),
+    /** Как сосед назвал себя сам; `localName` — как его назвал НАШ держатель (перебивает, §5.1.2). */
+    theirName: text('their_name'),
+    localName: text('local_name'),
+    iconHash: text('icon_hash'),
+    /** requested | pending | active | paused | blocked | trust-lost — переходы в `linkRules.ts`. */
+    state: text('state').notNull(),
+    protocolVersion: integer('protocol_version'),
+    features: jsonb('features').$type<string[]>().notNull().default([]),
+    /** Замеренное расхождение часов — чтобы вкладка «Федерация» объясняла отказы подписи. */
+    clockSkewMs: integer('clock_skew_ms'),
+    /** Последний принятый номер события соседа (дедуп) и наш счётчик исходящих. */
+    lastEventSeq: bigint('last_event_seq', { mode: 'number' }).notNull().default(0),
+    outEventSeq: bigint('out_event_seq', { mode: 'number' }).notNull().default(0),
+    /**
+     * Квота хранилища для файлов гостей этой связки и сколько занято (миграция 0068, §5.10).
+     * 🔴 На связку, а не «на гостей вообще»: предел обязан называть виновника, иначе держателю
+     * нечего решать. `0` = без предела.
+     */
+    quotaBytes: bigint('quota_bytes', { mode: 'number' }).notNull().default(2147483648),
+    usedBytes: bigint('used_bytes', { mode: 'number' }).notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
+    /** Наше «подтверждено» соседу не доставлено — досылается (миграция 0074, #199; `linkService.resendConfirmation`). */
+    confirmPending: boolean('confirm_pending').notNull().default(false),
+  },
+  (t) => ({
+    byState: index('federation_links_state_idx').on(t.state),
+    // Домен НЕ уникален: после перепривязки старая замороженная связка и новая какое-то время
+    // делят один домен, и падать на этом нельзя.
+    byDomain: index('federation_links_domain_idx').on(t.domain),
+  }),
+);
+
+/**
+ * Одноразовые коды связки (миграция 0063).
+ *
+ * 🔴 Хранится только ХЕШ секрета, как у пароля: сам код живёт лишь в сообщении, которым держатели
+ * обменялись вне приложения. Использованный код не принимается, даже если срок ещё не вышел.
+ */
+export const federationLinkCodes = pgTable(
+  'federation_link_codes',
+  {
+    id: text('id').primaryKey(),
+    secretHash: text('secret_hash').notNull().unique(),
+    /** link | rebind — перепривязка после потери или кражи ключа (§5.1.3). */
+    purpose: text('purpose').notNull().default('link'),
+    previousInstanceId: text('previous_instance_id'),
+    // Кто выдал код — только в журнале аудита: иначе это ещё одно место с личными данными,
+    // которое пришлось бы чистить при удалении аккаунта ради строки, живущей сутки.
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    usedByInstanceId: text('used_by_instance_id'),
+  },
+  (t) => ({ byExpiry: index('federation_link_codes_expires_idx').on(t.expiresAt) }),
+);
+
+/**
+ * Отозванные ключи инстансов (федерация #139, миграция 0064).
+ *
+ * 🔴 Запись живёт НАВСЕГДА: «ключ неизвестен» — обычное дело (сосед, с которым мы не связаны), а
+ * «ключ отозван» — сигнал о возможной краже, и держатель должен его увидеть, а не гадать.
+ */
+export const federationRevokedKeys = pgTable('federation_revoked_keys', {
+  instanceId: text('instance_id').primaryKey(),
+  /** На какую личность сосед перешёл — человек сверяет с ней отпечаток при перепривязке. */
+  replacedByInstanceId: text('replaced_by_instance_id'),
+  domain: text('domain'),
+  /** own — мы отозвали свой ключ; peer — отзыв пришёл от соседа. */
+  origin: text('origin').notNull().default('peer'),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }).notNull(),
+  recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Очередь исходящих событий федерации (#139, миграция 0065).
+ *
+ * 🔴 Разбирается строго по возрастанию `seq` внутри связки: у события есть порядковый номер, и
+ * получатель отбрасывает всё, что меньше последнего принятого. Отправь пятое раньше четвёртого —
+ * четвёртое пропадёт как «старое».
+ */
+export const federationOutbox = pgTable(
+  'federation_outbox',
+  {
+    id: text('id').primaryKey(),
+    /** Внешнего ключа нет намеренно: связку могут разорвать и завести заново, а хвост очереди
+     *  должен выбрасываться по своим правилам, а не каскадом. */
+    instanceId: text('instance_id').notNull(),
+    seq: bigint('seq', { mode: 'number' }).notNull(),
+    eventId: text('event_id').notNull(),
+    kind: text('kind').notNull(),
+    version: integer('version'),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byDelivery: index('federation_outbox_delivery_idx').on(t.instanceId, t.seq),
+    byAttempt: index('federation_outbox_attempt_idx').on(t.nextAttemptAt),
+  }),
+);
+
+/**
+ * КЕШ каталога соседа (#139 F2, миграция 0066, план §5.2).
+ *
+ * 🔴 Именно кеш, а не источник правды: упал сосед — выпадающие списки в админке остаются на месте с
+ * пометкой «обновлено N назад» (требование 4). Первичный ключ — ПАРА: один и тот же идентификатор у
+ * разных инстансов означает разных людей.
+ */
+export const federationPeerUsers = pgTable(
+  'federation_peer_users',
+  {
+    instanceId: text('instance_id').notNull(),
+    userId: text('user_id').notNull(),
+    username: text('username').notNull(),
+    displayName: text('display_name').notNull(),
+    /** Отпечаток аватара у соседа; картинка качается лениво и только при несовпадении (§5.4). */
+    avatarHash: text('avatar_hash'),
+    avatarLocalUrl: text('avatar_local_url'),
+    avatarCachedHash: text('avatar_cached_hash'),
+    /** Часы СОСЕДА на момент правки записи — они же версия состояния. */
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    cachedAt: timestamp('cached_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.instanceId, t.userId] }),
+    byName: index('federation_peer_users_name_idx').on(t.instanceId, t.username),
+  }),
+);
+
+/** Серверы соседа, открытые для федеративного доступа (миграция 0066, §5.3) — только просмотр. */
+export const federationPeerServers = pgTable(
+  'federation_peer_servers',
+  {
+    instanceId: text('instance_id').notNull(),
+    serverId: text('server_id').notNull(),
+    name: text('name').notNull(),
+    iconHash: text('icon_hash'),
+    members: integer('members').notNull().default(0),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    cachedAt: timestamp('cached_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.instanceId, t.serverId] }) }),
+);
+
+/**
+ * Состояние синхронизации по связке и виду каталога (миграция 0066, §5.4).
+ *
+ * 🔴 `needsFull` по умолчанию `true`: у новой связки дельте «с момента» не от чего отсчитываться,
+ * пока не прошла первая полная выдача.
+ */
+export const federationSyncState = pgTable(
+  'federation_sync_state',
+  {
+    instanceId: text('instance_id').notNull(),
+    /** directory | servers — у каждого вида своё расписание и свой курсор. */
+    kind: text('kind').notNull(),
+    /** С какого момента просить следующую дельту. Время в часах СОСЕДА, не в наших. */
+    since: bigint('since', { mode: 'number' }),
+    lastDeltaAt: timestamp('last_delta_at', { withTimezone: true }),
+    lastFullAt: timestamp('last_full_at', { withTimezone: true }),
+    failures: integer('failures').notNull().default(0),
+    needsFull: boolean('needs_full').notNull().default(true),
+    lastProblem: text('last_problem'),
+    entries: integer('entries').notNull().default(0),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.instanceId, t.kind] }) }),
+);
+
+/**
+ * Индекс членств на ДОМЕ (миграция 0067, F3 §5.5): где наши люди состоят гостями.
+ *
+ * 🔴 Без него «выйти везде» (§5.6.1) не знало бы, КУДА слать отзыв: гостевая сессия живёт у хоста и
+ * от дома не зависит — в этом и была вся устойчивость (требование 4). Отсюда же «Где я гость» (§5.7),
+ * рейл на новом устройстве и отметка «скрыт, но виден» у админа (§5.2.1).
+ */
+export const federationMemberships = pgTable(
+  'federation_memberships',
+  {
+    /** Хост, где человек гость. `userId` — НАШ, в пространстве дома. */
+    instanceId: text('instance_id').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    serverId: text('server_id').notNull(),
+    serverName: text('server_name').notNull().default(''),
+    state: text('state').notNull().default('active'),
+    /** Как вошёл и кто позвал — в пространстве ХОСТА: этих строк у нас нет, показываем как есть. */
+    method: text('method'),
+    invitedBy: text('invited_by'),
+    reason: text('reason'),
+    /** Часы ХОСТА на момент события — они же версия: без неё старое «вышел» затрёт свежее «вернулся». */
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    /** Когда индекс сверялся с хостом целиком (§5.4). Пусто — ещё ни разу. */
+    checkedAt: timestamp('checked_at', { withTimezone: true }),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.instanceId, t.userId, t.serverId] }) }),
+);
+
+/**
+ * Поручительства ДОМА: кому из хостов и за кого выдавался токен личности (миграция 0070, аудит F-04).
+ *
+ * 🔴 Единственное, что дом знает о гостевании САМ, а не со слов хоста. Членства и просьбы разбудить
+ * телефон принимаются только для пар, которые здесь есть: иначе связанный сосед объявлял бы гостем
+ * любого нашего человека и будил бы его когда захочет.
+ */
+export const federationGuestGrants = pgTable(
+  'federation_guest_grants',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    instanceId: text('instance_id').notNull(),
+    firstIssuedAt: timestamp('first_issued_at', { withTimezone: true }).notNull().defaultNow(),
+    lastIssuedAt: timestamp('last_issued_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.instanceId] }) }),
+);
+
+/**
+ * Журнал отзывов на ДОМЕ (миграция 0067, §5.6.1).
+ *
+ * 🔴 Хост мог быть выключен в момент, когда человек нажал «выйти везде»: событие до него не доедет, а
+ * поднявшись, он обязан забрать пропущенное сам (`GET /fed/v1/revocations?since=`). Без журнала
+ * «выйти везде» было бы обещанием, которое держится, только пока все живы.
+ */
+export const federationRevocations = pgTable('federation_revocations', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  /** `sessions` — новое поколение (человек жив); `revoked` — аккаунта больше нет. */
+  kind: text('kind').notNull(),
+  gen: integer('gen'),
+  /** НАШИ часы: хост спрашивает «что после такого-то момента», называя момент из нашего же ответа. */
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  /**
+   * Кому адресована запись — хост человека (миграция 0071, аудит run-1 F-26). Строка пишется на
+   * КАЖДОГО его хоста, а выдача отбирает строки спрашивающего: иначе любой сосед получал бы
+   * хронологию событий безопасности всех наших людей.
+   */
+  instanceId: text('instance_id').notNull().default(''),
+});
+
+/**
+ * Запрет чужому человеку на весь инстанс (миграция 0068, F3 §5.11, требование 36).
+ *
+ * 🔴 Ключ — ГЛОБАЛЬНАЯ личность, а не наша теневая строка: запретить можно того, кто ещё ни разу не
+ * заходил, запрет переживает разрыв связки и переезжает при перепривязке. Привяжи его к теневой
+ * строке — человек снимал бы запрет, просто зайдя заново.
+ */
+export const instanceBans = pgTable(
+  'instance_bans',
+  {
+    homeInstanceId: text('home_instance_id').notNull(),
+    homeUserId: text('home_user_id').notNull(),
+    /** Для держателя и журнала. Человеку причина НЕ показывается — он видит «вход закрыт». */
+    reason: text('reason'),
+    /** Пусто = навсегда. Истёк — войти можно, но прежние членства не возвращаются. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Снятие не стирает строку — это журнал запретов (§5.11): кто, кого, срок, причина, снятие. */
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+    removedBy: text('removed_by').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.homeInstanceId, t.homeUserId] }) }),
+);
+
+/**
+ * Жалобы держателям — наши и к нам (миграция 0068, §5.11, требование 37).
+ *
+ * `direction`: `out` — мы пожаловались соседу, `in` — сосед нам. Одна таблица, потому что
+ * жизненный цикл у них один (отправлена → доставлена → прочитана → отвечена → закрыта) и список
+ * во вкладке «Федерация» тоже один.
+ */
+/**
+ * Журнал оповещений держателю о федерации (миграция 0069, §5.10).
+ *
+ * 🔴 Ключ тройной — вид, связка и подробность: «нужна другая версия» для версии 2 и для версии 3 это
+ * РАЗНЫЕ поводы, и второй обязан прозвучать, хотя вид у них один.
+ */
+export const federationAlerts = pgTable(
+  'federation_alerts',
+  {
+    kind: text('kind').notNull(),
+    /** Пустая строка — повод про нас самих (истекает свой ключ подписи), а не про связку. */
+    instanceId: text('instance_id').notNull().default(''),
+    detail: text('detail').notNull().default(''),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSentAt: timestamp('last_sent_at', { withTimezone: true }),
+    /** Повод исчез. Строка остаётся: держатель должен видеть, что связка падала. */
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.kind, t.instanceId, t.detail] }) }),
+);
+
+export const federationReports = pgTable(
+  'federation_reports',
+  {
+    id: text('id').primaryKey(),
+    direction: text('direction').notNull(),
+    instanceId: text('instance_id').notNull(),
+    /** Идентификатор в пространстве ОТПРАВИТЕЛЯ: по нему приходит ответ. */
+    reportId: text('report_id').notNull(),
+    /** На кого жалуются — в пространстве его дома (у входящей это наш собственный человек). */
+    reportedUserId: text('reported_user_id').notNull(),
+    /** `instance_ban` | `server_ban` — что отправитель уже сделал у себя. */
+    action: text('action').notNull(),
+    serverName: text('server_name'),
+    reason: text('reason'),
+    /** 🔴 До пяти сообщений, выбранных ВРУЧНУЮ: переписку соседу хост сам не отдаёт. */
+    evidence: jsonb('evidence')
+      .$type<{ text: string; at: number; channel: string }[]>()
+      .notNull()
+      .default([]),
+    /** Когда улики менялись в последний раз (миграция 0073, #197 п. 4): по этому держателя оповещают заново. */
+    evidenceAt: timestamp('evidence_at', { withTimezone: true }).notNull().defaultNow(),
+    status: text('status').notNull().default('sent'),
+    reply: text('reply'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byTarget: index('federation_reports_target_idx').on(t.instanceId, t.reportedUserId, t.createdAt),
+  }),
+);
+
+/**
+ * Журнал федерации уровня инстанса (миграция 0072, аудит 19.09 F-25): события связок, первый вход
+ * гостя, отказы гостевых сессий, потеря доверия. Раньше всё это жило только в выводе процесса.
+ */
+export const federationAudit = pgTable(
+  'federation_audit',
+  {
+    id: text('id').primaryKey(),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+    event: text('event').notNull(),
+    instanceId: text('instance_id'),
+    actorId: text('actor_id'),
+    detail: jsonb('detail').$type<Record<string, unknown>>().notNull().default({}),
+  },
+  (t) => ({ byAt: index('federation_audit_at_idx').on(t.at) }),
 );

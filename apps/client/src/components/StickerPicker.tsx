@@ -1,5 +1,6 @@
 import type { Sticker, StickerPack } from '@gusvoice/shared';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { exprAutoFocus } from './ExprTabs';
 import { placeByAnchor, toLayoutRect } from '../popover';
 import { StickerView } from './StickerView';
 
@@ -15,17 +16,23 @@ const CELL = 72;
  *
  * Математика размещения общая — `placeByAnchor` уже вынесена в `popover.ts` (#65), поэтому
  * единственная по-настоящему хитрая часть не дублируется.
+ *
+ * В строке ввода стикеры открываются ВКЛАДКОЙ рядом с эмодзи (#159, как в Telegram): оба пикера
+ * получают одну и ту же нижнюю полосу `ExprTabs` и одинаковый размер (`.expr`), а переключение
+ * просто меняет один пикер на другой на том же месте. Жизни по-прежнему две — общая только полоса.
  */
 export function StickerPicker({
   anchor,
   packs,
   onPick,
   onClose,
+  footer,
 }: {
   anchor: DOMRect;
   packs: StickerPack[];
   onPick: (s: Sticker) => void;
   onClose: () => void;
+  footer?: ReactNode;
 }) {
   const [packId, setPackId] = useState<string>(packs[0]?.id ?? '');
   const [query, setQuery] = useState('');
@@ -71,7 +78,7 @@ export function StickerPicker({
     <>
       <div className="emoji-backdrop" onClick={onClose} />
       <div
-        className="sticker-pop"
+        className={`sticker-pop${footer ? ' expr' : ''}`}
         ref={popRef}
         // Первый кадр скрыт: пока не измерили, куда встать, показывать в левом верхнем углу — это рывок.
         style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
@@ -79,7 +86,7 @@ export function StickerPicker({
       >
         <div className="emoji-search">
           <input
-            autoFocus
+            autoFocus={exprAutoFocus(footer)}
             value={query}
             placeholder="Поиск по эмодзи или названию набора"
             aria-label="Поиск стикеров"
@@ -121,6 +128,7 @@ export function StickerPicker({
             <div className="emoji-empty muted">{query ? 'Ничего не нашлось' : 'В наборе пусто'}</div>
           )}
         </div>
+        {footer}
       </div>
     </>
   );

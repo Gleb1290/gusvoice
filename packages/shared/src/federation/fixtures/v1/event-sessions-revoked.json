@@ -1,0 +1,27 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W3C",
+      "seq": 70,
+      "kind": "user.sessions_revoked",
+      "created_at": 1758001200000,
+      "payload": {
+        "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+        "gen": 7,
+        "at": 1758001200000
+      }
+    },
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W4D",
+      "seq": 71,
+      "kind": "user.revoked",
+      "created_at": 1758001800000,
+      "payload": {
+        "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6c",
+        "gen": null,
+        "at": 1758001800000
+      }
+    }
+  ]
+}

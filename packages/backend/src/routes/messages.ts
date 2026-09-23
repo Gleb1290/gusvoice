@@ -22,9 +22,10 @@ import { channelReads, channels, messageReactions, messages, polls, stickerPacks
 import { getChannelPermissions, getServerChannelPermissions } from '../permissions.js';
 import { contentPreview, resolveMentionedMembers, sendPushToUsers } from '../push.js';
 import { publishToChannel, publishToUser } from '../realtime.js';
-import { serializeMessage } from '../serialize.js';
+import { serializeMessage, serializeUserBrief } from '../serialize.js';
 import { attachmentBlocked, isOwnMediaUrl, putAttachment, storageConfigured } from '../storage.js';
 import { id } from '../util.js';
+import { releaseQuota, reserveQuota } from '../federation/guestQuota.js';
 
 /** Aggregate reactions for a batch of messages into per-message groups, with `me` for the viewer. */
 async function reactionsFor(messageIds: string[], viewerId: string): Promise<Map<string, ReactionGroup[]>> {
@@ -163,10 +164,21 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const { id: channelId } = z.object({ id: z.string() }).parse(req.params);
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms) return reply.code(404).send({ error: 'not found' });
+    const at = new Date();
     await db
       .insert(channelReads)
-      .values({ userId: req.user!.sub, channelId, lastReadAt: new Date() })
-      .onConflictDoUpdate({ target: [channelReads.userId, channelReads.channelId], set: { lastReadAt: new Date() } });
+      .values({ userId: req.user!.sub, channelId, lastReadAt: at })
+      .onConflictDoUpdate({ target: [channelReads.userId, channelReads.channelId], set: { lastReadAt: at } });
+    /* Рассказать ОСТАЛЬНЫМ СВОИМ устройствам, что это прочитано (20.09). Раньше ручка писала строку
+       и молчала: прочитал с телефона — на компьютере значок горел до перезахода. Адресно по
+       `userId`, чтобы «что я прочитал» не уехало соседям по серверу. Отправка не ждёт ответа и не
+       может помешать самой отметке. */
+    void publishToUser(req.user!.sub, {
+      t: 'read.channel',
+      channelId,
+      serverId: perms.serverId,
+      at: at.toISOString(),
+    }).catch(() => {});
     return { ok: true };
   });
 
@@ -189,7 +201,28 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     // multipart stream is drained), BEFORE the bucket write.
     const upWait = await attachmentUploadBlock(req.user!.sub);
     if (upWait) return reply.code(429).header('Retry-After', String(upWait)).send({ error: retryMessage(upWait) });
-    const url = await putAttachment(id(), buffer, mime, name, Date.now());
+    /**
+     * Квота хранилища для гостей (#139, F3, §5.10, требование 30): файлы чужих людей лежат у нас и
+     * стоят нам места. Предел — на СВЯЗКУ, чтобы держателю было с кем разговаривать. Местных не
+     * касается вовсе.
+     *
+     * ⚠️ Стоит именно на вложениях: эмодзи и стикеры требуют прав управления сервером (их гостю
+     * дают осознанно и поимённо), а вложения шлёт каждый участник по десятку в день — объём здесь.
+     *
+     * 🔴 Место ЗАНИМАЕТСЯ одним запросом до записи файла, а не «проверили → записали → посчитали»
+     * (нашёл Codex 16.09): две одновременные загрузки читали одно и то же занятое и обе проходили
+     * предел. Предел, который обходится двумя вкладками, это не предел.
+     */
+    const quota = await reserveQuota(req.user!.sub, buffer.length);
+    if (quota) return reply.code(413).send({ error: quota });
+    let url: string;
+    try {
+      url = await putAttachment(id(), buffer, mime, name, Date.now());
+    } catch (err) {
+      // Хранилище не приняло файл — возвращаем занятое: наша неудача не должна съедать чужую квоту.
+      await releaseQuota(req.user!.sub, buffer.length);
+      throw err;
+    }
     const attachment: Attachment = { url, name, contentType: mime, size: buffer.length };
     return reply.send(attachment);
   });
@@ -207,8 +240,10 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
               name: z.string().min(1).max(300),
               contentType: z.string().min(1).max(150),
               size: z.number().int().nonnegative(),
-              width: z.number().int().positive().nullish(),
-              height: z.number().int().positive().nullish(),
+              // Размер картинки (#194) — со слов отправителя, клиент задаёт им только место до загрузки. Потолок —
+              // чтобы в jsonb не уезжали числа, которых у картинок не бывает (`imageSize.IMAGE_DIM_MAX`).
+              width: z.number().int().positive().max(20_000).nullish(),
+              height: z.number().int().positive().max(20_000).nullish(),
               // Голосовое сообщение (#20). Границы жёсткие: это чужие данные, и они попадают
               // в jsonb сообщения как есть — без потолка сюда уедет массив любой длины.
               waveform: z.array(z.number().int().min(0).max(100)).max(WAVEFORM_BUCKETS).nullish(),
@@ -275,7 +310,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const message = serializeMessage({ ...row, author, replyTo: replyToId ? (replies.get(replyToId) ?? null) : null });
     await publishToChannel(channel.serverId, channelId, { t: 'message.create', channelId, serverId: channel.serverId, message });
     // Wake offline @mentioned members (fire-and-forget; only fires when the content has an @mention).
-    void resolveMentionedMembers(content, channel.serverId, author.id).then(async (ids) => {
+    void resolveMentionedMembers(content, channel.serverId, author.id, channelId).then(async (ids) => {
       if (ids.length === 0) return;
       // Push-bomb debounce (#5, P1-3): at most one mention-push per recipient per channel per window,
       // so a burst of @mentions can't machine-gun someone's phone.
@@ -545,7 +580,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       users: v.userIds
         .map((id) => byId.get(id))
         .filter((u): u is (typeof people)[number] => !!u)
-        .map((u) => ({ id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl })),
+        .map((u) => serializeUserBrief(u)),
     }));
   });
 }

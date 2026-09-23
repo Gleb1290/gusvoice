@@ -73,6 +73,8 @@ export interface AudienceMember {
   roleIds: string[];
   /** Владелец сервера или супер-админ — видит всё, оверрайды не применяются. */
   privileged: boolean;
+  /** Гость с другого инстанса (#139): базовые права ему даёт роль «Гости», а не `@everyone`. */
+  isGuest?: boolean;
 }
 
 /**
@@ -91,22 +93,35 @@ export function channelAudience(p: {
   members: AudienceMember[];
   roles: AudienceRole[];
   everyoneRoleId: string | null;
+  /** Системная роль «Гости» этого сервера (§5.9); `null` — сервер заведён до неё. */
+  guestsRoleId?: string | null;
   categoryOverwrites: OverwriteRow[];
   channelOverwrites: OverwriteRow[];
 }): string[] {
   const out: string[] = [];
+  const guestsRole = p.guestsRoleId ? (p.roles.find((r) => r.id === p.guestsRoleId) ?? null) : null;
 
   for (const m of p.members) {
     if (m.privileged) {
       out.push(m.userId);
       continue;
     }
+    /**
+     * 🔴 Гость считается ТАК ЖЕ, как в `getMemberContext` (аудит 19.09, F-03): роль «Гости» ЗАМЕНЯЕТ
+     * ему `@everyone` в базовых правах и едет в `roleIds`, чтобы работали её канальные переопределения.
+     * Раньше рассылка про роль «Гости» не знала вовсе — она виртуальная, в `member_roles` её не бывает,
+     * — и гость получал сообщения каналов, скрытых от гостей: через REST канала нет, а сокет его слал.
+     * ⚠️ Нет роли на сервере — гость считается по `@everyone`, ровно как там же.
+     */
+    const guestBaseId = m.isGuest && guestsRole ? guestsRole.id : null;
     // ⚠️ Фильтруем от СПИСКА РОЛЕЙ СЕРВЕРА, а не от `m.roleIds`: висячая связь на удалённую роль не
     // должна ни давать прав, ни ронять расчёт.
     // 🔴 И тот же отфильтрованный список идёт В SUBJECT (нашёл Codex): иначе защита половинчатая —
     // прав удалённой роли нет, а вот её `allow`-оверрайд, оставшийся в `channel_overwrites` (там нет
     // FK на roles), всё ещё применялся бы и возвращал доступ.
-    const live = p.roles.filter((r) => r.isEveryone || m.roleIds.includes(r.id));
+    const live = p.roles.filter(
+      (r) => (guestBaseId ? r.id === guestBaseId : r.isEveryone) || m.roleIds.includes(r.id),
+    );
     const liveRoleIds = live.filter((r) => !r.isEveryone).map((r) => r.id);
     const base = basePermissions(live.map((r) => ({ permissions: permsFromString(r.permissions) })));
     if (isAdmin(base)) {

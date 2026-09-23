@@ -19,9 +19,12 @@ function ev(): TauriEvent | null {
   return (window as unknown as { __TAURI__?: { event?: TauriEvent } }).__TAURI__?.event ?? null;
 }
 
+/** Заводское поведение крестика — спросить. */
+export const CLOSE_BEHAVIOR_DEFAULT: CloseBehavior = 'ask';
+
 export function getCloseBehavior(): CloseBehavior {
   const v = localStorage.getItem(KEY);
-  return v === 'tray' || v === 'quit' ? v : 'ask';
+  return v === 'tray' || v === 'quit' ? v : CLOSE_BEHAVIOR_DEFAULT;
 }
 export function setCloseBehavior(b: CloseBehavior): void {
   if (b === 'ask') localStorage.removeItem(KEY);
@@ -164,4 +167,62 @@ export function onCloseRequested(handler: () => void): () => void {
     disposed = true;
     un?.();
   };
+}
+
+/**
+ * Ссылка-приглашение на десктопе (#139, F4, план §4.2.2).
+ *
+ * Две двери: приложение УЖЕ работало (Windows запустила второй процесс с адресом в аргументах, его
+ * перехватил single-instance и прислал событие) или запустилось этим кликом (адрес лежит в
+ * собственных аргументах — забираем их командой один раз).
+ *
+ * ⚠️ Оболочка отдаёт СЫРУЮ строку и ничего о ней не решает: что считать годной ссылкой, знает
+ * `deepLinkInvite.ts` — одно место на все платформы.
+ */
+export function onDeepLink(handler: (url: string) => void): () => void {
+  if (!isDesktop()) return () => {};
+  // Холодный старт: спрашиваем разово, ответ приходит после того, как оболочка поднялась.
+  core()
+    ?.invoke('gv_take_deep_link')
+    .then((url) => {
+      if (typeof url === 'string' && url) handler(url);
+    })
+    .catch(() => {
+      /* старая сборка без команды — живые ссылки всё равно доедут событием */
+    });
+
+  const e = ev();
+  if (!e?.listen) return () => {};
+  let stop: (() => void) | null = null;
+  let disposed = false;
+  void e
+    .listen('gv://deep-link', (ce) => {
+      if (typeof ce.payload === 'string' && ce.payload) handler(ce.payload);
+    })
+    .then((u) => (disposed ? u() : (stop = u)));
+  return () => {
+    disposed = true;
+    stop?.();
+  };
+}
+
+/**
+ * Ускорение отрисовки окна видеокартой (#193). Настройка живёт в ФАЙЛЕ рядом с настройками
+ * приложения, а не в браузерном хранилище: оболочка читает её до создания окна, когда браузерного
+ * хранилища ещё нет. На вебе обе функции — заглушки.
+ */
+export async function gpuAccelGet(): Promise<boolean> {
+  const c = core();
+  if (!isDesktop() || !c) return true;
+  try {
+    return (await c.invoke('gv_gpu_accel_get')) === true;
+  } catch {
+    return true;
+  }
+}
+
+export async function gpuAccelSet(on: boolean): Promise<void> {
+  const c = core();
+  if (!isDesktop() || !c) return;
+  await c.invoke('gv_gpu_accel_set', { on });
 }

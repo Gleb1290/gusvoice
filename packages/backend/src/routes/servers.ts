@@ -3,6 +3,9 @@ import {
   checkEmojiUpload,
   checkPackImport,
   DEFAULT_EVERYONE_PERMISSIONS,
+  FED_ERRORS,
+  FED_FEATURES,
+  FED_MEMBERSHIP_STATES,
   has,
   mentionSqlPattern,
   parseStickerSetName,
@@ -15,7 +18,15 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
+import { announceServer } from '../federation/directoryEvents.js';
+import { guestAccessRefusal } from '../federation/guestAccess.js';
+import { announceMembership } from '../federation/guestMembership.js';
+import { instanceLabel } from '../federation/instanceLabels.js';
+import { REPORT_EVIDENCE_MAX, sendReport } from '../federation/instanceBan.js';
+import { getLink } from '../federation/links.js';
+import { GUESTS_ROLE_NAME } from '../federation/guestRules.js';
 import { isSuperAdmin, requireAuth } from '../auth.js';
+import { asUserId } from '../superAdminRules.js';
 import { heavyReadBlock, retryMessage } from '../authGuard.js';
 import { publishToServer } from '../realtime.js';
 import { db } from '../db/index.js';
@@ -26,7 +37,7 @@ import {
   getServerChannelPermissions,
   highestPosition,
 } from '../permissions.js';
-import { serializeCategory, serializeChannel, serializeRole, serializeServer, statusFieldsOf } from '../serialize.js';
+import { serializeCategory, serializeChannel, serializeRole, serializeServer, serializeUserBrief, statusFieldsOf } from '../serialize.js';
 import { animatedAvatarFor } from '../shopRules.js';
 import { isSupportedImage, putMedia } from '../storage.js';
 import { downloadSticker, getStickerSet, telegramConfigured, TelegramError } from '../telegram.js';
@@ -128,8 +139,19 @@ export async function buildBootstrap(serverId: string, userId: string): Promise<
   const reads: Record<string, { unread: number; mentions: number }> = {};
   const textChanIds = visibleChans.filter((c) => c.type === 'text').map((c) => c.id);
   if (textChanIds.length) {
-    const [me] = await db.select({ username: users.username }).from(users).where(eq(users.id, userId)).limit(1);
-    const mentionRe = mentionSqlPattern(me?.username);
+    const [me] = await db
+      .select({ username: users.username, homeInstanceId: users.homeInstanceId, homeUsername: users.homeUsername })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    /**
+     * 🔴 Гостя в тексте зовут `@ник@домен`, а его `username` в базе — служебная строка (§5.5).
+     * Без второго варианта в шаблоне бейдж непрочитанных упоминаний у гостя не считался бы вовсе.
+     */
+    const meHome = me?.homeInstanceId && me.homeUsername
+      ? { username: me.homeUsername, domain: instanceLabel(me.homeInstanceId).domain }
+      : null;
+    const mentionRe = mentionSqlPattern(meHome ? null : me?.username, meHome);
     const res = await db.execute(sql`
       SELECT m.channel_id AS id,
              COUNT(*)::int AS unread,
@@ -183,7 +205,7 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
 
   // List servers the user belongs to. The super-admin sees every server.
   app.get('/servers', async (req) => {
-    if (isSuperAdmin(req.user!.sub)) {
+    if (isSuperAdmin(asUserId(req.user!.sub))) {
       const all = await db.select().from(servers);
       return all.map(serializeServer);
     }
@@ -202,7 +224,14 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     const userId = req.user!.sub;
 
     const [me] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!isSuperAdmin(userId) && !me?.canCreateServers) {
+    /**
+     * Гость с другого инстанса серверов у нас не создаёт (#139, F3, §5.8).
+     *
+     * 🔴 Не «из осторожности»: разорви держатели связку — и сервер остался бы с владельцем, который
+     * физически не может войти. Некому передать владение, некому удалить, а внутри живые люди.
+     */
+    if (me?.homeInstanceId) return reply.code(403).send({ error: FED_ERRORS.guestForbidden });
+    if (!isSuperAdmin(asUserId(userId)) && !me?.canCreateServers) {
       return reply.code(403).send({ error: 'you are not allowed to create servers' });
     }
     const serverId = id();
@@ -217,6 +246,21 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
         permissions: permsToString(DEFAULT_EVERYONE_PERMISSIONS),
         position: 0,
         isEveryone: true,
+      });
+      /**
+       * Системная роль «Гости» (§5.9) заводится СРАЗУ, вместе с сервером.
+       *
+       * Иначе она появлялась бы только у серверов, переживших миграцию 0067, и владелец нового
+       * сервера, открыв его для федерации, не смог бы ограничить гостей вовсе. Права — копия
+       * `@everyone`: по умолчанию гость равен своему.
+       */
+      await tx.insert(roles).values({
+        id: id(),
+        serverId,
+        name: GUESTS_ROLE_NAME,
+        permissions: permsToString(DEFAULT_EVERYONE_PERMISSIONS),
+        position: 0,
+        isGuests: true,
       });
       await tx.insert(serverMembers).values({ serverId, userId });
       await tx.insert(categories).values({ id: categoryId, serverId, name: 'General', position: 0 });
@@ -233,7 +277,17 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
   app.get('/servers/:id', async (req, reply) => {
     const { id: serverId } = z.object({ id: z.string() }).parse(req.params);
     const data = await buildBootstrap(serverId, req.user!.sub);
-    if (!data) return reply.code(404).send({ error: 'not found or not a member' });
+    if (!data) {
+      /**
+       * Закрытому гостю (§5.3.1) отвечаем ПРИЧИНОЙ, а не «не найдено».
+       *
+       * Требование 16: закрывать не молча. Человек видит окно «сервер закрыт
+       * держателем» с контактами — и понимает, что это чужое решение, а не поломка у него.
+       */
+      const closed = await guestAccessRefusal(serverId, req.user!.sub);
+      if (closed) return reply.code(403).send(closed);
+      return reply.code(404).send({ error: 'not found or not a member' });
+    }
     return data;
   });
 
@@ -260,6 +314,8 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     // Оповещаем участников: имя и иконка видны в РЕЙЛЕ, а он живёт отдельно от bootstrap.
     // Без этого переименование сервера доезжало до остальных только после перезагрузки страницы.
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
+    // Соседям — если сервер открыт для федеративного доступа: имя и иконка видны и у них (F2, §5.3).
+    await announceServer(serverId);
     return serializeServer(row);
   });
 
@@ -291,12 +347,16 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     return rows.map(({ m, u }) => ({
       user: {
         id: u.id,
-        username: u.username,
+        // Гостю — его домашний ник: служебный логин теневой строки людям не показывается (§5.5).
+        username: u.homeUsername || u.username,
         displayName: u.displayName,
         avatarUrl: u.avatarUrl,
         // 🔴 Аренда проверяется И ЗДЕСЬ. Это ростер, и именно он кормит все аватарки на экране —
         // без проверки анимация не гасла ни у кого, кроме самого покупателя (разбор в `animatedAvatarFor`).
         animatedAvatarUrl: animatedAvatarFor(u.animatedAvatarUrl, u.animatedAvatarUntil, now),
+        // Гость — значок инстанса рядом с ником на всех поверхностях (§5.7). Подпись берётся из
+        // кеша связок: имя инстанса меняется раз в недели, а ростер собирается постоянно.
+        homeInstance: u.homeInstanceId ? instanceLabel(u.homeInstanceId) : null,
         ...statusFieldsOf(u, Date.now()),
       },
       nickname: m.nickname,
@@ -330,6 +390,9 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
       targetId: userId,
       data: { username: kicked?.username, displayName: kicked?.displayName },
     });
+    // Гостя выкинули — его дом обязан узнать СРАЗУ (§5.5, индекс членств). Иначе у человека в
+    // «Где я гость» и в рейле остаётся сервер, откуда его уже убрали, — до суточной сверки.
+    if (kicked) await announceMembership({ guest: kicked, serverId, state: FED_MEMBERSHIP_STATES.removed });
     // 🔴 Раньше здесь не публиковалось НИЧЕГО (#91): ростер у остальных не обновлялся, а у
     // исключённого оставалась живая подписка на сервер, по которой он продолжал получать поток до
     // переподключения. Гейтвей на этом событии снимает подписки тех, кто больше не участник.
@@ -358,9 +421,13 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'владелец не может выйти — передайте владение или удалите сервер' });
     }
 
+    const [leaving] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     await db.delete(serverMembers).where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
     await db.delete(memberRoles).where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
     await writeAudit(serverId, userId, 'member.leave', { targetType: 'member', targetId: userId });
+    // Гость ушёл сам — дому это тем более надо знать: «Где я гость» у него открыт на том же экране,
+    // и список, не меняющийся после выхода, читается как «выход не сработал».
+    if (leaving) await announceMembership({ guest: leaving, serverId, state: FED_MEMBERSHIP_STATES.removed });
     // Ростер у остальных обновится, а гейтвей на этом событии снимет подписку у ушедшего (#91) —
     // иначе он продолжал бы получать поток сервера до переподключения.
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
@@ -371,7 +438,25 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
   // Same owner/self/hierarchy guards as kick. The target need not currently be a member.
   app.post('/servers/:id/members/:userId/ban', async (req, reply) => {
     const { id: serverId, userId } = z.object({ id: z.string(), userId: z.string() }).parse(req.params);
-    const body = z.object({ reason: z.string().max(512).optional() }).parse(req.body ?? {});
+    const body = z
+      .object({
+        reason: z.string().max(512).optional(),
+        /**
+         * Пожаловаться держателю инстанса гостя (§5.11). Галочка в том же окне, что и бан, но
+         * действие отдельное: бан работает и без неё, а жалоба — письмо живому человеку.
+         */
+        report: z.boolean().optional(),
+        /**
+         * 🔴 Приложенные сообщения — ТОЛЬКО выбранные модератором вручную. Сервер сам переписку
+         * соседу не отдаёт и «последние N сообщений» не подставляет: это была бы выгрузка чужого
+         * чата под видом модерации.
+         */
+        evidence: z
+          .array(z.object({ text: z.string().max(2000), at: z.number(), channel: z.string().max(120) }))
+          .max(REPORT_EVIDENCE_MAX)
+          .optional(),
+      })
+      .parse(req.body ?? {});
     const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.BAN_MEMBERS)) return reply.code(403).send({ error: 'forbidden' });
@@ -399,8 +484,35 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
       targetId: userId,
       data: { username: banned.username, displayName: banned.displayName, reason },
     });
+    // ⚠️ Причину бана дому НЕ пересказываем: она написана для журнала своего сервера и вполне может
+    // содержать то, чего человеку знать не следует. Дому достаточно, что членства больше нет.
+    await announceMembership({ guest: banned, serverId, state: FED_MEMBERSHIP_STATES.removed });
     // См. комментарий в кике: без этого забаненный оставался подписанным на поток сервера.
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
+    await announceMembership({ guest: banned, serverId, state: FED_MEMBERSHIP_STATES.removed });
+
+    /**
+     * Жалоба держателю инстанса гостя (§5.11).
+     *
+     * ⚠️ Отказ жалобы НЕ роняет бан: бан уже случился и целиком на нашей стороне, а жалоба зависит
+     * от соседа — его версии, связки, суточного предела. Клиент получает исход отдельным полем и
+     * показывает его словами; молчаливая потеря жалобы была бы хуже отказа.
+     */
+    if (body.report && banned.homeInstanceId && banned.homeUserId) {
+      const link = await getLink(banned.homeInstanceId);
+      if (!link || !link.features.includes(FED_FEATURES.reports)) {
+        return reply.send({ ok: true, report: { sent: false, problem: FED_ERRORS.unsupported } });
+      }
+      const sent = await sendReport({
+        instanceId: banned.homeInstanceId,
+        reportedUserId: banned.homeUserId,
+        action: 'server_ban',
+        serverName: server?.name ?? null,
+        reason,
+        evidence: body.evidence ?? [],
+      });
+      return reply.send({ ok: true, report: sent.ok ? { sent: true } : { sent: false, problem: sent.problem } });
+    }
     return reply.code(204).send();
   });
 
@@ -417,7 +529,9 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
       .innerJoin(users, eq(bans.userId, users.id))
       .where(eq(bans.serverId, serverId));
     return rows.map(({ b, u }) => ({
-      user: { id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl },
+      // Через общий сериализатор: у гостя `username` в базе технический, а показывать надо
+      // домашний ник и значок инстанса (§5.7).
+      user: serializeUserBrief(u),
       reason: b.reason,
       bannedBy: b.bannedBy,
       createdAt: b.createdAt.toISOString(),
@@ -473,6 +587,13 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     if (!targetCtx) return reply.code(400).send({ error: 'новый владелец должен быть участником сервера' });
 
     const [target] = await db.select().from(users).where(eq(users.id, body.newOwnerId)).limit(1);
+    /**
+     * Владельцем сервера может быть только НАШ человек (требование 25, §5.8).
+     *
+     * Та же причина, что и у запрета создавать серверы: разрыв связки оставил бы сервер с
+     * владельцем, который не может войти. Код отказа стабильный — клиент показывает его текстом.
+     */
+    if (target?.homeInstanceId) return reply.code(403).send({ error: FED_ERRORS.ownerMustBeLocal });
     await db.update(servers).set({ ownerId: body.newOwnerId }).where(eq(servers.id, serverId));
     await writeAudit(serverId, req.user!.sub, 'server.transfer', {
       targetType: 'member',

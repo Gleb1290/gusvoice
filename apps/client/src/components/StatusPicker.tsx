@@ -8,6 +8,7 @@ import { toast, toastError } from '../toast';
 import { EmojiPicker } from './EmojiPicker';
 import { Icon } from './Icon';
 import { StatusDot } from './StatusDot';
+import { Select } from './Select';
 
 const CLEAR_OPTIONS: { label: string; minutes: number | null }[] = [
   { label: 'Не сбрасывать', minutes: null },
@@ -147,17 +148,13 @@ export function StatusPicker({ onClose }: { onClose: () => void }) {
       )}
       <label className="status-clear-row">
         <span>Сбросить через</span>
-        <select
-          className="settings-select"
-          value={clearAfter ?? ''}
-          onChange={(e) => setClearAfter(e.target.value ? Number(e.target.value) : null)}
-        >
-          {CLEAR_OPTIONS.map((o) => (
-            <option key={o.label} value={o.minutes ?? ''}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <Select
+          value={clearAfter == null ? '' : String(clearAfter)}
+          onChange={(v) => setClearAfter(v ? Number(v) : null)}
+          ariaLabel="Сбросить через"
+          title="Сбросить через"
+          options={CLEAR_OPTIONS.map((o) => ({ value: o.minutes == null ? '' : String(o.minutes), label: o.label }))}
+        />
       </label>
       <div className="status-pop-actions">
         <button type="button" className="status-save-btn" onClick={() => void saveCustom()} disabled={busy}>

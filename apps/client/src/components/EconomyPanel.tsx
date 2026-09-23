@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { alertDialog, confirmAction } from '../confirm';
 import {
   coinsPerHour,
   minutesForCoins,
@@ -271,20 +272,21 @@ export function EconomyPanel({ serverId }: { serverId: string }) {
     }
     setBusy(false);
     if (plan.samples === 0) {
-      alert('Статистики присутствия ещё нет — начислять не за что.');
+      await alertDialog('Начислять пока не за что', 'Статистики присутствия ещё нет — сначала нужно, чтобы люди посидели в голосовых.');
       return;
     }
     const lines = plan.people.map((p) => `  ${p.displayName} — ${p.coins} (${p.hours} ч)`).join(`\n`);
     const tail = plan.skipped > 0 ? `\n\nОбойдём ${plan.skipped}: отказались от участия либо уже не на сервере.` : '';
-    if (
-      !confirm(
-        `Начислить ${plan.granted} монет на ${plan.people.length} человек?\n\n` +
-          `${lines}${tail}\n\n` +
-          `Считано по ${plan.samples} срезам за всё время до ${new Date(plan.until).toLocaleString('ru-RU')}.\n` +
-          `Это делается ОДИН раз за всю жизнь сервера, и отменить его нельзя.`,
-      )
-    )
-      return;
+    const ok = await confirmAction({
+      title: `Начислить ${plan.granted} монет на ${plan.people.length} человек?`,
+      body:
+        `Считано по ${plan.samples} срезам за всё время до ${new Date(plan.until).toLocaleString('ru-RU')}.` +
+        ` Это делается ОДИН раз за всю жизнь сервера, и отменить начисление нельзя.${tail}`,
+      // Кому и сколько — списком: в сплошном тексте это не читалось, а решение принимают по нему.
+      items: plan.people.map((p) => `${p.displayName} — ${p.coins} (${p.hours} ч)`),
+      confirmLabel: 'Начислить',
+    });
+    if (!ok) return;
     setBusy(true);
     setError(null);
     try {
@@ -294,7 +296,7 @@ export function EconomyPanel({ serverId }: { serverId: string }) {
       // сервере), и «почему мне не пришло» обязано иметь ответ ещё до того, как вопрос прозвучит.
       const skipped =
         res.skipped > 0 ? `\n\nОбошли ${res.skipped}: они отказались от участия либо уже не на сервере.` : '';
-      alert(`Начислено ${res.granted} монет на ${res.people} человек.${skipped}`);
+      await alertDialog(`Начислено ${res.granted} монет`, `На ${res.people} человек.${skipped}`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -558,19 +560,25 @@ export function EconomyPanel({ serverId }: { serverId: string }) {
         <span>Помесячные сезоны</span>
         <Toggle
           checked={settings.seasonLength === 'month'}
-          onChange={(v) => {
+          onChange={async (v) => {
             // 🔴 Спрашиваем ДО применения. Смена сетки может досрочно подвести прошедшие месяцы и
             // выдать корону — это необратимо, и узнавать об этом постфактум человек не должен.
             // Текст описывает то, что делает сервер (`freezeWindow` + пересчёт по журналу): сезон
             // по новой сетке начинается с её календарной границы, а не с момента нажатия.
-            if (
-              !confirm(
-                v
-                  ? 'Перейти на помесячные сезоны?\n\nСчёт сезона у всех пересчитается с 1-го числа текущего месяца. Если сезон начался в этом же месяце, он просто продолжится как месяц; если раньше — прошедшие полные месяцы подведутся досрочно: итоги заморозятся, победитель получит корону.'
-                  : 'Вернуться к сезонам по временам года?\n\nСчёт сезона у всех пересчитается с первого дня текущего времени года — уже закрытые месяцы войдут в него целиком. Корона за последний закрытый месяц остаётся до конца сезона.',
-              )
-            )
-              return;
+            const ok = await confirmAction(
+              v
+                ? {
+                    title: 'Перейти на помесячные сезоны?',
+                    body: 'Счёт сезона у всех пересчитается с 1-го числа текущего месяца. Если сезон начался в этом же месяце, он просто продолжится как месяц; если раньше — прошедшие полные месяцы подведутся досрочно: итоги заморозятся, победитель получит корону.',
+                    confirmLabel: 'Перейти на месяцы',
+                  }
+                : {
+                    title: 'Вернуться к сезонам по временам года?',
+                    body: 'Счёт сезона у всех пересчитается с первого дня текущего времени года — уже закрытые месяцы войдут в него целиком. Корона за последний закрытый месяц остаётся до конца сезона.',
+                    confirmLabel: 'Вернуть времена года',
+                  },
+            );
+            if (!ok) return;
             patch({ seasonLength: v ? 'month' : 'quarter' });
           }}
           label={settings.seasonLength === 'month' ? 'месяц' : 'времена года'}

@@ -1,0 +1,37 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W1A",
+      "seq": 61,
+      "kind": "membership.changed",
+      "created_at": 1758000000000,
+      "payload": {
+        "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+        "server_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a70",
+        "server_name": "Кино",
+        "state": "active",
+        "method": "invite",
+        "invited_by": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6f",
+        "reason": null,
+        "at": 1758000000000
+      }
+    },
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W2B",
+      "seq": 62,
+      "kind": "membership.changed",
+      "created_at": 1758000600000,
+      "payload": {
+        "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+        "server_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a70",
+        "server_name": "Кино",
+        "state": "closed_by_host",
+        "method": "invite",
+        "invited_by": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6f",
+        "reason": "federation_disabled",
+        "at": 1758000600000
+      }
+    }
+  ]
+}

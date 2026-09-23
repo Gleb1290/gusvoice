@@ -13,14 +13,22 @@ import { Icon } from './Icon';
 let playing: HTMLAudioElement | null = null;
 
 export function VoiceMessage({ a }: { a: Attachment }) {
+  return <VoicePlayer url={a.url} waveform={a.waveform ?? []} durationMs={a.durationMs ?? 0} />;
+}
+
+/**
+ * Сам плеер — без вложения: им же слушают только что записанное перед отправкой (#159), когда
+ * вложения ещё нет, а есть файл в памяти и уже посчитанная огибающая.
+ */
+export function VoicePlayer({ url, waveform, durationMs }: { url: string; waveform: number[]; durationMs: number }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setPlaying] = useState(false);
   const [at, setAt] = useState(0);
 
-  const bars = a.waveform ?? [];
+  const bars = waveform;
   // Длительность из вложения — надёжнее, чем `audio.duration`: у WebM из MediaRecorder её в
   // заголовке нет, и браузер до конца воспроизведения честно отдаёт Infinity.
-  const total = a.durationMs ?? 0;
+  const total = durationMs;
   const progress = total > 0 ? Math.min(1, at / total) : 0;
 
   useEffect(() => {
@@ -78,7 +86,7 @@ export function VoiceMessage({ a }: { a: Attachment }) {
 
       <audio
         ref={audioRef}
-        src={a.url}
+        src={url}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}

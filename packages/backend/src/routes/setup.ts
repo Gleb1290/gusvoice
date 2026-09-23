@@ -7,14 +7,18 @@
  */
 import type { AuthResponse, InstanceInfo, SetupStatus, VoiceTestToken } from '@gusvoice/shared';
 import { randomUUID } from 'node:crypto';
-import { or, sql } from 'drizzle-orm';
+import { eq, or, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { hashPassword, requireSuperAdmin, setSuperAdminId, signToken, superAdminId } from '../auth.js';
 import { clientIp, rateHit, retryMessage } from '../authGuard.js';
 import { db } from '../db/index.js';
-import { instanceSettings, users } from '../db/schema.js';
+import { instanceSettings, invites, serverFederationExclusions, servers, users } from '../db/schema.js';
 import { env } from '../env.js';
+import { federation } from '../federation/instance.js';
+import { listLinks } from '../federation/links.js';
+import { linkDisplayNames } from '../federation/linkRules.js';
+import { readInstanceMeta } from '../federation/instanceMeta.js';
 import { instanceMeta, markSetup, registrationPolicy, setupState } from '../instanceSetup.js';
 import { createVoiceTestToken } from '../livekit.js';
 import { serializeUser } from '../serialize.js';
@@ -81,7 +85,56 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
   // Публично: экран входа по нему решает, показывать ли мастер, а регистрация — нужно ли поле кода приглашения.
   app.get('/instance', async (): Promise<InstanceInfo> => {
     const [meta, policy] = await Promise.all([instanceMeta(), registrationPolicy()]);
-    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy };
+    // ⚠️ Признак федерации — «поднялась ли она», а не «просили ли её в `.env`»: при испорченном
+    // ключе (`key-error`) маршрутов тоже нет, и обещать клиенту работающую федерацию нельзя.
+    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, federation: federation.status() === 'ready' };
+  });
+
+  /**
+   * Что показать на странице `/i/<код>` тому, кто пришёл по ссылке и ещё не вошёл (§4.2.2).
+   *
+   * 🔴 Маршрут ПУБЛИЧНЫЙ — иначе страница бесполезна: на неё как раз и попадают до всякого входа.
+   * Поэтому наружу уходит ровно два факта: существует ли такой код и какие инстансы нам доверяют.
+   * Ни имени сервера, ни числа людей: код — шесть символов, и перебор не должен становиться
+   * разведкой (то же правило, что у предпросмотра для соседа).
+   *
+   * 🔴 Список доверенных отдаётся ТОЛЬКО при годном коде и только для сервера с федеративным
+   * доступом. Иначе любой прохожий узнавал бы, с кем мы связаны, открыв `/i/` со случайным кодом.
+   */
+  app.get('/invites/:code/open', async (req, reply): Promise<{ known: boolean; peers: { name: string; clientOrigin: string }[] } | undefined> => {
+    const { code } = req.params as { code: string };
+    /**
+     * 🔴 Под счётчиком по адресу (аудит 19.09, F-18): маршрут публичный и отвечает «код существует», а
+     * при годном коде на открытый сервер — именами и адресами доверенных соседей. Список оставлен
+     * осознанно (держатель ссылки видит, с кем мы связаны, — иначе кнопке «у меня аккаунт на другом
+     * инстансе» не из чего строиться), но перебирать коды этим маршрутом без ограничений нельзя.
+     */
+    const wait = await rateHit(`inviteopen:${clientIp(req)}`, 30, 10 * 60);
+    if (wait > 0) {
+      await reply.code(429).header('Retry-After', String(wait)).send({ error: retryMessage(wait) });
+      return;
+    }
+    const [invite] = await db.select().from(invites).where(eq(invites.code, code)).limit(1);
+    if (!invite) return { known: false, peers: [] };
+    const [server] = await db.select().from(servers).where(eq(servers.id, invite.serverId)).limit(1);
+    if (!server?.federatedAccess || !env.federation.enabled) return { known: true, peers: [] };
+    const excluded = new Set(
+      (
+        await db
+          .select({ instanceId: serverFederationExclusions.instanceId })
+          .from(serverFederationExclusions)
+          .where(eq(serverFederationExclusions.serverId, invite.serverId))
+      ).map((r) => r.instanceId),
+    );
+    const links = await listLinks();
+    // Имена — через защиту от одноимённых (F-11): сосед, назвавшийся как другой, показывается с доменом.
+    const names = linkDisplayNames(links, (await readInstanceMeta()).name);
+    return {
+      known: true,
+      peers: links
+        .filter((l) => l.state === 'active' && !excluded.has(l.instanceId) && l.clientOrigin)
+        .map((l) => ({ name: names.get(l.instanceId) ?? l.domain, clientOrigin: l.clientOrigin })),
+    };
   });
 
   app.get('/setup/status', async (): Promise<SetupStatus> => {

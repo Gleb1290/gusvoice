@@ -98,7 +98,10 @@ export async function startVoiceRecording(): Promise<VoiceRecording> {
           const blob = new Blob(chunks, { type });
           // Длительность берём по часам, а не из файла: у WebM из MediaRecorder её в заголовке
           // обычно нет вовсе, и `<audio>.duration` до конца воспроизведения отдаёт Infinity.
-          const durationMs = Date.now() - startedAt;
+          // 🔴 Не больше потолка: запись сама встаёт на VOICE_MAX_MS, а «отправить» или «стоп»
+          // человек может нажать и позже — тогда часы насчитали бы лишнее, и сервер отверг бы
+          // голосовое целиком (`max(VOICE_MAX_MS)` в схеме приёма). Сказанное пропадало бы молча.
+          const durationMs = Math.min(Date.now() - startedAt, VOICE_MAX_MS);
           // Расширение по типу, иначе файл уедет в бакет как `.bin`.
           const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
           const file = new File([blob], `voice-${startedAt}.${ext}`, { type });

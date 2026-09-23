@@ -1,15 +1,23 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
 import { toastError } from '../toast';
-import { multiInstanceEnabled } from '../config';
+import { noticeFromRefusal } from '../accessClosed';
+import { takeInviteLink, usePendingInviteLink } from '../deepLinkInvite';
 import { subscribeToServer } from '../sockets';
 import { useStore } from '../store';
+import { confirmAction } from '../confirm';
+import { activeInstanceId, instances } from '../config';
+import { adminTarget } from '../configRules';
+import { openOwnAdmin } from '../instanceSwitch';
 import { Avatar } from './Avatar';
 import { Goose } from './Goose';
 import { Icon } from './Icon';
-import { InstanceSwitcher } from './InstanceSwitcher';
 import { ProfileModal } from './ProfileModal';
+import { RailGroups } from './RailGroups';
+import { railEdges, railScrollClass, RAIL_SCROLLBAR_LINGER_MS, type RailEdges } from '../railScroll';
+import { hasUnseen } from '../settingsSeen';
+import { SECTIONS } from '../settingsNav';
 import { CreateServerModal, JoinServerModal } from './ServerActionModals';
 import { ContextMenu, MenuItem, type MenuPos } from './ContextMenu';
 
@@ -23,13 +31,68 @@ export function ServerRail() {
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
   const unreadDms = useStore((s) => s.unreadDms);
-  const unreadServers = useStore((s) => s.unreadServers);
-  const mentionServers = useStore((s) => s.mentionServers);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
-  const setAdminOpen = useStore((s) => s.setAdminOpen);
+  /**
+   * Прокрутка списка серверов (19.09). Серверов бывает больше, чем влезает, и список давил на
+   * нижние кнопки — настройки, админка, профиль уезжали за край. Теперь серверы живут в своей
+   * полосе: колесо прокручивает её, содержимое у краёв тает (уплывает под кнопки), а полоска
+   * прокрутки показывается только во время движения и сама гаснет.
+   */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState<RailEdges>({ top: false, bottom: false });
+  const [scrolling, setScrolling] = useState(false);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function onRailScroll(): void {
+    const el = scrollRef.current;
+    if (!el) return;
+    setEdges(railEdges(el));
+    setScrolling(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setScrolling(false), RAIL_SCROLLBAR_LINGER_MS);
+  }
+
+  /**
+   * Пересчитать края, когда список поменялся (вступили в сервер, ушли, пришла группа соседа).
+   * ⚠️ Таймером, а не `requestAnimationFrame`: в скрытой вкладке кадры не идут вовсе, и затухание
+   * осталось бы в состоянии «как было при прошлом показе».
+   */
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (scrollRef.current) setEdges(railEdges(scrollRef.current));
+    }, 0);
+    return () => clearTimeout(t);
+  }, [servers.length]);
+
+  useEffect(() => () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+  }, []);
+
+  /**
+   * Есть ли в настройках непросмотренное — пересчитываем при открытии и закрытии окна настроек:
+   * именно там отметка и меняется, а на каждой отрисовке рейла читать хранилище незачем.
+   */
+  const settingsOpen = useStore((s) => s.settingsOpen);
+  const [unseenSettings, setUnseenSettings] = useState(false);
+  useEffect(() => {
+    setUnseenSettings(hasUnseen(SECTIONS.flatMap((sec) => sec.groups.map((g) => g.id))));
+  }, [settingsOpen]);
+
   const [showProfile, setShowProfile] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
+  /**
+   * Пришли по ссылке снаружи (мессенджер → `gusvoice://` → мы). Окно открываем САМИ: человек уже
+   * сделал жест «хочу сюда», и заставлять его искать кнопку «Войти по приглашению» после этого —
+   * значит потерять его на полпути.
+   */
+  const pendingLink = usePendingInviteLink();
+  const [linkToCheck, setLinkToCheck] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingLink) return;
+    setLinkToCheck(takeInviteLink());
+    setShowJoin(true);
+  }, [pendingLink]);
   const pushMutedServers = useStore((s) => s.pushMutedServers);
   const setPushMuted = useStore((s) => s.setPushMuted);
   // Своё меню по ПКМ (#75). Настройки сервера отсюда НЕ предлагаем: права мы знаем только для
@@ -38,10 +101,28 @@ export function ServerRail() {
   const [menu, setMenu] = useState<{ pos: MenuPos; id: string; name: string; ownerId: string } | null>(null);
 
   const canCreate = !!(user?.superAdmin || user?.canCreateServers);
+  const admin = adminTarget(instances(), activeInstanceId(), !!user?.superAdmin);
 
   async function select(id: string) {
-    await openServer(id);
-    subscribeToServer(id);
+    /**
+     * Закрытый держателем сервер не открываем ВООБЩЕ (§5.3.1): жать по нему человек будет — он
+     * остался в рейле, потому что членство сохранено. Показываем то же окно, что и в момент
+     * закрытия, вместо похода за отказом.
+     */
+    const closed = useStore.getState().closedServers[id];
+    if (closed) {
+      useStore.getState().noteAccessClosed(closed);
+      return;
+    }
+    try {
+      await openServer(id);
+      subscribeToServer(id);
+    } catch (err) {
+      // Закрыли, пока нас не было: узнаём об этом только сейчас, отказом с причиной и контактами.
+      const notice = noticeFromRefusal(err, { id, name: servers.find((x) => x.id === id)?.name ?? 'сервер' });
+      if (notice) useStore.getState().noteAccessClosed(notice);
+      else toastError(err);
+    }
   }
 
   async function afterJoinOrCreate(serverId: string) {
@@ -51,7 +132,12 @@ export function ServerRail() {
 
   /** Покинуть сервер (#92). Владельцу пункт не показываем — сервер остался бы без хозяина. */
   async function leave(serverId: string, name: string) {
-    if (!confirm(`Покинуть сервер «${name}»? Вернуться можно будет только по приглашению.`)) return;
+    const ok = await confirmAction({
+      title: `Покинуть сервер «${name}»?`,
+      body: 'Ваши сообщения останутся, но вернуться можно будет только по новому приглашению.',
+      confirmLabel: 'Покинуть',
+    });
+    if (!ok) return;
     try {
       await api.leaveServer(serverId);
       await loadServers();
@@ -77,32 +163,17 @@ export function ServerRail() {
         {unreadDms.length > 0 && <span className="rail-badge">{unreadDms.length}</span>}
       </button>
       <div className="rail-sep" />
-      {servers.map((s) => (
-        <button
-          key={s.id}
-          className={`rail-icon ${view === 'server' && s.id === currentServerId ? 'active' : ''}`}
-          title={s.name}
-          onClick={() => select(s.id)}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setMenu({ pos: { x: e.clientX, y: e.clientY }, id: s.id, name: s.name, ownerId: s.ownerId });
-          }}
-        >
-          {/* Иконка сервера (#74); буква — запасной вариант, пока её не загрузили. */}
-          {s.iconUrl ? (
-            <img className="rail-img" src={s.iconUrl} alt="" loading="lazy" />
-          ) : (
-            s.name[0]?.toUpperCase()
-          )}
-          {/* Непрочитанное на сервере, который сейчас НЕ открыт: иначе про него неоткуда узнать,
-              не переключившись туда наугад. Упоминания — тем же ярким значком, что и у ЛС. */}
-          {(mentionServers[s.id] ?? 0) > 0 ? (
-            <span className="rail-badge">{(mentionServers[s.id] ?? 0) > 99 ? '99+' : mentionServers[s.id]}</span>
-          ) : (unreadServers[s.id] ?? 0) > 0 ? (
-            <span className="rail-badge muted">{(unreadServers[s.id] ?? 0) > 99 ? '99+' : unreadServers[s.id]}</span>
-          ) : null}
-        </button>
-      ))}
+      <div className={railScrollClass(edges, scrolling)} ref={scrollRef} onScroll={onRailScroll}>
+      {/**
+       * 🔴 Серверы ВСЕХ инстансов — одним списком (§5.7). Рисует их `RailGroups`, а не этот файл:
+       * свои и чужие подчиняются одним правилам показа, и две реализации одной кнопки разошлись бы
+       * на первом же значке. Здесь остаётся то, что относится к рейлу целиком: ЛС, кнопки внизу и
+       * меню по ПКМ.
+       */}
+      <RailGroups
+        onOpenLive={(id) => void select(id)}
+        onMenu={(e, s) => setMenu({ pos: { x: e.clientX, y: e.clientY }, id: s.id, name: s.name, ownerId: s.ownerId })}
+      />
       {canCreate && (
         <button className="rail-icon add" title="Создать сервер" onClick={() => setShowCreate(true)}>
           <Icon name="plus" size={22} />
@@ -111,9 +182,10 @@ export function ServerRail() {
       <button className="rail-icon add" title="Войти по приглашению" onClick={() => setShowJoin(true)}>
         <Icon name="chevron-down" size={22} />
       </button>
+      </div>
       <div className="rail-spacer" />
-      {/* Multi-instance switcher (#7) — native (desktop + mobile): switch between saved GusVoice backends. */}
-      {multiInstanceEnabled() && <InstanceSwitcher />}
+      {/* Переключателя инстансов здесь больше нет (23.09): переход — группами рейла, добавить/убрать —
+          «Настройки › Федерация › Мои инстансы» (`InstancesPanel`). */}
       {menu && (
         <ContextMenu pos={menu.pos} onClose={() => setMenu(null)} width={232}>
           {menu.id !== currentServerId && (
@@ -149,11 +221,22 @@ export function ServerRail() {
           )}
         </ContextMenu>
       )}
+      {/* 🔴 Кружок «загляни»: в настройках есть то, чего человек ещё не видел (новая настройка из
+          обновления). Отметка про ПРОСМОТР, а не про значение, — поэтому отдельная от точки
+          «изменено» внутри окна. Гаснет, когда человек до этих групп доберётся. */}
       <button className="rail-icon settings-btn" title="Настройки" onClick={() => setSettingsOpen(true)}>
         <Icon name="settings" size={20} />
+        {unseenSettings && <span className="rail-new" role="img" aria-label="в настройках есть новое" />}
       </button>
-      {user?.superAdmin && (
-        <button className="rail-icon admin" title="Админ-панель" onClick={() => setAdminOpen(true)}>
+      {/* 🔴 Решает не живой профиль, а `adminTarget` (23.09): стоя гостем у соседа, человек там без прав,
+          но администрирует по-прежнему свой инстанс — и кнопка пропадать не должна. Тогда клик ведёт
+          домой и открывает админку уже там. */}
+      {admin && (
+        <button
+          className="rail-icon admin"
+          title={admin.homeId ? 'Админ-панель вашего инстанса (перейдёт туда)' : 'Админ-панель'}
+          onClick={() => void openOwnAdmin(admin.homeId).catch(toastError)}
+        >
           <Icon name="lock" size={20} />
         </button>
       )}
@@ -173,7 +256,19 @@ export function ServerRail() {
 
       {showProfile && <ProfileModal onClose={() => setShowProfile(false)} />}
       {showCreate && <CreateServerModal onClose={() => setShowCreate(false)} onCreated={afterJoinOrCreate} />}
-      {showJoin && <JoinServerModal onClose={() => setShowJoin(false)} onJoined={afterJoinOrCreate} />}
+      {showJoin && (
+        <JoinServerModal
+          // Ключ по ссылке: пришла ВТОРАЯ ссылка, пока окно открыто, — окно пересоберётся с ней,
+          // а не останется с первой (человек кликнул ещё раз, значит передумал).
+          key={linkToCheck ?? 'manual'}
+          initial={linkToCheck ?? undefined}
+          onClose={() => {
+            setShowJoin(false);
+            setLinkToCheck(null);
+          }}
+          onJoined={afterJoinOrCreate}
+        />
+      )}
     </div>
   );
 }

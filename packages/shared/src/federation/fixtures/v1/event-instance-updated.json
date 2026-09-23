@@ -1,0 +1,16 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0V1W",
+      "seq": 42,
+      "kind": "instance.updated",
+      "created_at": 1758000000000,
+      "version": 3,
+      "payload": {
+        "name": "Гусиный дом",
+        "icon_hash": null
+      }
+    }
+  ]
+}

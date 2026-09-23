@@ -6,7 +6,9 @@ import {
   voicePublishBits,
 } from '@gusvoice/shared';
 import { api, getToken } from './api';
+import { isFeedOnScreen } from './channelRules';
 import { notifyLevel } from './channelPrefs';
+import { isMobile } from './hotkeys';
 import { shouldPulseWallet } from './coinsCue';
 import { ensureEconomy } from './economyClient';
 import { resolveMemberName } from './memberName';
@@ -208,13 +210,32 @@ export function connectGateway(): void {
   const token = getToken();
   if (!token) return;
   installResumeWatchers();
-  gateway = new WebSocket(gatewayWsUrl());
-  const gatewayHandshake = guardHandshake(gateway);
+  /**
+   * 🔴 **Обработчики говорят со СВОИМ сокетом, а не с модульной переменной** (18.09, §5.7).
+   *
+   * Раньше `onopen`/`onclose` трогали `gateway` — то есть тот сокет, который активен СЕЙЧАС, а не
+   * тот, чьё событие пришло. Пока смена инстанса была перезапуском приложения, второго сокета в
+   * одном процессе почти не случалось. С мягким переходом это происходит на каждом клике: старый
+   * закрывается, новый заводится в том же кадре, и запоздалый `onopen` старого слал `identify` в
+   * новый — `Still in CONNECTING state`, — а запоздалый `onclose` обнулял ссылку на живой новый и
+   * заводил лишнее переподключение. Сверка `gateway !== socket` = «это событие уже неактуально».
+   */
+  const socket = new WebSocket(gatewayWsUrl());
+  gateway = socket;
+  const gatewayHandshake = guardHandshake(socket);
+  // ⚠️ Сердцебиение СВОЁ у каждого сокета: модульная переменная одна, и сокет, которого уже сменили,
+  // не должен ни гасить чужой таймер, ни оставлять свой тикать вечно.
+  let ping: ReturnType<typeof setInterval> | null = null;
 
-  gateway.onopen = () => {
+  socket.onopen = () => {
     gatewayHandshake();
+    // Нас успели сменить, пока шло рукопожатие: этот сокет — сирота, закрываем и молчим.
+    if (gateway !== socket) {
+      socket.close();
+      return;
+    }
     gatewayLastRecv = Date.now();
-    gateway?.send(JSON.stringify({ t: 'identify', token }));
+    socket.send(JSON.stringify({ t: 'identify', token }));
     /**
      * 🔴 **Подписки уходят на `ready`, а НЕ здесь** (#126). Раньше `subscribe` летел вплотную за
      * `identify`, в том же кадре, — а сервер разбирает `identify` асинхронно и такой `subscribe`
@@ -233,7 +254,8 @@ export function connectGateway(): void {
       .catch(() => {
         /* список догонит при следующем коннекте — не роняем сокет из-за него */
       });
-    if (gateway) gatewayPing = heartbeat(gateway, () => gatewayLastRecv);
+    ping = heartbeat(socket, () => gatewayLastRecv);
+    gatewayPing = ping;
     // Seed everyone's current game activity (#40) on (re)connect — live deltas arrive via user.activity.
     void api.getActivities().then((r) => useStore.getState().setActivities(r.activities)).catch(() => {});
     // On a RE-connect (not the first) we were likely half-open and missed message.create events while
@@ -246,7 +268,8 @@ export function connectGateway(): void {
     gatewayHadConnected = true;
   };
 
-  gateway.onmessage = (ev) => {
+  socket.onmessage = (ev) => {
+    if (gateway !== socket) return;
     gatewayLastRecv = Date.now();
     const msg = JSON.parse(ev.data) as GatewayServerMessage;
     const store = useStore.getState();
@@ -273,12 +296,29 @@ export function connectGateway(): void {
         if (msg.message.author.id !== store.user?.id) {
           // Per-channel level: 'none' stays silent, 'mentions' reacts only to @-mentions, 'all' to any.
           const channelLevel = notifyLevel(msg.channelId);
-          const mentioned = mentionsMe(msg.message.content, store.user?.username);
+          /**
+           * 🔴 Гостя зовут `@ник@домен` и ТОЛЬКО так (§5.5): на сервере бывает свой тёзка, и звенеть
+           * ему на чужое обращение нельзя. Поэтому у гостя обычное имя не передаём вовсе.
+           */
+          const home = store.user?.homeInstance ?? null;
+          const mentioned = mentionsMe(
+            msg.message.content,
+            home ? null : store.user?.username,
+            home && store.user ? { username: store.user.username, domain: home.domain } : null,
+          );
           const notify = channelLevel === 'all' || (channelLevel === 'mentions' && mentioned);
           const dnd = store.user?.status === 'dnd';
-          if (notify && msg.channelId !== store.currentChannelId) store.markUnread(msg.channelId, mentioned, msg.serverId);
+          // «Смотрит ли человек эту ленту» — правило в `channelRules.isFeedOnScreen`: на телефоне
+          // «текущий канал» и «канал на экране» — РАЗНЫЕ вещи (список и лента там два экрана).
+          const chanOnScreen = isFeedOnScreen({
+            id: msg.channelId,
+            currentId: store.currentChannelId,
+            mobile: isMobile(),
+            mobilePane: store.mobilePane,
+          });
+          if (notify && !chanOnScreen) store.markUnread(msg.channelId, mentioned, msg.serverId);
           // Watching the channel — keep the persisted read mark current so a reload stays read.
-          if (msg.channelId === store.currentChannelId) {
+          if (chanOnScreen) {
             scheduleRead(`ch:${msg.channelId}`, () => void api.markChannelRead(msg.channelId).catch(() => {}));
           }
           // "Не беспокоить" (DND) additionally suppresses notification sounds (unread still tracked).
@@ -350,6 +390,46 @@ export function connectGateway(): void {
           });
         return;
       }
+      case 'federation.links': {
+        /**
+         * Что-то изменилось в связках. Событие без нагрузки: вкладка «Федерация» сама перечитает
+         * состояние целиком. Если она закрыта — просто растёт счётчик, и при открытии данные свежие.
+         */
+        store.bumpFederationRev();
+        return;
+      }
+      case 'server.access_closed': {
+        /**
+         * Нас закрыли прямо сейчас (§5.3.1). Порядок: сначала ВЫВЕСТИ из сервера, потом показать
+         * окно. Наоборот человек прочитал бы объяснение, стоя в канале, куда уже не вхож, и первое,
+         * что он сделал бы после «Понятно», — написал бы сообщение и получил отказ.
+         */
+        const name = store.servers.find((x) => x.id === msg.serverId)?.name ?? 'сервер';
+        const s = useStore.getState();
+        if (s.currentServerId === msg.serverId) {
+          if (s.voice) s.leaveVoice();
+          useStore.setState({ currentServerId: null, bootstrap: null, currentChannelId: null });
+          s.setView('dm');
+        }
+        store.noteAccessClosed({ serverId: msg.serverId, serverName: name, reason: msg.reason, contacts: msg.contacts });
+        // Рейл перечитываем: сервер остаётся в списке (членство не снято), но с этого момента он
+        // под замком, и список должен приехать в том виде, в каком его теперь отдаёт хост.
+        void store.loadServers();
+        return;
+      }
+      case 'server.access_restored': {
+        /**
+         * Держатель вернул федеративный доступ (§5.3.1). Снимаем замок и перечитываем список —
+         * членство на хосте уже восстановлено, и сервер снова открывается обычным кликом.
+         *
+         * ⚠️ Окно «сервер закрыт» гасится тем же вызовом (`clearAccessClosed` чистит и `accessNotice`):
+         * оно могло висеть на экране ровно в этот миг, и читать «закрыт» у открытого сервера хуже,
+         * чем не увидеть объяснения вовсе.
+         */
+        store.clearAccessClosed(msg.serverId);
+        void store.loadServers();
+        return;
+      }
       case 'online.snapshot':
         return store.setOnlineSnapshot(msg.users);
       case 'online.update':
@@ -409,8 +489,14 @@ export function connectGateway(): void {
         return store.upsertDm(msg.channel);
       case 'dm.create': {
         if (msg.message.author.id !== store.user?.id) {
-          if (msg.channelId !== store.currentDmId) store.markDmUnread(msg.channelId);
-          if (msg.channelId === store.currentDmId) {
+          const dmOnScreen = isFeedOnScreen({
+            id: msg.channelId,
+            currentId: store.currentDmId,
+            mobile: isMobile(),
+            mobilePane: store.mobilePane,
+          });
+          if (!dmOnScreen) store.markDmUnread(msg.channelId);
+          if (dmOnScreen) {
             scheduleRead(`dm:${msg.channelId}`, () => void api.markDmRead(msg.channelId).catch(() => {}));
           }
           // "Не беспокоить" (DND) suppresses the DM ping (unread still tracked).
@@ -431,6 +517,11 @@ export function connectGateway(): void {
         return store.removeDmMessage(msg.channelId, msg.messageId);
       case 'dm.reaction':
         return store.applyDmReaction(msg.channelId, msg.messageId, msg.emoji, msg.userId, msg.op);
+      // Прочитал на другом своём устройстве — гасим здесь (событие адресное, приходит только своим).
+      case 'read.channel':
+        return store.applyRemoteRead({ channelId: msg.channelId, serverId: msg.serverId, at: msg.at });
+      case 'read.dm':
+        return store.applyRemoteRead({ dmId: msg.dmId, at: msg.at });
       case 'typing':
         if (msg.userId && msg.userId !== store.user?.id) noteTyping(msg.channelId ?? msg.dmId ?? '', msg.userId);
         return;
@@ -579,12 +670,17 @@ export function connectGateway(): void {
     }
   };
 
-  gateway.onclose = () => {
+  socket.onclose = () => {
     gatewayHandshake();
+    // Свой таймер гасим ВСЕГДА, даже если сокет уже не активен: иначе он тикал бы до конца сессии.
+    if (ping) clearInterval(ping);
+    if (gatewayPing === ping) gatewayPing = null;
+    ping = null;
+    // Закрылся не наш сокет (сменили инстанс, переподключились) — ни обнулять ссылку, ни заводить
+    // переподключение нельзя: и то и другое ударило бы по ЖИВОМУ соединению.
+    if (gateway !== socket) return;
     // Отправленное на умершем соединении отправленным больше не считается (#126).
     subsDisconnect(subs);
-    if (gatewayPing) clearInterval(gatewayPing);
-    gatewayPing = null;
     gateway = null;
     if (getToken()) reconnect(connectGateway);
   };
@@ -616,17 +712,26 @@ export function subscribeToServers(serverIds: string[]): void {
 export function connectPresence(): void {
   const token = getToken();
   if (!token) return;
-  presence = new WebSocket(config.presenceWs);
-  const presenceHandshake = guardHandshake(presence);
+  // Та же сверка «это мой сокет», что и у гейтвея выше — причина там же.
+  const socket = new WebSocket(config.presenceWs);
+  presence = socket;
+  const presenceHandshake = guardHandshake(socket);
+  let ping: ReturnType<typeof setInterval> | null = null;
 
-  presence.onopen = () => {
+  socket.onopen = () => {
     presenceHandshake();
+    if (presence !== socket) {
+      socket.close();
+      return;
+    }
     presenceLastRecv = Date.now();
-    presence?.send(JSON.stringify({ t: 'identify', token }));
-    if (presence) presencePing = heartbeat(presence, () => presenceLastRecv);
+    socket.send(JSON.stringify({ t: 'identify', token }));
+    ping = heartbeat(socket, () => presenceLastRecv);
+    presencePing = ping;
   };
 
-  presence.onmessage = (ev) => {
+  socket.onmessage = (ev) => {
+    if (presence !== socket) return;
     presenceLastRecv = Date.now();
     const msg = JSON.parse(ev.data) as PresenceServerMessage;
     const store = useStore.getState();
@@ -637,10 +742,12 @@ export function connectPresence(): void {
     }
   };
 
-  presence.onclose = () => {
+  socket.onclose = () => {
     presenceHandshake();
-    if (presencePing) clearInterval(presencePing);
-    presencePing = null;
+    if (ping) clearInterval(ping);
+    if (presencePing === ping) presencePing = null;
+    ping = null;
+    if (presence !== socket) return;
     presence = null;
     if (getToken()) reconnect(connectPresence);
   };

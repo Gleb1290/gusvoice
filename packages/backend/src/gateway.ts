@@ -4,19 +4,14 @@ import Redis from 'ioredis';
 import { superAdminId, tokenGenValid, verifyToken } from './auth.js';
 import { clientIp, rateHit } from './authGuard.js';
 import { db } from './db/index.js';
+import { loadPeers } from './db/peerQueries.js';
 import { dmChannels, serverMembers } from './db/schema.js';
 import { eq, sql } from 'drizzle-orm';
 import { env } from './env.js';
-import {
-  mayObserveUser,
-  membershipDiff,
-  parseEnvelope,
-  shouldDeliver,
-  typingRoute,
-  visibleOnline,
-} from './gatewayRules.js';
+import { parseEnvelope, shouldDeliver, typingRoute } from './gatewayRules.js';
 import { getChannelAudience, getMemberContext } from './permissions.js';
 import { publishToChannel } from './realtime.js';
+import { createUserVisibilityHub } from './userVisibilityHub.js';
 
 interface WsLike {
   send(data: string): void;
@@ -35,11 +30,6 @@ interface Conn {
 // serverId -> connections currently subscribed to that server.
 const byServer = new Map<string, Set<Conn>>();
 
-// userId -> that user's own connections (for direct-message fan-out).
-const byUser = new Map<string, Set<Conn>>();
-
-// General online presence: userId -> active gateway connection count (online while > 0).
-const online = new Map<string, number>();
 const allConns = new Set<Conn>();
 
 // --- Unauth-DoS guards (#2, P0-2). Cheap in-process caps so an unauthenticated client can neither
@@ -52,142 +42,34 @@ const MAX_PREAUTH_FRAMES = 10; // frames tolerated before identify (a normal cli
 const MAX_FRAME_BYTES = 16 * 1024; // any single frame larger than this is abuse (identify JWT is small)
 const connsByIp = new Map<string, number>();
 
+/**
+ * Вся память шлюза о людях — чьи это соединения, кто онлайн, кто о ком может знать, какой состав
+ * серверов мы видели — живёт в хабе (`userVisibilityHub.ts`, #143). Там она проверяется тестом без
+ * Redis, базы и сокетов; здесь остаются только запросы в базу и сам транспорт.
+ */
+const hub = createUserVisibilityHub<Conn>({
+  loadPeers,
+  now: () => Date.now(),
+  superAdminId,
+  send: (conn, data) => conn.socket.send(data),
+});
+
 /** Whether the user currently has ≥1 live gateway socket — used to gate offline push (push.ts). */
 export function isUserOnline(userId: string): boolean {
-  return (online.get(userId) ?? 0) > 0;
-}
-
-function addUserConn(conn: Conn, userId: string): void {
-  let set = byUser.get(userId);
-  if (!set) byUser.set(userId, (set = new Set()));
-  set.add(conn);
-}
-
-function removeUserConn(conn: Conn): void {
-  if (!conn.userId) return;
-  const set = byUser.get(conn.userId);
-  if (!set) return;
-  set.delete(conn);
-  if (set.size === 0) byUser.delete(conn.userId);
+  return hub.isOnline(userId);
 }
 
 /**
- * С кем у человека есть общий сервер или ЛС (#136) — кому можно знать о его онлайне и статусе.
- *
- * ⚠️ В кэше лежит ПРОМИС, а не готовый набор: два события подряд об одном человеке (статус, затем
- * игра) дожидаются одного и того же запроса и уходят в том порядке, в каком возникли. С готовым
- * набором второе могло бы проскочить мимо первого, пока тот ждёт базу, и клиент остался бы со
- * старым статусом.
- * ⚠️ Срок короткий, а состав серверов шлюз отслеживает сам (`onServerInvalidate`): кэш нужен не для
- * точности, а чтобы частые события не били в базу. ЛС в сроке догоняются сами.
- * ⚠️ Ошибка базы — пустой набор (никто лишний не получит) и запись из кэша удаляется, чтобы следующий
- * вызов спросил заново, а не держал человека «невидимым» весь срок.
- * 🔴 **Ещё не ответивший запрос не протухает** (нашёл Codex 15.09): срок считается от ОТВЕТА, а не от
- * начала. Раньше событие A запускало зависший запрос, через 60 с событие B считало запись старой и
- * запускало второй; второй отвечал первым — и получатель видел B раньше A. Сам запрос ограничен
- * `PEERS_LOAD_TIMEOUT_MS`, поэтому ожидание не бесконечно: по таймауту — пустой набор и новая попытка.
+ * Кто-то мог вступить в сервер или уйти из него — отдать хабу новый состав (#136). Сам
+ * `server.invalidate` летит и на правку канала, и на роль, поэтому решение «менялся ли состав»
+ * принимает хаб, а здесь только запрос.
  */
-const PEERS_TTL_MS = 60_000;
-const PEERS_LOAD_TIMEOUT_MS = 10_000;
-const peersCache = new Map<string, { at: number; settled: boolean; p: Promise<Set<string>> }>();
-
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('peers load timeout')), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
-}
-
-async function loadPeers(userId: string): Promise<Set<string>> {
-  const res = await db.execute(sql`
-    SELECT b.user_id AS id FROM server_members a
-      JOIN server_members b ON b.server_id = a.server_id
-      WHERE a.user_id = ${userId}
-    UNION SELECT user_b AS id FROM dm_channels WHERE user_a = ${userId}
-    UNION SELECT user_a AS id FROM dm_channels WHERE user_b = ${userId}
-  `);
-  return new Set((res.rows as { id: string }[]).map((r) => r.id));
-}
-
-function peersOf(userId: string): Promise<Set<string>> {
-  const hit = peersCache.get(userId);
-  if (hit && (!hit.settled || Date.now() - hit.at < PEERS_TTL_MS)) return hit.p;
-  if (peersCache.size > 5000) {
-    // Грубый потолок. Выкидываем только ответившие: ожидающий запрос держит порядок событий (см. выше).
-    for (const [k, e] of peersCache) if (e.settled) peersCache.delete(k);
-  }
-  const entry = { at: Date.now(), settled: false, p: Promise.resolve(new Set<string>()) };
-  entry.p = withTimeout(loadPeers(userId), PEERS_LOAD_TIMEOUT_MS).then(
-    (peers) => {
-      entry.settled = true;
-      entry.at = Date.now();
-      return peers;
-    },
-    () => {
-      entry.settled = true;
-      if (peersCache.get(userId) === entry) peersCache.delete(userId);
-      return new Set<string>();
-    },
-  );
-  peersCache.set(userId, entry);
-  return entry.p;
-}
-
-/**
- * Разослать событие О ЧЕЛОВЕКЕ только тем, кому о нём можно знать (#136). Замена прежнего
- * `broadcastAll`, который слал всем сокетам, в том числе не представившимся.
- *
- * ⚠️ Обходим только представившихся (`byUser`) — безымянных соединений там нет по построению, а
- * `mayObserveUser` отбивает их ещё раз.
- */
-function deliverAboutUser(subjectId: string, msg: GatewayServerMessage): void {
-  void peersOf(subjectId).then((peers) => {
-    const data = JSON.stringify(msg);
-    const su = superAdminId();
-    for (const [uid, set] of byUser) {
-      if (!mayObserveUser(uid, subjectId, peers, su)) continue;
-      for (const c of set) c.socket.send(data);
-    }
-  });
-}
-
-/** Снимок «кто онлайн» для одного соединения — только те, о ком ему можно знать (#136). */
-async function sendOnlineSnapshot(conn: Conn): Promise<void> {
-  const uid = conn.userId;
-  if (!uid) return;
-  const peers = await peersOf(uid);
-  if (conn.userId !== uid) return;
-  send(conn.socket, { t: 'online.snapshot', users: visibleOnline(online.keys(), uid, peers, superAdminId()) });
-}
-
-/**
- * Последний известный шлюзу состав сервера — чтобы на `server.invalidate` понять, менялся ли он (#136).
- * Сам `server.invalidate` летит и на правку канала, и на роль; пересылать снимки всему серверу
- * имеет смысл, только когда кто-то вступил или ушёл.
- */
-const serverMembersSeen = new Map<string, Set<string>>();
-
 async function onServerInvalidate(serverId: string): Promise<void> {
   const rows = await db
     .select({ userId: serverMembers.userId })
     .from(serverMembers)
     .where(eq(serverMembers.serverId, serverId));
-  const next = new Set(rows.map((r) => r.userId));
-  const { changed, affected } = membershipDiff(serverMembersSeen.get(serverId), next);
-  if (next.size === 0) serverMembersSeen.delete(serverId);
-  else serverMembersSeen.set(serverId, next);
-  if (!changed) return;
-  for (const uid of affected) peersCache.delete(uid);
-  for (const uid of affected) for (const c of byUser.get(uid) ?? []) void sendOnlineSnapshot(c);
+  await hub.applyServerMembers(serverId, new Set(rows.map((r) => r.userId)));
 }
 
 /**
@@ -195,7 +77,7 @@ async function onServerInvalidate(serverId: string): Promise<void> {
  * чужой «невидимый» маскируют в «не в сети» сами. Получатели — см. `deliverAboutUser` (#136).
  */
 export function broadcastUserStatus(userId: string, status: PresenceStatus, customStatus: CustomStatus | null): void {
-  deliverAboutUser(userId, { t: 'user.status', userId, status, customStatus });
+  hub.deliverAboutUser(userId, { t: 'user.status', userId, status, customStatus });
 }
 
 /**
@@ -212,7 +94,7 @@ export function broadcastUserProfile(
   avatarUrl: string | null,
   animatedAvatarUrl: string | null,
 ): void {
-  deliverAboutUser(userId, { t: 'user.update', userId, displayName, avatarUrl, animatedAvatarUrl });
+  hub.deliverAboutUser(userId, { t: 'user.update', userId, displayName, avatarUrl, animatedAvatarUrl });
 }
 
 /**
@@ -220,7 +102,7 @@ export function broadcastUserProfile(
  * живёт в эфемерном хранилище (activity.ts), здесь только дельта. Получатели — `deliverAboutUser` (#136).
  */
 export function broadcastUserActivity(userId: string, activity: GameActivity | null): void {
-  deliverAboutUser(userId, { t: 'user.activity', userId, activity });
+  hub.deliverAboutUser(userId, { t: 'user.activity', userId, activity });
 }
 
 function subscribe(conn: Conn, serverId: string): void {
@@ -310,8 +192,7 @@ export function registerGateway(app: FastifyInstance): void {
         void onServerInvalidate(serverId).catch(() => {});
       }
     } else if (channel.startsWith('gw:user:')) {
-      const set = byUser.get(channel.slice('gw:user:'.length));
-      if (set) for (const conn of set) conn.socket.send(payload);
+      for (const conn of hub.connsOf(channel.slice('gw:user:'.length))) conn.socket.send(payload);
     }
   });
 
@@ -362,14 +243,14 @@ export function registerGateway(app: FastifyInstance): void {
             }
             conn.userId = claims.sub;
             conn.tokenGen = claims.gen ?? 0;
-            addUserConn(conn, claims.sub);
-            const was = online.get(claims.sub) ?? 0;
-            online.set(claims.sub, was + 1);
-            if (was === 0) deliverAboutUser(claims.sub, { t: 'online.update', userId: claims.sub, online: true });
+            hub.attach(conn, claims.sub);
+            // Первый сокет человека — только тогда «зашёл в сеть» (вкладок и устройств бывает много).
+            if (hub.goOnline(claims.sub))
+              hub.deliverAboutUser(claims.sub, { t: 'online.update', userId: claims.sub, online: true });
           }
           send(socket, { t: 'ready', userId: conn.userId });
           // Только те, с кем есть общий сервер или ЛС, — а не весь инстанс (#136).
-          await sendOnlineSnapshot(conn);
+          await hub.sendOnlineSnapshot(conn);
         } catch {
           send(socket, { t: 'error', message: 'invalid token' });
           socket.close();
@@ -448,8 +329,7 @@ export function registerGateway(app: FastifyInstance): void {
           const route = typingRoute(msg, { userId: uid, servers: conn.servers }, () => peerId);
           if (!route) return;
           if (route.kind === 'dm') {
-            const set = byUser.get(route.peerId);
-            if (set) for (const c of set) send(c.socket, { t: 'typing', dmId: route.dmId, userId: uid });
+            for (const c of hub.connsOf(route.peerId)) send(c.socket, { t: 'typing', dmId: route.dmId, userId: uid });
             return;
           }
           // Канал: аудитория считается по факту, и отправитель обязан в неё входить — иначе можно
@@ -481,18 +361,12 @@ export function registerGateway(app: FastifyInstance): void {
       if (n <= 0) connsByIp.delete(ip);
       else connsByIp.set(ip, n);
       allConns.delete(conn);
-      removeUserConn(conn);
+      hub.detach(conn);
       for (const serverId of conn.servers) byServer.get(serverId)?.delete(conn);
       conn.servers.clear();
-      if (conn.userId) {
-        const n = (online.get(conn.userId) ?? 1) - 1;
-        if (n <= 0) {
-          online.delete(conn.userId);
-          deliverAboutUser(conn.userId, { t: 'online.update', userId: conn.userId, online: false });
-        } else {
-          online.set(conn.userId, n);
-        }
-      }
+      // Ушёл последний сокет — только тогда «вышел из сети».
+      if (conn.userId && hub.goOffline(conn.userId))
+        hub.deliverAboutUser(conn.userId, { t: 'online.update', userId: conn.userId, online: false });
     };
     socket.on('close', cleanup);
     socket.on('error', cleanup);

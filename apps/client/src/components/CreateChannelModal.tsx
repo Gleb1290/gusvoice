@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import { Icon } from './Icon';
+import { Select } from './Select';
 
 export function CreateChannelModal({
   serverId,
@@ -77,14 +78,16 @@ export function CreateChannelModal({
         {categories.length > 0 && (
           <label className="field">
             Категория
-            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <option value="">— без категории —</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+            <Select
+              value={categoryId}
+              onChange={setCategoryId}
+              ariaLabel="Категория"
+              title="Категория"
+              options={[
+                { value: '', label: '— без категории —' },
+                ...categories.map((c) => ({ value: c.id, label: c.name })),
+              ]}
+            />
           </label>
         )}
 

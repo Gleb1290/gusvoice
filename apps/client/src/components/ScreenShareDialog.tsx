@@ -14,6 +14,7 @@ import { formatCombo, getHotkeys, isDesktop } from '../hotkeys';
 import { gvScreenSources, type ScreenSource } from '../nativeScreenShare';
 import { Icon } from './Icon';
 import { Toggle } from './Toggle';
+import { Select } from './Select';
 
 const MODE_HINT: Record<StreamSettings['mode'], string> = {
   detail: 'Чёткость — резкая картинка для текста и кода.',
@@ -160,7 +161,11 @@ export function ScreenShareDialog({
       else await onStart({ sourceId: selectedId, isWindow: tab === 'window' });
       // success → the caller closes the dialog (it owns the sharing state).
     } catch (e) {
-      setError((e as Error)?.message || 'Не удалось начать трансляцию');
+      // 🔴 Оболочка отказывает СТРОКОЙ, а не `Error` (так устроен `invoke` Tauri): раньше здесь читали
+      // только `.message`, и причина вроде «signal connection timed out» терялась за общей фразой —
+      // на пробной сборке 23.09 разбирать пришлось через отладчик.
+      const reason = typeof e === 'string' ? e : (e as Error)?.message;
+      setError(reason ? `Не удалось начать трансляцию: ${reason}` : 'Не удалось начать трансляцию');
       setStarting(false);
     }
   }
@@ -369,19 +374,15 @@ export function ScreenShareDialog({
               <label className="settings-group-label" htmlFor="ss-codec">
                 Кодек
               </label>
-              <select
+              <Select
                 id="ss-codec"
-                className="settings-select"
                 value={settings.codec}
-                aria-describedby="ss-codec-hint"
-                onChange={(e) => update({ codec: e.target.value as StreamCodec })}
-              >
-                {CODEC_OPTIONS.map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
+                ariaDescribedBy="ss-codec-hint"
+                ariaLabel="Кодек"
+                title="Кодек"
+                onChange={(v) => update({ codec: v as StreamCodec })}
+                options={CODEC_OPTIONS.map((c) => ({ value: c.value, label: c.label }))}
+              />
               <span className="ss-hint" id="ss-codec-hint">
                 {CODEC_HINT[settings.codec]}
               </span>

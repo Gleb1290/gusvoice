@@ -44,6 +44,19 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- Ссылка-приглашение из мессенджера (#139, F4, §4.2.2): страница `/i/<код>` на хосте
+                 вызывает `gusvoice://join?invite=…`, и сюда приходит уже запущенное приложение
+                 (singleTask → onNewIntent) или холодный старт.
+                 🔴 Своя СХЕМА, а не App Links по https: те требуют перечислить домены при сборке и
+                 положить assetlinks.json на каждом — а домены инстансов друзей нам заранее
+                 неизвестны. Схема работает для любого инстанса.
+                 ⚠️ BROWSABLE обязателен: без него браузер ссылку нам не отдаст. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="gusvoice" />
+            </intent-filter>
         </activity>
 
         <!-- Voice-call foreground service (#89). Not exported — only our own JS bridge starts it.

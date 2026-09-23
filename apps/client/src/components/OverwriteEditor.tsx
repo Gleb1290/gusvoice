@@ -4,6 +4,8 @@ import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
+import { Select } from './Select';
+import { roleHex } from './UserContextMenu';
 
 // PRIORITY_SPEAKER and DEAFEN_MEMBERS are intentionally absent: neither does anything yet (see the
 // note on PERMS in MembersRolesModal), so offering them per-channel only promises what we don't do.
@@ -218,35 +220,30 @@ export function OverwriteEditor({
         </div>
       ))}
 
-      <select
+      <Select
         className="ow-add"
         value=""
-        onChange={(e) => {
-          const v = e.target.value;
+        placeholder="+ добавить роль или участника…"
+        ariaLabel="Добавить роль или участника"
+        title="Добавить роль или участника"
+        onChange={(v) => {
           if (v.startsWith('r:')) addTarget('role', v.slice(2));
           else if (v.startsWith('m:')) addTarget('member', v.slice(2));
         }}
-      >
-        <option value="">+ добавить роль или участника…</option>
-        {addableRoles.length > 0 && (
-          <optgroup label="Роли">
-            {addableRoles.map((r) => (
-              <option key={r.id} value={`r:${r.id}`}>
-                {r.isEveryone ? '@everyone' : r.name}
-              </option>
-            ))}
-          </optgroup>
-        )}
-        {addableMembers.length > 0 && (
-          <optgroup label="Участники">
-            {addableMembers.map((m) => (
-              <option key={m.user.id} value={`m:${m.user.id}`}>
-                {m.user.displayName}
-              </option>
-            ))}
-          </optgroup>
-        )}
-      </select>
+        options={[
+          ...addableRoles.map((r) => ({
+            value: `r:${r.id}`,
+            label: r.isEveryone ? '@everyone' : r.name,
+            dot: r.color ? roleHex(r.color) : undefined,
+            group: 'Роли',
+          })),
+          ...addableMembers.map((m) => ({
+            value: `m:${m.user.id}`,
+            label: m.user.displayName,
+            group: 'Участники',
+          })),
+        ]}
+      />
     </div>
   );
 }

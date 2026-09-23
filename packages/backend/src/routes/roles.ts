@@ -153,6 +153,9 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
     if (!role) return reply.code(404).send({ error: 'not found' });
     if (role.isEveryone) return reply.code(400).send({ error: 'cannot delete @everyone' });
+    // Системная роль гостей (§5.9) — как `@everyone`: удалишь её, и ограничивать гостей станет
+    // нечем, а выданные ей переопределения каналов молча перестанут действовать.
+    if (role.isGuests) return reply.code(400).send({ error: 'роль «Гости» удалить нельзя' });
     const ctx = await getMemberContext(role.serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
@@ -179,6 +182,13 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
 
     const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
     if (!role || role.serverId !== serverId) return reply.code(404).send({ error: 'role not found' });
+    /**
+     * 🔴 «Гости» руками не выдаётся (§5.9): она действует ПО ПРИЗНАКУ гостя (`baseRoleFor`), а не по
+     * строке в `member_roles`. Выданная местному, она не ограничила бы его, а наоборот добавила бы
+     * прав поверх `@everyone` — владелец сервера, сужая гостям права, расширил бы их своим.
+     * Гостю же эта строка не даёт ничего: роль у него и так базовая.
+     */
+    if (role.isGuests) return reply.code(400).send({ error: 'роль «Гости» выдаётся гостям сама' });
 
     const block = assignRoleBlock({
       isManager: has(ctx.serverPermissions, Permission.MANAGE_ROLES),
@@ -215,6 +225,9 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
 
     const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
+    // Снять «Гостей» тоже нельзя, и по той же причине: у гостя она не строкой, а правилом — снятие
+    // выглядело бы как действие, а не меняло бы ничего.
+    if (role?.isGuests) return reply.code(400).send({ error: 'роль «Гости» снять нельзя' });
     if (role && role.position >= highestPosition(ctx)) {
       return reply.code(403).send({ error: 'нельзя снять роль своего уровня или выше' });
     }

@@ -7,6 +7,8 @@ import {
   diagReports,
   dmReads,
   emailVerifications,
+  federationGuestGrants,
+  federationMemberships,
   memberRoles,
   passwordResets,
   pushDevices,
@@ -42,6 +44,17 @@ export async function anonymizeAccountRows(tx: PgDatabase<any, any, any>, userId
   await tx.delete(channelReads).where(eq(channelReads.userId, userId));
   await tx.delete(dmReads).where(eq(dmReads.userId, userId));
   await tx.delete(diagReports).where(eq(diagReports.userId, userId));
+  /**
+   * Где человек был гостем (F3, §5.5). Аккаунта больше нет — значит и «Где я гость» пусто.
+   *
+   * 🔴 Список хостов для `user.revoked` берётся ИЗ ЭТОГО ЖЕ индекса, поэтому собрать и разослать его
+   * обязан вызывающий ДО транзакции (`accountDelete.ts`). Почистить сначала, а потом искать, кому
+   * сообщать, — значит не сообщить никому: гость остался бы жить на хостах до их суточной сверки.
+   */
+  await tx.delete(federationMemberships).where(eq(federationMemberships.userId, userId));
+  // Поручительства перед хостами (аудит 19.09, F-04): аккаунта нет — ручаться больше не за кого, и
+  // запоздавшее «членство» от хоста про обезличенную строку приниматься не должно.
+  await tx.delete(federationGuestGrants).where(eq(federationGuestGrants.userId, userId));
   await tx.update(users).set(anonymizedUserFields(userId, unusablePasswordHash, now)).where(eq(users.id, userId));
   return memberOf.map((s) => s.serverId);
 }

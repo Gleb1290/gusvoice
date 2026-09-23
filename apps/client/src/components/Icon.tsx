@@ -26,6 +26,7 @@ export type IconName =
   | 'sticker'
   | 'play'
   | 'pause'
+  | 'stop'
   | 'reply'
   | 'more'
   | 'signal'
@@ -33,6 +34,7 @@ export type IconName =
   | 'edit'
   | 'trash'
   | 'chevron-down'
+  | 'chevron-up'
   | 'chevron-right'
   | 'chevron-left'
   | 'mail'
@@ -65,6 +67,7 @@ export type IconName =
   | 'download'
   | 'minus'
   | 'maximize'
+  | 'globe'
   | 'camera-flip';
 
 const PATHS: Record<IconName, string[]> = {
@@ -96,6 +99,7 @@ const PATHS: Record<IconName, string[]> = {
   // Плеер голосовых (#20).
   play: ['M8 5 L19 12 L8 19 Z'],
   pause: ['M9 5 V19 M15 5 V19'],
+  stop: ['M6.5 6.5 h11 v11 h-11 z'],
   settings: [
     'M4 7 H20 M4 17 H20',
     'M9 4.4 a2.6 2.6 0 1 0 0 5.2 a2.6 2.6 0 0 0 0 -5.2 Z',
@@ -121,6 +125,7 @@ const PATHS: Record<IconName, string[]> = {
   edit: ['M4 20 h4 L18 10 a2 2 0 0 0 -3 -3 L5 17 Z', 'M13 7 L17 11'],
   trash: ['M4 7 H20', 'M9 7 V5 a1 1 0 0 1 1 -1 h4 a1 1 0 0 1 1 1 V7', 'M6 7 L7 20 a1 1 0 0 0 1 1 h8 a1 1 0 0 0 1 -1 L18 7'],
   'chevron-down': ['M6 9 L12 15 L18 9'],
+  'chevron-up': ['M6 15 L12 9 L18 15'],
   'chevron-right': ['M9 6 L15 12 L9 18'],
   'chevron-left': ['M15 6 L9 12 L15 18'],
   mail: ['M3 5 h18 v14 h-18 z', 'M3 7 L12 13 L21 7'],
@@ -192,6 +197,18 @@ const PATHS: Record<IconName, string[]> = {
   keyboard: ['M3 6 h18 v12 h-18 z', 'M7 10 v.01 M11 10 v.01 M15 10 v.01 M7 14 h10'],
   download: ['M12 4 V15', 'M8 11 L12 15 L16 11', 'M5 19 H19'],
   minus: ['M5 12 H19'],
+  /**
+   * Значок ДРУГОГО инстанса (#139, F4). Шар с параллелью и меридианом: этим знаком помечается всё
+   * чужое — карточка приглашения, группа в рейле, гость в списке участников.
+   *
+   * ⚠️ Меридиан нарисован дугами, а не эллипсом: на 12 px эллипс внутри круга сливается в пятно, а
+   * две дуги держат силуэт «это не наш дом» даже мелким.
+   */
+  globe: [
+    'M12 3 a9 9 0 1 0 0 18 a9 9 0 0 0 0 -18 Z',
+    'M3 12 H21',
+    'M12 3 a13 13 0 0 1 0 18 a13 13 0 0 1 0 -18 Z',
+  ],
 };
 
 /**

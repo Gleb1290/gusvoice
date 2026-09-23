@@ -16,6 +16,13 @@ function emit() {
   for (const l of listeners) l();
 }
 
+/** Забыть, кто печатал: после перехода в другой инстанс это чужие люди в чужих каналах (§5.7). */
+export function clearTyping(): void {
+  if (typing.size === 0) return;
+  typing.clear();
+  emit();
+}
+
 function ensureTimer() {
   if (timer) return;
   timer = setInterval(() => {

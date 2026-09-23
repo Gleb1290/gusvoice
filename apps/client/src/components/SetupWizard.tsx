@@ -6,6 +6,7 @@ import { RELEASES_URL } from '../config';
 import { inviteLink } from '../inviteLinkRules';
 import { toastError } from '../toast';
 import { useStore } from '../store';
+import { confirmAction } from '../confirm';
 import { Goose } from './Goose';
 import { Icon } from './Icon';
 import { InstanceIconPicker, RegistrationPolicyPicker } from './InstanceSettingsForms';
@@ -608,7 +609,14 @@ export function SetupConfigureWizard({ onFinished }: { onFinished: () => Promise
             style={{ color: 'var(--muted)' }}
             disabled={busy}
             onClick={() => {
-              if (window.confirm('Пропустить настройку? Всё это можно сделать потом в админ-панели.')) void finish();
+              void (async () => {
+                const ok = await confirmAction({
+                  title: 'Пропустить настройку?',
+                  body: 'Всё это можно сделать потом в админ-панели — мастер просто закроется.',
+                  confirmLabel: 'Пропустить',
+                });
+                if (ok) await finish();
+              })();
             }}
           >
             Пропустить настройку

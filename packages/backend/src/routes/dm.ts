@@ -1,12 +1,14 @@
-import { VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
+import { FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
 import type { Attachment, DmChannel, MessageReplyPreview, ReactionGroup } from '@gusvoice/shared';
 import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { isSuperAdmin, requireAuth } from '../auth.js';
-import { decideDmOpen, DM_NO_SHARED_SERVER_ERROR } from '../dmRules.js';
+import { asUserId } from '../superAdminRules.js';
+import { canWriteDm, DM_NO_SHARED_SERVER_ERROR, DM_PEER_GONE_ERROR, openDm } from '../dmRules.js';
 import { attachmentUploadBlock, messageSendBlock, pushDebounced, retryMessage } from '../authGuard.js';
 import { db } from '../db/index.js';
+import { shareServer } from '../db/peerQueries.js';
 import { dmChannels, dmMessageReactions, dmMessages, dmReads, users } from '../db/schema.js';
 import { contentPreview, sendPushToUsers } from '../push.js';
 import { publishToUser } from '../realtime.js';
@@ -90,17 +92,6 @@ async function dmReplyPreviewsFor(ids: (string | null)[]): Promise<Map<string, M
   return out;
 }
 
-/** Есть ли сервер, где состоят оба. Один запрос по индексу `server_members(user_id)` (миграция 0060). */
-async function shareServer(userA: string, userB: string): Promise<boolean> {
-  const res = await db.execute(sql`
-    SELECT 1 FROM server_members a
-      JOIN server_members b ON b.server_id = a.server_id AND b.user_id = ${userB}
-      WHERE a.user_id = ${userA}
-      LIMIT 1
-  `);
-  return res.rows.length > 0;
-}
-
 /** Load a DM channel only if `me` is a participant; returns the row and the other user's id. */
 async function loadDm(dmId: string, me: string): Promise<{ row: DmRow; otherId: string } | null> {
   const [row] = await db.select().from(dmChannels).where(eq(dmChannels.id, dmId)).limit(1);
@@ -115,8 +106,10 @@ const attachmentSchema = z
       name: z.string().min(1).max(300),
       contentType: z.string().min(1).max(150),
       size: z.number().int().nonnegative(),
-      width: z.number().int().positive().nullish(),
-      height: z.number().int().positive().nullish(),
+      // Размер картинки (#194) — со слов отправителя, клиент задаёт им только место до загрузки. Потолок —
+      // чтобы в jsonb не уезжали числа, которых у картинок не бывает (`imageSize.IMAGE_DIM_MAX`).
+      width: z.number().int().positive().max(20_000).nullish(),
+      height: z.number().int().positive().max(20_000).nullish(),
       // Голосовое сообщение (#20) — те же границы, что в канальном роуте: данные чужие.
       waveform: z.array(z.number().int().min(0).max(100)).max(WAVEFORM_BUCKETS).nullish(),
       durationMs: z.number().int().positive().max(VOICE_MAX_MS).nullish(),
@@ -171,10 +164,13 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     const { id: dmId } = z.object({ id: z.string() }).parse(req.params);
     const [row] = await db.select().from(dmChannels).where(eq(dmChannels.id, dmId)).limit(1);
     if (!row || (row.userA !== me && row.userB !== me)) return reply.code(404).send({ error: 'not found' });
+    const at = new Date();
     await db
       .insert(dmReads)
-      .values({ userId: me, dmChannelId: dmId, lastReadAt: new Date() })
-      .onConflictDoUpdate({ target: [dmReads.userId, dmReads.dmChannelId], set: { lastReadAt: new Date() } });
+      .values({ userId: me, dmChannelId: dmId, lastReadAt: at })
+      .onConflictDoUpdate({ target: [dmReads.userId, dmReads.dmChannelId], set: { lastReadAt: at } });
+    // То же, что и у каналов: остальные СВОИ устройства гасят значок этой переписки.
+    void publishToUser(me, { t: 'read.dm', dmId, at: at.toISOString() }).catch(() => {});
     return { ok: true };
   });
 
@@ -187,31 +183,47 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     const [other] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!other) return reply.code(404).send({ error: 'user not found' });
 
-    const [a, b] = me < userId ? [me, userId] : [userId, me];
-    let [row] = await db
-      .select()
-      .from(dmChannels)
-      .where(and(eq(dmChannels.userA, a), eq(dmChannels.userB, b)))
-      .limit(1);
-    // Новая беседа — только при общем сервере (F0, #139). Правило и его граница — в `dmRules.ts`.
-    const verdict = decideDmOpen({
-      exists: !!row,
-      sharedServer: row ? false : await shareServer(me, userId),
-      initiatorIsSuperAdmin: isSuperAdmin(me),
-    });
-    if (verdict === 'no-shared-server') return reply.code(403).send({ error: DM_NO_SHARED_SERVER_ERROR });
-    if (!row) {
-      [row] = await db.insert(dmChannels).values({ id: id(), userA: a, userB: b }).onConflictDoNothing().returning();
-      // Гонка двух одновременных «Написать» у одной пары: вторая вставка ничего не вернула — берём первую.
-      if (!row) {
-        [row] = await db
-          .select()
-          .from(dmChannels)
-          .where(and(eq(dmChannels.userA, a), eq(dmChannels.userB, b)))
-          .limit(1);
-      }
+    /**
+     * Личка между инстансами выключена до #141 (требование 22, §5.8).
+     *
+     * 🔴 Дело не в лени: беседа у нас живёт ОДНОЙ строкой на нашем инстансе, а переписка людей двух
+     * инстансов обязана пережить падение любого из них (§7.2) — это копии у обоих и запись через
+     * инстанс собеседника. Половинчатая личка, которая исчезает вместе с хостом, хуже, чем её
+     * отсутствие: люди успеют ей поверить.
+     */
+    const [meRow] = await db.select({ home: users.homeInstanceId }).from(users).where(eq(users.id, me)).limit(1);
+    if (other.homeInstanceId !== null || meRow?.home) {
+      return reply.code(403).send({ error: FED_ERRORS.dmUnavailable });
     }
-    return serializeDmChannel(row, other);
+
+    // Новая беседа — только при общем сервере (F0, #139). Правило, порядок шагов и разбор гонки —
+    // в `dmRules.ts openDm`; здесь только запросы.
+    const opened = await openDm<DmRow>(
+      {
+        findExisting: async (a, b) => {
+          const [row] = await db
+            .select()
+            .from(dmChannels)
+            .where(and(eq(dmChannels.userA, a), eq(dmChannels.userB, b)))
+            .limit(1);
+          return row ?? null;
+        },
+        shareServer: (one, two) => shareServer(one, two),
+        initiatorIsSuperAdmin: () => isSuperAdmin(asUserId(me)),
+        create: async (a, b) => {
+          const [row] = await db
+            .insert(dmChannels)
+            .values({ id: id(), userA: a, userB: b })
+            .onConflictDoNothing()
+            .returning();
+          return row ?? null;
+        },
+      },
+      me,
+      userId,
+    );
+    if (!opened.ok) return reply.code(403).send({ error: DM_NO_SHARED_SERVER_ERROR });
+    return serializeDmChannel(opened.row, other);
   });
 
   // Messages of a conversation (newest-last). Cursor: ?before=<ISO timestamp>.
@@ -299,10 +311,14 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'вложение должно быть загружено через этот сервер' });
 
     const dm = await loadDm(dmId, me);
-    if (!dm) return reply.code(404).send({ error: 'not found' });
     // Собеседник удалил аккаунт (F0 #139): история остаётся читаемой, но писать больше некому.
-    const [peer] = await db.select({ deletedAt: users.deletedAt }).from(users).where(eq(users.id, dm.otherId)).limit(1);
-    if (!peer || peer.deletedAt) return reply.code(403).send({ error: 'Собеседник удалил аккаунт' });
+    // Само правило (и почему «не участник» — это 404, а не 403) — в `dmRules.ts canWriteDm`.
+    const [peer] = dm
+      ? await db.select({ deletedAt: users.deletedAt }).from(users).where(eq(users.id, dm.otherId)).limit(1)
+      : [];
+    const write = canWriteDm({ member: !!dm, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
+    if (write === 'not-a-member' || !dm) return reply.code(404).send({ error: 'not found' });
+    if (write === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
 
     // A reply must point at an existing message in this same conversation.
     let replyToId: string | null = null;

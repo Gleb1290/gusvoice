@@ -24,7 +24,18 @@ import { isIP } from 'node:net';
  */
 
 const MAX_REDIRECTS = 3;
+/** Срок ТИШИНЫ сокета: сбрасывается любым байтом — поэтому один он не защищает (см. ниже). */
 const TIMEOUT_MS = 5000;
+/**
+ * Общий срок на весь запрос (аудит 19.09, F-09; подтверждено run-1).
+ *
+ * 🔴 `timeout` у `http.request` — это срок молчания, а не запроса: сосед, отдающий по байту раз в
+ * четыре секунды, держал соединение часами (ответ до 1 МБ, файл до 6 МБ), и каждый проход очереди
+ * или сверки добавлял ещё один зависший сокет. Документы федерации — килобайты, им хватает 20 с;
+ * файлу (аватар до 5 МБ) — минуты.
+ */
+export const REQUEST_DEADLINE_MS = 20_000;
+export const FILE_DEADLINE_MS = 60_000;
 /** Хватает на `<head>`; тело дальше этого не читаем, чтобы гигабайтный ответ не занял память. */
 const MAX_BYTES = 256 * 1024;
 
@@ -181,7 +192,19 @@ const safeLookup: typeof dnsLookup = ((hostname: string, options: unknown, cb: u
   });
 }) as typeof dnsLookup;
 
-export type SafeResponse = { url: string; status: number; contentType: string; body: string };
+export type SafeResponse = {
+  url: string;
+  status: number;
+  contentType: string;
+  body: string;
+  /**
+   * Сырые байты ответа — заполняются только при `binary: true` (F2: аватар соседа).
+   *
+   * 🔴 У картинки `body` брать НЕЛЬЗЯ: он собран как utf8, и любой байт вне допустимой
+   * последовательности превращается в символ замены — файл тихо портится, а размер даже растёт.
+   */
+  bytes?: Buffer;
+};
 
 /**
  * Если в URL уже стоит IP-литерал — проверить его ЗДЕСЬ.
@@ -238,11 +261,12 @@ function once(
   url: URL,
   headers: Record<string, string>,
   lookup: TestLookup = safeLookup,
-  opts: { method?: 'GET' | 'POST'; body?: Buffer; maxBytes?: number } = {},
+  opts: { method?: 'GET' | 'POST'; body?: Buffer; maxBytes?: number; binary?: boolean; deadlineMs?: number } = {},
 ): Promise<SafeResponse & { location?: string; truncated: boolean }> {
   if (lookup === safeLookup) assertLiteralAllowed(url.hostname);
   const isHttps = url.protocol === 'https:';
   const maxBytes = opts.maxBytes ?? MAX_BYTES;
+  const deadlineMs = opts.deadlineMs ?? REQUEST_DEADLINE_MS;
   const req = (isHttps ? httpsRequest : httpRequest)({
     protocol: url.protocol,
     hostname: url.hostname,
@@ -254,7 +278,15 @@ function once(
     timeout: TIMEOUT_MS,
   });
 
-  return new Promise((resolve, reject) => {
+  // 🔴 Общий срок: по истечении сокет рвётся, а уже полученный кусок ответа НЕ отдаётся — половина
+  // JSON или картинки хуже, чем честная ошибка (см. `REQUEST_DEADLINE_MS`).
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    req.destroy(new Error(`срок запроса истёк (${deadlineMs} мс)`));
+  }, deadlineMs);
+
+  return new Promise<SafeResponse & { location?: string; truncated: boolean }>((resolve, reject) => {
     req.on('response', (res) => {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -268,11 +300,14 @@ function once(
         }
       });
       const finish = () =>
-        resolve({
+        timedOut
+          ? reject(new Error(`срок запроса истёк (${deadlineMs} мс)`))
+          : resolve({
           url: url.toString(),
           status: res.statusCode ?? 0,
           contentType: String(res.headers['content-type'] ?? ''),
-          body: Buffer.concat(chunks).toString('utf8'),
+          body: opts.binary ? '' : Buffer.concat(chunks).toString('utf8'),
+          ...(opts.binary ? { bytes: Buffer.concat(chunks) } : {}),
           location: typeof res.headers.location === 'string' ? res.headers.location : undefined,
           truncated,
         });
@@ -283,7 +318,7 @@ function once(
     req.on('timeout', () => req.destroy(new Error('таймаут')));
     req.on('error', reject);
     req.end(opts.body);
-  });
+  }).finally(() => clearTimeout(deadline));
 }
 
 /**
@@ -326,6 +361,15 @@ export async function safeFetchPage(raw: string, testLookup?: TestLookup): Promi
 export const PEER_MAX_BYTES = 1024 * 1024;
 
 /**
+ * Потолок для файлового ответа соседа (аватар, иконка сервера).
+ *
+ * Отдельно от `PEER_MAX_BYTES` и заметно выше: документы федерации — килобайты, а аватар у нас
+ * разрешён до 5 МБ. 🔴 Но потолок всё равно есть, и его нельзя поднять параметром выше этого
+ * значения: без него связанный сосед мог бы кормить нас гигабайтом на каждый запрос картинки.
+ */
+export const PEER_MAX_FILE_BYTES = 6 * 1024 * 1024;
+
+/**
  * Разрешён ли адрес соседа — до всякой сети.
  *
  * 🔴 **Список разрешённых хостов обязателен и сравнивается с `host` (имя + порт), а не с именем.**
@@ -362,6 +406,14 @@ export type PeerRequest = {
   headers?: Record<string, string>;
   /** Хосты активных связок (`host` вида `voice.example.com` или `example.com:8443`). */
   allowHosts: ReadonlySet<string>;
+  /**
+   * Ответ — файл, а не JSON (F2: аватар соседа). Байты приезжают в `bytes`, `body` остаётся пустым.
+   * Свой `maxBytes` обязателен: общий предел рассчитан на документы в килобайтах, а картинка больше.
+   */
+  binary?: boolean;
+  maxBytes?: number;
+  /** Общий срок на запрос; выше `FILE_DEADLINE_MS` не поднимается. Нужен проверкам, боевой код берёт умолчания. */
+  deadlineMs?: number;
 };
 
 /**
@@ -385,14 +437,21 @@ export async function safePeerRequest(req: PeerRequest, testLookup?: TestLookup)
     if (key === 'host' || key === 'content-length' || key === 'transfer-encoding') continue;
     headers[key] = v;
   }
-  headers.accept = 'application/json';
+  headers.accept = req.binary ? 'image/*' : 'application/json';
   headers['user-agent'] = 'GusVoice federation';
   if (body) {
     headers['content-type'] = 'application/json';
     headers['content-length'] = String(body.length);
   }
 
-  const res = await once(url, headers, testLookup ?? safeLookup, { method: req.method, body, maxBytes: PEER_MAX_BYTES });
+  const maxBytes = Math.min(req.maxBytes ?? PEER_MAX_BYTES, PEER_MAX_FILE_BYTES);
+  const res = await once(url, headers, testLookup ?? safeLookup, {
+    method: req.method,
+    body,
+    maxBytes,
+    binary: req.binary,
+    deadlineMs: Math.min(req.deadlineMs ?? (req.binary ? FILE_DEADLINE_MS : REQUEST_DEADLINE_MS), FILE_DEADLINE_MS),
+  });
   if (res.truncated) throw new BlockedTargetError('ответ соседа больше предела');
-  return { url: res.url, status: res.status, contentType: res.contentType, body: res.body };
+  return { url: res.url, status: res.status, contentType: res.contentType, body: res.body, bytes: res.bytes };
 }

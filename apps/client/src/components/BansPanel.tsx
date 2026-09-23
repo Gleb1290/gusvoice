@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
+import { GuestMark } from './GuestMark';
 
 /** Server settings → Баны: list of banned users (search by name/reason) with «Разбанить». */
 export function BansPanel({ serverId }: { serverId: string }) {
@@ -65,6 +66,9 @@ export function BansPanel({ serverId }: { serverId: string }) {
               <div className="ban-meta">
                 <div className="ban-name">
                   {b.user.displayName} <span className="ban-handle">@{b.user.username}</span>
+                  {/* Забаненного в ростере уже нет, поэтому значок берём из самой записи: иначе
+                      гость в этом списке неотличим от своего (§5.7). */}
+                  <GuestMark home={b.user.homeInstance} size={11} />
                 </div>
                 <div className="ban-sub">
                   {b.reason ? b.reason : 'без причины'} · {fmtDate(b.createdAt)}

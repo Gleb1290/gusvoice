@@ -1,9 +1,10 @@
 import { type Channel, has, type Message, Permission, permsFromString, type Role } from '@gusvoice/shared';
-import { lastSeenAt, markChannelSeen } from '../channelPrefs';
+import { useChannelVisit } from '../channelVisit';
 import { useMemo, useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
+import { isMobile } from '../hotkeys';
 import { sendTyping } from '../sockets';
 import { useTyping } from '../typing';
 import { useNameResolver } from '../memberName';
@@ -21,6 +22,7 @@ export function ChatView({ channel }: { channel: Channel }) {
   const messagesRaw = useStore((s) => s.messagesByChannel[channel.id]);
   const messages = messagesRaw ?? EMPTY;
   const user = useStore((s) => s.user);
+  const loadOlderMessages = useStore((s) => s.loadOlderMessages);
   const perms = useStore((s) => s.bootstrap?.permissions);
   // Нужен ТОЛЬКО ради короны в шапке блока сообщений — см. проп в MessagePane.
   const serverId = useStore((s) => s.bootstrap?.server.id);
@@ -51,7 +53,11 @@ export function ChatView({ channel }: { channel: Channel }) {
     () => ({
       users: members.map((m) => ({
         id: m.user.id,
-        username: m.user.username,
+        /**
+         * 🔴 Гостя вставляем как `ник@домен` (#139, F4, §5.5): без домена обращение уйдёт местному
+         * тёзке, а к гостю не попадёт вовсе. Человек домен не печатает — его подставляет подсказка.
+         */
+        username: m.user.homeInstance?.domain ? `${m.user.username}@${m.user.homeInstance.domain}` : m.user.username,
         displayName: m.nickname ?? m.user.displayName,
         avatarUrl: m.user.avatarUrl,
         online: onlineUsers.includes(m.user.id),
@@ -64,19 +70,26 @@ export function ChatView({ channel }: { channel: Channel }) {
     [members, onlineUsers, roles, channels],
   );
 
-  // «Новые сообщения» divider (#15): freeze the last-visit mark on entry, and move it forward on the
-  // way out — so the line stays where reading stopped instead of chasing incoming messages.
-  const [newSince, setNewSince] = useState<number | null>(null);
-  useEffect(() => {
-    const id = channel.id;
-    setNewSince(lastSeenAt(id));
-    return () => markChannelSeen(id);
-  }, [channel.id]);
+  /* «Новые сообщения» divider (#15): метка визита замирает на входе и двигается вперёд на выходе —
+     черта стоит там, где человек перестал читать, а не убегает за новыми сообщениями. Что считать
+     входом и выходом на телефоне (там лента не размонтируется) — в `channelVisit.ts`. */
+  const { newSince, visitKey } = useChannelVisit(channel.id, 'channel');
+
+  /**
+   * На телефоне имя канала в подсказке обрезалось на полуслове, а канал и так написан в шапке прямо
+   * над лентой. ⚠️ И сама подпись КОРОТКАЯ: замер на живом устройстве (411 px) дал полю ровно 128 px —
+   * остальное съели четыре кнопки и отправка. «Написать сообщение» в них не влезало и обрывалось
+   * многоточием, а обрезанная подсказка читается хуже короткой.
+   */
+  const placeholder = isMobile() ? 'Сообщение' : `Написать в #${channel.name}`;
 
   return (
     <MessagePane
       serverId={serverId}
       newSince={newSince}
+      scrollKey={visitKey}
+      feedId={channel.id}
+      onLoadOlder={() => loadOlderMessages(channel.id)}
       pollChannelId={channel.id}
       title={
         <>
@@ -88,7 +101,7 @@ export function ChatView({ channel }: { channel: Channel }) {
           <PinnedMessages channelId={channel.id} canManage={canModerate} />
         </>
       }
-      placeholder={`Message #${channel.name}`}
+      placeholder={placeholder}
       messages={messages}
       loading={messagesRaw === undefined}
       autocomplete={autocomplete}

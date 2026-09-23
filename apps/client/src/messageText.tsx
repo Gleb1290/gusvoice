@@ -20,7 +20,11 @@ import { useState } from 'react';
  * подсветка врала: `@Маша` выглядел упоминанием, хотя имён с кириллицей не бывает и никого он не
  * пингует, а кусок чужой почты `user@super.dev` подсвечивался целиком.
  */
-const MENTION_TEST = new RegExp(`^@${MENTION_NAME_SRC}$`);
+/**
+ * ⚠️ Хвост `@домен` — для гостей (#139, F4, §5.5): `@vasya@voice.friend.org` это ОДНО обращение, и
+ * подсветить только `@vasya` значило бы разорвать его пополам прямо в тексте.
+ */
+const MENTION_TEST = new RegExp(`^@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?$`);
 
 /** One pass over inline syntax. Order matters: code first (it swallows everything else inside). */
 const INLINE = new RegExp(
@@ -33,7 +37,7 @@ const INLINE = new RegExp(
     // 6 italic _ — with word boundaries, so snake_case_names and my_file_name.txt stay literal
     '((?<![\\p{L}\\p{N}])_[^_\\n]+_(?![\\p{L}\\p{N}]))',
     '(https?://[^\\s<>"]+)', // 7 link
-    `${MENTION_LEFT_GUARD}(@${MENTION_NAME_SRC})`, // 8 mention
+    `${MENTION_LEFT_GUARD}(@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?)`, // 8 mention (+ @домен у гостя)
     // 9 кастомное эмодзи сервера `:name:` (#18). Перед двоеточием обязан идти НЕ буквенно-цифровой
     // символ и не двоеточие — иначе `10:30:00` превращается в эмодзи `:30:`, а `host:8080:` в `:8080:`.
     '((?<![\\p{L}\\p{N}_:]):[a-z0-9_]{2,32}:)',

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GusVoice",
-  "version": "0.7.0",
+  "version": "0.8.2",
   "identifier": "tech.gusik.gusvoice",
   "build": {
     "frontendDist": "../../client/dist",
@@ -41,7 +41,10 @@
       "certificateThumbprint": "4F8586CF4B40BFC298F3432BFC843DA377EA119C",
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.digicert.com",
-      "tsp": true
+      "tsp": true,
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
     }
   },
   "plugins": {

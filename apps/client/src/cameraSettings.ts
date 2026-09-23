@@ -27,16 +27,16 @@ export const CAMERA_PRESETS: Record<CameraPreset, PresetDef> = {
 export const CAMERA_PRESET_ORDER: CameraPreset[] = ['max', 'normal', 'eco'];
 
 const KEY = 'gv_camera';
-const DEFAULT: CameraPreset = 'normal';
+export const CAMERA_DEFAULT: CameraPreset = 'normal';
 let cache: CameraPreset | null = null;
 
 export function getCameraPreset(): CameraPreset {
   if (cache) return cache;
   try {
     const raw = localStorage.getItem(KEY);
-    cache = raw && raw in CAMERA_PRESETS ? (raw as CameraPreset) : DEFAULT;
+    cache = raw && raw in CAMERA_PRESETS ? (raw as CameraPreset) : CAMERA_DEFAULT;
   } catch {
-    cache = DEFAULT;
+    cache = CAMERA_DEFAULT;
   }
   return cache;
 }

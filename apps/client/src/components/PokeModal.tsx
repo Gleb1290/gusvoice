@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import { toastError } from '../toast';
+import { confirmAction } from '../confirm';
 import { Icon } from './Icon';
 
 /** Столько же, сколько принимает бэкенд (`POKE_MAX_LEN`) — чтобы обрезание не удивляло постфактум. */
@@ -83,13 +84,16 @@ export function PokeComposer({
     e.preventDefault();
     // 🔴 Дорогая трата необратима, поэтому спрашиваем ПРЯМО с ценой. Промах по строке меню не
     // должен стоить монет.
-    if (
-      mega &&
-      !confirm(
-        `Ущипнуть ${name} за ${price} ${currencyName}?\n\nОн получит перья, тряску и звук. ⚠️ Если он сидит в игре на весь экран, до него дойдёт только звук — монеты спишутся всё равно.`,
-      )
-    )
-      return;
+    if (mega) {
+      const ok = await confirmAction({
+        title: `Ущипнуть ${name} за ${price} ${currencyName}?`,
+        body:
+          'Он получит перья, тряску и звук. Если он сидит в игре на весь экран, до него дойдёт только звук —' +
+          ' монеты спишутся всё равно.',
+        confirmLabel: 'Ущипнуть',
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       if (mega) await api.buyForUser(channelId, userId, 'mega-poke', text.trim());

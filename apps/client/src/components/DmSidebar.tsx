@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { isMobile } from '../hotkeys';
 import { useStore } from '../store';
-import { toastError } from '../toast';
+import { toast, toastError } from '../toast';
+import { dmBlockText, dmEmptyHint } from '../dmRules';
 import { Avatar } from './Avatar';
 import { BottomSheet } from './BottomSheet';
 import { Goose } from './Goose';
@@ -35,6 +36,8 @@ export function DmSidebar() {
   const voice = useStore((s) => s.voice);
   const members = useStore((s) => s.members);
   const meId = useStore((s) => s.user?.id);
+  // Гость ли я сам — от этого зависит и подпись пустого списка, и каждый клик «написать» (§5.8).
+  const me = useStore((s) => s.user);
   const openDmWith = useStore((s) => s.openDmWith);
   const [newDmOpen, setNewDmOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -65,7 +68,7 @@ export function DmSidebar() {
           <div className="empty-goose">
             <Goose pose="look" size={104} />
             <div className="eg-title">Нет личных сообщений</div>
-            <div className="eg-sub">Откройте участников сервера и нажмите на человека, чтобы написать ему.</div>
+            <div className="eg-sub">{dmEmptyHint(me?.homeInstance)}</div>
           </div>
         )}
         {dms.map((d) => {
@@ -79,6 +82,16 @@ export function DmSidebar() {
             <div
               key={d.id}
               className={`dm-row ${d.id === currentDmId ? 'active' : ''} ${unread ? 'unread' : ''}`}
+              /* Та же история, что со строкой канала: без роли и обработчика клавиш диалог
+                 открывался только мышью (WCAG 2.1.1, уровень A). */
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                if (e.target !== e.currentTarget) return;
+                e.preventDefault();
+                void selectDm(d.id);
+              }}
               onClick={() => void selectDm(d.id)}
             >
               {mobile ? (
@@ -144,6 +157,12 @@ export function DmSidebar() {
               className="sheet-row"
               onClick={() => {
                 setNewDmOpen(false);
+                // Гость и гостю — нельзя (§5.8): отвечаем словами, не сходив за отказом на сервер.
+                const blocked = dmBlockText(me?.homeInstance, m.user.homeInstance);
+                if (blocked) {
+                  toast('info', blocked);
+                  return;
+                }
                 // Бэкенд откажет, если общего сервера уже нет (человек вышел, список устарел) — сказать об этом.
                 openDmWith(m.user.id).catch((e: Error) => toastError(e));
               }}

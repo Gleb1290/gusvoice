@@ -40,6 +40,42 @@ export function isOwnMediaUrl(url: string): boolean {
   return urlBelongsToBucket(url, env.minio.publicUrl, env.minio.bucket);
 }
 
+/**
+ * Прочитать НАШ объект из хранилища в память (F2, §5.4 — отдача аватара соседу).
+ *
+ * 🔴 Адрес обязан быть нашим (`isOwnMediaUrl`) и разбирается на бакет и ключ здесь же: иначе сюда
+ * можно было бы передать чужой URL и заставить нас читать что угодно чужими руками.
+ * ⚠️ Предел размера обязателен: объект читается В ПАМЯТЬ, и «просто отдать файл» без предела — это
+ * способ съесть память инстанса одним запросом.
+ */
+export async function readOwnMedia(
+  url: string,
+  maxBytes: number,
+): Promise<{ bytes: Buffer; contentType: string } | null> {
+  if (!minio || !isOwnMediaUrl(url)) return null;
+  const prefix = `${env.minio.publicUrl.replace(/\/+$/, '')}/${env.minio.bucket}/`;
+  if (!url.startsWith(prefix)) return null;
+  const key = decodeURIComponent(url.slice(prefix.length));
+  if (key.length === 0) return null;
+
+  const stat = await minio.statObject(env.minio.bucket, key).catch(() => null);
+  if (!stat) return null;
+  if (stat.size > maxBytes) return null;
+
+  const stream = await minio.getObject(env.minio.bucket, key);
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    // Размер известен заранее, но проверяем и по ходу: объект мог смениться между stat и чтением.
+    if (size > maxBytes) return null;
+    chunks.push(buf);
+  }
+  const contentType = String(stat.metaData?.['content-type'] ?? 'application/octet-stream');
+  return { bytes: Buffer.concat(chunks), contentType };
+}
+
 /** Один заход: бакет есть и публично читается (только GetObject — без листинга). */
 async function prepareMediaBucket(client: Minio.Client): Promise<void> {
   if (!(await client.bucketExists(env.minio.bucket))) {
@@ -145,6 +181,27 @@ export async function removeUserAvatars(userId: string): Promise<number> {
   }
   for (const name of names) await minio.removeObject(env.minio.bucket, name);
   return names.length;
+}
+
+/**
+ * Удалить НАШ объект по его публичному адресу — прежний аватар соседа при замене, картинку по
+ * надгробию каталога (аудит 19.09, F-05). Адрес обязан быть нашим — та же проверка, что у чтения.
+ */
+export async function removeOwnMedia(url: string): Promise<number> {
+  if (!minio || !isOwnMediaUrl(url)) return 0;
+  const prefix = `${env.minio.publicUrl.replace(/\/+$/, '')}/${env.minio.bucket}/`;
+  if (!url.startsWith(prefix)) return 0;
+  const key = decodeURIComponent(url.slice(prefix.length));
+  if (key.length === 0) return 0;
+  // Размер — чтобы вернуть место в квоту связки (ревью #195 п. 7); объекта уже нет — вернуть нечего.
+  let size = 0;
+  try {
+    size = (await minio.statObject(env.minio.bucket, key)).size;
+  } catch {
+    size = 0;
+  }
+  await minio.removeObject(env.minio.bucket, key);
+  return size;
 }
 
 /** Convenience wrapper for user avatars. */

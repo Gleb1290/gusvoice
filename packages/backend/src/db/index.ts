@@ -9,12 +9,34 @@ import * as schema from './schema.js';
 const { Pool } = pg;
 
 export const pool = new Pool({ connectionString: env.databaseUrl });
-export const db = drizzle(pool, { schema });
+
+/**
+ * Соединение с базой. `let`, а не `const`, ровно ради одного: интеграционные тесты подменяют его на
+ * временную базу в памяти (`integration/harness.ts`, #143) — иначе проверить SQL можно только живым
+ * Postgres. В проде подменять некому: `setDbForTests` никто, кроме харнесса, не зовёт.
+ */
+export let db = drizzle(pool, { schema });
+
+/** Только для интеграционных тестов: подменить соединение (см. `integration/harness.ts`). */
+export function setDbForTests(next: typeof db): void {
+  db = next;
+}
 
 // In the bundled runtime image the source tree is gone, so the relative path below no longer
 // resolves — the Dockerfile sets MIGRATIONS_DIR to where it COPYs the drizzle/ SQL. Under tsx
 // (dev + current image) MIGRATIONS_DIR is unset and we fall back to ../../drizzle next to src.
-const migrationsDir = process.env.MIGRATIONS_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle');
+export const migrationsDir =
+  process.env.MIGRATIONS_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle');
+
+/**
+ * Порядок применения миграций — по имени файла, только `.sql`.
+ *
+ * Отдельной функцией, потому что тот же порядок нужен харнессу интеграционных тестов: разойдись они —
+ * и тесты проверяли бы базу, которой не бывает в бою.
+ */
+export function migrationOrder(files: string[]): string[] {
+  return files.filter((f) => f.endsWith('.sql')).sort();
+}
 
 /**
  * Minimal forward-only migrator: applies every *.sql file in drizzle/ exactly once,
@@ -26,7 +48,7 @@ export async function runMigrations(): Promise<void> {
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
 
-  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort();
+  const files = migrationOrder(await readdir(migrationsDir));
   const applied = new Set(
     (await pool.query<{ name: string }>('SELECT name FROM _migrations')).rows.map((r) => r.name),
   );

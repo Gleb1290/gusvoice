@@ -11,6 +11,7 @@ import { useStore } from '../store';
 import { toastError } from '../toast';
 import { useDialogChrome } from '../dialogChrome';
 import { Icon } from './Icon';
+import { Select } from './Select';
 
 /**
  * Форма создания опроса (#17).
@@ -94,6 +95,12 @@ export function PollComposer({ channelId, onClose }: { channelId: string; onClos
           placeholder="Заказываем пиццу?"
           onChange={(e) => setQuestion(e.target.value)}
         />
+        {/* 🔴 Жёсткий `maxLength` без счётчика — это курсор, который молча перестал двигаться:
+            человек не понимает, сломалось ли поле. Показываем остаток не всегда, а когда он
+            становится новостью: пока до конца далеко, счётчик — лишний шум. */}
+        {question.length > POLL_MAX_QUESTION - 40 && (
+          <div className="pc-count">осталось {POLL_MAX_QUESTION - question.length}</div>
+        )}
 
         <div className="pc-label">Варианты</div>
         {options.map((o, i) => (
@@ -151,13 +158,14 @@ export function PollComposer({ channelId, onClose }: { channelId: string; onClos
         <label className="pc-label" htmlFor="pc-dur">
           Срок
         </label>
-        <select id="pc-dur" value={hours} onChange={(e) => setHours(Number(e.target.value))}>
-          {DURATIONS.map((d) => (
-            <option key={d.hours} value={d.hours}>
-              {d.label}
-            </option>
-          ))}
-        </select>
+        <Select
+          id="pc-dur"
+          value={String(hours)}
+          onChange={(v) => setHours(Number(v))}
+          ariaLabel="Сколько голосовать"
+          title="Сколько голосовать"
+          options={DURATIONS.map((d) => ({ value: String(d.hours), label: d.label }))}
+        />
 
         {dupes && <div className="pc-warn">Варианты повторяются</div>}
 

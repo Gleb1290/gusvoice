@@ -1,5 +1,8 @@
 import type { CSSProperties } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { pushBackHandler } from '../androidBack';
+import { activeAnchor, atBottomOf, groupLabelAt } from '../settingsAnchor';
+import { markChangedSeen, markGroupSeen, seedSeenOnce, seenChangedPrints, seenGroups } from '../settingsSeen';
 import { api, setToken } from '../api';
 import { getAudioSettings, setAudioSettings, type AudioSettings } from '../audioSettings';
 import {
@@ -14,8 +17,16 @@ import {
   renameInstance,
   serverHost,
 } from '../config';
-import { appVersion, type CloseBehavior, getCloseBehavior, openExternal, setCloseBehavior } from '../desktopWindow';
-import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
+import {
+  appVersion,
+  type CloseBehavior,
+  getCloseBehavior,
+  gpuAccelGet,
+  gpuAccelSet,
+  openExternal,
+  setCloseBehavior,
+} from '../desktopWindow';
+import { useDialogChrome } from '../dialogChrome';
 import { chooseDownloadDir, getDownloadDir, setDownloadDir } from '../downloads';
 import { comboFromEvent, comboFromMouse, formatCombo, getHotkeys, type Hotkeys, isAndroid, isDesktop, isMobile, isTauri, setHotkeys } from '../hotkeys';
 import { hasPushDistributor } from '../nativeUnifiedPush';
@@ -47,7 +58,23 @@ import {
 import { toast, toastError } from '../toast';
 import { Avatar } from './Avatar';
 import { AvatarCropModal } from './AvatarCropModal';
-import { Icon } from './Icon';
+import { Icon, type IconName } from './Icon';
+import { Select } from './Select';
+import {
+  changedDotOn,
+  groupPrints,
+  markChanged,
+  marksLabel,
+  sameMarks,
+  samePrints,
+  sectionMark,
+  type SettingsMarks,
+} from '../settingsChanged';
+import { SEARCH_MIN, searchSettings, SECTIONS, sectionOf, type SectionKey, visibleSections } from '../settingsNav';
+import { factorySettings, readSettings } from '../settingsSnapshot';
+import { GuestPlacesPanel } from './GuestPlacesPanel';
+import { InstancesPanel } from './InstancesPanel';
+import { useFederationEnabled } from '../federationClient';
 import { OverlaySettingsPanel } from './OverlaySettingsPanel';
 import { ToastSettingsPanel } from './ToastSettingsPanel';
 import { SoundSettingsPanel } from './SoundSettingsPanel';
@@ -63,7 +90,6 @@ import {
 } from '../linkGuard';
 import { DiagSettingsSection } from './DiagConsent';
 
-type Tab = 'audio' | 'notif' | 'appearance' | 'account' | 'security' | 'desktop' | 'android';
 
 
 /** One re-bindable hotkey row: click to capture a key combo, × to clear. Esc cancels capture. */
@@ -114,6 +140,44 @@ function HotkeyRow({ label, value, onChange }: { label: string; value: string; o
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Выбор устройства: пустое значение — «как в системе», отдельной первой строкой со своей подписью.
+ *
+ * ⚠️ Объявлен на уровне модуля намеренно. Компонент, созданный внутри другого компонента, — новый
+ * тип при каждом рендере: React размонтирует старый и монтирует новый, унося с собой раскрытый
+ * список. Нативный `<select>` схлопывался здесь ровно по этой причине (см. ref у индикатора
+ * уровня микрофона ниже), и повторять её своим списком было бы обидно.
+ */
+function DeviceSelect({
+  value,
+  onChange,
+  list,
+  icon,
+  title,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  list: MediaDeviceInfo[];
+  icon: IconName;
+  title: string;
+}) {
+  return (
+    <Select
+      value={value}
+      onChange={onChange}
+      icon={icon}
+      title={title}
+      searchPlaceholder="Поиск устройства"
+      emptyText="Устройств не найдено"
+      ariaLabel={title}
+      options={[
+        { value: '', label: 'По умолчанию', hint: 'следовать системе' },
+        ...list.map((d, i) => ({ value: d.deviceId, label: d.label || `Устройство ${i + 1}` })),
+      ]}
+    />
   );
 }
 
@@ -298,34 +362,41 @@ function AudioVideoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.inputDeviceId, s.noiseFilter, s.echoCancellation, s.autoGainControl]);
 
-  const Select = ({ value, onChange, list, empty }: { value: string; onChange: (v: string) => void; list: MediaDeviceInfo[]; empty: string }) => (
-    <select className="settings-select" value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">{empty}</option>
-      {list.map((d, i) => (
-        <option key={d.deviceId || i} value={d.deviceId}>
-          {d.label || `Устройство ${i + 1}`}
-        </option>
-      ))}
-    </select>
-  );
-
   return (
     <div className="settings-pane">
-      <div className="settings-group-label">Устройства</div>
+      <div className="settings-group-label" id="set-g-devices">Устройства</div>
       <label className="settings-row col">
         <span>Микрофон</span>
-        <Select value={s.inputDeviceId} onChange={(v) => update({ ...s, inputDeviceId: v })} list={byKind('audioinput')} empty="По умолчанию" />
+        <DeviceSelect
+          value={s.inputDeviceId}
+          onChange={(v) => update({ ...s, inputDeviceId: v })}
+          list={byKind('audioinput')}
+          icon="mic"
+          title="Микрофон"
+        />
       </label>
       <label className="settings-row col">
         <span>Динамики</span>
-        <Select value={s.outputDeviceId} onChange={(v) => update({ ...s, outputDeviceId: v })} list={byKind('audiooutput')} empty="По умолчанию" />
+        <DeviceSelect
+          value={s.outputDeviceId}
+          onChange={(v) => update({ ...s, outputDeviceId: v })}
+          list={byKind('audiooutput')}
+          icon="headphones"
+          title="Динамики"
+        />
       </label>
       <label className="settings-row col">
         <span>Камера</span>
-        <Select value={s.cameraDeviceId} onChange={(v) => update({ ...s, cameraDeviceId: v })} list={byKind('videoinput')} empty="По умолчанию" />
+        <DeviceSelect
+          value={s.cameraDeviceId}
+          onChange={(v) => update({ ...s, cameraDeviceId: v })}
+          list={byKind('videoinput')}
+          icon="camera"
+          title="Камера"
+        />
       </label>
 
-      <div className="settings-group-label">Микрофон · уровень и чувствительность</div>
+      <div className="settings-group-label" id="set-g-mic">Микрофон · уровень и чувствительность</div>
       <div className="mic-meter mic-meter-lg">
         <div className="mic-meter-fill" ref={meterRef} style={{ width: '0%' }} />
         {s.vadThreshold > 0 && (
@@ -384,7 +455,7 @@ function AudioVideoTab() {
         громкостью. Наденьте наушники, чтобы не словить эхо.
       </div>
 
-      <div className="settings-group-label">Обработка звука</div>
+      <div className="settings-group-label" id="set-g-audio-proc">Обработка звука</div>
       <div className="settings-row">
         <span id="set-nf-label">Шумоподавление</span>
         <div className="seg" role="group" aria-labelledby="set-nf-label">
@@ -448,7 +519,7 @@ function AudioVideoTab() {
         </>
       )}
 
-      <div className="settings-group-label">Режим передачи</div>
+      <div className="settings-group-label" id="set-g-ptt">Режим передачи</div>
       <div className="settings-row">
         <span>Push-to-talk (говорить по кнопке)</span>
         <Toggle
@@ -460,7 +531,10 @@ function AudioVideoTab() {
           }}
         />
       </div>
-      {s.pushToTalk && (
+      {/* 🔴 Клавиша — только там, где есть клавиатура. На телефоне строка честно писала «Пробел»,
+          и это читалось как издевательство: нажать его не на чем. Кнопка поверх игр — отдельная
+          задача, до неё режим рации на телефоне живёт без назначения клавиши. */}
+      {s.pushToTalk && !isMobile() && (
         <div className="settings-row">
           <span>Клавиша</span>
           <button
@@ -491,7 +565,11 @@ function AudioVideoTab() {
         Изменения устройства/обработки применяются при следующем входе в голосовой канал.
       </div>
 
-      <div className="settings-group-label" style={{ marginTop: 18 }}>
+      {/* Вся группа — про физическую клавиатуру, поэтому на телефоне её нет: там она показывала
+          три «Не задано», которые назначить нечем. */}
+      {!isMobile() && (
+        <>
+      <div className="settings-group-label" id="set-g-hotkeys" style={{ marginTop: 18 }}>
         Горячие клавиши
       </div>
       <HotkeyRow label="Заглушить микрофон" value={hk.mute} onChange={(v) => updateHk({ ...hk, mute: v })} />
@@ -513,18 +591,17 @@ function AudioVideoTab() {
           ? 'В десктоп-версии работают глобально — даже когда GusVoice не в фокусе (например, в игре). Демонстрацию экрана надёжнее запускать из окна приложения.'
           : 'Работают, пока вкладка GusVoice в фокусе и вы в голосовом канале. Глобальные хоткеи (поверх игр) — в десктоп-версии.'}
       </div>
+        </>
+      )}
 
-      <div className="settings-group-label" style={{ marginTop: 18 }}>
+      <div className="settings-group-label" id="set-g-stream" style={{ marginTop: 18 }}>
         Качество трансляции экрана
       </div>
       <StreamQualityPanel />
 
-      {isDesktop() && <OverlaySettingsPanel />}
-      {isDesktop() && <ToastSettingsPanel />}
-
       {isDesktop() && (
         <>
-          <div className="settings-group-label" style={{ marginTop: 18 }}>
+          <div className="settings-group-label" id="set-g-native-audio" style={{ marginTop: 18 }}>
             Тест нативного захвата звука (отладка)
           </div>
           <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
@@ -574,12 +651,12 @@ function AppearanceTab() {
   const [animated, setAnimated] = useState(animatedAvatarsEnabled);
   return (
     <div className="settings-pane">
-      <div className="settings-group-label" id="set-theme-label">
+      <div className="settings-group-label" id="set-g-theme">
         Тема
       </div>
       {isMobile() ? (
         // Mobile (design-step8 E2): tappable preview cards instead of a text segment.
-        <div className="theme-cards" role="group" aria-labelledby="set-theme-label">
+        <div className="theme-cards" role="group" aria-labelledby="set-g-theme">
           {(['dark', 'light'] as Theme[]).map((t) => (
             <button
               key={t}
@@ -603,7 +680,7 @@ function AppearanceTab() {
           ))}
         </div>
       ) : (
-        <div className="seg" role="group" aria-labelledby="set-theme-label">
+        <div className="seg" role="group" aria-labelledby="set-g-theme">
           <button
             type="button"
             aria-pressed={theme === 'dark'}
@@ -629,10 +706,10 @@ function AppearanceTab() {
         </div>
       )}
 
-      <div className="settings-group-label" style={{ marginTop: 16 }} id="set-scale-label">
+      <div className="settings-group-label" style={{ marginTop: 16 }} id="set-g-scale">
         Масштаб интерфейса
       </div>
-      <div className="seg" role="group" aria-labelledby="set-scale-label">
+      <div className="seg" role="group" aria-labelledby="set-g-scale">
         {UI_SCALES.map((s) => (
           <button
             key={s.key}
@@ -653,7 +730,7 @@ function AppearanceTab() {
           desktop-only "drag the right edge" hint are dead weight on phones — hide them there. */}
       {!isMobile() && (
         <>
-          <label className="settings-group-label" style={{ marginTop: 16 }} htmlFor="set-sidebar-w">
+          <label className="settings-group-label" id="set-g-sidebar" style={{ marginTop: 16 }} htmlFor="set-sidebar-w">
             Ширина боковой панели · {sidebar}px
           </label>
           <input
@@ -677,7 +754,7 @@ function AppearanceTab() {
         </>
       )}
 
-      <div className="settings-group-label">Аватары</div>
+      <div className="settings-group-label" id="set-g-avatars">Аватары</div>
       <div className="settings-row">
         <span>Показывать анимированные аватары</span>
         <Toggle
@@ -695,7 +772,7 @@ function AppearanceTab() {
         картинка. Настройка только для этого устройства.
       </div>
 
-      <div className="settings-group-label">Ссылки</div>
+      <div className="settings-group-label" id="set-g-links">Ссылки</div>
       {/* ⚠️ `Toggle` рисует ТОЛЬКО сам переключатель — `label` уходит в `aria-label`, для скринридера.
           Видимая подпись ставится рядом, обёрткой `settings-row` (как во всех остальных настройках).
           Без неё выходило два безымянных тумблера подряд: непонятно, что к чему относится, а описание
@@ -905,6 +982,9 @@ function AccountTab({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="settings-pane">
+      <div className="settings-group-label" id="set-g-profile">
+        Профиль
+      </div>
       <div className="profile-avatar">
         <Avatar url={user.avatarUrl} name={user.displayName} size={72} />
         <div>
@@ -942,7 +1022,7 @@ function AccountTab({ onClose }: { onClose: () => void }) {
           Steam-линка ломал сессию. На вебе секцию не показываем. */}
       {isDesktop() && (
         <>
-          <div className="settings-group-label">Игровая активность</div>
+          <div className="settings-group-label" id="set-g-game">Игровая активность</div>
           <div className="settings-row">
             <span>Показывать, во что я играю</span>
             <Toggle
@@ -976,7 +1056,7 @@ function AccountTab({ onClose }: { onClose: () => void }) {
         </>
       )}
 
-      <div className="settings-group-label">Email</div>
+      <div className="settings-group-label" id="set-g-email">Email</div>
       {emailMode === 'idle' ? (
         <div className="settings-row">
           <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -1037,7 +1117,7 @@ function AccountTab({ onClose }: { onClose: () => void }) {
       </div>
 
       {/* Active instance display name (#7) — desktop (multi-instance). Lets you label this server; empty
-          resets to the server host. The same rename lives in the rail switcher's "Управление". */}
+          resets to the server host. Все записи разом — «Федерация › Мои инстансы» (`InstancesPanel`, 23.09). */}
       {multiInstanceEnabled() && activeInstance() && (
         <>
           <div className="settings-group-label" style={{ marginTop: 14 }}>
@@ -1269,7 +1349,7 @@ function SecurityTab() {
   return (
     <div className="settings-pane">
       {/* ---- Password ---- */}
-      <div className="settings-group-label">Смена пароля</div>
+      <div className="settings-group-label" id="set-g-password">Смена пароля</div>
       <label className="settings-row col">
         <span>Текущий пароль</span>
         <input type="password" value={curPw} onChange={(e) => setCurPw(e.target.value)} autoComplete="current-password" />
@@ -1289,12 +1369,16 @@ function SecurityTab() {
       </div>
 
       {/* ---- Sessions ---- */}
-      <div className="settings-group-label" style={{ marginTop: 22 }}>
+      <div className="settings-group-label" id="set-g-sessions" style={{ marginTop: 22 }}>
         Сессии
       </div>
+      {/* 🔴 Про чужие инстансы сказано ВСЛУХ (#139, §5.6.1, требование 24): отзыв действительно
+          доходит до них (`revokeSessionsEverywhere` рассылает хостам), но человек об этом не знал —
+          а именно ради этого требование и писалось. Тот, кто ходит гостем на чужие серверы, должен
+          понимать, что нажатие закрывает и их, не проверяя это на себе. */}
       <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-        Разлогинит этот аккаунт на всех остальных устройствах (браузеры, десктоп, телефон). Текущая
-        сессия останется активной.
+        Разлогинит этот аккаунт на всех остальных устройствах (браузеры, десктоп, телефон) и там, где
+        вы были гостем на других инстансах. Текущая сессия останется активной.
       </div>
       <label className="settings-row col">
         <span>Пароль</span>
@@ -1307,7 +1391,7 @@ function SecurityTab() {
       </div>
 
       {/* ---- 2FA ---- */}
-      <div className="settings-group-label" style={{ marginTop: 22 }}>
+      <div className="settings-group-label" id="set-g-2fa" style={{ marginTop: 22 }}>
         Двухфакторная аутентификация (2FA)
       </div>
 
@@ -1409,7 +1493,7 @@ function WindowsDownload() {
   }, []);
   return (
     <div className="settings-pane">
-      <div className="settings-group-label">Приложение для Windows</div>
+      <div className="settings-group-label" id="set-g-windows">Приложение для Windows</div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
         Отдельное десктоп-приложение: глобальные горячие клавиши, работа в трее, авто-обновление и
         нативный захват экрана. Скачайте и установите — данные те же, вход тот же.
@@ -1457,7 +1541,7 @@ function AndroidInstallTab() {
   }, []);
   return (
     <div className="settings-pane">
-      <div className="settings-group-label">GusVoice на Android</div>
+      <div className="settings-group-label" id="set-g-android">GusVoice на Android</div>
       {info === undefined && (
         <div className="muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 12 }}>Загружаю данные репозитория…</div>
       )}
@@ -1542,7 +1626,7 @@ function AndroidInstallTab() {
 
       {/* Push-setup guide (#120): DMs/@mentions wake the phone even when GusVoice is closed only if a
           UnifiedPush distributor (ntfy) is installed AND pointed at our server. */}
-      <div className="settings-group-label" style={{ marginTop: 22 }}>Пуш-уведомления (ntfy)</div>
+      <div className="settings-group-label" id="set-g-push" style={{ marginTop: 22 }}>Пуш-уведомления (ntfy)</div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
         <b>Без ntfy уведомления (ЛС, упоминания) в фоне и при закрытом приложении приходить не будут.</b> Нужен
         маленький бесплатный приёмник <b>UnifiedPush</b> — <b>ntfy</b>.
@@ -1589,6 +1673,10 @@ function AndroidInstallTab() {
 
 function DesktopTab() {
   const [behavior, setBehavior] = useState<CloseBehavior>(getCloseBehavior());
+  // Ускорение отрисовки видеокартой (#193). Умолчание — включено; выключатель нужен на случай
+  // битого драйвера, когда принудительное ускорение даёт артефакты.
+  const [gpu, setGpu] = useState<boolean | null>(null);
+  const [gpuBusy, setGpuBusy] = useState(false);
   const [checking, setChecking] = useState(false);
   // Installed app version (tauri.conf.json) — shown under «Обновления» so a user can always tell
   // which update they're on (and copy it into a bug report). Desktop-only: this tab is Tauri-gated.
@@ -1597,7 +1685,18 @@ function DesktopTab() {
   const [dlDir, setDlDir] = useState<string | null>(getDownloadDir());
   useEffect(() => {
     void appVersion().then(setVer);
+    void gpuAccelGet().then(setGpu);
   }, []);
+  function flipGpu(on: boolean) {
+    setGpuBusy(true);
+    void gpuAccelSet(on)
+      .then(() => {
+        setGpu(on);
+        toast('info', 'Применится после перезапуска', 'Движок читает эту настройку один раз, при запуске окна');
+      })
+      .catch((e) => toastError(e as Error))
+      .finally(() => setGpuBusy(false));
+  }
   function pick(b: CloseBehavior) {
     setCloseBehavior(b);
     setBehavior(b);
@@ -1609,11 +1708,26 @@ function DesktopTab() {
   ];
   return (
     <div className="settings-pane">
-      <div className="settings-group-label" id="set-close-label">
+      {gpu !== null && (
+        <>
+          <div className="settings-group-label">Отрисовка</div>
+          <div className="settings-row">
+            <span>Рисовать окно видеокартой</span>
+            <Toggle checked={gpu} onChange={flipGpu} disabled={gpuBusy} label="Рисовать окно видеокартой" />
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {gpu
+              ? 'Окно рисует видеокарта — процессор свободнее, а игре рядом достаётся больше. Если вместо интерфейса появились полосы или чёрные пятна, выключите: у некоторых драйверов ускорение работает криво.'
+              : 'Окно рисует процессор. Медленнее и заметно дороже, зато работает на любом драйвере.'}{' '}
+            Настройка применяется после перезапуска приложения.
+          </div>
+        </>
+      )}
+      <div className="settings-group-label" id="set-g-close">
         При нажатии на крестик
       </div>
       {/* display:contents keeps the options direct children of .settings-pane so its gap survives. */}
-      <div role="group" aria-labelledby="set-close-label" style={{ display: 'contents' }}>
+      <div role="group" aria-labelledby="set-g-close" style={{ display: 'contents' }}>
         {opts.map((o) => (
           <button
             key={o.val}
@@ -1634,7 +1748,7 @@ function DesktopTab() {
         Иконка в трее позволяет вернуть окно (клик) или выйти из приложения (правый клик → «Выйти»).
       </div>
 
-      <div className="settings-group-label" style={{ marginTop: 18 }}>Загрузки</div>
+      <div className="settings-group-label" id="set-g-downloads" style={{ marginTop: 18 }}>Загрузки</div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
         {dlDir ? (
           <>
@@ -1670,7 +1784,7 @@ function DesktopTab() {
         )}
       </div>
 
-      <div className="settings-group-label" style={{ marginTop: 18 }}>Обновления</div>
+      <div className="settings-group-label" id="set-g-updates" style={{ marginTop: 18 }}>Обновления</div>
       {ver && (
         // A real <button>: it copies on click, so it has to be reachable and pressable from the
         // keyboard. Styled flat so it still reads as the caption it looks like.
@@ -1810,7 +1924,7 @@ function OsNotifyPanel() {
 
   return (
     <div style={{ marginBottom: 16 }}>
-      <div className="settings-group-label" id="set-osn-label">
+      <div className="settings-group-label" id="set-g-osn">
         Системные уведомления
       </div>
       <div className="seg" role="group" aria-labelledby="set-osn-label">
@@ -1896,7 +2010,7 @@ function CoinNotifyPanel() {
 
   return (
     <div style={{ marginBottom: 16 }}>
-      <div className="settings-group-label" id="set-coin-notify-label">
+      <div className="settings-group-label" id="set-g-coin">
         Уведомления о монетах
       </div>
       <div className="seg" role="group" aria-labelledby="set-coin-notify-label">
@@ -1936,81 +2050,504 @@ function CoinNotifyPanel() {
   );
 }
 
+/**
+ * Доехать до группы настроек — плавно, когда это видно, и гарантированно всегда.
+ *
+ * 🔴 Плавная прокрутка — это анимация, а анимации в СКРЫТОЙ вкладке браузер не выполняет вовсе.
+ * Замерено на проде: мгновенная уезжает на 1333 px, плавная не двигается ни на пиксель — то есть
+ * клик по разделу в фоновой вкладке молча не делал НИЧЕГО. Поэтому решаем по видимости, а не
+ * надеемся: на экране — плавно (так живее, и это осознанный выбор), в фоне — сразу.
+ *
+ * ⚠️ И всё равно страхуемся: если через полсекунды позиция не сдвинулась (браузер урезал анимации,
+ * вкладку спрятали посреди пути), дожимаем мгновенно. Обещание «нажал — попал» важнее красоты.
+ */
+function scrollToAnchor(el: HTMLElement, box: HTMLElement | null) {
+  const before = box?.scrollTop ?? 0;
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const canAnimate = document.visibilityState === 'visible' && !calm;
+  el.scrollIntoView({ block: 'start', behavior: canAnimate ? 'smooth' : 'auto' });
+  if (!canAnimate) return;
+  setTimeout(() => {
+    if (box && Math.abs(box.scrollTop - before) < 2) el.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }, 500);
+}
+
 export function UserSettingsModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<Tab>('audio');
-  const TABS: { key: Tab; label: string }[] = [
-    { key: 'audio', label: 'Аудио и видео' },
-    { key: 'notif', label: 'Уведомления' },
-    { key: 'appearance', label: 'Внешний вид' },
-    { key: 'account', label: 'Аккаунт' },
-    { key: 'security', label: 'Безопасность' },
-    // Shown on any desktop context: in the app it's the tray/close settings, in a browser it's
-    // the "download the Windows app" pane. Hidden on mobile (RuStore app instead).
-    ...(!isMobile() ? [{ key: 'desktop' as Tab, label: 'Десктоп' }] : []),
-    // Install-on-Android helper (guide + credentialed QR/link). Shown everywhere — also handy for
-    // sharing the store with a friend, and on mobile web the add-link opens Droid-ify directly.
-    { key: 'android', label: 'Android' },
-  ];
-  const dialogRef = useDialogChrome<HTMLDivElement>(onClose);
-  // Esc closing here is safe next to the hotkey/PTT capture: that one listens in the capture phase and
-  // preventDefault()s Esc, and useDialogChrome skips already-handled events.
-  const onTabsKey = tabListKeyDown(
-    TABS.map((t) => t.key),
-    tab,
-    setTab,
-    (k) => `set-tab-${k}`,
+  // Раздел «Федерация» появляется ТОЛЬКО на инстансе с федерацией (#139, §5.7): без неё он отвечал
+  // бы на вопрос, которого у человека нет, и пугал бы словом «гость» на ровном месте.
+  const fed = useFederationEnabled();
+  const desktop = isDesktop();
+  const mobile = isMobile();
+  // «Мои инстансы» — там, где у приложения свой реестр инстансов (десктоп, Android); в вебе инстанс один.
+  const multi = multiInstanceEnabled();
+  const sections = useMemo(
+    () => visibleSections({ federation: fed, desktop, mobile, multi }),
+    [fed, desktop, mobile, multi],
   );
+  const [section, setSection] = useState<SectionKey>('sound');
+  const [query, setQuery] = useState('');
+  const [anchor, setAnchor] = useState<string | null>(null);
+  // Телефон: сперва список разделов, тап — экран раздела (list→detail, как везде в приложении).
+  const [picked, setPicked] = useState(false);
+
+  /**
+   * Системная «назад» на телефоне: из раздела — к списку разделов, и только потом закрытие окна.
+   * Без этого один жест закрывал окно целиком (найдено на живом устройстве).
+   */
+  useEffect(() => {
+    if (!picked) return;
+    return pushBackHandler(() => {
+      setPicked(false);
+      return true;
+    });
+  }, [picked]);
+
+  const [live, setLive] = useState<string[]>([]);
+  /** До какого момента НЕ слушаем скролл: пока едем сами, «кто сверху» отвечает про прошлую группу. */
+  const scrollLock = useRef(0);
+  /**
+   * Что здесь не как с завода (#153) — точка у раздела и группы, счётчик в шапке.
+   *
+   * 🔴 Пересчитываем ПО ЖЕСТУ, а не на каждый рендер: настройки лежат в десятке разных хранилищ,
+   * половина меняется из вложенных панелей со своим состоянием, и подписки есть не у всех. Жест
+   * внутри этого окна — единственное общее событие, после которого значение могло измениться.
+   */
+  const [marks, setMarks] = useState<SettingsMarks>(() => markChanged(readSettings(), factorySettings()));
+  // Отпечатки значений по группам и то, какие из них человек уже видел (точка «изменено» гаснет
+  // наведением и загорается снова, когда значение поменяли, — `settingsChanged.groupPrints`).
+  const [prints, setPrints] = useState<Record<string, string>>(() => groupPrints(readSettings()));
+  const [changedSeen, setChangedSeen] = useState<Record<string, string>>(() => seenChangedPrints());
+  const dotOn = (id: string) => changedDotOn(marks[id], changedSeen[id], prints[id]);
+  function refreshMarks() {
+    // ⚠️ `setTimeout`, а не `requestAnimationFrame`: в фоновой вкладке rAF не вызывается вовсе, и
+    // маркеры замерли бы ровно там, где окно оставили. Ноль нужен, чтобы обработчик самой строки
+    // успел записать новое значение — перехват идёт до него.
+    //
+    // 🔴 Слушаем `click`/`change`, а НЕ `pointerup`. На мышке разницы нет — они приходят одной
+    // задачей, и отложенный на ноль пересчёт видел уже новое значение. На ТАЧЕ между ними пауза:
+    // пересчёт успевал первым и читал прошлое состояние, поэтому счётчик на телефоне отставал
+    // ровно на одно касание (переключил — тихо, переключил ещё раз — показалось первое).
+    // Поймано на живом телефоне; ни типы, ни тесты, ни проверка в браузере этого не видят.
+    setTimeout(() => {
+      const snap = readSettings();
+      const next = markChanged(snap, factorySettings());
+      setMarks((prev) => (sameMarks(prev, next) ? prev : next));
+      const nextPrints = groupPrints(snap);
+      setPrints((prev) => (samePrints(prev, nextPrints) ? prev : nextPrints));
+    }, 0);
+  }
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialogChrome<HTMLDivElement>(onClose);
+  const hits = searchSettings(query, sections);
+  const current = sections.find((s) => s.key === section) ?? sections[0];
+  const headMark = marksLabel(sectionMark(marks, current.groups));
+
+  /**
+   * Перейти к найденной настройке и подсветить её.
+   *
+   * ⚠️ Подсветка временная (класс снимается через пару секунд), а не постоянное состояние: она
+   * отвечает на вопрос «куда я попал», а не помечает строку навсегда.
+   */
+  function goTo(sec: SectionKey, id: string) {
+    setSection(sec);
+    setPicked(true);
+    setQuery('');
+    setAnchor(id);
+    // 🔴 Глушим слежение за скроллом, пока едем САМИ. Иначе полоска у якоря мигает: её ставят на
+    // нужную группу сразу, плавная прокрутка тут же зовёт пересчёт «кто сверху» — а сверху всё ещё
+    // предыдущая группа, — полоска отскакивает назад и возвращается только по прибытии.
+    scrollLock.current = Date.now() + 900;
+    // Ждём перерисовку: раздел только что переключился, узла с этим id в дереве ещё нет.
+    setTimeout(() => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      scrollToAnchor(el, bodyRef.current);
+      el.classList.add('set-hit');
+      setTimeout(() => el.classList.remove('set-hit'), 2600);
+    });
+  }
+
+
+
+  /**
+   * «Ты сюда ещё не заглядывал» — вторая отметка, независимая от «изменено» (19.09, просьба
+   * владельца). Она про то, ЗНАЕТ ли человек, что настройка появилась, а не про её значение.
+   *
+   * ⚠️ Группа считается просмотренной, когда РЕАЛЬНО побывала перед глазами: пробыла в видимой
+   * части списка полсекунды или человек навёл на неё мышь. Отмечать по «открыл раздел» нельзя —
+   * в разделе полтора десятка групп, и нижние он не видел.
+   */
+  const [seen, setSeen] = useState<Set<string>>(() => seenGroups());
+
+  useEffect(() => {
+    seedSeenOnce(SECTIONS.flatMap((sec) => sec.groups.map((g) => g.id)));
+    setSeen(seenGroups());
+  }, []);
+
+  function noteSeen(id: string): void {
+    if (seen.has(id)) return;
+    markGroupSeen(id);
+    setSeen(seenGroups());
+  }
+
+  /** Погасить точки «изменено» у групп — запомнить их нынешние значения как увиденные. */
+  function noteChangedSeen(ids: string[]): void {
+    const lit = ids.filter((id) => dotOn(id) && prints[id] !== undefined);
+    if (lit.length === 0) return;
+    markChangedSeen(Object.fromEntries(lit.map((id) => [id, prints[id]!])));
+    setChangedSeen(seenChangedPrints());
+  }
+
+  /**
+   * Наведение гасит точки не сразу, а через 300 мс под курсором: мышь, пролетевшая через весь рельс
+   * к другой кнопке, иначе стёрла бы все отметки разом, и человек их так и не увидел бы.
+   */
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function hoverAck(ids: string[]) {
+    return {
+      onMouseEnter: () => {
+        if (hoverTimer.current) clearTimeout(hoverTimer.current);
+        hoverTimer.current = setTimeout(() => noteChangedSeen(ids), 300);
+      },
+      onMouseLeave: () => {
+        if (hoverTimer.current) clearTimeout(hoverTimer.current);
+        hoverTimer.current = null;
+      },
+    };
+  }
+
+  /**
+   * Наведение на группу СПРАВА подсвечивает её заголовок так же, как переход к ней из рельса слева
+   * (просьба владельца 23.09), и гасит её точку «изменено». Класс ставим прямо на узел, как `set-hit`:
+   * состояние в React перерисовывало бы всю панель на каждое движение мыши.
+   */
+  const hoverLabel = useRef<HTMLElement | null>(null);
+  function setHoverLabel(next: HTMLElement | null) {
+    if (hoverLabel.current === next) return;
+    hoverLabel.current?.classList.remove('set-hover');
+    hoverLabel.current = next;
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    if (!next) return;
+    next.classList.add('set-hover');
+    const id = next.id;
+    hoverTimer.current = setTimeout(() => noteChangedSeen([id]), 300);
+  }
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const timers = new Map<string, ReturnType<typeof setTimeout>>();
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const id = e.target.id;
+          if (e.isIntersecting) {
+            if (timers.has(id)) continue;
+            // Полсекунды на виду: пролистанное насквозь просмотренным не считается.
+            timers.set(id, setTimeout(() => noteSeen(id), 500));
+          } else {
+            const t = timers.get(id);
+            if (t) clearTimeout(t);
+            timers.delete(id);
+          }
+        }
+      },
+      { root: body, threshold: 0.6 },
+    );
+    for (const g of current.groups) {
+      const el = document.getElementById(g.id);
+      if (el) io.observe(el);
+    }
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      io.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, live]);
+  /**
+   * Показать, ЧТО именно изменено: доехать до первой изменённой группы и подсветить все.
+   *
+   * ⚠️ Подсветка та же, что у поиска (`set-hit`), и по той же причине гаснет сама: это ответ на
+   * вопрос «где оно», а не состояние, которое надо потом снимать руками.
+   */
+  function showChanged() {
+    const changed = current.groups.filter((g) => (marks[g.id]?.changed ?? 0) > 0).map((g) => g.id);
+    if (changed.length === 0) return;
+    scrollLock.current = Date.now() + 900;
+    setAnchor(changed[0]!);
+    setTimeout(() => {
+      const first = document.getElementById(changed[0]!);
+      if (first) scrollToAnchor(first, bodyRef.current);
+      for (const id of changed) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.classList.add('set-hit');
+        setTimeout(() => el.classList.remove('set-hit'), 2600);
+      }
+    });
+  }
+  /**
+   * Какие группы РЕАЛЬНО есть в открытом разделе.
+   *
+   * ⚠️ Половина настроек показывается по условию: «Игровая активность» — не у всех, оверлей и
+   * загрузки — только в десктопной оболочке. Якорь на то, чего в разделе нет, — обещание, которого
+   * рельс не держит: нажимаешь и не происходит ничего. Поэтому список якорей сверяется с деревом.
+   */
+  useEffect(() => {
+    // ⚠️ Через таймер, а не requestAnimationFrame: кадры в СКРЫТОМ окне не рисуются вовсе, и
+    // список якорей остался бы пустым до первого показа. Поймано на стенде — пейн был в фоне.
+    const t = setTimeout(() => setLive(current.groups.filter((g) => document.getElementById(g.id)).map((g) => g.id)), 0);
+    return () => clearTimeout(t);
+  }, [current]);
+
+  // Какая группа сейчас наверху — тем якорем и светится рельс. Дешёвая проверка на скролле: групп
+  // в разделе меньше десятка, IntersectionObserver тут был бы из пушки по воробьям.
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const onScroll = () => {
+      // Пока идёт наша собственная плавная прокрутка, «кто сверху» врёт — ответ придёт по прибытии.
+      if (Date.now() < scrollLock.current) return;
+      const top = body.getBoundingClientRect().top;
+      const groups = current.groups
+        .map((g) => ({ id: g.id, el: document.getElementById(g.id) }))
+        .filter((g): g is { id: string; el: HTMLElement } => !!g.el)
+        .map((g) => ({ id: g.id, top: g.el.getBoundingClientRect().top - top }));
+      setAnchor(activeAnchor({ groups, atBottom: atBottomOf(body) }));
+    };
+    onScroll();
+    body.addEventListener('scroll', onScroll, { passive: true });
+    return () => body.removeEventListener('scroll', onScroll);
+  }, [current]);
+
+  // Ctrl+K — в поиск. Ровно та привычка, с которой люди приходят из редакторов и мессенджеров.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPicked(false);
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  function openSection(key: SectionKey) {
+    setSection(key);
+    setPicked(true);
+    bodyRef.current?.scrollTo({ top: 0 });
+  }
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className="modal admin settings-modal"
+        className={`modal admin rail-modal settings-modal${picked ? ' picked' : ''}`}
         onClick={(e) => e.stopPropagation()}
+        onClickCapture={refreshMarks}
+        onChangeCapture={refreshMarks}
+        onKeyUpCapture={refreshMarks}
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
         tabIndex={-1}
       >
-        <div className="admin-head">
-          <h2 id="settings-title">Настройки</h2>
-          <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-            <Icon name="close" size={18} />
-          </button>
-        </div>
-        <div className="tabs2" role="tablist" aria-label="Разделы настроек" onKeyDown={onTabsKey}>
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              role="tab"
-              id={`set-tab-${t.key}`}
-              aria-selected={tab === t.key}
-              aria-controls="settings-body"
-              tabIndex={tab === t.key ? 0 : -1}
-              className={tab === t.key ? 'active' : ''}
-              onClick={() => setTab(t.key)}
-            >
-              {t.label}
+        <div className="set-rail">
+          {/* 🔴 Только для телефона: там рельс — САМОСТОЯТЕЛЬНЫЙ экран, а крестик живёт в шапке
+              раздела, которой здесь нет. Без этой строки окно нечем закрыть: системная «назад»
+              выбрасывает из приложения целиком (проверено на устройстве). */}
+          <div className="set-rail-head">
+            <span>Настройки</span>
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
             </button>
-          ))}
+          </div>
+          <div className="set-search">
+            <Icon name="search" size={15} />
+            <input
+              ref={searchRef}
+              value={query}
+              placeholder="Поиск"
+              aria-label="Поиск по настройкам"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && query) {
+                  e.stopPropagation();
+                  setQuery('');
+                }
+                if (e.key === 'Enter' && hits[0]) goTo(hits[0].section, hits[0].id);
+              }}
+            />
+            <kbd>Ctrl K</kbd>
+          </div>
+          <div className="set-rail-list" role="tablist" aria-label="Разделы настроек" aria-orientation="vertical">
+            {sections.map((s) => (
+              <div key={s.key}>
+                <button
+                  type="button"
+                  role="tab"
+                  id={`set-tab-${s.key}`}
+                  aria-selected={section === s.key}
+                  className={`set-rail-item${section === s.key ? ' active' : ''}`}
+                  onClick={() => openSection(s.key)}
+                  {...hoverAck(s.groups.map((g) => g.id))}
+                >
+                  <Icon name={s.icon} size={16} />
+                  <span>{s.label}</span>
+                  {s.groups.some((g) => dotOn(g.id)) && (
+                    <span className="set-dot" role="img" aria-label="есть изменения" />
+                  )}
+                  {s.groups.some((g) => !seen.has(g.id)) && (
+                    <span className="set-dot new" role="img" aria-label="есть непросмотренное" />
+                  )}
+                </button>
+                {section === s.key && s.groups.length > 1 && (
+                  <div className="set-rail-anchors">
+                    {s.groups.filter((g) => live.length === 0 || live.includes(g.id)).map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        className={`set-rail-anchor${anchor === g.id ? ' on' : ''}`}
+                        onClick={() => goTo(s.key, g.id)}
+                        onMouseEnter={() => {
+                          noteSeen(g.id);
+                          hoverAck([g.id]).onMouseEnter();
+                        }}
+                        onMouseLeave={hoverAck([g.id]).onMouseLeave}
+                      >
+                        {g.label}
+                        {dotOn(g.id) && (
+                          <span className="set-dot" role="img" aria-label="есть изменения" />
+                        )}
+                        {!seen.has(g.id) && <span className="set-dot new" role="img" aria-label="не просмотрено" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="settings-body" id="settings-body" role="tabpanel" aria-labelledby={`set-tab-${tab}`}>
-          {tab === 'audio' && <AudioVideoTab />}
-          {tab === 'notif' && (
-            <div className="settings-pane">
-              <NotifyPermissionRow />
-              <OsNotifyPanel />
-              <CoinNotifyPanel />
-              <div className="settings-group-label">Звуки уведомлений</div>
-              <SoundSettingsPanel />
+
+        <div className="set-main">
+          <div className="set-head">
+            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
+              <Icon name="chevron-left" size={18} />
+            </button>
+            <div className="set-head-text">
+              <h2 id="settings-title">{current.label}</h2>
+              <div className="set-head-sub">
+                {current.sub}
+                {/* Счётчик молчит, когда всё заводское: «изменено 0 из 14» — это шум в каждом окне
+                    у каждого, кто настройки не трогал. */}
+                {/* 🔴 Счётчик — КНОПКА: он называет число, а человек хочет увидеть, что именно.
+                    Клик ведёт к первой изменённой группе и подсвечивает все изменённые тем же
+                    приёмом, что и поиск (`set-hit` гаснет сам — это подсказка, а не состояние). */}
+                {/* ⚠️ Живёт вместе с точками (решение владельца 23.09): все изменения раздела увидены —
+                    счётчика нет, поменяли что-то снова — появится вместе с точкой. */}
+                {headMark && current.groups.some((g) => dotOn(g.id)) && (
+                  <button type="button" className="set-head-mark" onClick={showChanged}>
+                    · {headMark}
+                  </button>
+                )}
+              </div>
+            </div>
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
+            </button>
+          </div>
+
+          {hits.length > 0 && (
+            <div className="set-results" role="listbox" aria-label="Результаты поиска">
+              <div className="set-results-label">НАЙДЕНО · {hits.length}</div>
+              {hits.map((h) => (
+                <button key={h.id} type="button" className="set-result" onClick={() => goTo(h.section, h.id)}>
+                  <Icon name={sectionOf(h.section).icon} size={16} />
+                  <span className="set-result-text">
+                    <span className="set-result-title">{h.title}</span>
+                    <span className="set-result-path">{h.path}</span>
+                  </span>
+                  <Icon name="chevron-right" size={14} />
+                </button>
+              ))}
             </div>
           )}
-          {tab === 'appearance' && <AppearanceTab />}
-          {tab === 'account' && <AccountTab onClose={onClose} />}
-          {tab === 'security' && <SecurityTab />}
-          {tab === 'desktop' && (isTauri() ? <DesktopTab /> : <WindowsDownload />)}
-          {tab === 'android' && <AndroidInstallTab />}
+          {query.length >= SEARCH_MIN && hits.length === 0 && (
+            <div className="set-results">
+              <div className="set-nothing">
+                Ничего не нашлось по «{query}». Попробуйте другое слово — например, «звук» или «пароль».
+              </div>
+            </div>
+          )}
+
+          <div
+            className="settings-body"
+            id="settings-body"
+            role="tabpanel"
+            aria-labelledby={`set-tab-${section}`}
+            ref={bodyRef}
+            onMouseOver={(e) => setHoverLabel(bodyRef.current ? groupLabelAt(e.target as Element, bodyRef.current) : null)}
+            onMouseLeave={() => setHoverLabel(null)}
+          >
+            {/* Обёртка с ключом по разделу: на ней живёт появление содержимого. Анимировать сам
+                блок прокрутки нельзя — его пересоздание рвало бы слежение за скроллом. */}
+            <div className="set-pane-anim" key={section}>
+            {section === 'sound' && <AudioVideoTab />}
+            {section === 'notif' && (
+              <div className="settings-pane">
+                <NotifyPermissionRow />
+                <OsNotifyPanel />
+                <CoinNotifyPanel />
+                {/* Плашка «кто кого типнул» переехала сюда из «Аудио и видео»: искали её здесь. */}
+                {desktop && <ToastSettingsPanel />}
+                <div className="settings-group-label" id="set-g-sounds">
+                  Звуки уведомлений
+                </div>
+                <SoundSettingsPanel />
+              </div>
+            )}
+            {section === 'look' && (
+              <>
+                <AppearanceTab />
+                {desktop && (
+                  <div className="settings-pane">
+                    <OverlaySettingsPanel />
+                  </div>
+                )}
+              </>
+            )}
+            {section === 'account' && (
+              <>
+                <AccountTab onClose={onClose} />
+                <SecurityTab />
+              </>
+            )}
+            {section === 'federation' && (
+              <>
+                {multi && <InstancesPanel onClose={onClose} />}
+                {fed && (
+                  <>
+                    <div className="settings-pane">
+                      <div className="settings-group-label" id="set-g-guest">
+                        Где я гость
+                      </div>
+                    </div>
+                    <GuestPlacesPanel />
+                  </>
+                )}
+              </>
+            )}
+            {section === 'apps' && (
+              <>
+                {isTauri() ? <DesktopTab /> : <WindowsDownload />}
+                <AndroidInstallTab />
+              </>
+            )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

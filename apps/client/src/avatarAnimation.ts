@@ -29,10 +29,18 @@ function prefersReducedMotion(): boolean {
   }
 }
 
+/**
+ * Заводское значение. ⚠️ Это ФУНКЦИЯ, а не константа: умолчание зависит от системной просьбы
+ * «не двигать ничего», а её человек может переключить в системе, пока приложение открыто.
+ */
+export function animatedAvatarsDefault(): boolean {
+  return !prefersReducedMotion();
+}
+
 function load(): boolean {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw === null) return !prefersReducedMotion();
+    if (raw === null) return animatedAvatarsDefault();
     return raw === '1';
   } catch {
     return true;

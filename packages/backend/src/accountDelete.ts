@@ -5,6 +5,8 @@ import { anonymizeAccountRows } from './accountRows.js';
 import { clearActivity } from './activity.js';
 import { forgetTokenGeneration, hashPassword } from './auth.js';
 import { db } from './db/index.js';
+import { announceUser } from './federation/directoryEvents.js';
+import { revokeAccountEverywhere } from './federation/guestRevocation.js';
 import { users } from './db/schema.js';
 import { broadcastUserProfile } from './gateway.js';
 import { removeFromOtherRooms } from './livekit.js';
@@ -28,6 +30,14 @@ import { removeUserAvatars } from './storage.js';
  */
 export async function anonymizeAccount(userId: string): Promise<void> {
   const unusable = await hashPassword(randomBytes(32).toString('hex'));
+  /**
+   * 🔴 Хостам, где человек был гостем, сообщаем ДО транзакции (F3, §5.6): она чистит индекс членств
+   * каскадом, и список адресатов после неё был бы пуст. Гость остался бы жить на чужих серверах до
+   * их суточной сверки — то есть до суток от имени удалённого аккаунта.
+   */
+  await revokeAccountEverywhere({ userId }).catch((err) => {
+    console.warn(`[account] отзыв гостевых сессий ${userId} не разослан: ${err instanceof Error ? err.message : err}`);
+  });
   const memberOf = await db.transaction(async (tx) => {
     const servers = await anonymizeAccountRows(tx, userId, unusable, new Date());
     await tx
@@ -47,6 +57,9 @@ export async function anonymizeAccount(userId: string): Promise<void> {
     removeUserAvatars(userId),
     removeFromOtherRooms(userId, ''),
     removeFromOtherRooms(`${userId}#screen`, ''),
+    // Соседям по федерации — надгробие «удалён» (F2, §5.2). Время правки каталога уже сдвинуто самой
+    // транзакцией обезличивания, поэтому даже не доехавшее событие догонит дельтой.
+    announceUser(userId),
   ]);
   const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
   if (failed.length > 0) {

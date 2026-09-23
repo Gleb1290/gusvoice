@@ -1,0 +1,7 @@
+{
+  "secret": "fixturesecretnotarealoneabcdefgh",
+  "instance_id": "up7ipjxv5cd3zlsmlya4sau3qrvxcohl",
+  "api_base": "https://api.voice.friend.example",
+  "domain": "voice.friend.example",
+  "name": "Друзья"
+}

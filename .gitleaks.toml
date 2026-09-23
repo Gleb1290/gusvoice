@@ -29,3 +29,14 @@ paths = ['''packages/backend/src/totp\.test\.ts''']
 description = "invented not-a-placeholder value in the secret-rules test"
 targetRules = ["generic-api-key"]
 paths = ['''packages/shared/src/secretRules\.test\.ts''']
+
+# Фикстуры протокола федерации — это ИСТОРИЧЕСКИЕ ПРИМЕРЫ сообщений, по которым страж проверяет, что
+# формат не сломан (`scripts/check-protocol.mjs`). В них обязаны быть поля, выглядящие как публичный
+# ключ, подпись и одноразовый код: пример без них перестаёт проверять формат, ради которого заведён.
+# Сами значения — читаемый текст в base64 («fixture-root-public-key-not-a-real-one»), они ничего не
+# открывают и никуда не подходят. Отпечатки в hashes.json — это sha256 самих файлов, тоже не секрет.
+# Область та же, что у соседних исключений: ЭТОТ каталог И ЭТО правило.
+[[allowlists]]
+description = "federation protocol fixtures are format examples, not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''packages/shared/src/federation/fixtures/.*''']

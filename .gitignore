@@ -57,3 +57,11 @@ Thumbs.db
 *.local
 minio.md
 *-info.md
+
+# Выгрузка дизайн-системы в claude.ai/design (/design-sync): сюда пишет конвертер.
+# Durable-часть — .design-sync/config.json, NOTES.md, conventions.md, previews/ — КОММИТИТСЯ.
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules

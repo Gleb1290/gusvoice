@@ -6,6 +6,7 @@ import {
   serverHost,
   stripSlash,
   type Instance,
+  type InstanceServer,
   type RuntimeConfig,
   type ServerConfig,
 } from './configRules';
@@ -13,7 +14,7 @@ import { isTauri } from './hotkeys';
 
 // Чистые правила (нормализация адреса, переход реестра) — в `configRules.ts`, там же и типы.
 // Реэкспорт, чтобы компоненты продолжали импортировать их из `./config`.
-export type { Instance, ServerConfig } from './configRules';
+export type { Instance, InstanceServer, ServerConfig } from './configRules';
 export { normalizeServerInput, serverHost } from './configRules';
 
 declare global {
@@ -35,6 +36,25 @@ export const RELEASES_URL = 'https://github.com/Gleb1290/gusvoice/releases/lates
 
 const injected: RuntimeConfig = window.__GUSVOICE_CONFIG__ ?? {};
 
+/**
+ * Кеш посчитанного `config` (само вычисление и зачем оно живое — ниже, у `config`).
+ *
+ * 🔴 **Объявлены ЗДЕСЬ, а не рядом с `config`, и это не вкусовщина.** `migrate()` вызывается на
+ * загрузке модуля и пишет в реестр, а запись зовёт `invalidateConfig()`. Пока объявление стояло
+ * ниже по файлу, к моменту вызова переменная была в мёртвой зоне `let` — и приложение падало
+ * насмерть ещё до первой отрисовки: `Cannot access 'resolvedCache' before initialization`, чёрный
+ * экран у КАЖДОГО, у кого реестр на старте меняется (то есть у всех при первом заходе).
+ *
+ * ⚠️ Правило шире одного случая: всё, к чему тянется `migrate()`, обязано быть объявлено ВЫШЕ его
+ * вызова. Типы такого не ловят, и сборка тоже — только запуск.
+ */
+let resolvedCache: ResolvedConfig | null = null;
+
+/** Сбросить посчитанный конфиг — зовётся из любой записи в реестр. */
+export function invalidateConfig(): void {
+  resolvedCache = null;
+}
+
 function makeId(): string {
   try {
     return crypto.randomUUID();
@@ -53,6 +73,7 @@ function readInstances(): Instance[] {
 }
 
 function writeInstances(list: Instance[]): void {
+  invalidateConfig();
   try {
     localStorage.setItem(INSTANCES_KEY, JSON.stringify(list));
   } catch {
@@ -69,6 +90,7 @@ function readActiveId(): string | null {
 }
 
 function writeActiveId(id: string | null): void {
+  invalidateConfig();
   try {
     if (id) localStorage.setItem(ACTIVE_KEY, id);
     else localStorage.removeItem(ACTIVE_KEY);
@@ -180,6 +202,17 @@ export function updateActiveInstance(patch: Partial<Instance>): void {
   if (id) updateInstance(id, patch);
 }
 
+/**
+ * Запомнить, супер-админ ли аккаунт активной записи (`Instance.superAdmin`, 23.09). Гостевые записи не
+ * трогаем: там живой профиль — учётка у соседа, и её «нет прав» затёрло бы домашний снимок. Пишем только
+ * при изменении — зовётся на каждой загрузке профиля.
+ */
+export function noteActiveSuperAdmin(superAdmin: boolean): void {
+  const cur = activeInstance();
+  if (!cur || cur.guestOf || !!cur.superAdmin === superAdmin) return;
+  updateInstance(cur.id, { superAdmin });
+}
+
 /** Add a new (token-less) instance from a discovered ServerConfig. Optionally make it active. */
 export function addInstance(cfg: ServerConfig, opts?: { name?: string; activate?: boolean }): Instance {
   const list = readInstances();
@@ -191,11 +224,86 @@ export function addInstance(cfg: ServerConfig, opts?: { name?: string; activate?
   return inst;
 }
 
-/** Forget an instance (drops its token too). If it was active, activate the first remaining one. */
+/**
+ * Forget an instance (drops its token too). If it was active, activate the first remaining one.
+ *
+ * 🔴 Дом уходит — с ним и его гостевые записи (аудит 19.09, F-23): иначе они оставались в реестре с
+ * живыми токенами, и фоновые шлюзы продолжали к ним подключаться от имени аккаунта, которого у
+ * человека здесь больше нет. Хостам при этом сообщаем «завершить сессию» — как при выходе.
+ */
 export function removeInstance(id: string): void {
-  const list = readInstances().filter((i) => i.id !== id);
+  const all = readInstances();
+  endGuestSessions(all.filter((i) => i.guestOf === id));
+  const list = all.filter((i) => i.id !== id && i.guestOf !== id);
   writeInstances(list);
-  if (readActiveId() === id) writeActiveId(list[0]?.id ?? null);
+  const active = readActiveId();
+  if (active === null || !list.some((i) => i.id === active)) writeActiveId(list[0]?.id ?? null);
+}
+
+/**
+ * Попросить хосты завершить гостевые сессии — ДО того, как токены будут стёрты (F-23).
+ *
+ * «Выйти» раньше забывало токены только в браузере: на хостах они жили до своего срока, и угнанный
+ * токен переживал нажатие. `POST /fed/guest-session/end` поднимает поколение теневой строки — то же,
+ * что «выйти везде» дома. Без ожидания и с `keepalive`: за выходом следует перезагрузка, и запрос
+ * обязан её пережить; хост лежит — выход всё равно происходит, его сессия умрёт по сроку.
+ */
+function endGuestSessions(guests: Instance[]): void {
+  for (const inst of guests) {
+    if (!inst.token || !inst.apiUrl) continue;
+    try {
+      void fetch(`${inst.apiUrl}/api/fed/guest-session/end`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${inst.token}` },
+        keepalive: true,
+      }).catch(() => {
+        /* хост недоступен — сессия умрёт по сроку */
+      });
+    } catch {
+      /* fetch недоступен (тесты без окна) — не повод ломать выход */
+    }
+  }
+}
+
+/**
+ * Запомнить, какие серверы у этой записи (§5.7).
+ *
+ * 🔴 Ради рейла: он обязан показывать серверы ВСЕХ инстансов всегда, а живой шлюз у нас пока один.
+ *
+ * ⚠️ Зовётся ТОЛЬКО с удачного ответа списка серверов, поэтому пустой список здесь значит «серверов
+ * правда не осталось», а не «сеть не ответила», — и тогда снимок честно очищается. Сорванный запрос
+ * сюда не доходит вовсе: он бросает исключение выше.
+ * ⚠️ Пишем, только если список ИЗМЕНИЛСЯ: `loadServers()` зовётся часто (после каждого вступления и
+ * выхода), а каждая запись в реестр — это `JSON.stringify` всего реестра в `localStorage`.
+ */
+export function rememberInstanceServers(id: string, servers: InstanceServer[]): void {
+  const cur = readInstances().find((i) => i.id === id);
+  if (!cur) return;
+  const next = servers.map((s) => ({ id: s.id, name: s.name, iconUrl: s.iconUrl ?? null }));
+  if (JSON.stringify(cur.servers ?? []) === JSON.stringify(next)) return;
+  updateInstance(id, { servers: next });
+}
+
+/**
+ * Выйти из аккаунта ЦЕЛИКОМ: у дома и у всех его гостевых записей (#139, §5.7).
+ *
+ * 🔴 **Повод — «пришлось нажать „Выйти“ дважды»** (найдено владельцем 19.09). Гостевая сессия принадлежит
+ * дому: токен хосту выдан под его поручительство. Но «Выйти» стирал токен только АКТИВНОЙ записи, и
+ * если человек стоял в гостях, после перезагрузки его возвращало домой — где он по-прежнему вошедший.
+ * Со стороны это выглядит как «кнопка не сработала»: человек жал второй раз, и только тогда выходил.
+ *
+ * ⚠️ Семья — это дом и ЕГО гости, а не весь реестр: у человека может быть несколько своих аккаунтов
+ * на разных инстансах, и выход из одного не должен выбрасывать из остальных.
+ */
+export function logoutFamily(id: string | null): void {
+  const list = readInstances();
+  const me = list.find((i) => i.id === id);
+  if (!me) return;
+  const homeId = me.guestOf ?? me.id;
+  const family = new Set([homeId, ...list.filter((i) => i.guestOf === homeId).map((i) => i.id)]);
+  // Хостам — «завершить сессию», пока токены ещё на руках (F-23), и только потом стираем.
+  endGuestSessions(list.filter((i) => i.guestOf === homeId));
+  writeInstances(list.map((i) => (family.has(i.id) ? { ...i, token: null } : i)));
 }
 
 export function renameInstance(id: string, name: string): void {
@@ -228,19 +336,66 @@ export function multiInstanceEnabled(): boolean {
   }
 }
 
-// ---- Frozen active config (re-resolved on each module load = each app restart) -------------------
+// ---- Active config: живое, а не замороженное на загрузке (§5.7) ---------------------------------
 
-const boot = activeInstance();
+/**
+ * 🔴 **Раньше это был замороженный объект**, посчитанный один раз при загрузке модуля: смена
+ * инстанса обязана была перезапускать приложение, иначе `config.apiUrl` продолжал указывать на
+ * прежний. Переход между инстансами перестал быть перезапуском (`instanceSwitch.ts`), поэтому
+ * поля стали геттерами и всегда отвечают по АКТИВНОЙ записи реестра.
+ *
+ * ⚠️ Значения кешируются до первой записи в реестр: `config.apiUrl` читается на каждом запросе, а
+ * `activeInstance()` каждый раз разбирает JSON из хранилища. Сброс кеша — в `writeInstances` и
+ * `writeActiveId`, то есть в ЕДИНСТВЕННЫХ местах, где реестр меняется.
+ * ⚠️ Из-за геттеров нельзя разворачивать конфиг в переменные на загрузке модуля
+ * (`const { apiUrl } = config`) — это снова заморозит его. Обращаться полем в момент нужды.
+ */
+interface ResolvedConfig {
+  apiUrl: string;
+  presenceWs: string;
+  pushGateway: string;
+  ntfyServer: string;
+  diagEnabled: boolean;
+  economyEnabled: boolean;
+}
 
-export const config = {
-  apiUrl: boot?.apiUrl || injected.apiUrl || import.meta.env.VITE_API_URL || 'http://localhost:4000',
-  presenceWs: boot?.presenceWs || injected.presenceWs || import.meta.env.VITE_PRESENCE_WS || 'ws://localhost:4001',
-  pushGateway: boot?.pushGateway || injected.pushGateway || import.meta.env.VITE_PUSH_GATEWAY || '',
-  ntfyServer: boot?.ntfyServer || injected.ntfyServer || import.meta.env.VITE_NTFY_SERVER || '',
-  // ⚠️ Строго `=== true`: у инстанса, который про диагностику ничего не знает, поле отсутствует, и
-  // это должно читаться как «выключено», а не как «неизвестно, попробуем».
-  diagEnabled: (boot?.diagEnabled ?? injected.diagEnabled) === true,
-  economyEnabled: (boot?.economyEnabled ?? injected.economyEnabled) === true,
+function resolveConfig(): ResolvedConfig {
+  const boot = activeInstance();
+  return {
+    apiUrl: boot?.apiUrl || injected.apiUrl || import.meta.env.VITE_API_URL || 'http://localhost:4000',
+    presenceWs: boot?.presenceWs || injected.presenceWs || import.meta.env.VITE_PRESENCE_WS || 'ws://localhost:4001',
+    pushGateway: boot?.pushGateway || injected.pushGateway || import.meta.env.VITE_PUSH_GATEWAY || '',
+    ntfyServer: boot?.ntfyServer || injected.ntfyServer || import.meta.env.VITE_NTFY_SERVER || '',
+    // ⚠️ Строго `=== true`: у инстанса, который про диагностику ничего не знает, поле отсутствует, и
+    // это должно читаться как «выключено», а не как «неизвестно, попробуем».
+    diagEnabled: (boot?.diagEnabled ?? injected.diagEnabled) === true,
+    economyEnabled: (boot?.economyEnabled ?? injected.economyEnabled) === true,
+  };
+}
+
+function current(): ResolvedConfig {
+  return (resolvedCache ??= resolveConfig());
+}
+
+export const config: ResolvedConfig = {
+  get apiUrl() {
+    return current().apiUrl;
+  },
+  get presenceWs() {
+    return current().presenceWs;
+  },
+  get pushGateway() {
+    return current().pushGateway;
+  },
+  get ntfyServer() {
+    return current().ntfyServer;
+  },
+  get diagEnabled() {
+    return current().diagEnabled;
+  },
+  get economyEnabled() {
+    return current().economyEnabled;
+  },
 };
 
 /**

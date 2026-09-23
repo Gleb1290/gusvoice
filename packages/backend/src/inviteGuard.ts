@@ -8,6 +8,11 @@ import { redisPub as redis } from './realtime.js';
 // Brute-force protection for server invite codes. Keyed per user (joining requires auth):
 // after MAX_FAILS wrong codes the user is locked out of joining for `level * STEP_MIN` minutes,
 // escalating every subsequent lockout (15 → 30 → 45 …). The admin is emailed on each trip.
+//
+// 🔴 Успешное вступление счётчик НЕ обнуляет (аудит 19.09 F-18; #195 п. 3; #196 п. 3): в отличие от
+// входа по паролю, верный код приглашения ничего не доказывает о человеке — его получает любой, кому
+// прислали ссылку, — и цикл «4 промаха → вступил → вышел → 4 промаха» обходил блокировку вечно.
+// Промахи забываются сами по окну FAIL_WINDOW_S, уровень — по LEVEL_TTL_S.
 const MAX_FAILS = 5;
 const FAIL_WINDOW_S = 15 * 60; // wrong attempts must fall inside this sliding window to add up
 const LEVEL_TTL_S = 24 * 60 * 60; // escalation memory — a full quiet day resets you to 15 min
@@ -21,11 +26,6 @@ const lockKey = (id: string) => `iv:lock:${id}`;
 export async function inviteLockRemaining(userId: string): Promise<number> {
   const ttl = await redis.ttl(lockKey(userId));
   return ttl > 0 ? ttl : 0;
-}
-
-/** Wipe the failure counter + escalation level after a legitimate join. */
-export async function clearInviteFailures(userId: string): Promise<void> {
-  await redis.del(failKey(userId), lvlKey(userId));
 }
 
 /**

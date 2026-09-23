@@ -3,10 +3,12 @@ import { useState } from 'react';
 import { isMobile } from '../hotkeys';
 import { customStatusVisible, effectiveDot } from '../status';
 import { useStore } from '../store';
-import { toastError } from '../toast';
+import { toast, toastError } from '../toast';
+import { dmBlockText } from '../dmRules';
 import { Avatar } from './Avatar';
 import { CrownMark, crownGlow, useCrownId } from './Crown';
 import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
+import { GuestMark } from './GuestMark';
 import { Icon } from './Icon';
 import { MemberProfileSheet } from './MemberProfileSheet';
 import { StatusDot } from './StatusDot';
@@ -52,6 +54,19 @@ export function ServerMembersPanel() {
   const online = sorted.filter((m) => dotOf(m) !== 'offline');
   const offline = sorted.filter((m) => dotOf(m) === 'offline');
 
+  /**
+   * ЛКМ по строке — «написать». Гостю (и гостя) писать нельзя, и отказ за этим ходил на сервер:
+   * человек получал тостом код `federation.dm_unavailable`. Отвечаем сразу и словами (§5.8).
+   */
+  const openDm = (m: ServerMemberInfo) => {
+    const blocked = dmBlockText(me?.homeInstance, m.user.homeInstance);
+    if (blocked) {
+      toast('info', blocked);
+      return;
+    }
+    void openDmWith(m.user.id).catch((e: Error) => toastError(e));
+  };
+
   const row = (m: ServerMemberInfo) => {
     const name = m.nickname || m.user.displayName;
     const self = m.user.id === me?.id;
@@ -64,13 +79,21 @@ export function ServerMembersPanel() {
       <li
         key={m.user.id}
         className={`mp-row ${dot === 'offline' ? 'mp-off' : ''} ${self && !mobile ? '' : 'mp-clickable'}`}
-        title={mobile ? undefined : self ? undefined : `ЛКМ — написать, ПКМ — меню`}
+        // Подсказку сверяем с тем же правилом: обещать «ЛКМ — написать» тому, кому написать нельзя,
+        // значит звать человека нажать и получить отказ.
+        title={
+          mobile || self
+            ? undefined
+            : dmBlockText(me?.homeInstance, m.user.homeInstance)
+              ? 'ПКМ — меню'
+              : 'ЛКМ — написать, ПКМ — меню'
+        }
         onClick={
           mobile
             ? () => setSheetMember(m)
             : self
               ? undefined
-              : () => void openDmWith(m.user.id).catch((e: Error) => toastError(e))
+              : () => openDm(m)
         }
         onContextMenu={(e) => openMenu(e, { userId: m.user.id, name, avatarUrl: m.user.avatarUrl })}
       >
@@ -88,7 +111,11 @@ export function ServerMembersPanel() {
           </span>
         </span>
         <span className="mp-meta">
-          <span className={`mp-name${crownGlow(crownId === m.user.id)}`}>{name}</span>
+          <span className={`mp-name${crownGlow(crownId === m.user.id)}`}>
+            {name}
+            {/* Гость виден сразу: список участников — первое место, где на человека смотрят. */}
+            <GuestMark home={m.user.homeInstance} size={11} />
+          </span>
           {game ? (
             <span className="mp-game" title={`Играет в ${game.name}`}>
               <Icon name="gamepad" size={12} />

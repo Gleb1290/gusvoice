@@ -60,7 +60,7 @@ export function ToastSettingsPanel() {
 
   return (
     <>
-      <div className="settings-group-label" style={{ marginTop: 18 }}>
+      <div className="settings-group-label" id="set-g-poke-toast" style={{ marginTop: 18 }}>
         Плашка «кто кого типнул»
       </div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>

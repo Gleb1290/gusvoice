@@ -1,0 +1,27 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "entries": [
+    {
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+      "updated_at": 1758000000000,
+      "username": "gus",
+      "display_name": "Гусь",
+      "avatar_hash": "9f2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+    },
+    {
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6c",
+      "updated_at": 1758000060000,
+      "removed": true,
+      "reason": "hidden"
+    },
+    {
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6d",
+      "updated_at": 1758000120000,
+      "removed": true,
+      "reason": "deleted"
+    }
+  ],
+  "next_cursor": "MTc1ODAwMDEyMDAwMDowMTkzZjFhMi01YzZkLTdlOGYtOWEwYi0xYzJkM2U0ZjVhNmQ",
+  "full": false,
+  "now": 1758000180000
+}

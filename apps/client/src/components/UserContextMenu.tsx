@@ -6,6 +6,10 @@ import { MAX_VOLUME, useUserAudio } from '../localUserAudio';
 import { useStore } from '../store';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
+import { GuestLine, guestHomeLabel, useGuestHome } from './GuestMark';
+import { dmBlockText } from '../dmRules';
+import { clearEvidence, useEvidence } from '../reportEvidence';
+import { toast } from '../toast';
 import { AvatarZoom } from './AvatarZoom';
 import { customStatusVisible, type DotStatus, effectiveDot } from '../status';
 import { ContextMenu, MenuDivider, MenuHeader, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
@@ -13,6 +17,7 @@ import { Icon } from './Icon';
 import { PokeComposer } from './PokeModal';
 import { ProfileEconomy } from './ProfileEconomy';
 import { useAnimatedAvatarUrl } from '../avatarAnimation';
+import { confirmAction } from '../confirm';
 import { StatusDot } from './StatusDot';
 
 export type UserMenuTarget = {
@@ -304,6 +309,11 @@ function ProfileCard({
    * карточки из «неправильного» места, и объяснить это было бы нечем.
    */
   const animatedAvatarUrl = useAnimatedAvatarUrl()(target.userId) ?? null;
+  // Откуда человек — из того же общего ростера и по той же причине, что и анимация.
+  const guestHome = useGuestHome()(target.userId);
+  // Запрет личек двусторонний (§5.8): гостю закрыта переписка и с местными, поэтому спрашиваем
+  // правило, а не одно лишь «гость ли собеседник».
+  const dmBlocked = dmBlockText(useStore((s) => s.user?.homeInstance), guestHome);
   // Кружок обрезает картинку, а прийти в профиль могут именно ради неё. Открываем ровно то, что
   // человек тут видит: анимацию, когда она показана, иначе обычный аватар. Выключивший анимацию
   // не должен получить её через просмотрщик — выключатель бережёт трафик, а не только глаза.
@@ -337,6 +347,9 @@ function ProfileCard({
           {isSelf && <span className="pcard-badge">это вы</span>}
         </div>
         {username && <div className="pcard-handle">@{username}</div>}
+        {/* Откуда человек — сразу под @ником: в карточку приходят смотреть на человека, и «он с
+            другого инстанса» здесь такая же часть ответа, как его роли. */}
+        <GuestLine home={guestHome} />
         {customStatus && (
           <div className="pcard-custom">
             {customStatus.emoji && <span className="pcard-custom-emoji">{customStatus.emoji}</span>}
@@ -386,6 +399,10 @@ function ProfileCard({
             <button type="button" className="pcard-cta" onClick={onEdit}>
               <Icon name="edit" size={16} /> Изменить профиль
             </button>
+          ) : dmBlocked ? (
+            /* 🔴 Личка с людьми других инстансов выключена до #141 (§5.8). Молча убирать кнопку
+               нельзя: человек ищет её глазами и решит, что промахнулся. Объясняем словами. */
+            <div className="pcard-dm-off">{dmBlocked}</div>
           ) : (
             <>
               <button type="button" className="pcard-cta" onClick={onDm}>
@@ -418,6 +435,11 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
   const pushMutedDmUsers = useStore((s) => s.pushMutedDmUsers);
   const setPushMuted = useStore((s) => s.setPushMuted);
   const audio = useUserAudio(target.userId);
+  // Гость ли человек — из общего ростера; по этому же полю решается, предлагать ли ему личку.
+  const menuGuestHome = useGuestHome()(target.userId);
+  // Галочка «Пожаловаться» и корзина приложенных сообщений живут рядом с окном бана (§5.11).
+  const [banReport, setBanReport] = useState(false);
+  const banEvidence = useEvidence(target.userId);
   const [view, setView] = useState<View>('menu');
   const [nickDraft, setNickDraft] = useState('');
   // Свой выключатель приёма тычков на этом сервере (#122). Грузим ТОЛЬКО для себя и отдельным
@@ -539,7 +561,9 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
   const assignableRoles = useMemo(
     () =>
       (bootstrap?.roles ?? [])
-        .filter((r) => !r.isEveryone && r.position < myTop)
+        // «Гости» в списке выдачи не место (§5.9): её получают по признаку гостя, а не строкой, и
+        // клик по ней либо ничего не менял бы, либо добавлял бы прав местному (приёмка 18.09).
+        .filter((r) => !r.isEveryone && !r.isGuests && r.position < myTop)
         .sort((a, b) => b.position - a.position),
     [bootstrap, myTop],
   );
@@ -548,7 +572,7 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
   const selfAssignableRoles = useMemo(() => {
     if (!bootstrap) return [] as Role[];
     const mine = new Set(bootstrap.member.roleIds);
-    return bootstrap.roles.filter((r) => !r.isEveryone && r.membersCanAssign && mine.has(r.id));
+    return bootstrap.roles.filter((r) => !r.isEveryone && !r.isGuests && r.membersCanAssign && mine.has(r.id));
   }, [bootstrap]);
   const assignableIds = useMemo(() => new Set(assignableRoles.map((r) => r.id)), [assignableRoles]);
   const grantRoles = useMemo(() => {
@@ -650,6 +674,30 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
             maxLength={512}
             autoFocus
           />
+          {/* 🔴 Жалоба держателю ЧУЖОГО инстанса (§5.11) — только у гостя и только если тот инстанс
+              её примет. Бан работает в любом случае: он целиком на нашей стороне. */}
+          {menuGuestHome && (
+            <label className={`ctx-ban-report${menuGuestHome.reports === false ? ' off' : ''}`}>
+              <input
+                type="checkbox"
+                checked={banReport}
+                disabled={menuGuestHome.reports === false}
+                onChange={(e) => setBanReport(e.target.checked)}
+              />
+              <span>
+                Пожаловаться держателю «{guestHomeLabel(menuGuestHome)}»
+                {menuGuestHome.reports === false ? (
+                  <em> — этот инстанс жалоб пока не принимает</em>
+                ) : (
+                  <em>
+                    {' '}
+                    — уйдут ник, причина, сервер и время
+                    {banEvidence.length > 0 ? `, а также ${banEvidence.length} прил. сообщ.` : ''}
+                  </em>
+                )}
+              </span>
+            </label>
+          )}
           <div className="ctx-ban-actions">
             <button type="button" className="ctx-ban-cancel" onClick={() => setView('menu')}>
               Отмена
@@ -657,7 +705,23 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
             <button
               type="button"
               className="ctx-ban-confirm"
-              onClick={() => run(() => api.banMember(serverId, target.userId, banReason.trim() || undefined).then(() => loadMembers(serverId)))}
+              onClick={() =>
+                run(async () => {
+                  const res = await api.banMemberWithReport(serverId, target.userId, {
+                    reason: banReason.trim() || undefined,
+                    report: banReport || undefined,
+                    evidence: banReport && banEvidence.length ? banEvidence.map(({ text, at, channel }) => ({ text, at, channel })) : undefined,
+                  });
+                  clearEvidence(target.userId);
+                  // Жалоба могла не уйти (сосед лежит, суточный предел) — говорим об этом отдельно:
+                  // бан уже случился, и молчать про половину действия нельзя.
+                  const report = res && typeof res === 'object' ? res.report : undefined;
+                  if (banReport && report && !report.sent) {
+                    toast('error', 'Жалоба не ушла', 'Забанить получилось. Жалобу попробуйте отправить позже.');
+                  }
+                  await loadMembers(serverId);
+                })
+              }
             >
               Забанить
             </button>
@@ -905,7 +969,13 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
           <MenuDivider />
           {p && <MenuItem icon="activity" label="Инфо о подключении" onClick={() => setView('connection')} />}
           <MenuItem icon="user" label="Профиль" onClick={() => setView('profile')} />
-          <MenuItem icon="mail" label="Написать в ЛС" onClick={() => run(() => openDmWith(target.userId))} />
+          {/* Гостю пункта нет: `POST /dm` с ним отвечает `federation.dm_unavailable` (§5.8), и пункт
+              меню, который всегда кончается отказом, — это обещание, которого мы не держим.
+              ⚠️ Смотрим на ОБЕ стороны: гостю закрыта личка и с местными, а раньше условие знало
+              только про собеседника, и у гостя пункт оставался на месте. */}
+          {!dmBlockText(me?.homeInstance, menuGuestHome) && (
+            <MenuItem icon="mail" label="Написать в ЛС" onClick={() => run(() => openDmWith(target.userId))} />
+          )}
           {/* Вставляем ИМЯ ПОЛЬЗОВАТЕЛЯ, а не отображаемое: упоминание ловится по username
               (`shared/mentions.ts`), и `@Маша` не разбудил бы никого — пункт меню делал вид, что
               сработал, а человек упоминания не получал. */}
@@ -1024,9 +1094,14 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
               label="Кикнуть с сервера"
               danger
               onClick={() =>
-                run(() => {
-                  if (window.confirm(`Кикнуть ${target.name} с сервера?`))
-                    return api.kickMember(bootstrap.server.id, target.userId);
+                run(async () => {
+                  const ok = await confirmAction({
+                    title: `Кикнуть ${target.name} с сервера?`,
+                    body: 'Сообщения останутся. Вернуться можно по новому приглашению.',
+                    tone: 'danger',
+                    confirmLabel: 'Кикнуть',
+                  });
+                  if (ok) await api.kickMember(bootstrap.server.id, target.userId);
                 })
               }
             />

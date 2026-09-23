@@ -1,0 +1,20 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "servers": [
+    {
+      "server_id": "0193f1a2-aaaa-7e8f-9a0b-1c2d3e4f5a6b",
+      "updated_at": 1758000000000,
+      "name": "Гуси",
+      "icon_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+      "members": 12
+    },
+    {
+      "server_id": "0193f1a2-bbbb-7e8f-9a0b-1c2d3e4f5a6c",
+      "updated_at": 1758000060000,
+      "removed": true
+    }
+  ],
+  "next_cursor": null,
+  "full": true,
+  "now": 1758000180000
+}

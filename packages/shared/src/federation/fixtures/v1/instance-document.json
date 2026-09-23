@@ -1,0 +1,26 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "name": "Гусик",
+  "icon_hash": null,
+  "domain": "voice.example.org",
+  "client_origin": "https://voice.example.org",
+  "api_base": "https://api.voice.example.org",
+  "protocol": {
+    "min": 1,
+    "max": 1
+  },
+  "features": [
+    "link"
+  ],
+  "app_version": "v0.7.0",
+  "root_key": "Zml4dHVyZS1yb290LXB1YmxpYy1rZXktbm90LWEtcmVhbC1vbmU",
+  "keys": [
+    {
+      "kid": "iCoOZ-t6EtyTvoVo",
+      "public_key": "Zml4dHVyZS1zaWduaW5nLXB1YmxpYy1rZXktbm90LXJlYWw",
+      "not_before": 1758000000000,
+      "not_after": 1760592000000,
+      "sig": "Zml4dHVyZS1zaWduYXR1cmUtbm90LWEtcmVhbC1vbmU"
+    }
+  ]
+}

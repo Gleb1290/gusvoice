@@ -10,6 +10,7 @@ import {
 } from '@gusvoice/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { isSuperAdmin, superAdminId } from './auth.js';
+import { asUserId } from './superAdminRules.js';
 import { db } from './db/index.js';
 import {
   categoryOverwrites,
@@ -19,6 +20,7 @@ import {
   roles,
   serverMembers,
   servers,
+  users,
 } from './db/schema.js';
 
 import {
@@ -49,22 +51,45 @@ export interface MemberContext {
 /** Load a member's server-level context, or null if they are not a member. */
 export async function getMemberContext(serverId: string, userId: string): Promise<MemberContext | null> {
   // Super-admin is a virtual full-permission member of every server. По id, без похода в базу (#140).
-  if (isSuperAdmin(userId)) {
+  if (isSuperAdmin(asUserId(userId))) {
     return { isOwner: true, roleIds: [], roles: [], everyoneRoleId: null, serverPermissions: ALL_PERMISSIONS };
   }
 
   const [member] = await db
-    .select()
+    .select({ state: serverMembers.state, homeInstanceId: users.homeInstanceId })
     .from(serverMembers)
+    .innerJoin(users, eq(serverMembers.userId, users.id))
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
     .limit(1);
   if (!member) return null;
+  /**
+   * Членство есть, но закрыто держателем (#139, F3, §5.3.1) — прав у человека нет НИГДЕ.
+   *
+   * 🔴 Проверка стоит здесь, в одном месте, а не в маршрутах: «любой запрос гостя к серверу
+   * получает отказ» (план §5.3.1) — это десятки маршрутов, и достаточно забыть один, чтобы
+   * закрытый гость продолжал, например, писать в канал. Там, где человеку нужен ТЕКСТ с
+   * контактами держателя, а не голое «не участник», стоит `guestAccessRefusal`.
+   */
+  if (member.state !== 'active') return null;
 
   const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
   const isOwner = server?.ownerId === userId;
 
   const serverRoles = await db.select().from(roles).where(eq(roles.serverId, serverId));
   const everyone = serverRoles.find((r) => r.isEveryone) ?? null;
+  /**
+   * Базовые права гостя даёт системная роль «Гости» (#139, F3, §5.9) — она ЗАМЕНЯЕТ `@everyone`.
+   *
+   * 🔴 Именно заменяет, а не добавляется: роли только прибавляют права, и ограничить всех гостей
+   * разом, оставив им `@everyone`, было бы нечем. При создании роль — копия прав `@everyone`, то
+   * есть по умолчанию гость равен своему, а сузить может владелец сервера.
+   * ⚠️ `everyoneRoleId` при этом остаётся `@everyone`: канальные переопределения на `@everyone` —
+   * это «для всех участников канала», и гость участник не меньше прочих. Переопределения на саму
+   * роль «Гости» работают поверх — через `roleIds` ниже.
+   */
+  const isGuest = member.homeInstanceId !== null;
+  const guestsRole = serverRoles.find((r) => r.isGuests) ?? null;
+  const baseRole = isGuest && guestsRole ? guestsRole : everyone;
 
   const mr = await db
     .select({ roleId: memberRoles.roleId })
@@ -73,7 +98,7 @@ export async function getMemberContext(serverId: string, userId: string): Promis
   const assigned = new Set(mr.map((r) => r.roleId));
 
   const effectiveRoles: RoleRow[] = serverRoles
-    .filter((r) => r.isEveryone || assigned.has(r.id))
+    .filter((r) => r.id === baseRole?.id || assigned.has(r.id))
     .map((r) => ({ id: r.id, isEveryone: r.isEveryone, permissions: r.permissions, position: r.position }));
   // ⚠️ `roleIds` отдаём только по СУЩЕСТВУЮЩИМ ролям: он уходит в `applyOverwrites`, а оверрайды на
   // роль хранятся без FK, поэтому висячая связь дотянулась бы до чужого `allow`. Сейчас `member_roles`
@@ -83,6 +108,10 @@ export async function getMemberContext(serverId: string, userId: string): Promis
 
   let serverPermissions = basePermissions(effectiveRoles.map((r) => ({ permissions: permsFromString(r.permissions) })));
   if (isOwner) serverPermissions = ALL_PERMISSIONS;
+
+  // Роль «Гости» едет в `roleIds`, чтобы работали её канальные переопределения (скрыть «Админку»,
+  // запретить показ экрана) — ради них она и заведена.
+  if (isGuest && guestsRole) assigned.add(guestsRole.id);
 
   return {
     isOwner,
@@ -239,7 +268,17 @@ export async function getChannelAudience(channelId: string): Promise<{ serverId:
 
   const [server, memberRows, serverRoles, memberRoleRows, chanOws] = await Promise.all([
     db.select({ ownerId: servers.ownerId }).from(servers).where(eq(servers.id, serverId)).limit(1),
-    db.select({ userId: serverMembers.userId }).from(serverMembers).where(eq(serverMembers.serverId, serverId)),
+    /**
+     * 🔴 Только ДЕЙСТВУЮЩИЕ членства и с признаком гостя (аудит 19.09, F-03). Строка членства гостя
+     * переживает закрытие сервера для федерации (`closed_by_host`) и запрет (`removed`) — так
+     * задумано, чтобы возврат был без потерь, — но в аудиторию такой человек входить не должен:
+     * `getMemberContext` отвечает про него «не участник», и рассылка обязана отвечать так же.
+     */
+    db
+      .select({ userId: serverMembers.userId, homeInstanceId: users.homeInstanceId })
+      .from(serverMembers)
+      .innerJoin(users, eq(serverMembers.userId, users.id))
+      .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.state, 'active'))),
     db.select().from(roles).where(eq(roles.serverId, serverId)),
     db
       .select({ userId: memberRoles.userId, roleId: memberRoles.roleId })
@@ -266,6 +305,7 @@ export async function getChannelAudience(channelId: string): Promise<{ serverId:
     userId: m.userId,
     roleIds: rolesByUser.get(m.userId) ?? [],
     privileged: m.userId === ownerId || m.userId === superId,
+    isGuest: m.homeInstanceId !== null,
   }));
 
   // Супер-админ, НЕ состоящий в сервере, участником не числится, но подписаться на него может —
@@ -278,6 +318,7 @@ export async function getChannelAudience(channelId: string): Promise<{ serverId:
     members,
     roles: serverRoles.map((r) => ({ id: r.id, isEveryone: r.isEveryone, permissions: r.permissions })),
     everyoneRoleId: serverRoles.find((r) => r.isEveryone)?.id ?? null,
+    guestsRoleId: serverRoles.find((r) => r.isGuests)?.id ?? null,
     categoryOverwrites: catOws,
     channelOverwrites: chanOws,
   });
@@ -290,7 +331,7 @@ export async function getVisibleVoiceChannelIds(userId: string): Promise<string[
   // channels so presence (who-is-in-voice) shows up even in servers they aren't a member of.
   // Without this, voice-visibility is built only from serverMembers, so an un-joined super-admin
   // sees the channel but never who's sitting in it.
-  if (isSuperAdmin(userId)) {
+  if (isSuperAdmin(asUserId(userId))) {
     const all = await db.select({ id: channels.id }).from(channels).where(eq(channels.type, 'voice'));
     return all.map((c) => c.id);
   }

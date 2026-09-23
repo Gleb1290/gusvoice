@@ -65,16 +65,64 @@ export const MENTION_LEFT_GUARD = '(?<![^\\s(\\[<"«„,;:*~`])';
 /** Обращения ко всему каналу. Обычные имена, просто зарезервированные. */
 export const BROADCAST_MENTIONS = ['everyone', 'here'] as const;
 
-const MENTION_RE = new RegExp(`${MENTION_LEFT_GUARD}@(${MENTION_NAME_SRC})`, 'g');
+/**
+ * 🔴 **Хвост `@домен`** (#139, F4, §5.5). Гость приходит со своим ником, и на сервере может
+ * оказаться ДВА Васи — свой и с соседнего инстанса. Обратиться ко второму без домена нельзя в
+ * принципе: любое правило «кого из них» было бы угадыванием, а упоминание обязано попадать точно.
+ *
+ * ⚠️ Домен пишется теми же символами, что и имя (`MENTION_NAME_SRC` допускает точки внутри), —
+ * отдельного выражения для него не нужно, и одно место остаётся одним.
+ *
+ * 🔴 **Хвостом-доменом считается только то, что содержит ТОЧКУ.** Иначе `@super@petya` — «Супер,
+ * позови Петю», два обращения подряд — превратилось бы в обращение к несуществующему инстансу
+ * `petya`, то есть ни к кому: оба человека перестали бы получать упоминание. Этот случай поймал
+ * тест (`@super@petya` обязан оставаться обращением к `super`), и решение по нему такое: адреса
+ * инстансов — доменные имена, в них точка есть всегда, а ники пишут без точек.
+ *
+ * ⚠️ Цена: на стенде с адресом без точки (`localhost`) обратиться к гостю по домену нельзя. Для
+ * боевых инстансов это не случай, а стенд обходится обычным `@ник`, пока тёзок нет.
+ */
+const MENTION_RE = new RegExp(`${MENTION_LEFT_GUARD}@(${MENTION_NAME_SRC})(?:@(${MENTION_NAME_SRC}))?`, 'g');
+
+/** Обращение: имя и, для гостя, домен его инстанса. */
+export interface MentionHandle {
+  name: string;
+  /** `null` — обращение к своему человеку. */
+  domain: string | null;
+}
+
+/**
+ * Все обращения текста, в нижнем регистре и без повторов.
+ *
+ * ⚠️ Возвращает ИМЕННО пары: `@vasya` и `@vasya@voice.friend.org` — два разных человека, и сводить
+ * их к одному имени значило бы звонить не тому.
+ */
+export function mentionedHandles(content: string): MentionHandle[] {
+  const seen = new Set<string>();
+  const out: MentionHandle[] = [];
+  for (const m of content.matchAll(MENTION_RE)) {
+    const name = m[1].toLowerCase();
+    // Точка — признак адреса инстанса (см. шапку `MENTION_RE`); без неё это просто вторая собака.
+    const tail = m[2] && m[2].includes('.') ? m[2].toLowerCase() : null;
+    const domain = tail;
+    const key = domain ? `${name}@${domain}` : name;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, domain });
+  }
+  return out;
+}
 
 /**
  * Все имена, упомянутые в тексте, в нижнем регистре и без повторов.
  * `everyone` и `here` попадают сюда наравне с остальными — это просто имена.
  */
 export function mentionedNames(content: string): string[] {
-  const out = new Set<string>();
-  for (const m of content.matchAll(MENTION_RE)) out.add(m[1].toLowerCase());
-  return [...out];
+  // ⚠️ Только обращения БЕЗ домена: с доменом — это гость, и искать его по одному имени среди
+  // своих значит найти тёзку. Их разбирает `mentionedHandles`.
+  return mentionedHandles(content)
+    .filter((h) => h.domain === null)
+    .map((h) => h.name);
 }
 
 /**
@@ -84,11 +132,22 @@ export function mentionedNames(content: string): string[] {
  * а звук считает эту функцию, и если они разойдутся — звук будет без пуша или наоборот.
  * Сравнение регистронезависимое, потому что вход в аккаунт тоже регистронезависимый.
  */
-export function mentionsMe(content: string, username?: string | null): boolean {
-  const names = mentionedNames(content);
-  if (names.some((n) => (BROADCAST_MENTIONS as readonly string[]).includes(n))) return true;
+export function mentionsMe(
+  content: string,
+  username?: string | null,
+  /** Для ГОСТЯ: его домашний ник и домен его инстанса — по ним к нему и обращаются (§5.5). */
+  home?: { username: string; domain: string } | null,
+): boolean {
+  const handles = mentionedHandles(content);
+  if (handles.some((h) => h.domain === null && (BROADCAST_MENTIONS as readonly string[]).includes(h.name))) return true;
+  if (home?.username && home.domain) {
+    const name = home.username.toLowerCase();
+    const domain = home.domain.toLowerCase();
+    if (handles.some((h) => h.name === name && h.domain === domain)) return true;
+  }
   if (!username) return false;
-  return names.includes(username.toLowerCase());
+  const me = username.toLowerCase();
+  return handles.some((h) => h.domain === null && h.name === me);
 }
 
 /** Экранирование имени для подстановки в регулярку (в имени встречаются `.` и `-`). */
@@ -106,7 +165,13 @@ function escapeName(name: string): string {
  *
  * Postgres понимает те же lookahead/lookbehind (ARE), что и JS.
  */
-export function mentionSqlPattern(username?: string | null): string {
+export function mentionSqlPattern(username?: string | null, home?: { username: string; domain: string } | null): string {
   const names = [...BROADCAST_MENTIONS, ...(username ? [escapeName(username)] : [])];
-  return `${MENTION_LEFT_GUARD}@(${names.join('|')})(?![A-Za-z0-9_]|[.-]+[A-Za-z0-9_])`;
+  const tail = '(?![A-Za-z0-9_]|[.-]+[A-Za-z0-9_])';
+  const plain = `@(${names.join('|')})${tail}`;
+  // 🔴 Гостю нужен ВТОРОЙ вариант: к нему обращаются `@ник@домен`, а его собственный `username` в
+  // базе — служебная строка `id@instance`, по которой в тексте никто не пишет (§5.5).
+  const guest =
+    home?.username && home.domain ? `|@${escapeName(home.username)}@${escapeName(home.domain)}${tail}` : '';
+  return `${MENTION_LEFT_GUARD}(?:${plain}${guest})`;
 }

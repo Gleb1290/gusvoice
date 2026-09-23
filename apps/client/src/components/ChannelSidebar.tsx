@@ -2,11 +2,14 @@ import type { Channel } from '@gusvoice/shared';
 import { has, Permission, permsFromString } from '@gusvoice/shared';
 import { Fragment, useRef, useState } from 'react';
 import { api } from '../api';
+import { openCheatSheet } from '../cheatSheet';
 import { toggleCategoryCollapse, useCollapsedCategories, useMutedChannels } from '../channelPrefs';
+import { isFeedOnScreen } from '../channelRules';
 import { useNameResolver } from '../memberName';
 import { useStore } from '../store';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
+import { GuestMark, useGuestHome } from './GuestMark';
 import { CrownMark, crownGlow, useCrownId } from './Crown';
 import { hintsFor } from '../tipHints';
 import { useAltHeld, useTip } from '../tipGesture';
@@ -42,7 +45,17 @@ export function ChannelSidebar() {
   const tipHints = useStore((s) => s.tipHints);
   // Анимация аватара: одна подписка на компонент, годная внутри `map` (хук туда нельзя).
   const animatedOf = useAnimatedAvatarUrl();
+  const guestHomeOf = useGuestHome();
   const currentChannelId = useStore((s) => s.currentChannelId);
+  const mobilePane = useStore((s) => s.mobilePane);
+  /* Значок непрочитанного прячется у канала, который ВИДНО, а не у «текущего»: на телефоне список
+     и лента — разные экраны (правило целиком — `channelRules.isFeedOnScreen`). Подсветка строки
+     остаётся по `currentChannelId`: человеку полезно видеть, куда он вернётся. */
+  const shownChannelId =
+    currentChannelId &&
+    isFeedOnScreen({ id: currentChannelId, currentId: currentChannelId, mobile: isMobile(), mobilePane })
+      ? currentChannelId
+      : null;
   const openChannel = useStore((s) => s.openChannel);
   const enterVoiceChannel = useStore((s) => s.enterVoiceChannel);
   const voice = useStore((s) => s.voice);
@@ -311,12 +324,24 @@ export function ChannelSidebar() {
       >
         <div
           className={`channel ${c.id === currentChannelId ? 'active' : ''} ${
-            (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== currentChannelId ? 'unread' : ''
+            (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== shownChannelId ? 'unread' : ''
           } ${mutedChannels.has(c.id) ? 'muted' : ''} ${canManage && dragUnlocked ? 'draggable' : ''} ${
             drag?.id === c.id ? 'dragging' : ''
           }`}
           data-ch={c.id}
           data-cat={c.categoryId ?? ''}
+          /* 🔴 Строка канала — это `div` с обработчиком клика, и до 19.09 открыть канал можно было
+             только мышью или пальцем: ни Tab сюда не попадал, ни Enter ничего не делал (WCAG 2.1.1,
+             уровень A). Роль и обработчик клавиш это чинят, не меняя вёрстки. Пробел гасим
+             отдельно: по умолчанию он листает страницу, а не нажимает. */
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            if (e.target !== e.currentTarget) return; // нажатие на вложенной кнопке — не наше дело
+            e.preventDefault();
+            clickChannel(c);
+          }}
           onClick={() => {
             if (suppressClick.current) {
               suppressClick.current = false;
@@ -354,9 +379,9 @@ export function ChannelSidebar() {
           {/* Приоритет за упоминаниями: красный бейдж с их числом. Иначе — число непрочитанных
               медовым (#78; сервер его и так присылает, раньше клиент схлопывал в точку).
               Заглушённый канал не показывает ничего — иначе «заглушить» теряет смысл. */}
-          {c.id !== currentChannelId && (mentionCounts[c.id] ?? 0) > 0 ? (
+          {c.id !== shownChannelId && (mentionCounts[c.id] ?? 0) > 0 ? (
             <span className="ch-mention">{(mentionCounts[c.id] ?? 0) > 99 ? '99+' : mentionCounts[c.id]}</span>
-          ) : (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== currentChannelId ? (
+          ) : (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== shownChannelId ? (
             <span className="ch-unread">{(unreadCounts[c.id] ?? 0) > 99 ? '99+' : unreadCounts[c.id]}</span>
           ) : null}
           {(canManage || canEditOverwrites || (isVoice && (canManageServer || canManageSounds || c.generalUserId === user?.id))) && (
@@ -468,6 +493,7 @@ export function ChannelSidebar() {
                     ) : (
                       pname
                     )}
+                    <GuestMark home={guestHomeOf(p.userId)} size={10} />
                   </span>
                   {/* 🔴 Слот нулевой ширины СРАЗУ после ника: `.pname` растягивается, поэтому слот
                       всегда стоит там, где ник кончается и начинаются значки — «справа от ника, до
@@ -557,6 +583,12 @@ export function ChannelSidebar() {
           <div className="head-actions">
           <button className="head-icon" title="Поиск" onClick={() => setShowSearch(true)}>
             <Icon name="search" size={18} />
+          </button>
+          {/* 🔴 Шпаргалка сочетаний открывалась только клавишей «?», о которой написано лишь
+              внутри неё самой. Функция, о которой неоткуда узнать, всё равно что отсутствует —
+              поэтому к ней теперь есть видимая дверь. */}
+          <button className="head-icon" title="Горячие клавиши (?)" onClick={openCheatSheet}>
+            <Icon name="keyboard" size={18} />
           </button>
           {canInvite && (
             <button className="head-icon" title="Пригласить" onClick={() => setShowInvite(true)}>

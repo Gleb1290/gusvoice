@@ -5,8 +5,10 @@ import {
   applyAc,
   emojiSubstitution,
   GROUP_WINDOW_MS,
+  dayLabel,
   isFirstUnread,
   isGrouped,
+  isNewDay,
   type ListMessage,
 } from './messagePaneRules.js';
 
@@ -151,3 +153,30 @@ describe('группировка соседних сообщений', () => {
   });
 });
 
+describe('границы календарных дней', () => {
+  it('первое сообщение всегда открывает дневной блок', () => {
+    // Ловит ленту без даты над самым верхним сообщением.
+    assert.equal(isNewDay(message(Date.UTC(2026, 8, 20, 12)), undefined), true);
+  });
+
+  it('сообщения одного местного дня не создают второй разделитель', () => {
+    // Ловит сравнение полных timestamp вместо календарной даты читателя.
+    const noon = new Date(2026, 8, 20, 12).getTime();
+    const evening = new Date(2026, 8, 20, 23).getTime();
+    assert.equal(isNewDay(message(evening), message(noon)), false);
+  });
+
+  it('соседние сообщения по разные стороны местной полуночи разделяются', () => {
+    // Ловит расчёт дня по UTC, когда у читающего уже наступили новые сутки.
+    const before = new Date(2026, 8, 20, 23, 59, 59).getTime();
+    const after = new Date(2026, 8, 21, 0, 0, 0).getTime();
+    assert.equal(isNewDay(message(after), message(before)), true);
+  });
+
+  it('подписи сегодня и вчера считаются от переданного времени', () => {
+    // Ловит зависимость теста и интерфейса от часов машины вместо выбранного «сейчас».
+    const now = new Date(2026, 8, 22, 12);
+    assert.equal(dayLabel(new Date(2026, 8, 22, 1).toISOString(), now), 'Сегодня');
+    assert.equal(dayLabel(new Date(2026, 8, 21, 23).toISOString(), now), 'Вчера');
+  });
+});
