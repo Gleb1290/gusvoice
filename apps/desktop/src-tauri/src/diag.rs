@@ -135,16 +135,16 @@ struct LoadQuery {
 
 static LOAD: Mutex<Option<LoadQuery>> = Mutex::new(None);
 
-fn load_sample() -> (f64, f64) {
+fn load_sample() -> (f64, f64, Vec<(String, f64)>) {
     let mut guard = match LOAD.lock() {
         Ok(g) => g,
-        Err(_) => return (0.0, 0.0),
+        Err(_) => return (0.0, 0.0, Vec::new()),
     };
     unsafe {
         if guard.is_none() {
             let mut query: PdhHandle = 0;
             if PdhOpenQueryW(std::ptr::null(), 0, &mut query) != 0 {
-                return (0.0, 0.0);
+                return (0.0, 0.0, Vec::new());
             }
             let mut cpu: PdhHandle = 0;
             let mut gpu: PdhHandle = 0;
@@ -159,11 +159,11 @@ fn load_sample() -> (f64, f64) {
             // следующем вызове быть не должно: он выбросил бы первое валидное значение, и загрузка
             // приезжала бы нулевой (уже поймано дымовым прогоном).
             *guard = Some(LoadQuery { query, cpu, gpu });
-            return (0.0, 0.0);
+            return (0.0, 0.0, Vec::new());
         }
         let q = guard.as_ref().unwrap();
         if PdhCollectQueryData(q.query) != 0 {
-            return (0.0, 0.0);
+            return (0.0, 0.0, Vec::new());
         }
         let mut ty: u32 = 0;
         let mut v = PdhFmtValue { c_status: 0, _pad: 0, double_value: 0.0 };
@@ -175,12 +175,66 @@ fn load_sample() -> (f64, f64) {
         // У видеокарты движков много (3D, кодировщик, копирование). Берём МАКСИМУМ, а не сумму:
         // сумма по восьми движкам легко даёт «400%» и ничего не значит, а узкое место — тот движок,
         // который упёрся в потолок первым.
-        let gpu = pdh_array(q.gpu)
-            .into_iter()
-            .map(|(_, v)| v)
-            .fold(0.0_f64, f64::max);
-        (cpu, gpu)
+        let engines = pdh_array(q.gpu);
+        let gpu = engines.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
+        (cpu, gpu, engines)
     }
+}
+
+/// Загрузка блоков видеокарты у одного «кого-то» (игра / мы / WebView2 / DWM), %, за интервал между
+/// срезами. Экземпляры одного типа СКЛАДЫВАЮТСЯ: у RTX 5080 блоков кодирования несколько, и сумма —
+/// это вся работа кодирования, а не «загрузка одного блока».
+#[derive(Serialize, Clone, Default)]
+pub struct EngineLoad {
+    #[serde(rename = "3d")]
+    pub d3: f64,
+    pub copy: f64,
+    pub venc: f64,
+    pub vdec: f64,
+    pub other: f64,
+}
+
+/// Кто занимает видеокарту рядом с игрой (#207, плейбук тема 06, §2 п. 1).
+///
+/// 🔴 Главная дыра телеметрии до 25.09: видна была только загрузка САМОГО нагруженного блока карты
+/// в целом, и «игра потеряла кадры при показе» нельзя было разложить на виновников. Счётчик
+/// `GPU Engine` уже читается (он же даёт `gpu_pct`), здесь его экземпляры `pid_…_engtype_…` просто
+/// разложены по процессам.
+#[derive(Serialize, Clone, Default)]
+pub struct GpuBy {
+    /// Полноэкранная игра на переднем плане (`occlusion::game_pid_now`). Нет игры — нет поля.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<EngineLoad>,
+    /// Наш процесс: захват, перевод цвета, NVENC, CUDA.
+    pub native: EngineLoad,
+    /// Процессы WebView2 НАШЕГО дерева (интерфейс, декод чужого показа, композиция страницы).
+    pub webview: EngineLoad,
+    pub dwm: EngineLoad,
+}
+
+fn add_engine(load: &mut EngineLoad, engtype: &str, v: f64) {
+    match engtype {
+        "3D" => load.d3 += v,
+        "Copy" => load.copy += v,
+        t if t.starts_with("VideoEncode") => load.venc += v,
+        t if t.starts_with("VideoDecode") => load.vdec += v,
+        _ => load.other += v,
+    }
+}
+
+fn round1(load: &mut EngineLoad) {
+    for v in [&mut load.d3, &mut load.copy, &mut load.venc, &mut load.vdec, &mut load.other] {
+        *v = (*v * 10.0).round() / 10.0;
+    }
+}
+
+/// Имя экземпляра `pid_1234_luid_0x…_0x…_phys_0_eng_3_engtype_VideoEncode` → (pid, тип блока).
+fn parse_engine_instance(name: &str) -> Option<(u32, &str)> {
+    let rest = name.strip_prefix("pid_")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let pid = digits.parse::<u32>().ok()?;
+    let engtype = name.rsplit_once("_engtype_")?.1;
+    Some((pid, engtype))
 }
 
 /// Разовый запрос с подстановкой: суммы по pid. Открывается и закрывается на каждый срез — для
@@ -281,6 +335,21 @@ pub struct ProcSample {
 #[derive(Serialize, Clone)]
 pub struct DiagSnapshot {
     pub procs: Vec<ProcSample>,
+    /// Кто занимает видеокарту: игра / наш процесс / наш WebView2 / DWM (#207).
+    pub gpu_by: GpuBy,
+    /// Имя exe полноэкранной игры на переднем плане — чтобы сравнивать игры одного типа между собой.
+    /// Только имя файла, без пути.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_exe: Option<String>,
+    /// Перехватчик мыши для рации (`WH_MOUSE_LL`): сколько событий прошло через наш поток за окно и
+    /// самая долгая задержка «событие случилось → мы его получили», мс. `None` — перехватчик не
+    /// стоит (на мышь ничего не назначено). 🔴 Кандидат на микрофризы мыши: пока наш поток не ответил,
+    /// событие дальше не идёт (плейбук #207, тема 06, §3). Точность — тик системных часов (~16 мс),
+    /// так что видны только крупные задержки.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse_hook_events: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse_hook_lag_max_ms: Option<u32>,
     /// Суммарная выделенная видеопамять по всем адаптерам — фон, на котором смотрим процессы.
     pub gpu_adapter_total_mb: f64,
     /// Средняя загрузка процессора за интервал между срезами, %.
@@ -514,15 +583,65 @@ fn sample_proc(
     s
 }
 
+/// Разложить экземпляры `GPU Engine` по владельцам: игра, наш процесс, наш WebView2, DWM.
+fn gpu_by_owner(engines: &[(String, f64)], all: &[(u32, u32, String)]) -> (GpuBy, Option<String>) {
+    // Наше дерево: сам процесс и все потомки (WebView2 порождает свои процессы от нашего).
+    let me = std::process::id();
+    let mut ours: std::collections::HashSet<u32> = std::collections::HashSet::from([me]);
+    loop {
+        let before = ours.len();
+        for (pid, parent, _) in all {
+            if ours.contains(parent) {
+                ours.insert(*pid);
+            }
+        }
+        if ours.len() == before {
+            break;
+        }
+    }
+    let dwm: std::collections::HashSet<u32> =
+        all.iter().filter(|(_, _, n)| n.eq_ignore_ascii_case("dwm.exe")).map(|(p, _, _)| *p).collect();
+    let game_pid = crate::occlusion::game_pid_now();
+    let game_exe = game_pid.and_then(|g| all.iter().find(|(p, _, _)| *p == g).map(|(_, _, n)| n.clone()));
+    let mut by = GpuBy { game: game_pid.map(|_| EngineLoad::default()), ..Default::default() };
+    for (inst, v) in engines {
+        let Some((pid, engtype)) = parse_engine_instance(inst) else { continue };
+        let slot = if Some(pid) == game_pid {
+            by.game.as_mut()
+        } else if pid == me {
+            Some(&mut by.native)
+        } else if ours.contains(&pid) {
+            Some(&mut by.webview)
+        } else if dwm.contains(&pid) {
+            Some(&mut by.dwm)
+        } else {
+            None
+        };
+        if let Some(load) = slot {
+            add_engine(load, engtype, *v);
+        }
+    }
+    round1(&mut by.native);
+    round1(&mut by.webview);
+    round1(&mut by.dwm);
+    if let Some(g) = by.game.as_mut() {
+        round1(g);
+    }
+    (by, game_exe)
+}
+
 /// Один срез. Зовётся раз в 15 секунд, пока идёт показ экрана.
 pub fn snapshot() -> DiagSnapshot {
     let ded = pdh_sum_by_pid("\\GPU Process Memory(*)\\Dedicated Usage");
     let shr = pdh_sum_by_pid("\\GPU Process Memory(*)\\Shared Usage");
-    let (cpu_pct, gpu_pct) = load_sample();
+    let (cpu_pct, gpu_pct, engines) = load_sample();
     let (ram_used_mb, ram_total_mb, commit_used_mb, commit_total_mb) = mem();
     let (shell_hung, taskbar_hung, input_idle_ms) = shell_health();
     let (sys_gdi_total, sys_user_total, sys_procs_denied) = system_gui_totals();
     let mut procs = Vec::new();
+    // Все процессы: pid → (родитель, имя). Нужны, чтобы найти НАШИ процессы WebView2 (по родству,
+    // а не по имени — `msedgewebview2.exe` есть и у Teams, и у виджетов) и имя игры.
+    let mut all: Vec<(u32, u32, String)> = Vec::new();
 
     unsafe {
         if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
@@ -539,6 +658,7 @@ pub fn snapshot() -> DiagSnapshot {
                     if WATCH.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
                         procs.push(sample_proc(&name, e.th32ProcessID, &ded, &shr));
                     }
+                    all.push((e.th32ProcessID, e.th32ParentProcessID, name));
                     if Process32NextW(snap, &mut e).is_err() {
                         break;
                     }
@@ -548,8 +668,18 @@ pub fn snapshot() -> DiagSnapshot {
         }
     }
 
+    let (gpu_by, game_exe) = gpu_by_owner(&engines, &all);
+    let (mouse_hook_events, mouse_hook_lag_max_ms) = match crate::ptt_mouse::take_stats() {
+        Some((n, lag)) => (Some(n), Some(lag)),
+        None => (None, None),
+    };
+
     DiagSnapshot {
         procs,
+        gpu_by,
+        game_exe,
+        mouse_hook_events,
+        mouse_hook_lag_max_ms,
         gpu_adapter_total_mb: pdh_adapter_total_bytes() / MB,
         cpu_pct,
         gpu_pct,
@@ -574,9 +704,16 @@ pub fn snapshot() -> DiagSnapshot {
 }
 
 /// Команда для веб-слоя: один срез. Буферизация и отправка — забота клиента.
+///
+/// 🔴 `async` + `spawn_blocking` (27.09). Синхронная команда Tauri исполняется в главном потоке
+/// событийного цикла, а срез — это три свежих запроса PDH, два обхода всех процессов с `OpenProcess`
+/// и NVML. На слабой машине это десятки–сотни мс, и всё это время стояли окно, IPC и доставка звука
+/// показа — раз в 15 с во время показа.
 #[tauri::command]
-pub fn gv_diag_snapshot() -> DiagSnapshot {
-    snapshot()
+pub async fn gv_diag_snapshot() -> Result<DiagSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(snapshot)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Настоящая версия Windows.
@@ -641,6 +778,29 @@ pub fn gv_os_info() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{add_engine, parse_engine_instance, EngineLoad};
+
+    #[test]
+    fn имя_счётчика_движка_даёт_pid_и_тип_блока() {
+        // Ловит смещение в разборе PDH, после которого вся загрузка владельцев GPU исчезает.
+        assert_eq!(
+            parse_engine_instance("pid_1234_luid_0x0_0x1_phys_0_eng_3_engtype_VideoEncode"),
+            Some((1234, "VideoEncode")),
+        );
+        assert_eq!(parse_engine_instance("мусор"), None);
+        assert_eq!(parse_engine_instance("pid_x_engtype_3D"), None);
+    }
+
+    #[test]
+    fn типы_движков_раскладываются_по_своим_счётчикам() {
+        // Ловит смешение кодирования с 3D: тогда отчёт обвинит игру вместо нашего NVENC.
+        let mut load = EngineLoad::default();
+        for (kind, value) in [("3D", 1.0), ("Copy", 2.0), ("VideoEncode0", 3.0), ("VideoDecode1", 4.0), ("Compute", 5.0)] {
+            add_engine(&mut load, kind, value);
+        }
+        assert_eq!((load.d3, load.copy, load.venc, load.vdec, load.other), (1.0, 2.0, 3.0, 4.0, 5.0));
+    }
+
     /// Дымовой прогон на живой машине. `#[ignore]` — в CI не гоняется (там Linux, модуль
     /// windows-only), запускать руками:
     ///   cargo test --lib diag -- --ignored --nocapture

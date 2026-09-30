@@ -27,7 +27,7 @@ async function tick(): Promise<void> {
   if (!gameActivityEnabled()) return;
   let exes: string[];
   try {
-    exes = (await listOverlayApps()).map((a) => a.exe);
+    exes = (await listOverlayApps({ icons: false })).map((a) => a.exe);
   } catch {
     return; // enumeration failed this cycle — leave state; the TTL covers a prolonged silence
   }

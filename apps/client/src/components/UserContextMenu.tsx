@@ -35,14 +35,15 @@ export type UserMenuTarget = {
  * (and optionally a ••• button), and render `menu` somewhere in the same tree.
  */
 export function useUserMenu() {
-  const [state, setState] = useState<{ pos: MenuPos; target: UserMenuTarget } | null>(null);
-  const open = (e: ReactMouseEvent, target: UserMenuTarget) => {
+  const [state, setState] = useState<{ pos: MenuPos; target: UserMenuTarget; view: 'menu' | 'profile' } | null>(null);
+  /** `view: 'profile'` — сразу карточка профиля (нажатие на аватар или имя в ленте, #212), иначе меню. */
+  const open = (e: ReactMouseEvent, target: UserMenuTarget, view: 'menu' | 'profile' = 'menu') => {
     e.preventDefault();
     e.stopPropagation();
-    setState({ pos: { x: e.clientX, y: e.clientY }, target });
+    setState({ pos: { x: e.clientX, y: e.clientY }, target, view });
   };
   const menu = state ? (
-    <UserContextMenu target={state.target} pos={state.pos} onClose={() => setState(null)} />
+    <UserContextMenu target={state.target} pos={state.pos} initialView={state.view} onClose={() => setState(null)} />
   ) : null;
   return { open, menu };
 }
@@ -421,7 +422,17 @@ function ProfileCard({
 
 // ---- the menu --------------------------------------------------------------
 
-export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarget; pos: MenuPos; onClose: () => void }) {
+export function UserContextMenu({
+  target,
+  pos,
+  onClose,
+  initialView = 'menu',
+}: {
+  target: UserMenuTarget;
+  pos: MenuPos;
+  onClose: () => void;
+  initialView?: 'menu' | 'profile';
+}) {
   const bootstrap = useStore((s) => s.bootstrap);
   const me = useStore((s) => s.user);
   const members = useStore((s) => s.members);
@@ -440,7 +451,7 @@ export function UserContextMenu({ target, pos, onClose }: { target: UserMenuTarg
   // Галочка «Пожаловаться» и корзина приложенных сообщений живут рядом с окном бана (§5.11).
   const [banReport, setBanReport] = useState(false);
   const banEvidence = useEvidence(target.userId);
-  const [view, setView] = useState<View>('menu');
+  const [view, setView] = useState<View>(initialView);
   const [nickDraft, setNickDraft] = useState('');
   // Свой выключатель приёма тычков на этом сервере (#122). Грузим ТОЛЬКО для себя и отдельным
   // запросом: в общем списке участников такому полю не место — иначе видно, кто отключил приём.

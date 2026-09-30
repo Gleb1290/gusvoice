@@ -1,11 +1,14 @@
 import { fileURLToPath, URL } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+import { hoverOnly } from './hoverOnly';
 
 // Alias the shared workspace package to its TypeScript source so Vite transpiles it
 // as part of the app (rather than serving raw .ts from node_modules).
 export default defineConfig({
   plugins: [react()],
+  // `:hover` только у мыши: на телефоне касание оставляло подсветку висеть (#212) — подробности в `hoverOnly.ts`.
+  css: { postcss: { plugins: [hoverOnly()] } },
   resolve: {
     alias: {
       '@gusvoice/shared': fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),

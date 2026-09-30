@@ -8,11 +8,18 @@ import { isServerMessageType, type GatewayServerMessage } from '@gusvoice/shared
  * сообщения из приватного канала уезжало тем, кому канал закрыт.
  */
 
-/** Внутренний конверт шины: наружу уходит только `m`, `to` — маршрутизация. */
+/** Внутренний конверт шины: наружу уходит только `m`, `to`/`cap`/`notCap` — маршрутизация. */
 export interface Envelope {
   m: GatewayServerMessage;
   /** `undefined` — событие всего сервера; иначе только этим пользователям. */
   to?: string[];
+  /**
+   * Только соединениям, объявившим эту возможность в `identify.caps` (ЛС этап 1, шаг 0.5). `notCap` — наоборот,
+   * только тем, кто её НЕ объявил. Так одно и то же изменение уходит старым клиентам прежним `dm.*`, а новым —
+   * `conv.change`, и каждый получает только понятную ему форму.
+   */
+  cap?: string;
+  notCap?: string;
 }
 
 /**
@@ -38,7 +45,43 @@ export function parseEnvelope(raw: string): Envelope | null {
   if (!isServerMessageType((env.m as { t?: unknown }).t)) return null;
   if (env.to !== undefined && !Array.isArray(env.to)) return null;
   if (Array.isArray(env.to) && env.to.some((x) => typeof x !== 'string')) return null;
-  return { m: env.m as GatewayServerMessage, to: env.to as string[] | undefined };
+  // ⚠️ Тоже fail-closed: кривой `cap` мог бы означать «новым клиентам» — отдать его всем значит отдать старым
+  // клиентам форму, которую они не понимают.
+  const { cap, notCap } = env as { cap?: unknown; notCap?: unknown };
+  if (cap !== undefined && typeof cap !== 'string') return null;
+  if (notCap !== undefined && typeof notCap !== 'string') return null;
+  const out: Envelope = { m: env.m as GatewayServerMessage, to: env.to as string[] | undefined };
+  if (cap !== undefined) out.cap = cap;
+  if (notCap !== undefined) out.notCap = notCap;
+  return out;
+}
+
+/**
+ * Проходит ли событие фильтр возможностей соединения (`cap`/`notCap`, шаг 0.5).
+ *
+ * ⚠️ Решается ПО СОЕДИНЕНИЮ, а не по человеку: у одного человека бывают сразу старый десктоп и новый клиент.
+ */
+export function capAllows(env: Pick<Envelope, 'cap' | 'notCap'>, caps: ReadonlySet<string> | undefined): boolean {
+  if (env.cap !== undefined && !caps?.has(env.cap)) return false;
+  if (env.notCap !== undefined && caps?.has(env.notCap)) return false;
+  return true;
+}
+
+const MAX_CAPS = 16;
+const CAP_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+
+/**
+ * `identify.caps` от клиента → набор возможностей соединения. Всё непохожее молча отбрасывается: не массив,
+ * не строка, длиннее 32 символов, чужие символы, больше 16 штук. Отсутствие поля — пустой набор (старый клиент).
+ */
+export function parseCaps(raw: unknown): ReadonlySet<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(raw)) return out;
+  for (const c of raw) {
+    if (out.size >= MAX_CAPS) break;
+    if (typeof c === 'string' && CAP_RE.test(c)) out.add(c);
+  }
+  return out;
 }
 
 /**
@@ -47,7 +90,8 @@ export function parseEnvelope(raw: string): Envelope | null {
  * ⚠️ Неидентифицированное соединение (`userId === null`) не получает НИЧЕГО адресного: до `identify`
  * мы не знаем, кто там, а значит не можем утверждать, что он в аудитории.
  */
-export function shouldDeliver(env: Envelope, userId: string | null): boolean {
+export function shouldDeliver(env: Envelope, userId: string | null, caps?: ReadonlySet<string>): boolean {
+  if (!capAllows(env, caps)) return false;
   if (!env.to) return true;
   if (!userId) return false;
   return env.to.includes(userId);

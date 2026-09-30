@@ -7,7 +7,11 @@ import {
   captureOptions,
   getStreamSettings,
   publishOptions,
+  returnLayersOnce,
+  shareLayerPresets,
   setStreamSettings,
+  STREAM_DEFAULTS,
+  webShareLayers,
   type StreamSettings,
 } from './streamSettings.js';
 
@@ -156,6 +160,31 @@ describe('параметры захвата и публикации экрана
 });
 
 describe('провод настроек в нативный показ', () => {
+  it('новый GPU-конвейер включён отсутствием поля, а явное выключение доходит до Rust', () => {
+    // Ловит отправку `undefined`/`true` как отдельного значения, с которым старый десктоп не умеет работать.
+    assert.equal('gpuPipeline' in STREAM_DEFAULTS, false);
+    const input = {
+      url: 'wss://voice.example.test', token: 'test-token', sourceId: 'screen:1', isWindow: false,
+    };
+    const legacy = buildNativeShareConfig({ ...input, settings: settings() });
+    const enabled = buildNativeShareConfig({ ...input, settings: settings({ gpuPipeline: true }) });
+    const disabled = buildNativeShareConfig({ ...input, settings: settings({ gpuPipeline: false }) });
+    assert.equal('gpuPipeline' in legacy, false);
+    assert.equal('gpuPipeline' in enabled, false);
+    assert.equal(disabled.gpuPipeline, false);
+  });
+
+  it('курсор включён отсутствием поля, а явное выключение доходит до Rust', () => {
+    // Ловит лишний ключ у старых оболочек и потерю осознанного запрета показывать курсор зрителям.
+    assert.equal('cursor' in STREAM_DEFAULTS, false);
+    const input = {
+      url: 'wss://voice.example.test', token: 'test-token', sourceId: 'screen:1', isWindow: false,
+    };
+    assert.equal('cursor' in buildNativeShareConfig({ ...input, settings: settings() }), false);
+    assert.equal('cursor' in buildNativeShareConfig({ ...input, settings: settings({ cursor: true }) }), false);
+    assert.equal(buildNativeShareConfig({ ...input, settings: settings({ cursor: false }) }).cursor, false);
+  });
+
   it('передаёт источник, качество и оба осознанно выключенных защитных переключателя', () => {
     // #100/#109: если хоть одно поле потеряется между панелью и Rust, человек снова получит WGC
     // с утечкой explorer или лишний слой, который не даёт начаться показу на слабой видеокарте.
@@ -181,5 +210,70 @@ describe('провод настроек в нативный показ', () => {
         layers: false,
       },
     );
+  });
+});
+
+describe('лестница слоёв показа', () => {
+  it('1440p30 даёт экономный 360p и средний 720p именно в порядке SDK', () => {
+    // Ловит перестановку RID: тогда сервер называет экономный слой средним и переключает не туда.
+    assert.deepEqual(shareLayerPresets(2560, 1440, 7_000_000, 30), [
+      { width: 640, height: 360, maxBitrate: 150_000, maxFramerate: 3 },
+      { width: 1280, height: 720, maxBitrate: 2_500_000, maxFramerate: 30 },
+    ]);
+  });
+
+  it('4K получает средний 1080p, а 720p — только половинный экономный слой', () => {
+    // Ловит лишний кодировщик у 720p и слишком мелкий средний слой у 4K.
+    assert.deepEqual(shareLayerPresets(3840, 2160, 8_000_000, 60), [
+      { width: 960, height: 540, maxBitrate: 150_000, maxFramerate: 3 },
+      { width: 1920, height: 1080, maxBitrate: 2_500_000, maxFramerate: 60 },
+    ]);
+    assert.deepEqual(shareLayerPresets(1280, 720, 1_500_000, 30), [
+      { width: 640, height: 360, maxBitrate: 150_000, maxFramerate: 3 },
+    ]);
+  });
+
+  it('средний слой соблюдает пол, потолок и долю общего бюджета', () => {
+    // Ловит как голодный 720p, так и слой, съедающий больше 60 % канала основного потока.
+    assert.equal(shareLayerPresets(1920, 1080, 1_000_000, 30)[1]?.maxBitrate, 600_000);
+    assert.equal(shareLayerPresets(1920, 1080, 20_000_000, 30)[1]?.maxBitrate, 2_500_000);
+    assert.equal(shareLayerPresets(1920, 1080, 1_500_000, 30)[1]?.maxBitrate, 900_000);
+  });
+
+  it('браузер не создаёт отдельные пресеты при выключенных слоях и у VP9', () => {
+    // Ловит двойную лестницу у SVC-кодека и игнорирование аварийного выключателя слоёв.
+    assert.deepEqual(webShareLayers(settings({ codec: 'h264', layers: false })), []);
+    assert.deepEqual(webShareLayers(settings({ codec: 'vp9', layers: true })), []);
+    assert.equal(webShareLayers(settings({ codec: 'h264', layers: true })).length, 1);
+  });
+
+  it('одноразовый возврат включает только ранее выключенные слои и уважает отметку', () => {
+    // Ловит вечное принудительное включение, которое отнимет у старой карты аварийный выход.
+    const off = settings({ layers: false });
+    assert.deepEqual(returnLayersOnce(off, false), { settings: { ...off, layers: true }, changed: true });
+    assert.deepEqual(returnLayersOnce(off, true), { settings: off, changed: false });
+    const on = settings({ layers: true });
+    assert.deepEqual(returnLayersOnce(on, false), { settings: on, changed: false });
+  });
+
+  it('общая таблица 720p–4K и 30/60 fps совпадает с нативной лестницей', () => {
+    // Межъязыковой страж: изменение только TypeScript или только Rust даст разные слои одному зрителю.
+    const cases = [
+      ['720', 30, 2_100_000, [[640, 360, 150_000, 3]]],
+      ['720', 60, 3_360_000, [[640, 360, 150_000, 3]]],
+      ['1080', 30, 4_200_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 30]]],
+      ['1080', 60, 6_720_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 60]]],
+      ['1440', 30, 7_000_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 30]]],
+      ['1440', 60, 11_200_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 60]]],
+      ['2160', 30, 11_200_000, [[960, 540, 150_000, 3], [1920, 1080, 2_500_000, 30]]],
+      ['2160', 60, 17_920_000, [[960, 540, 150_000, 3], [1920, 1080, 2_500_000, 60]]],
+    ] as const;
+    const dims = { '720': [1280, 720], '1080': [1920, 1080], '1440': [2560, 1440], '2160': [3840, 2160] } as const;
+    for (const [resolution, fps, bitrate, expected] of cases) {
+      const s = settings({ resolution, fps, codec: 'h264' });
+      assert.equal(bitrateFor(s), bitrate, `${resolution}p${fps}`);
+      const [w, h] = dims[resolution];
+      assert.deepEqual(shareLayerPresets(w, h, bitrate, fps).map((x) => [x.width, x.height, x.maxBitrate, x.maxFramerate]), expected);
+    }
   });
 });

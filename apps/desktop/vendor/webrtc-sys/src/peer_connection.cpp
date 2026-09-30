@@ -17,6 +17,8 @@
 #include "livekit/peer_connection.h"
 #include "livekit/peer_connection_factory.h"
 
+#include <algorithm>
+#include <atomic>
 #include <memory>
 
 #include "api/data_channel_interface.h"
@@ -24,11 +26,16 @@
 #include "api/scoped_refptr.h"
 #include "livekit/candidate.h"
 #include "livekit/data_channel.h"
+#include "livekit/gv_bitrate_hint.h"
 #include "livekit/jsep.h"
 #include "livekit/media_stream.h"
 #include "livekit/rtc_error.h"
 #include "livekit/rtp_transceiver.h"
 #include "rtc_base/logging.h"
+
+#if defined(USE_NVIDIA_VIDEO_CODEC)
+#include "nvidia/nvidia_encoder_factory.h"
+#endif
 
 namespace livekit_ffi {
 
@@ -55,6 +62,19 @@ webrtc::PeerConnectionInterface::RTCConfiguration to_native_rtc_configuration(
       static_cast<webrtc::PeerConnectionInterface::IceTransportsType>(
           config.ice_transport_type);
 
+#if defined(USE_NVIDIA_VIDEO_CODEC)
+  // GusVoice (#207 loss #2, #111): no CPU-overuse adaptation when NVENC encodes. The overuse
+  // detector measures WALL time from frame-in to last-layer-out, so waiting for a GPU busy with a
+  // game reads as "CPU overuse" and the screen share is throttled to a few fps while the CPU idles
+  // (telemetry: limitation=cpu at CPU 23 %). With hardware encoding the CPU is not the bottleneck.
+  // Without NVENC (software OpenH264 / libvpx) the adaptation stays ON — there it is real.
+  // The probe is cached: it opens a CUDA context and an NVENC session once per process.
+  static const bool kNvenc = webrtc::NvidiaVideoEncoderFactory::IsSupported();
+  if (kNvenc) {
+    rtc_config.set_cpu_adaptation(false);
+  }
+#endif
+
   return rtc_config;
 }
 
@@ -71,6 +91,31 @@ to_native_offer_answer_options(const RtcOfferAnswerOptions& options) {
   rtc_options.use_obsolete_sctp_sdp = options.use_obsolete_sctp_sdp;
   return rtc_options;
 }
+
+}  // namespace livekit_ffi
+
+// GusVoice (#207): подсказка оценщику канала — см. livekit/gv_bitrate_hint.h.
+namespace livekit {
+namespace {
+std::atomic<int32_t> g_hint_start_bps{0};
+std::atomic<int32_t> g_hint_min_bps{0};
+}  // namespace
+
+void SetBitrateHint(int32_t start_bps, int32_t min_bps) {
+  g_hint_start_bps.store(start_bps, std::memory_order_relaxed);
+  g_hint_min_bps.store(min_bps, std::memory_order_relaxed);
+}
+
+int32_t BitrateHintStart() {
+  return g_hint_start_bps.load(std::memory_order_relaxed);
+}
+
+int32_t BitrateHintMin() {
+  return g_hint_min_bps.load(std::memory_order_relaxed);
+}
+}  // namespace livekit
+
+namespace livekit_ffi {
 
 PeerConnection::PeerConnection(
     std::shared_ptr<RtcRuntime> rtc_runtime,
@@ -98,6 +143,19 @@ bool PeerConnection::Initialize(
     return false;
   }
   peer_connection_ = std::move(result.value());
+
+  // GusVoice (#207): стартовый битрейт и нижняя граница оценщика для показа экрана, если Rust
+  // их выставил (livekit/gv_bitrate_hint.h). Без них GCC стартует с 300 кбит/с.
+  const int32_t hint_min = livekit::BitrateHintMin();
+  const int32_t hint_start = livekit::BitrateHintStart();
+  if (hint_min > 0 || hint_start > 0) {
+    webrtc::BitrateSettings bitrate;
+    if (hint_min > 0) bitrate.min_bitrate_bps = hint_min;
+    if (hint_start > 0) bitrate.start_bitrate_bps = std::max(hint_start, hint_min);
+    const webrtc::RTCError err = peer_connection_->SetBitrate(bitrate);
+    RTC_LOG(LS_INFO) << "GusVoice bitrate hint: start=" << hint_start << " min=" << hint_min
+                     << (err.ok() ? "" : " (SetBitrate failed)");
+  }
   return true;
 }
 

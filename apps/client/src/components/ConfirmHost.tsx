@@ -23,6 +23,8 @@ export function ConfirmHost() {
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Галочка окна (`ConfirmSpec.option`) — своя у каждого вопроса. */
+  const [option, setOption] = useState(false);
   const okRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -35,6 +37,8 @@ export function ConfirmHost() {
     setTyped('');
     setBusy(false);
     setError(null);
+    setOption(pending?.option?.checked ?? false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- новый вопрос = новый id
   }, [pending?.id]);
 
   /**
@@ -157,6 +161,21 @@ export function ConfirmHost() {
                   {guardOk && <Icon name="check" size={17} />}
                 </div>
               </div>
+            )}
+
+            {pending.option && (
+              <label className="confirm-option">
+                <input
+                  type="checkbox"
+                  checked={option}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setOption(e.target.checked);
+                    pending.onOption?.(e.target.checked);
+                  }}
+                />
+                <span>{pending.option.label}</span>
+              </label>
             )}
 
             {error && (

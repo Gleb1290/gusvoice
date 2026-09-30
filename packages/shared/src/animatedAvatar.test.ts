@@ -3,6 +3,10 @@ import { describe, it } from 'node:test';
 import {
   ANIMATED_AVATAR_MAX_BYTES,
   ANIMATED_AVATAR_MAX_FRAMES,
+  AVATAR_RENTAL_DAYS,
+  AVATAR_RENTAL_MAX_DAYS,
+  avatarRentalCanExtend,
+  avatarRentalExtendFrom,
   checkAnimatedAvatar,
   frameCount,
   imageSize,
@@ -66,6 +70,43 @@ describe('размер из заголовка', () => {
   it('обрубок не притворяется разобранным', () => {
     assert.equal(imageSize(new Uint8Array([0x47, 0x49, 0x46]), 'image/gif'), null);
     assert.equal(imageSize(new Uint8Array(0), 'image/png'), null);
+  });
+});
+
+describe('потолок аренды анимированного аватара', () => {
+  const now = Date.UTC(2026, 8, 29);
+  const day = 24 * 60 * 60 * 1000;
+
+  it('без аренды и после её окончания можно купить новый срок', () => {
+    // Ловит отказ в первой покупке или продлении после перерыва.
+    assert.equal(avatarRentalCanExtend(null, now), true);
+    assert.equal(avatarRentalCanExtend(now, now), true);
+    assert.equal(avatarRentalCanExtend(now - day, now), true);
+    assert.equal(avatarRentalExtendFrom(null, now), null);
+  });
+
+  it('ровно 30 дней остатка ещё допускают продление до 60', () => {
+    // Ловит ошибку на включительной границе, при которой своевременное продление блокируется.
+    for (const days of [10, AVATAR_RENTAL_DAYS]) {
+      assert.equal(avatarRentalCanExtend(now + days * day, now), true);
+      assert.equal(avatarRentalExtendFrom(now + days * day, now), null);
+    }
+  });
+
+  it('на миллисекунду сверх 30 дней продление уже запрещено', () => {
+    // Ловит обход потолка дробным остатком суток и неверный момент разблокировки.
+    const until = now + AVATAR_RENTAL_DAYS * day + 1;
+    assert.equal(avatarRentalCanExtend(until, now), false);
+    assert.equal(avatarRentalExtendFrom(until, now), now + 1);
+  });
+
+  it('при остатке 45 и 60 дней окно покупки сдвигается вместе со сроком', () => {
+    // Ловит ошибочное фиксированное окно вместо вычисления от текущего срока.
+    for (const days of [45, AVATAR_RENTAL_MAX_DAYS]) {
+      const until = now + days * day;
+      assert.equal(avatarRentalCanExtend(until, now), false);
+      assert.equal(avatarRentalExtendFrom(until, now), until - AVATAR_RENTAL_DAYS * day);
+    }
   });
 });
 

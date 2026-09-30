@@ -48,6 +48,7 @@ export function App() {
   const setAuth = useStore((s) => s.setAuth);
   const loadServers = useStore((s) => s.loadServers);
   const loadPushMutes = useStore((s) => s.loadPushMutes);
+  const loadBlocks = useStore((s) => s.loadBlocks);
   const restoreVoiceSession = useStore((s) => s.restoreVoiceSession);
   /** Поколение активного инстанса (§5.7): растёт на мягком переходе, см. `instanceSwitch.ts`. */
   const instanceEpoch = useStore((s) => s.instanceEpoch);
@@ -141,6 +142,8 @@ export function App() {
     await loadServers();
     // Load push-mute rules so context-menu toggles reflect state (best-effort, non-blocking).
     void loadPushMutes();
+    // Чёрный список ЛС (#212): кнопка в беседе и раздел настроек показывают, кого я заблокировал.
+    void loadBlocks();
     connectGateway();
     connectPresence();
     // Шлюзы ОСТАЛЬНЫХ записей реестра (§5.7): непрочитанное и упоминания с инстансов, куда человек

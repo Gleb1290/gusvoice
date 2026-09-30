@@ -3,12 +3,14 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import Redis from 'ioredis';
 import { superAdminId, tokenGenValid, verifyToken } from './auth.js';
 import { clientIp, rateHit } from './authGuard.js';
+import { isBlockedBy } from './blocks.js';
 import { db } from './db/index.js';
 import { loadPeers } from './db/peerQueries.js';
-import { dmChannels, serverMembers } from './db/schema.js';
+import { conversationMembers, serverMembers } from './db/schema.js';
 import { eq, sql } from 'drizzle-orm';
 import { env } from './env.js';
-import { parseEnvelope, shouldDeliver, typingRoute } from './gatewayRules.js';
+import { capAllows, parseCaps, parseEnvelope, shouldDeliver } from './gatewayRules.js';
+import { relayTyping, type TypingDeps } from './gatewayTyping.js';
 import { getChannelAudience, getMemberContext } from './permissions.js';
 import { publishToChannel } from './realtime.js';
 import { createUserVisibilityHub } from './userVisibilityHub.js';
@@ -25,6 +27,8 @@ interface Conn {
   servers: Set<string>;
   /** Token generation this socket identified with — re-validated on pings (session revocation). */
   tokenGen?: number;
+  /** Возможности клиента из `identify.caps` (ЛС шаг 0.5): по ним шлюз выбирает форму события для ЭТОГО соединения. */
+  caps: ReadonlySet<string>;
 }
 
 // serverId -> connections currently subscribed to that server.
@@ -124,7 +128,7 @@ function send(socket: WsLike, msg: GatewayServerMessage): void {
 /**
  * Собеседник по диалогу — или `null`, если отправитель в нём не состоит (#88).
  *
- * Состав диалога НЕИЗМЕНЯЕМ: в `dm_channels` за всю жизнь правится только `lastMessageAt`. Поэтому
+ * Состав беседы 1:1 НЕИЗМЕНЯЕМ (с шага 1б ЛС — `conversation_members`; выход из беседы — этап 3, групп). Поэтому
  * кэш вечный — один запрос на диалог за жизнь процесса, инвалидировать нечего.
  *
  * ⚠️ Получатель ВЫВОДИТСЯ из строки диалога, а не берётся из `recipientId` клиента. Проверять
@@ -135,19 +139,31 @@ const dmPeers = new Map<string, [string, string]>();
 async function dmPeerOf(dmId: string, senderId: string): Promise<string | null> {
   let pair = dmPeers.get(dmId);
   if (!pair) {
-    const [row] = await db
-      .select({ a: dmChannels.userA, b: dmChannels.userB })
-      .from(dmChannels)
-      .where(eq(dmChannels.id, dmId))
-      .limit(1);
-    if (!row) return null; // отрицательные ответы НЕ кэшируем — иначе память растёт от мусорных id
+    const rows = await db
+      .select({ userId: conversationMembers.userId })
+      .from(conversationMembers)
+      .where(eq(conversationMembers.conversationId, dmId))
+      .limit(3);
+    // Не беседа 1:1 (нет такой или в ней не двое) — отрицательные ответы НЕ кэшируем, иначе память растёт от мусорных id.
+    if (rows.length !== 2) return null;
     if (dmPeers.size > 5000) dmPeers.clear(); // грубый потолок
-    dmPeers.set(dmId, (pair = [row.a, row.b]));
+    dmPeers.set(dmId, (pair = [rows[0].userId, rows[1].userId]));
   }
   if (pair[0] === senderId) return pair[1];
   if (pair[1] === senderId) return pair[0];
   return null;
 }
+
+/** Зависимости пересылки «печатает…» — настоящие; в тесте Codex подставляет свои (`gatewayTyping.ts`). */
+const typingDeps: TypingDeps<WsLike> = {
+  rateHit,
+  dmPeerOf,
+  isBlockedBy,
+  connsOf: (userId) => hub.connsOf(userId),
+  send,
+  getChannelAudience,
+  publishToChannel: (serverId, channelId, msg, audience) => publishToChannel(serverId, channelId, msg, audience),
+};
 
 /**
  * Снять подписку на сервер у тех локальных соединений, чей владелец больше не участник (#91).
@@ -184,7 +200,7 @@ export function registerGateway(app: FastifyInstance): void {
     if (channel.startsWith('gw:server:')) {
       const serverId = channel.slice('gw:server:'.length);
       const set = byServer.get(serverId);
-      if (set) for (const conn of set) if (shouldDeliver(env, conn.userId)) conn.socket.send(payload);
+      if (set) for (const conn of set) if (shouldDeliver(env, conn.userId, conn.caps)) conn.socket.send(payload);
       // Состав/права могли измениться — снимаем подписки у тех, кто больше не участник (#91).
       if (env.m.t === 'server.invalidate') {
         void dropRevokedSubscribers(serverId);
@@ -192,7 +208,8 @@ export function registerGateway(app: FastifyInstance): void {
         void onServerInvalidate(serverId).catch(() => {});
       }
     } else if (channel.startsWith('gw:user:')) {
-      for (const conn of hub.connsOf(channel.slice('gw:user:'.length))) conn.socket.send(payload);
+      for (const conn of hub.connsOf(channel.slice('gw:user:'.length)))
+        if (capAllows(env, conn.caps)) conn.socket.send(payload);
     }
   });
 
@@ -207,7 +224,7 @@ export function registerGateway(app: FastifyInstance): void {
       }
       return;
     }
-    const conn: Conn = { socket, userId: null, servers: new Set() };
+    const conn: Conn = { socket, userId: null, servers: new Set(), caps: new Set() };
     allConns.add(conn);
     connsByIp.set(ip, (connsByIp.get(ip) ?? 0) + 1);
 
@@ -226,7 +243,7 @@ export function registerGateway(app: FastifyInstance): void {
     let identifying: Promise<void> | null = null;
 
     /** Разбор `identify` одним куском: его дожидаются остальные сообщения этого соединения (#126). */
-    const handleIdentify = async (token: string): Promise<void> => {
+    const handleIdentify = async (token: string, caps: unknown): Promise<void> => {
         try {
           const claims = verifyToken(token);
           // Session revocation: a bumped generation (logout-everywhere / password change)
@@ -243,6 +260,8 @@ export function registerGateway(app: FastifyInstance): void {
             }
             conn.userId = claims.sub;
             conn.tokenGen = claims.gen ?? 0;
+            // Только при ПЕРВОМ `identify`: повторный на том же соединении не меняет форму уже идущих событий.
+            conn.caps = parseCaps(caps);
             hub.attach(conn, claims.sub);
             // Первый сокет человека — только тогда «зашёл в сеть» (вкладок и устройств бывает много).
             if (hub.goOnline(claims.sub))
@@ -271,7 +290,7 @@ export function registerGateway(app: FastifyInstance): void {
       }
 
       if (msg.t === 'identify') {
-        identifying = handleIdentify(msg.token);
+        identifying = handleIdentify(msg.token, msg.caps);
         await identifying;
         identifying = null;
         return;
@@ -321,29 +340,9 @@ export function registerGateway(app: FastifyInstance): void {
         }
         case 'unsubscribe':
           return unsubscribe(conn, msg.serverId);
-        case 'typing': {
-          // Ephemeral, cosmetic — но граница авторизации тут такая же, как у сообщений (#88).
-          const uid = conn.userId;
-          if (await rateHit(`typing:${uid}`, 20, 10)) return; // честный клиент шлёт ≤1 / 2.5с
-          const peerId = msg.dmId ? await dmPeerOf(msg.dmId, uid) : null;
-          const route = typingRoute(msg, { userId: uid, servers: conn.servers }, () => peerId);
-          if (!route) return;
-          if (route.kind === 'dm') {
-            for (const c of hub.connsOf(route.peerId)) send(c.socket, { t: 'typing', dmId: route.dmId, userId: uid });
-            return;
-          }
-          // Канал: аудитория считается по факту, и отправитель обязан в неё входить — иначе можно
-          // было бы «печатать» в канал, который сам не видишь.
-          const audience = await getChannelAudience(route.channelId);
-          if (!audience || audience.serverId !== route.serverId || !audience.userIds.includes(uid)) return;
-          await publishToChannel(
-            route.serverId,
-            route.channelId,
-            { t: 'typing', channelId: route.channelId, userId: uid },
-            audience.userIds.filter((id) => id !== uid), // себе «печатает…» не показываем
-          );
-          return;
-        }
+        case 'typing':
+          // Ephemeral, cosmetic — но граница авторизации тут такая же, как у сообщений (#88); вся ветка — `gatewayTyping.ts`.
+          return relayTyping(typingDeps, { userId: conn.userId, servers: conn.servers }, msg);
       }
     });
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { contentPreview, endpointAllowed } from './pushRules.js';
+import { contentPreview, endpointAllowed, redactPushPayload } from './pushRules.js';
 
 describe('SSRF-гард push endpoint', () => {
   const base = 'https://ntfy.example.test';
@@ -60,5 +60,28 @@ describe('текст push-превью', () => {
     // Ловит невидимый push о файле и ложную скрепку у пустого сообщения.
     assert.equal(contentPreview('   ', 1), '📎 Вложение');
     assert.equal(contentPreview('', 0), '');
+  });
+});
+
+describe('пуш без ключей шифрования', () => {
+  it('личное сообщение и упоминание теряют текст, но сохраняют адрес перехода', () => {
+    // Ловит как утечку текста через открытый ntfy topic, так и поломанный тап по обезличенному пушу.
+    const dm = {
+      type: 'dm' as const,
+      title: 'Иван',
+      body: 'секрет',
+      dmId: 'dm-1',
+      instanceId: 'peer-1',
+    };
+    const mention = {
+      type: 'mention' as const,
+      title: 'Сервер',
+      body: '@me секрет',
+      channelId: 'ch-1',
+      serverId: 'srv-1',
+      instanceId: 'peer-2',
+    };
+    assert.deepEqual(redactPushPayload(dm), { ...dm, body: 'Новое личное сообщение' });
+    assert.deepEqual(redactPushPayload(mention), { ...mention, body: 'Вас упомянули' });
   });
 });

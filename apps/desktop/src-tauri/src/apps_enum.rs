@@ -227,7 +227,8 @@ unsafe fn hicon_to_png(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) ->
 }
 
 /// Enumerate the user's currently-open apps (deduped by exe), each with a name + icon.
-pub fn list_apps() -> Vec<AppEntry> {
+/// `with_icons: false` — без иконок: извлечение и сжатие в PNG здесь самое дорогое (см. `gv_list_apps`).
+pub fn list_apps(with_icons: bool) -> Vec<AppEntry> {
     let self_pid = unsafe { GetCurrentProcessId() };
     let mut state = EnumState {
         apps: BTreeMap::new(),
@@ -245,7 +246,7 @@ pub fn list_apps() -> Vec<AppEntry> {
             } else {
                 title
             };
-            let icon = unsafe { icon_data_url(&path) };
+            let icon = if with_icons { unsafe { icon_data_url(&path) } } else { None };
             AppEntry { exe, name, icon }
         })
         .collect();

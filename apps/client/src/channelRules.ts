@@ -18,14 +18,25 @@ import type { ServerBootstrap } from '@gusvoice/shared';
  * Из-за этого входящие сообщения не считались непрочитанными ВООБЩЕ (значок не загорался ни разу,
  * проверено: 40 новых сообщений — счётчик пуст), и вдобавок им ставилась серверная отметка
  * «прочитано», хотя человек их не видел.
+ *
+ * 🔴 `kind` + `view` (28.09, #212, Б2 воспроизведён на стенде). «Текущая беседа» и «текущий канал»
+ * живут ОБА, пока человек переходит между сервером и личками: ушёл из беседы в канал — `currentDmId`
+ * остался, и сообщения собеседника считались прочитанными (без значка, с тихой отметкой на сервер).
+ * Зеркально — канал, пока человек в личках. Лента на экране, только если открыт её раздел.
+ * Без `kind`/`view` — прежнее поведение (старые вызовы и тесты).
  */
 export function isFeedOnScreen(args: {
   id: string;
   currentId: string | null;
   mobile: boolean;
   mobilePane: 'list' | 'content';
+  /** Чья лента: канал сервера или личная беседа. */
+  kind?: 'channel' | 'dm';
+  /** Открытый раздел приложения (`store.view`). */
+  view?: 'server' | 'dm';
 }): boolean {
   if (!args.currentId || args.id !== args.currentId) return false;
+  if (args.kind && args.view && args.view !== (args.kind === 'dm' ? 'dm' : 'server')) return false;
   return !args.mobile || args.mobilePane === 'content';
 }
 

@@ -1,7 +1,8 @@
 import { has, mentionSqlPattern, Permission, type UnreadSummary } from '@gusvoice/shared';
-import { eq, inArray, or, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
+import { myConversationIds, unreadCounts } from './conversations.js';
 import { db } from './db/index.js';
-import { channels, dmChannels, serverMembers, users } from './db/schema.js';
+import { channels, serverMembers, users } from './db/schema.js';
 import { instanceLabel } from './federation/instanceLabels.js';
 import { getMemberContext, getServerChannelPermissions } from './permissions.js';
 
@@ -86,26 +87,13 @@ export async function unreadSummary(userId: string): Promise<UnreadSummary> {
   }
 
   // Личка: то же правило, что в `GET /dm`, но наружу отдаём только числа — беседы фоновому
-  // инстансу не нужны, а их список тянет за собой профили собеседников.
-  const dmRows = await db
-    .select({ id: dmChannels.id })
-    .from(dmChannels)
-    .where(or(eq(dmChannels.userA, userId), eq(dmChannels.userB, userId)));
-  if (dmRows.length) {
-    const counts = await db.execute(sql`
-      SELECT dm.dm_channel_id AS id, COUNT(*)::int AS unread
-      FROM dm_messages dm
-      LEFT JOIN dm_reads r ON r.dm_channel_id = dm.dm_channel_id AND r.user_id = ${userId}
-      WHERE dm.dm_channel_id IN (${sql.join(dmRows.map((r) => sql`${r.id}`), sql`, `)})
-        AND dm.author_id <> ${userId}
-        AND dm.created_at > GREATEST(COALESCE(r.last_read_at, to_timestamp(0)), now() - interval '14 days')
-      GROUP BY dm.dm_channel_id
-    `);
-    for (const row of counts.rows as { id: string; unread: number }[]) {
-      if (row.unread <= 0) continue;
-      out.dms += 1;
-      out.dmUnread += row.unread;
-    }
+  // инстансу не нужны, а их список тянет за собой профили собеседников. С шага 1б — по беседам
+  // (`conversations.unreadCounts`): точное «прочитано до», без окна 14 дней.
+  const dmCounts = await unreadCounts(userId, await myConversationIds(userId));
+  for (const n of dmCounts.values()) {
+    if (n <= 0) continue;
+    out.dms += 1;
+    out.dmUnread += n;
   }
 
   return out;

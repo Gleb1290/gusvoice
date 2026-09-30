@@ -143,6 +143,10 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
       MINIO_BUCKET: ${MINIO_BUCKET:-gusvoice}
       MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-}
+      # Закрытый бакет файлов ЛС (шаг 1в). Пусто — «<MINIO_BUCKET>-private», бэкенд создаёт его сам, без политики.
+      MINIO_PRIVATE_BUCKET: ${MINIO_PRIVATE_BUCKET:-}
+      # Внешний адрес API — из него собираются ссылки на закрытые файлы ЛС (/api/att/…).
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-${VITE_API_URL:-}}
       # Tauri updater feed (latest.json) — the public /download/{latest,windows} endpoints read it to
       # hand a fresh user the current signed Windows installer. Empty => /download returns 503. Value in .env.
       UPDATE_FEED_URL: ${UPDATE_FEED_URL:-}

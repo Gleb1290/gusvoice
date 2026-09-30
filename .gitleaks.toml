@@ -40,3 +40,11 @@ paths = ['''packages/shared/src/secretRules\.test\.ts''']
 description = "federation protocol fixtures are format examples, not secrets"
 targetRules = ["generic-api-key"]
 paths = ['''packages/shared/src/federation/fixtures/.*''']
+
+# Тест шифра пуша закрепляет ОПУБЛИКОВАННЫЙ вектор приложения A RFC 8291 (секрет устройства, закрытые ключи
+# P-256, соль и ожидаемое тело напечатаны в самом RFC). Выдуманные значения сделали бы сверку байт-в-байт с RFC
+# невозможной — публичность здесь и есть смысл, как у вектора TOTP выше. Та же узкая область: ЭТОТ файл И ЭТО правило.
+[[allowlists]]
+description = "RFC 8291 appendix A published test vector, not a real secret"
+targetRules = ["generic-api-key"]
+paths = ['''packages/backend/src/pushCrypto\.test\.ts''']

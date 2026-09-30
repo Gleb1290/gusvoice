@@ -10,6 +10,7 @@ import { useTyping } from '../typing';
 import { useNameResolver } from '../memberName';
 import { useEmojiById, useEmojiResolver, useServerEmojis } from '../serverEmoji';
 import { useStickerPacks } from '../serverStickers';
+import { FeedLoadError } from './FeedLoadError';
 import { ChannelGlyph } from './Icon';
 import { MessagePane } from './MessagePane';
 import { PinnedMessages } from './PinnedMessages';
@@ -23,6 +24,8 @@ export function ChatView({ channel }: { channel: Channel }) {
   const messages = messagesRaw ?? EMPTY;
   const user = useStore((s) => s.user);
   const loadOlderMessages = useStore((s) => s.loadOlderMessages);
+  const openChannel = useStore((s) => s.openChannel);
+  const failed = useStore((s) => s.historyFailed.includes(channel.id));
   const perms = useStore((s) => s.bootstrap?.permissions);
   // Нужен ТОЛЬКО ради короны в шапке блока сообщений — см. проп в MessagePane.
   const serverId = useStore((s) => s.bootstrap?.server.id);
@@ -103,7 +106,9 @@ export function ChatView({ channel }: { channel: Channel }) {
       }
       placeholder={placeholder}
       messages={messages}
-      loading={messagesRaw === undefined}
+      loading={messagesRaw === undefined && !failed}
+      // Сбой при пустом кеше — ошибка с повтором, а не вечные скелетоны (#212, Б5).
+      emptyState={failed ? <FeedLoadError onRetry={() => void openChannel(channel.id)} /> : undefined}
       autocomplete={autocomplete}
       // Ники действуют в пределах сервера — поэтому резолвер передаёт КАНАЛ, а ЛС не передают (#73).
       nameOf={nameOf}

@@ -1,7 +1,9 @@
 import { type Category, has, Permission, permsFromString, type Server } from '@gusvoice/shared';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { pushBackHandler } from '../androidBack';
 import { api } from '../api';
 import { config } from '../config';
+import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
 import { AvatarCropModal } from './AvatarCropModal';
@@ -10,6 +12,7 @@ import { BansPanel } from './BansPanel';
 import { CategoryPermissionsEditor } from './CategoryPermissionsEditor';
 import { Icon } from './Icon';
 import { serverSettingsTabs, type ServerSettingsTab } from '../serverSettingsTabs';
+import { ServerRolesPanel } from './ServerRolesPanel';
 import { ServerEmojiPanel } from './ServerEmojiPanel';
 import { ServerStickerPanel } from './ServerStickerPanel';
 import { EconomyPanel } from './EconomyPanel';
@@ -25,11 +28,14 @@ export function ServerSettingsModal({
   categories,
   canDelete,
   onClose,
+  initialTab,
 }: {
   server: Server;
   categories: Category[];
   canDelete: boolean;
   onClose: () => void;
+  /** С какого раздела открыть (кнопка 👥 открывает «Роли»). Недоступный раздел молча не берём. */
+  initialTab?: ServerSettingsTab;
 }) {
   const serverPerms = permsFromString(useStore((s) => s.bootstrap?.permissions));
   // Список вкладок и условие показа пункта меню считает ОДИН модуль (`serverSettingsTabs.ts`).
@@ -47,7 +53,15 @@ export function ServerSettingsModal({
   const canManageCategories = has(serverPerms, Permission.MANAGE_CHANNELS);
   // Оверрайды категории требуют MANAGE_ROLES — кнопка «доступ» не должна вести в 403.
   const canEditOverwrites = has(serverPerms, Permission.MANAGE_ROLES);
-  const [tab, setTab] = useState<ServerSettingsTab>(tabs[0]?.key ?? 'general');
+  const canManageRoles = has(serverPerms, Permission.MANAGE_ROLES);
+  const canKick = has(serverPerms, Permission.KICK_MEMBERS);
+  const selfId = useStore((s) => s.user?.id ?? '');
+  const startTab = initialTab && tabs.some((t) => t.key === initialTab) ? initialTab : undefined;
+  const [tab, setTab] = useState<ServerSettingsTab>(startTab ?? tabs[0]?.key ?? 'general');
+  // Телефон: сперва список разделов, тап — экран раздела (как в настройках и админке). Открыли сразу
+  // на разделе (кнопка 👥) — список пропускаем: человек уже сказал, куда шёл.
+  const [picked, setPicked] = useState(!!startTab);
+  const current = tabs.find((t) => t.key === tab);
   const [permCat, setPermCat] = useState<Category | null>(null);
   const [name, setName] = useState(server.name);
   const [newCat, setNewCat] = useState('');
@@ -57,6 +71,28 @@ export function ServerSettingsModal({
   const [cropFile, setCropFile] = useState<File | null>(null);
   const iconRef = useRef<HTMLInputElement | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Esc закрывает сначала вложенное окно, а не все настройки разом: «Доступ» категории своего
+  // обработчика не имеет, и без этой развилки Esc в нём уносил бы и настройки сервера.
+  const dialogRef = useDialogChrome<HTMLDivElement>(() => {
+    if (permCat) setPermCat(null);
+    else if (cropFile) setCropFile(null);
+    else onClose();
+  });
+  const onTabsKey = tabListKeyDown(
+    tabs.map((t) => t.key),
+    tab,
+    setTab,
+    (k) => `ss-tab-${k}`,
+  );
+
+  /** Системная «назад» на телефоне: из раздела — к списку разделов, и только потом закрытие окна. */
+  useEffect(() => {
+    if (!picked) return;
+    return pushBackHandler(() => {
+      setPicked(false);
+      return true;
+    });
+  }, [picked]);
 
   const refresh = () => useStore.getState().openServer(server.id);
   const reloadList = () => useStore.getState().loadServers();
@@ -207,23 +243,70 @@ export function ServerSettingsModal({
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal admin" onClick={(e) => e.stopPropagation()}>
-        <div className="admin-head">
-          <h2>Настройки сервера</h2>
-          <button type="button" className="icon-close" title="Закрыть" onClick={onClose}>
-            <Icon name="close" size={18} />
-          </button>
-        </div>
-
-        {tabs.length > 1 && (
-          <div className="admin-tabs">
+      <div
+        className={`modal admin rail-modal server-rail${picked ? ' picked' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ss-title"
+        tabIndex={-1}
+      >
+        {/* Рельс разделов — как в настройках пользователя и в админке (23.09): десять слов в строку
+            вкладок уже не помещались, и ни одно не говорило, что внутри. */}
+        <div className="set-rail">
+          <div className="set-rail-title">
+            {/* Имя сервера, а не «Настройки сервера»: у человека их несколько, и строка выделенного
+                раздела не говорит, ЧЕЙ это раздел. */}
+            <span className="rail-title-text" title={server.name}>
+              {server.name}
+            </span>
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
+            </button>
+          </div>
+          <div
+            className="set-rail-list"
+            role="tablist"
+            aria-label="Разделы настроек сервера"
+            aria-orientation="vertical"
+            onKeyDown={onTabsKey}
+          >
             {tabs.map((t) => (
-              <button key={t.key} type="button" className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>
-                {t.label}
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                id={`ss-tab-${t.key}`}
+                aria-selected={tab === t.key}
+                aria-controls="ss-panel-body"
+                tabIndex={tab === t.key ? 0 : -1}
+                className={`set-rail-item${tab === t.key ? ' active' : ''}`}
+                onClick={() => {
+                  setTab(t.key);
+                  setPicked(true);
+                }}
+              >
+                <Icon name={t.icon} size={16} />
+                <span>{t.label}</span>
               </button>
             ))}
           </div>
-        )}
+        </div>
+
+        <div className="set-main">
+          <div className="set-head">
+            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
+              <Icon name="chevron-left" size={18} />
+            </button>
+            <div className="set-head-text">
+              <h2 id="ss-title">{current?.label ?? 'Настройки сервера'}</h2>
+              {current && <div className="set-head-sub">{current.sub}</div>}
+            </div>
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
+            </button>
+          </div>
 
         {/*
           🔴 Прокрутка вкладок. Без неё модалка с `max-height: 85vh` просто ОБРЕЗАЛА содержимое:
@@ -233,11 +316,22 @@ export function ServerSettingsModal({
 
           ⚠️ Обёрнута ВСЯ область вкладок, а не саундборд, с которого пришла жалоба (08.09): дыра
           одна на все семь вкладок, и первой до неё доросла та, где список растёт руками владельца.
-          Экономика с её двумя десятками ползунков — следующая на очереди.
           ⚠️ `min-height: 0` внутри `.admin-scroll` обязателен и уже там есть: во флекс-колонке
           элемент не сжимается ниже своего содержимого, и `overflow: auto` без него не сработал бы.
+          ⚠️ «Роли» и «Участники» — вне этой прокрутки: редактор ролей держит свои (см. ServerRolesPanel).
+          Один элемент на оба раздела в ОДНОМ месте дерева — переход между ними не перезагружает списки.
         */}
-        <div className="admin-scroll">
+        {tab === 'roles' || tab === 'members' ? (
+          <ServerRolesPanel
+            serverId={server.id}
+            ownerId={server.ownerId}
+            selfId={selfId}
+            canManageRoles={canManageRoles}
+            canKick={canKick}
+            view={tab}
+          />
+        ) : (
+        <div className="admin-scroll" id="ss-panel-body" role="tabpanel" aria-labelledby={`ss-tab-${tab}`}>
         {tab === 'audit' ? (
           <AuditLogView serverId={server.id} />
         ) : tab === 'bans' ? (
@@ -382,6 +476,8 @@ export function ServerSettingsModal({
           </div>
         )}
           </>
+        )}
+        </div>
         )}
         </div>
       </div>

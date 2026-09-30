@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { Permission } from '@gusvoice/shared';
-import { canOpenServerSettings, serverSettingsTabs } from './serverSettingsTabs.js';
+import { canOpenServerSettings, serverSettingsHas, serverSettingsTabs } from './serverSettingsTabs.js';
 
 const keys = (p: bigint) => serverSettingsTabs(p).map((t) => t.key);
 
@@ -52,7 +52,8 @@ describe('вкладки настроек сервера', () => {
 
   it('право, не дающее ни одной вкладки, пункт меню НЕ открывает', () => {
     // Парное «не открывается»: иначе тест выше проходил бы и у функции «всегда true».
-    assert.equal(canOpenServerSettings(Permission.KICK_MEMBERS), false);
+    // KICK_MEMBERS здесь больше не годится: с 23.09 он открывает раздел «Участники» (кик живёт там).
+    assert.equal(canOpenServerSettings(Permission.MOVE_MEMBERS), false);
     assert.equal(canOpenServerSettings(Permission.SEND_MESSAGES | Permission.CONNECT), false);
   });
 
@@ -74,10 +75,10 @@ describe('вкладки настроек сервера', () => {
 
   it('администратор видит все вкладки', () => {
     // has() пропускает ADMINISTRATOR мимо любых битов — значит и здесь обязан.
-    // ⚠️ Число обновляется при КАЖДОЙ новой вкладке (последняя — «Саундборд», #21). Так и задумано:
-    // тест обязан падать, чтобы про вход в новую вкладку нельзя было забыть — ровно ради этого
-    // список вкладок и свели в один модуль. Он и упал, когда вкладка появилась.
-    assert.equal(keys(Permission.ADMINISTRATOR).length, 8);
+    // ⚠️ Число обновляется при КАЖДОЙ новой вкладке (последние — «Роли» и «Участники», 23.09: окно
+    // «Роли и участники» влилось в настройки сервера). Так и задумано: тест обязан падать, чтобы про
+    // вход в новую вкладку нельзя было забыть — ровно ради этого список вкладок и свели в один модуль.
+    assert.equal(keys(Permission.ADMINISTRATOR).length, 10);
   });
 
   it('первая вкладка — стартовая, и у неё есть подпись', () => {
@@ -85,5 +86,30 @@ describe('вкладки настроек сервера', () => {
     assert.equal(first.key, 'emoji');
     assert.equal(typeof first.label, 'string');
     assert.equal(first.label.length > 0, true);
+  });
+
+  it('кик в одиночку открывает только участников, а управление ролями — роли и участников', () => {
+    // Ловит старую дверь 👥, которая не пускала к списку человека с правом кика.
+    assert.deepEqual(keys(Permission.KICK_MEMBERS), ['members']);
+    assert.equal(serverSettingsHas(Permission.KICK_MEMBERS, 'members'), true);
+    assert.deepEqual(keys(Permission.MANAGE_ROLES), ['roles', 'members']);
+    assert.equal(serverSettingsHas(Permission.MANAGE_ROLES, 'roles'), true);
+  });
+
+  it('каждая доступная вкладка имеет непустые подпись, пояснение и иконку', () => {
+    // Ловит новый раздел, который есть в рейле, но выглядит пустым или без пиктограммы.
+    for (const tab of serverSettingsTabs(Permission.ADMINISTRATOR)) {
+      assert.ok(tab.label.trim(), tab.key);
+      assert.ok(tab.sub.trim(), tab.key);
+      assert.ok(tab.icon.trim(), tab.key);
+    }
+  });
+
+  it('выключенная экономика скрывает вкладку и не открывает пустую дверь', () => {
+    // Ловит доступ к несуществующей на инстансе подсистеме по одному лишь праву.
+    const features = { economy: false };
+    assert.deepEqual(serverSettingsTabs(Permission.MANAGE_ECONOMY, features), []);
+    assert.equal(canOpenServerSettings(Permission.MANAGE_ECONOMY, features), false);
+    assert.equal(serverSettingsHas(Permission.MANAGE_ECONOMY, 'economy', features), false);
   });
 });

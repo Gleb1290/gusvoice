@@ -62,6 +62,11 @@ fn main() {
         rust_files.push("src/desktop_capturer.rs");
     }
 
+    // GusVoice (#207, шаг 4.2): захват экрана без выхода кадра из видеокарты.
+    if target_os == "windows" {
+        rust_files.push("src/gv_gpu_capture.rs");
+    }
+
     let mut builder = cxx_build::bridges(rust_files);
 
     builder.files(&[
@@ -147,6 +152,10 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=dxgi");
             println!("cargo:rustc-link-lib=dylib=dwmapi");
             println!("cargo:rustc-link-lib=dylib=shcore");
+
+            // GusVoice (#207, шаг 4): кадр в видеопамяти и свой DXGI-захват. `USE_NVIDIA_VIDEO_CODEC`
+            // ниже определяется для всего `builder`, так что захват узнаёт, собран ли NVENC.
+            builder.file("src/gv_d3d11_frame_buffer.cpp").file("src/gv_gpu_capture.cpp");
 
             //let path = env::current_dir().unwrap();
             //println!("cargo:rustc-link-search=native={}/vaapi-windows/x64/lib", path.display());

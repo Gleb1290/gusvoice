@@ -25,6 +25,10 @@ export interface NativeShareConfig {
   wgcWindow?: boolean;
   /** Публиковать двумя слоями качества (#109). Отсутствие = включено, как и было. */
   layers?: boolean;
+  /** Показ экрана с кадром внутри видеокарты (#207, шаг 4). Отсутствие = включено. */
+  gpuPipeline?: boolean;
+  /** Курсор в кадре показа (28.09). Отсутствие = включено. */
+  cursor?: boolean;
 }
 
 type TauriCore = { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
@@ -132,7 +136,24 @@ export function onNativeShareLayersOff(cb: (reason: string) => void): () => void
 }
 
 /** Live encoder stats for the native share (see ShareStats in screenshare.rs). Null when not sharing. */
+/** Один слой показа (#207): активен ли (dynacast ставит несмотримые на паузу) и во что обходится. */
+export interface NativeLayerStat {
+  rid: string;
+  active: boolean;
+  width: number;
+  height: number;
+  fps: number;
+  frames_encoded: number;
+  encode_ms: number;
+  /** Сколько бит/с WebRTC отдал слою; у оболочки старше 0.8.11 нет. */
+  target_bitrate?: number;
+}
+
 export interface NativeShareStats {
+  /** Все слои; у оболочки старше 0.8.8 поля нет. */
+  layers?: NativeLayerStat[];
+  /** Время кодирования кадра основного слоя, мс; у оболочки старше 0.8.8 поля нет. */
+  encode_ms_per_frame?: number;
   width: number;
   height: number;
   fps: number;
@@ -175,6 +196,17 @@ export interface NativeShareStats {
   heals: number;
   /** Сколько секунд подряд держится залипание прямо сейчас (0 — всё в порядке). */
   stuck_s: number;
+  /** Оценка канала самим WebRTC, бит/с — из неё он раздаёт биты слоям; у оболочки старше 0.8.11 нет. */
+  bwe_bps?: number;
+  /** Подсказка оценщику на показ: старт и нижняя граница, бит/с (граница > 0 — сервер в локалке). */
+  bwe_start_bps?: number;
+  bwe_min_bps?: number;
+  /** Задержка TCP до сервера LiveKit, мс; -1 — не достучались. */
+  server_rtt_ms?: number;
+  /** Путь кадра (#207, шаг 4): `gpu` или `cpu`; у оболочки старше 0.8.11 поля нет. */
+  pipeline?: string;
+  /** Почему не `gpu` (показ окна, выключено, не NVIDIA, HDR…); пусто — получилось. */
+  pipeline_note?: string;
 }
 
 /**

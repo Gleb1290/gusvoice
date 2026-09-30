@@ -5,6 +5,7 @@ import { activeAnchor, atBottomOf, groupLabelAt } from '../settingsAnchor';
 import { markChangedSeen, markGroupSeen, seedSeenOnce, seenChangedPrints, seenGroups } from '../settingsSeen';
 import { api, setToken } from '../api';
 import { getAudioSettings, setAudioSettings, type AudioSettings } from '../audioSettings';
+import { VAD_THRESHOLD_MAX, VAD_THRESHOLD_MIN } from '../micProcessorRules';
 import {
   activeInstance,
   activeInstanceId,
@@ -79,8 +80,10 @@ import { OverlaySettingsPanel } from './OverlaySettingsPanel';
 import { ToastSettingsPanel } from './ToastSettingsPanel';
 import { SoundSettingsPanel } from './SoundSettingsPanel';
 import { StreamQualityPanel } from './StreamQualityPanel';
+import { getStreamSettings, setStreamSettings } from '../streamSettings';
 import { Toggle } from './Toggle';
 import { animatedAvatarsEnabled, setAnimatedAvatarsEnabled } from '../avatarAnimation';
+import { liteModeEnabled, setLiteModeEnabled } from '../liteMode';
 import { linkPreviewsEnabled, setLinkPreviewsEnabled } from './LinkPreview';
 import {
   forgetTrustedLinkAuthors,
@@ -91,6 +94,71 @@ import {
 import { DiagSettingsSection } from './DiagConsent';
 
 
+
+/**
+ * Курсор в трансляции (28.09) — своим пунктом слева, по правилу «новая настройка = пункт в рельсе».
+ * Та же галочка стоит в окне выбора показа. Пишем поверх СВЕЖИХ настроек, а не своей копии: рядом
+ * живёт панель качества со своим состоянием.
+ */
+function StreamCursorSetting() {
+  const [on, setOn] = useState(() => getStreamSettings().cursor !== false);
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-stream-cursor" style={{ marginTop: 18 }}>
+        Курсор в трансляции
+      </div>
+      <div className="settings-row">
+        <span>Показывать курсор зрителям</span>
+        <Toggle
+          checked={on}
+          onChange={(v) => {
+            setStreamSettings({ ...getStreamSettings(), cursor: v });
+            setOn(v);
+          }}
+          label="Показывать курсор зрителям"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+        Зрители видят ваш курсор поверх экрана или окна. Если игра прячет курсор, его не видно и в показе.
+        Применяется при следующем запуске показа.
+      </div>
+    </>
+  );
+}
+
+/**
+ * Чёрный список личных сообщений (#212, этап 0 ЛС). Блокируют из шапки беседы; здесь — кого и
+ * разблокировать. Заблокированный об этом не узнаёт (`backend/src/blockRules.ts`).
+ */
+function BlockedUsersSetting() {
+  const blocked = useStore((s) => s.blockedUsers);
+  const setBlocked = useStore((s) => s.setBlocked);
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-blocked" style={{ marginTop: 22 }}>
+        Заблокированные
+      </div>
+      {blocked.length === 0 ? (
+        <div className="muted" style={{ fontSize: 13 }}>
+          Никого. Заблокировать человека можно кнопкой в шапке личной беседы: он не узнает об этом, а его новые
+          сообщения до вас не дойдут.
+        </div>
+      ) : (
+        blocked.map((u) => (
+          <div key={u.id} className="settings-row">
+            <span className="blocked-user">
+              <Avatar url={u.avatarUrl} name={u.displayName} size={24} fallback="icon" />
+              {u.displayName}
+            </span>
+            <button type="button" className="settings-action" onClick={() => void setBlocked(u, false).catch(toastError)}>
+              Разблокировать
+            </button>
+          </div>
+        ))
+      )}
+    </>
+  );
+}
 
 /** One re-bindable hotkey row: click to capture a key combo, × to clear. Esc cancels capture. */
 function HotkeyRow({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
@@ -399,22 +467,23 @@ function AudioVideoTab() {
       <div className="settings-group-label" id="set-g-mic">Микрофон · уровень и чувствительность</div>
       <div className="mic-meter mic-meter-lg">
         <div className="mic-meter-fill" ref={meterRef} style={{ width: '0%' }} />
-        {s.vadThreshold > 0 && (
-          <div className="mic-meter-thresh" style={{ left: `${Math.round(s.vadThreshold * 100)}%` }} title="Порог голоса" />
-        )}
+        <div className="mic-meter-thresh" style={{ left: `${Math.round(s.vadThreshold * 100)}%` }} title="Порог голоса" />
       </div>
       <label className="settings-row col" style={{ marginTop: 8 }}>
         <span>
-          Чувствительность (порог голоса) · {s.vadThreshold === 0 ? 'выкл' : `${Math.round(s.vadThreshold * 100)}%`}
+          Чувствительность (порог голоса) · {Math.round(s.vadThreshold * 100)}%
         </span>
         <input
           type="range"
           className="gv-range"
-          min={0}
-          max={0.6}
+          // Шкала 1–60 %, «выкл» нет (29.09) — `micProcessorRules.VAD_THRESHOLD_MIN/MAX`.
+          min={VAD_THRESHOLD_MIN}
+          max={VAD_THRESHOLD_MAX}
           step={0.01}
           value={s.vadThreshold}
-          style={{ ['--p']: s.vadThreshold / 0.6 } as CSSProperties}
+          style={
+            { ['--p']: (s.vadThreshold - VAD_THRESHOLD_MIN) / (VAD_THRESHOLD_MAX - VAD_THRESHOLD_MIN) } as CSSProperties
+          }
           disabled={s.pushToTalk}
           onChange={(e) => {
             const v = parseFloat(e.target.value);
@@ -425,8 +494,8 @@ function AudioVideoTab() {
       </label>
       <div className="muted" style={{ fontSize: 12 }}>
         Метр выше — живой уровень голоса. Ставьте порог (honey-метка) чуть выше фонового шума: громче
-        метки — звук идёт и обводка горит, тише — тишина. 0 = выкл (передаёт всегда). В режиме рации не
-        используется.
+        метки — звук идёт и обводка горит, тише — тишина. По умолчанию 1 % — отрезает только самый слабый фон. В
+        режиме рации не используется.
       </div>
 
       <label className="settings-row col">
@@ -599,6 +668,8 @@ function AudioVideoTab() {
       </div>
       <StreamQualityPanel />
 
+      {isDesktop() && <StreamCursorSetting />}
+
       {isDesktop() && (
         <>
           <div className="settings-group-label" id="set-g-native-audio" style={{ marginTop: 18 }}>
@@ -649,6 +720,7 @@ function AppearanceTab() {
    * там выключено по умолчанию, но включается руками.
    */
   const [animated, setAnimated] = useState(animatedAvatarsEnabled);
+  const [lite, setLite] = useState(liteModeEnabled);
   return (
     <div className="settings-pane">
       <div className="settings-group-label" id="set-g-theme">
@@ -753,6 +825,24 @@ function AppearanceTab() {
           </div>
         </>
       )}
+
+      <div className="settings-group-label" id="set-g-lite">Оптимизированный режим</div>
+      <div className="settings-row">
+        <span>Оптимизированный режим</span>
+        <Toggle
+          checked={lite}
+          onChange={(v) => {
+            setLiteModeEnabled(v);
+            setLite(v);
+          }}
+          label="Оптимизированный режим"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+        Для слабых компьютеров и игр: интерфейс перестаёт двигаться сам. Анимированные аватары замирают на
+        первом кадре и оживают при наведении, пульсирующие значки и прочие украшения стоят на месте. Звук,
+        показ и сообщения работают как обычно. Настройка только для этого устройства.
+      </div>
 
       <div className="settings-group-label" id="set-g-avatars">Аватары</div>
       <div className="settings-row">
@@ -2523,6 +2613,7 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
               <>
                 <AccountTab onClose={onClose} />
                 <SecurityTab />
+                <BlockedUsersSetting />
               </>
             )}
             {section === 'federation' && (

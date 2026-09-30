@@ -16,9 +16,50 @@ let pendingUpdate: UpdateHandle | null = null;
 let snoozedVersion: string | null = null; // version we won't re-offer (user pressed "Позже", or it's already installed)
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * Штатно завершить нативный показ, пока процесс ещё жив (#112/#109, найдено 25.09).
+ *
+ * 🔴 Установщик обновления на Windows закрывает приложение сам, мимо штатного выхода, — как и
+ * перезапуск. Метка «показ идёт» (`screenshare-active`) при этом уцелевала, и следующий показ
+ * считал, что приложение УПАЛО: снимал слои качества на этот показ, а три обновления посреди
+ * показа подряд выключали их НАСОВСЕМ. При наших частых релизах это и было одной из дорог, по
+ * которым слои пропали у половины показывающих. Поймал владелец: обновился посреди показа —
+ * следующий показ «идёт одним слоем».
+ *
+ * Импорт динамический: модуль показа тянет стор и Tauri, а порядок загрузки модулей мы уже ломали.
+ * Любая ошибка — молча: обновление важнее.
+ *
+ * `stopShare` — шов для тестов (просьба Codex, 26.09): по умолчанию настоящая остановка, в Node её
+ * подменяют, чтобы проверить порядок «сначала показ, потом установка/перезапуск» без Tauri.
+ */
+export async function endShareBeforeExit(stopShare: () => Promise<void> = stopNativeShareLazily): Promise<void> {
+  try {
+    await stopShare();
+  } catch {
+    /* не мешаем обновлению и перезапуску */
+  }
+}
+
+/** Настоящая остановка показа: модуль показа грузится только в момент вызова (см. выше). */
+async function stopNativeShareLazily(): Promise<void> {
+  const { stopNativeShareIfActive } = await import('./nativeShareSession');
+  await stopNativeShareIfActive();
+}
+
+/** Настоящий перезапуск процесса: плагин Tauri грузится только в момент вызова. */
+async function relaunchLazily(): Promise<void> {
+  const { relaunch } = await import('@tauri-apps/plugin-process');
+  await relaunch();
+}
+
 /** Download + install a known-available update with progress, then 'ready' (awaiting relaunch). Stamps
- *  the just-updated marker so the next launch shows the persistent heads-up. Throws on failure. */
-async function downloadAndInstall(update: UpdateHandle): Promise<void> {
+ *  the just-updated marker so the next launch shows the persistent heads-up. Throws on failure.
+ *  Экспортирована с `stopShare` ради теста порядка (показ гасится ДО `install()`); приложение зовёт её
+ *  с одним аргументом — остановка настоящая. */
+export async function downloadAndInstall(
+  update: Pick<UpdateHandle, 'download' | 'install' | 'version'>,
+  stopShare: () => Promise<void> = stopNativeShareLazily,
+): Promise<void> {
   const { set } = useUpdate.getState();
   set({ phase: 'downloading', downloaded: 0, total: 0 });
   await update.download((e) => {
@@ -28,6 +69,8 @@ async function downloadAndInstall(update: UpdateHandle): Promise<void> {
     else if (e.event === 'Finished') set({ downloaded: st.total || st.downloaded });
   });
   set({ phase: 'installing' });
+  // На Windows `install()` сам закрывает приложение — показ завершаем ДО него (см. выше).
+  await endShareBeforeExit(stopShare);
   await update.install();
   set({ phase: 'ready' });
   pendingUpdate = null;
@@ -184,10 +227,15 @@ export function notifyIfJustUpdated(): void {
   }
 }
 
-/** Relaunch into the freshly-installed build. Called from the UpdatePanel's "Перезапустить" button. */
-export async function relaunchApp(): Promise<void> {
+/** Relaunch into the freshly-installed build. Called from the UpdatePanel's "Перезапустить" button.
+ *  `stopShare`/`relaunch` — швы для теста порядка (показ гасится ДО перезапуска); кнопка зовёт без
+ *  аргументов — работают настоящие. */
+export async function relaunchApp(
+  stopShare: () => Promise<void> = stopNativeShareLazily,
+  relaunch: () => Promise<void> = relaunchLazily,
+): Promise<void> {
   try {
-    const { relaunch } = await import('@tauri-apps/plugin-process');
+    await endShareBeforeExit(stopShare);
     await relaunch();
   } catch (e) {
     console.warn('[updater] relaunch failed:', e);

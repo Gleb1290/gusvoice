@@ -25,6 +25,7 @@ const CLEARED_USER_FK_TABLES = [
   'push_devices',
   'push_mutes',
   'server_members',
+  'user_sync',
 ].sort();
 
 const RETAINED_USER_FKS = [
@@ -36,6 +37,10 @@ const RETAINED_USER_FKS = [
   'coin_ledger.user_id',
   'coin_purchases.target_user_id',
   'coin_purchases.user_id',
+  'conversation_members.user_id',
+  'conversation_message_reactions.user_id',
+  'conversation_messages.author_id',
+  'conversations.created_by',
   'dm_channels.user_a',
   'dm_channels.user_b',
   'dm_message_reactions.user_id',
@@ -54,6 +59,11 @@ const RETAINED_USER_FKS = [
   'server_soundboard.created_by',
   'sticker_packs.created_by',
   'voice_activity.user_id',
+].sort();
+
+const CLEARED_NONSTANDARD_USER_FKS = [
+  'user_blocks.blocker_id',
+  'user_blocks.blocked_id',
 ].sort();
 
 describe('удаление аккаунта обезличивает, а не стирает (F0, #139)', () => {
@@ -168,7 +178,10 @@ describe('строки аккаунта в соседних таблицах', (
       .filter((name) => name !== 'member_roles')
       .map((name) => `${name}.user_id`);
     const blockedByDeleteRule = ['servers.owner_id'];
-    assert.deepEqual(actual.sort(), [...clearedDirectFks, ...RETAINED_USER_FKS, ...blockedByDeleteRule].sort());
+    assert.deepEqual(
+      actual.sort(),
+      [...clearedDirectFks, ...CLEARED_NONSTANDARD_USER_FKS, ...RETAINED_USER_FKS, ...blockedByDeleteRule].sort(),
+    );
   });
 
   it('транзакционная функция удаляет весь очищаемый набор и обезличивает users последним', async () => {
@@ -211,7 +224,7 @@ describe('строки аккаунта в соседних таблицах', (
     assert.equal(operations.at(-1), 'update:users');
     assert.deepEqual(
       operations.slice(1, -1).sort(),
-      CLEARED_USER_FK_TABLES.map((name) => `delete:${name}`).sort(),
+      [...CLEARED_USER_FK_TABLES.map((name) => `delete:${name}`), 'delete:user_blocks'].sort(),
     );
     assert.deepEqual(updatedFields, anonymizedUserFields('u-1', '$2a$10$unusable', new Date('2026-09-15T12:00:00Z')));
   });

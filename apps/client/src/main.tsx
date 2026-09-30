@@ -24,9 +24,14 @@ import { notifyIfJustUpdated, runDesktopUpdateCheck, startUpdatePolling } from '
 import { watchWindowCovered } from './windowCovered';
 import { httpsUpgradeUrl } from './configRules';
 import { isTauri } from './hotkeys';
+import { installLivekitTweaks } from './livekitTweaks';
+import { applyLiteMode } from './liteMode';
 
+// До любого подключения к комнате: иначе первые дорожки успеют запустить вечный цикл отрисовки.
+installLivekitTweaks();
 applyTheme(getTheme());
 applyUiPrefs();
+applyLiteMode();
 // Системная «назад» на Android: без этого жест выбрасывал из приложения с любого экрана (#157).
 installAndroidBack();
 

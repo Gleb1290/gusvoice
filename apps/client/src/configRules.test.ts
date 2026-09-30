@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  adminTarget,
+  findGuestEntry,
+  guestEntryRebound,
   hostOf,
+  homeEntry,
   httpsUpgradeUrl,
   instanceFrom,
   migrateRegistry,
@@ -272,5 +276,50 @@ describe('миграция реестра инстансов', () => {
       newId: () => 'unused',
     });
     assert.equal(result.activeId, 'first');
+  });
+});
+
+describe('дом и гостевая запись федерации', () => {
+  it('гость находится по личности, затем по домену записи и только потом по хосту API', () => {
+    // Ловит создание второй мёртвой записи после перепривязки соседа с отдельным api-доменом.
+    const home = instance('home');
+    const byId = { ...instance('by-id', 1), guestOf: home.id, federationInstanceId: 'old', domain: 'id.example.test' };
+    const byDomain = { ...instance('by-domain', 2), guestOf: home.id, federationInstanceId: 'older', domain: ' Voice.Example.Test ' };
+    const byHost = { ...instance('by-host', 3), guestOf: home.id, federationInstanceId: 'oldest', apiUrl: 'https://api.host.example.org' };
+    const list = [home, byId, byDomain, byHost];
+    assert.equal(findGuestEntry(list, 'old', 'voice.example.test')?.id, 'by-id');
+    assert.equal(findGuestEntry(list, 'new', 'voice.example.test')?.id, 'by-domain');
+    assert.equal(findGuestEntry(list, 'new', 'host.example.org')?.id, 'by-host');
+    assert.equal(findGuestEntry([home], 'new', 'home.example.test'), null);
+  });
+
+  it('перепривязкой считается только замена уже известной личности', () => {
+    // Ловит лишний перевыпуск первой гостевой сессии и пропуск настоящей смены ключа.
+    const blank = { ...instance('guest'), guestOf: 'home' };
+    const known = { ...blank, federationInstanceId: 'peer-a' };
+    assert.equal(guestEntryRebound(blank, 'peer-a'), false);
+    assert.equal(guestEntryRebound(known, 'peer-a'), false);
+    assert.equal(guestEntryRebound(known, 'peer-b'), true);
+  });
+
+  it('админка в гостях ведёт только в живой собственный дом супер-админа', () => {
+    // Ловит показ чужой админки и исчезновение своей кнопки при открытом сервере соседа.
+    const home = { ...instance('home'), superAdmin: true, token: 'home-token' };
+    const guest = { ...instance('guest', 1), guestOf: home.id };
+    assert.deepEqual(adminTarget([home, guest], home.id, true), { homeId: null });
+    assert.equal(adminTarget([home, guest], home.id, false), null);
+    assert.deepEqual(adminTarget([home, guest], guest.id, false), { homeId: home.id });
+    assert.equal(adminTarget([{ ...home, token: null }, guest], guest.id, false), null);
+    assert.equal(adminTarget([{ ...home, superAdmin: false }, guest], guest.id, false), null);
+  });
+
+  it('дом гостя не может сам быть гостевой записью или отсутствовать', () => {
+    // Ловит поручительство через соседа вместо собственного инстанса.
+    const home = instance('home');
+    const guest = { ...instance('guest', 1), guestOf: home.id };
+    assert.equal(homeEntry([home, guest], home.id)?.id, home.id);
+    assert.equal(homeEntry([home, guest], guest.id)?.id, home.id);
+    assert.equal(homeEntry([guest], guest.id), null);
+    assert.equal(homeEntry([{ ...home, guestOf: 'other' }, guest], guest.id), null);
   });
 });

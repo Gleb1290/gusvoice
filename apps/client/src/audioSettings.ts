@@ -1,4 +1,5 @@
 import { isMobile } from './hotkeys';
+import { clampVadThreshold, VAD_THRESHOLD_MIN } from './micProcessorRules';
 
 /**
  * Per-browser audio/video capture preferences (device selection, browser DSP, push-to-talk).
@@ -49,7 +50,7 @@ export const AUDIO_DEFAULTS: AudioSettings = {
   pushToTalk: false,
   pttKey: 'Space',
   inputGain: 1,
-  vadThreshold: 0,
+  vadThreshold: VAD_THRESHOLD_MIN,
   pttReleaseMs: 150,
 };
 
@@ -72,6 +73,8 @@ export function getAudioSettings(): AudioSettings {
     if (raw && parsed.noiseFilter === undefined) {
       merged.noiseFilter = parsed.noiseSuppression === false ? 'off' : 'system';
     }
+    // Порог голоса — в шкалу 1–60 % (29.09): сохранённый 0 («выкл») становится 1 % — `clampVadThreshold`.
+    merged.vadThreshold = clampVadThreshold(merged.vadThreshold);
     cache = merged;
   } catch {
     cache = { ...AUDIO_DEFAULTS };

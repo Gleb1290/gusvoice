@@ -294,6 +294,17 @@ pub fn record_wav(seconds: u32) -> std::result::Result<String, String> {
 
 static STREAM_STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
+/// Сколько звука копить перед отправкой в окно, мс.
+///
+/// 🔴 Зачем (трейс 27.09, #207). WASAPI отдаёт пакеты по 10 мс, и каждый уходил в окно отдельно. Пакет
+/// в 3840 байт больше порога Tauri на прямую доставку (1024), поэтому каждый — это `eval` в странице
+/// плюс запрос по своему протоколу через процесс браузера: сто раз в секунду. На машине владельца это
+/// ~120 мс процессора в секунду на трёх процессах WebView2, на четырёх ядрах — в разы больше. По 40 мс —
+/// вчетверо меньше пересылок; задержка звука показа растёт на те же 40 мс, это ниже задержки видео.
+/// ⚠️ Страница принимает кусок любой длины (`nativeStreamAudio.ts` считает кадры из размера).
+const BATCH_MS: usize = 40;
+const BATCH_SAMPLES: usize = SAMPLE_RATE as usize / 1000 * BATCH_MS * CHANNELS as usize;
+
 /// Continuously capture stream audio per `target`, handing each block to `sink` as raw little-endian
 /// bytes (interleaved f32, 48 kHz stereo) — the webview wraps these into a MediaStreamTrack. Runs on its
 /// own thread until `stop_stream()`. Any in-flight capture is stopped first.
@@ -317,14 +328,21 @@ pub fn start_stream<F: Fn(&[u8]) + Send + 'static>(target: AudioTarget, sink: F)
             }
             AudioTarget::IncludeProcess(pid) => (pid, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE),
         };
+        // Копим до `BATCH_SAMPLES` и только потом отдаём в окно — см. `BATCH_MS`.
+        let mut batch: Vec<f32> = Vec::with_capacity(BATCH_SAMPLES * 2);
         let _ = unsafe {
             run_capture(
                 pid,
                 mode,
                 |block| {
+                    batch.extend_from_slice(block);
+                    if batch.len() < BATCH_SAMPLES {
+                        return;
+                    }
                     // Reinterpret the f32 slice as little-endian bytes for the webview to wrap into AudioData.
-                    let bytes = std::slice::from_raw_parts(block.as_ptr() as *const u8, size_of::<f32>() * block.len());
+                    let bytes = std::slice::from_raw_parts(batch.as_ptr() as *const u8, size_of::<f32>() * batch.len());
                     sink(bytes);
+                    batch.clear();
                 },
                 || stop.load(Ordering::Relaxed),
             )

@@ -23,6 +23,15 @@ import { MAX_SAMPLES, partitionSamples, stripNulls } from './diagRules.js';
  */
 const cappedString = (max: number) => z.string().transform((s) => s.slice(0, max));
 
+/** Загрузка блоков видеокарты у одного владельца, % (см. `gpu_by`). Ключ `3d` — как в Rust. */
+const engineLoad = z.object({
+  '3d': z.number(),
+  copy: z.number(),
+  venc: z.number(),
+  vdec: z.number(),
+  other: z.number(),
+});
+
 const Sample = z.object({
   t: z.number(),
   /**
@@ -136,6 +145,41 @@ const Sample = z.object({
        */
       heals: z.number().optional(),
       stuck_s: z.number().optional(),
+      /**
+       * Путь кадра (#207, шаг 4, с 0.8.11): `gpu` — кадр не покидает видеокарту, `cpu` — через
+       * оперативку. Без него по отчёту не отличить «новый путь не помог» от «новый путь не включился».
+       */
+      pipeline: cappedString(8).optional(),
+      /**
+       * Оценка канала самим WebRTC (`availableOutgoingBitrate`), бит/с, с 0.8.11. Не провод: из неё WebRTC
+       * раздаёт биты слоям. 26.09 полный слой получал 3,5 Мбит/с из 12,9 на гигабитной локалке.
+       */
+      bwe_bps: z.number().optional(),
+      /** Нижняя граница оценщика на показ, бит/с (> 0 — сервер в локалке, `bitrate_hint` в Rust). */
+      bwe_min_bps: z.number().optional(),
+      /** Задержка TCP до сервера LiveKit перед показом, мс; -1 — не достучались. */
+      server_rtt_ms: z.number().optional(),
+      /** Почему не `gpu`: показ окна, выключено, кодек, экран не на NVIDIA, HDR, отказ посреди показа. */
+      pipeline_note: cappedString(96).optional(),
+      /**
+       * Слои показа (#207, с 0.8.8): что сейчас кодируется, а что стоит. С dynacast слой, который
+       * никто не смотрит, на паузе, и без списка `fps = 0` не отличить «не смотрят» от «сломалось».
+       */
+      layers: z
+        .array(
+          z.object({
+            rid: cappedString(8),
+            active: z.union([z.literal(0), z.literal(1)]),
+            w: z.number(),
+            h: z.number(),
+            fps: z.number(),
+            encode_ms: z.number(),
+            /** Цель слоя, кбит/с (с 0.8.11): как WebRTC поделил оценку канала между слоями. */
+            target_kbps: z.number().optional(),
+          }),
+        )
+        .max(4)
+        .optional(),
     })
     .optional(),
   /**
@@ -219,6 +263,8 @@ const Sample = z.object({
       /** Что думает оболочка: накрыто ли окно целиком и на сколько процентов. */
       covered: z.union([z.literal(0), z.literal(1)]).optional(),
       cover_pct: z.number().optional(),
+      /** На переднем плане чужое окно на весь монитор, то есть игра (#207) — анимации-украшения стоят. */
+      game_fg: z.union([z.literal(0), z.literal(1)]).optional(),
       /** Сколько анимаций крутилось и какие именно — имена наши, из стилей. */
       anims: z.number().optional(),
       anim_names: z.record(z.string(), z.number()).optional(),
@@ -237,6 +283,28 @@ const Sample = z.object({
   taskbar_hung: z.boolean().optional(),
   input_idle_ms: z.number().optional(),
   hook_idle_ms: z.number().optional(),
+  /**
+   * Кто занимает видеокарту рядом с игрой (#207, с 0.8.8): загрузка блоков (3D, копирование,
+   * кодирование, декодирование, прочее) у полноэкранной игры на переднем плане, у нашего процесса, у
+   * нашего WebView2 и у DWM, %. 🔴 До этого была видна только загрузка самого нагруженного блока карты
+   * в целом, и влияние показа на игру у людей нельзя было разложить на виновников.
+   */
+  gpu_by: z
+    .object({
+      game: engineLoad.optional(),
+      native: engineLoad,
+      webview: engineLoad,
+      dwm: engineLoad,
+    })
+    .optional(),
+  /** Имя exe полноэкранной игры на переднем плане (только имя файла) — сравнивать игры между собой. */
+  game_exe: cappedString(64).optional(),
+  /**
+   * Перехватчик мыши для рации: событий за окно и самая долгая задержка доставки нам, мс (точность
+   * ~16 мс). Нет полей — перехватчик не стоит. Кандидат на микрофризы мыши (#207).
+   */
+  mouse_hook_events: z.number().optional(),
+  mouse_hook_lag_max_ms: z.number().optional(),
   /** Объекты по ВСЕЙ системе + сколько процессов не удалось открыть (сумма настолько же неполна). */
   sys_gdi_total: z.number().optional(),
   sys_user_total: z.number().optional(),

@@ -16,10 +16,43 @@ import { linkVerdict } from './linkRules.js';
 import { readInstanceMeta } from './instanceMeta.js';
 import { mediaHashOf } from './directoryRules.js';
 import { issueIdentityToken } from './identityToken.js';
+import type { StoredLink } from './linkService.js';
+import type { SigningKeyPair } from './signingKeys.js';
 
 export type IdentityIssue =
   | { ok: true; token: string; expiresAt: number }
   | { ok: false; problem: FedErrorCode | 'unavailable' | 'not-found' };
+
+/**
+ * Всё, что выпуск токена берёт СНАРУЖИ, кроме базы (она в проверках настоящая, PGlite). Вынесено ради
+ * проверок: подставной выпуск, падающий после записи поручительства, показывает порядок шагов.
+ */
+export interface IssueIdentityDeps {
+  /** Наша личность. `null` — федерация не поднялась. */
+  identity(): { instanceId: string } | null;
+  /** Ключ подписи. `null` — ключа нет, ручаться нечем. */
+  signingKey(): Pick<SigningKeyPair, 'kid' | 'privateKeyDer'> | null;
+  getLink(instanceId: string): Promise<StoredLink | null>;
+  /** Аварийная пауза держателя. */
+  readMeta(): Promise<{ paused: boolean }>;
+  issueIdentityToken: typeof issueIdentityToken;
+}
+
+/** Выпуск токена с подставляемыми зависимостями — для проверок; в бою это `issueIdentityFor`. */
+export function createIssueIdentityFor(deps: IssueIdentityDeps) {
+  return (input: { userId: string; hostInstanceId: string; now: number }) => issue(deps, input);
+}
+
+/** Живые зависимости: настоящая личность, связки, метаданные инстанса и подпись. */
+function liveDeps(): IssueIdentityDeps {
+  return {
+    identity: () => federation.identity(),
+    signingKey: () => federation.signingKey(),
+    getLink,
+    readMeta: readInstanceMeta,
+    issueIdentityToken,
+  };
+}
 
 /**
  * Выпустить токен личности для указанного хоста.
@@ -27,20 +60,21 @@ export type IdentityIssue =
  * Порядок проверок выбран по цене: сначала свои (связка, пауза, возможности соседа), и только потом
  * чтение человека из базы. Криптография — последней, после всех «нет».
  */
-export async function issueIdentityFor(input: {
-  userId: string;
-  hostInstanceId: string;
-  now: number;
-}): Promise<IdentityIssue> {
-  const self = federation.identity();
-  const key = federation.signingKey();
+export const issueIdentityFor = createIssueIdentityFor(liveDeps());
+
+async function issue(
+  deps: IssueIdentityDeps,
+  input: { userId: string; hostInstanceId: string; now: number },
+): Promise<IdentityIssue> {
+  const self = deps.identity();
+  const key = deps.signingKey();
   // Нет ключа — нечем ручаться. Это про нас, а не про человека, поэтому отдельный ответ.
   if (!self || !key) return { ok: false, problem: 'unavailable' };
 
-  const link = await getLink(input.hostInstanceId);
+  const link = await deps.getLink(input.hostInstanceId);
   if (!link) return { ok: false, problem: FED_ERRORS.noLink };
 
-  const refusal = linkVerdict(link, (await readInstanceMeta()).paused);
+  const refusal = linkVerdict(link, (await deps.readMeta()).paused);
   if (refusal) return { ok: false, problem: refusal };
 
   // 🔴 Решение «умеет ли сосед гостей» — ТОЛЬКО по `features`, никогда по версии приложения
@@ -76,7 +110,7 @@ export async function issueIdentityFor(input: {
       set: { lastIssuedAt: new Date(input.now) },
     });
 
-  const issued = issueIdentityToken({
+  const issued = deps.issueIdentityToken({
     claims: {
       iss: self.instanceId,
       sub: user.id,

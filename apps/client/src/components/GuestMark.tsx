@@ -1,5 +1,7 @@
 import type { User } from '@gusvoice/shared';
+import { useMemo } from 'react';
 import { useStore } from '../store';
+import { guestHomeResolver } from '../rosterResolvers';
 import { Icon } from './Icon';
 
 type Home = NonNullable<User['homeInstance']>;
@@ -21,7 +23,10 @@ type Home = NonNullable<User['homeInstance']>;
  */
 export function useGuestHome(): (userId: string | undefined) => Home | null {
   const members = useStore((s) => s.members);
-  return (userId) => (userId ? (members.find((m) => m.user.id === userId)?.user.homeInstance ?? null) : null);
+  // Стабильная функция и поиск по словарю — ради `memo`-строк ленты (фаза 0.4 ЛС, 30.09), как `useAnimatedAvatarUrl`.
+  return useMemo(() => {
+    return guestHomeResolver(members);
+  }, [members]);
 }
 
 export function guestHomeLabel(home: Home): string {

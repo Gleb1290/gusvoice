@@ -14,9 +14,11 @@ import type {
   VoiceParticipant,
 } from '@gusvoice/shared';
 import { create } from 'zustand';
-import { api, setToken, type PushMuteScope } from './api';
+import { api, setToken, type BlockedUser, type PushMuteScope } from './api';
 import { activeInstanceId, logoutFamily, rememberInstanceServers } from './config';
 import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads } from './channelRules';
+import { applyDmDelete, byRecent, mergeDmChannel, mergeDmUpdate, seedDmList } from './dmListRules';
+import { hasMoreOlder, mergeLatestPage, mergeOlderPage, olderCursor } from './historyPage';
 import { markChannelSeen } from './channelPrefs';
 import { rememberPlace } from './lastPlace';
 import { onTabEvent, publishTabEvent } from './tabSync';
@@ -43,9 +45,6 @@ function channelSoundMap(channels: { id: string; sounds?: Record<string, string>
 }
 
 /** Sort conversations by most-recent activity (lastMessageAt, else createdAt). */
-const byRecent = (a: DmChannel, b: DmChannel) =>
-  (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt);
-
 interface VoiceConnection {
   channelId: string;
   url: string;
@@ -184,15 +183,25 @@ interface State {
   searchOpen: boolean;
   dmMessages: Record<string, Message[]>;
   unreadDms: string[];
+  /**
+   * Ленты (канал или беседа), чья история не загрузилась, а показать нечего (#212, Б5). Без этого
+   * сбой выглядел как вечные скелетоны: ни ошибки, ни повода нажать ещё раз.
+   */
+  historyFailed: string[];
 
   /** Account-wide push-mute sets (loaded on boot). Suppress phone pushes from a server's @mentions
    *  or a person's DMs — in-app delivery is unaffected. Edited via context menus. */
   pushMutedServers: string[];
   pushMutedDmUsers: string[];
+  /** Чёрный список ЛС (#212) — кого я заблокировал. Грузится на старте, меняется `setBlocked`. */
+  blockedUsers: BlockedUser[];
 
   setAuth: (user: User) => void;
   logout: () => void;
   loadPushMutes: () => Promise<void>;
+  loadBlocks: () => Promise<void>;
+  /** Заблокировать / разблокировать (сразу в списке, откат при ошибке сервера). */
+  setBlocked: (user: BlockedUser, blocked: boolean) => Promise<void>;
   /** Optimistically toggle a push-mute (server or dm_user); reverts + rethrows on API failure. */
   setPushMuted: (scope: PushMuteScope, targetId: string, muted: boolean) => Promise<void>;
   loadServers: () => Promise<void>;
@@ -254,10 +263,15 @@ interface State {
   setAdminOpen: (open: boolean) => void;
   setSearchOpen: (open: boolean) => void;
   selectDm: (dmId: string) => Promise<void>;
+  /** Перечитать последнюю порцию беседы и слить с кешем (открытие, повтор, пробуждение). */
+  refreshDmHistory: (dmId: string) => Promise<void>;
+  /** Подтянуть порцию более старых сообщений беседы; `false` — дно. */
+  loadOlderDmMessages: (dmId: string) => Promise<boolean>;
   upsertDm: (channel: DmChannel) => void;
   appendDmMessage: (dmId: string, message: Message) => void;
   updateDmMessage: (dmId: string, message: Message) => void;
-  removeDmMessage: (dmId: string, messageId: string) => void;
+  /** `ev` — поля события `dm.delete` (#212): новое время беседы и новое непрочитанное, если сервер их прислал. */
+  removeDmMessage: (dmId: string, messageId: string, ev?: { lastMessageAt?: string | null; unread?: number }) => void;
   markDmUnread: (dmId: string) => void;
 
   // socket-driven mutations
@@ -383,9 +397,11 @@ export const useStore = create<State>((set, get) => ({
   adminOpen: false,
   searchOpen: false,
   dmMessages: {},
+  historyFailed: [],
   unreadDms: [],
   pushMutedServers: [],
   pushMutedDmUsers: [],
+  blockedUsers: [],
 
   setAuth: (user) =>
     set((state) => ({
@@ -450,9 +466,11 @@ export const useStore = create<State>((set, get) => ({
       dms: [],
       currentDmId: null,
       dmMessages: {},
+      historyFailed: [],
       unreadDms: [],
       pushMutedServers: [],
       pushMutedDmUsers: [],
+      blockedUsers: [],
     });
   },
 
@@ -465,6 +483,26 @@ export const useStore = create<State>((set, get) => ({
       });
     } catch {
       /* push mutes are a nicety — never block boot over them */
+    }
+  },
+
+  loadBlocks: async () => {
+    try {
+      set({ blockedUsers: await api.listBlocks() });
+    } catch {
+      /* старый сервер без чёрного списка или сбой — список просто пуст */
+    }
+  },
+
+  setBlocked: async (user, blocked) => {
+    const prev = get().blockedUsers;
+    set({ blockedUsers: blocked ? [...prev.filter((u) => u.id !== user.id), user] : prev.filter((u) => u.id !== user.id) });
+    try {
+      if (blocked) await api.blockUser(user.id);
+      else await api.unblockUser(user.id);
+    } catch (e) {
+      set({ blockedUsers: prev });
+      throw e;
     }
   },
 
@@ -571,20 +609,26 @@ export const useStore = create<State>((set, get) => ({
     const { currentServerId, currentChannelId, currentDmId, bootstrap } = get();
     if (currentChannelId && bootstrap?.channels.find((c) => c.id === currentChannelId)?.type === 'text') {
       try {
-        const messages = await api.listMessages(currentChannelId);
-        set((s) => ({ messagesByChannel: { ...s.messagesByChannel, [currentChannelId]: messages } }));
+        const page = await api.listMessages(currentChannelId);
+        // Сливаем, а не заменяем: подгруженная прокруткой история переживает пробуждение (#212).
+        set((s) => ({
+          messagesByChannel: {
+            ...s.messagesByChannel,
+            [currentChannelId]: mergeLatestPage(s.messagesByChannel[currentChannelId], page),
+          },
+        }));
       } catch {
         /* keep the cached messages if the refetch fails */
       }
     }
-    if (currentDmId) {
-      try {
-        const messages = await api.listDmMessages(currentDmId);
-        set((s) => ({ dmMessages: { ...s.dmMessages, [currentDmId]: messages } }));
-      } catch {
-        /* keep cache */
-      }
-    }
+    if (currentDmId) await get().refreshDmHistory(currentDmId);
+    // Список бесед тоже: пока спали, могли написать в другую беседу — значок и порядок догоняют здесь
+    // (#212, Б3: раньше перезапрашивалась только открытая беседа).
+    await get()
+      .loadDms()
+      .catch(() => {
+        /* значки догонят при следующем открытии списка */
+      });
     if (currentServerId) {
       try {
         await get().refreshBootstrap(currentServerId);
@@ -630,20 +674,70 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   loadOlderMessages: async (channelId) => {
-    const list = get().messagesByChannel[channelId] ?? [];
-    const oldest = list[0];
-    if (!oldest) return false;
-    const older = await api.listMessages(channelId, new Date(oldest.createdAt).toISOString());
+    const cursor = olderCursor(get().messagesByChannel[channelId] ?? []);
+    if (!cursor) return false;
+    const older = await api.listMessages(channelId, cursor);
     if (older.length === 0) return false;
-    set((s) => {
-      const cur = s.messagesByChannel[channelId] ?? [];
-      // ⚠️ Склейка по id: пока шёл запрос, кто-то мог прислать сообщение, а порция могла
-      // пересечься с уже загруженным. Дубликат в ленте заметнее, чем лишняя проверка.
-      const have = new Set(cur.map((m) => m.id));
-      const fresh = older.filter((m) => !have.has(m.id));
-      return { messagesByChannel: { ...s.messagesByChannel, [channelId]: [...fresh, ...cur] } };
-    });
-    return older.length >= 50;
+    set((s) => ({
+      messagesByChannel: {
+        ...s.messagesByChannel,
+        [channelId]: mergeOlderPage(s.messagesByChannel[channelId] ?? [], older),
+      },
+    }));
+    return hasMoreOlder(older);
+  },
+
+  /**
+   * 🔴 История ЛС глубже 50 (28.09, #212). Сервер отдавал её порциями с первого дня, но лента беседы
+   * не просила ни разу: переписка глубже одного экрана была недостижима. Каналы это починили 19.09;
+   * правила порций теперь общие (`historyPage.ts`).
+   */
+  loadOlderDmMessages: async (dmId) => {
+    const cursor = olderCursor(get().dmMessages[dmId] ?? []);
+    if (!cursor) return false;
+    const older = await api.listDmMessages(dmId, cursor);
+    if (older.length === 0) return false;
+    set((s) => ({ dmMessages: { ...s.dmMessages, [dmId]: mergeOlderPage(s.dmMessages[dmId] ?? [], older) } }));
+    return hasMoreOlder(older);
+  },
+
+  /**
+   * Перечитать последнюю порцию беседы (#212, Б3 и Б5).
+   *
+   * - 🔴 Б3 (воспроизведено 28.09): кеш беседы считался истиной на всю сессию — повторное открытие не
+   *   ходило в сеть, и сообщение, пропущенное во сне, не появлялось до перезапуска. Теперь в сеть
+   *   ходим всегда (как каналы с #80), а порция СЛИВАЕТСЯ с кешем (`historyPage.mergeLatestPage`).
+   * - Кеш есть — показываем его сразу, ответ сольётся; кеша нет — ждём (`historyLoadPlan` каналов).
+   * - 🔴 Б5 (воспроизведено 28.09): сбой при пустом кеше оставлял вечные скелетоны. Теперь лента
+   *   попадает в `historyFailed` и показывает ошибку с кнопкой «Повторить».
+   * - «Прочитано» уходит ПОСЛЕ ответа и до последнего сообщения на экране (`api.markDmRead` c `upTo`),
+   *   а не до часов сервера — и только если беседа всё ещё на экране.
+   */
+  refreshDmHistory: async (dmId) => {
+    const hadCache = !!get().dmMessages[dmId];
+    set((s) => (s.historyFailed.includes(dmId) ? { historyFailed: s.historyFailed.filter((x) => x !== dmId) } : s));
+    const load = api
+      .listDmMessages(dmId)
+      .then((page) => {
+        set((s) => ({ dmMessages: { ...s.dmMessages, [dmId]: mergeLatestPage(s.dmMessages[dmId], page) } }));
+      })
+      .catch(() => {
+        if (!get().dmMessages[dmId]) set((s) => ({ historyFailed: [...s.historyFailed, dmId] }));
+      })
+      .then(() => {
+        const s = get();
+        const onScreen = isFeedOnScreen({
+          id: dmId,
+          currentId: s.currentDmId,
+          mobile: isMobile(),
+          mobilePane: s.mobilePane,
+          kind: 'dm',
+          view: s.view,
+        });
+        const list = s.dmMessages[dmId];
+        if (onScreen && list) void api.markDmRead(dmId, list[list.length - 1]?.id).catch(() => {});
+      });
+    if (!hadCache) await load;
   },
 
   /**
@@ -690,6 +784,8 @@ export const useStore = create<State>((set, get) => ({
       currentId: channelId ? s0.currentChannelId : s0.currentDmId,
       mobile: isMobile(),
       mobilePane: s0.mobilePane,
+      kind: channelId ? 'channel' : 'dm',
+      view: s0.view,
     });
     if (!onScreen) markChannelSeen(id, at ? Date.parse(at) : Date.now());
     set((s) => {
@@ -715,7 +811,9 @@ export const useStore = create<State>((set, get) => ({
       unreadDms: s.unreadDms.filter((x) => x !== dmId),
       dms: s.dms.map((d) => (d.id === dmId ? { ...d, unread: 0 } : d)),
     }));
-    void api.markDmRead(dmId).catch(() => {});
+    // До последнего показанного, а не до часов сервера (#212): разбор — `routes/dm.ts`, ручка `/read`.
+    const list = get().dmMessages[dmId];
+    void api.markDmRead(dmId, list?.[list.length - 1]?.id).catch(() => {});
     publishTabEvent({ kind: 'read-dm', dmId });
   },
 
@@ -742,11 +840,19 @@ export const useStore = create<State>((set, get) => ({
     // тестами); здесь только сам поход. Разбор, почему рефетчим ВСЕГДА, — там же.
     const plan = historyLoadPlan({ channelType: channel?.type, hasCache: !!get().messagesByChannel[channelId] });
     if (plan.refetch) {
+      set((s) => (s.historyFailed.includes(channelId) ? { historyFailed: s.historyFailed.filter((x) => x !== channelId) } : s));
       const refetch = api
         .listMessages(channelId)
-        .then((messages) => set((s) => ({ messagesByChannel: { ...s.messagesByChannel, [channelId]: messages } })))
+        // Сливаем с кешем, а не заменяем: подгруженная прокруткой история не пропадает (#212).
+        .then((page) =>
+          set((s) => ({
+            messagesByChannel: { ...s.messagesByChannel, [channelId]: mergeLatestPage(s.messagesByChannel[channelId], page) },
+          })),
+        )
         .catch(() => {
-          /* оффлайн — остаёмся на кеше, следующее открытие догонит */
+          // Оффлайн при кеше — остаёмся на нём, следующее открытие догонит. Без кеша — показываем
+          // сбой, а не вечные скелетоны (#212, Б5 — у каналов та же дыра, что у ЛС).
+          if (!get().messagesByChannel[channelId]) set((s) => ({ historyFailed: [...s.historyFailed, channelId] }));
         });
       if (plan.blocking) await refetch;
     }
@@ -877,9 +983,21 @@ export const useStore = create<State>((set, get) => ({
 
   loadDms: async () => {
     const dms = await api.listDms();
-    dms.sort(byRecent);
-    // Seed persisted unread (server-side dm_reads) — the open conversation stays read.
-    set((s) => ({ dms, unreadDms: dms.filter((d) => (d.unread ?? 0) > 0 && d.id !== s.currentDmId).map((d) => d.id) }));
+    // Непрочитанное с сервера (dm_reads); беседа НА ЭКРАНЕ не горит. Раньше «на экране» было просто
+    // `currentDmId`, и беседа, из которой ушли в сервер, теряла значок при загрузке списка (#212, Б2).
+    set((s) => {
+      const onScreen = s.currentDmId
+        ? isFeedOnScreen({
+            id: s.currentDmId,
+            currentId: s.currentDmId,
+            mobile: isMobile(),
+            mobilePane: s.mobilePane,
+            kind: 'dm',
+            view: s.view,
+          })
+        : false;
+      return seedDmList(dms, onScreen ? s.currentDmId : null);
+    });
   },
 
   requestMention: (name) =>
@@ -904,11 +1022,8 @@ export const useStore = create<State>((set, get) => ({
       dms: s.dms.map((d) => (d.id === dm.id ? { ...d, unread: 0 } : d)),
       mobilePane: 'content',
     }));
-    void api.markDmRead(dm.id).catch(() => {});
-    if (!get().dmMessages[dm.id]) {
-      const messages = await api.listDmMessages(dm.id);
-      set((s) => ({ dmMessages: { ...s.dmMessages, [dm.id]: messages } }));
-    }
+    // История и «прочитано» — в `refreshDmHistory` (всегда в сеть, слияние с кешем, сбой без скелетонов).
+    await get().refreshDmHistory(dm.id);
   },
 
   selectDm: async (dmId) => {
@@ -919,21 +1034,14 @@ export const useStore = create<State>((set, get) => ({
       dms: s.dms.map((d) => (d.id === dmId ? { ...d, unread: 0 } : d)),
       mobilePane: 'content',
     }));
-    void api.markDmRead(dmId).catch(() => {});
     publishTabEvent({ kind: 'read-dm', dmId });
     const instDm = activeInstanceId();
     if (instDm) rememberPlace({ instanceId: instDm, dmId });
-    if (!get().dmMessages[dmId]) {
-      const messages = await api.listDmMessages(dmId);
-      set((s) => ({ dmMessages: { ...s.dmMessages, [dmId]: messages } }));
-    }
+    await get().refreshDmHistory(dmId);
   },
 
-  upsertDm: (channel) =>
-    set((s) => {
-      const dms = [channel, ...s.dms.filter((d) => d.id !== channel.id)].sort(byRecent);
-      return { dms };
-    }),
+  // `dm.channel` без поля `unread` больше не обнуляет счётчик (#212, Б1 — разбор в `dmListRules.ts`).
+  upsertDm: (channel) => set((s) => ({ dms: mergeDmChannel(s.dms, channel) })),
 
   appendDmMessage: (dmId, message) =>
     set((s) => {
@@ -951,14 +1059,26 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       const list = s.dmMessages[dmId];
       if (!list) return s;
-      return { dmMessages: { ...s.dmMessages, [dmId]: list.map((m) => (m.id === message.id ? message : m)) } };
+      // Реакции не трогаем: `dm.update` несёт их глазами редактора (#212, Б4 — `dmListRules.mergeDmUpdate`).
+      return {
+        dmMessages: { ...s.dmMessages, [dmId]: list.map((m) => (m.id === message.id ? mergeDmUpdate(m, message) : m)) },
+      };
     }),
 
-  removeDmMessage: (dmId, messageId) =>
+  removeDmMessage: (dmId, messageId, ev) =>
     set((s) => {
       const list = s.dmMessages[dmId];
-      if (!list) return s;
-      return { dmMessages: { ...s.dmMessages, [dmId]: list.filter((m) => m.id !== messageId) } };
+      const dmMessages = list ? { ...s.dmMessages, [dmId]: list.filter((m) => m.id !== messageId) } : s.dmMessages;
+      if (!ev) return { dmMessages };
+      const onScreen = isFeedOnScreen({
+        id: dmId,
+        currentId: s.currentDmId,
+        mobile: isMobile(),
+        mobilePane: s.mobilePane,
+        kind: 'dm',
+        view: s.view,
+      });
+      return { dmMessages, ...applyDmDelete(s.dms, s.unreadDms, dmId, ev, onScreen ? dmId : null) };
     }),
 
   /**
@@ -1251,9 +1371,11 @@ export const useStore = create<State>((set, get) => ({
       dms: [],
       currentDmId: null,
       dmMessages: {},
+      historyFailed: [],
       unreadDms: [],
       pushMutedServers: [],
       pushMutedDmUsers: [],
+      blockedUsers: [],
       mentionRequest: null,
       // Окна прежнего инстанса закрываем: настройки сервера, админка и поиск говорили о том, чего
       // здесь уже нет.

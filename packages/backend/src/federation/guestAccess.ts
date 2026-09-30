@@ -45,12 +45,20 @@ export type CloseReason = FedCloseReason;
  *
  * `instanceId` пуст — закрываем всем (сняли галочку целиком); задан — только людям этой связки
  * (выключили её в списке исключений, §5.3).
+ *
+ * `deps` — только для проверок: подставные рассыльщики показывают `server.invalidate` и окно гостю
+ * без Redis. В бою не передаётся, и события идут через `realtime`.
  */
-export async function closeServerForGuests(input: {
-  serverId: string;
-  instanceId?: string | null;
-  reason: CloseReason;
-}): Promise<number> {
+export async function closeServerForGuests(
+  input: {
+    serverId: string;
+    instanceId?: string | null;
+    reason: CloseReason;
+  },
+  deps: { publish?: typeof publishToServer; publishToUser?: typeof publishToUser } = {},
+): Promise<number> {
+  const publish = deps.publish ?? publishToServer;
+  const toUser = deps.publishToUser ?? publishToUser;
   const guests = await guestsOnServer(input.serverId, input.instanceId ?? null, FED_MEMBERSHIP_STATES.active);
   if (guests.length === 0) return 0;
 
@@ -76,12 +84,12 @@ export async function closeServerForGuests(input: {
    * `server.invalidate` (`dropRevokedSubscribers`), а поколение токена здесь не поднимается — гость
    * может быть на других серверах, и выкидывать его оттуда не за что.
    */
-  await publishToServer(input.serverId, { t: 'server.invalidate', serverId: input.serverId }).catch(() => {});
+  await publish(input.serverId, { t: 'server.invalidate', serverId: input.serverId }).catch(() => {});
 
   for (const guest of guests) {
     // Окно по центру экрана — тем, кто сейчас на сервере. Летит В ЛИЧНЫЕ подключения человека, а не
     // всему серверу: это сообщение адресное, и остальным участникам знать о нём незачем.
-    await publishToUser(guest.id, {
+    await toUser(guest.id, {
       t: 'server.access_closed',
       serverId: input.serverId,
       reason: input.reason,

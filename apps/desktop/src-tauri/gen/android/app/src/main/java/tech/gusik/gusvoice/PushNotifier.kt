@@ -26,14 +26,18 @@ object PushNotifier {
   private const val TAG = "GusVoicePush"
 
   fun show(context: Context, message: ByteArray) {
+    // Шифр WebPush (#213) — расшифровать ключом этого телефона; открытый JSON старого бэкенда — как есть.
+    val encrypted = PushCrypto.looksEncrypted(message)
+    val clear = if (encrypted) PushCrypto.decrypt(context, message) else message
     val payload = try {
-      JSONObject(String(message, Charsets.UTF_8))
+      clear?.let { JSONObject(String(it, Charsets.UTF_8)) }
     } catch (_: Exception) {
       null
     }
     val title = payload?.optString("title").takeUnless { it.isNullOrEmpty() } ?: "GusVoice"
+    // Не расшифровалось — «новое сообщение», а не байты шифра на экране.
     val body = payload?.optString("body").takeUnless { it.isNullOrEmpty() }
-      ?: String(message, Charsets.UTF_8)
+      ?: if (encrypted) "Новое сообщение" else String(message, Charsets.UTF_8)
 
     // Foreground suppression (#119): if the GusVoice UI is in front ON THIS PHONE, the in-app path
     // already shows the message — don't also post a system notification.

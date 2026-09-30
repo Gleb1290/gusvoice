@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.ActionMode
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -11,6 +13,9 @@ import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 /** Install-once flag for the renderer-gone guard: onCreate re-runs on activity recreation, but the
  *  uncaught-exception handler is process-wide — re-wrapping it would stack delegation layers. */
@@ -24,10 +29,14 @@ class MainActivity : TauriActivity() {
   // The WebView we hand the back gesture to. Captured in onWebViewCreate; null until the shell builds it.
   private var webViewRef: WebView? = null
 
+  // Системная строка над выделенным текстом («Вставить / Копировать…») — пока она открыта, «назад» закрывает её.
+  private var textActionMode: ActionMode? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     installRendererGoneGuard()
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    fitAboveKeyboard()
 
     // 🔴 Back gesture (#157). Without this the system back left the app from ANY screen — inside a
     // channel, inside settings, anywhere — because nothing claimed it. On Android that gesture is how
@@ -38,6 +47,12 @@ class MainActivity : TauriActivity() {
     // sidesteps evaluateJavascript being async — we never need its answer.
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
+        // 🔴 Открыта системная строка над полем («Вставить») — закрываем только её (#212, 29.09, S25): иначе
+        // жест уходил клиенту, и тот уводил из беседы в список, а строка закрывалась заодно. У Telegram так же.
+        textActionMode?.let {
+          it.finish()
+          return
+        }
         val wv = webViewRef
         if (wv == null) {
           moveTaskToBack(true)
@@ -149,6 +164,49 @@ class MainActivity : TauriActivity() {
       .edit().putString(UnifiedPushReceiver.KEY_DEEPLINK, link).apply()
   }
 
+  override fun onActionModeStarted(mode: ActionMode) {
+    super.onActionModeStarted(mode)
+    textActionMode = mode
+  }
+
+  override fun onActionModeFinished(mode: ActionMode) {
+    super.onActionModeFinished(mode)
+    if (textActionMode === mode) textActionMode = null
+  }
+
+  /**
+   * 🔴 Страница сжимается под клавиатуру, а не уезжает вверх (#212, 29.09, проход по касаниям на S25).
+   *
+   * С `enableEdgeToEdge()` окно под клавиатуру не ужимается само (Android 15 игнорирует `adjustResize` для
+   * приложений на весь экран), и WebView поступал по-браузерному: сдвигал видимую часть страницы. Замер: из 891 px
+   * видно 559, сдвиг 332 — шапка беседы и верх ленты уходили за экран, в короткой беседе над полем было пусто,
+   * а панель вкладок прежде вставала прямо над клавиатурой. У Telegram лента сжимается, шапка остаётся.
+   *
+   * Поэтому высоту клавиатуры отдаём ОТСТУПОМ снизу у корня содержимого: WebView становится короче ровно на неё, и
+   * вёрстка раскладывается заново (`innerHeight` меньше). Детям вставку клавиатуры не передаём — иначе WebView
+   * вдобавок сдвинул бы страницу ещё раз. Пока клавиатура открыта, прячем и нижний отступ системной панели: она
+   * под клавиатурой, и `env(safe-area-inset-bottom)` дал бы пустую полосу между полем и клавишами.
+   */
+  private fun fitAboveKeyboard() {
+    val content = findViewById<View>(android.R.id.content) ?: return
+    ViewCompat.setOnApplyWindowInsetsListener(content) { v, insets ->
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+      v.setPadding(v.paddingLeft, v.paddingTop, v.paddingRight, ime.bottom)
+      if (ime.bottom == 0) return@setOnApplyWindowInsetsListener insets
+      val out = WindowInsetsCompat.Builder(insets).setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+      for (type in intArrayOf(
+        WindowInsetsCompat.Type.navigationBars(),
+        WindowInsetsCompat.Type.systemBars(),
+        WindowInsetsCompat.Type.tappableElement(),
+        WindowInsetsCompat.Type.mandatorySystemGestures(),
+      )) {
+        val i = insets.getInsets(type)
+        out.setInsets(type, Insets.of(i.left, i.top, i.right, 0))
+      }
+      out.build()
+    }
+  }
+
   // Layer 2: Tauri/wry installs NO WebChromeClient, so the WebView denies getUserMedia by default.
   // We ADD one (via wry's official onWebViewCreate hook) — nothing existing is replaced. Grant only
   // the media-capture resources the page requests; the OS grant above is the real gate.
@@ -256,6 +314,16 @@ class MainActivity : TauriActivity() {
         .remove(PushDistributorService.KEY_NTFY_BASE)
         .remove(PushDistributorService.KEY_TOPIC)
         .apply()
+    }
+
+    // Ключи шифрования пуша этого телефона (#213, WebPush): открытый ключ и секрет для регистрации на
+    // бэкенде. Закрытый ключ остаётся в `PushCrypto`. "" — не вышло создать ключи (регистрация без них).
+    @JavascriptInterface
+    fun pushKeys(): String = try {
+      PushCrypto.keysJson(this@MainActivity)
+    } catch (e: Exception) {
+      android.util.Log.w("GusVoicePush", "pushKeys failed", e)
+      ""
     }
 
     @JavascriptInterface

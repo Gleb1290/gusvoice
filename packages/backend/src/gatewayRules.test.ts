@@ -1,18 +1,35 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import {
+  capAllows,
   mayObserveUser,
   membershipDiff,
   parseEnvelope,
+  parseCaps,
   shouldDeliver,
   typingRoute,
   visibleOnline,
   type Envelope,
 } from './gatewayRules.js';
+import { INSTANCE_FEATURES } from './instanceFeatures.js';
 
 const invalidate = { t: 'server.invalidate' as const, serverId: 'server-1' };
 
 describe('разбор внутреннего конверта gateway', () => {
+  it('возможности сохраняются только строками, а отсутствие полей остаётся отсутствием', () => {
+    // Ловит потерю маршрутизации между новыми и старыми соединениями.
+    assert.deepEqual(parseEnvelope(JSON.stringify({ m: invalidate, cap: 'conv1', notCap: 'old' })),
+      { m: invalidate, to: undefined, cap: 'conv1', notCap: 'old' });
+    assert.deepEqual(parseEnvelope(JSON.stringify({ m: invalidate })), { m: invalidate, to: undefined });
+  });
+
+  it('кривое поле возможности отвергает весь конверт', () => {
+    // Ловит утечку новой формы старому клиенту при повреждённом ограничителе.
+    for (const field of ['cap', 'notCap']) for (const value of [5, null, {}]) {
+      assert.equal(parseEnvelope(JSON.stringify({ m: invalidate, [field]: value })), null);
+    }
+  });
   it('серверное событие без списка адресатов разбирается', () => {
     // Ловит ошибочное требование `to`, которое погасило бы invalidate для всего сервера.
     assert.deepEqual(parseEnvelope(JSON.stringify({ m: invalidate })), { m: invalidate, to: undefined });
@@ -78,6 +95,26 @@ describe('разбор внутреннего конверта gateway', () => {
 });
 
 describe('решение о доставке соединению', () => {
+  it('cap и notCap применяются к каждому соединению отдельно', () => {
+    // Ловит смешение старого и нового клиентов одного человека.
+    const old = new Set<string>();
+    const fresh = new Set(['conv1']);
+    assert.equal(capAllows({}, undefined), true);
+    assert.equal(capAllows({ cap: 'conv1' }, undefined), false);
+    assert.equal(capAllows({ cap: 'conv1' }, old), false);
+    assert.equal(capAllows({ cap: 'conv1' }, fresh), true);
+    assert.equal(capAllows({ notCap: 'conv1' }, undefined), true);
+    assert.equal(capAllows({ notCap: 'conv1' }, fresh), false);
+    assert.equal(capAllows({ cap: 'conv1', notCap: 'old' }, fresh), true);
+    assert.equal(capAllows({ cap: 'conv1', notCap: 'conv1' }, fresh), false);
+  });
+
+  it('адресат без нужной возможности не получает событие', () => {
+    // Ловит обход фильтра cap через совпадение адреса в to.
+    assert.equal(shouldDeliver({ m: invalidate, to: ['anna'], cap: 'conv1' }, 'anna'), false);
+    assert.equal(shouldDeliver({ m: invalidate, to: ['anna'], cap: 'conv1' }, 'anna', new Set(['conv1'])), true);
+    assert.equal(shouldDeliver({ m: invalidate, to: ['anna'], notCap: 'conv1' }, 'anna', new Set(['conv1'])), false);
+  });
   it('событие без адресатов доступно любому серверному соединению', () => {
     // Ловит случайное применение user-фильтра к server-wide invalidate.
     const env: Envelope = { m: invalidate };
@@ -104,6 +141,39 @@ describe('решение о доставке соединению', () => {
     // Ловит трактовку пустого массива как отсутствующего ограничения.
     assert.equal(shouldDeliver({ m: invalidate, to: [] }, 'anna'), false);
     assert.equal(shouldDeliver({ m: invalidate, to: [] }, null), false);
+  });
+});
+
+describe('возможности из identify', () => {
+  it('сервер объявляет работающую новую форму бесед', () => {
+    // Ловит клиент, который не переключится на новую ручку после переноса живых ЛС.
+    assert.deepEqual(INSTANCE_FEATURES, ['conv1']);
+  });
+
+  it('шлюз фильтрует обе ветки по возможности самого соединения', () => {
+    // Ловит обход cap при доставке через персональную, а не серверную подписку.
+    const source = readFileSync(new URL('./gateway.ts', import.meta.url), 'utf8');
+    assert.match(source, /shouldDeliver\(env, conn\.userId, conn\.caps\)/);
+    assert.match(source, /capAllows\(env, conn\.caps\)/);
+    assert.equal((source.match(/conn\.caps\s*=\s*parseCaps\(caps\)/g) ?? []).length, 1);
+  });
+
+  it('старый клиент и неверный контейнер дают пустой набор', () => {
+    // Ловит аварийный разбор отсутствующего caps у выпущенного десктопа.
+    for (const value of [undefined, null, 'conv1', { cap: 'conv1' }]) assert.equal(parseCaps(value).size, 0);
+  });
+
+  it('неверные имена отбрасываются, а допустимые и дубли сохраняются один раз', () => {
+    // Ловит принятие неоднозначных или неограниченных capability имён.
+    assert.deepEqual([...parseCaps(['conv1', 'conv1', 'v2.foo-bar', 3, 'Conv1', 'a b', 'гусь', '-x', 'x'.repeat(33)])],
+      ['conv1', 'v2.foo-bar']);
+    assert.deepEqual([...parseCaps(['x'.repeat(32)])], ['x'.repeat(32)]);
+  });
+
+  it('после шестнадцатой годной возможности следующие не принимаются', () => {
+    // Ловит неограниченный клиентский набор, влияющий на память каждого соединения.
+    assert.deepEqual([...parseCaps([...Array.from({ length: 16 }, (_, i) => `c${i}`), 'extra'])],
+      Array.from({ length: 16 }, (_, i) => `c${i}`));
   });
 });
 

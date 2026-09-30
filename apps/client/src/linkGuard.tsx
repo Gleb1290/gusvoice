@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { config } from './config';
 import { isDesktop } from './hotkeys';
 import { openExternal } from './desktopWindow';
@@ -133,7 +134,9 @@ export function LinkConfirmModal({
     onClose();
   }
 
-  return (
+  /* В портал, а не на месте (фаза 0.4 ЛС, 30.09): ссылка живёт внутри ленты, а у `.messages` теперь `contain: strict`,
+     и для `position: fixed` она сама становится рамкой — окно прижалось бы к ленте вместо всего экрана. */
+  return createPortal(
     <div className="modal-overlay" onClick={onClose}>
       <div
         className="modal link-confirm"
@@ -163,7 +166,8 @@ export function LinkConfirmModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

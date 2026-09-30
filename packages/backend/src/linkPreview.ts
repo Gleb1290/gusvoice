@@ -1,4 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
+import { isAttPath } from './attachmentRules.js';
 import { db } from './db/index.js';
 import { linkPreviews } from './db/schema.js';
 import { isRedundantDescription, parseHead } from './ogParse.js';
@@ -49,6 +50,9 @@ function cacheKey(raw: string): string | null {
   try {
     const u = new URL(raw);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    // Ссылка на закрытый файл ЛС (шаг 1в) — ключ на предъявителя: превью по ней не строим, иначе подпись осела бы в
+    // таблице превью и в журнале. Чужие инстансы — тоже: у них тот же вид ссылок.
+    if (isAttPath(u.pathname)) return null;
     u.hash = '';
     return u.toString();
   } catch {

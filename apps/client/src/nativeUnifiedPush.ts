@@ -2,6 +2,7 @@ import { api, getToken } from './api';
 import { activeInstanceId, config, instances } from './config';
 import { switchInstance } from './instanceSwitch';
 import { setPendingOpen } from './pendingOpen';
+import { parsePushKeys } from './pushKeys';
 import { isAndroid } from './hotkeys';
 import { subscribeToServer } from './sockets';
 import { useStore } from './store';
@@ -29,6 +30,11 @@ interface GusVoicePushBridge {
   enableEmbeddedPush?(ntfyBase: string): string;
   disableEmbeddedPush?(): void;
   embeddedPushEndpoint?(): string;
+  /**
+   * Ключи шифрования пуша этого устройства (#213): JSON `{"p256dh":"…","auth":"…"}` (base64url). Закрытый
+   * ключ не покидает телефон. Нет метода (старый APK) — регистрируемся без ключей, пуш придёт без текста.
+   */
+  pushKeys?(): string;
 }
 
 function bridge(): GusVoicePushBridge | null {
@@ -37,6 +43,16 @@ function bridge(): GusVoicePushBridge | null {
   // The same object carries the #89 voice methods; guard on a push method so an older installed APK
   // (voice-bridge only) is treated as "no push".
   return b && typeof b.registerForPush === 'function' ? (b as GusVoicePushBridge) : null;
+}
+
+/** Ключи шифрования из моста; любой сбой — `null` (регистрация без ключей лучше, чем никакой). Разбор — `pushKeys.ts`. */
+function pushKeys(b: GusVoicePushBridge): { p256dh: string; auth: string } | null {
+  if (typeof b.pushKeys !== 'function') return null;
+  try {
+    return parsePushKeys(b.pushKeys()); // сам вызов моста тоже может бросить
+  } catch {
+    return null;
+  }
 }
 
 const DEVICE_KEY = 'gv_push_device_id';
@@ -75,7 +91,7 @@ export function startPushRegistration(): void {
     inFlight = false;
     if (endpoint && getToken()) {
       registered = true;
-      void api.registerPush(endpoint, deviceId()).catch((e) => {
+      void api.registerPush(endpoint, deviceId(), pushKeys(b)).catch((e) => {
         registered = false; // let a later foreground/boot retry
         console.warn('[push] backend register failed', e);
       });
@@ -104,7 +120,7 @@ export function startPushRegistration(): void {
       window.clearInterval(iv);
       inFlight = false;
       registered = true;
-      void api.registerPush(endpoint, deviceId()).catch((e) => {
+      void api.registerPush(endpoint, deviceId(), pushKeys(b)).catch((e) => {
         registered = false; // let a later foreground/boot retry
         console.warn('[push] backend register failed', e);
       });

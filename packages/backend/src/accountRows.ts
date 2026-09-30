@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
 import { anonymizedUserFields } from './accountRules.js';
 import {
@@ -14,6 +14,8 @@ import {
   pushDevices,
   pushMutes,
   serverMembers,
+  userBlocks,
+  userSync,
   users,
 } from './db/schema.js';
 
@@ -44,6 +46,12 @@ export async function anonymizeAccountRows(tx: PgDatabase<any, any, any>, userId
   await tx.delete(channelReads).where(eq(channelReads.userId, userId));
   await tx.delete(dmReads).where(eq(dmReads.userId, userId));
   await tx.delete(diagReports).where(eq(diagReports.userId, userId));
+  // Журнал догонки ЛС (этап 1): состояние синхронизации устройств человека. Строки `user_changes` уходят каскадом.
+  // Беседы, участие в них и сообщения остаются — это переписка собеседника, как `dm_*`.
+  await tx.delete(userSync).where(eq(userSync.userId, userId));
+  // Чёрный список (#212) — в обе стороны: свой список — личные данные, а блокировка удалённого аккаунта
+  // ничего не защищает (писать ему уже нельзя, `dmRules.canWriteDm`).
+  await tx.delete(userBlocks).where(or(eq(userBlocks.blockerId, userId), eq(userBlocks.blockedId, userId)));
   /**
    * Где человек был гостем (F3, §5.5). Аккаунта больше нет — значит и «Где я гость» пусто.
    *

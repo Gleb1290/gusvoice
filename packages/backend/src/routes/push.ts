@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../auth.js';
 import { rateHit, retryMessage } from '../authGuard.js';
+import { validWebPushKeys } from '../pushCrypto.js';
 import {
   listPushMutes,
   pushEndpointAllowed,
@@ -24,10 +25,13 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
         endpoint: z.string().url().max(500),
         deviceId: z.string().min(1).max(200),
         platform: z.enum(['android', 'ios', 'web', 'desktop']).nullish(),
+        // Ключи шифрования пуша (#213, WebPush) — только у новых установок; старые шлют без них.
+        keys: z.object({ p256dh: z.string().min(1).max(200), auth: z.string().min(1).max(100) }).nullish(),
       })
       .parse(req.body);
     if (!pushEndpointAllowed(b.endpoint)) return reply.code(400).send({ error: 'endpoint host not allowed' });
-    await registerPushDevice(req.user!.sub, b.deviceId, b.endpoint, b.platform ?? null);
+    if (b.keys && !validWebPushKeys(b.keys)) return reply.code(400).send({ error: 'invalid push keys' });
+    await registerPushDevice(req.user!.sub, b.deviceId, b.endpoint, b.platform ?? null, b.keys ?? null);
     return reply.code(204).send();
   });
 

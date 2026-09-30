@@ -27,8 +27,33 @@ static HK_MASK: AtomicU32 = AtomicU32::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
+/// Для диагностики (#207, плейбук тема 06, §3): сколько событий мыши прошло через нас за окно среза и
+/// самая долгая задержка «событие случилось (`MSLLHOOKSTRUCT.time`) → наш поток его получил», мс.
+/// 🔴 Пока наш поток не ответил, событие дальше не идёт — в том числе в игру. Мышь 1000 Гц даёт
+/// тысячу переключений на наш поток в секунду; если он хоть раз не успел, это микрофриз мыши.
+/// Точность — тик системных часов (~16 мс): видны только крупные задержки, но они и важны.
+static EVENTS: AtomicU32 = AtomicU32::new(0);
+static LAG_MAX_MS: AtomicU32 = AtomicU32::new(0);
+
+/// Снять и обнулить счётчики за окно среза. `None` — перехватчик не стоит (на мышь ничего не назначено).
+pub fn take_stats() -> Option<(u32, u32)> {
+    if !INSTALLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some((EVENTS.swap(0, Ordering::Relaxed), LAG_MAX_MS.swap(0, Ordering::Relaxed)))
+}
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
+        EVENTS.fetch_add(1, Ordering::Relaxed);
+        let info = lparam.0 as *const MSLLHOOKSTRUCT;
+        if !info.is_null() {
+            let lag = windows::Win32::System::SystemInformation::GetTickCount().wrapping_sub((*info).time);
+            // Больше минуты — это не задержка, а перенос счётчика/чужая метка времени: не считаем.
+            if lag < 60_000 {
+                LAG_MAX_MS.fetch_max(lag, Ordering::Relaxed);
+            }
+        }
         let target = TARGET.load(Ordering::Relaxed);
         let mask = HK_MASK.load(Ordering::Relaxed);
         if target >= 0 || mask != 0 {

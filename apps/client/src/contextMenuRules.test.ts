@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { isEditableTag, keepNativeMenu } from './contextMenuRules.js';
+import { isEditableTag, keepNativeMenu, ownEditMenu } from './contextMenuRules.js';
 
 const target = (o: Partial<Parameters<typeof keepNativeMenu>[0]> = {}) => ({
   editable: false,
@@ -80,5 +80,16 @@ describe('распознавание полей ввода', () => {
     assert.equal(isEditableTag('select'), false);
     // img больше не «поле» и сам по себе меню не спасает — это и есть суть фикса аватаров.
     assert.equal(isEditableTag('img'), false);
+  });
+});
+
+describe('меню редактирования на разных указателях', () => {
+  it('мышь оставляет наше меню на компьютере, касание и стилус отдают управление системе', () => {
+    // Ловит наложение нашего меню на ручки Android и потерю вставки мышью в десктопе.
+    assert.equal(ownEditMenu('mouse', false), true);
+    assert.equal(ownEditMenu(undefined, false), true);
+    assert.equal(ownEditMenu('touch', false), false);
+    assert.equal(ownEditMenu('pen', false), false);
+    assert.equal(ownEditMenu('mouse', true), false);
   });
 });

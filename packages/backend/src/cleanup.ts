@@ -1,4 +1,6 @@
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
+import { pruneJournal } from './convJournal.js';
+import { purgeAttachments } from './attachments.js';
 import { db } from './db/index.js';
 import { diagReports, users, voiceActivity } from './db/schema.js';
 import { env } from './env.js';
@@ -42,6 +44,9 @@ export async function purgeUnverifiedUsers(): Promise<number> {
         // ⚠️ Беседа ЛС уходит каскадом ЦЕЛИКОМ — вместе с репликами второго человека, даже если этот
         // сам не написал ни слова. И членство: «не держит членства» раньше проверялось только по ролям.
         sql`${users.id} NOT IN (SELECT user_a FROM dm_channels UNION SELECT user_b FROM dm_channels)`,
+        // С шага 1б ЛС живут в беседах: то же самое — автор и участник (старые `dm_*` заморожены, но тоже держат).
+        sql`${users.id} NOT IN (SELECT author_id FROM conversation_messages)`,
+        sql`${users.id} NOT IN (SELECT user_id FROM conversation_members)`,
         sql`${users.id} NOT IN (SELECT user_id FROM server_members)`,
         sql`${users.id} NOT IN (SELECT user_id FROM member_roles)`,
       ),
@@ -165,8 +170,36 @@ export function startDailyCleanup(): void {
     } catch (err) {
       console.error('[cleanup] voice-activity purge failed:', (err as Error).message);
     }
+    // Журнал догонки ЛС (этап 1, Р18): старше 30 дней — удалить и поднять `min_pts`. Взаимная блокировка с писателем
+    // (он берёт `user_sync` по возрастанию id) возможна и безвредна: уборка повторится завтра.
+    try {
+      const n = await pruneJournal();
+      if (n > 0) console.log(`[cleanup] pruned ${n} DM journal row(s)`);
+    } catch (err) {
+      console.error('[cleanup] DM journal prune failed:', (err as Error).message);
+    }
   };
   void run();
   const timer = setInterval(run, DAY_MS);
   timer.unref(); // don't hold the process open on shutdown
+}
+
+/**
+ * Файлы ЛС (шаг 1в) — раз в час, отдельно от суточной уборки: незавершённые загрузки старше суток и вытесненные, а
+ * также недоудалённые после «удалить у обоих». Отдельно — чтобы подвисшее хранилище не держало чистку журнала ЛС, и
+ * чаще — чтобы вытесненные и просроченные файлы не лежали лишние сутки (ревью 30.09).
+ */
+export function startAttachmentSweeper(): void {
+  const run = async () => {
+    try {
+      const n = await purgeAttachments();
+      if (n > 0) console.log(`[cleanup] removed ${n} DM file(s)`);
+    } catch (err) {
+      console.error('[cleanup] DM files purge failed:', (err as Error).message);
+    }
+  };
+  const first = setTimeout(run, 60_000);
+  first.unref();
+  const timer = setInterval(run, 60 * 60 * 1000);
+  timer.unref();
 }

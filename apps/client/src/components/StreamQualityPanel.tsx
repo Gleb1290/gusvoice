@@ -19,7 +19,10 @@ import { Select } from './Select';
 export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRestart?: () => void }) {
   const [s, setS] = useState<StreamSettings>(getStreamSettings());
 
-  function update(next: StreamSettings) {
+  // Правка — поверх СВЕЖИХ настроек, а не своей копии: рядом в настройках живёт галочка курсора со
+  // своим состоянием, и запись целой старой копии вернула бы ей прежнее значение.
+  function update(patch: Partial<StreamSettings>) {
+    const next = { ...getStreamSettings(), ...patch };
     setS(next);
     setStreamSettings(next);
   }
@@ -36,7 +39,7 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
             type="button"
             aria-pressed={s.resolution === r.value}
             className={s.resolution === r.value ? 'on' : ''}
-            onClick={() => update({ ...s, resolution: r.value })}
+            onClick={() => update({ resolution: r.value })}
           >
             {r.label}
           </button>
@@ -54,7 +57,7 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
             aria-pressed={s.fps === f}
             aria-label={`${f} кадров в секунду`}
             className={s.fps === f ? 'on' : ''}
-            onClick={() => update({ ...s, fps: f })}
+            onClick={() => update({ fps: f })}
           >
             {f}
           </button>
@@ -69,7 +72,7 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
           type="button"
           aria-pressed={s.mode === 'detail'}
           className={s.mode === 'detail' ? 'on' : ''}
-          onClick={() => update({ ...s, mode: 'detail' })}
+          onClick={() => update({ mode: 'detail' })}
         >
           Чёткость
         </button>
@@ -77,7 +80,7 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
           type="button"
           aria-pressed={s.mode === 'motion'}
           className={s.mode === 'motion' ? 'on' : ''}
-          onClick={() => update({ ...s, mode: 'motion' })}
+          onClick={() => update({ mode: 'motion' })}
         >
           Плавность
         </button>
@@ -94,7 +97,7 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
       <Select
         id="sq-codec"
         value={s.codec}
-        onChange={(v) => update({ ...s, codec: v as StreamSettings['codec'] })}
+        onChange={(v) => update({ codec: v as StreamSettings['codec'] })}
         ariaLabel="Кодек"
         title="Кодек"
         options={CODEC_OPTIONS.map((c) => ({ value: c.value, label: c.label }))}
@@ -102,7 +105,7 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
 
       <div className="settings-row" style={{ marginTop: 10 }}>
         <span>Звук из вкладки / системы</span>
-        <Toggle checked={s.audio} onChange={(v) => update({ ...s, audio: v })} label="Транслировать звук" />
+        <Toggle checked={s.audio} onChange={(v) => update({ audio: v })} label="Транслировать звук" />
       </div>
 
       <div className="stream-estimate">

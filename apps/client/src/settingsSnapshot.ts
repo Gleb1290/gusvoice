@@ -14,6 +14,7 @@ import { AUDIO_DEFAULTS, getAudioSettings } from './audioSettings';
 import { animatedAvatarsDefault, animatedAvatarsEnabled } from './avatarAnimation';
 import { CAMERA_DEFAULT, getCameraPreset } from './cameraSettings';
 import { LINK_PREVIEWS_DEFAULT, linkPreviewsEnabled } from './components/LinkPreview';
+import { liteModeDefault, liteModeEnabled } from './liteMode';
 import { CLOSE_BEHAVIOR_DEFAULT, getCloseBehavior } from './desktopWindow';
 import { getDownloadDir } from './downloads';
 import { getHotkeys, HOTKEY_DEFAULTS } from './hotkeys';
@@ -40,6 +41,7 @@ export function readSettings(): SettingsSnapshot {
     uiScale: getUiScale(),
     sidebarWidth: getSidebarWidth(),
     animatedAvatars: animatedAvatarsEnabled(),
+    liteMode: liteModeEnabled(),
     linkPreviews: linkPreviewsEnabled(),
     osNotify: osNotifyLevel(),
     coinNotify: coinNotifyLevel(),
@@ -62,6 +64,7 @@ export function factorySettings(): SettingsSnapshot {
     uiScale: UI_SCALE_DEFAULT,
     sidebarWidth: SIDEBAR_DEFAULT,
     animatedAvatars: animatedAvatarsDefault(),
+    liteMode: liteModeDefault(),
     linkPreviews: LINK_PREVIEWS_DEFAULT,
     osNotify: OS_NOTIFY_DEFAULT,
     coinNotify: COIN_NOTIFY_DEFAULT,

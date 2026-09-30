@@ -3,13 +3,26 @@
 //   * Presence socket    — authoritative "who is in which voice channel", driven
 //                          by LiveKit webhooks, pushed to every client.
 
-import type { Channel, CustomStatus, DmChannel, GameActivity, Message, PresenceMap, PresenceStatus, VoiceParticipant } from './types';
+import type { Channel, ConvGone, ConvLeft, ConvMessage, ConvSummary, CustomStatus, DmChannel, GameActivity, Message, PresenceMap, PresenceStatus, VoiceParticipant } from './types';
 
 // ===== Backend gateway =====================================================
 
+/**
+ * Возможности клиента, которые он объявляет шлюзу в `identify.caps` (ЛС этап 1, шаг 0.5, `docs/dm/STAGE1.md`).
+ *
+ * `conv1` — клиент понимает модель бесед (`/api/conv/*`, событие `conv.change`). Шлюз по ней решает, какую форму
+ * события отдать КАЖДОМУ соединению: у одного человека могут быть сразу десктоп 0.8.x без `caps` и новый клиент.
+ * Старый клиент никогда не получит событие, которого не поймёт, — и не потеряет привычное `dm.*`.
+ */
+export const CAP_CONV1 = 'conv1';
+
 /** Client -> gateway. */
 export type GatewayClientMessage =
-  | { t: 'identify'; token: string }
+  /**
+   * `caps` — необязательное добавление протокола (шаг 0.5): старые клиенты его не шлют, и для шлюза это «никаких
+   * возможностей». Неизвестные строки шлюз хранит, но ни на что не опирается.
+   */
+  | { t: 'identify'; token: string; caps?: string[] }
   | { t: 'subscribe'; serverId: string }
   | { t: 'unsubscribe'; serverId: string }
   // "I'm typing" — relayed to the channel's server subscribers (serverId+channelId) or to a
@@ -137,9 +150,20 @@ export type GatewayServerMessage =
   | { t: 'dm.channel'; channel: DmChannel }
   | { t: 'dm.create'; channelId: string; message: Message }
   | { t: 'dm.update'; channelId: string; message: Message }
-  | { t: 'dm.delete'; channelId: string; messageId: string }
+  /**
+   * Сообщение удалено (#212): у обоих — или «у меня» (тогда событие только своим устройствам).
+   * `lastMessageAt` — время беседы после удаления (удалили последнее — беседа опускается в списке); `unread` —
+   * непрочитанное получателя в этой беседе после удаления. Оба необязательны: старый сервер их не шлёт.
+   */
+  | { t: 'dm.delete'; channelId: string; messageId: string; lastMessageAt?: string | null; unread?: number }
   // A reaction was added/removed on a DM message; both participants apply the delta.
   | { t: 'dm.reaction'; channelId: string; messageId: string; emoji: string; userId: string; op: 'add' | 'remove' }
+  /**
+   * ЛС этап 1: изменение в беседе — только соединениям с `caps: ['conv1']` (`cap` в конверте шлюза). `pts` — номер
+   * журнала ЭТОГО получателя: следующий после известного клиенту — применить; с дырой — догнать `/api/conv/sync`, не
+   * перескакивая. Сущности — текущее состояние глазами получателя, как в догонке.
+   */
+  | { t: 'conv.change'; pts: number; conversation: ConvSummary | ConvLeft; message?: ConvMessage | ConvGone }
   /**
    * «Я прочитал это у себя» — адресно ВСЕМ СВОИМ соединениям (`publishToUser`), больше никому.
    *
@@ -276,6 +300,7 @@ const SERVER_MESSAGE_TYPES: Record<GatewayServerMessage['t'], true> = {
   'dm.create': true,
   'dm.update': true,
   'dm.delete': true,
+  'conv.change': true,
   'dm.reaction': true,
   'read.channel': true,
   'read.dm': true,

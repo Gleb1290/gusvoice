@@ -65,3 +65,16 @@ export function isEditableTag(tag: string, inputType = ''): boolean {
   if (t === 'input') return TEXT_INPUT_TYPES.has(inputType.toLowerCase());
   return false;
 }
+
+/**
+ * Показывать ли НАШЕ меню правки (`EditContextMenu`) в поле ввода — или отдать жест системе.
+ *
+ * 🔴 #212, 28.09, проход по касаниям на S25: долгое нажатие пальцем в поле ввода открывало наше меню
+ * «Вырезать / Копировать / Вставить / Выделить всё» по центру экрана, а поверх него Android рисовал свою ручку
+ * курсора, и после закрытия ручка висела без клавиатуры. На сенсоре у системы своё меню над полем (и лупа, и
+ * выбор слова), и оно лучше нашего. Наше нужно мыши: правый клик в десктопе без него вставить не даёт.
+ * `pointerType` — у события `contextmenu` (в Chromium это PointerEvent); у сборки для телефона — всегда система.
+ */
+export function ownEditMenu(pointerType: string | undefined, mobileApp: boolean): boolean {
+  return !mobileApp && pointerType !== 'touch' && pointerType !== 'pen';
+}

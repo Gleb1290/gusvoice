@@ -214,12 +214,18 @@ export function initOverlay(): void {
   schedule();
 }
 
-/** Enumerate the user's currently-open apps for the "выбранные приложения" picker. */
-export async function listOverlayApps(): Promise<AppInfo[]> {
+/**
+ * Enumerate the user's currently-open apps for the "выбранные приложения" picker.
+ *
+ * `icons: false` — только имена, без иконок (27.09): так зовёт сборщик «во что играет» раз в 30 с, и
+ * вытаскивать ради него иконку каждого окна PNG-строкой — самая дорогая часть вызова. Старая оболочка
+ * параметра не знает и вернёт с иконками — это просто дороже, не ошибка.
+ */
+export async function listOverlayApps(opts?: { icons?: boolean }): Promise<AppInfo[]> {
   const core = tauriCore();
   if (!core) return [];
   try {
-    return ((await core.invoke('gv_list_apps')) as AppInfo[]) ?? [];
+    return ((await core.invoke('gv_list_apps', { icons: opts?.icons ?? true })) as AppInfo[]) ?? [];
   } catch {
     return [];
   }

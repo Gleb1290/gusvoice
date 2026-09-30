@@ -34,7 +34,10 @@ test('loadPeers объединяет общий сервер и обе стор�
   await seedPeople();
   await t.raw.exec(`
     INSERT INTO server_members (server_id, user_id) VALUES ('shared', 'a'), ('shared', 'b'), ('foreign', 'd');
-    INSERT INTO dm_channels (id, user_a, user_b) VALUES ('dm-ab', 'a', 'b'), ('dm-ac', 'a', 'c');
+    INSERT INTO conversations (id, kind, direct_key, created_by) VALUES
+      ('dm-ab', 'direct', 'a:b', 'a'), ('dm-ac', 'direct', 'a:c', 'a');
+    INSERT INTO conversation_members (conversation_id, user_id) VALUES
+      ('dm-ab', 'a'), ('dm-ab', 'b'), ('dm-ac', 'a'), ('dm-ac', 'c');
   `);
   assert.deepEqual([...await loadPeers('a')].sort(), ['a', 'b', 'c']);
   assert.deepEqual([...await loadPeers('c')].sort(), ['a']);
@@ -51,6 +54,23 @@ test('shareServer симметричен и не принимает просто
   assert.equal(await shareServer('a', 'b'), true);
   assert.equal(await shareServer('b', 'a'), true);
   assert.equal(await shareServer('a', 'c'), false);
+});
+
+test('закрытое и снятое членство не создаёт связь между людьми', async () => {
+  // Ловит утечку онлайна и возможность открыть ЛС через сохранённую, но уже недействующую строку членства.
+  await seedPeople();
+  await t.raw.exec(`
+    INSERT INTO server_members (server_id, user_id, state) VALUES
+      ('shared', 'a', 'active'),
+      ('shared', 'b', 'closed_by_host'),
+      ('shared', 'c', 'removed'),
+      ('shared', 'd', 'active')
+  `);
+  assert.deepEqual([...await loadPeers('a')].sort(), ['a', 'd']);
+  assert.deepEqual([...await loadPeers('b')], []);
+  assert.equal(await shareServer('a', 'b'), false);
+  assert.equal(await shareServer('a', 'c'), false);
+  assert.equal(await shareServer('a', 'd'), true);
 });
 
 test('два одновременных openDm получают одну строку с упорядоченной уникальной парой', async () => {

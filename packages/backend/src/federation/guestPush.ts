@@ -5,11 +5,11 @@ import { db } from '../db/index.js';
 import { servers, users } from '../db/schema.js';
 import { env } from '../env.js';
 import { sendPushToUsers, type PushPayload } from '../push.js';
-import { onFedEvent, queueEventTo } from './eventStream.js';
+import { onFedEvent, queueEventTo, type FedEventHandler } from './eventStream.js';
 import { guestMembershipsOf, hasGuestGrant } from './guestMembership.js';
 
 /** Окно, в которое хост может разбудить одного нашего человека не больше одного раза (F-04). */
-const GUEST_PUSH_WINDOW_S = 20;
+export const GUEST_PUSH_WINDOW_S = 20;
 
 /**
  * Пуш гостю на телефон — через его дом (#139, F5, требование 33).
@@ -65,6 +65,16 @@ export async function notifyGuestHomes(
 }
 
 /**
+ * Что приём просьбы разбудить берёт СНАРУЖИ, кроме базы: счётчик частоты (Redis) и сам пуш.
+ * Вынесено ради проверок — база в них настоящая (PGlite), а эти двое подставные.
+ */
+export interface GuestPushDeps {
+  /** Счётчик частоты: 0 — предел не превышен, иначе секунды до следующей попытки. */
+  rateHit(key: string, max: number, windowS: number): Promise<number>;
+  sendPushToUsers(recipientIds: string[], payload: PushPayload): Promise<void>;
+}
+
+/**
  * Дом принимает просьбу разбудить своего человека.
  *
  * 🔴 Две проверки, и обе обязательны: человек должен быть НАШ (сосед не вправе просить нас будить
@@ -73,7 +83,15 @@ export async function notifyGuestHomes(
  * бы будить его от имени чужих серверов.
  */
 export function registerGuestPushHandlers(): void {
-  onFedEvent(FED_EVENTS.guestNotify, async ({ instanceId, event }) => {
+  onFedEvent(FED_EVENTS.guestNotify, createGuestPushHandler({ rateHit, sendPushToUsers }));
+}
+
+/**
+ * Обработчик `guestNotify` с подставляемыми зависимостями: в бою его вешает `registerGuestPushHandlers`,
+ * а проверка зовёт напрямую и видит решение «будить или нет и с каким названием» без Redis и пушей.
+ */
+export function createGuestPushHandler(deps: GuestPushDeps): FedEventHandler {
+  return async ({ instanceId, event }) => {
     const p = event.payload as Record<string, unknown>;
     const userId = typeof p.user_id === 'string' ? p.user_id : null;
     if (!userId) return;
@@ -106,7 +124,7 @@ export function registerGuestPushHandlers(): void {
 
     // Не чаще одного пуша на пару «человек + хост» за окно: событий в пачке может быть сколько
     // угодно, а телефон у человека один. Redis лежит — пропускаем пуш, а не шлём без счёта.
-    const limited = await rateHit(`fed:gnotify:${instanceId}:${userId}`, 1, GUEST_PUSH_WINDOW_S).catch(() => 1);
+    const limited = await deps.rateHit(`fed:gnotify:${instanceId}:${userId}`, 1, GUEST_PUSH_WINDOW_S).catch(() => 1);
     if (limited > 0) return;
 
     /**
@@ -121,7 +139,7 @@ export function registerGuestPushHandlers(): void {
     const serverName = place?.serverName ? place.serverName.slice(0, 80) : null;
     const where = serverName ? `на сервере «${serverName}»` : 'на другом инстансе';
     const dm = p.kind === 'dm';
-    await sendPushToUsers([userId], {
+    await deps.sendPushToUsers([userId], {
       type: dm ? 'dm' : 'mention',
       title: 'GusVoice',
       // ⚠️ Ни текста, ни автора: их нам не присылали и присылать не должны. Человек откроет
@@ -133,6 +151,6 @@ export function registerGuestPushHandlers(): void {
       // 🔴 Инстанс, где случилось событие: без него тап по пушу искал бы этот сервер У НАС и не нашёл.
       instanceId,
     });
-  });
+  };
 }
 

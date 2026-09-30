@@ -69,6 +69,9 @@ let frames = 0;
 let rafId = 0;
 let framesMs = 0;
 let sampleUntil = 0;
+/** Когда начата последняя выборка кадров и досчитана ли она с прошлого среза. */
+let lastSampleAt = -Infinity;
+let sampleFresh = false;
 let animNames: Record<string, number> = {};
 let anims = 0;
 
@@ -110,18 +113,37 @@ export function watchLongTasks(): void {
  */
 const SAMPLE_MS = 2000;
 
+/**
+ * Примерно раз в минуту (27.09, #207). Выборка сама заставляет страницу рисовать с частотой монитора:
+ * при срезах раз в 15 с (идёт показ) это 2 с из каждых 15, то есть 13 % времени принудительной
+ * отрисовки ради замера. Срез без свежей выборки отдаёт `frames_ms: 0` — «не мерили», а не «0 кадров».
+ */
+// 55, а не 60: срезы без показа идут ровно раз в 60 с, и таймер, пришедший на миллисекунду раньше,
+// пропускал бы каждую вторую выборку.
+const SAMPLE_EVERY_MS = 55_000;
+
 function countFrame(): void {
   if (performance.now() >= sampleUntil) {
     rafId = 0;
+    sampleFresh = true;
     return;
   }
   frames += 1;
   rafId = requestAnimationFrame(countFrame);
 }
 
-/** Начать выборку, если предыдущая уже кончилась. */
+/** Начать выборку, если предыдущая уже кончилась и прошла минута. */
 function sampleFrames(): void {
-  if (rafId) return;
+  if (rafId) {
+    // Страница скрылась посреди выборки: rAF в скрытой странице не зовётся, `rafId` висел вечно, и
+    // все следующие срезы повторяли застывшее число. Досчитанное до скрытия отдаём как есть.
+    if (performance.now() < sampleUntil + SAMPLE_MS) return;
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+    sampleFresh = true;
+  }
+  if (performance.now() - lastSampleAt < SAMPLE_EVERY_MS) return;
+  lastSampleAt = performance.now();
   frames = 0;
   framesMs = SAMPLE_MS;
   sampleUntil = performance.now() + SAMPLE_MS;
@@ -162,8 +184,8 @@ export function takeUiMeters(): UiMeters {
     long_count: longCount,
     hidden: document.visibilityState === 'hidden' ? 1 : 0,
     focused: document.hasFocus() ? 1 : 0,
-    frames,
-    frames_ms: framesMs,
+    frames: sampleFresh ? frames : 0,
+    frames_ms: sampleFresh ? framesMs : 0,
     anims,
     anim_names: animNames,
   };
@@ -172,6 +194,7 @@ export function takeUiMeters(): UiMeters {
   longMs = 0;
   longMax = 0;
   longCount = 0;
+  sampleFresh = false;
   // Следующая выборка — к следующему срезу: между ними цикл не крутится вовсе.
   sampleFrames();
   return out;

@@ -22,8 +22,9 @@ export async function loadPeers(userId: string): Promise<Set<string>> {
     SELECT b.user_id AS id FROM server_members a
       JOIN server_members b ON b.server_id = a.server_id AND b.state = 'active'
       WHERE a.user_id = ${userId} AND a.state = 'active'
-    UNION SELECT user_b AS id FROM dm_channels WHERE user_a = ${userId}
-    UNION SELECT user_a AS id FROM dm_channels WHERE user_b = ${userId}
+    UNION SELECT p.user_id AS id FROM conversation_members m
+      JOIN conversation_members p ON p.conversation_id = m.conversation_id AND p.user_id <> m.user_id
+      WHERE m.user_id = ${userId}
   `);
   return new Set((res.rows as { id: string }[]).map((r) => r.id));
 }

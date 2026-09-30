@@ -24,6 +24,17 @@ export function endpointAllowed(endpoint: string, ntfyBase: string): boolean {
   }
 }
 
+/**
+ * Пуш для устройства БЕЗ ключей шифрования (#213): текст сообщения не отправляем вовсе.
+ *
+ * Такие устройства — установки до шифрования. Им по-прежнему приходит «кто и где» (заголовок и адрес
+ * перехода), но не «что»: ntfy отдаёт тему на чтение без входа, и открытый текст ЛС лежал бы там, пока
+ * человек не обновится. Обновится — пришлёт ключи и снова увидит текст в уведомлении.
+ */
+export function redactPushPayload<P extends { type: 'dm' | 'mention'; body: string }>(p: P): P {
+  return { ...p, body: p.type === 'dm' ? 'Новое личное сообщение' : 'Вас упомянули' };
+}
+
 /** Trim message content to a short notification preview (or an attachment placeholder). */
 export function contentPreview(content: string, attachmentCount: number): string {
   const t = content.trim();

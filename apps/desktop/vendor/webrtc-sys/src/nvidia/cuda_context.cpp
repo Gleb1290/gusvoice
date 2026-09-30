@@ -150,10 +150,15 @@ bool CudaContext::Initialize() {
       cuDeviceGetName(device_name, sizeof(device_name), cu_device));
   RTC_LOG(LS_INFO) << "CUDA device name: " << device_name;
 
+  // GusVoice (#207, playbook 25.09): BLOCKING_SYNC instead of the default flags (0 = SCHED_AUTO).
+  // With one context and many cores SCHED_AUTO spins a CPU core while the synchronous NVENC path
+  // waits for the GPU — 9 cuMemcpy2D per frame over three simulcast layers, i.e. exactly while a
+  // game keeps the GPU busy. Blocking sync sleeps on an OS primitive instead.
+  const unsigned int ctx_flags = CU_CTX_SCHED_BLOCKING_SYNC;
 #if CUDA_VERSION >= 13000
-  CUCTX_CUDA_CALL_ERROR(cuCtxCreate(&context, nullptr, 0, cu_device));
+  CUCTX_CUDA_CALL_ERROR(cuCtxCreate(&context, nullptr, ctx_flags, cu_device));
 #else
-  CUCTX_CUDA_CALL_ERROR(cuCtxCreate(&context, 0, cu_device));
+  CUCTX_CUDA_CALL_ERROR(cuCtxCreate(&context, ctx_flags, cu_device));
 #endif
   if (context == nullptr) {
     RTC_LOG(LS_ERROR) << "Failed to create CUDA context.";

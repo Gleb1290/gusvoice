@@ -16,7 +16,10 @@ import { id } from './util.js';
  * ради которого журнал и заводился: «было 500, стало 410» без ответа.
  */
 
-export type PurchaseBlock = 'poor';
+export type PurchaseBlock = 'poor' | 'rental-full';
+
+/** Транзакция покупки — её получает `effect`, чтобы писать награду тем же атомом. */
+export type PurchaseTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export interface PurchaseInput {
   serverId: string;
@@ -33,6 +36,16 @@ export interface PurchaseInput {
   data?: Record<string, unknown>;
   /** Момент покупки. ⚠️ Аргументом: часов внутри модуля нет. */
   now: Date;
+  /**
+   * Действие награды ВНУТРИ транзакции покупки — после проверки баланса под замком кошелька, ДО списания.
+   * Вернуло причину отказа — транзакция не списывает ничего; отказывать нужно ДО своих записей.
+   *
+   * 🔴 Заведено ради аренды аватара (30.09, найдено Codex): «проверить срок снаружи, списать, записать
+   * новый срок» разрывало одно решение на три шага. Redis-захват на 5 с закрывал двойной клик, но не
+   * зависший запрос: через 6 с второй читал тот же старый срок и платил ещё раз за то же продление. Здесь
+   * срок читается и пишется под замком строки человека, в одном атоме со списанием и чеком.
+   */
+  effect?: (tx: PurchaseTx) => Promise<PurchaseBlock | null>;
 }
 
 export interface PurchaseResult {
@@ -62,6 +75,9 @@ export async function buyItem(i: PurchaseInput): Promise<PurchaseResult> {
     if (!wallet || wallet.balance < i.price) {
       return { block: 'poor' as const, purchaseId: '', balance: wallet?.balance ?? 0, expiresAt: null };
     }
+
+    const effectBlock = i.effect ? await i.effect(tx) : null;
+    if (effectBlock) return { block: effectBlock, purchaseId: '', balance: wallet.balance, expiresAt: null };
 
     const [updated] = await tx
       .update(coinBalances)

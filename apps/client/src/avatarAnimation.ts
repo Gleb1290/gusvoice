@@ -1,5 +1,6 @@
-import { useSyncExternalStore } from 'react';
+import { useMemo, useSyncExternalStore } from 'react';
 import { useStore } from './store';
+import { animatedAvatarResolver } from './rosterResolvers';
 
 /**
  * Показывать ли анимированные аватары — настройка ЗРИТЕЛЯ, не владельца аватара.
@@ -89,7 +90,11 @@ export function useAnimatedAvatarsEnabled(): boolean {
 export function useAnimatedAvatarUrl(): (userId: string | undefined) => string | undefined {
   const on = useAnimatedAvatarsEnabled();
   const members = useStore((s) => s.members);
-  if (!on) return () => undefined;
-  return (userId) =>
-    (userId ? members.find((m) => m.user.id === userId)?.user.animatedAvatarUrl : null) ?? undefined;
+  /* ⚠️ Одна и та же функция, пока не сменились ростер и выключатель (фаза 0.4 ЛС, 30.09): лента сообщений
+     держит строки `memo`, и новая функция на каждую перерисовку заставляла перерисовывать все строки. Поиск —
+     по словарю: раньше `find` по ростеру шёл на КАЖДОЕ сообщение ленты. */
+  return useMemo(() => {
+    if (!on) return () => undefined;
+    return animatedAvatarResolver(members);
+  }, [on, members]);
 }

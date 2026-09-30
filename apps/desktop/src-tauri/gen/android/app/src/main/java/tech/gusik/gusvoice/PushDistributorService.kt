@@ -115,7 +115,18 @@ class PushDistributorService : Service() {
     if (env.optString("event") != "message") return
     val body = env.optString("message")
     if (body.isEmpty()) return
-    PushNotifier.show(this, body.toByteArray(Charsets.UTF_8))
+    // Шифр WebPush (#213) двоичный: бэкенд шлёт его с `X-UnifiedPush: 1`, и ntfy кладёт тело base64 с
+    // `encoding: "base64"`. Приложение ntfy раскодирует само; встроенный распространитель — здесь.
+    val bytes = if (env.optString("encoding") == "base64") {
+      try {
+        android.util.Base64.decode(body, android.util.Base64.DEFAULT)
+      } catch (_: IllegalArgumentException) {
+        return
+      }
+    } else {
+      body.toByteArray(Charsets.UTF_8)
+    }
+    PushNotifier.show(this, bytes)
   }
 
   private fun scheduleReconnect(ntfyBase: String, topic: String) {
@@ -144,11 +155,26 @@ class PushDistributorService : Service() {
       .setPriority(NotificationCompat.PRIORITY_MIN)
       .build()
     // API 29+ requires the FGS type at start; it must match the manifest's foregroundServiceType.
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    // 🔴 #212: Android 14+ — `specialUse`. У `dataSync` с Android 15 лимит 6 ч в сутки (дальше
+    // `onTimeout`, а не остановились — процесс падает) и запрет старта из BOOT_COMPLETED: после
+    // перезагрузки пушей не было до первого открытия приложения.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     } else {
       startForeground(NOTIF_ID, n)
     }
+  }
+
+  /**
+   * Система исчерпала лимит времени службы (Android 15+, типы с лимитом). С `specialUse` не должно
+   * случаться, но если тип когда-нибудь вернётся к `dataSync`, без остановки здесь процесс падает с
+   * `RemoteServiceException`. Остановиться тихо: пуш вернётся при следующем открытии приложения.
+   */
+  override fun onTimeout(startId: Int, fgsType: Int) {
+    Log.w(TAG, "foreground service timeout (type=$fgsType) — stopping")
+    stopSelf()
   }
 
   private fun ensureChannel() {

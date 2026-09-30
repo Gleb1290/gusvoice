@@ -11,6 +11,7 @@
  * и назначают в минутах просмотра.
  */
 
+import { AVATAR_RENTAL_DAYS, avatarRentalCanExtend } from '@gusvoice/shared';
 import { RATE_PERIOD_S } from './coinRules.js';
 
 /** Что вообще продаётся. ⚠️ Новый ключ добавлять СЮДА — дальше всё типизировано от него. */
@@ -178,6 +179,7 @@ export type BuyBlock =
   | 'target-full'
   | 'cooldown'
   | 'already-owned'
+  | 'rental-full'
   | 'poor';
 
 export interface BuyInput {
@@ -221,6 +223,11 @@ export interface BuyInput {
    * ничего нового. Расходников это не касается — у них своя жизнь, и `false` для них нормален.
    */
   alreadyOwned: boolean;
+  /**
+   * Аренда анимированного аватара после покупки ушла бы дальше потолка (`avatarRentalFull`). Необязательно:
+   * у остальных наград аренды нет.
+   */
+  rentalFull?: boolean;
   balance: number;
   price: number;
 }
@@ -255,6 +262,8 @@ export function buyBlock(i: BuyInput): BuyBlock {
   if (i.item.target === 'channel' && !i.buyerInVoice) return 'not-in-voice';
   // Раньше денег: списать за то, что уже есть, — худший вид отказа, потому что он не отказ.
   if (i.alreadyOwned) return 'already-owned';
+  // Аренда оплачена дальше потолка (#117, решение 29.09) — тоже раньше денег.
+  if (i.rentalFull) return 'rental-full';
   if (i.onCooldown) return 'cooldown';
   if (i.balance < i.price) return 'poor';
   return null;
@@ -285,6 +294,9 @@ export const BUY_BLOCK_TEXT: Record<Exclude<BuyBlock, null>, string> = {
   'target-full': 'Его сегодня уже нащипали вдоволь — попробуй завтра',
   cooldown: 'Слишком часто — подожди немного',
   'already-owned': 'Это у тебя уже есть',
+  // Числа — `AVATAR_RENTAL_MAX_DAYS` и остаток до продления (60 − 30); литералом, потому что этот словарь
+  // собирается раньше, чем модуль доходит до констант ниже.
+  'rental-full': 'Больше чем на 60 дней вперёд не оплатить — продлить можно, когда останется 30 дней или меньше',
   poor: 'Не хватает монет',
 };
 
@@ -312,8 +324,16 @@ export function buyCooldownKey(item: ShopItem, buyerId: string, targetId: string
  */
 export const BUY_COOLDOWN_MS = 60_000;
 
-/** Сколько длится аренда анимированного аватара. Решение 02.09: тридцать дней. */
-export const AVATAR_RENTAL_DAYS = 30;
+/** Сколько длится аренда анимированного аватара — общая константа (`@gusvoice/shared`), клиент считает по ней же. */
+export { AVATAR_RENTAL_DAYS };
+
+/**
+ * Упрётся ли покупка в потолок аренды (решение 29.09: не больше 60 дней вперёд). Правило общее с клиентом —
+ * `shared/animatedAvatar.avatarRentalCanExtend`, здесь только перевод дат.
+ */
+export function avatarRentalFull(current: Date | null, now: Date): boolean {
+  return !avatarRentalCanExtend(current ? current.getTime() : null, now.getTime());
+}
 
 /**
  * Новый срок аренды после покупки.

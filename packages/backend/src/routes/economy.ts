@@ -48,7 +48,14 @@ import { levelOf, levelStages } from '../levelRules.js';
 import { streakView } from '../streakRules.js';
 import { closeSeasonIfNeeded, crownHolder } from '../seasons.js';
 import { shopFor } from '../shop.js';
-import { avatarPriceAllowed, avatarRentalUntil, BUY_BLOCK_TEXT, buyBlock, shopItem } from '../shopRules.js';
+import {
+  avatarPriceAllowed,
+  avatarRentalFull,
+  avatarRentalUntil,
+  BUY_BLOCK_TEXT,
+  buyBlock,
+  shopItem,
+} from '../shopRules.js';
 import { avatarPriceMinutes } from '../instanceSettings.js';
 import { buyItem } from '../purchase.js';
 import { putMedia, storageConfigured } from '../storage.js';
@@ -231,11 +238,26 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
        * флаг «куплено навсегда», и с ним второй покупки быть не могло по определению.
        */
       alreadyOwned: false,
+      // …но не дальше 60 дней вперёд (решение 29.09): осталось 45 — ещё 30 не купишь.
+      rentalFull: spec.key === 'animated-avatar' && avatarRentalFull(me?.until ?? null, nowAt),
       balance: mine.balance,
       price: entry.priceCoins,
     });
     if (block) return reply.code(403).send({ error: BUY_BLOCK_TEXT[block] });
 
+    /* 🔴 Двойное нажатие не должно проскочить потолок (29.09): оба запроса прочитали бы старый срок, оба прошли
+       бы проверку, и за два списания срок ушёл бы на 90 дней. Захват атомарный — как у адресных наград в
+       `voice.ts`; ключ без сервера, потому что аренда одна на человека, а не на сервер. */
+    if (spec.key === 'animated-avatar') {
+      const claimed = await redisPub.set(`buy:animated-avatar:${req.user!.sub}`, '1', 'PX', 5_000, 'NX');
+      if (claimed !== 'OK') return reply.code(429).send({ error: BUY_BLOCK_TEXT.cooldown });
+    }
+
+    /* 🔴 Срок аренды читается и пишется ВНУТРИ транзакции покупки, под замком строки человека (30.09, Codex).
+       Проверка выше — быстрый ответ по старому чтению, но решает только эта: захват в Redis живёт 5 с, и
+       зависший запрос без неё прочитал бы тот же старый срок и заплатил второй раз за одно продление. Замок
+       на `users`, а не на кошельке: аренда одна на человека, а кошельки у каждого сервера свои. */
+    const rental: { until: Date | null } = { until: null }; // пишет `effect` ниже, внутри транзакции
     const bought = await buyItem({
       serverId,
       userId: req.user!.sub,
@@ -245,16 +267,29 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
       priceMinutes: entry.priceMinutes,
       ratePer5min: economy?.ratePer5min ?? 0,
       now: new Date(),
+      effect:
+        spec.key === 'animated-avatar'
+          ? async (tx) => {
+              const [row] = await tx
+                .select({ until: users.animatedAvatarUntil })
+                .from(users)
+                .where(eq(users.id, req.user!.sub))
+                .limit(1)
+                .for('update');
+              if (avatarRentalFull(row?.until ?? null, nowAt)) return 'rental-full';
+              // Продлеваем от большего из «сейчас» и текущего срока: покупка за день до конца обязана
+              // давать 31 день, иначе экономика наказывает за то, что человек продлил заранее.
+              rental.until = avatarRentalUntil(row?.until ?? null, nowAt);
+              await tx.update(users).set({ animatedAvatarUntil: rental.until }).where(eq(users.id, req.user!.sub));
+              return null;
+            }
+          : undefined,
     });
-    if (bought.block) return reply.code(403).send({ error: BUY_BLOCK_TEXT.poor });
+    if (bought.block) return reply.code(403).send({ error: BUY_BLOCK_TEXT[bought.block] });
 
-    if (spec.key === 'animated-avatar') {
-      // 🔴 Продлеваем от большего из «сейчас» и текущего срока: покупка за день до конца обязана
-      // давать 31 день, иначе экономика наказывает за то, что человек продлил заранее.
-      const until = avatarRentalUntil(me?.until ?? null, nowAt);
-      await db.update(users).set({ animatedAvatarUntil: until }).where(eq(users.id, req.user!.sub));
+    if (rental.until) {
       await pushWallet(serverId, req.user!.sub);
-      return reply.send({ spent: entry.priceCoins, balance: bought.balance, until: until.toISOString() });
+      return reply.send({ spent: entry.priceCoins, balance: bought.balance, until: rental.until.toISOString() });
     }
     await pushWallet(serverId, req.user!.sub);
     return reply.send({ spent: entry.priceCoins, balance: bought.balance });

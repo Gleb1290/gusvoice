@@ -45,6 +45,8 @@ export interface SettingsSnapshot {
   uiScale: UiScale;
   sidebarWidth: number;
   animatedAvatars: boolean;
+  /** Оптимизированный режим (`liteMode.ts`). Необязательное: старые снимки в тестах его не знают. */
+  liteMode?: boolean;
   linkPreviews: boolean;
   osNotify: OsNotifyLevel;
   coinNotify: CoinNotifyLevel;
@@ -89,8 +91,10 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
     (s) => s.stream.audio,
     (s) => s.stream.wgcWindow,
     (s) => s.stream.layers,
+    (s) => s.stream.gpuPipeline !== false,
     (s) => s.stream.streamPreview,
   ],
+  'set-g-stream-cursor': [(s) => s.stream.cursor !== false],
   'set-g-osn': [(s) => s.osNotify],
   'set-g-coin': [(s) => s.coinNotify],
   'set-g-poke-toast': [
@@ -110,6 +114,7 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
   'set-g-scale': [(s) => s.uiScale],
   'set-g-sidebar': [(s) => s.sidebarWidth],
   'set-g-avatars': [(s) => s.animatedAvatars],
+  'set-g-lite': [(s) => s.liteMode ?? false],
   'set-g-links': [(s) => s.linkPreviews],
   'set-g-overlay': [
     (s) => s.overlay.enabled,

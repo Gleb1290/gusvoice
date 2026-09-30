@@ -90,6 +90,12 @@ export interface User {
    */
   economyWelcomeSeen?: boolean;
   /**
+   * Возможности ИНСТАНСА, на которые клиент переходит только по объявлению (ЛС этап 1: `conv1` — беседы
+   * `/api/conv/*`). Едет только в `/auth/me`. Нет поля или нет строки — инстанс старый или сосед по федерации без
+   * этой возможности, и клиент остаётся на прежних ручках.
+   */
+  features?: string[];
+  /**
    * Видна ли этому человеку экономика: флаг инстанса И список закрытого показа (#117).
    * ⚠️ Едет только в СВОЁМ профиле. У чужих людей поля нет, и это правильно: кто в закрытом показе
    * — не их дело.
@@ -407,7 +413,13 @@ export interface BanInfo {
 }
 
 export interface Attachment {
+  /**
+   * Ссылка на файл. У закрытых файлов ЛС (шаг 1в) — своя у КАЖДОГО смотрящего (`/api/att/<id>/<смотрящий>/<подпись>`),
+   * работает, пока у него есть доступ; кешировать её нельзя — кешировать можно `id`.
+   */
   url: string;
+  /** id закрытого вложения ЛС (шаг 1в). Нет — старое вложение из публичного бакета. */
+  id?: string;
   name: string;
   contentType: string;
   size: number;
@@ -435,6 +447,11 @@ export interface MessageReplyPreview {
   id: string;
   authorName: string;
   content: string;
+  /**
+   * Цитируемое удалено у обоих (ЛС этап 1, беседы): текста нет, клиент пишет «сообщение удалено». Необязательное —
+   * старые ручки его не шлют (у них удалённая цитата просто пропадает).
+   */
+  deleted?: boolean;
 }
 
 /** Вариант ответа с уже посчитанными голосами. */
@@ -516,6 +533,89 @@ export interface DmChannel {
   /** Messages from the other user newer than my last-read mark (14-day window). GET /dm only. */
   unread?: number;
 }
+
+/**
+ * ЛС, этап 1 (#211, `docs/dm/STAGE1.md`): беседы `/api/conv/*`. Клиент переходит на них только если `/auth/me`
+ * объявил `features: ['conv1']`, а шлюзу сказал `identify.caps: ['conv1']`.
+ */
+
+/** Сообщение беседы. `channelId` = id беседы — общий `MessagePane` работает с ним как с любым `Message`. */
+export interface ConvMessage extends Message {
+  conversationId: string;
+  /** Ключ порядка (микросекунды, HLC) — точное число JS; по нему лента, курсор и «прочитано до». */
+  sortKey: number;
+  /** id отправки, который прислал отправитель, — чтобы его клиент сопоставил своё «отправляется…». */
+  clientId: string | null;
+}
+
+/** Сообщения для этого человека больше нет: удалено у обоих, спрятано им «у себя» или чужое придержанное. */
+export interface ConvGone {
+  id: string;
+  conversationId: string;
+  gone: true;
+}
+
+/** Последнее видимое МНЕ сообщение беседы — для строки списка. */
+export interface ConvLastMessage {
+  id: string;
+  authorId: string;
+  /** Текст в одну строку, не длиннее 200 символов. */
+  text: string;
+  attachments: number;
+  sortKey: number;
+  createdAt: string;
+}
+
+/** Беседа в списке — глазами спрашивающего. */
+export interface ConvSummary {
+  id: string;
+  kind: 'direct';
+  /** Собеседник 1:1. `null` — строки человека нет (не бывает при обезличивании, но список не должен падать). */
+  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'> | null;
+  createdAt: string;
+  /** Время последнего видимого мне сообщения (не общее время беседы: придержанное у получателя её не поднимает). */
+  lastMessageAt: string | null;
+  lastMessage: ConvLastMessage | null;
+  /** Точное непрочитанное: видимые мне чужие сообщения новее моего «прочитано до». */
+  unread: number;
+  lastReadKey: number;
+}
+
+/** Я больше не участник беседы — клиент убирает её из списка. */
+export interface ConvLeft {
+  id: string;
+  left: true;
+}
+
+export interface ConvListResponse {
+  /** Номер журнала, согласованный со списком (одна транзакция), — с него начинается догонка. */
+  pts: number;
+  conversations: ConvSummary[];
+}
+
+export interface ConvHistoryResponse {
+  pts: number;
+  /** Старые сверху, новые снизу. */
+  messages: ConvMessage[];
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
+
+/**
+ * Догонка `GET /api/conv/sync?pts=N`. Сущности — в ТЕКУЩЕМ виде глазами спрашивающего (журнал хранит указатели,
+ * поэтому три правки подряд и «удалили раньше, чем я узнал о создании» сворачиваются сами).
+ * `reset` — журнал уже обрезан (или сервер «моложе» клиента): перечитать список и открытые беседы.
+ */
+export type ConvSyncResponse =
+  | { reset: true; pts: number }
+  | {
+      reset: false;
+      /** При `more` — номер последней отданной строки журнала: следующий запрос — с него. */
+      pts: number;
+      more: boolean;
+      conversations: (ConvSummary | ConvLeft)[];
+      messages: (ConvMessage | ConvGone)[];
+    };
 
 /** A participant currently connected to a voice channel (from LiveKit presence). */
 export interface VoiceParticipant {

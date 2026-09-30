@@ -12,7 +12,7 @@ import {
   type StickerPack,
 } from '@gusvoice/shared';
 import type { ReactNode } from 'react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { isMobile } from '../hotkeys';
 import { useStore } from '../store';
@@ -22,6 +22,7 @@ import {
   applyAc,
   dayLabel,
   emojiSubstitution,
+  enterSends,
   isFirstUnread,
   isGrouped,
   isNewDay,
@@ -70,8 +71,9 @@ import { Icon } from './Icon';
 import { Lightbox } from './Lightbox';
 import { GuestMark, useGuestHome } from './GuestMark';
 import { addEvidence, EVIDENCE_MAX } from '../reportEvidence';
-import { confirmAction } from '../confirm';
-import { useUserMenu } from './UserContextMenu';
+import { confirmAction, confirmWithOption } from '../confirm';
+import { pushBackHandler } from '../androidBack';
+import { useUserMenu, type UserMenuTarget } from './UserContextMenu';
 
 /** Candidates for @-mention / #-channel autocomplete in the composer (channels only; DMs omit it). */
 export type AutocompleteData = {
@@ -93,6 +95,8 @@ const ATT_IMG_MAX_H = 300;
 const kb = (n: number) => (n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 /** Emoji offered in the mobile long-press action sheet's quick-reaction strip (design-step8 C2). */
 const QUICK_REACTIONS = ['👍', '🔥', '😂', '❤️', '🦆'];
+/** Потолок роста поля ввода: примерно восемь строк, дальше текст прокручивается внутри поля. */
+const COMPOSER_MAX_PX = 200;
 
 function AttachmentView({ a, onOpen }: { a: Attachment; onOpen?: (a: Attachment) => void }) {
   // Real download goes through the backend (Content-Disposition: attachment) — the
@@ -201,6 +205,335 @@ function renderContent(
 }
 
 /**
+ * Время сообщения «чч:мм». Один форматтер на весь модуль (фаза 0.4 ЛС, 30.09): `toLocaleTimeString` создавал его
+ * заново на КАЖДОЕ сообщение при каждой перерисовке ленты — это была заметная доля замера этапа М.
+ */
+const TIME_FMT = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
+const NO_EMOJI_BY_ID = (): ServerEmoji | null => null;
+const PLAIN_NAME = (_userId: string, fallback: string) => fallback;
+
+/**
+ * Действия строки ленты. Объект ОДИН на всю жизнь `MessagePane` и внутри зовёт свежие обработчики (`rowActsRef`):
+ * строки держатся `memo`, и новая стрелочная функция на каждую перерисовку перерисовывала бы их все.
+ */
+interface RowActions {
+  touchStart(e: React.TouchEvent, m: Message): void;
+  touchMove(e: React.TouchEvent): void;
+  touchEnd(): void;
+  menu(m: Message, x: number, y: number): void;
+  userMenu(e: React.MouseEvent, target: UserMenuTarget, view?: 'menu' | 'profile'): void;
+  openImage(a: Attachment): void;
+  react(messageId: string, emoji: string, op: 'add' | 'remove'): void;
+  picker(messageId: string, anchor: DOMRect): void;
+  reply(m: Message): void;
+  startEdit(m: Message): void;
+  setEditText(text: string): void;
+  saveEdit(m: Message): void;
+  cancelEdit(): void;
+  del(m: Message): void;
+}
+
+type GuestHome = ReturnType<ReturnType<typeof useGuestHome>>;
+
+interface MessageRowProps {
+  m: Message;
+  grouped: boolean;
+  firstUnread: boolean;
+  newDay: boolean;
+  mine: boolean;
+  /** С сообщением сейчас работают: его меню, пикер реакций, шторка, правка. */
+  active: boolean;
+  editing: boolean;
+  /** Текст правки на месте — только у редактируемой строки, у остальных пусто: иначе каждая буква правки
+      перерисовывала бы всю ленту. */
+  editText: string;
+  author: string;
+  animatedUrl: string | undefined;
+  crowned: boolean;
+  guestHome: GuestHome;
+  canReact: boolean;
+  /** Корзина видна: своё — всегда, чужое — только в ЛС («удалить у себя», #212). */
+  canDelete: boolean;
+  onEmoji: EmojiResolver | undefined;
+  emojiById: (id: string) => ServerEmoji | null;
+  act: RowActions;
+}
+
+/**
+ * Одно сообщение ленты (фаза 0.4 ЛС, 30.09).
+ *
+ * 🔴 Отдельный `memo`-компонент, а не JSX внутри `MessagePane.messages.map`: замер этапа М показал, что при 2 000
+ * сообщений в ленте каждая буква в поле ввода стоила 344 мс (×3 CPU — 2,1 с), а подгрузка 50 старых — до 0,8 с —
+ * любое изменение состояния `MessagePane` перестраивало ВСЕ строки (`docs/dm/research/M1-baseline.md`). Здесь строка
+ * перерисовывается, только когда поменялись её собственные данные. ⚠️ Поэтому всё, что приходит в пропсы, обязано
+ * быть стабильным: примитивы, сам объект сообщения из стора, функции-резолверы в `useMemo`, действия — через `act`.
+ */
+const MessageRow = memo(function MessageRow({
+  m,
+  grouped,
+  firstUnread,
+  newDay,
+  mine,
+  active,
+  editing,
+  editText,
+  author,
+  animatedUrl,
+  crowned,
+  guestHome,
+  canReact,
+  canDelete,
+  onEmoji,
+  emojiById,
+  act,
+}: MessageRowProps) {
+  const time = TIME_FMT.format(new Date(m.createdAt));
+  const who: UserMenuTarget = { userId: m.author.id, name: author, avatarUrl: m.author.avatarUrl };
+  return (
+    <>
+      {/* Дневная метка: без неё, чтобы понять, где кончился вчерашний разговор, приходится
+          читать время у каждого сообщения по отдельности. */}
+      {newDay && (
+        <div className="day-divider" role="separator">
+          <span>{dayLabel(m.createdAt)}</span>
+        </div>
+      )}
+      {firstUnread && (
+        <div className="new-divider" role="separator" aria-label="Новые сообщения">
+          <span>Новые сообщения</span>
+        </div>
+      )}
+      <div
+        // `active` — сообщение, с которым сейчас работают: открыто его контекстное меню,
+        // висит его пикер реакций или оно редактируется. Наведение даёт слабую подсветку,
+        // а действие — рамку: иначе при открытом меню курсор уходит на меню, ховер
+        // слетает, и непонятно, к какому сообщению это меню относится.
+        className={`message ${grouped ? 'grouped' : ''} ${active ? 'active' : ''}`}
+        onTouchStart={(e) => act.touchStart(e, m)}
+        onTouchMove={act.touchMove}
+        onTouchEnd={act.touchEnd}
+        onTouchCancel={act.touchEnd}
+        onContextMenu={(e) => {
+          // Let avatar/author (user menu), links, images and controls keep their own
+          // right-click behaviour; the message menu only opens over the message body.
+          if ((e.target as Element).closest('a, img, button, input, textarea, .msg-ava, .author')) return;
+          e.preventDefault();
+          act.menu(m, e.clientX, e.clientY);
+        }}
+      >
+        <div className="msg-gutter">
+          {grouped ? (
+            <span className="msg-hovertime">{time}</span>
+          ) : (
+            <span
+              className="msg-ava"
+              // Нажатие — сразу карточка профиля, как у Telegram и Discord (#212); правый клик — меню.
+              onClick={(e) => act.userMenu(e, who, 'profile')}
+              onContextMenu={(e) => act.userMenu(e, who)}
+            >
+              <Avatar url={m.author.avatarUrl} animatedUrl={animatedUrl} name={author} size={38} />
+              {crowned && <CrownMark size={13} />}
+            </span>
+          )}
+        </div>
+        <div className="message-main">
+          {m.replyTo && (
+            <div className="reply-quote">
+              <Icon name="reply" size={13} />
+              <span className="rq-author">{m.replyTo.authorName}</span>
+              <span className="rq-text">{m.replyTo.content || 'вложение'}</span>
+            </div>
+          )}
+          {!grouped && (
+            <div className="message-head">
+              <span
+                className={`author ${mine ? 'me' : ''}${crownGlow(crowned)}`}
+                onClick={(e) => act.userMenu(e, who, 'profile')}
+                onContextMenu={(e) => act.userMenu(e, who)}
+              >
+                {author}
+              </span>
+              <GuestMark home={guestHome} size={11} />{' '}
+              <span className="ts muted">{time}</span>
+            </div>
+          )}
+          {editing ? (
+            <div className="edit-box">
+              <textarea
+                value={editText}
+                autoFocus
+                onChange={(e) => act.setEditText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    act.saveEdit(m);
+                  } else if (e.key === 'Escape') {
+                    act.cancelEdit();
+                  }
+                }}
+              />
+              <div className="edit-hint muted">Enter — сохранить · Esc — отмена</div>
+            </div>
+          ) : (
+            <>
+              {m.poll ? <PollCard poll={m.poll} channelId={m.channelId} messageId={m.id} /> : null}
+              {/* Стикер (#68) — крупно и без рамки сообщения. Лежит копией в самом сообщении,
+                  поэтому переживает удаление набора, из которого пришёл. */}
+              {m.sticker ? (
+                <div className="message-sticker">
+                  <StickerView url={m.sticker.url} format={m.sticker.format} emoji={m.sticker.emoji} size={160} />
+                </div>
+              ) : null}
+              {m.content ? (
+                <div className="message-body">
+                  {renderContent(m.content, m.author.id, author, onEmoji)}
+                  {m.editedAt ? <span className="ts muted edited"> (изм.)</span> : null}
+                </div>
+              ) : null}
+              {/* Карточки ссылок (#64). Своим инстансом не занимаемся — предпросмотр
+                  собственных страниц бессмысленен, а запрос лишний. */}
+              {m.content && linkPreviewsEnabled()
+                ? previewableLinks(m.content).map((u) => (
+                    <LinkPreviewCard key={u} url={u} authorId={m.author.id} authorName={author} />
+                  ))
+                : null}
+              {m.attachments?.length ? (
+                <div className="attachments">
+                  {m.attachments.map((a, j) => (
+                    <AttachmentView key={j} a={a} onOpen={act.openImage} />
+                  ))}
+                </div>
+              ) : null}
+              {m.reactions && m.reactions.length > 0 ? (
+                <div className="reactions">
+                  {m.reactions.map((r) => (
+                    <button
+                      type="button"
+                      key={r.emoji}
+                      className={`reaction ${r.me ? 'mine' : ''}`}
+                      disabled={!canReact}
+                      onClick={() => act.react(m.id, r.emoji, r.me ? 'remove' : 'add')}
+                    >
+                      <span className="re-emoji">{renderReaction(r.emoji, emojiById)}</span>
+                      <span className="re-count">{r.count}</span>
+                    </button>
+                  ))}
+                  {canReact ? (
+                    <button
+                      type="button"
+                      className="reaction add"
+                      title="Добавить реакцию"
+                      onClick={(e) => act.picker(m.id, e.currentTarget.getBoundingClientRect())}
+                    >
+                      <Icon name="reaction" size={15} />
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+        {!editing && (
+          <div className="msg-actions">
+            <button type="button" title="Ответить" onClick={() => act.reply(m)}>
+              <Icon name="reply" size={16} />
+            </button>
+            {canReact ? (
+              <button
+                type="button"
+                title="Реакция"
+                onClick={(e) => act.picker(m.id, e.currentTarget.getBoundingClientRect())}
+              >
+                <Icon name="reaction" size={16} />
+              </button>
+            ) : null}
+            {mine ? (
+              <button type="button" title="Изменить" onClick={() => act.startEdit(m)}>
+                <Icon name="edit" size={16} />
+              </button>
+            ) : null}
+            {/* В ЛС корзина есть и у чужих: там это «удалить у себя» (#212). В канале — как было, только своё. */}
+            {canDelete ? (
+              <button type="button" className="danger" title="Удалить" onClick={() => act.del(m)}>
+                <Icon name="trash" size={16} />
+              </button>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </>
+  );
+});
+
+interface MessageListProps {
+  messages: Message[];
+  meId: string | undefined;
+  newSince: number | null | undefined;
+  editingId: string | null;
+  editText: string;
+  /** Id сообщений, с которыми сейчас работают (меню, пикер, шторка, правка в поле), — у их строк рамка `active`. */
+  menuId: string | undefined;
+  pickerId: string | undefined;
+  sheetId: string | undefined;
+  composerEditId: string | undefined;
+  nameOf: (userId: string, fallback: string) => string;
+  animatedOf: (userId: string | undefined) => string | undefined;
+  guestHomeOf: (userId: string | undefined) => GuestHome;
+  crownId: string | undefined;
+  canReact: boolean;
+  canDeleteOthers: boolean;
+  onEmoji: EmojiResolver | undefined;
+  emojiById: (id: string) => ServerEmoji | null;
+  act: RowActions;
+}
+
+/**
+ * Вся лента сообщений — тоже `memo` (фаза 0.4 ЛС): набор текста, флаг «у низа», подсказка подгрузки и прочее
+ * состояние `MessagePane` её пропсы не трогают, поэтому такая перерисовка обходит ленту целиком, а не сравнивает
+ * тысячи строк по одной.
+ */
+const MessageList = memo(function MessageList(p: MessageListProps) {
+  return (
+    <>
+      {p.messages.map((m, i) => {
+        const prev = p.messages[i - 1];
+        // First message newer than the last visit — and not mine, since my own message isn't news
+        // to me. Rendered once, above that message.
+        const row = { createdAt: m.createdAt, authorId: m.author.id, hasReply: !!m.replyTo };
+        const prevRow = prev ? { createdAt: prev.createdAt, authorId: prev.author.id } : undefined;
+        const mine = m.author.id === p.meId;
+        const editing = p.editingId === m.id;
+        return (
+          <MessageRow
+            key={m.id}
+            m={m}
+            grouped={isGrouped(row, prevRow)}
+            firstUnread={isFirstUnread(row, prevRow, p.meId, p.newSince)}
+            newDay={isNewDay(row, prevRow)}
+            mine={mine}
+            active={
+              p.menuId === m.id || p.pickerId === m.id || editing || p.sheetId === m.id || p.composerEditId === m.id
+            }
+            editing={editing}
+            editText={editing ? p.editText : ''}
+            // Имя автора — через резолвер: в канале сервера это ник, в ЛС остаётся обычное имя (#73).
+            author={p.nameOf(m.author.id, m.author.displayName)}
+            animatedUrl={p.animatedOf(m.author.id)}
+            crowned={p.crownId === m.author.id}
+            guestHome={p.guestHomeOf(m.author.id)}
+            canReact={p.canReact}
+            canDelete={mine || p.canDeleteOthers}
+            onEmoji={p.onEmoji}
+            emojiById={p.emojiById}
+            act={p.act}
+          />
+        );
+      })}
+    </>
+  );
+});
+
+/**
  * Generic message list + composer (attachments, edit/delete, mentions). Used by both the
  * server channel chat and direct messages — the caller supplies the transport callbacks.
  */
@@ -212,6 +545,7 @@ export function MessagePane({
   onSend,
   onEdit,
   onDelete,
+  deletePeerName,
   onReact,
   onCopyLink,
   canModerate,
@@ -227,10 +561,11 @@ export function MessagePane({
   pollChannelId,
   emptyState,
   headerActions,
-  nameOf = (_userId, fallback) => fallback,
+  composerReplacement,
+  nameOf = PLAIN_NAME,
   onEmoji,
   customEmojis,
-  emojiById = () => null,
+  emojiById = NO_EMOJI_BY_ID,
   stickerPacks,
   onSendSticker,
   onSendVoice,
@@ -250,7 +585,13 @@ export function MessagePane({
   loading?: boolean;
   onSend: (content: string, files: File[], replyToId?: string | null) => Promise<void>;
   onEdit: (m: Message, content: string) => Promise<void>;
-  onDelete: (m: Message) => Promise<void>;
+  /** `scope` — только в ЛС (`deletePeerName`): «у меня» или «у обоих». В канале не передаётся. */
+  onDelete: (m: Message, scope?: 'me' | 'both') => Promise<void>;
+  /**
+   * Имя собеседника — ЛС удаляет «как в Telegram» (#212, Р5): своё — «Удалить» с галочкой «Также удалить для
+   * {имя}», чужое — только у себя. Не передан (канал) — удаление как было: своё или модератором, у всех.
+   */
+  deletePeerName?: string;
   onReact?: (messageId: string, emoji: string, op: 'add' | 'remove') => void;
   /** When provided, the message menu shows "Копировать ссылку" (channels only). */
   onCopyLink?: (m: Message) => void;
@@ -304,6 +645,8 @@ export function MessagePane({
   emptyState?: ReactNode;
   /** Optional controls rendered right-aligned in the top bar (e.g. a DM push-mute toggle). */
   headerActions?: ReactNode;
+  /** Вместо поля ввода — эта разметка (например, плашка блокировки в ЛС, #212). */
+  composerReplacement?: ReactNode;
   /**
    * Как звать автора (#19/#73). Канал сервера передаёт резолвер ников (`useNameResolver`), **ЛС не
    * передают ничего** — по умолчанию берётся имя из самого сообщения. Ник живёт в пределах сервера,
@@ -404,6 +747,16 @@ export function MessagePane({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  /**
+   * Правка в ОСНОВНОМ поле — телефон (#212, 28.09, проход по касаниям на S25). Раньше и на телефоне правка шла
+   * по-десктопному: маленькое поле внутри сообщения с подсказкой «Enter — сохранить · Esc — отмена» (Esc на
+   * телефоне нет), без кнопок, а «назад» уводила в список — вернёшься, правка висит, выйти можно только сохранив.
+   * Теперь как у Telegram: текст в поле ввода, над ним плашка «Редактирование» с ✕, вместо «отправить» — ✓,
+   * «назад» отменяет. На компьютере правка по-прежнему в самом сообщении (так у Discord, и мышью это ближе).
+   */
+  const [composerEdit, setComposerEdit] = useState<Message | null>(null);
+  /** Что лежало в поле до правки — отмена и сохранение возвращают черновик на место, как у Telegram. */
+  const draftBeforeEdit = useRef<{ text: string; replyingTo: Message | null } | null>(null);
   const [picker, setPicker] = useState<
     { kind: 'msg'; messageId: string; anchor: DOMRect } | { kind: 'composer'; anchor: DOMRect } | null
   >(null);
@@ -453,7 +806,41 @@ export function MessagePane({
   const [dragOver, setDragOver] = useState(false);
   /** Последнее сообщение прошлой отрисовки — по нему считаем, сколько пришло именно снизу. */
   const prevLastId = useRef<string | undefined>(undefined);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** В поле больше одной строки — кнопки встают к нижнему краю, как у Telegram (`.composer.multiline`). */
+  const [multiline, setMultiline] = useState(false);
+  /* Поле растёт под текст до потолка, дальше прокручивается само (#212). Меряем по `scrollHeight` после
+     сброса высоты: `field-sizing: content` удобнее, но WebView на старых Android и Safari его не знают. */
+  const fitComposer = () => {
+    const el = inputRef.current;
+    // Поле ещё не разложено (почти нулевая ширина) — мерить нечего: подсказка перенеслась бы по буквам.
+    if (!el || el.clientWidth < 40) return;
+    el.style.height = 'auto';
+    const full = el.scrollHeight;
+    const h = Math.min(full, COMPOSER_MAX_PX);
+    el.style.height = `${h}px`;
+    el.style.overflowY = full > COMPOSER_MAX_PX ? 'auto' : 'hidden';
+    const cs = getComputedStyle(el);
+    const line = parseFloat(cs.lineHeight) || 20;
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    setMultiline(h > line * 1.5 + pad);
+  };
+  useLayoutEffect(fitComposer, [text]);
+  /* ⚠️ И при смене ШИРИНЫ: при монтировании поле бывает почти нулевой ширины (лента ещё грузится), подсказка
+     переносится по буквам — и пустое поле раздувалось до потолка. Высота на ширину не влияет, петли нет. */
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let width = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      fitComposer();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fitComposer читает только ref
+  }, []);
   const { open: openUserMenu, menu: userMenu } = useUserMenu();
   /**
    * Корона в чате рисуется В ШАПКЕ БЛОКА, а не у каждого сообщения: подряд идущие сообщения
@@ -466,6 +853,47 @@ export function MessagePane({
   const animatedOf = useAnimatedAvatarUrl();
   // Гость ли автор — из общего ростера, тем же приёмом, что и его движущийся аватар.
   const guestHomeOf = useGuestHome();
+  /* Действия строк ленты: свежие обработчики кладём в ref на каждой перерисовке, а строкам отдаём ОДИН объект,
+     который их зовёт, — иначе новые стрелочные функции перерисовывали бы все `memo`-строки (фаза 0.4). */
+  const rowActsRef = useRef<RowActions>(null!);
+  rowActsRef.current = {
+    touchStart: (e, m) => onMsgTouchStart(e, m),
+    touchMove: (e) => onMsgTouchMove(e),
+    touchEnd: () => cancelLongPress(),
+    menu: (m, x, y) => setMsgMenu({ m, pos: { x, y } }),
+    userMenu: (e, target, view) => openUserMenu(e, target, view),
+    openImage: (a) => openImage(a),
+    react: (id, emoji, op) => onReact?.(id, emoji, op),
+    picker: (messageId, anchor) => setPicker({ kind: 'msg', messageId, anchor }),
+    reply: (m) => startReply(m),
+    startEdit: (m) => {
+      setEditingId(m.id);
+      setEditText(m.content);
+    },
+    setEditText: (text) => setEditText(text),
+    saveEdit: (m) => void saveEdit(m),
+    cancelEdit: () => setEditingId(null),
+    del: (m) => void del(m),
+  };
+  const rowActs = useMemo<RowActions>(
+    () => ({
+      touchStart: (e, m) => rowActsRef.current.touchStart(e, m),
+      touchMove: (e) => rowActsRef.current.touchMove(e),
+      touchEnd: () => rowActsRef.current.touchEnd(),
+      menu: (m, x, y) => rowActsRef.current.menu(m, x, y),
+      userMenu: (e, target, view) => rowActsRef.current.userMenu(e, target, view),
+      openImage: (a) => rowActsRef.current.openImage(a),
+      react: (id, emoji, op) => rowActsRef.current.react(id, emoji, op),
+      picker: (messageId, anchor) => rowActsRef.current.picker(messageId, anchor),
+      reply: (m) => rowActsRef.current.reply(m),
+      startEdit: (m) => rowActsRef.current.startEdit(m),
+      setEditText: (text) => rowActsRef.current.setEditText(text),
+      saveEdit: (m) => rowActsRef.current.saveEdit(m),
+      cancelEdit: () => rowActsRef.current.cancelEdit(),
+      del: (m) => rowActsRef.current.del(m),
+    }),
+    [],
+  );
 
   /**
    * Прижать ленту к низу. Именно `scrollTop`, а не `scrollIntoView`: второй ищет ближайшего
@@ -739,6 +1167,7 @@ export function MessagePane({
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
+    if (composerEdit) return void saveComposerEdit();
     const content = text.trim();
     if (!content && pending.length === 0) return;
     /* ⚠️ Кнопка «отправить» больше НЕ выключается на время запроса (23.09, #194). Enter в поле — это
@@ -797,9 +1226,71 @@ export function MessagePane({
   }
 
   function startReply(m: Message) {
+    if (composerEdit) finishComposerEdit();
     setReplyingTo(m);
     inputRef.current?.focus();
   }
+
+  function startComposerEdit(m: Message) {
+    if (!composerEdit) draftBeforeEdit.current = { text, replyingTo };
+    setReplyingTo(null);
+    setComposerEdit(m);
+    setText(m.content);
+    // Каретка — в конец: правят чаще всего хвост («опечатка в последнем слове»).
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }
+
+  /** Выйти из правки и вернуть черновик, который был до неё (и после отмены, и после сохранения). */
+  function finishComposerEdit() {
+    const draft = draftBeforeEdit.current;
+    draftBeforeEdit.current = null;
+    setComposerEdit(null);
+    setText(draft?.text ?? '');
+    setReplyingTo(draft?.replyingTo ?? null);
+  }
+
+  async function saveComposerEdit() {
+    const m = composerEdit;
+    if (!m) return;
+    const content = text.trim();
+    if (!content) return;
+    // Ничего не поменял — просто выходим: пустая правка поставила бы «(изм.)» на нетронутое сообщение.
+    if (content === m.content.trim()) return finishComposerEdit();
+    try {
+      await onEdit(m, content);
+      finishComposerEdit();
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  /* «Назад» на Android сначала отменяет правку или ответ (#212): иначе она уводила в список, а режим правки
+     оставался висеть до возвращения. Окно поверх ленты (настройки, профиль, участники) закрывается раньше —
+     порядок держит `androidBack.stepBack`, а здесь мы просто не берём шаг, пока ленту не видно. */
+  useEffect(() => {
+    if (!composerEdit && !replyingTo) return;
+    return pushBackHandler(() => {
+      const s = useStore.getState();
+      if (s.adminOpen || s.settingsOpen || s.mobileProfileOpen || s.mobileMembersOpen || s.mobilePane !== 'content')
+        return false;
+      if (composerEdit) finishComposerEdit();
+      else setReplyingTo(null);
+      return true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- finishComposerEdit читает рефы и сеттеры
+  }, [composerEdit, replyingTo]);
+
+  /**
+   * Кнопки у поля ввода не забирают фокус (#212, 28.09, S25): после «отправить» клавиатура закрывалась — фокус
+   * уходил на кнопку, — и следующее сообщение начиналось с нового нажатия в поле. У Telegram клавиатура
+   * остаётся. Нажатие при этом срабатывает как обычно: гасим только перенос фокуса.
+   */
+  const keepFocus = (e: React.PointerEvent | React.MouseEvent) => e.preventDefault();
 
   // Mobile long-press on a message body → open the action sheet (design-step8 C2). Ignore presses
   // that land on interactive children (avatar/author open the user menu; links/images/buttons keep
@@ -812,8 +1303,27 @@ export function MessagePane({
     lpTimer.current = window.setTimeout(() => {
       lpTimer.current = null;
       navigator.vibrate?.(8);
+      swallowNativeLongPress();
       setSheetMsg(m);
     }, 480);
+  }
+  /**
+   * 🔴 Системное долгое нажатие WebView срабатывает чуть ПОЗЖЕ нашего (28.09, поймано на S25): к этому
+   * моменту под пальцем уже открытая шторка, и Android выделял ближайший текст в ней (👍 из ряда
+   * реакций) и показывал своё «Перевести / Копировать / Выбрать все» поверх нашего меню. До конца этого
+   * жеста гасим `contextmenu` (его действие по умолчанию и есть выделение) и снимаем выделение.
+   */
+  function swallowNativeLongPress() {
+    const stop = (e: Event) => e.preventDefault();
+    const done = () => {
+      window.removeEventListener('contextmenu', stop, true);
+      window.removeEventListener('touchend', done, true);
+      window.removeEventListener('touchcancel', done, true);
+      window.getSelection()?.removeAllRanges();
+    };
+    window.addEventListener('contextmenu', stop, true);
+    window.addEventListener('touchend', done, true);
+    window.addEventListener('touchcancel', done, true);
   }
   function onMsgTouchMove(e: React.TouchEvent) {
     if (lpTimer.current == null || !lpStart.current) return;
@@ -842,14 +1352,40 @@ export function MessagePane({
   }
 
   async function del(m: Message) {
-    // Самое частое подтверждение в приложении — поэтому короткое: без тела, одним вопросом.
-    if (!(await confirmAction({ title: 'Удалить сообщение?', tone: 'danger', confirmLabel: 'Удалить' }))) return;
+    let scope: 'me' | 'both' | undefined;
+    if (deletePeerName === undefined) {
+      // Самое частое подтверждение в приложении — поэтому короткое: без тела, одним вопросом.
+      if (!(await confirmAction({ title: 'Удалить сообщение?', tone: 'danger', confirmLabel: 'Удалить' }))) return;
+    } else if (m.author.id === meId) {
+      /* ЛС, своё (#212, «как в Telegram»): галочка по умолчанию стоит — так удаление вело себя всегда, и
+         человек, не читающий окно, получает прежнее. Сняв её, удаляет только у себя. */
+      const r = await confirmWithOption({
+        title: 'Удалить сообщение?',
+        tone: 'danger',
+        confirmLabel: 'Удалить',
+        option: { label: `Также удалить для ${deletePeerName}`, checked: true },
+      });
+      if (!r) return;
+      scope = r.option ? 'both' : 'me';
+    } else {
+      // ЛС, чужое: стереть у собеседника его же слова нельзя — только убрать у себя, и окно говорит это прямо.
+      const ok = await confirmAction({
+        title: 'Удалить у себя?',
+        body: `Сообщение пропадёт только у вас — ${deletePeerName} его по-прежнему увидит.`,
+        tone: 'danger',
+        confirmLabel: 'Удалить',
+      });
+      if (!ok) return;
+      scope = 'me';
+    }
     try {
-      await onDelete(m);
+      await onDelete(m, scope);
     } catch (err) {
       toastError(err);
     }
   }
+  /** Можно ли удалить: своё, модератору — любое, в ЛС — любое (чужое — только у себя). */
+  const canDelete = (m: Message) => m.author.id === meId || !!canModerate || deletePeerName !== undefined;
 
   // Тикаем, пока идёт запись: и таймер, и уровень. 100 мс — глазу достаточно, процессору не жалко.
   useEffect(() => {
@@ -1005,224 +1541,27 @@ export function MessagePane({
               </div>
             )
           ))}
-        {messages.map((m, i) => {
-          const prev = messages[i - 1];
-          // First message newer than the last visit — and not mine, since my own message isn't news
-          // to me. Rendered once, above that message.
-          const row = { createdAt: m.createdAt, authorId: m.author.id, hasReply: !!m.replyTo };
-          const prevRow = prev ? { createdAt: prev.createdAt, authorId: prev.author.id } : undefined;
-          const firstUnread = isFirstUnread(row, prevRow, meId, newSince);
-          const grouped = isGrouped(row, prevRow);
-          const mine = m.author.id === meId;
-          const editing = editingId === m.id;
-          const time = new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          // Имя автора — через резолвер: в канале сервера это ник, в ЛС остаётся обычное имя (#73).
-          const author = nameOf(m.author.id, m.author.displayName);
-          const newDay = isNewDay(row, prevRow);
-          return (
-            <Fragment key={m.id}>
-            {/* Дневная метка: без неё, чтобы понять, где кончился вчерашний разговор, приходится
-                читать время у каждого сообщения по отдельности. */}
-            {newDay && (
-              <div className="day-divider" role="separator">
-                <span>{dayLabel(m.createdAt)}</span>
-              </div>
-            )}
-            {firstUnread && (
-              <div className="new-divider" role="separator" aria-label="Новые сообщения">
-                <span>Новые сообщения</span>
-              </div>
-            )}
-            <div
-              // `active` — сообщение, с которым сейчас работают: открыто его контекстное меню,
-              // висит его пикер реакций или оно редактируется. Наведение даёт слабую подсветку,
-              // а действие — рамку: иначе при открытом меню курсор уходит на меню, ховер
-              // слетает, и непонятно, к какому сообщению это меню относится.
-              className={`message ${grouped ? 'grouped' : ''} ${
-                msgMenu?.m.id === m.id || (picker?.kind === 'msg' && picker.messageId === m.id) || editing
-                  ? 'active'
-                  : ''
-              }`}
-              onTouchStart={(e) => onMsgTouchStart(e, m)}
-              onTouchMove={onMsgTouchMove}
-              onTouchEnd={cancelLongPress}
-              onTouchCancel={cancelLongPress}
-              onContextMenu={(e) => {
-                // Let avatar/author (user menu), links, images and controls keep their own
-                // right-click behaviour; the message menu only opens over the message body.
-                if ((e.target as Element).closest('a, img, button, input, textarea, .msg-ava, .author')) return;
-                e.preventDefault();
-                setMsgMenu({ m, pos: { x: e.clientX, y: e.clientY } });
-              }}
-            >
-              <div className="msg-gutter">
-                {grouped ? (
-                  <span className="msg-hovertime">{time}</span>
-                ) : (
-                  <span
-                    className="msg-ava"
-                    onContextMenu={(e) =>
-                      openUserMenu(e, { userId: m.author.id, name: author, avatarUrl: m.author.avatarUrl })
-                    }
-                  >
-                    <Avatar url={m.author.avatarUrl} animatedUrl={animatedOf(m.author.id)} name={author} size={38} />
-                    {crownId === m.author.id && <CrownMark size={13} />}
-                  </span>
-                )}
-              </div>
-              <div className="message-main">
-                {m.replyTo && (
-                  <div className="reply-quote">
-                    <Icon name="reply" size={13} />
-                    <span className="rq-author">{m.replyTo.authorName}</span>
-                    <span className="rq-text">{m.replyTo.content || 'вложение'}</span>
-                  </div>
-                )}
-                {!grouped && (
-                  <div className="message-head">
-                    <span
-                      className={`author ${mine ? 'me' : ''}${crownGlow(crownId === m.author.id)}`}
-                      onContextMenu={(e) =>
-                        openUserMenu(e, {
-                          userId: m.author.id,
-                          name: author,
-                          avatarUrl: m.author.avatarUrl,
-                        })
-                      }
-                    >
-                      {author}
-                    </span>
-                    <GuestMark home={guestHomeOf(m.author.id)} size={11} />{' '}
-                    <span className="ts muted">{time}</span>
-                  </div>
-                )}
-                {editing ? (
-                  <div className="edit-box">
-                    <textarea
-                      value={editText}
-                      autoFocus
-                      onChange={(e) => setEditText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          void saveEdit(m);
-                        } else if (e.key === 'Escape') {
-                          setEditingId(null);
-                        }
-                      }}
-                    />
-                    <div className="edit-hint muted">Enter — сохранить · Esc — отмена</div>
-                  </div>
-                ) : (
-                  <>
-                    {m.poll ? <PollCard poll={m.poll} channelId={m.channelId} messageId={m.id} /> : null}
-                    {/* Стикер (#68) — крупно и без рамки сообщения. Лежит копией в самом сообщении,
-                        поэтому переживает удаление набора, из которого пришёл. */}
-                    {m.sticker ? (
-                      <div className="message-sticker">
-                        <StickerView
-                          url={m.sticker.url}
-                          format={m.sticker.format}
-                          emoji={m.sticker.emoji}
-                          size={160}
-                        />
-                      </div>
-                    ) : null}
-                    {m.content ? (
-                      <div className="message-body">
-                        {renderContent(m.content, m.author.id, author, onEmoji)}
-                        {m.editedAt ? <span className="ts muted edited"> (изм.)</span> : null}
-                      </div>
-                    ) : null}
-                    {/* Карточки ссылок (#64). Своим инстансом не занимаемся — предпросмотр
-                        собственных страниц бессмысленен, а запрос лишний. */}
-                    {m.content && linkPreviewsEnabled()
-                      ? previewableLinks(m.content).map((u) => (
-                          <LinkPreviewCard
-                            key={u}
-                            url={u}
-                            authorId={m.author.id}
-                            authorName={author}
-                          />
-                        ))
-                      : null}
-                    {m.attachments?.length ? (
-                      <div className="attachments">
-                        {m.attachments.map((a, j) => (
-                          <AttachmentView key={j} a={a} onOpen={openImage} />
-                        ))}
-                      </div>
-                    ) : null}
-                    {m.reactions && m.reactions.length > 0 ? (
-                      <div className="reactions">
-                        {m.reactions.map((r) => (
-                          <button
-                            type="button"
-                            key={r.emoji}
-                            className={`reaction ${r.me ? 'mine' : ''}`}
-                            disabled={!onReact}
-                            onClick={() => onReact?.(m.id, r.emoji, r.me ? 'remove' : 'add')}
-                          >
-                            <span className="re-emoji">{renderReaction(r.emoji, emojiById)}</span>
-                            <span className="re-count">{r.count}</span>
-                          </button>
-                        ))}
-                        {onReact ? (
-                          <button
-                            type="button"
-                            className="reaction add"
-                            title="Добавить реакцию"
-                            onClick={(e) =>
-                              setPicker({ kind: 'msg', messageId: m.id, anchor: e.currentTarget.getBoundingClientRect() })
-                            }
-                          >
-                            <Icon name="reaction" size={15} />
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </>
-                )}
-              </div>
-              {!editing && (
-                <div className="msg-actions">
-                  <button type="button" title="Ответить" onClick={() => startReply(m)}>
-                    <Icon name="reply" size={16} />
-                  </button>
-                  {onReact ? (
-                    <button
-                      type="button"
-                      title="Реакция"
-                      onClick={(e) =>
-                        setPicker({ kind: 'msg', messageId: m.id, anchor: e.currentTarget.getBoundingClientRect() })
-                      }
-                    >
-                      <Icon name="reaction" size={16} />
-                    </button>
-                  ) : null}
-                  {mine ? (
-                    <>
-                      <button
-                        type="button"
-                        title="Изменить"
-                        onClick={() => {
-                          setEditingId(m.id);
-                          setEditText(m.content);
-                        }}
-                      >
-                        <Icon name="edit" size={16} />
-                      </button>
-                      <button type="button" className="danger" title="Удалить" onClick={() => void del(m)}>
-                        <Icon name="trash" size={16} />
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              )}
-            </div>
-            </Fragment>
-          );
-        })}
+        <MessageList
+          messages={messages}
+          meId={meId}
+          newSince={newSince}
+          editingId={editingId}
+          editText={editText}
+          menuId={msgMenu?.m.id}
+          pickerId={picker?.kind === 'msg' ? picker.messageId : undefined}
+          // Телефон: шторка действий и правка в поле — видно, к какому сообщению они относятся (#212).
+          sheetId={sheetMsg?.id}
+          composerEditId={composerEdit?.id}
+          nameOf={nameOf}
+          animatedOf={animatedOf}
+          guestHomeOf={guestHomeOf}
+          crownId={crownId}
+          canReact={!!onReact}
+          canDeleteOthers={deletePeerName !== undefined}
+          onEmoji={onEmoji}
+          emojiById={emojiById}
+          act={rowActs}
+        />
         {outgoing
           .filter((o) => o.feedId === feedId)
           /* Событие шлюза с настоящим сообщением часто приходит РАНЬШЕ ответа на запрос — тогда на
@@ -1330,17 +1669,45 @@ export function MessagePane({
           onIndex={setPendingBox}
         />
       )}
-      {replyingTo && (
-        <div className="reply-strip">
-          <Icon name="reply" size={14} />
+      {composerEdit ? (
+        /* Правка в поле (телефон, #212) — плашка на месте строки ответа: исходный текст перед глазами, ✕ отменяет. */
+        <div className="reply-strip edit-strip">
+          <Icon name="edit" size={14} />
           <span className="rs-label">
-            Ответ <b>{nameOf(replyingTo.author.id, replyingTo.author.displayName)}</b>
+            <b>Редактирование</b>
           </span>
-          <span className="rs-text">{replyingTo.content || 'вложение'}</span>
-          <button type="button" className="rs-close" title="Отменить ответ" onClick={() => setReplyingTo(null)}>
+          <span className="rs-text">{composerEdit.content || 'вложение'}</span>
+          <button
+            type="button"
+            className="rs-close"
+            title="Отменить правку"
+            onPointerDown={keepFocus}
+            onMouseDown={keepFocus}
+            onClick={finishComposerEdit}
+          >
             <Icon name="close" size={14} />
           </button>
         </div>
+      ) : (
+        replyingTo && (
+          <div className="reply-strip">
+            <Icon name="reply" size={14} />
+            <span className="rs-label">
+              Ответ <b>{nameOf(replyingTo.author.id, replyingTo.author.displayName)}</b>
+            </span>
+            <span className="rs-text">{replyingTo.content || 'вложение'}</span>
+            <button
+              type="button"
+              className="rs-close"
+              title="Отменить ответ"
+              onPointerDown={keepFocus}
+              onMouseDown={keepFocus}
+              onClick={() => setReplyingTo(null)}
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        )
       )}
       {/* Полоса записи (#20) — над композером, как строка ответа: сам ввод остаётся на месте,
           и запись не выглядит как «приложение переключилось в другой режим». */}
@@ -1385,10 +1752,14 @@ export function MessagePane({
           </button>
         </div>
       )}
+      {/* Поле ввода можно заменить плашкой (#212: «Вы заблокировали собеседника · Разблокировать»). */}
+      {composerReplacement ?? (
       <form
-        className={`composer${text.trim() || pending.length ? '' : ' empty'}${micAvailable ? ' has-mic' : ''}${
-          recording || holdUi || preview ? ' rec-on' : ''
-        }${holdUi ? ' rec-hold' : ''}`}
+        className={`composer${text.trim() || pending.length || composerEdit ? '' : ' empty'}${
+          micAvailable && !composerEdit ? ' has-mic' : ''
+        }${recording || holdUi || preview ? ' rec-on' : ''}${holdUi ? ' rec-hold' : ''}${multiline ? ' multiline' : ''}${
+          composerEdit ? ' editing' : ''
+        }`}
         onSubmit={send}
       >
         {ac && acItems.length > 0 && (
@@ -1439,6 +1810,8 @@ export function MessagePane({
             сжималось до 128 px из 387 — места под текст было меньше, чем под ряд кнопок. Кнопка
             есть в разметке всегда, а показывает её только мобильная раскладка (styles.css) — она
             же прячет четыре кнопки ниже. На компьютере строка остаётся прежней. */}
+        {/* Правка меняет только текст: вложения, голосовое и опрос к ней не относятся (#212). */}
+        {!composerEdit && (
         <button
           type="button"
           className="att-btn plus"
@@ -1449,6 +1822,8 @@ export function MessagePane({
         >
           <Icon name="plus" size={21} />
         </button>
+        )}
+        {!composerEdit && (
         <button
           type="button"
           className="att-btn attach"
@@ -1457,6 +1832,7 @@ export function MessagePane({
         >
           <Icon name="paperclip" size={19} />
         </button>
+        )}
         <input
           ref={fileRef}
           type="file"
@@ -1470,12 +1846,12 @@ export function MessagePane({
         <button
           type="button"
           className="att-btn emoji"
-          title={canSticker ? 'Эмодзи и стикеры' : 'Эмодзи'}
+          title={canSticker && !composerEdit ? 'Эмодзи и стикеры' : 'Эмодзи'}
           onClick={(e) => setPicker({ kind: 'composer', anchor: e.currentTarget.getBoundingClientRect() })}
         >
           <Icon name="reaction" size={19} />
         </button>
-        {canVoice && (
+        {canVoice && !composerEdit && (
           <button
             type="button"
             className="att-btn voice"
@@ -1486,13 +1862,15 @@ export function MessagePane({
             <Icon name="mic" size={19} />
           </button>
         )}
-        {pollChannelId && (
+        {pollChannelId && !composerEdit && (
           <button type="button" className="att-btn poll" title="Создать опрос" onClick={() => setPollOpen(true)}>
             <Icon name="activity" size={19} />
           </button>
         )}
-        <input
+        <textarea
           ref={inputRef}
+          className="composer-input"
+          rows={1}
           value={text}
           onPaste={onPasteFiles}
           onChange={(e) => {
@@ -1532,10 +1910,30 @@ export function MessagePane({
                 return;
               }
             }
-            // Esc cancels an in-progress reply first.
+            // Esc: сначала правка в поле, потом ответ.
+            if (e.key === 'Escape' && composerEdit) {
+              e.preventDefault();
+              finishComposerEdit();
+              return;
+            }
             if (e.key === 'Escape' && replyingTo) {
               e.preventDefault();
               setReplyingTo(null);
+              return;
+            }
+            // Enter: отправить или перенос строки — правило в `messagePaneRules.enterSends`.
+            if (e.key === 'Enter') {
+              const sends = enterSends({
+                shift: e.shiftKey,
+                composing: e.nativeEvent.isComposing,
+                /* 🔴 По ОСНОВНОМУ указателю, а не «есть ли хоть один точный» (28.09, S25 Ultra): у телефона
+                   со стилусом `any-pointer: fine` истинно, и Enter отправлял вместо переноса. */
+                touchOnly: window.matchMedia('(pointer: coarse)').matches,
+              });
+              if (sends) {
+                e.preventDefault();
+                e.currentTarget.form?.requestSubmit();
+              }
               return;
             }
             // Empty composer + ArrowUp → edit your last message (Discord-style).
@@ -1548,10 +1946,22 @@ export function MessagePane({
               }
             }
           }}
-          placeholder={replyingTo ? `Ответ ${nameOf(replyingTo.author.id, replyingTo.author.displayName)}…` : placeholder}
+          placeholder={
+            composerEdit
+              ? 'Текст сообщения'
+              : replyingTo
+                ? `Ответ ${nameOf(replyingTo.author.id, replyingTo.author.displayName)}…`
+                : placeholder
+          }
         />
-        <button type="submit" className="send-btn" title="Отправить">
-          <Icon name="send" size={18} />
+        <button
+          type="submit"
+          className="send-btn"
+          title={composerEdit ? 'Сохранить' : 'Отправить'}
+          onPointerDown={keepFocus}
+          onMouseDown={keepFocus}
+        >
+          <Icon name={composerEdit ? 'check' : 'send'} size={18} />
         </button>
         {/* Телефон (#159): пока поле пустое, на месте «отправить» — микрофон. Плашка записи ложится
             ПОВЕРХ строки, а не вместо неё: спрятанное поле потеряло бы фокус, и клавиатура
@@ -1607,7 +2017,7 @@ export function MessagePane({
             <Icon name="stop" size={18} />
           </button>
         )}
-        {micAvailable && (
+        {micAvailable && !composerEdit && (
           <button
             type="button"
             className="mic-btn"
@@ -1625,6 +2035,7 @@ export function MessagePane({
           </button>
         )}
       </form>
+      )}
       {picker &&
         (() => {
           // Вкладки — только в строке ввода и только если стикеры тут есть. Реакции остаются
@@ -1769,7 +2180,7 @@ export function MessagePane({
                   }}
                 />
               )}
-              {(mine || canModerate) && (
+              {canDelete(m) && (
                 <>
                   <MenuDivider />
                   {mine && (
@@ -1881,13 +2292,13 @@ export function MessagePane({
                   icon="edit"
                   label="Изменить"
                   onClick={() => {
-                    setEditingId(m.id);
-                    setEditText(m.content);
+                    // Телефон — правка в основном поле (#212), а не маленьким полем в сообщении.
+                    startComposerEdit(m);
                     close();
                   }}
                 />
               )}
-              {(mine || canModerate) && (
+              {canDelete(m) && (
                 <SheetRow
                   icon="trash"
                   label="Удалить"

@@ -7,6 +7,7 @@ import {
   avatarMinutesFor,
   avatarPriceAllowed,
   avatarRentalActive,
+  avatarRentalFull,
   avatarRentalUntil,
   SHOP_ITEMS,
   buyBlock,
@@ -230,6 +231,22 @@ describe('ключ кулдауна', () => {
 describe('аренда анимированного аватара', () => {
   const now = new Date('2026-09-02T12:00:00Z');
   const day = 24 * 60 * 60 * 1000;
+
+  it('потолок аренды: ровно 30 дней ещё можно продлить, на миллисекунду больше — нельзя', () => {
+    // Ловит рассинхронизацию серверного запрета с общим правилом на включительной границе.
+    assert.equal(avatarRentalFull(null, now), false);
+    assert.equal(avatarRentalFull(new Date(now.getTime() - day), now), false);
+    assert.equal(avatarRentalFull(new Date(now.getTime() + 30 * day), now), false);
+    assert.equal(avatarRentalFull(new Date(now.getTime() + 30 * day + 1), now), true);
+    assert.equal(avatarRentalFull(new Date(now.getTime() + 45 * day), now), true);
+  });
+
+  it('переполненная аренда отказывает раньше кулдауна и нехватки монет', () => {
+    // Ловит утечку баланса или маскировку настоящей причины отказа в покупке.
+    assert.equal(buyBlock(input({ rentalFull: true, onCooldown: true, balance: 0 })), 'rental-full');
+    assert.equal(buyBlock(input({ rentalFull: false })), null);
+    assert.equal(buyBlock(input()), null);
+  });
 
   it('первая покупка даёт 30 дней от сегодня', () => {
     assert.equal(avatarRentalUntil(null, now).getTime(), now.getTime() + 30 * day);

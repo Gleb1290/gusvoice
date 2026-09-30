@@ -42,6 +42,15 @@ export interface ServerEnvelope {
   m: GatewayServerMessage;
   /** `undefined` — всем подписчикам сервера; иначе только перечисленным пользователям. */
   to?: string[];
+  /** Только соединениям с этой возможностью / только без неё (`gatewayRules.capAllows`, ЛС шаг 0.5). */
+  cap?: string;
+  notCap?: string;
+}
+
+/** Кому из соединений человека уходит событие: всем (по умолчанию), только новым или только старым клиентам. */
+export interface CapRoute {
+  cap?: string;
+  notCap?: string;
 }
 
 /** События, которые ПО СМЫСЛУ видны всем участникам сервера — без привязки к каналу. */
@@ -101,7 +110,15 @@ export async function publishToChannel(
   await redisPub.publish(serverChannel(serverId), JSON.stringify({ m: msg, to } satisfies ServerEnvelope));
 }
 
-/** Fan a message out to all of one user's own gateway connections (used for DMs). */
-export async function publishToUser(userId: string, msg: GatewayServerMessage): Promise<void> {
-  await redisPub.publish(userChannel(userId), JSON.stringify({ m: msg } satisfies ServerEnvelope));
+/**
+ * Fan a message out to all of one user's own gateway connections (used for DMs).
+ *
+ * `route` — по возможностям соединения (ЛС шаг 0.5): `{ notCap: 'conv1' }` для прежних `dm.*`, `{ cap: 'conv1' }`
+ * для `conv.change`. Без него — всем соединениям, как раньше.
+ */
+export async function publishToUser(userId: string, msg: GatewayServerMessage, route?: CapRoute): Promise<void> {
+  const env: ServerEnvelope = { m: msg };
+  if (route?.cap !== undefined) env.cap = route.cap;
+  if (route?.notCap !== undefined) env.notCap = route.notCap;
+  await redisPub.publish(userChannel(userId), JSON.stringify(env));
 }

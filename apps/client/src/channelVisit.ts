@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { lastSeenAt, markChannelSeen } from './channelPrefs';
 import { isMobile } from './hotkeys';
+import { windowFocused } from './notifications';
 import { useStore } from './store';
 
 /**
@@ -35,11 +36,37 @@ export function useChannelVisit(
     if (!viewing) return;
     setNewSince(lastSeenAt(id));
     setVisit((n) => n + 1);
+    /* Беседа снова на глазах — дочитана (#212). После починки Б2 письма в ПОСЛЕДНЮЮ беседу, пока
+       человек в сервере, горят непрочитанным; а вернуться к ней можно не через `selectDm`, а кнопкой
+       «Личные сообщения» в рейле (`setView`), которая ничего не гасит. Без этого значок висел бы,
+       пока человек читает. Каналы гасятся своим `openChannel`. */
+    if (kind === 'dm' && windowFocused()) readDmNow(id);
     return () => {
       markChannelSeen(id);
       // Ушёл из ленты — значит прочитал: гасим счётчик, который до сих пор прятался за «текущим».
       if (kind === 'dm') readDmNow(id);
       else readChannelNow(id);
+    };
+  }, [id, viewing, kind, readChannelNow, readDmNow]);
+
+  /**
+   * Вернулся в окно — дочитал то, что пришло, пока оно было свёрнуто (#212).
+   * Личное сообщение в открытую беседу при окне не в фокусе теперь горит непрочитанным, а не
+   * отмечается тихо (`dmListRules.dmIncomingDecision`); гасит его возврат взгляда, как у Telegram.
+   * У каналов такие сообщения пока отмечаются сразу — вызов для них ничего не меняет.
+   */
+  useEffect(() => {
+    if (!viewing) return;
+    const onBack = () => {
+      if (!windowFocused()) return;
+      if (kind === 'dm') readDmNow(id);
+      else readChannelNow(id);
+    };
+    window.addEventListener('focus', onBack);
+    document.addEventListener('visibilitychange', onBack);
+    return () => {
+      window.removeEventListener('focus', onBack);
+      document.removeEventListener('visibilitychange', onBack);
     };
   }, [id, viewing, kind, readChannelNow, readDmNow]);
 

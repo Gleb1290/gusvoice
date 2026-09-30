@@ -1,0 +1,258 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { resolveAudioMime, sniffAudioMime, sniffImageMime } from './storageRules.js';
+
+/**
+ * Закрытые файлы ЛС (этап 1, шаг 1в, `docs/dm/STAGE1.md`, «Файлы») — чистые правила. Без env, базы, S3 и сети:
+ * подпись и разбор ссылки, тип по байтам, диапазон для перемотки, заголовки ответа, чистка журнала от подписей.
+ * Доступ человека к файлу — `convRules.attachmentAccess`; запись и выдача — `attachments.ts`, `routes/att.ts`.
+ *
+ * 🔴 Ссылка своя у КАЖДОГО смотрящего: `/api/att/<id вложения>/<id смотрящего>/<подпись>`. `<img>` и `<audio>` не
+ * несут токена, поэтому ссылка сама — ключ на предъявителя. Отзывается она не сроком, а проверкой доступа ЭТОГО
+ * человека на каждом запросе (удалено у обоих, спрятано у него, вышел, аккаунт удалён) и поколением его токенов в
+ * подписи: «выйти на всех устройствах» гасит и ссылки.
+ */
+
+/** Ключ подписи — из секрета JWT, но в своей области: ссылка не должна быть подписью того же вида, что токен. */
+export function deriveAttKey(secret: string): Buffer {
+  return createHmac('sha256', secret).update('gv-att-v1').digest();
+}
+
+/** Подпись ссылки: 32 символа base64url (192 бита). В подписи — версия, вложение, смотрящий и поколение его токенов. */
+export function attSig(key: Buffer, attId: string, viewerId: string, tokenGen: number): string {
+  return createHmac('sha256', key).update(`v1\n${attId}\n${viewerId}\n${tokenGen}`).digest('base64url').slice(0, 32);
+}
+
+export function attSigValid(key: Buffer, attId: string, viewerId: string, tokenGen: number, sig: string): boolean {
+  const want = Buffer.from(attSig(key, attId, viewerId, tokenGen));
+  const got = Buffer.from(sig);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const VIEWER_RE = /^[A-Za-z0-9-]{1,64}$/;
+const SIG_RE = /^[A-Za-z0-9_-]{32}$/;
+
+/** id вложения — UUID. Проверяется ДО запроса в базу: мусор в пути не должен доходить до SQL. */
+export function isAttId(s: string): boolean {
+  return UUID_RE.test(s);
+}
+
+/** Части ссылки по отдельности годятся (формат, не подлинность). */
+export function attPartsWellFormed(id: string, viewerId: string, sig: string): boolean {
+  return UUID_RE.test(id) && VIEWER_RE.test(viewerId) && SIG_RE.test(sig);
+}
+
+/**
+ * Полная ссылка. `apiBase` — внешний адрес API без завершающего `/` (десктоп ставит её прямо в `<img src>` на
+ * источнике `tauri.localhost`, поэтому только абсолютная).
+ * ⚠️ Путь НЕ кончается на `attachments/<имя>`: старый клиент такие отправляет в публичную `/api/download/attachment`.
+ */
+export function attLink(apiBase: string, attId: string, viewerId: string, sig: string): string {
+  return `${apiBase}/api/att/${attId}/${viewerId}/${sig}`;
+}
+
+/**
+ * Разобрать ссылку, которую старый клиент вернул при отправке (он шлёт `url`, а не id). Чужой хост, чужой путь,
+ * лишние части → `null`. Подлинность подписи проверяет вызывающий (ему нужен id смотрящего и поколение токенов).
+ */
+export function parseAttLink(url: string, apiBase: string): { id: string; viewerId: string; sig: string } | null {
+  let u: URL;
+  let base: URL;
+  try {
+    u = new URL(url);
+    base = new URL(apiBase);
+  } catch {
+    return null;
+  }
+  if (u.origin !== base.origin || u.search || u.hash) return null;
+  const prefix = `${base.pathname.replace(/\/+$/, '')}/api/att/`;
+  if (!u.pathname.startsWith(prefix)) return null;
+  const parts = u.pathname.slice(prefix.length).split('/');
+  if (parts.length !== 3) return null;
+  const [id, viewerId, sig] = parts;
+  return attPartsWellFormed(id, viewerId, sig) ? { id, viewerId, sig } : null;
+}
+
+const VIDEO_MIME = new Set(['video/mp4', 'video/webm']);
+
+function isMp4Box(b: Uint8Array): boolean {
+  return b.length > 7 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70; // 'ftyp'
+}
+
+function isEbml(b: Uint8Array): boolean {
+  return b.length > 3 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3;
+}
+
+/** AVIF — это контейнер MP4 с маркой `avif`/`avis`: без этой проверки он уходил бы в «байты» (ревью 30.09). */
+function isAvif(b: Uint8Array): boolean {
+  if (!isMp4Box(b) || b.length < 12) return false;
+  const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
+  return brand === 'avif' || brand === 'avis';
+}
+
+function isBmp(b: Uint8Array): boolean {
+  return b.length > 26 && b[0] === 0x42 && b[1] === 0x4d; // 'BM'
+}
+
+/** Метка порядка байт UTF-16 (FF FE / FE FF): такой текст сырой кадр MP3 «узнаёт» ложно (ревью 30.09). */
+function isUtf16Bom(b: Uint8Array): boolean {
+  return b.length > 1 && ((b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff));
+}
+
+/**
+ * Тип файла ЛС по СОДЕРЖИМОМУ; объявление клиента — только подсказка там, где байты неоднозначны.
+ *
+ * 🔴 WebM и MP4 по байтам не отличить: это и голосовое, и видео. Голосовое у клиента опознаётся по `audio/*` и
+ * огибающей (`voiceMessage.isVoiceMessage`), поэтому заявленный `audio/*` при контейнере WebM/MP4 остаётся звуком, а
+ * заявленный `video/*` — видео. Без заявления такой контейнер — просто файл (`application/octet-stream`).
+ * Всё непризнанное — `application/octet-stream`: отдаётся только скачиванием.
+ */
+export function resolveAttachmentMime(declared: string, bytes: Uint8Array): string {
+  const image = sniffImageMime(bytes);
+  if (image) return image;
+  if (isAvif(bytes)) return 'image/avif';
+  if (isBmp(bytes)) return 'image/bmp';
+  const d = declared.trim().toLowerCase();
+  if (VIDEO_MIME.has(d) && (isMp4Box(bytes) || isEbml(bytes))) return d;
+  if (d.startsWith('audio/')) return resolveAudioMime(d, bytes) ?? 'application/octet-stream';
+  // Угадывать звук по байтам — только когда тип не заявлен вовсе: иначе текст с меткой UTF-16 (FF FE — «сырой кадр
+  // MP3» для сниффера) становился `audio/mpeg`, хотя клиент честно назвал его `text/plain`.
+  if ((d === '' || d === 'application/octet-stream') && !isMp4Box(bytes) && !isEbml(bytes) && !isUtf16Bom(bytes)) {
+    const audio = sniffAudioMime(bytes);
+    if (audio) return audio;
+  }
+  if (bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+    return 'application/pdf'; // %PDF
+  }
+  return 'application/octet-stream';
+}
+
+/** Что ставить в `Content-Type` ответа: картинка, звук и видео — как есть (их показывают `<img>`/`<audio>`), остальное — безликие байты. */
+export function servedContentType(mime: string): string {
+  return /^(image\/(png|jpeg|gif|webp|avif|bmp)|audio\/[a-z0-9.+-]+|video\/(mp4|webm))$/.test(mime) ? mime : 'application/octet-stream';
+}
+
+/**
+ * Заголовки успешной выдачи файла.
+ *
+ * 🔴 Всегда `attachment`: старый клиент ведёт «Скачать» прямо на эту ссылку (регулярка `attachmentDownloadUrl` её не
+ * узнаёт), и без `attachment` окно десктопа уходило бы с приложения на файл. На `<img>`/`<audio>` это не влияет.
+ * 🔴 `sandbox` и `default-src 'none'`: файл отдаётся с домена API, и даже пропущенный мимо сниффера HTML не должен там
+ * исполниться. `no-cache` + ETag: каждый показ — условный запрос с проверкой доступа, дешёвый 304 без тела.
+ */
+/**
+ * Имя файла для хранения и заголовка: без управляющих и «форматирующих» символов Unicode (в том числе U+202E — им
+ * подменяют видимое расширение: «фото‮gpj.exe»), без кавычки и обратного слэша, до `max` КОДОВЫХ ТОЧЕК.
+ * 🔴 Резать по кодовым единицам UTF-16 нельзя (ревью 30.09): эмодзи на границе оставлял одинокий суррогат,
+ * `encodeURIComponent` бросал, и файл не отдавался никому — навсегда.
+ */
+export function sanitizeFilename(name: string, max = 200): string {
+  const clean = name
+    .replace(/[\p{Cc}\p{Cf}"\\]/gu, '_')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '_');
+  return Array.from(clean).slice(0, max).join('') || 'file';
+}
+
+export function attachmentHeaders(mime: string, filename: string, attId: string): Record<string, string> {
+  const safeName = sanitizeFilename(filename);
+  return {
+    'Content-Type': servedContentType(mime),
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'Cache-Control': 'private, no-cache',
+    ETag: `"${attId}"`,
+    'Accept-Ranges': 'bytes',
+  };
+}
+
+/**
+ * Один диапазон `bytes=a-b` / `bytes=a-` / `bytes=-n` → границы включительно. Нет заголовка или он из нескольких
+ * диапазонов/мусор → `null` (отдаём файл целиком — так делают и браузеры, и S3). За пределами файла → `unsatisfiable`.
+ * Без 206 голосовое у старых клиентов не перематывается (`<audio>` двигает `currentTime` запросом диапазона).
+ */
+export function parseRange(header: string | undefined, size: number): { start: number; end: number } | 'unsatisfiable' | null {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m || (m[1] === '' && m[2] === '')) return null;
+  if (size <= 0) return 'unsatisfiable';
+  let start: number;
+  let end: number;
+  if (m[1] === '') {
+    const n = Number(m[2]);
+    if (!Number.isSafeInteger(n) || n <= 0) return 'unsatisfiable';
+    start = Math.max(0, size - n);
+    end = size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return null;
+  }
+  if (start >= size || start > end) return 'unsatisfiable';
+  return { start, end };
+}
+
+/**
+ * Адрес запроса для журнала: подпись ссылки на файл вырезается. Журнал бэкенда пишет адрес КАЖДОГО запроса, а
+ * ссылка — ключ на предъявителя. id вложения оставляем — по нему разбирают жалобы.
+ */
+export function redactLogUrl(url: string): string {
+  return url.replace(/(\/api\/att\/[^/?#]+)\/[^?#]*/, '$1/…');
+}
+
+/** Путь — наша ссылка на файл ЛС. Сервер не строит по таким ссылкам превью: иначе подпись уедет в базу превью и журнал. */
+export function isAttPath(pathname: string): boolean {
+  return /\/api\/att\//.test(pathname);
+}
+
+/** Есть ли в политике бакета разрешение для всех (`*`). На закрытом бакете это отказ запускать закрытые файлы. */
+export function policyGrantsPublic(policyJson: string): boolean {
+  if (!policyJson.trim()) return false;
+  let doc: unknown;
+  try {
+    doc = JSON.parse(policyJson);
+  } catch {
+    return true; // не разобрали — считаем опасной: закрытое хранилище работает только на доказуемо закрытом бакете
+  }
+  const statements = (doc as { Statement?: unknown }).Statement;
+  const list = Array.isArray(statements) ? statements : statements ? [statements] : [];
+  return list.some((st) => {
+    const s = st as { Effect?: unknown; Principal?: unknown };
+    if (s.Effect !== 'Allow') return false;
+    const p = s.Principal;
+    if (p === '*') return true;
+    const aws = (p as { AWS?: unknown } | undefined)?.AWS;
+    return aws === '*' || (Array.isArray(aws) && aws.includes('*'));
+  });
+}
+
+/**
+ * Сколько незавершённых загрузок человек держит разом: без предела сутки по 15 × 25 МиБ в минуту — сотни ГБ.
+ * 🔴 Сверх предела НЕ отказ, а вытеснение самых старых (ревью 30.09): 0.8.x на каждую повторную попытку заново заливает
+ * все файлы и id прежних не знает — отказ запирал бы файлы в ЛС на сутки-двое. Предел — с запасом на два сообщения
+ * по 10 файлов × 25 МиБ, чтобы вытеснение не задело загрузки ТЕКУЩЕЙ отправки.
+ */
+export const PENDING_MAX_COUNT = 40;
+export const PENDING_MAX_BYTES = 600 * 1024 * 1024;
+
+/**
+ * Какие незавершённые загрузки вытеснить, чтобы новая (`newSize`) уложилась в предел. `existing` — от старых к новым.
+ */
+export function pendingEvictions(
+  existing: readonly { id: string; size: number }[],
+  newSize: number,
+  maxCount = PENDING_MAX_COUNT,
+  maxBytes = PENDING_MAX_BYTES,
+): string[] {
+  let count = existing.length + 1;
+  let bytes = existing.reduce((sum, e) => sum + e.size, 0) + newSize;
+  const out: string[] = [];
+  for (const e of existing) {
+    if (count <= maxCount && bytes <= maxBytes) break;
+    out.push(e.id);
+    count -= 1;
+    bytes -= e.size;
+  }
+  return out;
+}
+/** Незавершённая загрузка старше этого — удаляется вместе с файлом. */
+export const PENDING_TTL_HOURS = 24;

@@ -22,12 +22,14 @@ interface Pending extends ConfirmSpec {
    * в угол, а окно к тому моменту уже закрывалось: связь между нажатием и отказом терялась.
    */
   run?: () => Promise<void>;
+  /** Человек переключил галочку `option` — окно сообщает сразу, ответ собирает `confirmWithOption`. */
+  onOption?: (checked: boolean) => void;
 }
 
 interface ConfirmState {
   pending: Pending | null;
   answer: (ok: boolean) => void;
-  request: (spec: ConfirmSpec & { run?: () => Promise<void> }) => Promise<boolean>;
+  request: (spec: ConfirmSpec & { run?: () => Promise<void>; onOption?: (checked: boolean) => void }) => Promise<boolean>;
 }
 
 let nextId = 1;
@@ -57,6 +59,23 @@ export const useConfirmDialog = create<ConfirmState>((set, get) => ({
  */
 export function confirmAction(spec: ConfirmSpec & { run?: () => Promise<void> }): Promise<boolean> {
   return useConfirmDialog.getState().request(spec);
+}
+
+/**
+ * Спросить подтверждение с галочкой (#212: «Удалить сообщение?» + «Также удалить для …»).
+ * `null` — отказ; иначе — в каком положении галочка была в момент согласия.
+ */
+export async function confirmWithOption(
+  spec: ConfirmSpec & { option: NonNullable<ConfirmSpec['option']> },
+): Promise<{ option: boolean } | null> {
+  let checked = spec.option.checked;
+  const ok = await useConfirmDialog.getState().request({
+    ...spec,
+    onOption: (v) => {
+      checked = v;
+    },
+  });
+  return ok ? { option: checked } : null;
 }
 
 /** Сообщить и дождаться «Понятно» — замена `alert()`. */

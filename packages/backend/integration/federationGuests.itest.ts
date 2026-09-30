@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
-import { FED_ERRORS, Permission } from '@gusvoice/shared';
+import {
+  FED_ERRORS,
+  FED_EVENTS,
+  Permission,
+  serializeFedEvent,
+  serializeMembershipEvent,
+} from '@gusvoice/shared';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
 let t: TestDb;
@@ -11,6 +17,12 @@ let profile: typeof import('../src/federation/guestProfile.js');
 let bans: typeof import('../src/federation/instanceBan.js');
 let permissions: typeof import('../src/permissions.js');
 let avatars: typeof import('../src/federation/avatars.js');
+let membership: typeof import('../src/federation/guestMembership.js');
+let guestPush: typeof import('../src/federation/guestPush.js');
+let guestHome: typeof import('../src/federation/guestHome.js');
+let guestAccess: typeof import('../src/federation/guestAccess.js');
+let receiveEvents: typeof import('../src/federation/eventStream.js').receiveEvents;
+let resolveMentionedMembers: typeof import('../src/push.js').resolveMentionedMembers;
 
 before(async () => {
   t = await createTestDb();
@@ -21,6 +33,14 @@ before(async () => {
   bans = await import('../src/federation/instanceBan.js');
   permissions = await import('../src/permissions.js');
   avatars = await import('../src/federation/avatars.js');
+  membership = await import('../src/federation/guestMembership.js');
+  guestPush = await import('../src/federation/guestPush.js');
+  guestHome = await import('../src/federation/guestHome.js');
+  guestAccess = await import('../src/federation/guestAccess.js');
+  ({ receiveEvents } = await import('../src/federation/eventStream.js'));
+  ({ resolveMentionedMembers } = await import('../src/push.js'));
+  membership.registerMembershipHandlers();
+  bans.registerReportHandlers();
 });
 beforeEach(async () => truncateAll(t.raw));
 after(async () => {
@@ -139,6 +159,161 @@ test('закрытое членство не даёт контекст, а ро�
   assert.equal(await permissions.getMemberContext('server', 'guest-closed'), null);
 });
 
+test('закрытый и удалённый гость не попадают в адресную аудиторию канала', async () => {
+  // Ловит рассылку тела сообщения по сокету тем, кого REST уже считает вышедшими с сервера.
+  await seedServer();
+  await seedLink('peer');
+  await t.raw.exec(`
+    INSERT INTO users
+      (id, username, display_name, password_hash, home_instance_id, home_user_id)
+    VALUES
+      ('guest-open', 'open@peer', 'Open', 'hash', 'peer', 'open'),
+      ('guest-closed', 'closed@peer', 'Closed', 'hash', 'peer', 'closed'),
+      ('guest-removed', 'removed@peer', 'Removed', 'hash', 'peer', 'removed');
+    INSERT INTO server_members (server_id, user_id, state) VALUES
+      ('server', 'guest-open', 'active'),
+      ('server', 'guest-closed', 'closed_by_host'),
+      ('server', 'guest-removed', 'removed');
+    INSERT INTO roles (id, server_id, name, permissions, is_everyone)
+    VALUES ('everyone', 'server', 'everyone', '${Permission.VIEW_CHANNEL}', true);
+    INSERT INTO roles (id, server_id, name, permissions, is_guests)
+    VALUES ('guests', 'server', 'guests', '${Permission.VIEW_CHANNEL}', true);
+    INSERT INTO channels (id, server_id, name, type) VALUES ('channel', 'server', 'chat', 'text')
+  `);
+  const result = await permissions.getChannelAudience('channel');
+  assert.equal(result?.serverId, 'server');
+  assert.deepEqual(result?.userIds.sort(), ['guest-open', 'local', 'owner']);
+});
+
+test('@everyone будит только видящих канал участников, а @here и вызов без канала — никого', async () => {
+  // Ловит пустой @everyone, пуш автору и пробуждение человека, которому канал закрыт правами.
+  await seedServer();
+  await t.raw.exec(`
+    INSERT INTO users (id, username, display_name, password_hash) VALUES
+      ('visible', 'visible', 'Visible', 'hash'),
+      ('hidden', 'hidden', 'Hidden', 'hash');
+    INSERT INTO server_members (server_id, user_id) VALUES
+      ('server', 'visible'), ('server', 'hidden');
+    INSERT INTO roles (id, server_id, name, permissions, is_everyone)
+    VALUES ('everyone', 'server', 'everyone', '${Permission.VIEW_CHANNEL}', true);
+    INSERT INTO channels (id, server_id, name, type) VALUES ('channel', 'server', 'chat', 'text');
+    INSERT INTO channel_overwrites (channel_id, target_id, target_type, deny)
+    VALUES ('channel', 'hidden', 'member', '${Permission.VIEW_CHANNEL}')
+  `);
+  assert.deepEqual(
+    (await resolveMentionedMembers('@everyone', 'server', 'owner', 'channel')).sort(),
+    ['local', 'visible'],
+  );
+  assert.deepEqual(await resolveMentionedMembers('@here', 'server', 'owner', 'channel'), []);
+  assert.deepEqual(await resolveMentionedMembers('@everyone', 'server', 'owner'), []);
+});
+
+test('приём останавливается на двадцати жалобах одной связки за сутки', async () => {
+  // Ловит неограниченный поток писем и строк аудита от одного соседа.
+  await seedLink('peer');
+  await t.raw.exec(`
+    INSERT INTO users (id, username, display_name, password_hash)
+    SELECT 'reported-' || i, 'reported-' || i, 'Reported', 'hash' FROM generate_series(1, 21) AS i
+  `);
+  const events = Array.from({ length: 21 }, (_, i) => serializeFedEvent({
+    eventId: `report-${i + 1}`,
+    seq: i + 1,
+    kind: FED_EVENTS.reportCreate,
+    createdAt: 10_000 + i,
+    payload: {
+      report_id: `r-${i + 1}`,
+      reported_user_id: `reported-${i + 1}`,
+      action: 'server_ban',
+      evidence: [],
+    },
+  }));
+  await receiveEvents('peer', events);
+  const count = await t.raw.query<{ n: number }>("SELECT count(*)::int AS n FROM federation_reports WHERE direction = 'in'");
+  assert.equal(count.rows[0]?.n, 20);
+});
+
+test('повтор report_id дополняет ту же жалобу без дублей и не больше пяти улик', async () => {
+  // Ловит вторую строку от повторной доставки и бесконечное разрастание массива доказательств.
+  await seedLink('peer');
+  await t.raw.exec("INSERT INTO users (id, username, display_name, password_hash) VALUES ('reported', 'reported', 'Reported', 'hash')");
+  const payload = (reason: string, evidence: { text: string; at: number; channel: string }[]) => ({
+    report_id: 'same-report', reported_user_id: 'reported', action: 'server_ban', reason, evidence,
+  });
+  await receiveEvents('peer', [
+    serializeFedEvent({ eventId: 'report-first', seq: 1, kind: FED_EVENTS.reportCreate, createdAt: 1,
+      payload: payload('first', [1, 2, 3, 4].map((n) => ({ text: `e${n}`, at: n, channel: 'chat' }))) }),
+    serializeFedEvent({ eventId: 'report-more', seq: 2, kind: FED_EVENTS.reportCreate, createdAt: 2,
+      payload: payload('updated', [3, 4, 5, 6].map((n) => ({ text: `e${n}`, at: n, channel: 'chat' }))) }),
+  ]);
+  const rows = await t.raw.query<{ report_id: string; reason: string; evidence: { text: string }[] }>(
+    "SELECT report_id, reason, evidence FROM federation_reports WHERE direction = 'in'",
+  );
+  assert.equal(rows.rows.length, 1);
+  assert.equal(rows.rows[0]?.report_id, 'same-report');
+  assert.equal(rows.rows[0]?.reason, 'updated');
+  assert.deepEqual(rows.rows[0]?.evidence.map((e) => e.text), ['e1', 'e2', 'e3', 'e4', 'e5']);
+});
+
+test('событие членства принимается только после нашего поручительства и соблюдает предел индекса', async () => {
+  // Ловит возможность соседа объявить гостем любого нашего человека и бесконечно растить его индекс.
+  await seedServer();
+  await seedLink('peer');
+  assert.equal(t.appliedMigrations.includes('0070_federation_guest_grants.sql'), true);
+  const rawEvent = (seq: number, serverId: string, serverName: string) => serializeFedEvent({
+    eventId: `membership-${seq}`,
+    seq,
+    kind: FED_EVENTS.membershipChanged,
+    createdAt: 1_000 + seq,
+    payload: serializeMembershipEvent({
+      userId: 'local', serverId, serverName, state: 'active', method: null, invitedBy: null, reason: null, at: 1_000 + seq,
+    }),
+  });
+
+  await receiveEvents('peer', [rawEvent(1, 'forged', 'Подсунутый сервер')]);
+  assert.deepEqual(await membership.guestMembershipsOf('local'), []);
+
+  await t.raw.exec(`INSERT INTO federation_guest_grants (user_id, instance_id) VALUES ('local', 'peer')`);
+  await receiveEvents('peer', [rawEvent(2, 'real', 'Я'.repeat(5_000))]);
+  const accepted = await membership.guestMembershipsOf('local');
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0]?.serverName.length, 100);
+
+  const values = Array.from({ length: 199 }, (_, index) =>
+    `('peer', 'local', 'seed-${index}', 'Seed', 'active', ${2_000 + index})`,
+  ).join(',');
+  await t.raw.exec(`
+    INSERT INTO federation_memberships
+      (instance_id, user_id, server_id, server_name, state, updated_at)
+    VALUES ${values}
+  `);
+  await receiveEvents('peer', [rawEvent(3, 'over-limit', 'Лишний')]);
+  const rows = await t.raw.query<{ server_id: string }>(
+    `SELECT server_id FROM federation_memberships WHERE instance_id = 'peer' AND user_id = 'local'`,
+  );
+  assert.equal(rows.rows.length, 200);
+  assert.equal(rows.rows.some((row) => row.server_id === 'over-limit'), false);
+});
+
+test('полная сверка не обходит поручительство, а удаление аккаунта стирает его', async () => {
+  // Ловит второй путь подложного членства и осиротевшее разрешение после удаления человека.
+  await seedServer();
+  await seedLink('peer');
+  assert.deepEqual(await membership.reconcileMemberships('peer', [{
+    userId: 'local', serverId: 'forged', serverName: 'Подсунутый', state: 'active', method: null, invitedBy: null,
+  }], 5_000), { added: 0, removed: 0 });
+  assert.deepEqual(await membership.guestMembershipsOf('local'), []);
+
+  await t.raw.exec(`INSERT INTO federation_guest_grants (user_id, instance_id) VALUES ('local', 'peer')`);
+  assert.deepEqual(await membership.reconcileMemberships('peer', [{
+    userId: 'local', serverId: 'real', serverName: 'Настоящий', state: 'active', method: null, invitedBy: null,
+  }], 6_000), { added: 1, removed: 0 });
+  assert.equal((await membership.guestMembershipsOf('local')).length, 1);
+
+  await t.raw.exec(`DELETE FROM users WHERE id = 'local'`);
+  const grants = await t.raw.query(`SELECT 1 FROM federation_guest_grants WHERE user_id = 'local'`);
+  assert.equal(grants.rows.length, 0);
+});
+
 test('журнал отзывов выдаёт только записи строго новее курсора и держит стабильный порядок', async () => {
   // Ловит повтор старого отзыва либо пропуск двух отзывов с одинаковыми часами.
   await t.raw.exec(`
@@ -253,4 +428,109 @@ test('удаление дома обезличивает гостя и сним�
     `SELECT state FROM server_members WHERE server_id = 'server' AND user_id = 'shadow'`,
   );
   assert.deepEqual(member.rows, [{ state: 'removed' }]);
+});
+
+test('дом будит только своего действующего гостя, с доверенным именем и одним rate-key', async () => {
+  // Ловит пуш по подложному членству, текст из чужой нагрузки и обход окна через другой ключ счётчика.
+  await seedServer();
+  await t.raw.exec(`
+    INSERT INTO federation_guest_grants (user_id, instance_id) VALUES ('local', 'peer');
+    INSERT INTO federation_memberships
+      (instance_id, user_id, server_id, server_name, state, updated_at)
+    VALUES ('peer', 'local', 'remote-server', 'Доверенная стая', 'active', 1)
+  `);
+  const rates: [string, number, number][] = [];
+  const pushes: unknown[] = [];
+  const handler = guestPush.createGuestPushHandler({
+    async rateHit(key, max, windowS) { rates.push([key, max, windowS]); return 0; },
+    async sendPushToUsers(ids, payload) { pushes.push([ids, payload]); },
+  });
+  await handler({ instanceId: 'peer', event: {
+    eventId: 'notify', seq: 1, kind: FED_EVENTS.guestNotify, createdAt: 1,
+    payload: { user_id: 'local', kind: 'mention', server_id: 'remote-server', channel_id: 'chat', server_name: 'Подделка' },
+  } });
+  assert.deepEqual(rates, [['fed:gnotify:peer:local', 1, guestPush.GUEST_PUSH_WINDOW_S]]);
+  assert.deepEqual(pushes, [[['local'], {
+    type: 'mention', title: 'GusVoice', body: 'Вас упомянули на сервере «Доверенная стая»',
+    serverId: 'remote-server', channelId: 'chat', instanceId: 'peer',
+  }]]);
+});
+
+test('лимит или отказ Redis гасит гостевой пуш, а закрытое членство не даёт будить человека', async () => {
+  // Ловит fail-open рассылку без счётчика и право бывшего хоста продолжать будить телефон.
+  await seedServer();
+  await t.raw.exec(`
+    INSERT INTO federation_guest_grants (user_id, instance_id) VALUES ('local', 'peer');
+    INSERT INTO federation_memberships
+      (instance_id, user_id, server_id, server_name, state, updated_at)
+    VALUES ('peer', 'local', 'remote-server', 'Стая', 'closed_by_host', 1)
+  `);
+  let pushes = 0;
+  const event = { eventId: 'notify', seq: 1, kind: FED_EVENTS.guestNotify, createdAt: 1, payload: { user_id: 'local' } };
+  await guestPush.createGuestPushHandler({
+    async rateHit() { throw new Error('redis down'); }, async sendPushToUsers() { pushes++; },
+  })({ instanceId: 'peer', event });
+  assert.equal(pushes, 0);
+  await t.raw.exec(`UPDATE federation_memberships SET state = 'active'`);
+  await guestPush.createGuestPushHandler({
+    async rateHit() { return 1; }, async sendPushToUsers() { pushes++; },
+  })({ instanceId: 'peer', event });
+  assert.equal(pushes, 0);
+});
+
+test('поручительство записывается до выпуска токена и повтор обновляет last_issued_at', async () => {
+  // Ловит выданный токен без следа на доме и повторный выпуск, который не освежает адресный журнал.
+  await seedServer();
+  await t.raw.exec(`UPDATE users SET verified = true, approved_at = now(), token_generation = 4 WHERE id = 'local'`);
+  const link = {
+    instanceId: 'peer', domain: 'peer.example', apiBase: 'https://peer.example/api',
+    clientOrigin: 'https://peer.example', rootKey: 'root', theirName: 'Peer', state: 'active' as const,
+    protocolVersion: 1, features: ['guests'],
+  };
+  const deps = {
+    identity: () => ({ instanceId: 'home' }),
+    signingKey: () => ({ kid: 'kid', privateKeyDer: Buffer.from([1]) }),
+    getLink: async () => link,
+    readMeta: async () => ({ paused: false }),
+    issueIdentityToken: (() => { throw new Error('sign failed'); }) as never,
+  };
+  const issue = guestHome.createIssueIdentityFor(deps);
+  await assert.rejects(issue({ userId: 'local', hostInstanceId: 'peer', now: 10_000 }), /sign failed/);
+  let rows = await t.raw.query<{ last_issued_at: Date }>(
+    `SELECT last_issued_at FROM federation_guest_grants WHERE user_id = 'local' AND instance_id = 'peer'`,
+  );
+  assert.equal(rows.rows.length, 1);
+
+  deps.issueIdentityToken = ((input: { now: number }) => ({ token: 'token', claims: { exp: input.now + 120_000 } })) as never;
+  const result = await issue({ userId: 'local', hostInstanceId: 'peer', now: 20_000 });
+  assert.deepEqual(result, { ok: true, token: 'token', expiresAt: 140_000 });
+  rows = await t.raw.query<{ last_issued_at: Date }>(
+    `SELECT last_issued_at FROM federation_guest_grants WHERE user_id = 'local' AND instance_id = 'peer'`,
+  );
+  assert.equal(new Date(rows.rows[0]!.last_issued_at).getTime(), 20_000);
+});
+
+test('закрытие гостевого доступа сначала инвалидирует сервер и адресно объясняет причину', async () => {
+  // Ловит сокет, который продолжает получать сервер после закрытия, и рассылку личного окна всем участникам.
+  await seedServer();
+  await t.raw.exec(`
+    INSERT INTO users (id, username, display_name, password_hash, home_instance_id, home_user_id)
+    VALUES ('shadow', 'u@peer', 'Guest', 'hash', 'peer', 'u');
+    INSERT INTO server_members (server_id, user_id, state) VALUES ('server', 'shadow', 'active')
+  `);
+  const calls: unknown[] = [];
+  const count = await guestAccess.closeServerForGuests(
+    { serverId: 'server', instanceId: 'peer', reason: guestAccess.CLOSE_REASONS.federationDisabled },
+    {
+      publish: async (serverId, event) => { calls.push(['server', serverId, event]); },
+      publishToUser: async (userId, event) => { calls.push(['user', userId, event]); },
+    },
+  );
+  assert.equal(count, 1);
+  assert.deepEqual(calls[0], ['server', 'server', { t: 'server.invalidate', serverId: 'server' }]);
+  assert.deepEqual(calls[1], ['user', 'shadow', {
+    t: 'server.access_closed', serverId: 'server', reason: guestAccess.CLOSE_REASONS.federationDisabled, contacts: [],
+  }]);
+  const state = await t.raw.query<{ state: string }>(`SELECT state FROM server_members WHERE user_id = 'shadow'`);
+  assert.deepEqual(state.rows, [{ state: 'closed_by_host' }]);
 });

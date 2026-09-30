@@ -14,7 +14,9 @@ import {
   type RemoteVideoTrack,
   RoomEvent,
   Track,
+  VideoQuality,
 } from 'livekit-client';
+import { api } from '../api';
 import { useEffect, useRef, useState } from 'react';
 import { isMobile } from '../hotkeys';
 import {
@@ -30,6 +32,7 @@ import { useNameResolver } from '../memberName';
 import { ensureEconomy } from '../economyClient';
 import { useStore } from '../store';
 import { MAX_STREAM_VOLUME, ownerOf } from '../streamAudioRules';
+import { canSnapshotStream, streamCardCycle } from '../streamCardRules';
 import { toast, toastError } from '../toast';
 import { TIP_HOLD_MS, tipInteraction, type TipInteraction } from '../tipMode';
 import { useAltHeld, useTip } from '../tipGesture';
@@ -48,14 +51,20 @@ import { PENDING_WATCH_TIMEOUT_MS, matchPendingWatch } from '../pendingWatch';
 import { STREAM_VIEW_GRACE_MS } from '../streamCue';
 import { createWatchGrace, type WatchGrace } from '../watchGrace';
 import {
+  layerChoices,
   resolutionText,
   setStreamQuality,
+  shownPref,
+  stepDrop,
   STREAM_QUALITY_HINT,
   STREAM_QUALITY_LABEL,
-  STREAM_QUALITY_ORDER,
   streamHasLayers,
   useStreamQuality,
+  wantedLayer,
+  type DropTracker,
+  type StreamQualityPref,
 } from '../streamQuality';
+import { isWindowCovered } from '../windowCovered';
 import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
 
 // `ownerOf` живёт в `streamAudioRules` — там же, где правило громкости стрима. Держать здесь вторую
@@ -67,7 +76,8 @@ import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu'
 // decode of every stream is what makes shares lag, worst on big scene changes. Instead we briefly
 // subscribe, grab one frame, unsubscribe, and refresh on an interval (see StreamCard).
 const SNAPSHOT_MAX_W = 480; // downscale previews — a thumbnail needs no more
-const SNAPSHOT_EVERY_MS = 60_000; // refresh cadence (a fresh still every minute)
+// Частота заходов (`SNAPSHOT_EVERY_MS`, `PREVIEW_EVERY_MS`) и выбор «превью или поток» — в
+// `streamCardRules.ts`, под тестами без React и LiveKit.
 
 // Poll a publication until its remote video track is live (subscription just requested it) or we give up.
 async function waitForVideoTrack(pub: RemoteTrackPublication, timeoutMs: number): Promise<RemoteVideoTrack | null> {
@@ -179,6 +189,23 @@ function ScreenViewer({
   const qualityPref = useStreamQuality();
   const pubForQuality = track.publication as RemoteTrackPublication | undefined;
   const layered = streamHasLayers(pubForQuality);
+  // Пункты — из НАСТОЯЩИХ слоёв трека (разбор 24.09): у показа в H.264 от старых версий слоёв два,
+  // и пункт «Среднее» там ничего не менял. Слои есть, а описания нет (не должно случаться) —
+  // остаются «Высокое» и «Экономное» без разрешения.
+  const described = layerChoices(pubForQuality?.trackInfo);
+  const choices = described.length
+    ? described
+    : layered
+      ? [
+          { pref: 'high' as const, label: STREAM_QUALITY_HINT.high },
+          { pref: 'low' as const, label: STREAM_QUALITY_HINT.low },
+        ]
+      : [];
+  const checked = shownPref(qualityPref, choices);
+  const menuItems: { pref: StreamQualityPref; sub: string }[] = [
+    { pref: 'auto', sub: STREAM_QUALITY_HINT.auto },
+    ...choices.map((c) => ({ pref: c.pref, sub: c.label })),
+  ];
   const [qualityMenu, setQualityMenu] = useState<MenuPos | null>(null);
   const [receiving, setReceiving] = useState<string | null>(null);
   useEffect(() => {
@@ -200,6 +227,57 @@ function ScreenViewer({
       window.clearInterval(id);
     };
   }, [qualityMenu, pubForQuality]);
+
+  /**
+   * «Вас скинуло на слой ниже» (#191, 24.09). Сервер понижает слой зрителю, которому
+   * не хватает скорости, молча — человек видит мыло и не понимает, у кого беда. Замер раз в 3 с,
+   * решение — чистый `stepDrop` (там же, почему сравниваем с лучшим кадром, а не с объявленным).
+   * Окно не видно — не меряем: тогда мы сами просим нижний слой, и говорить некому.
+   */
+  const dropRef = useRef<DropTracker | null>(null);
+  const qualityPrefRef = useRef(qualityPref);
+  qualityPrefRef.current = qualityPref;
+  useEffect(() => {
+    const pub = pubForQuality;
+    if (!pub) return;
+    dropRef.current = null;
+    let alive = true;
+    const sample = async () => {
+      const hidden = isWindowCovered() || document.visibilityState === 'hidden';
+      if (hidden) {
+        dropRef.current = null;
+        return;
+      }
+      const layer = wantedLayer(qualityPrefRef.current, { windowHidden: false, watched: true });
+      let st: { frameWidth?: number; frameHeight?: number } | undefined;
+      try {
+        st = await (pub.videoTrack as RemoteVideoTrack | undefined)?.getReceiverStats();
+      } catch {
+        return; // статистики нет — молчим, а не гадаем
+      }
+      if (!alive) return;
+      const { next, notify } = stepDrop(dropRef.current, {
+        key: `${pub.trackSid}|${layer}`,
+        w: st?.frameWidth,
+        h: st?.frameHeight,
+        now: Date.now(),
+      });
+      dropRef.current = next;
+      if (notify) {
+        toast(
+          'warn',
+          'Качество показа снижено',
+          `${name}: сейчас приходит ${st?.frameWidth}×${st?.frameHeight} вместо ${next.bestW}×${next.bestH}. Не хватает скорости соединения — у вас или у показывающего.`,
+        );
+      }
+    };
+    const id = window.setInterval(() => void sample(), 3000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pubForQuality]);
 
   // Watching = full live subscription. StreamCard's snapshot mode leaves streams UNsubscribed, so
   // re-subscribe here (and hold it while open) — otherwise <VideoTrack> would have no track to attach.
@@ -301,21 +379,20 @@ function ScreenViewer({
       {qualityMenu && (
         <ContextMenu pos={qualityMenu} onClose={() => setQualityMenu(null)} width={250}>
           <MenuSection>Качество показа</MenuSection>
-          {STREAM_QUALITY_ORDER.map((q) => (
+          {menuItems.map(({ pref: q, sub }) => (
             <MenuItem
               key={q}
-              icon={q === qualityPref ? 'check' : undefined}
+              icon={q === checked ? 'check' : undefined}
               label={STREAM_QUALITY_LABEL[q]}
-              sub={STREAM_QUALITY_HINT[q]}
-              active={q === qualityPref}
-              disabled={!layered && q !== 'auto'}
+              sub={sub}
+              active={q === checked}
               onClick={() => {
                 setStreamQuality(q);
                 setQualityMenu(null);
               }}
             />
           ))}
-          {!layered && <MenuSection>Показывающий шлёт один слой — понизить нельзя</MenuSection>}
+          {choices.length === 0 && <MenuSection>Показывающий шлёт один слой — понизить нельзя</MenuSection>}
           {receiving && <MenuSection>Сейчас приходит {receiving}</MenuSection>}
         </ContextMenu>
       )}
@@ -324,38 +401,45 @@ function ScreenViewer({
 }
 
 // A screen-share offered as a tile. For a REMOTE stream (someone else's, or our own native companion
-// "#screen") it shows a periodic SNAPSHOT — subscribe briefly, grab a frame, unsubscribe, refresh every
-// minute — so an unwatched preview never decodes the full stream non-stop. A LOCAL web share stays live
-// (it's our own capture, no decode cost). Audio is never played here; you only hear the one you open.
+// "#screen") it shows a periodic still, so an unwatched preview never decodes the full stream non-stop.
+// A LOCAL web share stays live (it's our own capture, no decode cost). Audio is never played here; you
+// only hear the one you open.
+//
+// 🔴 Сначала — готовое превью показа (#115), а НЕ подписка на поток (#207, 25.09). Телеметрия
+// показала: снимок с живого потока раз в минуту будил у показывающего ВСЕ три слоя (сервер сначала
+// отдаёт верхний, просьба о нижнем приходила уже после подписки) — три сеанса NVENC и опорные кадры
+// на 4–5 секунд. С dynacast в остальное время кодировщик спит, и этот рывок раз в минуту совпал с
+// микрофризами мыши у показывающего. Картинку #115 он отдаёт и так, кодировщик она не трогает.
+// Снимок с потока остаётся запасным путём (человек выключил отдачу превью), и тогда нижний слой
+// просим СРАЗУ после подписки. Сам заход (порядок «превью → поток») — `streamCardCycle` в
+// `streamCardRules.ts`; здесь только настоящие LiveKit, сеть и таймер.
 function StreamCard({ trackRef, name, onWatch }: { trackRef: TrackReference; name: string; onWatch: () => void }) {
   const pub = trackRef.publication as RemoteTrackPublication | undefined;
-  const canSnapshot = !trackRef.participant.isLocal && typeof pub?.setSubscribed === 'function';
+  const canSnapshot = canSnapshotStream(trackRef.participant.isLocal, pub);
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const sid = pub?.trackSid;
+  const channelId = useStore((s) => s.voice?.channelId);
+  const ownerId = ownerOf(trackRef.participant.identity);
 
   useEffect(() => {
     if (!canSnapshot || !pub) return;
     let cancelled = false;
     let timer: number | undefined;
-    const cycle = async () => {
-      if (cancelled) return;
-      try {
-        pub.setSubscribed(true);
-        const track = await waitForVideoTrack(pub, 4000);
-        if (cancelled) return;
-        if (track) {
-          const url = await captureTrackSnapshot(track, SNAPSHOT_MAX_W);
-          if (!cancelled && url) setSnapshot(url);
-        }
-      } catch {
-        /* keep the previous snapshot */
-      } finally {
-        if (!cancelled) {
-          pub.setSubscribed(false);
-          timer = window.setTimeout(() => void cycle(), SNAPSHOT_EVERY_MS);
-        }
-      }
-    };
+    const cycle = (): Promise<void> =>
+      streamCardCycle({
+        channelId,
+        ownerId,
+        cancelled: () => cancelled,
+        getPreview: (ch, owner) => api.getStreamPreview(ch, owner),
+        setSnapshot: (url) => setSnapshot(url),
+        setSubscribed: (on) => pub.setSubscribed(on),
+        requestLow: () => pub.setVideoQuality(VideoQuality.LOW),
+        waitTrack: () => waitForVideoTrack(pub, 4000),
+        capture: (track) => captureTrackSnapshot(track, SNAPSHOT_MAX_W),
+        next: (ms) => {
+          timer = window.setTimeout(() => void cycle(), ms);
+        },
+      });
     void cycle();
     return () => {
       cancelled = true;
@@ -367,7 +451,7 @@ function StreamCard({ trackRef, name, onWatch }: { trackRef: TrackReference; nam
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sid, canSnapshot]);
+  }, [sid, canSnapshot, channelId, ownerId]);
 
   return (
     <button type="button" className="stream-card" onClick={onWatch} title={`${name} — смотреть трансляцию`}>

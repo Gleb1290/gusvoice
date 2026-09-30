@@ -5,7 +5,8 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { pushDevices, pushMutes, serverMembers, users } from './db/schema.js';
 import { env } from './env.js';
-import { endpointAllowed } from './pushRules.js';
+import { encryptWebPush, type WebPushKeys } from './pushCrypto.js';
+import { endpointAllowed, redactPushPayload } from './pushRules.js';
 import { id } from './util.js';
 
 // Чистые правила — в `pushRules.ts`. Реэкспорт, чтобы роуты продолжали брать `contentPreview`
@@ -45,6 +46,14 @@ export interface PushSource {
   targetId: string;
 }
 
+/**
+ * Пуш без текста устройствам БЕЗ ключей шифрования (#213, `pushRules.redactPushPayload`).
+ *
+ * ⚠️ Выключено до выхода APK, который шлёт ключи: включи раньше — у всех нынешних телефонов пропадёт текст
+ * в уведомлениях до обновления. Порядок: релиз с ключами → люди обновились → `true` отдельным коммитом.
+ */
+const REDACT_KEYLESS = false;
+
 const NTFY_BASE = env.ntfy.baseUrl; // e.g. https://ntfy.example.com
 const NTFY_TOKEN = env.ntfy.token;
 
@@ -53,19 +62,26 @@ export function pushEndpointAllowed(endpoint: string): boolean {
   return endpointAllowed(endpoint, NTFY_BASE);
 }
 
-/** Upsert a device's UnifiedPush endpoint for a user (one row per user+device). */
+/**
+ * Upsert a device's UnifiedPush endpoint for a user (one row per user+device).
+ * `keys` — ключи шифрования пуша (#213). Нет — строка их теряет: устройство, которое перестало их
+ * слать (откат версии), должно получать пуш без текста, а не шифр, который не прочтёт.
+ */
 export async function registerPushDevice(
   userId: string,
   deviceId: string,
   endpoint: string,
   platform: string | null,
+  keys: WebPushKeys | null = null,
 ): Promise<void> {
+  const p256dh = keys?.p256dh ?? null;
+  const auth = keys?.auth ?? null;
   await db
     .insert(pushDevices)
-    .values({ id: id(), userId, deviceId, endpoint, platform, updatedAt: new Date() })
+    .values({ id: id(), userId, deviceId, endpoint, platform, p256dh, auth, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: [pushDevices.userId, pushDevices.deviceId],
-      set: { endpoint, platform, updatedAt: new Date() },
+      set: { endpoint, platform, p256dh, auth, updatedAt: new Date() },
     });
 }
 
@@ -140,15 +156,47 @@ export async function sendPushToUsers(
   if (!NTFY_BASE || !NTFY_TOKEN) return;
   const devices = await db.select().from(pushDevices).where(inArray(pushDevices.userId, ids));
   if (devices.length === 0) return;
-  const body = JSON.stringify(payload);
+  const plain = Buffer.from(JSON.stringify(payload), 'utf8');
+  const redacted = JSON.stringify(REDACT_KEYLESS ? redactPushPayload(payload) : payload);
   await Promise.all(
     devices.map(async (d) => {
       if (!pushEndpointAllowed(d.endpoint)) return;
+      /**
+       * 🔴 Текст сообщения — только шифром (#213). Устройство прислало ключи → тело aes128gcm (RFC 8291),
+       * `X-UnifiedPush: 1` велит ntfy принять двоичное тело (он кладёт его base64 с `encoding`, а
+       * приложение ntfy и наш встроенный распространитель раскодируют). Ключей нет или они кривые —
+       * пуш без текста (`redactPushPayload`), когда включён `REDACT_KEYLESS` (до того — как раньше).
+       */
+      let wire: { body: string | Buffer; headers: Record<string, string> } = {
+        body: redacted,
+        headers: { 'Content-Type': 'application/json' },
+      };
+      if (d.p256dh && d.auth) {
+        try {
+          wire = {
+            body: encryptWebPush(plain, { p256dh: d.p256dh, auth: d.auth }),
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'Content-Encoding': 'aes128gcm',
+              'X-UnifiedPush': '1',
+            },
+          };
+        } catch {
+          /* 🔴 Шифр не вышел (ключ не на кривой, слишком длинно) — пуш БЕЗ текста, независимо от
+             `REDACT_KEYLESS` (найдено Codex 28.09). Раньше здесь оставалось запасное тело, а пока флаг выключен,
+             это открытый JSON с текстом ЛС: устройство прислало ключи ради шифра и получало открытым. Новое
+             приложение без шифра покажет «Новое сообщение». */
+          wire = {
+            body: JSON.stringify(redactPushPayload(payload)),
+            headers: { 'Content-Type': 'application/json' },
+          };
+        }
+      }
       try {
         const res = await fetch(d.endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${NTFY_TOKEN}` },
-          body,
+          headers: { ...wire.headers, Authorization: `Bearer ${NTFY_TOKEN}` },
+          body: wire.body,
           redirect: 'manual', // SSRF (P2-5): NEVER follow a 3xx into the internal network
         });
         // A redirect (3xx) from a push endpoint is anomalous/malicious — don't follow it, drop the

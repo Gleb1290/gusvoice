@@ -29,10 +29,11 @@ beforeEach(async () => {
   await truncateAll(t.raw);
   await t.raw.exec(`
     INSERT INTO users
-      (id, username, display_name, password_hash, verified, show_game_activity, home_instance_id, home_user_id)
+      (id, username, display_name, password_hash, verified, show_game_activity, animated_avatar_url,
+       home_instance_id, home_user_id)
     VALUES
-      ('local', 'petya', 'Петя', 'hash', true, true, null, null),
-      ('guest', 'masha@peer', 'Маша', 'hash', true, true, 'peer', 'home-user')
+      ('local', 'petya', 'Петя', 'hash', true, true, '/media/local.gif', null, null),
+      ('guest', 'masha@peer', 'Маша', 'hash', true, true, '/media/guest.gif', 'peer', 'home-user')
   `);
 });
 
@@ -89,4 +90,32 @@ test('оба маршрута загрузки аватара отсекают �
     assert.equal(response.statusCode, 403, url);
     assert.deepEqual(response.json(), { error: 'federation.guest_forbidden' }, url);
   }
+});
+
+test('снять анимированный аватар может местный, но не гость', async () => {
+  // Ловит единственную аватарную ручку без requireLocalUser: гость менял домашний профиль на хосте.
+  const guest = await app.inject({
+    method: 'DELETE', url: '/users/me/avatar/animated', headers: authHeader('guest'),
+  });
+  assert.equal(guest.statusCode, 403);
+  assert.deepEqual(guest.json(), { error: 'federation.guest_forbidden' });
+  let rows = await t.raw.query<{ id: string; animated_avatar_url: string | null }>(
+    `SELECT id, animated_avatar_url FROM users ORDER BY id`,
+  );
+  assert.deepEqual(rows.rows, [
+    { id: 'guest', animated_avatar_url: '/media/guest.gif' },
+    { id: 'local', animated_avatar_url: '/media/local.gif' },
+  ]);
+
+  const local = await app.inject({
+    method: 'DELETE', url: '/users/me/avatar/animated', headers: authHeader('local'),
+  });
+  assert.equal(local.statusCode, 200);
+  rows = await t.raw.query<{ id: string; animated_avatar_url: string | null }>(
+    `SELECT id, animated_avatar_url FROM users ORDER BY id`,
+  );
+  assert.deepEqual(rows.rows, [
+    { id: 'guest', animated_avatar_url: '/media/guest.gif' },
+    { id: 'local', animated_avatar_url: null },
+  ]);
 });

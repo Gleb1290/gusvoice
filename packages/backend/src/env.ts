@@ -120,7 +120,24 @@ export const env = {
     secretKey: process.env.MINIO_SECRET_KEY ?? '',
     bucket: process.env.MINIO_BUCKET ?? 'gusvoice',
     publicUrl: (process.env.MINIO_PUBLIC_URL ?? '').replace(/\/+$/, ''),
+    /**
+     * Закрытый бакет файлов ЛС (шаг 1в): БЕЗ политики, читается только бэкендом (`routes/att.ts`). Пусто — `<bucket>-private`.
+     * 🔴 Совпал с публичным или на нём нашлась политика для всех — закрытые файлы выключены, загрузки в ЛС отвечают 503
+     * (`storage.ensurePrivateBucket`): молча класть их в открытый бакет нельзя.
+     */
+    privateBucket: (process.env.MINIO_PRIVATE_BUCKET ?? '').trim() || `${process.env.MINIO_BUCKET ?? 'gusvoice'}-private`,
   },
+  /**
+   * Внешний адрес API без завершающего `/` — из него собираются ссылки на закрытые файлы ЛС (`/api/att/…`): десктоп
+   * ставит их прямо в `<img src>`, поэтому только абсолютные. Пусто — закрытые файлы выключены (загрузки в ЛС — 503).
+   */
+  publicApiUrl: (
+    process.env.PUBLIC_API_URL ||
+    process.env.STEAM_API_PUBLIC_URL ||
+    process.env.VITE_API_URL ||
+    process.env.FEDERATION_API_BASE ||
+    ''
+  ).replace(/\/+$/, ''),
   smtp: {
     host: process.env.SMTP_HOST ?? '', // empty => codes are logged instead of emailed
     port: Number(process.env.SMTP_PORT ?? 587),

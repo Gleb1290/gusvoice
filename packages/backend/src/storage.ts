@@ -1,4 +1,6 @@
+import type { Readable } from 'node:stream';
 import * as Minio from 'minio';
+import { policyGrantsPublic } from './attachmentRules.js';
 import { env } from './env.js';
 import {
   attachmentExt,
@@ -124,6 +126,101 @@ export async function ensureMediaBucket(): Promise<void> {
       console.log(`[storage] bucket "${env.minio.bucket}" ready (public-read) at ${env.minio.endpoint}${after}.`);
     },
   });
+}
+
+// ─── Закрытый бакет файлов ЛС (шаг 1в) ────────────────────────────────────────────────────────────────────────────
+
+let privateReady = false;
+
+/** Закрытые файлы ЛС можно принимать и отдавать: хранилище настроено, бакет создан и проверен (без политики для всех). */
+export function privateStorageReady(): boolean {
+  return !!minio && privateReady;
+}
+
+/**
+ * Один заход: закрытый бакет есть и НИКОМУ, кроме бэкенда, не открыт.
+ *
+ * 🔴 Политику на него не ставим никогда (в отличие от `prepareMediaBucket`). Совпал по имени с публичным или на нём
+ * нашлась политика «для всех» — это отказ, а не предупреждение: `/api/download/attachment` и публичный адрес хранилища
+ * отдали бы такие файлы кому угодно. Закрытые файлы тогда выключены, загрузки в ЛС отвечают 503.
+ */
+async function preparePrivateBucket(client: Minio.Client): Promise<void> {
+  const bucket = env.minio.privateBucket;
+  if (bucket === env.minio.bucket) throw new Error(`MINIO_PRIVATE_BUCKET совпадает с публичным бакетом «${bucket}»`);
+  if (!(await client.bucketExists(bucket))) await client.makeBucket(bucket);
+  // Нет политики — S3 отвечает ошибкой NoSuchBucketPolicy: это и есть нужное состояние. Любая ДРУГАЯ ошибка — не
+  // «политики нет», а «не знаем»: бросаем, попытка повторится (иначе сбой чтения политики открывал бы дорогу).
+  const policy = await client.getBucketPolicy(bucket).catch((e: { code?: string }) => {
+    if (e?.code === 'NoSuchBucketPolicy') return '';
+    throw e;
+  });
+  if (policyGrantsPublic(policy)) throw new Error(`на закрытом бакете «${bucket}» висит политика, открывающая его всем`);
+  privateReady = true;
+}
+
+let lastOnDemand = 0;
+
+/**
+ * Подготовить закрытый бакет прямо сейчас (не чаще раза в 30 с) — для загрузки, пришедшей, пока фоновые повторы ещё
+ * ждут своей очереди: хранилище поднялось позже бэкенда (ревью 30.09), а следующая плановая попытка — через минуты.
+ */
+export async function tryPreparePrivateNow(): Promise<boolean> {
+  if (privateReady || !minio || !env.publicApiUrl) return privateReady;
+  const now = Date.now();
+  if (now - lastOnDemand < 30_000) return false;
+  lastOnDemand = now;
+  await preparePrivateBucket(minio).catch(() => {});
+  return privateReady;
+}
+
+/** Подготовить закрытый бакет при старте; не вышло — повторяем в фоне, как публичный (`ensureMediaBucket`). */
+export async function ensurePrivateBucket(): Promise<void> {
+  if (!minio) return;
+  if (!env.publicApiUrl) {
+    console.warn('[storage] PUBLIC_API_URL/VITE_API_URL пуст — закрытые файлы ЛС выключены (ссылки /api/att не собрать).');
+    return;
+  }
+  const client = minio;
+  await startRetryUntilOk({
+    run: () => preparePrivateBucket(client),
+    delayMs: bucketRetryDelayMs,
+    schedule: (next, ms) => {
+      setTimeout(next, ms).unref();
+    },
+    onFailure: (failures, delay, e) =>
+      console.error(
+        `[storage] private bucket setup failed (attempt ${failures}), retrying in ${Math.round(delay / 1000)}s:`,
+        (e as Error).message,
+      ),
+    onSuccess: () => console.log(`[storage] private bucket "${env.minio.privateBucket}" ready (no public policy).`),
+  });
+}
+
+/** Положить файл ЛС в закрытый бакет. Заголовки выдачи ставит бэкенд при отдаче (`routes/att.ts`), не хранилище. */
+export async function putPrivate(key: string, bytes: Buffer, mime: string): Promise<void> {
+  if (!minio) throw new Error('storage not configured');
+  await minio.putObject(env.minio.privateBucket, key, bytes, bytes.length, { 'Content-Type': mime });
+}
+
+/** Размер файла ЛС; `null` — объекта нет. */
+export async function statPrivate(key: string): Promise<{ size: number } | null> {
+  if (!minio) return null;
+  const st = await minio.statObject(env.minio.privateBucket, key).catch(() => null);
+  return st ? { size: st.size } : null;
+}
+
+/** Поток файла ЛС целиком или диапазона (границы включительно) — для перемотки голосовых. */
+export async function getPrivate(key: string, range?: { start: number; end: number }): Promise<Readable> {
+  if (!minio) throw new Error('storage not configured');
+  return range
+    ? minio.getPartialObject(env.minio.privateBucket, key, range.start, range.end - range.start + 1)
+    : minio.getObject(env.minio.privateBucket, key);
+}
+
+/** Удалить файл ЛС. Отсутствующий объект — не ошибка (повтор уборки после частичного сбоя). */
+export async function removePrivate(key: string): Promise<void> {
+  if (!minio) throw new Error('storage not configured');
+  await minio.removeObject(env.minio.privateBucket, key);
 }
 
 /** Upload a custom server sound (one per server+event) and return its public URL. */

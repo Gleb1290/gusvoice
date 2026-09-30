@@ -1,5 +1,5 @@
 import { api } from './api';
-import { finiteDeep } from './diagRules';
+import { finiteDeep, nativeEncodeStatsFrom, type EncodeStats } from './diagRules';
 import { isDesktop } from './hotkeys';
 import { gvScreenShareStats } from './nativeScreenShare';
 import { toast } from './toast';
@@ -7,7 +7,7 @@ import { config } from './config';
 import { diagDecision, getDiagConsent } from './diagConsent';
 import { diagVisible } from './diagVisible';
 import { takeUiMeters, watchLongTasks } from './uiMeters';
-import { isWindowCovered, windowCoverPct } from './windowCovered';
+import { isGameForeground, isWindowCovered, windowCoverPct } from './windowCovered';
 import { useStore } from './store';
 
 /**
@@ -172,56 +172,6 @@ type SubStats = {
   fps_min: number;
 };
 
-type EncodeStats = {
-  /** Кадров закодировано и отправлено. Расхождение = кадры теряются уже после кодирования. */
-  frames_encoded: number;
-  frames_sent: number;
-  /** Реальная частота кадров у кодировщика — против той, что человек выбрал в настройках. */
-  fps: number;
-  /** Во что упёрлись: none | cpu | bandwidth | other. */
-  limitation: string;
-  /** Сколько секунд провели в каждом из состояний ограничения — накопительно за показ. */
-  limited_cpu_s: number;
-  limited_bw_s: number;
-  /** Запросы ключевого кадра от получателей: растут, когда до них не доезжают куски картинки. */
-  pli: number;
-  nack: number;
-  /** Ширина/высота того, что реально уходит (кодировщик мог понизить сам). */
-  width: number;
-  height: number;
-  /** Целевой битрейт кодировщика, бит/с — падает, когда сеть не тянет. */
-  target_bitrate: number;
-  /** Средняя стоимость кодирования одного кадра, мс. Растёт — процессор не успевает. */
-  encode_ms_per_frame: number;
-
-  // ─── Только для НАТИВНОГО показа: этих полей у браузерного пути нет вовсе ───
-  /**
-   * Название кодировщика от libwebrtc: `NvCodec…` = аппаратный NVENC, `OpenH264`/`libvpx` = софт.
-   *
-   * 🔴 Прямой ответ на «почему при показе лагает игра»: софтверный кодировщик 1080p съедает заметную
-   * долю процессора, и это ложится поверх игры. Раньше это было видно только косвенно.
-   */
-  encoder?: string;
-  power_efficient?: boolean;
-  /** Сеть до сервера: задержка, доля и число потерянных пакетов (из отчёта получателя). */
-  rtt_ms?: number;
-  fraction_lost?: number;
-  packets_lost?: number;
-  /** Сколько раз кодировщик сам понижал разрешение — прямой признак, что он не тянет. */
-  resolution_changes?: number;
-  key_frames?: number;
-  codec?: string;
-  /**
-   * Сколько раз показ пересобрался САМ (#111) и сколько секунд подряд залипание держится сейчас.
-   *
-   * 🔴 Оба поля — проверка самолечения, а не украшение. У здорового показа `heals` обязан остаться
-   * нулём: ненулевой у того, кто ни на что не жалуется, значит порог сработал вхолостую. А
-   * `stuck_s` показывает «почти сработало», без него о промахах порога мы бы не узнали вовсе.
-   */
-  heals?: number;
-  stuck_s?: number;
-};
-
 /** `sharing` размечает срез по фазе: 0 — просто сидим в голосе, 1 — идёт показ. Ради этой разметки
  *  сбор и переехал на вход в канал: без фоновых срезов «до» цифры показа не с чем сравнивать. */
 type Sample = Snapshot & {
@@ -379,33 +329,7 @@ async function nativeEncodeStats(): Promise<EncodeStats | null> {
   // Возвращает null, когда нативного показа нет, — это и есть признак «брать браузерный путь».
   const n = await gvScreenShareStats().catch(() => null);
   if (!n) return null;
-  return {
-    frames_encoded: n.frames_encoded,
-    // Нативный отчёт считает пакеты, а не кадры. Приравнивать пакеты к кадрам нельзя — это разные
-    // величины, и подставленное сюда число врало бы. Расхождение «закодировано против отправлено»
-    // для этого пути смотрим по потерям пакетов ниже.
-    frames_sent: 0,
-    fps: Math.round(n.fps * 10) / 10,
-    limitation: n.limit_reason,
-    limited_cpu_s: Math.round(n.limit_cpu_s * 10) / 10,
-    limited_bw_s: Math.round(n.limit_bandwidth_s * 10) / 10,
-    pli: n.pli,
-    nack: n.nack,
-    width: n.width,
-    height: n.height,
-    target_bitrate: Math.round(n.target_bitrate),
-    encode_ms_per_frame: 0, // нативный отчёт не даёт суммарное время кодирования
-    encoder: n.encoder,
-    power_efficient: n.power_efficient,
-    rtt_ms: Math.round(n.rtt_ms * 10) / 10,
-    fraction_lost: Math.round(n.fraction_lost * 1000) / 1000,
-    packets_lost: n.packets_lost,
-    resolution_changes: n.resolution_changes,
-    key_frames: n.key_frames,
-    codec: n.codec,
-    heals: n.heals,
-    stuck_s: n.stuck_s,
-  };
+  return nativeEncodeStatsFrom(n);
 }
 
 /** Нативный показ или браузерный — источник выбирается сам, по наличию нативной сессии. */
@@ -568,7 +492,7 @@ async function tick(): Promise<void> {
       // Нагрузка интерфейса (#193). Снимается ВСЕГДА: беда видна и без показа — 26 % машины у
       // человека, который просто сидит в голосе и смотрит в игру. Заодно — что об окне думает
       // оболочка: без этого «заморозка не сработала» и «окно и не было накрыто» неотличимы.
-      ui: { ...takeUiMeters(), covered: isWindowCovered() ? 1 : 0, cover_pct: coverPct },
+      ui: { ...takeUiMeters(), covered: isWindowCovered() ? 1 : 0, cover_pct: coverPct, game_fg: isGameForeground() ? 1 : 0 },
       enc: enc ?? undefined,
       cap: cap ?? undefined,
       sub: sub ?? undefined,

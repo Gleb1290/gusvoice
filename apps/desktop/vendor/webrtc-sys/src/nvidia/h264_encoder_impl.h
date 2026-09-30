@@ -13,14 +13,22 @@
 
 #include <cuda.h>
 
+#include <deque>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "NvEncoder/NvEncoder.h"
 #include "NvEncoder/NvEncoderCuda.h"
+#if defined(_WIN32)
+// GusVoice (#207, шаг 4.1): кадры из видеопамяти — своя D3D11-сессия NVENC.
+#include "gv_d3d11_converter.h"
+#include "nvenc_d3d11.h"
+#endif
 
 #include "absl/container/inlined_vector.h"
 #include "api/transport/rtp/dependency_descriptor.h"
+#include "api/video/color_space.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_codec_constants.h"
 #include "api/video_codecs/scalability_mode.h"
@@ -74,8 +82,32 @@ class NvidiaH264EncoderImpl : public VideoEncoder {
   EncoderInfo GetEncoderInfo() const override;
 
  private:
-  int32_t ProcessEncodedFrame(std::vector<uint8_t>& packet,
-                              const ::webrtc::VideoFrame& inputFrame);
+  // Метаданные кадра, нужные упаковке. С конвейером (D3D11-сессия) пакет приходит на кадр позже,
+  // чем сам кадр, поэтому держим их отдельно от `VideoFrame` — он держал бы и текстуру.
+  struct FrameMeta {
+    uint32_t rtp_timestamp = 0;
+    int64_t ntp_time_ms = 0;
+    int64_t render_time_ms = 0;
+    VideoRotation rotation = kVideoRotation_0;
+    std::optional<ColorSpace> color_space;
+    bool drop = false;  // поток поставили на паузу, пока кадр был в работе
+  };
+  static FrameMeta MetaOf(const VideoFrame& frame);
+  int32_t ProcessEncodedFrame(std::vector<uint8_t>& packet, const FrameMeta& meta);
+  // Сессия NVENC: `native` — D3D11 со входом из видеопамяти, иначе CUDA с загрузкой I420.
+  int32_t CreateSession(bool native);
+#if defined(_WIN32)
+  int32_t EncodeNative(const VideoFrame& frame,
+                       const livekit::D3D11FrameBuffer& buffer,
+                       bool key_frame);
+  std::unique_ptr<GvD3D11Converter> converter_;
+#endif
+  std::deque<FrameMeta> pending_;
+  bool native_ = false;         // текущая сессия — D3D11
+  bool native_failed_ = false;  // путь из видеопамяти отказал — до конца сессии старым путём
+  bool has_rates_ = false;
+  RateControlParameters last_rates_;
+  std::string session_error_;  // почему не создалась последняя сессия — для «Пути кадра»  // чтобы новая сессия сразу получила текущий битрейт
  private:
   const webrtc::Environment& env_;
   EncodedImageCallback* encoded_image_callback_ = nullptr;

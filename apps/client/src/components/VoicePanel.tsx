@@ -1,6 +1,6 @@
 import { useMaybeRoomContext } from '@livekit/components-react';
 import { ConnectionQuality, type Room } from 'livekit-client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { playSound } from '../sounds';
 import { useStore } from '../store';
 import { Icon } from './Icon';
@@ -79,29 +79,38 @@ async function engineReports(room: Room): Promise<{ sub?: RTCStatsReport; pub?: 
 }
 
 /**
- * Poll MY connection to the SFU every 2s while connected: quality (localParticipant.connectionQuality),
+ * 🔴 Опрос частый (2 с) ТОЛЬКО пока мышь над строкой состояния — окошко видно лишь при наведении
+ * (27.09, #207). Раньше две полные `getStats()` и перерисовка панели шли каждые 2 с всё время в голосе;
+ * без наведения теперь раз в 10 с и без перерисовки — только ради истории спарклайнов.
+ *
+ * Poll MY connection to the SFU while connected: quality (localParticipant.connectionQuality),
  * ping (ICE candidate-pair RTT), upload bitrate (mic outbound-rtp), and download loss + jitter (a
  * subscribed remote audio track's inbound-rtp — the receive path, available whenever someone else is in
  * the channel). Null when not connected. Feeds the styled hover popover in VoicePanel.
  */
-function useSelfConnStats(room: Room | undefined, connected: boolean): ConnState | null {
+function useSelfConnStats(room: Room | undefined, connected: boolean, hot: boolean): ConnState | null {
   const [state, setState] = useState<ConnState | null>(null);
+  // История и «прошлый замер» живут между сменами `hot`: спарклайны не должны обнуляться от наведения.
+  const mem = useRef<{ hist: Hist; prevBytes: number; prevTs: number; lastRtt?: number }>({
+    hist: { rtt: [], loss: [], jitter: [], up: [] },
+    prevBytes: 0,
+    prevTs: 0,
+  });
   useEffect(() => {
-    if (!room || !connected) {
-      setState(null);
-      return;
-    }
+    mem.current = { hist: { rtt: [], loss: [], jitter: [], up: [] }, prevBytes: 0, prevTs: 0 };
+    if (!room || !connected) setState(null);
+  }, [room, connected]);
+  useEffect(() => {
+    if (!room || !connected) return;
     const lp = room.localParticipant;
-    const hist: Hist = { rtt: [], loss: [], jitter: [], up: [] };
+    const m = mem.current;
+    const hist = m.hist;
     const push = (arr: number[], v?: number) => {
       if (v == null) return;
       arr.push(v);
       if (arr.length > 30) arr.shift();
     };
     let stopped = false;
-    let prevBytes = 0;
-    let prevTs = 0;
-    let lastRtt: number | undefined;
     const tick = async () => {
       try {
         const cur: SelfStats = { quality: lp.connectionQuality };
@@ -120,8 +129,8 @@ function useSelfConnStats(room: Room | undefined, connected: boolean): ConnState
             if (val != null && val > 0) r = val;
           });
         }
-        if (r != null) lastRtt = r * 1000;
-        cur.rtt = lastRtt;
+        if (r != null) m.lastRtt = r * 1000;
+        cur.rtt = m.lastRtt;
         // Download loss (cumulative %) + jitter (worst) — remote inbound audio on the subscriber PC.
         let lost = 0;
         let recv = 0;
@@ -146,17 +155,18 @@ function useSelfConnStats(room: Room | undefined, connected: boolean): ConnState
             ts = Math.max(ts, st.timestamp);
           }
         });
-        if (ts && prevTs && bytes >= prevBytes) {
-          const dt = (ts - prevTs) / 1000;
-          if (dt > 0) cur.up = Math.max(0, ((bytes - prevBytes) * 8) / dt / 1000);
+        if (ts && m.prevTs && bytes >= m.prevBytes) {
+          const dt = (ts - m.prevTs) / 1000;
+          if (dt > 0) cur.up = Math.max(0, ((bytes - m.prevBytes) * 8) / dt / 1000);
         }
-        prevBytes = bytes;
-        prevTs = ts;
+        m.prevBytes = bytes;
+        m.prevTs = ts;
         push(hist.rtt, cur.rtt);
         push(hist.loss, cur.loss);
         push(hist.jitter, cur.jitter);
         push(hist.up, cur.up);
-        if (!stopped) {
+        // Без наведения окошко скрыто — копим историю, но панель не перерисовываем.
+        if (!stopped && hot) {
           setState({
             cur,
             hist: { rtt: [...hist.rtt], loss: [...hist.loss], jitter: [...hist.jitter], up: [...hist.up] },
@@ -167,12 +177,12 @@ function useSelfConnStats(room: Room | undefined, connected: boolean): ConnState
       }
     };
     void tick();
-    const iv = setInterval(() => void tick(), 2000);
+    const iv = setInterval(() => void tick(), hot ? 2000 : 10_000);
     return () => {
       stopped = true;
       clearInterval(iv);
     };
-  }, [room, connected]);
+  }, [room, connected, hot]);
   return state;
 }
 
@@ -215,7 +225,8 @@ export function VoicePanel() {
   const servers = useStore((s) => s.servers);
   const currentServerId = useStore((s) => s.currentServerId);
   const room = useMaybeRoomContext();
-  const connStats = useSelfConnStats(room, voiceState === 'connected');
+  const [statsHot, setStatsHot] = useState(false);
+  const connStats = useSelfConnStats(room, voiceState === 'connected', statsHot);
   if (!voice) return null;
 
   const ch = bootstrap?.channels.find((c) => c.id === voice.channelId);
@@ -226,7 +237,7 @@ export function VoicePanel() {
 
   return (
     <div className="voice-panel">
-      <div className="vp-status">
+      <div className="vp-status" onMouseEnter={() => setStatsHot(true)} onMouseLeave={() => setStatsHot(false)}>
         <span className={`vp-sig ${connected ? 'ok' : 'warn'}`}>
           <Icon name="signal" size={18} />
         </span>

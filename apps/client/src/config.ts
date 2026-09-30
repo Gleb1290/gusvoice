@@ -11,6 +11,7 @@ import {
   type ServerConfig,
 } from './configRules';
 import { isTauri } from './hotkeys';
+import { endGuestSessions as endGuestSessionsWith, logoutFamilyCore } from './logoutFamilyRules';
 
 // Чистые правила (нормализация адреса, переход реестра) — в `configRules.ts`, там же и типы.
 // Реэкспорт, чтобы компоненты продолжали импортировать их из `./config`.
@@ -244,25 +245,12 @@ export function removeInstance(id: string): void {
  * Попросить хосты завершить гостевые сессии — ДО того, как токены будут стёрты (F-23).
  *
  * «Выйти» раньше забывало токены только в браузере: на хостах они жили до своего срока, и угнанный
- * токен переживал нажатие. `POST /fed/guest-session/end` поднимает поколение теневой строки — то же,
- * что «выйти везде» дома. Без ожидания и с `keepalive`: за выходом следует перезагрузка, и запрос
- * обязан её пережить; хост лежит — выход всё равно происходит, его сессия умрёт по сроку.
+ * токен переживал нажатие. Сам запрос (адрес, `keepalive`, «без ожидания») — в `logoutFamilyRules.ts`
+ * под тестами; здесь только настоящая сеть. `fetch` берётся в момент вызова, внутри `try` у правила:
+ * без окна его может не быть, и это не повод ломать выход.
  */
 function endGuestSessions(guests: Instance[]): void {
-  for (const inst of guests) {
-    if (!inst.token || !inst.apiUrl) continue;
-    try {
-      void fetch(`${inst.apiUrl}/api/fed/guest-session/end`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${inst.token}` },
-        keepalive: true,
-      }).catch(() => {
-        /* хост недоступен — сессия умрёт по сроку */
-      });
-    } catch {
-      /* fetch недоступен (тесты без окна) — не повод ломать выход */
-    }
-  }
+  endGuestSessionsWith(guests, (url, init) => fetch(url, init));
 }
 
 /**
@@ -294,16 +282,14 @@ export function rememberInstanceServers(id: string, servers: InstanceServer[]): 
  *
  * ⚠️ Семья — это дом и ЕГО гости, а не весь реестр: у человека может быть несколько своих аккаунтов
  * на разных инстансах, и выход из одного не должен выбрасывать из остальных.
+ *
+ * Решение и порядок — в чистом `logoutFamilyCore` (`logoutFamilyRules.ts`, под тестами): хостам
+ * «завершить сессию» уходит внутри ядра, пока токены ещё на руках (F-23), а стираем уже здесь, записью
+ * возвращённого списка. Записи нет — в хранилище не пишем вовсе.
  */
 export function logoutFamily(id: string | null): void {
-  const list = readInstances();
-  const me = list.find((i) => i.id === id);
-  if (!me) return;
-  const homeId = me.guestOf ?? me.id;
-  const family = new Set([homeId, ...list.filter((i) => i.guestOf === homeId).map((i) => i.id)]);
-  // Хостам — «завершить сессию», пока токены ещё на руках (F-23), и только потом стираем.
-  endGuestSessions(list.filter((i) => i.guestOf === homeId));
-  writeInstances(list.map((i) => (family.has(i.id) ? { ...i, token: null } : i)));
+  const next = logoutFamilyCore(readInstances(), id, endGuestSessions);
+  if (next) writeInstances(next);
 }
 
 export function renameInstance(id: string, name: string): void {
@@ -462,6 +448,9 @@ export function clearServer(): void {
 export async function restartApp(): Promise<void> {
   if (isTauri()) {
     try {
+      // Перезапуск идёт мимо штатного выхода — идущий показ иначе выглядел бы падением (#112).
+      const { endShareBeforeExit } = await import('./updater');
+      await endShareBeforeExit();
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
       return;

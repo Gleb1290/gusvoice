@@ -10,7 +10,7 @@
   },
   "pnpm": {
     "overrides": {
-      "fast-uri": "3.1.6",
+      "fast-uri": "3.1.7",
       "fast-xml-parser": "5.10.1",
       "find-my-way": "9.7.0"
     }

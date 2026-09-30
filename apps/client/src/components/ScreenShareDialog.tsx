@@ -12,6 +12,7 @@ import {
 import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { formatCombo, getHotkeys, isDesktop } from '../hotkeys';
 import { gvScreenSources, type ScreenSource } from '../nativeScreenShare';
+import { shareStartErrorText } from '../shareErrorText';
 import { Icon } from './Icon';
 import { Toggle } from './Toggle';
 import { Select } from './Select';
@@ -161,11 +162,9 @@ export function ScreenShareDialog({
       else await onStart({ sourceId: selectedId, isWindow: tab === 'window' });
       // success → the caller closes the dialog (it owns the sharing state).
     } catch (e) {
-      // 🔴 Оболочка отказывает СТРОКОЙ, а не `Error` (так устроен `invoke` Tauri): раньше здесь читали
-      // только `.message`, и причина вроде «signal connection timed out» терялась за общей фразой —
-      // на пробной сборке 23.09 разбирать пришлось через отладчик.
-      const reason = typeof e === 'string' ? e : (e as Error)?.message;
-      setError(reason ? `Не удалось начать трансляцию: ${reason}` : 'Не удалось начать трансляцию');
+      // 🔴 Оболочка отказывает СТРОКОЙ, а не `Error` — разбор причины в `shareStartErrorText`
+      // (`shareErrorText.ts`, под тестами).
+      setError(shareStartErrorText(e));
       setStarting(false);
     }
   }
@@ -388,6 +387,19 @@ export function ScreenShareDialog({
               </span>
             </div>
 
+            {/* Показ ОКНА снимается только через WGC, а пока он идёт, Windows рисует курсор программно —
+                над игрой он может дёргаться (инвентарь, перетаскивание; #207, 25.09). Экран с 0.8.9
+                снимается другим способом (DXGI), курсор там обычный. Поведение окна решено не менять
+                (горячая клавиша стримит окно — показ всего экрана по клавише открыл бы зрителям весь
+                монитор при Alt+Tab), а честно подсказать. */}
+            {isDesktop() && tab === 'window' && (
+              <div className="ss-row">
+                <span className="ss-hint">
+                  Совет: показ всего экрана сейчас стабильнее — в играх не дёргается курсор.
+                </span>
+              </div>
+            )}
+
             {/* Обходной путь для утечки в проводнике при показе ОКНА (#100). Современный способ
                 захвата подтекает в explorer.exe — у одного человека тот вырос со 150 до 750 МБ за два
                 часа показа, три сессии подряд, — а когда проводнику плохо, отваливаются Alt+Tab,
@@ -413,12 +425,34 @@ export function ScreenShareDialog({
               </div>
             )}
 
+            {/* Путь кадра внутри видеокарты (#207, шаг 4). Только десктоп и только экран: окно пока
+                снимается прежним способом. Выключатель — на случай, если новый путь у кого-то
+                подведёт; выключенный возвращает прежний. */}
+            {isDesktop() && tab === 'screen' && (
+              <div className="ss-row">
+                <span className="settings-group-label" id="ss-gpu-label">
+                  Показ через видеокарту
+                </span>
+                <Toggle
+                  checked={settings.gpuPipeline !== false}
+                  onChange={(v) => update({ gpuPipeline: v })}
+                  labelledBy="ss-gpu-label"
+                  describedBy="ss-gpu-hint"
+                />
+                <span className="ss-hint" id="ss-gpu-hint">
+                  {settings.gpuPipeline !== false
+                    ? 'Кадр не уходит из видеокарты: меньше нагрузка на процессор и меньше рывков в тяжёлых играх. Работает на видеокартах NVIDIA. Если показ ведёт себя странно — выключите, вернётся прежний способ.'
+                    : 'Прежний способ: кадр идёт через процессор. Нагрузка выше, а в тяжёлых играх больше рывков.'}
+                </span>
+              </div>
+            )}
+
             {/* Запасной слой качества (#109). Показываем на ОБЕИХ вкладках и в вебе: беда не в том,
                 что снимаем, а в том, сколько потоков публикуем. Без запасного слоя зритель с
                 потерями просит опорные кадры, и пульсирует картинка у ВСЕХ зрителей сразу. */}
             <div className="ss-row">
               <span className="settings-group-label" id="ss-layers-label">
-                Запасной слой качества
+                Слои качества для зрителей
               </span>
               <Toggle
                 checked={settings.layers}
@@ -428,10 +462,31 @@ export function ScreenShareDialog({
               />
               <span className="ss-hint" id="ss-layers-hint">
                 {settings.layers
-                  ? 'Обычный режим. Зритель со слабым интернетом получает картинку попроще, а не портит её всем остальным. Выключайте, только если показ вообще не запускается.'
-                  : 'Один поток на всех. Показ запустится даже там, где видеокарта не тянет второй, но один зритель с плохой связью снова будет портить картинку всему каналу.'}
+                  ? 'Обычный режим. Зритель сам выбирает качество, а со слабым интернетом получает картинку попроще, а не портит её всем остальным. Выключайте, только если показ вообще не запускается.'
+                  : 'Один поток на всех. Показ запустится даже там, где видеокарта не тянет несколько, но зрителю не из чего выбирать качество, а один зритель с плохой связью снова будет портить картинку всему каналу.'}
               </span>
             </div>
+
+            {/* Курсор в кадре (28.09). Только десктоп: в браузере курсор рисует сам браузер. Камере
+                курсор ни к чему. По умолчанию включено — решение владельца. */}
+            {isDesktop() && tab !== 'camera' && (
+              <div className="ss-row">
+                <span className="settings-group-label" id="ss-cursor-label">
+                  Показывать курсор
+                </span>
+                <Toggle
+                  checked={settings.cursor !== false}
+                  onChange={(v) => update({ cursor: v })}
+                  labelledBy="ss-cursor-label"
+                  describedBy="ss-cursor-hint"
+                />
+                <span className="ss-hint" id="ss-cursor-hint">
+                  {settings.cursor !== false
+                    ? 'Зрители видят ваш курсор. Если игра прячет курсор, его не видно и в показе.'
+                    : 'Курсор в показе не виден.'}
+                </span>
+              </div>
+            )}
 
             {/* Превью показа (#115). Тумблер не про нагрузку, а про приватность: раньше, чтобы
                 увидеть чужой экран, надо было зайти в канал — и человек об этом узнавал. Право

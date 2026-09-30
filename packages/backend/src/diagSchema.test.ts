@@ -16,6 +16,22 @@ const report = (samples: unknown[]) => ({
   samples,
 });
 
+const enc = (patch: Record<string, unknown> = {}) => ({
+  frames_encoded: 0,
+  frames_sent: 0,
+  fps: 0,
+  limitation: '',
+  limited_cpu_s: 0,
+  limited_bw_s: 0,
+  pli: 0,
+  nack: 0,
+  width: 0,
+  height: 0,
+  target_bitrate: 0,
+  encode_ms_per_frame: 0,
+  ...patch,
+});
+
 describe('схема отчёта диагностики', () => {
   it('старый срез без новых полей сохраняет фазу показа, а не становится фоном', () => {
     // До смены модели сессии отчёты приходили только во время показа. default=0 переписал бы
@@ -47,21 +63,7 @@ describe('схема отчёта диагностики', () => {
     const encoder = 'x'.repeat(129);
     const parsed = parseDiagReport(report([
       sample({
-        enc: {
-          frames_encoded: 0,
-          frames_sent: 0,
-          fps: 0,
-          limitation: '',
-          limited_cpu_s: 0,
-          limited_bw_s: 0,
-          pli: 0,
-          nack: 0,
-          width: 0,
-          height: 0,
-          target_bitrate: 0,
-          encode_ms_per_frame: 0,
-          encoder,
-        },
+        enc: enc({ encoder }),
       }),
     ]));
     assert.ok(parsed);
@@ -69,5 +71,84 @@ describe('схема отчёта диагностики', () => {
     assert.ok(accepted?.enc);
     assert.equal(parsed.samples.dropped, 0);
     assert.equal(accepted.enc.encoder, encoder.slice(0, 128));
+  });
+
+  it('путь кадра доходит до отчёта, режется по границам и остаётся необязательным', () => {
+    // Ловит тихое удаление новых полей Zod-схемой и отказ отчётов от старой оболочки.
+    const pipeline = 'gpu-extra';
+    const note = 'n'.repeat(120);
+    const parsed = parseDiagReport(report([
+      sample({ enc: enc({ pipeline, pipeline_note: note }) }),
+      sample({ t: 2, enc: enc() }),
+    ]));
+    assert.ok(parsed);
+    assert.equal(parsed.samples.dropped, 0);
+    assert.equal(parsed.samples.ok[0]?.enc?.pipeline, pipeline.slice(0, 8));
+    assert.equal(parsed.samples.ok[0]?.enc?.pipeline_note, note.slice(0, 96));
+    assert.equal(parsed.samples.ok[1]?.enc?.pipeline, undefined);
+    assert.equal(parsed.samples.ok[1]?.enc?.pipeline_note, undefined);
+  });
+
+  it('оценка канала, сервер и цели слоёв доходят до отчёта и остаются необязательными', () => {
+    // Ловит тихое вырезание новых чисел Zod-схемой и отказ срезов от старой оболочки.
+    const layer = { rid: 'h', active: 1, w: 1920, h: 1080, fps: 30, encode_ms: 4, target_kbps: 3_500 };
+    const parsed = parseDiagReport(report([
+      sample({ enc: enc({ bwe_bps: 12_900_000, bwe_min_bps: 15_500_000, server_rtt_ms: 1.25, layers: [layer] }) }),
+      sample({ t: 2, enc: enc({ layers: [{ ...layer, target_kbps: undefined }] }) }),
+      sample({ t: 3, enc: enc() }),
+    ]));
+    assert.ok(parsed);
+    assert.equal(parsed.samples.dropped, 0);
+    assert.equal(parsed.samples.ok[0]?.enc?.bwe_bps, 12_900_000);
+    assert.equal(parsed.samples.ok[0]?.enc?.bwe_min_bps, 15_500_000);
+    assert.equal(parsed.samples.ok[0]?.enc?.server_rtt_ms, 1.25);
+    assert.equal(parsed.samples.ok[0]?.enc?.layers?.[0]?.target_kbps, 3_500);
+    assert.equal(parsed.samples.ok[1]?.enc?.bwe_bps, undefined);
+    assert.equal(parsed.samples.ok[1]?.enc?.bwe_min_bps, undefined);
+    assert.equal(parsed.samples.ok[1]?.enc?.server_rtt_ms, undefined);
+    assert.equal(parsed.samples.ok[1]?.enc?.layers?.[0]?.target_kbps, undefined);
+    assert.equal(parsed.samples.ok[2]?.enc?.layers, undefined);
+  });
+
+  it('владельцы GPU, игра и задержка мышиного хука доходят до хранилища', () => {
+    // Ловит тихое вырезание новых полей строгим объектом Zod при успешном ответе 200.
+    const load = { '3d': 1, copy: 2, venc: 3, vdec: 4, other: 5 };
+    const parsed = parseDiagReport(report([
+      sample({ gpu_by: { game: load, native: load, webview: load, dwm: load }, game_exe: 'x'.repeat(80), mouse_hook_events: 7, mouse_hook_lag_max_ms: 16 }),
+      sample({ t: 2, gpu_by: { native: load, webview: load, dwm: load } }),
+    ]));
+    assert.ok(parsed);
+    assert.equal(parsed.samples.dropped, 0);
+    assert.deepEqual(parsed.samples.ok[0]?.gpu_by?.game, load);
+    assert.equal(parsed.samples.ok[0]?.game_exe, 'x'.repeat(64));
+    assert.equal(parsed.samples.ok[0]?.mouse_hook_events, 7);
+    assert.equal(parsed.samples.ok[0]?.mouse_hook_lag_max_ms, 16);
+    assert.equal(parsed.samples.ok[1]?.gpu_by?.game, undefined);
+  });
+
+  it('до четырёх слоёв принимаются с обрезанным rid, а пятый отбрасывает только свой срез', () => {
+    // Ловит раздувание отчёта и повтор старой аварии, где один плохой срез стоил всей пачки.
+    const layer = (rid: string) => ({ rid, active: 1, w: 1280, h: 720, fps: 30, encode_ms: 2 });
+    const parsed = parseDiagReport(report([
+      sample({ enc: enc({ layers: [layer('very-long-rid'), layer('m'), layer('l'), layer('x')] }) }),
+      sample({ t: 2, enc: enc({ layers: [layer('a'), layer('b'), layer('c'), layer('d'), layer('e')] }) }),
+    ]));
+    assert.ok(parsed);
+    assert.equal(parsed.samples.ok.length, 1);
+    assert.equal(parsed.samples.dropped, 1);
+    assert.equal(parsed.samples.ok[0]?.enc?.layers?.[0]?.rid, 'very-lon');
+    assert.match(parsed.samples.firstError ?? '', /^enc\.layers:/);
+  });
+
+  it('признак полноэкранной игры принимает только 0/1 и остаётся необязательным', () => {
+    // Ловит потерю поля, из-за которой нельзя доказать работу остановки анимаций.
+    const ui = { vad_ms: 0, vad_ticks: 0, vad_tracks: 0, long_ms: 0, long_max_ms: 0, long_count: 0, hidden: 0, focused: 1 };
+    const parsed = parseDiagReport(report([
+      sample({ ui: { ...ui, game_fg: 1 } }), sample({ t: 2, ui }), sample({ t: 3, ui: { ...ui, game_fg: 2 } }),
+    ]));
+    assert.ok(parsed);
+    assert.equal(parsed.samples.ok[0]?.ui?.game_fg, 1);
+    assert.equal(parsed.samples.ok[1]?.ui?.game_fg, undefined);
+    assert.equal(parsed.samples.dropped, 1);
   });
 });

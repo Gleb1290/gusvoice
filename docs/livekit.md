@@ -20,8 +20,9 @@ only, no peer-to-peer" requirement is satisfied by the architecture itself; noth
 - Each participant holds **two PeerConnections**: a **publisher** PC (its outgoing tracks) and a
   **subscriber** PC (incoming tracks). Newer clients can collapse these into a single PC
   (`UseSinglePeerConnection`, seen in v1.13.1 logs).
-- Media is Opus audio + VP8/VP9/H264/AV1 video; simulcast/dynacast are available but we keep
-  `adaptiveStream`/`dynacast` off for simplicity.
+- Media is Opus audio + VP8/VP9/H264/AV1 video. Screen shares publish three simulcast layers (0.8.6).
+  `dynacast` is ON since 25.09 (#207): the SFU tells the publisher which layers anyone watches, the
+  rest are not encoded. `adaptiveStream` stays off (stream-card snapshots, `VoiceChannelView.tsx`).
 
 ## 2. Deployment
 
@@ -162,7 +163,7 @@ Other reconnect facts worth knowing:
   by `channelId` and connected in a `useEffect`, exposed through `RoomContext.Provider`. This is
   deliberate: **recreating the `Room` on every React render causes constant reconnects** — a classic
   pitfall. Re-renders must not tear down the media session.
-- `RoomOptions` we set: `disconnectOnPageLeave: false`, `adaptiveStream: false`, `dynacast: false`,
+- `RoomOptions` we set: `disconnectOnPageLeave: false`, `adaptiveStream: false`, `dynacast: true` (25.09),
   `audioCaptureDefaults: { autoGainControl, echoCancellation, noiseSuppression }` (free, browser-native
   — no Krisp).
 - We only call `leaveVoice()` (drop the UI) on **terminal** disconnect reasons

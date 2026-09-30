@@ -40,6 +40,7 @@ import { DiagConsentDialog } from './DiagConsent';
 import { api } from '../api';
 import { setSelfMuted } from '../voiceSelf';
 import { GRACE_MS, touchVoiceSession } from '../voiceSession';
+import { vadFloor, vadInitial, vadOpenLevel, vadStep, type VadState } from '../speakingVad';
 
 /** Слой показа → качество в терминах LiveKit (#191). */
 const LAYER_QUALITY: Record<StreamLayer, VideoQuality> = {
@@ -94,7 +95,11 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     return new Room({
       disconnectOnPageLeave: false,
       adaptiveStream: false,
-      dynacast: false,
+      // 🔴 Dynacast ВКЛЮЧЁН (#207, плейбук 25.09): сервер говорит, какие слои НАШЕЙ публикации кто-то
+      // смотрит, и SDK выключает остальные. Касается только того, что шлём мы (показ из браузера,
+      // камера): с тремя слоями (#191) без зрителей кодировались все три. Раньше стояло `false`
+      // «для простоты» — причины не было. На приём и снимки превью (`adaptiveStream`) не влияет.
+      dynacast: true,
       // Route remote audio through a shared AudioContext so per-user volume can exceed 100%
       // (a GainNode, not the [0,1]-capped HTMLMediaElement.volume). See localUserAudio.
       webAudioMix: true,
@@ -769,12 +774,8 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // (A frequency-bin average — LiveKit's calculateVolume — inflated idle noise via its hot dB window,
     // so the ring stuck "on"; a raw time-domain PEAK was too twitchy. RMS over the whole ~21ms window
     // is both quiet-at-idle and smooth.) Idle ≈ 0.002–0.01, speech ≈ 0.03–0.15. Tune via gvVad debug.
-    // Calibrated from real captures (time-domain RMS): idle ≈ 0.005–0.006, speech spikes 0.04–0.2 with
-    // between-syllable dips to ~0.005–0.009. OPEN sits well above idle; CLOSE stays above idle but low
-    // enough to ride small dips; HOLD bridges longer word/sentence pauses without lingering at silence.
-    const OPEN = 0.015; // cross this to START speaking
-    const CLOSE = 0.01; // stay-speaking floor (hysteresis kills boundary chatter; still > idle 0.006)
-    const HOLD = 500; // ms to keep the ring on after the level drops — bridges gaps between words
+    // 🔴 Порог — СВОЙ у каждой дорожки, от её же тишины (`speakingVad.ts`, 29.09). Был один на всех (0.015):
+    // тихо говорящих и шепчущих было слышно, а обводка у них не загоралась. Правило, замеры и прогоны — там.
     const TICK = 50; // ms poll (20 Hz) — smooth and cheap; store only updates on actual change
     const COVERED_TICK = 300; // окно под игрой: обводку никто не видит, хватит редкого шага
     // Re-read each tick so `localStorage.gvVad='1'` takes effect live, without rejoining the call.
@@ -799,8 +800,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       src: MediaStreamAudioSourceNode;
       el: HTMLAudioElement | null; // remote-track keep-alive sink (see attach)
       buf: Uint8Array<ArrayBuffer>;
-      lastAbove: number;
-      open: boolean;
+      vad: VadState;
     };
     const mons = new Map<string, Mon>();
 
@@ -854,8 +854,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
           src,
           el,
           buf: new Uint8Array(analyser.fftSize),
-          lastAbove: 0,
-          open: false,
+          vad: vadInitial(),
         });
       } catch (e) {
         console.warn('[voice] speaking-VAD analyser failed for', id, e);
@@ -916,14 +915,13 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         const m = mons.get(p.identity);
         if (micOn && m) {
           const lvl = levelOf(m);
-          if (lvl >= (m.open ? CLOSE : OPEN)) {
-            m.open = true;
-            m.lastAbove = now;
-          } else {
-            m.open = false;
+          const step = vadStep(m.vad, lvl, now);
+          m.vad = step.state;
+          speaking = step.speaking;
+          if (DEBUG) {
+            const floor = vadFloor(m.vad) ?? 0;
+            dbg[p.name || p.identity] = `${lvl.toFixed(3)} пол ${floor.toFixed(3)} порог ${vadOpenLevel(floor).toFixed(3)}${speaking ? ' ●' : ''}`;
           }
-          speaking = now - m.lastAbove < HOLD;
-          if (DEBUG) dbg[p.name || p.identity] = `${lvl.toFixed(3)}${speaking ? ' ●' : ''}`;
         } else if (micOn) {
           // No analyser yet (e.g. analyser-init failed) — degrade gracefully to the server flag.
           speaking = p.isSpeaking;
@@ -947,7 +945,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       // стоило зайти в канал к показывающему (и вместе с ним пропадала цель для превью, #115).
       // Правило и разбор — в `streamAudioRules.ts`.
       creditScreenOwners(next);
-      if (DEBUG && ++dbgN % 6 === 0) console.log('[gvVad]', ctx?.state, `open≥${OPEN}`, dbg);
+      if (DEBUG && ++dbgN % 6 === 0) console.log('[gvVad]', ctx?.state, dbg);
       if (changed(next)) {
         prev = next;
         setLiveVoice(next);

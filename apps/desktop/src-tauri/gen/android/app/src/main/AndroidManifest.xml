@@ -18,7 +18,13 @@
     <!-- Embedded push distributor: a data-sync FGS holds the socket to the instance's ntfy so DMs /
          @mentions wake the app when it's closed, with no separate distributor app. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- #212: на Android 14+ служба пушей — `specialUse`. У `dataSync` с Android 15 лимит 6 часов в сутки
+         (потом `onTimeout`, не остановился — процесс падает) и запрет старта после перезагрузки;
+         у `specialUse` нет ни того, ни другого. `dataSync` остаётся для Android 10–13. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- #212: вибро-отклик. Chromium в WebView без этого разрешения молча игнорирует `navigator.vibrate`. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -86,7 +92,13 @@
         <service
             android:name=".PushDistributorService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|specialUse">
+            <!-- Объяснение `specialUse` для системы (и магазинов): постоянное соединение с сервером
+                 уведомлений самого приложения, без стороннего сервиса пушей. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Holds the connection to the app's own push server (UnifiedPush) so messages arrive while the app is closed" />
+        </service>
 
         <!-- Restart the embedded push distributor after reboot (only if it was enabled). -->
         <receiver

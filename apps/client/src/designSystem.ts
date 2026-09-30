@@ -29,7 +29,7 @@ export { ContextMenu, MenuItem, MenuSection, MenuHeader, type MenuPos } from './
 
 // ——— Как этим пользуются из кода ————————————————————————————————————————————
 /** Свои окна вместо `window.confirm`/`alert`: нативные ЗАМОРАЖИВАЮТ вкладку целиком. */
-export { confirmAction, alertDialog, useConfirmDialog } from './confirm';
+export { confirmAction, confirmWithOption, alertDialog, useConfirmDialog } from './confirm';
 
 // ——— Чистые правила (их же проверяет Codex тестами) —————————————————————————
 export {

@@ -215,3 +215,42 @@ export function checkAnimatedAvatar(mime: string, bytes: Uint8Array): AnimatedAv
   }
   return { ok: true, frames };
 }
+
+// ---- Аренда анимированного аватара: срок и потолок (общие для сервера и клиента) --------------
+
+/** Сколько даёт одна покупка анимированного аватара. Решение 02.09: тридцать дней. */
+export const AVATAR_RENTAL_DAYS = 30;
+
+/**
+ * Дальше этого вперёд аватар не оплатить. Решение 29.09: не больше 60 дней — осталось 45, ещё 30 не купишь.
+ * Продлить можно, когда останется `AVATAR_RENTAL_MAX_DAYS − AVATAR_RENTAL_DAYS` (30) дней или меньше.
+ */
+export const AVATAR_RENTAL_MAX_DAYS = 60;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Можно ли продлить прямо сейчас: срок ПОСЛЕ покупки не дальше потолка от «сейчас».
+ * Отсчёт продления — от большего из «сейчас» и текущего срока (как у сервера, `shopRules.avatarRentalUntil`).
+ * Ровно на границе (осталось 30 дней) — можно.
+ */
+export function avatarRentalCanExtend(
+  untilMs: number | null,
+  nowMs: number,
+  days = AVATAR_RENTAL_DAYS,
+  maxDays = AVATAR_RENTAL_MAX_DAYS,
+): boolean {
+  const from = untilMs !== null && untilMs > nowMs ? untilMs : nowMs;
+  return from + days * DAY_MS - nowMs <= maxDays * DAY_MS;
+}
+
+/** С какого момента продление снова разрешено (для подписи «Продлить с …»); `null` — уже можно. */
+export function avatarRentalExtendFrom(
+  untilMs: number | null,
+  nowMs: number,
+  days = AVATAR_RENTAL_DAYS,
+  maxDays = AVATAR_RENTAL_MAX_DAYS,
+): number | null {
+  if (avatarRentalCanExtend(untilMs, nowMs, days, maxDays) || untilMs === null) return null;
+  return untilMs - (maxDays - days) * DAY_MS;
+}

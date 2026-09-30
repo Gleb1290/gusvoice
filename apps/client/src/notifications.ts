@@ -1,5 +1,5 @@
 import type { CoinNotifyLevel } from './coinNotifyRules';
-import { isTauri } from './hotkeys';
+import { isDesktop, isTauri } from './hotkeys';
 import type { OsNotifyLevel } from './notifyRules';
 
 // OS-level notifications: the web Notification API in browsers, the Tauri notification plugin
@@ -7,7 +7,7 @@ import type { OsNotifyLevel } from './notifyRules';
 // for events that already passed the sound/DND gates in sockets.ts, and only while the window
 // is unfocused — the in-app UI covers the focused case. Enabled per-browser via `gv_os_notify`.
 
-const KEY = 'gv_os_notify';
+const KEY = 'gv_notify_clickable';
 
 /** Заводской уровень — «упоминания и ЛС» (см. пояснение ниже). */
 export const OS_NOTIFY_DEFAULT: OsNotifyLevel = 'mentions';
@@ -142,16 +142,52 @@ export function osNotifyRaw(title: string, body: string, onClick?: () => void): 
   deliver(title, body, onClick);
 }
 
+type TauriCore = { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+type TauriEvent = {
+  listen: (event: string, handler: (e: { payload: unknown }) => void) => Promise<() => void>;
+};
+function tauriGlobal(): { core?: TauriCore; event?: TauriEvent } | null {
+  return (window as unknown as { __TAURI__?: { core?: TauriCore; event?: TauriEvent } }).__TAURI__ ?? null;
+}
+
+/**
+ * Клик по системному тосту в десктопе (#212, Б11).
+ *
+ * 🔴 Плагин уведомлений на десктопе клик не отдаёт, поэтому `onClick` в Tauri раньше просто
+ * игнорировался: клик по уведомлению ЛС поднимал окно, но не открывал беседу. Теперь тост с
+ * `onClick` показывает своя команда `gv_notify_clickable` (`os_notify.rs`) и на клик шлёт
+ * `gv://notify-click` с меткой; метка → обработчик. Держим последние 50 — тосты старше давно ушли.
+ */
+const clickHandlers = new Map<string, () => void>();
+let clickSeq = 0;
+let clickListening = false;
+function listenNotifyClicks(ev: TauriEvent): void {
+  if (clickListening) return;
+  clickListening = true;
+  void ev.listen('gv://notify-click', (e) => {
+    const tag = typeof e.payload === 'string' ? e.payload : '';
+    const fn = clickHandlers.get(tag);
+    clickHandlers.delete(tag);
+    fn?.();
+  });
+}
+
 function deliver(title: string, body: string, onClick?: () => void): void {
   if (isTauri()) {
-    void (async () => {
-      try {
-        const { isPermissionGranted, sendNotification } = await import('@tauri-apps/plugin-notification');
-        if (await isPermissionGranted()) sendNotification({ title, body });
-      } catch {
-        /* plugin absent in this build — skip */
-      }
-    })();
+    const t = tauriGlobal();
+    if (onClick && isDesktop() && t?.core && t.event) {
+      listenNotifyClicks(t.event);
+      const tag = `n${++clickSeq}`;
+      clickHandlers.set(tag, onClick);
+      if (clickHandlers.size > 50) clickHandlers.delete(clickHandlers.keys().next().value as string);
+      void t.core.invoke('gv_notify_clickable', { title, body, tag }).catch(() => {
+        // Сборка без команды — показываем тостом плагина, как раньше (без клика).
+        clickHandlers.delete(tag);
+        deliverViaPlugin(title, body);
+      });
+      return;
+    }
+    deliverViaPlugin(title, body);
     return;
   }
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -165,6 +201,17 @@ function deliver(title: string, body: string, onClick?: () => void): void {
   } catch {
     /* some WebViews throw on construction — never break the message path */
   }
+}
+
+function deliverViaPlugin(title: string, body: string): void {
+  void (async () => {
+    try {
+      const { isPermissionGranted, sendNotification } = await import('@tauri-apps/plugin-notification');
+      if (await isPermissionGranted()) sendNotification({ title, body });
+    } catch {
+      /* plugin absent in this build — skip */
+    }
+  })();
 }
 
 /** «Имя» for a message author DTO (display name over the handle). */

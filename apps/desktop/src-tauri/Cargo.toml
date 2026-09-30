@@ -1,6 +1,6 @@
 [package]
 name = "gusvoice"
-version = "0.8.2"
+version = "0.8.17"
 description = "GusVoice desktop client"
 license = "AGPL-3.0-only"
 edition = "2021"
@@ -53,6 +53,9 @@ tauri-plugin-dialog = "2.7.2"
 # WebView2 mic/camera permission grant (Windows). Pinned to Tauri/wry's transitive version.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
+# Тост, который знает про клик (`os_notify.rs`, #212): плагин уведомлений клик на десктопе не отдаёт, а
+# под ним лежит этот же notify-rust. Версия — ровно та, что уже тянет tauri-plugin-notification.
+notify-rust = "4.18.0"
 # Native screen-share audio: WASAPI process-loopback that EXCLUDES the GusVoice process tree, so
 # the stream carries system/game audio without our own voice output (no echo). windows 0.61 matches
 # the version webview2-com/wry already pull in.
@@ -106,3 +109,7 @@ base64 = "0.22"
 # Vendored under apps/desktop/vendor/webrtc-sys; see docs/native-screenshare-plan.md.
 [patch.crates-io]
 webrtc-sys = { path = "../vendor/webrtc-sys" }
+# Та же 0.3.38, что тянет livekit, с одной правкой: публичный `NativeVideoSource::sys_handle()` —
+# в C++-источник пишет захват, при котором кадр не покидает видеокарту (#207, шаг 4.2).
+# См. apps/desktop/vendor/libwebrtc/GUSVOICE.md.
+libwebrtc = { path = "../vendor/libwebrtc" }

@@ -1,0 +1,626 @@
+import type { PermissionName, Role, ServerMemberInfo } from '@gusvoice/shared';
+import { normalizeLegacyPerms, Permission, PROTECTED_PERMISSIONS } from '@gusvoice/shared';
+import { useEffect, useState } from 'react';
+import { api } from '../api';
+import { useStore } from '../store';
+import { confirmAction } from '../confirm';
+import { Avatar } from './Avatar';
+import { HelpDot } from './HelpDot';
+import { Toggle } from './Toggle';
+import { Select } from './Select';
+
+const ROLE_COLORS = [0xf2b33d, 0x3fb97a, 0xe0574e, 0x3f7fb9, 0xc95e8c, 0x5e9c8c, 0x9c97a8, 0xb07ad8];
+
+/**
+ * Permissions offered in the UI, with a plain-language note for each — the labels alone don't say what
+ * a right actually lets someone do, and a wrong guess here hands out server control by accident.
+ *
+ * Deliberately NOT listed (the bits stay defined in shared/permissions.ts — bit positions are stable
+ * and old role masks still carry them):
+ *  • DEAFEN_MEMBERS — no backend route exists, granting it did nothing.
+ *  • PRIORITY_SPEAKER — only rides along in the LiveKit token metadata; nothing ducks anyone for it.
+ *  • STREAM — the legacy camera+screen umbrella, superseded by VIDEO / SHARE_SCREEN. Roles that still
+ *    carry it keep working (canPublishCamera/canPublishScreen honour it), and `normalizeLegacyPerms`
+ *    (shared/permissions.ts) swaps it for the modern pair as soon as a role is opened, so it fades
+ *    out instead of lingering.
+ */
+const PERMS: { key: PermissionName; label: string; hint: string }[] = [
+  {
+    key: 'ADMINISTRATOR',
+    label: 'Администратор — все права',
+    hint: 'Все права сразу, включая те, что появятся позже, и в обход запретов на отдельных каналах. Выдавай только тем, кому доверяешь сервер целиком.',
+  },
+  {
+    key: 'MANAGE_SERVER',
+    label: 'Управление сервером',
+    hint: 'Менять имя и иконку сервера, его настройки.',
+  },
+  {
+    key: 'MANAGE_ROLES',
+    label: 'Управление ролями',
+    hint: 'Создавать, менять, удалять роли и выдавать их участникам — но только роли НИЖЕ своей старшей, и нельзя выдать право, которого нет у самого.',
+  },
+  {
+    key: 'MANAGE_CHANNELS',
+    label: 'Управление каналами',
+    hint: 'Создавать, переименовывать, двигать и удалять каналы и категории, настраивать вкладку «Доступ» у них.',
+  },
+  {
+    key: 'MANAGE_SOUNDS',
+    label: 'Управление звуками канала',
+    hint: 'Заменять звуки уведомлений сервера и каналов (вход, выход, сообщение) на свои файлы.',
+  },
+  {
+    key: 'MANAGE_SOUNDBOARD',
+    label: 'Управление саундбордом',
+    hint: 'Добавлять и удалять звуки саундборда сервера. Настройки сервера → Саундборд. Проигрывать их в канале может любой — за монеты.',
+  },
+  {
+    key: 'MANAGE_EMOJIS',
+    label: 'Управление эмодзи',
+    hint: 'Загружать и удалять свои эмодзи сервера. Настройки сервера → Эмодзи.',
+  },
+  {
+    key: 'MANAGE_STICKERS',
+    label: 'Управление стикерами',
+    hint: 'Импортировать наборы стикеров из Telegram и удалять их. Настройки сервера → Стикеры.',
+  },
+  {
+    key: 'VIEW_AUDIT_LOG',
+    label: 'Просмотр журнала аудита',
+    hint: 'Открывать журнал действий: кто выдавал роли, кикал, менял каналы. Настройки сервера → Журнал.',
+  },
+  {
+    key: 'KICK_MEMBERS',
+    label: 'Кикать участников',
+    hint: 'Удалять с сервера. Кикнутый может вернуться по новому приглашению. Владельца и тех, кто старше по ролям, кикнуть нельзя.',
+  },
+  {
+    key: 'BAN_MEMBERS',
+    label: 'Банить участников',
+    hint: 'Блокировать участника — в отличие от кика, по приглашению он уже не вернётся.',
+  },
+  {
+    key: 'CREATE_INVITE',
+    label: 'Создавать приглашения',
+    hint: 'Делать ссылки-приглашения на сервер.',
+  },
+  {
+    key: 'VIEW_CHANNEL',
+    label: 'Просматривать каналы',
+    hint: 'Видеть каналы в списке. Без этого права канала для участника просто не существует.',
+  },
+  {
+    key: 'READ_HISTORY',
+    label: 'Читать историю сообщений',
+    hint: 'Видеть сообщения, написанные до его прихода. Без права виден только новый поток.',
+  },
+  { key: 'SEND_MESSAGES', label: 'Писать сообщения', hint: 'Отправлять сообщения и вложения в текстовые каналы.' },
+  {
+    key: 'MANAGE_MESSAGES',
+    label: 'Удалять чужие сообщения',
+    hint: 'Удалять сообщения других участников (свои можно удалять всегда).',
+  },
+  {
+    key: 'CONNECT',
+    label: 'Подключаться к голосу',
+    hint: 'Заходить в голосовые каналы. Само по себе даёт только слушать — говорить разрешает «Говорить».',
+  },
+  { key: 'SPEAK', label: 'Говорить', hint: 'Включать микрофон в голосовом канале. Без права — только слушать.' },
+  { key: 'VIDEO', label: 'Камера', hint: 'Включать камеру в голосовом канале.' },
+  {
+    key: 'SHARE_SCREEN',
+    label: 'Демонстрация экрана',
+    hint: 'Показывать экран, окно или камеру как стрим.',
+  },
+  {
+    key: 'MUTE_MEMBERS',
+    label: 'Мьютить других в голосовом канале',
+    hint: 'Выключать чужой микрофон на сервере. Нельзя применить к владельцу и к тем, кто старше по ролям.',
+  },
+  {
+    key: 'MOVE_MEMBERS',
+    label: 'Перемещать между голосовыми',
+    hint: 'Переносить участников в другой голосовой канал и отключать их от голоса. В целевом канале участнику нужно право «Подключаться к голосу».',
+  },
+  {
+    key: 'MOVE_ANYONE',
+    label: 'Перемещать КОГО УГОДНО',
+    hint: 'Снимает защиту по старшинству ролей — эта роль может перетаскивать между голосовыми даже владельца сервера. Мьютить и отключать от голоса старших по-прежнему нельзя. Выдать это право может ТОЛЬКО владелец сервера (или супер-админ) — даже администратор не может выдать его себе сам.',
+  },
+  {
+    key: 'POKE_MEMBERS',
+    label: 'Тыкать в голосовом канале',
+    hint: 'Отправить человеку, сидящему в голосовом канале, короткое «ткнуть» — у него всплывёт окно со звуком. По умолчанию доступно всем; снимай у тех, кто этим злоупотребляет.',
+  },
+];
+
+/** Права, которые видны всем, но переключаются только владельцем сервера (см. PROTECTED_PERMISSIONS). */
+const isProtectedPerm = (key: PermissionName) => (Permission[key] & PROTECTED_PERMISSIONS) !== 0n;
+
+const colorToHex = (n: number) => '#' + (n & 0xffffff).toString(16).padStart(6, '0');
+const hasBit = (perms: bigint, bit: bigint) => (perms & bit) === bit;
+
+/**
+ * Разделы «Роли» и «Участники» настроек сервера. До 23.09 это было отдельное окно под кнопкой 👥 со
+ * своими двумя вкладками; теперь оба раздела живут на рельсе `ServerSettingsModal`.
+ *
+ * ⚠️ Один компонент на оба раздела, а не два: у них общие списки ролей и людей (выдача роли в
+ * «Участниках» — та же `toggleMemberRole`, что крестик в «Ролях»). Модалка рендерит его в ОДНОМ месте
+ * дерева с меняющимся `view` — так переход между разделами не перезагружает списки и не сбрасывает
+ * выбранную роль.
+ */
+export function ServerRolesPanel({
+  serverId,
+  ownerId,
+  selfId,
+  canManageRoles,
+  canKick,
+  view,
+}: {
+  serverId: string;
+  ownerId: string;
+  selfId: string;
+  canManageRoles: boolean;
+  canKick: boolean;
+  view: 'roles' | 'members';
+}) {
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [members, setMembers] = useState<ServerMemberInfo[]>([]);
+  const [selId, setSelId] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const [color, setColor] = useState(0);
+  const [perms, setPerms] = useState(0n);
+  const [mentionable, setMentionable] = useState(false);
+  const [membersCanAssign, setMembersCanAssign] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Защищённые права (MOVE_ANYONE) выдаёт ТОЛЬКО владелец сервера или супер-админ — бэкенд их иначе
+  // просто не примет (`clampGrant` оставит прежнее значение), поэтому и тумблер здесь заперт.
+  const canGrantProtected = useStore((s) => !!s.user && (s.user.superAdmin || s.user.id === ownerId));
+
+  const refreshTree = () => useStore.getState().openServer(serverId);
+
+  async function load() {
+    setError(null);
+    try {
+      const [r, m] = await Promise.all([api.listRoles(serverId), api.listMembers(serverId)]);
+      setRoles(r);
+      setMembers(m);
+      if (!selId && r.length) selectRole(r[0]);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function selectRole(r: Role) {
+    setSelId(r.id);
+    setName(r.name);
+    setColor(r.color);
+    setPerms(normalizeLegacyPerms(BigInt(r.permissions)));
+    setMentionable(r.mentionable);
+    setMembersCanAssign(r.membersCanAssign);
+  }
+
+  const selected = roles.find((r) => r.id === selId) ?? null;
+  // A self-service role must not carry admin-level perms (the backend rejects it) — disable the toggle.
+  const roleHasAdminPerms =
+    hasBit(perms, Permission.ADMINISTRATOR) || hasBit(perms, Permission.MANAGE_ROLES) || hasBit(perms, Permission.MANAGE_SERVER);
+  /**
+   * Кто в роли. У «Гостей» (§5.9) состав считается ПО ПРИЗНАКУ гостя, а не по строкам выдачи: роль
+   * системная, руками не выдаётся, и список по `roleIds` был бы всегда пуст — окно уверяло бы, что
+   * ограничивать некого, стоя рядом с живыми гостями сервера.
+   */
+  const systemRole = !!selected && (selected.isEveryone || !!selected.isGuests);
+  const roleMembers = !selected
+    ? []
+    : selected.isGuests
+      ? members.filter((m) => !!m.user.homeInstance)
+      : selected.isEveryone
+        ? []
+        : members.filter((m) => m.roleIds.includes(selected.id));
+  // Добавлять в системную роль нечего: в «Гостей» попадают сами, в `@everyone` — все.
+  const roleNonMembers = selected && !systemRole ? members.filter((m) => !m.roleIds.includes(selected.id)) : [];
+
+  // Display highest-first ("выше = больше прав"); @everyone always sits at the bottom.
+  const sortableRoles = roles.filter((r) => !r.isEveryone).sort((a, b) => b.position - a.position);
+  const displayRoles = [...sortableRoles, ...roles.filter((r) => r.isEveryone)];
+
+  async function moveRole(roleId: string, dir: -1 | 1) {
+    const order = sortableRoles.map((r) => r.id);
+    const idx = order.indexOf(roleId);
+    const j = idx + dir;
+    if (idx < 0 || j < 0 || j >= order.length) return;
+    [order[idx], order[j]] = [order[j], order[idx]];
+    setBusy(true);
+    setError(null);
+    try {
+      await api.reorderRoles(serverId, order);
+      setRoles(await api.listRoles(serverId));
+      await refreshTree();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveRole() {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateRole(selected.id, {
+        name: name.trim(),
+        color,
+        permissions: perms.toString(),
+        mentionable,
+        membersCanAssign: membersCanAssign && !roleHasAdminPerms,
+      });
+      const r = await api.listRoles(serverId);
+      setRoles(r);
+      await refreshTree();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createRole() {
+    setBusy(true);
+    setError(null);
+    try {
+      const role = await api.createRole(serverId, { name: 'новая роль' });
+      const r = await api.listRoles(serverId);
+      setRoles(r);
+      selectRole(role);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteRole(r: Role) {
+    const ok = await confirmAction({
+      title: `Удалить роль «${r.name}»?`,
+      body: 'Права, которые она давала, пропадут у всех, кто её носит.',
+      tone: 'danger',
+      confirmLabel: 'Удалить роль',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.deleteRole(r.id);
+      const list = await api.listRoles(serverId);
+      setRoles(list);
+      setSelId(list[0]?.id ?? null);
+      if (list[0]) selectRole(list[0]);
+      await refreshTree();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleMemberRole(userId: string, roleId: string, add: boolean) {
+    setBusy(true);
+    try {
+      if (add) await api.assignRole(serverId, userId, roleId);
+      else await api.unassignRole(serverId, userId, roleId);
+      setMembers(await api.listMembers(serverId));
+      await refreshTree();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function kick(userId: string, label: string) {
+    const ok = await confirmAction({
+      title: `Кикнуть ${label} с сервера?`,
+      body: 'Сообщения останутся. Вернуться можно по новому приглашению.',
+      tone: 'danger',
+      confirmLabel: 'Кикнуть',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.kickMember(serverId, userId);
+      setMembers(await api.listMembers(serverId));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // «Гости» в выдачу не попадают: бэкенд такую выдачу отклоняет, а местному она дала бы прав.
+  const assignableRoles = roles.filter((r) => !r.isEveryone && !r.isGuests);
+
+  const errorBox = error && (
+    <div className="error" role="alert">
+      {error}
+    </div>
+  );
+
+  return view === 'roles' ? (
+    // Редактор ролей держит СВОИ прокрутки (список слева, права справа) и потому тянется на всю
+    // высоту раздела, а не лежит в общей прокрутке: иначе список ролей уезжал бы вместе с правами.
+    <div className="rail-fill" id="ss-panel-body" role="tabpanel" aria-labelledby="ss-tab-roles">
+      {errorBox}
+      {/* Was a collapsed <details> — the explanation nobody opened. Same text, one hover away. */}
+      <div className="settings-group-label">
+        Роли сервера
+        <HelpDot label="Как работают роли">
+          <ul>
+            <li>
+              У участника может быть несколько ролей — права <b>складываются</b>. <b>@everyone</b> — базовая
+              роль для всех.
+            </li>
+            <li>
+              Роли упорядочены по старшинству. Управлять (выдавать / редактировать / удалять) можно только
+              ролями <b>ниже своей</b> самой старшей, и нельзя выдать право, которого <b>нет у тебя</b>.
+            </li>
+            <li>
+              <b>Администратор</b> = все права. <b>Владелец</b> сервера может всё.
+            </li>
+            <li>
+              Доступ к конкретным каналам — отдельно, вкладка <b>«Доступ»</b> у канала/категории
+              (переопределяет права роли).
+            </li>
+          </ul>
+        </HelpDot>
+      </div>
+      <div className="roles-editor">
+        <div className="roles-list">
+          {displayRoles.map((r, i) => (
+            <div key={r.id} className={`role-item-row ${r.id === selId ? 'active' : ''}`}>
+              <button type="button" className="role-item" onClick={() => selectRole(r)}>
+                <span className="role-dot" style={{ background: r.color ? colorToHex(r.color) : '#888' }} />
+                {r.isEveryone ? '@everyone' : r.name}
+                {r.isGuests && <span className="muted"> · системная</span>}
+              </button>
+              {canManageRoles && !r.isEveryone && (
+                <span className="role-reorder">
+                  <button type="button" title="Выше" disabled={busy || i === 0} onClick={() => void moveRole(r.id, -1)}>
+                    ↑
+                  </button>
+                  <button type="button" title="Ниже" disabled={busy || i === sortableRoles.length - 1} onClick={() => void moveRole(r.id, 1)}>
+                    ↓
+                  </button>
+                </span>
+              )}
+            </div>
+          ))}
+          {canManageRoles && (
+            <button type="button" className="role-item add" onClick={createRole} disabled={busy}>
+              + Создать роль
+            </button>
+          )}
+        </div>
+
+        <div className="role-detail">
+          {!selected ? (
+            <div className="muted">Выбери роль слева</div>
+          ) : (
+            <>
+              <label className="field">
+                Название
+                {/* Системную роль не переименовываем: её имя — часть правила, а не украшение. */}
+                <input value={name} onChange={(e) => setName(e.target.value)} disabled={!canManageRoles || systemRole} />
+                {/* 🔴 Объяснение жило только в комментарии кода — человек видел просто серое
+                    поле и не знал, он ли что-то делает не так. Образец «как надо» был тут же
+                    рядом, у тумблера самовыдачи. */}
+                {systemRole && (
+                  <span className="muted field-why">
+                    Эту роль нельзя переименовать: её имя — часть правил сервера, на него
+                    ссылаются права и упоминания.
+                  </span>
+                )}
+              </label>
+
+              <div className="field" style={{ gap: 8 }}>
+                Цвет
+                <div className="color-swatches">
+                  {ROLE_COLORS.map((c) => (
+                    <button
+                      type="button"
+                      key={c}
+                      className={`swatch ${color === c ? 'sel' : ''}`}
+                      style={{ background: colorToHex(c) }}
+                      disabled={!canManageRoles}
+                      onClick={() => setColor(c)}
+                      aria-label={colorToHex(c)}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="perm-toggle-row">
+                <span>Упоминаемая — @роль уведомляет участников</span>
+                <Toggle
+                  checked={mentionable}
+                  disabled={!canManageRoles || systemRole}
+                  onChange={setMentionable}
+                />
+              </div>
+
+              <div className="perm-toggle-row">
+                <span>
+                  Самовыдача — участники с этой ролью могут выдавать её другим (без права модератора)
+                  {roleHasAdminPerms && (
+                    <em style={{ display: 'block', color: 'var(--muted)', fontStyle: 'normal', fontSize: 12 }}>
+                      недоступно для ролей с админ-правами
+                    </em>
+                  )}
+                </span>
+                <Toggle
+                  checked={membersCanAssign && !roleHasAdminPerms}
+                  // «Гостей» руками не выдают вовсе, поэтому и самовыдача к ней неприменима.
+                  disabled={!canManageRoles || systemRole || roleHasAdminPerms}
+                  onChange={setMembersCanAssign}
+                />
+              </div>
+
+              <div className="perm-grid2">
+                {PERMS.map(({ key, label, hint }) => (
+                  <div key={key} className="perm-toggle-row">
+                    <span>
+                      {label}
+                      <HelpDot label={`Что даёт право «${label}»`}>{hint}</HelpDot>
+                    </span>
+                    <Toggle
+                      checked={hasBit(perms, Permission[key])}
+                      disabled={!canManageRoles || (isProtectedPerm(key) && !canGrantProtected)}
+                      label={label}
+                      onChange={(v) => setPerms((p) => (v ? p | Permission[key] : p & ~Permission[key]))}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {!selected.isEveryone && (
+                <div className="role-members">
+                  <div className="cat-name">
+                    {selected.isGuests ? 'Гости сервера' : 'Участники роли'} · {roleMembers.length}
+                  </div>
+                  <div className="role-mchips">
+                    {roleMembers.map((m) => (
+                      <span
+                        key={m.user.id}
+                        className="role-mchip"
+                        style={{ borderColor: selected.color ? colorToHex(selected.color) : '#888' }}
+                      >
+                        <Avatar url={m.user.avatarUrl} name={m.user.displayName} size={18} />
+                        {m.user.displayName}
+                        {/* Из «Гостей» не убирают: человек в ней, пока он гость (§5.9). Крестик
+                            тут был бы кнопкой, которая всегда отвечает отказом. */}
+                        {canManageRoles && !selected.isGuests && (
+                          <button type="button" onClick={() => toggleMemberRole(m.user.id, selected.id, false)} disabled={busy}>
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                    {roleMembers.length === 0 && (
+                      <span className="muted">
+                        {selected.isGuests ? 'гостей с других инстансов на сервере нет' : 'пока никого нет в этой роли'}
+                      </span>
+                    )}
+                  </div>
+                  {canManageRoles && roleNonMembers.length > 0 && (
+                    <Select
+                      value=""
+                      disabled={busy}
+                      placeholder="+ добавить участника в роль"
+                      ariaLabel="Добавить участника в роль"
+                      title="Добавить участника в роль"
+                      searchPlaceholder="Поиск участника"
+                      onChange={(v) => v && toggleMemberRole(v, selected.id, true)}
+                      options={roleNonMembers.map((m) => ({ value: m.user.id, label: m.user.displayName }))}
+                    />
+                  )}
+                </div>
+              )}
+
+              {canManageRoles && (
+                <div className="modal-actions">
+                  {/* Удалить системную роль нельзя (бэкенд отвечает отказом): без «Гостей»
+                      ограничивать гостей станет нечем, а её переопределения каналов молча
+                      перестанут действовать. */}
+                  {!systemRole && (
+                    <button type="button" className="danger-text" onClick={() => deleteRole(selected)} disabled={busy}>
+                      Удалить роль
+                    </button>
+                  )}
+                  <div style={{ flex: 1 }} />
+                  <button type="button" onClick={saveRole} disabled={busy}>
+                    Сохранить
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : (
+    <div className="admin-scroll" id="ss-panel-body" role="tabpanel" aria-labelledby="ss-tab-members">
+      {errorBox}
+      <div className="settings-group-label">
+        Участники
+        <HelpDot label="Как выдавать роли">
+          <ul>
+            <li>
+              Роль выдаётся кнопкой <b>«+ роль»</b> в строке участника, снимается <b>×</b> на самой роли.
+            </li>
+            <li>
+              Права участника = сумма прав всех его ролей плюс <b>@everyone</b>. Запретить что-то одной
+              ролью, если другая это разрешает, нельзя — для этого есть вкладка <b>«Доступ»</b> у канала.
+            </li>
+            <li>
+              Выдавать можно только роли <b>ниже своей</b> самой старшей. <b>Владельца</b> сервера нельзя
+              кикнуть и его роли не редактируются.
+            </li>
+          </ul>
+        </HelpDot>
+      </div>
+      <ul className="member-list">
+        {members.map((m) => {
+          const isOwner = m.user.id === ownerId;
+          const myRoles = m.roleIds.map((id) => roles.find((r) => r.id === id)).filter(Boolean) as Role[];
+          const addable = assignableRoles.filter((r) => !m.roleIds.includes(r.id));
+          return (
+            <li key={m.user.id} className="member-row">
+              <Avatar url={m.user.avatarUrl} name={m.user.displayName} size={36} />
+              <div className="member-main">
+                <div>
+                  {m.user.displayName} <span className="muted">@{m.user.username}</span>
+                  {isOwner && <span className="badge" style={{ marginLeft: 6 }}>owner</span>}
+                </div>
+                <div className="role-chips">
+                  {myRoles.map((r) => (
+                    <span key={r.id} className="role-chip" style={{ borderColor: r.color ? colorToHex(r.color) : '#888' }}>
+                      {r.name}
+                      {canManageRoles && (
+                        <button type="button" onClick={() => toggleMemberRole(m.user.id, r.id, false)} disabled={busy}>
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                  {canManageRoles && addable.length > 0 && (
+                    <Select
+                      value=""
+                      disabled={busy}
+                      placeholder="+ роль"
+                      ariaLabel="Добавить роль участнику"
+                      title="Добавить роль"
+                      onChange={(v) => v && toggleMemberRole(m.user.id, v, true)}
+                      options={addable.map((r) => ({ value: r.id, label: r.name, dot: r.color ? colorToHex(r.color) : undefined }))}
+                    />
+                  )}
+                </div>
+              </div>
+              {canKick && !isOwner && m.user.id !== selfId && (
+                <button type="button" className="danger-text" onClick={() => kick(m.user.id, m.user.displayName)} disabled={busy}>
+                  кик
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}

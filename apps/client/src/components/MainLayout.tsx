@@ -149,6 +149,8 @@ export function MainLayout() {
   // Mobile: viewing the voice channel you're connected to = a full-screen call (design-step8 B1). The
   // call bar owns the bottom, so hide the tab bar (CSS) — no double bottom bars.
   if (voice && mobilePane === 'content' && currentChannelId === voice.channelId) appClass.push('m-incall');
+  // Телефон: открыта переписка — панель вкладок прячется, как у Telegram (#212, CSS `.app.m-chat`).
+  if (mobilePane === 'content' && (isDm ? !!dm : channel?.type === 'text')) appClass.push('m-chat');
   // Ворота показа: гусь не лезет поверх настроек, админки, шпаргалки и тыка — и только в голосе,
   // потому что предложение выдаётся ровно сидящим в канале.
   const goosePresentationAllowed =

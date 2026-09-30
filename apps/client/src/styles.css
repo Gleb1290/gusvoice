@@ -2115,6 +2115,11 @@ body.resizing-sidebar {
   min-height: 0;
   overflow-y: auto;
   padding: var(--sp-4) var(--sp-5);
+  /* 🔴 Изоляция раскладки ленты (фаза 0.4 ЛС, 30.09): поле ввода подгоняет свою высоту на каждую букву, и без
+     неё браузер заново раскладывал ВСЕ сообщения — при 2 000 в ленте 64 мс на букву (замер этапа М), с ней 16.
+     `size` — главное: размер ленты задаёт колонка (`flex: 1`), а не содержимое. ⚠️ Для `position: fixed`
+     внутри ленты она теперь рамка — всплывающее из строк выносить порталом (`linkGuard`). */
+  contain: strict;
 }
 .message {
   display: flex;
@@ -2752,6 +2757,23 @@ body.resizing-sidebar {
   font: inherit;
   box-sizing: border-box;
 }
+/* Вместо поля ввода в беседе с заблокированным (#212): та же полоса, что у композера, без поля. */
+.blocked-user {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.composer-blocked {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  margin: 4px 16px 16px;
+  padding: var(--sp-4) var(--sp-3);
+  background: var(--bg-3);
+  border-radius: var(--r-3);
+  font-size: 14px;
+}
 .edit-hint {
   font-size: 11px;
   margin-top: 2px;
@@ -2770,7 +2792,11 @@ body.resizing-sidebar {
 .composer:focus-within {
   border-color: var(--accent-glow);
 }
-.composer input {
+/* Многострочный текст (#212): кнопки встают к нижнему краю, как у Telegram, а не висят посередине поля. */
+.composer.multiline {
+  align-items: flex-end;
+}
+.composer .composer-input {
   flex: 1;
   /* 🔴 min-width:0 обязателен: у flex-элемента дефолтный min-width:auto, а у <input> это его
      «предпочтительная» ширина (~20 символов). Без этого поле не сжимается, и когда кнопок в строке
@@ -2781,8 +2807,14 @@ body.resizing-sidebar {
   border: none;
   padding: var(--sp-3) var(--sp-1);
   color: var(--text);
+  /* Было `<input>`: перенос строки нельзя было набрать вовсе. Высоту ведёт `MessagePane` по тексту. */
+  display: block;
+  resize: none;
+  font: inherit;
+  line-height: 1.4;
+  overflow-y: hidden;
 }
-.composer input:focus {
+.composer .composer-input:focus {
   outline: none;
   border: none;
 }
@@ -4728,13 +4760,13 @@ button.leave {
   color: var(--text);
 }
 
-/* Right-clickable chat author name / avatar */
+/* Имя и аватар автора: нажатие — карточка профиля, правый клик — меню (#212). */
 .message-head .author {
-  cursor: context-menu;
+  cursor: pointer;
 }
 .msg-ava {
   display: inline-flex;
-  cursor: context-menu;
+  cursor: pointer;
   /* Контекст для короны победителя сезона (она абсолютная, чтобы не двигать строку). */
   position: relative;
 }
@@ -6880,6 +6912,35 @@ button.danger-text:hover {
   .app.m-content .voice-header {
     /* 48px кнопка + 9px отступ + запас: место под «назад», которая лежит поверх шапки. */
     padding-left: 64px;
+    /* 🔴 Шапка — РОВНО 56 px (+1 линия), и «назад»/«участники» поверх неё встают по той же оси (#212, 29.09, снимки
+       с S25). Раньше высоту давали отступы и содержимое, а кнопки поверх стояли на фиксированных 9 px сверху: у ЛС
+       середина «назад» была на 5 px ниже середины шапки, и низ кнопки ложился на её линию. */
+    box-sizing: border-box;
+    min-height: 57px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  /* Кнопки шапки — один размер и один вид с «назад»: 48 px (пальцевый минимум), без подложки, иконка 22. Было три
+     разных: «назад» 48 с рамкой и фоном, колокольчик и блок 32 без фона, скрепка 34. */
+  .app.m-content .channel-topbar .topbar-btn,
+  .app.m-content .channel-topbar .pins-btn {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--r-circle);
+  }
+  .app.m-content .channel-topbar .topbar-btn svg,
+  .app.m-content .channel-topbar .pins-btn svg {
+    width: 22px;
+    height: 22px;
+  }
+  .app.m-content .channel-topbar .pins-btn::after {
+    inset: 0;
+  }
+  .app.m-content .channel-topbar .topbar-actions {
+    gap: 0;
+  }
+  .app.m-content .dm-title {
+    font-size: 16px;
   }
 
   /* In-call view (design-step8 B1): a full-screen call — hide the tab bar (the call bar owns the bottom,
@@ -6888,6 +6949,14 @@ button.danger-text:hover {
     display: none;
   }
   .app.m-incall {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Внутри переписки (канал или ЛС) панели вкладок нет — как у Telegram (#212, S25). Она забирала 58 px у ленты
+     и поднималась над клавиатурой, вставая между полем ввода и клавишами. Назад — стрелкой в шапке или жестом. */
+  .app.m-chat .mobile-nav {
+    display: none;
+  }
+  .app.m-chat {
     padding-bottom: env(safe-area-inset-bottom);
   }
   /* 2-column participant tile grid (aspect 3:4), green ring on the speaker. */
@@ -7177,7 +7246,8 @@ button.danger-text:hover {
   .app.m-content .mobile-back {
     display: inline-flex;
     position: fixed;
-    top: calc(9px + env(safe-area-inset-top));
+    /* По оси шапки: её 56 px − кнопка 48 = по 4 сверху и снизу (см. `.channel-topbar` выше). */
+    top: calc(4px + env(safe-area-inset-top));
     left: 9px;
     z-index: 80;
     /* 48px = пальцевый минимум (48dp Material, 44pt Apple HIG). Иконки в шапке канала подняты до
@@ -7187,17 +7257,27 @@ button.danger-text:hover {
     align-items: center;
     justify-content: center;
     padding: 0;
-    background: var(--bg-2);
+    /* Без подложки и рамки, как остальные кнопки шапки (#212): квадрат с фоном выглядел отдельным окном. */
+    background: transparent;
     color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--r-2);
+    border: 0;
+    border-radius: var(--r-circle);
+  }
+  .app.m-content .mobile-back:active,
+  .app.m-content.has-members .mobile-members-btn:active {
+    background: var(--bg-3);
+  }
+  .app.m-content .mobile-back svg,
+  .app.m-content.has-members .mobile-members-btn svg {
+    width: 22px;
+    height: 22px;
   }
 
   /* Members slide-over: top-right trigger (mirrors the back button) + right drawer + backdrop. */
   .app.m-content.has-members .mobile-members-btn {
     display: inline-flex;
     position: fixed;
-    top: calc(9px + env(safe-area-inset-top));
+    top: calc(4px + env(safe-area-inset-top));
     right: 9px;
     z-index: 80;
     width: 48px;
@@ -7205,10 +7285,10 @@ button.danger-text:hover {
     align-items: center;
     justify-content: center;
     padding: 0;
-    background: var(--bg-2);
+    background: transparent;
     color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--r-2);
+    border: 0;
+    border-radius: var(--r-circle);
   }
   .app.m-content.has-members .channel-topbar {
     padding-right: 64px;
@@ -7337,7 +7417,7 @@ button.danger-text:hover {
   .app.m-content .composer .att-btn.poll {
     display: none;
   }
-  .app.m-content .composer input {
+  .app.m-content .composer .composer-input {
     order: 2;
     font-size: 16px; /* ≥16px so the WebView doesn't zoom the page on focus */
     padding: var(--sp-3) var(--sp-1);
@@ -7564,6 +7644,11 @@ button.danger-text:hover {
   .app.in-voice .dm-fab {
     bottom: calc(136px + env(safe-area-inset-bottom));
   }
+  /* Последняя строка списка ЛС уезжает из-под кнопки «Написать» (#212, S25: карандаш закрывал время и число у
+     нижней беседы, а долистать её выше было некуда). Кнопка 58 px + зазор до панели 14 px + воздух. */
+  .app.m-list .channel-list.dm-list {
+    padding-bottom: 88px;
+  }
 
   /* Profile tab (design-step8 D3): full-screen pane above the bottom nav. */
   .mobile-profile {
@@ -7673,6 +7758,16 @@ button.danger-text:hover {
   display: flex;
   align-items: flex-end;
   animation: sheetFade 0.16s ease;
+  /* Шторка — меню, а не текст: долгое нажатие, которое её открыло, не должно выделять в ней 👍 и звать
+     системное «Перевести / Копировать» (28.09, S25). Поля ввода в шторках выделяются как обычно. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.sheet-scrim input,
+.sheet-scrim textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
 @keyframes sheetFade {
   from {
@@ -14223,6 +14318,20 @@ input[type='radio']:disabled {
   outline: none;
   padding: 0;
 }
+.confirm-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-top: 12px;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--text);
+  cursor: pointer;
+}
+.confirm-option input {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
 .confirm-error {
   display: flex;
   align-items: flex-start;
@@ -14648,6 +14757,44 @@ input[type='radio']:disabled {
   height: min(720px, 90vh);
   max-height: 90vh;
 }
+/* Настройки сервера на рельсе (23.09): в «Ролях» редактор в две колонки (список ролей + права), и
+   на 980 px общей ширины правам оставалось меньше 500 px. Настройки канала — формы и один список
+   прав, им хватает и уже обычного. */
+.modal.rail-modal.server-rail {
+  width: min(1180px, 96vw);
+  height: min(720px, 90vh);
+  max-height: 90vh;
+}
+.modal.rail-modal.channel-rail {
+  width: min(860px, 96vw);
+  height: min(640px, 88vh);
+}
+/* В заголовке рельса — имя сервера или канала, а оно бывает длинным: режем многоточием, иначе оно
+   выдавливает крестик за край на телефоне. */
+.set-rail-title > span {
+  min-width: 0;
+}
+.set-rail-title .rail-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Раздел, который держит свои прокрутки («Роли»: список слева, права справа), а не лежит в общей. */
+.modal.rail-modal .rail-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5) var(--sp-5);
+}
+/* «Доступ» канала внутри общей прокрутки раздела: своя прокрутка редактора (62vh) дала бы две полосы. */
+.modal.rail-modal .admin-scroll .ow-editor {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
 /* Форма почты центрируется сама (её же показывает мастер установки, там это уместно). В окне с
    рельсом левый край задан рельсом, и форма, начинающаяся посреди экрана, отрывается от заголовка. */
 .modal.rail-modal .admin-scroll > .smtp-form {
@@ -15002,9 +15149,26 @@ input[type='radio']:disabled {
      замером, глазами читалось как «просто тёмный фон».
      ⚠️ Админку называем отдельно: её собственная ширина задана двумя классами и сильнее. */
   .modal.rail-modal,
-  .modal.rail-modal.admin-rail {
+  .modal.rail-modal.admin-rail,
+  .modal.rail-modal.server-rail,
+  .modal.rail-modal.channel-rail {
     height: auto;
     width: auto;
+  }
+  /* «Роли» на телефоне: список ролей над правами, а не рядом — двум колонкам не хватает 375 px. */
+  .modal.rail-modal .roles-editor {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .modal.rail-modal .roles-list {
+    max-height: 34vh;
+    border-right: none;
+    padding-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: var(--sp-3);
+  }
+  .modal.rail-modal .rail-fill {
+    padding: var(--sp-3) var(--sp-4) var(--sp-4);
   }
   .set-rail {
     width: auto;
@@ -15423,4 +15587,50 @@ html.gv-covered *::before,
 html.gv-covered *::after {
   animation-play-state: paused !important;
   transition: none !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   На переднем плане полноэкранная игра, а наше окно видно на другом мониторе (#207, плейбук 25.09).
+
+   🔴 Встают ТОЛЬКО бесконечные анимации. Каждая из них перерисовывает окно на каждом кадре
+   монитора и будит DWM, а его работа на видеокарте идёт впереди игры. Появление сообщений,
+   тостов, переходы — работают как обычно: окно видно, и замерший тост был бы невидим.
+   ⚠️ Добавил новую `animation: … infinite` — внеси её селектор сюда. Список должен совпадать со
+   ВСЕМИ бесконечными анимациями в этом файле (страж — задание Codex).
+   Класс ставит `windowCovered.ts` по признаку оболочки `gv://game-foreground` (`occlusion.rs`).
+   🆕 Тот же список встаёт в ОПТИМИЗИРОВАННОМ РЕЖИМЕ (`html.gv-lite`, `liteMode.ts`, 27.09): человек сам
+   попросил, чтобы интерфейс не двигался. Новый селектор — в ОБА списка.
+   ─────────────────────────────────────────────────────────────────────────── */
+html.gv-game-fg .auth-badge,
+html.gv-game-fg .inst-update-steps li.now::before,
+html.gv-game-fg .stream-card-live .live-dot,
+html.gv-game-fg .dot-connected.reconnecting,
+html.gv-game-fg .goose-bob,
+html.gv-game-fg .voice-rec-dot,
+html.gv-game-fg .update-progress-bar.indeterminate,
+html.gv-game-fg .update-shimmer,
+html.gv-game-fg .sk,
+html.gv-game-fg .typing-dots span,
+html.gv-game-fg .ss-card.skeleton,
+html.gv-game-fg .crowned-name,
+html.gv-game-fg .confirm-spin,
+html.gv-lite .auth-badge,
+html.gv-lite .inst-update-steps li.now::before,
+html.gv-lite .stream-card-live .live-dot,
+html.gv-lite .dot-connected.reconnecting,
+html.gv-lite .goose-bob,
+html.gv-lite .voice-rec-dot,
+html.gv-lite .update-progress-bar.indeterminate,
+html.gv-lite .update-shimmer,
+html.gv-lite .sk,
+html.gv-lite .typing-dots span,
+html.gv-lite .ss-card.skeleton,
+html.gv-lite .crowned-name,
+html.gv-lite .confirm-spin {
+  animation-play-state: paused;
+}
+/* У гуся-бонуса две анимации: короткое появление и бесконечное дыхание. Встаёт только вторая. */
+html.gv-game-fg .goose-bonus,
+html.gv-lite .goose-bonus {
+  animation-play-state: running, paused;
 }

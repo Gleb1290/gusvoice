@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { isEditableTag } from '../contextMenuRules';
+import { isEditableTag, ownEditMenu } from '../contextMenuRules';
+import { isMobile } from '../hotkeys';
 import { selectedSlice, spliceText } from '../textEdit';
 import { toast } from '../toast';
 import { ContextMenu, MenuDivider, MenuItem, type MenuPos } from './ContextMenu';
@@ -52,6 +53,8 @@ export function EditContextMenu() {
     const onCtx = (e: MouseEvent) => {
       // Компоненты со своим меню (канал, участник, сообщение) уже погасили событие — не мешаем им.
       if (e.defaultPrevented) return;
+      // Палец и телефон — системное меню над полем (правило и повод — `contextMenuRules.ownEditMenu`).
+      if (!ownEditMenu((e as PointerEvent).pointerType, isMobile())) return;
       const el = editTargetOf(e.target as Element | null);
       if (!el) return;
       e.preventDefault();

@@ -7,6 +7,7 @@ import {
 } from '@gusvoice/shared';
 import { api, getToken } from './api';
 import { isFeedOnScreen } from './channelRules';
+import { dmIncomingDecision } from './dmListRules';
 import { notifyLevel } from './channelPrefs';
 import { isMobile } from './hotkeys';
 import { shouldPulseWallet } from './coinsCue';
@@ -195,13 +196,23 @@ function notifyCoin(mine: boolean, title: string, body: string): void {
 }
 
 const readTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const readLatest = new Map<string, () => void>();
+/**
+ * Отметка «прочитано» с задержкой: пачка сообщений за 2 с даёт один запрос.
+ * ⚠️ Выполняется ПОСЛЕДНИЙ присланный вызов, а не первый (#212): отметка ЛС теперь «до этого
+ * сообщения», и первый вызов пачки поставил бы её на первое сообщение — остальные после перезапуска
+ * числились бы непрочитанными.
+ */
 function scheduleRead(key: string, fn: () => void): void {
+  readLatest.set(key, fn);
   if (readTimers.has(key)) return;
   readTimers.set(
     key,
     setTimeout(() => {
       readTimers.delete(key);
-      fn();
+      const latest = readLatest.get(key);
+      readLatest.delete(key);
+      latest?.();
     }, 2000),
   );
 }
@@ -315,6 +326,9 @@ export function connectGateway(): void {
             currentId: store.currentChannelId,
             mobile: isMobile(),
             mobilePane: store.mobilePane,
+            // Человек в личках — канал не на экране, даже если остался «текущим» (#212, зеркало Б2).
+            kind: 'channel',
+            view: store.view,
           });
           if (notify && !chanOnScreen) store.markUnread(msg.channelId, mentioned, msg.serverId);
           // Watching the channel — keep the persisted read mark current so a reload stays read.
@@ -488,33 +502,47 @@ export function connectGateway(): void {
       case 'dm.channel':
         return store.upsertDm(msg.channel);
       case 'dm.create': {
-        if (msg.message.author.id !== store.user?.id) {
-          const dmOnScreen = isFeedOnScreen({
+        // Что делать с входящим — целиком в `dmListRules.dmIncomingDecision` (#212: Б2 тихое
+        // «прочитано» из сервера, Б8 звук в открытой беседе, чтение только когда смотрят).
+        const d = dmIncomingDecision({
+          mine: msg.message.author.id === store.user?.id,
+          onScreen: isFeedOnScreen({
             id: msg.channelId,
             currentId: store.currentDmId,
             mobile: isMobile(),
             mobilePane: store.mobilePane,
-          });
-          if (!dmOnScreen) store.markDmUnread(msg.channelId);
-          if (dmOnScreen) {
-            scheduleRead(`dm:${msg.channelId}`, () => void api.markDmRead(msg.channelId).catch(() => {}));
-          }
-          // "Не беспокоить" (DND) suppresses the DM ping (unread still tracked).
-          if (store.user?.status !== 'dnd') {
-            playSound('dm');
-            osNotify(
-              `${authorName(msg.message)} — личное сообщение`,
-              messagePreview(msg.message),
-              () => void useStore.getState().selectDm(msg.channelId),
-            );
-          }
+            kind: 'dm',
+            view: store.view,
+          }),
+          focused: windowFocused(),
+          dnd: store.user?.status === 'dnd',
+        });
+        if (d.countUnread) store.markDmUnread(msg.channelId);
+        if (d.markRead) {
+          // До этого сообщения, а не до часов сервера: следующее могло прийти, пока шёл таймер.
+          const upTo = msg.message.id;
+          scheduleRead(`dm:${msg.channelId}`, () => void api.markDmRead(msg.channelId, upTo).catch(() => {}));
+        }
+        if (d.sound) playSound('dm');
+        if (d.osNotify) {
+          osNotify(
+            `${authorName(msg.message)} — личное сообщение`,
+            messagePreview(msg.message),
+            () => void useStore.getState().selectDm(msg.channelId),
+          );
+          // Иконка в панели задач мигает, как у тыка (#212): тост уходит за 5 секунд, а человек в игре
+          // его мог не заметить. Фокус не забираем — решает `gv_flash_window`.
+          flashWindow();
         }
         return store.appendDmMessage(msg.channelId, msg.message);
       }
       case 'dm.update':
         return store.updateDmMessage(msg.channelId, msg.message);
       case 'dm.delete':
-        return store.removeDmMessage(msg.channelId, msg.messageId);
+        return store.removeDmMessage(msg.channelId, msg.messageId, {
+          lastMessageAt: msg.lastMessageAt,
+          unread: msg.unread,
+        });
       case 'dm.reaction':
         return store.applyDmReaction(msg.channelId, msg.messageId, msg.emoji, msg.userId, msg.op);
       // Прочитал на другом своём устройстве — гасим здесь (событие адресное, приходит только своим).

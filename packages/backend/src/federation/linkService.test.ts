@@ -21,6 +21,13 @@ type Box = {
   codes: Map<string, StoredCode>;
   service: ReturnType<typeof createLinkService>;
   failPost: boolean;
+  postCalls: number;
+  upsertCalls: number;
+  rebindCalls: number;
+  order: string[];
+  burnResult: boolean | void;
+  revokedIds: Set<string>;
+  takenDomains: Set<string>;
 };
 
 function makeBox(id: string, fingerprint: string): Box {
@@ -37,7 +44,22 @@ function makeBox(id: string, fingerprint: string): Box {
     rootKey: `root-${id}`,
     keys: [],
   };
-  const box = { id, fingerprint, doc, links: new Map(), codes: new Map(), service: null as never, failPost: false };
+  const box = {
+    id,
+    fingerprint,
+    doc,
+    links: new Map(),
+    codes: new Map(),
+    service: null as never,
+    failPost: false,
+    postCalls: 0,
+    upsertCalls: 0,
+    rebindCalls: 0,
+    order: [],
+    burnResult: undefined,
+    revokedIds: new Set<string>(),
+    takenDomains: new Set<string>(),
+  };
   return box;
 }
 
@@ -56,6 +78,8 @@ function connect(box: Box, peers: Map<string, Box>): void {
       return peer ? { ok: true, value: peerOf(peer) } : { ok: false, problem: 'unreachable' };
     },
     async postToPeer(input) {
+      box.postCalls++;
+      box.order.push('post');
       if (box.failPost) return { ok: false, problem: 'unreachable' };
       const peer = [...peers.values()].find((candidate) => input.apiBase === candidate.doc.apiBase);
       if (!peer) return { ok: false, problem: 'unreachable' };
@@ -77,16 +101,27 @@ function connect(box: Box, peers: Map<string, Box>): void {
     async saveCode(code) { box.codes.set(code.secretHash, { ...code, usedAt: null }); },
     async findCodeByHash(hash) { return box.codes.get(hash) ?? null; },
     async markCodeUsed(codeId) {
+      if (box.burnResult === false) return false;
       for (const [hash, code] of box.codes) if (code.id === codeId) box.codes.set(hash, { ...code, usedAt: 1_000 });
+      return box.burnResult;
     },
+    async isRevoked(instanceId) { return box.revokedIds.has(instanceId); },
+    async domainTaken(domain) { return box.takenDomains.has(domain); },
     async getLink(instanceId) { return box.links.get(instanceId) ?? null; },
-    async upsertLink(link) { box.links.set(link.instanceId, link); },
+    async upsertLink(link) { box.upsertCalls++; box.links.set(link.instanceId, link); },
     async setLinkState(instanceId, state) {
       const link = box.links.get(instanceId);
       if (link) box.links.set(instanceId, { ...link, state });
     },
     newId: () => `${box.id}-${++seq}`,
-    async rebind() { return false; },
+    async rebind(fromInstanceId, link) {
+      box.rebindCalls++;
+      box.order.push('rebind');
+      if (!box.links.has(fromInstanceId)) return false;
+      box.links.delete(fromInstanceId);
+      box.links.set(link.instanceId, link);
+      return true;
+    },
     audit() {},
   };
   box.service = createLinkService(deps);
@@ -209,6 +244,201 @@ describe('разбор доставки подтверждения связки'
     assert.equal(peerRejectionReason(JSON.stringify({ error: `a${'b'.repeat(64)}` })), null);
     assert.equal(peerRejectionReason('{"error":""}'), null);
     assert.equal(peerRejectionReason('not json'), null);
+  });
+
+  it('сосед не может сам подтвердить присланную им заявку', async () => {
+    // Ловит обход второй кнопки держателя: входящее pending нельзя активировать чужим confirmed.
+    const a = makeBox('A', 'FP-A');
+    connect(a, new Map([[a.id, a]]));
+    const base = {
+      instanceId: 'B', domain: 'b.example', apiBase: 'https://b.example', clientOrigin: 'https://b.example',
+      rootKey: 'root-B', theirName: 'B', protocolVersion: 1, features: [],
+    };
+    a.links.set('B', { ...base, state: 'pending' });
+    assert.deepEqual(await a.service.receiveConfirmed('B'), { ok: false, problem: 'wrong-state', detail: 'pending' });
+    assert.equal(a.links.get('B')?.state, 'pending');
+
+    a.links.set('B', { ...base, state: 'requested' });
+    assert.deepEqual(await a.service.receiveConfirmed('B'), { ok: true, value: { state: 'active' } });
+    assert.equal(a.links.get('B')?.state, 'active');
+  });
+
+  it('код перепривязки в общем поле ничего не меняет и не исполняет названную в нём связку', async () => {
+    // Ловит F-01: недоверенное поле o прежде позволяло перенести чужую рабочую связку без выбора карточки.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    b.links.set('victim', {
+      instanceId: 'victim', domain: 'victim.example', apiBase: 'https://victim.example',
+      clientOrigin: 'https://victim.example', rootKey: 'root-victim', theirName: 'Victim',
+      state: 'active', protocolVersion: 1, features: [],
+    });
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a', purpose: 'rebind', previousInstanceId: 'victim' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    assert.deepEqual(await b.service.requestLink(issued.value.code), { ok: false, problem: 'rebind-code' });
+    assert.equal(b.postCalls, 0);
+    assert.equal(b.upsertCalls, 0);
+    assert.equal(b.rebindCalls, 0);
+    assert.equal(b.links.get('victim')?.state, 'active');
+  });
+
+  it('карточка перепривязки принимает только rebind-код для выбранной рабочей связки и прежнего хоста', async () => {
+    // Ловит повторное исполнение кода с неверной карточки, той же личностью или подменённым api_base.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    const normal = await a.service.issueCode({ issuedBy: 'owner-a' });
+    const rebound = await a.service.issueCode({ issuedBy: 'owner-a', purpose: 'rebind', previousInstanceId: 'B' });
+    assert.equal(normal.ok, true); assert.equal(rebound.ok, true);
+    if (!normal.ok || !rebound.ok) return;
+    const old = {
+      domain: 'a.example', apiBase: 'https://a.example', clientOrigin: 'https://a.example',
+      rootKey: 'old-root', theirName: 'A', protocolVersion: 1, features: [],
+    };
+
+    b.links.set('old-a', { ...old, instanceId: 'old-a', state: 'blocked' });
+    assert.deepEqual(await b.service.requestLink(normal.value.code, { rebindOf: 'old-a' }), { ok: false, problem: 'not-rebind-code' });
+    assert.deepEqual(await b.service.requestLink(rebound.value.code, { rebindOf: 'old-a' }), {
+      ok: false, problem: 'wrong-state', detail: 'blocked',
+    });
+
+    b.links.delete('old-a');
+    b.links.set('A', { ...old, instanceId: 'A', state: 'trust-lost' });
+    assert.deepEqual(await b.service.requestLink(rebound.value.code, { rebindOf: 'A' }), { ok: false, problem: 'same-identity' });
+
+    b.links.delete('A');
+    b.links.set('old-a', { ...old, instanceId: 'old-a', apiBase: 'https://old.example', state: 'trust-lost' });
+    assert.deepEqual(await b.service.requestLink(rebound.value.code, { rebindOf: 'old-a' }), {
+      ok: false, problem: 'host-mismatch', detail: 'old.example',
+    });
+    assert.equal(b.postCalls, 0);
+    assert.equal(b.rebindCalls, 0);
+  });
+
+  it('перепривязка сначала получает согласие соседа и только затем переносит старую связку', async () => {
+    // Ловит потерю рабочей связки при сетевом сбое между локальным переносом и отказом соседа.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    a.links.set('B', {
+      instanceId: 'B', domain: 'b.example', apiBase: 'https://b.example', clientOrigin: 'https://b.example',
+      rootKey: 'root-B', theirName: 'B', state: 'trust-lost', protocolVersion: 1, features: [],
+    });
+    b.links.set('old-a', {
+      instanceId: 'old-a', domain: 'a.example', apiBase: 'https://a.example', clientOrigin: 'https://a.example',
+      rootKey: 'old-root', theirName: 'A', state: 'trust-lost', protocolVersion: 1, features: [],
+    });
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a', purpose: 'rebind', previousInstanceId: 'B' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    assert.deepEqual(await b.service.requestLink(issued.value.code, { rebindOf: 'old-a' }), {
+      ok: true, value: { instanceId: 'A', state: 'active' },
+    });
+    assert.deepEqual(b.order, ['post', 'rebind']);
+    assert.equal(b.links.has('old-a'), false);
+    assert.equal(b.links.get('A')?.state, 'active');
+  });
+
+  it('отказ соседа не переносит старую связку и оставляет код пригодным для повтора', async () => {
+    // Ловит необратимое локальное изменение до внешнего подтверждения перепривязки.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    b.links.set('old-a', {
+      instanceId: 'old-a', domain: 'a.example', apiBase: 'https://a.example', clientOrigin: 'https://a.example',
+      rootKey: 'old-root', theirName: 'A', state: 'trust-lost', protocolVersion: 1, features: [],
+    });
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a', purpose: 'rebind', previousInstanceId: 'B' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+    b.failPost = true;
+
+    assert.deepEqual(await b.service.requestLink(issued.value.code, { rebindOf: 'old-a' }), { ok: false, problem: 'unreachable' });
+    assert.equal(b.rebindCalls, 0);
+    assert.equal(b.links.get('old-a')?.state, 'trust-lost');
+  });
+
+  it('код перепривязки оживляет только ту личность, для которой был выдан', async () => {
+    // Ловит применение утёкшего rebind-кода к другой связке в состоянии trust-lost.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const c = makeBox('C', 'FP-C');
+    const peers = new Map([[a.id, a], [b.id, b], [c.id, c]]);
+    connect(a, peers); connect(b, peers); connect(c, peers);
+    a.links.set('B', { ...b.doc, instanceId: 'B', rootKey: 'root-B', theirName: 'B', state: 'trust-lost', protocolVersion: 1, features: [] });
+    a.links.set('C', { ...c.doc, instanceId: 'C', rootKey: 'root-C', theirName: 'C', state: 'trust-lost', protocolVersion: 1, features: [] });
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a', purpose: 'rebind', previousInstanceId: 'B' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+    const decoded = decodeLinkCode(issued.value.code);
+    assert.ok(decoded);
+
+    assert.deepEqual(await a.service.receiveRequest({ secret: decoded.secret, peer: peerOf(c) }), { ok: false, problem: 'bad-code' });
+    assert.equal(a.links.get('C')?.state, 'trust-lost');
+    assert.deepEqual(await a.service.receiveRequest({ secret: decoded.secret, peer: peerOf(b) }), { ok: true, value: { state: 'active' } });
+    assert.equal(a.links.get('B')?.state, 'active');
+  });
+
+  it('проигравшая атомарное погашение заявка не создаёт связку', async () => {
+    // Ловит гонку двух предъявителей одного кода: второй не должен писать строку после CAS=false.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+    const decoded = decodeLinkCode(issued.value.code);
+    assert.ok(decoded);
+    a.burnResult = false;
+
+    assert.deepEqual(await a.service.receiveRequest({ secret: decoded.secret, peer: peerOf(b) }), { ok: false, problem: 'code-used' });
+    assert.equal(a.upsertCalls, 0);
+    assert.equal(a.links.has('B'), false);
+  });
+
+  it('код от отозванной личности отвергается до записи и сети', async () => {
+    // Ловит повторное доверие уже объявленному украденным корневому ключу.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+    b.revokedIds.add('A');
+
+    assert.deepEqual(await b.service.requestLink(issued.value.code), { ok: false, problem: 'revoked-identity' });
+    assert.equal(b.upsertCalls, 0);
+    assert.equal(b.postCalls, 0);
+  });
+
+  it('занятый домен запрещает и новую заявку, и позднее подтверждение', async () => {
+    // Ловит две рабочие личности с одинаковой видимой подписью после гонки между заявкой и кнопкой.
+    const a = makeBox('A', 'FP-A');
+    const b = makeBox('B', 'FP-B');
+    const peers = new Map([[a.id, a], [b.id, b]]);
+    connect(a, peers); connect(b, peers);
+    const issued = await a.service.issueCode({ issuedBy: 'owner-a' });
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+    b.takenDomains.add('a.example');
+    assert.deepEqual(await b.service.requestLink(issued.value.code), { ok: false, problem: 'domain-taken' });
+    assert.equal(b.upsertCalls, 0);
+
+    b.links.set('A', {
+      instanceId: 'A', domain: 'a.example', apiBase: 'https://a.example', clientOrigin: 'https://a.example',
+      rootKey: 'root-A', theirName: 'A', state: 'requested', protocolVersion: 1, features: [],
+    });
+    assert.deepEqual(await b.service.receiveConfirmed('A'), { ok: false, problem: 'domain-taken' });
+    assert.equal(b.links.get('A')?.state, 'requested');
   });
 });
 

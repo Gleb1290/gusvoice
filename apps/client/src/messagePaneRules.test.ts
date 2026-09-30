@@ -4,6 +4,7 @@ import {
   acTokenAt,
   applyAc,
   emojiSubstitution,
+  enterSends,
   GROUP_WINDOW_MS,
   dayLabel,
   isFirstUnread,
@@ -11,6 +12,16 @@ import {
   isNewDay,
   type ListMessage,
 } from './messagePaneRules.js';
+
+describe('Enter в многострочном поле', () => {
+  it('Shift, IME и сенсор оставляют перенос строки, а клавиатурный Enter отправляет', () => {
+    // Ловит случайную отправку с телефона/IME и потерю привычного Shift+Enter на компьютере.
+    assert.equal(enterSends({ shift: true, composing: false, touchOnly: false }), false);
+    assert.equal(enterSends({ shift: false, composing: true, touchOnly: false }), false);
+    assert.equal(enterSends({ shift: false, composing: false, touchOnly: true }), false);
+    assert.equal(enterSends({ shift: false, composing: false, touchOnly: false }), true);
+  });
+});
 
 const message = (at: number, authorId = 'other', hasReply = false): ListMessage => ({
   createdAt: new Date(at).toISOString(),

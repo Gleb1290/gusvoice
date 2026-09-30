@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
-import { hasUnseen, markGroupSeen, seedSeenOnce, seenGroups, unseenOf } from './settingsSeen.js';
+import {
+  hasUnseen,
+  markChangedSeen,
+  markGroupSeen,
+  seedSeenOnce,
+  seenChangedPrints,
+  seenGroups,
+  unseenOf,
+} from './settingsSeen.js';
 
 let values = new Map<string, string>();
 let writes = 0;
@@ -47,5 +55,20 @@ describe('просмотренные группы настроек', () => {
     values.set('gv_settings_seen', '{bad');
     assert.deepEqual([...seenGroups()], []);
     assert.equal(hasUnseen(['sound']), true);
+  });
+
+  it('просмотр изменённых групп сливается с прежними, а не затирает их', () => {
+    // Ловит возвращение точки в одной группе после просмотра другой.
+    markChangedSeen({ sound: 'a' });
+    markChangedSeen({ look: 'b' });
+    assert.deepEqual(seenChangedPrints(), { sound: 'a', look: 'b' });
+  });
+
+  it('битый или неоднородный набор увиденных отпечатков очищается безопасно', () => {
+    // Ловит падение настроек и протекание нестрокового значения в сравнение точек.
+    values.set('gv_settings_changed_seen', '{bad');
+    assert.deepEqual(seenChangedPrints(), {});
+    values.set('gv_settings_changed_seen', JSON.stringify({ sound: 'ok', look: 42 }));
+    assert.deepEqual(seenChangedPrints(), { sound: 'ok' });
   });
 });

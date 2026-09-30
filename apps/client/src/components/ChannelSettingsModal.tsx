@@ -9,8 +9,10 @@ import {
   VOICE_BITRATES,
   voiceBitrateOf,
 } from '@gusvoice/shared';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { pushBackHandler } from '../androidBack';
 import { api } from '../api';
+import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
@@ -18,6 +20,8 @@ import { ChannelPermissionsEditor } from './ChannelPermissionsEditor';
 import { ChannelSoundsPanel } from './ChannelSoundsPanel';
 import { ChannelGlyph, Icon, isCustomIcon, type IconName } from './Icon';
 import { Select } from './Select';
+
+type ChannelTab = 'main' | 'access' | 'general';
 
 export function ChannelSettingsModal({
   channel,
@@ -46,7 +50,34 @@ export function ChannelSettingsModal({
 
   // A channel general without MANAGE_CHANNELS only has the "Генерал" tab — land there directly.
   // Стартовая вкладка — первая ДОСТУПНАЯ, иначе можно приземлиться на скрытую и увидеть пустоту.
-  const [tab, setTab] = useState<'main' | 'access' | 'general'>(
+  // Разделы рельса (23.09 — вместо вкладок сверху, как у настроек сервера). Подпись под заголовком
+  // говорит, что внутри: «Генерал» без неё читается как звание, а не как раздел со звуками.
+  const sections: { key: ChannelTab; label: string; sub: string; icon: IconName }[] = [
+    ...(canManageChannels
+      ? [
+          {
+            key: 'main' as const,
+            label: 'Основное',
+            sub:
+              channel.type === 'voice'
+                ? 'Название, качество звука, категория и иконка'
+                : 'Название, тема, категория и иконка',
+            icon: 'settings' as const,
+          },
+        ]
+      : []),
+    ...(canEditOverwrites
+      ? [{ key: 'access' as const, label: 'Доступ', sub: 'Кто видит канал и что в нём можно', icon: 'lock' as const }]
+      : []),
+    ...(showGeneralTab
+      ? [
+          canManageServer
+            ? { key: 'general' as const, label: 'Генерал', sub: 'Генерал канала и звуки только этого канала', icon: 'crown' as const }
+            : { key: 'general' as const, label: 'Звуки', sub: 'Звуки событий только этого канала', icon: 'bell' as const },
+        ]
+      : []),
+  ];
+  const [tab, setTab] = useState<ChannelTab>(
     canManageChannels && initialTab === 'main'
       ? 'main'
       : canEditOverwrites && initialTab === 'access'
@@ -57,6 +88,24 @@ export function ChannelSettingsModal({
             ? 'access'
             : 'general',
   );
+  // Телефон: список разделов, потом раздел. Раздел один или его попросили явно («Доступ» из меню
+  // канала) — список пропускаем, он был бы лишним касанием.
+  const [picked, setPicked] = useState(sections.length === 1 || initialTab === 'access');
+  const current = sections.find((x) => x.key === tab);
+  const dialogRef = useDialogChrome<HTMLDivElement>(onClose);
+  const onTabsKey = tabListKeyDown(
+    sections.map((x) => x.key),
+    tab,
+    setTab,
+    (k) => `ch-tab-${k}`,
+  );
+  useEffect(() => {
+    if (!picked) return;
+    return pushBackHandler(() => {
+      setPicked(false);
+      return true;
+    });
+  }, [picked]);
   const [name, setName] = useState(channel.name);
   const [topic, setTopic] = useState(channel.topic ?? '');
   const [categoryId, setCategoryId] = useState(channel.categoryId ?? '');
@@ -147,40 +196,74 @@ export function ChannelSettingsModal({
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal channel-settings" onClick={(e) => e.stopPropagation()}>
-        <div className="admin-head">
-          <h2 className="ch-settings-title">
-            <ChannelGlyph c={{ type: channel.type, icon }} size={18} /> Настройки канала
-          </h2>
-          <button type="button" className="icon-close" title="Закрыть" onClick={onClose}>
-            <Icon name="close" size={18} />
-          </button>
+      <div
+        className={`modal channel-settings rail-modal channel-rail${picked ? ' picked' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ch-title"
+        tabIndex={-1}
+      >
+        <div className="set-rail">
+          <div className="set-rail-title">
+            <span className="ch-settings-title" title={channel.name}>
+              <ChannelGlyph c={{ type: channel.type, icon }} size={16} />
+              <span className="rail-title-text">{channel.name}</span>
+            </span>
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
+            </button>
+          </div>
+          <div
+            className="set-rail-list"
+            role="tablist"
+            aria-label="Разделы настроек канала"
+            aria-orientation="vertical"
+            onKeyDown={onTabsKey}
+          >
+            {sections.map((x) => (
+              <button
+                key={x.key}
+                type="button"
+                role="tab"
+                id={`ch-tab-${x.key}`}
+                aria-selected={tab === x.key}
+                aria-controls="ch-panel-body"
+                tabIndex={tab === x.key ? 0 : -1}
+                className={`set-rail-item${tab === x.key ? ' active' : ''}`}
+                onClick={() => {
+                  setTab(x.key);
+                  setPicked(true);
+                }}
+              >
+                <Icon name={x.icon} size={16} />
+                <span>{x.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="admin-tabs">
-          {canManageChannels && (
-            <button type="button" className={tab === 'main' ? 'active' : ''} onClick={() => setTab('main')}>
-              Основное
+        <div className="set-main">
+          <div className="set-head">
+            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
+              <Icon name="chevron-left" size={18} />
             </button>
-          )}
-          {canEditOverwrites && (
-            <button type="button" className={tab === 'access' ? 'active' : ''} onClick={() => setTab('access')}>
-              Доступ
+            <div className="set-head-text">
+              <h2 id="ch-title">{current?.label ?? 'Настройки канала'}</h2>
+              {current && <div className="set-head-sub">{current.sub}</div>}
+            </div>
+            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+              <Icon name="close" size={18} />
             </button>
-          )}
-          {showGeneralTab && (
-            <button type="button" className={tab === 'general' ? 'active' : ''} onClick={() => setTab('general')}>
-              {canManageServer ? 'Генерал' : 'Звуки'}
-            </button>
-          )}
-        </div>
+          </div>
 
-        <div className="ch-settings-body">
+        <div className="admin-scroll" id="ch-panel-body" role="tabpanel" aria-labelledby={`ch-tab-${tab}`}>
         {tab === 'main' ? (
           <form onSubmit={save}>
             <label className="field">
               Название
-              <input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+              <input value={name} onChange={(e) => setName(e.target.value)} />
             </label>
 
             {channel.type === 'text' && (
@@ -308,6 +391,7 @@ export function ChannelSettingsModal({
         ) : (
           <ChannelPermissionsEditor channel={channel} onChanged={refresh} />
         )}
+        </div>
         </div>
       </div>
     </div>

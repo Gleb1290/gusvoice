@@ -20,12 +20,11 @@ import { ChannelTimer } from './ChannelTimer';
 import { ChannelSettingsModal } from './ChannelSettingsModal';
 import { CoinChip } from './CoinChip';
 import { CreateChannelModal } from './CreateChannelModal';
-import { MembersRolesModal } from './MembersRolesModal';
 import { SearchModal } from './SearchModal';
 import { InviteCodeModal } from './ServerActionModals';
 import { ServerSettingsModal } from './ServerSettingsModal';
 import { config } from '../config';
-import { canOpenServerSettings } from '../serverSettingsTabs';
+import { canOpenServerSettings, serverSettingsHas, type ServerSettingsTab } from '../serverSettingsTabs';
 import { SelfVoiceBar } from './SelfVoiceBar';
 import { VoicePanel } from './VoicePanel';
 import { useChannelContextMenu } from './ChannelContextMenu';
@@ -101,7 +100,12 @@ export function ChannelSidebar() {
   const pClickAfterDrag = useRef(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
-  const [showMembers, setShowMembers] = useState(false);
+  // С какого раздела открыть настройки: у кнопки 👥 «Роли и участники» — свой (23.09 окно слилось).
+  const [serverSettingsTab, setServerSettingsTab] = useState<ServerSettingsTab | undefined>();
+  const openServerSettings = (tab?: ServerSettingsTab) => {
+    setServerSettingsTab(tab);
+    setShowServerSettings(true);
+  };
   const showSearch = useStore((s) => s.searchOpen);
   const setShowSearch = useStore((s) => s.setSearchOpen);
   const [showInvite, setShowInvite] = useState(false);
@@ -141,11 +145,11 @@ export function ChannelSidebar() {
   // до которой не может добраться — пункта меню у него просто нет.
   // Флаги ИНСТАНСА, а не права: экономика выключена на инстансе — вкладки «Монеты» нет ни у кого,
   // и пункт меню не должен из-за неё открываться (#117).
-  const canServerSettings = canOpenServerSettings(perms, {
-    economy: economyVisible(user?.economyPreview, config.economyEnabled === true),
-  });
-  const canManageRoles = has(perms, Permission.MANAGE_ROLES);
-  const canKick = has(perms, Permission.KICK_MEMBERS);
+  const serverSettingsFeatures = { economy: economyVisible(user?.economyPreview, config.economyEnabled === true) };
+  const canServerSettings = canOpenServerSettings(perms, serverSettingsFeatures);
+  // Кнопка 👥 — вторая дверь в то же окно; её условие считает тот же модуль, что и разделы.
+  const canPeople = serverSettingsHas(perms, 'members', serverSettingsFeatures);
+  const peopleTab: ServerSettingsTab = serverSettingsHas(perms, 'roles', serverSettingsFeatures) ? 'roles' : 'members';
   const canDeleteServer = !!user && (user.superAdmin || bootstrap.server.ownerId === user.id);
   // Personal push-mute for this server's @mentions (account-wide, any member) — see #117.
   const serverPushMuted = pushMutedServers.includes(bootstrap.server.id);
@@ -613,8 +617,8 @@ export function ChannelSidebar() {
               <Icon name="plus" size={18} />
             </button>
           )}
-          {(canManageRoles || canKick) && (
-            <button className="head-icon" title="Роли и участники" onClick={() => setShowMembers(true)}>
+          {canPeople && (
+            <button className="head-icon" title="Роли и участники" onClick={() => openServerSettings(peopleTab)}>
               <Icon name="users" size={18} />
             </button>
           )}
@@ -626,7 +630,7 @@ export function ChannelSidebar() {
             <Icon name={serverPushMuted ? 'bell-off' : 'bell'} size={18} />
           </button>
           {canServerSettings && (
-            <button className="head-icon" title="Настройки сервера" onClick={() => setShowServerSettings(true)}>
+            <button className="head-icon" title="Настройки сервера" onClick={() => openServerSettings()}>
               <Icon name="settings" size={18} />
             </button>
           )}
@@ -690,6 +694,7 @@ export function ChannelSidebar() {
           server={bootstrap.server}
           categories={bootstrap.categories}
           canDelete={canDeleteServer}
+          initialTab={serverSettingsTab}
           onClose={() => setShowServerSettings(false)}
         />
       )}
@@ -698,16 +703,6 @@ export function ChannelSidebar() {
           channel={editingChannel}
           categories={bootstrap.categories}
           onClose={() => setEditingChannel(null)}
-        />
-      )}
-      {showMembers && user && (
-        <MembersRolesModal
-          serverId={bootstrap.server.id}
-          ownerId={bootstrap.server.ownerId}
-          selfId={user.id}
-          canManageRoles={canManageRoles}
-          canKick={canKick}
-          onClose={() => setShowMembers(false)}
         />
       )}
       {showSearch && <SearchModal serverId={bootstrap.server.id} onClose={() => setShowSearch(false)} />}
@@ -723,8 +718,8 @@ export function ChannelSidebar() {
           {canInvite && (
             <SheetRow icon="user-plus" label="Пригласить друзей" onClick={() => { setShowMore(false); setShowInvite(true); }} />
           )}
-          {(canManageRoles || canKick) && (
-            <SheetRow icon="users" label="Роли и участники" onClick={() => { setShowMore(false); setShowMembers(true); }} />
+          {canPeople && (
+            <SheetRow icon="users" label="Роли и участники" onClick={() => { setShowMore(false); openServerSettings(peopleTab); }} />
           )}
           {canManage && (
             <SheetRow
@@ -734,7 +729,7 @@ export function ChannelSidebar() {
             />
           )}
           {canServerSettings && (
-            <SheetRow icon="settings" label="Настройки сервера" onClick={() => { setShowMore(false); setShowServerSettings(true); }} />
+            <SheetRow icon="settings" label="Настройки сервера" onClick={() => { setShowMore(false); openServerSettings(); }} />
           )}
         </BottomSheet>
       )}

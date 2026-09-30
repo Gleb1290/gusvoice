@@ -3,6 +3,7 @@ import { isMobile } from '../hotkeys';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
 import { dmBlockText, dmEmptyHint } from '../dmRules';
+import { isFeedOnScreen } from '../channelRules';
 import { Avatar } from './Avatar';
 import { BottomSheet } from './BottomSheet';
 import { Goose } from './Goose';
@@ -29,6 +30,8 @@ function fmtDmTime(iso: string | null): string {
 export function DmSidebar() {
   const dms = useStore((s) => s.dms);
   const currentDmId = useStore((s) => s.currentDmId);
+  const mobilePane = useStore((s) => s.mobilePane);
+  const view = useStore((s) => s.view);
   const unreadDms = useStore((s) => s.unreadDms);
   const onlineUsers = useStore((s) => s.onlineUsers);
   const loadDms = useStore((s) => s.loadDms);
@@ -48,6 +51,14 @@ export function DmSidebar() {
 
   const onlineSet = new Set(onlineUsers);
   const mobile = isMobile();
+  /* 🔴 Число прячется у беседы, которую ВИДНО, а не у «текущей» (#212, 28.09, поймано на S25): на телефоне
+     список и лента — разные экраны, и сообщение в беседу, из которой человек вышел в список, пропадало без
+     следа — ни числа, ни точки. Ровно та ошибка, что у каналов чинили 20.09 (`ChannelSidebar.shownChannelId`).
+     Подсветка строки остаётся по `currentDmId`: видно, куда вернёшься. */
+  const shownDmId =
+    currentDmId && isFeedOnScreen({ id: currentDmId, currentId: currentDmId, mobile, mobilePane, kind: 'dm', view })
+      ? currentDmId
+      : null;
 
   // Candidates for the "new message" sheet: the server roster minus yourself, filtered live.
   const candidates = useMemo(() => {
@@ -63,7 +74,7 @@ export function DmSidebar() {
       <div className="server-head">
         <strong>Личные сообщения</strong>
       </div>
-      <div className="channel-list">
+      <div className="channel-list dm-list">
         {dms.length === 0 && (
           <div className="empty-goose">
             <Goose pose="look" size={104} />
@@ -73,7 +84,7 @@ export function DmSidebar() {
         )}
         {dms.map((d) => {
           const online = onlineSet.has(d.otherUser.id);
-          const unread = unreadDms.includes(d.id) && d.id !== currentDmId;
+          const unread = unreadDms.includes(d.id) && d.id !== shownDmId;
           // Число, как в списке каналов. Точка остаётся страховкой: флаг непрочитанного и счётчик
           // приходят из разных мест (сокет и загрузка списка), и рисовать пустую пилюлю на
           // рассинхроне хуже, чем показать прежнюю точку.

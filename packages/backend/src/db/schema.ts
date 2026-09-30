@@ -1,7 +1,9 @@
 import type { Attachment, MessageSticker } from '@gusvoice/shared';
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -454,7 +456,169 @@ export const dmMessages = pgTable('dm_messages', {
   replyToId: text('reply_to_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   editedAt: timestamp('edited_at', { withTimezone: true }),
+  /**
+   * Написано, когда получатель уже заблокировал автора (миграция 0076, #212): автору видно как
+   * отправленное, получателю не показывается никогда (`blockRules.visibleToViewer`).
+   */
+  withheld: boolean('withheld').notNull().default(false),
+  /**
+   * Кто удалил сообщение «у себя» (миграция 0077, #212): у них его нет ни в истории, ни в непрочитанном, у
+   * остальных оно на месте. «У обоих» — по-прежнему удаление строки.
+   */
+  hiddenFor: text('hidden_for').array().notNull().default(sql`'{}'::text[]`),
 });
+
+/** Чёрный список (миграция 0076, #212): `blocker` не получает личных сообщений от `blocked`. */
+export const userBlocks = pgTable(
+  'user_blocks',
+  {
+    blockerId: text('blocker_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    blockedId: text('blocked_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.blockerId, t.blockedId] }) }),
+);
+
+/**
+ * ЛС, этап 1 (#211, `docs/dm/STAGE1.md`, миграция 0078): беседы рядом со старыми `dm_*`. До шага 1б пустые.
+ * Правила ключей, журнала и видимости — `convRules.ts`, запись и чтение — `conversations.ts`.
+ */
+export const conversations = pgTable('conversations', {
+  id: text('id').primaryKey(),
+  kind: text('kind', { enum: ['direct', 'group'] }).notNull(),
+  /** 1:1 — «меньший:больший» id участников (`convRules.directKey`): одна беседа на пару. */
+  directKey: text('direct_key').unique(),
+  createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
+  /** Последний выданный ключ порядка (микросекунды, HLC) — следующий берётся под замком этой строки. */
+  lastSortKey: bigint('last_sort_key', { mode: 'number' }).notNull().default(0),
+  originInstanceId: text('origin_instance_id'),
+});
+
+export const conversationMembers = pgTable(
+  'conversation_members',
+  {
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: ['owner', 'member'] }).notNull().default('member'),
+    joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
+    leftAt: timestamp('left_at', { withTimezone: true }),
+    /** «Прочитано до» — ключ последнего прочитанного сообщения, только вперёд. */
+    lastReadKey: bigint('last_read_key', { mode: 'number' }).notNull().default(0),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.conversationId, t.userId] }),
+    userIdx: index('conversation_members_user_idx').on(t.userId),
+  }),
+);
+
+export const conversationMessages = pgTable('conversation_messages', {
+  id: text('id').primaryKey(),
+  conversationId: text('conversation_id')
+    .notNull()
+    .references(() => conversations.id, { onDelete: 'cascade' }),
+  authorId: text('author_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  /** id отправки от клиента (уникален на автора) и отпечаток содержимого — повтор без дублей, `convRules.payloadHash`. */
+  clientId: text('client_id'),
+  payloadHash: text('payload_hash'),
+  sortKey: bigint('sort_key', { mode: 'number' }).notNull(),
+  content: text('content').notNull().default(''),
+  attachments: jsonb('attachments').$type<Attachment[]>().notNull().default([]),
+  // Self-reference; the FK is declared in the migration SQL (avoids a circular type here).
+  replyToId: text('reply_to_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  editedAt: timestamp('edited_at', { withTimezone: true }),
+  /** Надгробие «удалено у обоих»: текст и вложения стёрты, строка живёт, чтобы удаление дошло догонкой. */
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  withheld: boolean('withheld').notNull().default(false),
+  hiddenFor: text('hidden_for').array().notNull().default(sql`'{}'::text[]`),
+  originInstanceId: text('origin_instance_id'),
+});
+
+export const conversationMessageReactions = pgTable(
+  'conversation_message_reactions',
+  {
+    messageId: text('message_id')
+      .notNull()
+      .references(() => conversationMessages.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    emoji: text('emoji').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }) }),
+);
+
+/** Журнал изменений на человека (Р4): `pts` — номер последнего изменения, `minPts` — последний удалённый. */
+export const userSync = pgTable('user_sync', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  pts: bigint('pts', { mode: 'number' }).notNull().default(0),
+  minPts: bigint('min_pts', { mode: 'number' }).notNull().default(0),
+});
+
+/** Строка журнала — указатель «сущность изменилась»; ссылается на `user_sync` и уходит вместе с ним. */
+export const userChanges = pgTable(
+  'user_changes',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => userSync.userId, { onDelete: 'cascade' }),
+    pts: bigint('pts', { mode: 'number' }).notNull(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    kind: text('kind', { enum: ['msg', 'read', 'conv'] }).notNull(),
+    messageId: text('message_id'),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.pts] }),
+    atIdx: index('user_changes_at_idx').on(t.at),
+  }),
+);
+
+/**
+ * Вложения новых ЛС (шаг 1в, миграция 0080): файл — в закрытом бакете, строка — владелец, беседа, сообщение, тип по
+ * содержимому и состояние. Владелец ссылается на участие в беседе (не на `users`): вложение — часть переписки.
+ * Правила — `attachmentRules.ts`, `convRules.attachmentAccess`; запись и выдача — `attachments.ts`, `routes/att.ts`.
+ */
+export const attachments = pgTable(
+  'attachments',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id').notNull(),
+    ownerId: text('owner_id').notNull(),
+    messageId: text('message_id').references(() => conversationMessages.id, { onDelete: 'set null' }),
+    storageKey: text('storage_key').notNull().unique(),
+    name: text('name').notNull(),
+    contentType: text('content_type').notNull(),
+    size: bigint('size', { mode: 'number' }).notNull(),
+    state: text('state', { enum: ['pending', 'attached', 'deleted'] }).notNull().default('pending'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => ({
+    member: foreignKey({
+      columns: [t.conversationId, t.ownerId],
+      foreignColumns: [conversationMembers.conversationId, conversationMembers.userId],
+    }).onDelete('cascade'),
+    messageIdx: index('attachments_message_idx').on(t.messageId),
+  }),
+);
 
 // Emoji reactions on DM messages. One row per (message, user, emoji) — mirrors messageReactions.
 export const dmMessageReactions = pgTable(
@@ -546,6 +710,9 @@ export const pushDevices = pgTable(
     deviceId: text('device_id').notNull(),
     endpoint: text('endpoint').notNull(),
     platform: text('platform'),
+    /** Ключи шифрования пуша устройства (миграция 0075, #213), base64url. Пусто — пуш без текста. */
+    p256dh: text('p256dh'),
+    auth: text('auth'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

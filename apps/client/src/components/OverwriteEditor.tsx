@@ -8,7 +8,7 @@ import { Select } from './Select';
 import { roleHex } from './UserContextMenu';
 
 // PRIORITY_SPEAKER and DEAFEN_MEMBERS are intentionally absent: neither does anything yet (see the
-// note on PERMS in MembersRolesModal), so offering them per-channel only promises what we don't do.
+// note on PERMS in ServerRolesPanel), so offering them per-channel only promises what we don't do.
 export const PERM_LABELS: Partial<Record<PermissionName, string>> = {
   VIEW_CHANNEL: 'Видеть канал',
   READ_HISTORY: 'Читать историю',

@@ -26,6 +26,11 @@
 
 namespace webrtc {
 
+namespace {
+// Не код libwebrtc: `EncodeNative` так говорит «перевод отказал, кадр — старым путём».
+constexpr int32_t kFallBackToUpload = 100;
+}  // namespace
+
 // Used by histograms. Values of entries should not be changed.
 enum H264EncoderImplEvent {
   kH264EncoderEventInit = 0,
@@ -201,28 +206,69 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   configuration_.target_bps = codec_.startBitrate * 1000;
   configuration_.max_bps = codec_.maxBitrate * 1000;
 
-  const CUresult result = cuCtxSetCurrent(cu_context_);
-  if (result != CUDA_SUCCESS) {
-    return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+  // Сессия всегда начинается старой, CUDA: откуда придут кадры, кодировщик узнаёт по первому
+  // же кадру и при кадре из видеопамяти пересоздаёт её D3D11-сессией (`Encode`).
+  native_failed_ = false;
+  const int32_t session = CreateSession(false);
+  if (session != WEBRTC_VIDEO_CODEC_OK) {
+    return session;
   }
+
+  SimulcastRateAllocator init_allocator(env_, codec_);
+  VideoBitrateAllocation allocation =
+      init_allocator.Allocate(VideoBitrateAllocationParameters(
+          DataRate::KilobitsPerSec(codec_.startBitrate), codec_.maxFramerate));
+  SetRates(RateControlParameters(allocation, codec_.maxFramerate));
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+int32_t NvidiaH264EncoderImpl::CreateSession(bool native) {
+  if (encoder_) {
+    encoder_->DestroyEncoder();
+    encoder_.reset();
+  }
+  pending_.clear();
+  native_ = false;
+  const NV_ENC_BUFFER_FORMAT format = native ? NV_ENC_BUFFER_FORMAT_NV12 : nv_format_;
 
   // Some NVIDIA GPUs have a limited Encode Session count.
   // We can't get the Session count, so catching NvEncThrow to avoid the crash.
   // refer:
   // https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new
   try {
-    if (cu_memory_type_ == CU_MEMORYTYPE_DEVICE) {
-      encoder_ = std::make_unique<NvEncoderCuda>(cu_context_, codec_.width,
-                                                 codec_.height, nv_format_, 0);
-    } else {
-      RTC_DCHECK_NOTREACHED();
+#if defined(_WIN32)
+    if (native) {
+      converter_->ForgetOutputs();  // входные текстуры прошлой сессии больше не наши
+      // Конвейер на один кадр (замер 26.09 под игрой в упоре видеокарты: 50 → 59,9 к/с показа
+      // при +17 мс задержки): подача кадра ждёт готовности не своего кадра, а прошлого.
+      // Только у слоёв от 30 к/с: у нижнего (3 к/с) «прошлый кадр» — это +333 мс и к картинке, и к
+      // ответу на запрос опорного кадра, SFU успевает переспросить (разбор 26.09, план #207).
+      const uint32_t output_delay = codec_.maxFramerate >= 30 ? 1 : 0;
+      encoder_ = std::make_unique<NvEncoderD3D11Tex>(converter_->device(), codec_.width,
+                                                     codec_.height, format, output_delay);
+    } else
+#endif
+    {
+      if (cuCtxSetCurrent(cu_context_) != CUDA_SUCCESS) {
+        return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+      }
+      if (cu_memory_type_ != CU_MEMORYTYPE_DEVICE) {
+        RTC_DCHECK_NOTREACHED();
+        return WEBRTC_VIDEO_CODEC_ERROR;
+      }
+      encoder_ = std::make_unique<NvEncoderCuda>(cu_context_, codec_.width, codec_.height,
+                                                 format, 0);
     }
   } catch (const NVENCException& e) {
     // todo: If Encoder initialization fails, need to notify for Managed side.
     RTC_LOG(LS_ERROR) << "Failed Initialize NvEncoder " << e.what();
+    session_error_ = e.what();
+    encoder_.reset();
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
+  nv_initialize_params_ = {};
+  nv_encode_config_ = {};
   nv_initialize_params_.version = NV_ENC_INITIALIZE_PARAMS_VER;
   nv_encode_config_.version = NV_ENC_CONFIG_VER;
   nv_initialize_params_.encodeConfig = &nv_encode_config_;
@@ -235,9 +281,9 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
                                        NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
 
   nv_initialize_params_.frameRateNum =
-      static_cast<uint32_t>(configuration_.max_frame_rate);
+      std::max<uint32_t>(1, static_cast<uint32_t>(configuration_.max_frame_rate));
   nv_initialize_params_.frameRateDen = 1;
-  nv_initialize_params_.bufferFormat = nv_format_;
+  nv_initialize_params_.bufferFormat = format;
 
   nv_encode_config_.profileGUID = nv_profile_guid_;
   nv_encode_config_.gopLength = NVENC_INFINITE_GOPLENGTH;
@@ -260,19 +306,21 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
     encoder_->CreateEncoder(&nv_initialize_params_);
   } catch (const NVENCException& e) {
     RTC_LOG(LS_ERROR) << "Failed Initialize NvEncoder " << e.what();
+    session_error_ = e.what();
+    encoder_.reset();
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
+  native_ = native;
+  // Новая сессия начинается с опорного кадра: зритель декодирует её с нуля.
+  configuration_.key_frame_request = true;
 
-  RTC_LOG(LS_INFO) << "NVIDIA H264 NVENC initialized: "
-                   << codec_.width << "x" << codec_.height
-                   << " @ " << codec_.maxFramerate << "fps, target_bps="
-                   << configuration_.target_bps;
-
-  SimulcastRateAllocator init_allocator(env_, codec_);
-  VideoBitrateAllocation allocation =
-      init_allocator.Allocate(VideoBitrateAllocationParameters(
-          DataRate::KilobitsPerSec(codec_.startBitrate), codec_.maxFramerate));
-  SetRates(RateControlParameters(allocation, codec_.maxFramerate));
+  RTC_LOG(LS_INFO) << "NVIDIA H264 NVENC initialized (" << (native ? "D3D11" : "CUDA")
+                   << "): " << codec_.width << "x" << codec_.height << " @ "
+                   << codec_.maxFramerate << "fps, target_bps=" << configuration_.target_bps;
+  // Вторая и следующие сессии рождаются посреди показа: сразу нынешний битрейт, а не стартовый.
+  if (has_rates_) {
+    SetRates(last_rates_);
+  }
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -287,6 +335,11 @@ int32_t NvidiaH264EncoderImpl::Release() {
     encoder_->DestroyEncoder();
     encoder_ = nullptr;
   }
+  pending_.clear();
+  native_ = false;
+#if defined(_WIN32)
+  converter_.reset();
+#endif
   if (cu_scaled_array_) {
     cuArrayDestroy(cu_scaled_array_);
     cu_scaled_array_ = nullptr;
@@ -309,16 +362,37 @@ int32_t NvidiaH264EncoderImpl::Encode(
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
 
-  webrtc::scoped_refptr<I420BufferInterface> frame_buffer =
-      input_frame.video_frame_buffer()->ToI420();
-  if (!frame_buffer) {
-    RTC_LOG(LS_ERROR) << "Failed to convert "
-                      << VideoFrameBufferTypeToString(
-                             input_frame.video_frame_buffer()->type())
-                      << " image to I420. Can't encode frame.";
-    return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+  webrtc::scoped_refptr<VideoFrameBuffer> input_buffer = input_frame.video_frame_buffer();
+#if defined(_WIN32)
+  // Кадр из видеопамяти (#207, шаг 4) — своя D3D11-сессия. Сессию меняем ДО расчёта опорного
+  // кадра ниже: новая сессия просит его сама.
+  const livekit::D3D11FrameBuffer* d3d =
+      native_failed_ ? nullptr : livekit::D3D11FrameBuffer::FromNative(input_buffer.get());
+  if (d3d && (!native_ || !converter_ || !converter_->SameAdapter(d3d->adapter()))) {
+    if (!converter_ || !converter_->SameAdapter(d3d->adapter())) {
+      converter_ = std::make_unique<GvD3D11Converter>();
+      if (!converter_->Init(d3d->adapter())) {
+        converter_.reset();
+      }
+    }
+    if (!converter_ || CreateSession(true) != WEBRTC_VIDEO_CODEC_OK) {
+      RTC_LOG(LS_WARNING) << "NVENC D3D11 path unavailable, falling back to CUDA upload";
+      native_failed_ = true;
+      // Захват переведёт показ на старый путь; причина — в «Путь кадра».
+      livekit::SetNativeEncodeFailed(
+          true, !converter_ ? std::string("D3D11-устройство кодировщика")
+                            : "NVENC D3D11 " + std::to_string(codec_.width) + "x" +
+                                  std::to_string(codec_.height) + ": " + session_error_);
+      d3d = nullptr;
+    }
   }
-  RTC_CHECK(frame_buffer->type() == VideoFrameBuffer::Type::kI420);
+  if (!d3d && (native_ || !encoder_)) {
+    if (CreateSession(false) != WEBRTC_VIDEO_CODEC_OK) {
+      ReportError();
+      return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+    }
+  }
+#endif
 
   bool is_keyframe_needed = false;
   if (configuration_.key_frame_request && configuration_.sending) {
@@ -333,10 +407,12 @@ int32_t NvidiaH264EncoderImpl::Encode(
     configuration_.key_frame_request = false;
   }
 
-  RTC_DCHECK_EQ(configuration_.width, frame_buffer->width());
-  RTC_DCHECK_EQ(configuration_.height, frame_buffer->height());
-
   if (!configuration_.sending) {
+    // Кадры, что уже в конвейере, после паузы слоя слать нельзя: они старше опорного кадра,
+    // с которого слой начнётся снова.
+    for (FrameMeta& meta : pending_) {
+      meta.drop = true;
+    }
     return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
   }
 
@@ -345,6 +421,32 @@ int32_t NvidiaH264EncoderImpl::Encode(
     if ((*frame_types)[0] == VideoFrameType::kEmptyFrame) {
       return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
     }
+  }
+
+#if defined(_WIN32)
+  if (d3d) {
+    const int32_t native_result = EncodeNative(input_frame, *d3d, is_keyframe_needed);
+    if (native_result != kFallBackToUpload) {
+      return native_result;
+    }
+    is_keyframe_needed = true;  // старая сессия создана заново — начинаем с опорного кадра
+  }
+#endif
+
+  webrtc::scoped_refptr<I420BufferInterface> frame_buffer = input_buffer->ToI420();
+  if (!frame_buffer) {
+    RTC_LOG(LS_ERROR) << "Failed to convert "
+                      << VideoFrameBufferTypeToString(input_buffer->type())
+                      << " image to I420. Can't encode frame.";
+    return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+  }
+  RTC_CHECK(frame_buffer->type() == VideoFrameBuffer::Type::kI420);
+  // Кадр из видеопамяти, дошедший сюда запасным путём, — полного размера: при
+  // `supports_native_handle` слой уменьшает его сам.
+  if (frame_buffer->width() != codec_.width || frame_buffer->height() != codec_.height) {
+    webrtc::scoped_refptr<I420Buffer> scaled = I420Buffer::Create(codec_.width, codec_.height);
+    scaled->ScaleFrom(*frame_buffer);
+    frame_buffer = scaled;
   }
 
   try {
@@ -368,8 +470,9 @@ int32_t NvidiaH264EncoderImpl::Encode(
     std::vector<std::vector<uint8_t>> bit_stream;
     encoder_->EncodeFrame(bit_stream, &pic_params);
 
+    const FrameMeta meta = MetaOf(input_frame);
     for (std::vector<uint8_t>& packet : bit_stream) {
-      int32_t result = ProcessEncodedFrame(packet, input_frame);
+      int32_t result = ProcessEncodedFrame(packet, meta);
       if (result != WEBRTC_VIDEO_CODEC_OK) {
         return result;
       }
@@ -382,20 +485,81 @@ int32_t NvidiaH264EncoderImpl::Encode(
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t NvidiaH264EncoderImpl::ProcessEncodedFrame(
-    std::vector<uint8_t>& packet,
-    const ::webrtc::VideoFrame& inputFrame) {
+#if defined(_WIN32)
+int32_t NvidiaH264EncoderImpl::EncodeNative(const VideoFrame& frame,
+                                            const livekit::D3D11FrameBuffer& buffer,
+                                            bool key_frame) {
+  try {
+    const NvEncInputFrame* input = encoder_->GetNextInputFrame();
+    if (!converter_->Convert(buffer, NvEncoderD3D11Tex::Texture(input))) {
+      RTC_LOG(LS_WARNING) << "NVENC D3D11 conversion failed, falling back to CUDA upload";
+      native_failed_ = true;
+      // Захват переведёт показ на старый путь; причина — в «Путь кадра».
+      livekit::SetNativeEncodeFailed(true, "перевод " + std::to_string(codec_.width) + "x" +
+                                               std::to_string(codec_.height) + ": " +
+                                               converter_->last_error());
+      if (CreateSession(false) != WEBRTC_VIDEO_CODEC_OK) {
+        ReportError();
+        return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+      }
+      return kFallBackToUpload;
+    }
+    NV_ENC_PIC_PARAMS pic_params = NV_ENC_PIC_PARAMS();
+    pic_params.version = NV_ENC_PIC_PARAMS_VER;
+    pic_params.encodePicFlags = 0;
+    if (key_frame) {
+      pic_params.encodePicFlags =
+          NV_ENC_PIC_FLAG_FORCEINTRA | NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+    }
+    pending_.push_back(MetaOf(frame));
+    std::vector<std::vector<uint8_t>> bit_stream;
+    encoder_->EncodeFrame(bit_stream, &pic_params);
+    // Конвейер: пакеты — за кадры, отправленные раньше. Метаданные идут в том же порядке.
+    for (std::vector<uint8_t>& packet : bit_stream) {
+      if (pending_.empty()) {
+        break;
+      }
+      const FrameMeta meta = std::move(pending_.front());
+      pending_.pop_front();
+      if (meta.drop) {
+        continue;
+      }
+      const int32_t result = ProcessEncodedFrame(packet, meta);
+      if (result != WEBRTC_VIDEO_CODEC_OK) {
+        return result;
+      }
+    }
+  } catch (const NVENCException& e) {
+    RTC_LOG(LS_ERROR) << "Failed EncodeFrame NvEncoder (D3D11) " << e.what();
+    return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
+  }
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+#endif
+
+NvidiaH264EncoderImpl::FrameMeta NvidiaH264EncoderImpl::MetaOf(const VideoFrame& frame) {
+  FrameMeta meta;
+  meta.rtp_timestamp = frame.rtp_timestamp();
+  meta.ntp_time_ms = frame.ntp_time_ms();
+  meta.render_time_ms = frame.render_time_ms();
+  meta.rotation = frame.rotation();
+  meta.color_space = frame.color_space();
+  return meta;
+}
+
+int32_t NvidiaH264EncoderImpl::ProcessEncodedFrame(std::vector<uint8_t>& packet,
+                                                   const FrameMeta& meta) {
   encoded_image_._encodedWidth = encoder_->GetEncodeWidth();
   encoded_image_._encodedHeight = encoder_->GetEncodeHeight();
-  encoded_image_.SetRtpTimestamp(inputFrame.rtp_timestamp());
+  encoded_image_.SetRtpTimestamp(meta.rtp_timestamp);
   encoded_image_.SetSimulcastIndex(0);
-  encoded_image_.ntp_time_ms_ = inputFrame.ntp_time_ms();
-  encoded_image_.capture_time_ms_ = inputFrame.render_time_ms();
-  encoded_image_.rotation_ = inputFrame.rotation();
+  encoded_image_.ntp_time_ms_ = meta.ntp_time_ms;
+  encoded_image_.capture_time_ms_ = meta.render_time_ms;
+  encoded_image_.rotation_ = meta.rotation;
   encoded_image_.content_type_ = VideoContentType::UNSPECIFIED;
   encoded_image_.timing_.flags = VideoSendTiming::kInvalid;
   encoded_image_._frameType = VideoFrameType::kVideoFrameDelta;
-  encoded_image_.SetColorSpace(inputFrame.color_space());
+  encoded_image_.SetColorSpace(meta.color_space);
   std::vector<H264::NaluIndex> naluIndices =
       H264::FindNaluIndices(MakeArrayView(packet.data(), packet.size()));
   for (uint32_t i = 0; i < naluIndices.size(); i++) {
@@ -431,7 +595,12 @@ int32_t NvidiaH264EncoderImpl::ProcessEncodedFrame(
 
 VideoEncoder::EncoderInfo NvidiaH264EncoderImpl::GetEncoderInfo() const {
   EncoderInfo info;
+#if defined(_WIN32)
+  // Кадры из видеопамяти (#207, шаг 4) принимаем как есть: каждый слой уменьшает их сам.
+  info.supports_native_handle = true;
+#else
   info.supports_native_handle = false;
+#endif
   info.implementation_name = "NVIDIA H264 Encoder";
   info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
   info.is_hardware_accelerated = true;
@@ -442,6 +611,8 @@ VideoEncoder::EncoderInfo NvidiaH264EncoderImpl::GetEncoderInfo() const {
 
 void NvidiaH264EncoderImpl::SetRates(
     const RateControlParameters& parameters) {
+  last_rates_ = parameters;
+  has_rates_ = true;
   if (!encoder_) {
     RTC_LOG(LS_WARNING) << "SetRates() while uninitialized.";
     return;

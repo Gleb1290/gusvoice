@@ -29,6 +29,13 @@ test('транзакционное обезличивание сохраняет
     INSERT INTO messages (id, channel_id, author_id, content) VALUES ('m', 'ch', 'victim', 'kept channel history');
     INSERT INTO dm_channels (id, user_a, user_b) VALUES ('dm', 'keeper', 'victim');
     INSERT INTO dm_messages (id, dm_channel_id, author_id, content) VALUES ('dm-m', 'dm', 'victim', 'kept dm history');
+    INSERT INTO conversations (id, kind, direct_key, created_by) VALUES ('conv', 'direct', 'keeper:victim', 'victim');
+    INSERT INTO conversation_members (conversation_id, user_id) VALUES ('conv', 'keeper'), ('conv', 'victim');
+    INSERT INTO conversation_messages (id, conversation_id, author_id, sort_key, content)
+      VALUES ('conv-m', 'conv', 'victim', 1, 'kept conversation history');
+    INSERT INTO user_sync (user_id, pts) VALUES ('victim', 1);
+    INSERT INTO user_changes (user_id, pts, conversation_id, kind, message_id)
+      VALUES ('victim', 1, 'conv', 'msg', 'conv-m');
   `);
 
   const memberOf = await t.db.transaction(async (tx) => {
@@ -47,6 +54,11 @@ test('транзакционное обезличивание сохраняет
   assert.equal(victim?.approvedAt, null);
   assert.equal((await t.db.select().from(messages)).length, 1);
   assert.equal((await t.db.select().from(dmMessages)).length, 1);
+  assert.deepEqual((await t.raw.query(`SELECT id FROM conversation_messages`)).rows, [{ id: 'conv-m' }]);
+  assert.deepEqual((await t.raw.query(`SELECT user_id FROM conversation_members WHERE user_id = 'victim'`)).rows,
+    [{ user_id: 'victim' }]);
+  assert.equal((await t.raw.query(`SELECT 1 FROM user_sync WHERE user_id = 'victim'`)).rows.length, 0);
+  assert.equal((await t.raw.query(`SELECT 1 FROM user_changes WHERE user_id = 'victim'`)).rows.length, 0);
   assert.equal(await (await import('../src/auth.js')).tokenGenValid('victim', 5), false);
   await t.raw.exec(`
     INSERT INTO users (id, username, email, display_name, password_hash)
@@ -67,6 +79,7 @@ test('purgeUnverifiedUsers удаляет только старый пустой
       ('message-footprint', 'MessageFootprint', false, 'Message', 'hash', now() - interval '20 days', null),
       ('dm-message-footprint', 'DmMessageFootprint', false, 'DM Message', 'hash', now() - interval '20 days', null),
       ('dm-pair-footprint', 'DmPairFootprint', false, 'DM Pair', 'hash', now() - interval '20 days', null),
+      ('conv-member-footprint', 'ConvMemberFootprint', false, 'Conv Member', 'hash', now() - interval '20 days', null),
       ('member-footprint', 'MemberFootprint', false, 'Member', 'hash', now() - interval '20 days', null),
       ('role-footprint', 'RoleFootprint', false, 'Role', 'hash', now() - interval '20 days', null);
     INSERT INTO email_verifications (user_id, code, expires_at) VALUES ('eligible', 'code', now() + interval '1 day');
@@ -81,6 +94,9 @@ test('purgeUnverifiedUsers удаляет только старый пустой
       ('dm-third', 'keeper', 'verified-old');
     INSERT INTO dm_messages (id, dm_channel_id, author_id, content)
       VALUES ('dm-m', 'dm-third', 'dm-message-footprint', 'history');
+    INSERT INTO conversations (id, kind, direct_key) VALUES ('empty-conv', 'direct', 'conv-member-footprint:keeper');
+    INSERT INTO conversation_members (conversation_id, user_id) VALUES
+      ('empty-conv', 'conv-member-footprint'), ('empty-conv', 'keeper');
     INSERT INTO server_members (server_id, user_id) VALUES ('main', 'member-footprint');
     INSERT INTO roles (id, server_id, name) VALUES ('role', 'main', 'Role');
     INSERT INTO member_roles (server_id, user_id, role_id) VALUES ('main', 'role-footprint', 'role');
@@ -98,9 +114,31 @@ test('purgeUnverifiedUsers удаляет только старый пустой
     'message-footprint',
     'dm-message-footprint',
     'dm-pair-footprint',
+    'conv-member-footprint',
     'member-footprint',
     'role-footprint',
   ]) assert.equal(remaining.rows.some((r) => r.id === id), true, id);
   const verification = await t.raw.query(`SELECT 1 FROM email_verifications WHERE user_id = 'eligible'`);
   assert.equal(verification.rows.length, 0);
+});
+
+test('уборка журнала поднимает min_pts до последней удалённой строки', async () => {
+  // Ловит дырку в догонке: старый клиент должен перечитать снимок, а не считать потерянные события прочитанными.
+  await t.raw.exec(`
+    INSERT INTO users (id, username, display_name, password_hash) VALUES ('a','a','A','hash'),('b','b','B','hash');
+    INSERT INTO conversations (id, kind, direct_key) VALUES ('conv','direct','a:b');
+    INSERT INTO conversation_members (conversation_id, user_id) VALUES ('conv','a'),('conv','b');
+    INSERT INTO user_sync (user_id, pts, min_pts) VALUES ('a',3,0);
+    INSERT INTO user_changes (user_id, pts, conversation_id, kind, at) VALUES
+      ('a',1,'conv','conv',now() - interval '32 days'),
+      ('a',2,'conv','conv',now() - interval '31 days'),
+      ('a',3,'conv','conv',now());
+  `);
+  const { pruneJournal } = await import('../src/convJournal.js');
+  assert.equal(await pruneJournal(), 2);
+  assert.deepEqual((await t.raw.query<{ pts: number; min_pts: number }>(
+    `SELECT pts, min_pts FROM user_sync WHERE user_id = 'a'`,
+  )).rows.map((r) => [Number(r.pts), Number(r.min_pts)]), [[3, 2]]);
+  assert.deepEqual((await t.raw.query<{ pts: number }>(`SELECT pts FROM user_changes WHERE user_id = 'a'`)).rows.map((r) => Number(r.pts)), [3]);
+  assert.equal(await pruneJournal(), 0);
 });

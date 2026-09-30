@@ -9,6 +9,7 @@ import { count } from '../plural';
 import { formatBytes, gigabytesToBytes } from '../byteSize';
 import { toast, toastError } from '../toast';
 import { alertDialog, confirmAction } from '../confirm';
+import { overviewAfterError } from '../fedOverview';
 
 /**
  * Вкладка «Федерация» в админ-панели (#139, F1, план §4.1.1).
@@ -99,7 +100,10 @@ export function FederationPanel() {
       setData(next);
       setName((prev) => (quiet && prev !== (data?.instance?.name ?? '') ? prev : next.instance?.name ?? ''));
     } catch (e) {
-      if (!quiet) toastError(e instanceof Error ? e.message : 'Не удалось прочитать состояние федерации');
+      // 404 — маршрутов федерации на сервере нет: она выключена, и это не сбой (`fedOverview.ts`).
+      const off = overviewAfterError((e as { status?: number }).status);
+      if (off) setData(off);
+      else if (!quiet) toastError(e instanceof Error ? e.message : 'Не удалось прочитать состояние федерации');
     } finally {
       if (!quiet) setLoading(false);
     }
@@ -182,8 +186,11 @@ export function FederationPanel() {
           отдаёт наружу ничего и не принимает запросы соседей.
         </p>
         <p className="muted">
-          Включается в файле <code>.env</code>: <code>FEDERATION_ENABLED=true</code>, затем перезапуск коробки.
-          Пароль к ключу инстанса <code>FEDERATION_KEY_PASSPHRASE</code> установщик уже сгенерировал.
+          Включается в файле <code>.env</code>: <code>FEDERATION_ENABLED=true</code>, затем перезапуск коробки. Нужен
+          ещё пароль к ключу инстанса <code>FEDERATION_KEY_PASSPHRASE</code>: установщик новых коробок ставит его сам,
+          а у коробки, обновлённой со старой версии, его может не быть — тогда впишите длинную случайную строку
+          (например, из <code>openssl rand -hex 32</code>) и храните её вместе с каталогом <code>fed-keys</code>:
+          пароль и ключ — пара.
         </p>
       </div>
     );

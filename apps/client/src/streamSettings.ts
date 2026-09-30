@@ -48,17 +48,34 @@ export interface StreamSettings {
    */
   wgcWindow: boolean;
   /**
-   * Публиковать показ ДВУМЯ слоями качества вместо одного (#109).
+   * Публиковать показ СЛОЯМИ качества (полный, средний, экономный), а не одним потоком (#109, #191).
    *
    * По умолчанию включено: без запасного слоя зритель с потерями не может получить картинку полегче
    * и вместо этого просит опорные кадры — замерено 1.6 раза в секунду при норме 0.1, и пульсирует
-   * при этом У ВСЕХ, а не только у него.
+   * при этом У ВСЕХ, а не только у него. Слои же дают зрителю выбор качества и понижение, пока окно
+   * не видно (#191).
    *
-   * ⚠️ Выключатель существует, потому что второй слой стоит второго сеанса кодирования у видеокарты
-   * и лишних выделений памяти. Потолок сеансов задаёт драйвер (2 → 3 → 8), и симптом упора —
-   * «показ вообще не стартует». Выключать имеет смысл ровно в этом случае.
+   * ⚠️ Выключатель существует, потому что каждый слой — отдельный сеанс кодирования у видеокарты.
+   * Потолок сеансов задаёт драйвер (2 → 3 → 8), и симптом упора — «показ вообще не стартует».
+   * Выключать имеет смысл ровно в этом случае.
+   *
+   * 🔴 В 0.8.5 включён обратно ВСЕМ один раз (`returnLayersOnce`): до 06.09 одно падение выключало его
+   * навсегда, фикс поменял правило, но записанное не вернул — на 24.09 слой был выключен у 6 из 10
+   * показывающих, у большинства на свежих картах.
    */
   layers: boolean;
+  /**
+   * Показ ЭКРАНА с кадром внутри видеокарты (#207, шаг 4, десктоп). По умолчанию включено.
+   *
+   * Кадр не ездит через оперативку: захват, перевод цвета и уменьшение под слои — на видеокарте, NVENC
+   * берёт его оттуда же. Замер под игрой, занявшей видеокарту: рывки игры 15–18 → 0–2 за 90 с, показ
+   * 31 → 60 к/с, процессор в 13 раз меньше. Работает только для экрана, H.264 и NVIDIA — в остальных
+   * случаях приложение само идёт прежним путём, причина видна в телеметрии (`enc.pipeline_note`).
+   *
+   * ⚠️ Выключатель — на случай, если новый путь у кого-то подведёт: выключенный возвращает прежний.
+   * Необязательное: отсутствие = включено (так же читают его Rust и сохранённые до 0.8.11 настройки).
+   */
+  gpuPipeline?: boolean;
   /**
    * Отдавать маленькое превью показа, чтобы остальные видели по наведению мышкой, что ты стримишь,
    * не заходя в канал (#115). По умолчанию включено.
@@ -69,9 +86,19 @@ export interface StreamSettings {
    * право решать, отдавать его или нет, остаётся за показывающим.
    */
   streamPreview: boolean;
+  /**
+   * Курсор в кадре показа (28.09, решение владельца: галочка, включена по умолчанию). Только десктоп:
+   * в браузере курсор рисует сам браузер.
+   *
+   * Необязательное, как `gpuPipeline`: отсутствие = включено. Так читают его Rust (`default_true`) и
+   * сохранённые до этой версии настройки, а выключенное остаётся выключенным.
+   */
+  cursor?: boolean;
 }
 
 const KEY = 'gv_stream';
+/** Отметка «слои уже возвращали» (0.8.5). Отдельным ключом, чтобы не зависеть от формы `gv_stream`. */
+const LAYERS_BACK_KEY = 'gv_stream_layers_back';
 
 export const STREAM_DEFAULTS: StreamSettings = {
   resolution: '1080',
@@ -83,6 +110,8 @@ export const STREAM_DEFAULTS: StreamSettings = {
   audio: true,
   wgcWindow: true,
   layers: true,
+  // `gpuPipeline` и `cursor` не задаём: отсутствие = включено. Так сохранённые раньше настройки и
+  // новые читаются одинаково, а выключенное остаётся выключенным.
   streamPreview: true,
 };
 
@@ -99,7 +128,34 @@ export function getStreamSettings(): StreamSettings {
   // Drop any retired codec (e.g. a saved 'h265' from v0.5.7) so it can't keep publishing an
   // unviewable stream — fall back to the default.
   if (!VALID_CODECS.has(cache.codec)) cache = { ...cache, codec: STREAM_DEFAULTS.codec };
+  try {
+    const back = returnLayersOnce(cache, localStorage.getItem(LAYERS_BACK_KEY) === '1');
+    if (back.changed) {
+      cache = back.settings;
+      localStorage.setItem(KEY, JSON.stringify(cache));
+    }
+    localStorage.setItem(LAYERS_BACK_KEY, '1');
+  } catch {
+    /* хранилище недоступно — вернём при следующем чтении */
+  }
   return cache;
+}
+
+/**
+ * Вернуть слои качества ОДИН раз (0.8.5, разбор 24.09 по #191).
+ *
+ * 🔴 До 06.09 одно падение приложения во время показа записывало `layers: false` навсегда. Фикс
+ * `e067fbc7` сделал падение временным, но уже записанное не тронул — и на 24.09 слой был выключен у
+ * шести показывающих из десяти, хотя законно (старая карта) — у одной. Без слоёв у зрителя нет ни
+ * выбора качества, ни понижения при скрытом окне, ни защиты от пульсации (#109).
+ *
+ * ⚠️ Осознанно выключивший тоже получит слой обратно — так решено («всем один раз»). Старые карты
+ * защищены с другой стороны: Rust ведёт отметку «про старую карту уже сказали» под НОВЫМ именем
+ * (`screenshare-layers-told-2`), поэтому на старой карте слой выключится снова, с объяснением.
+ */
+export function returnLayersOnce(settings: StreamSettings, alreadyDone: boolean): { settings: StreamSettings; changed: boolean } {
+  if (alreadyDone || settings.layers) return { settings, changed: false };
+  return { settings: { ...settings, layers: true }, changed: true };
 }
 
 export function setStreamSettings(next: StreamSettings): void {
@@ -195,6 +251,67 @@ export function publishOptions(s: StreamSettings): TrackPublishOptions {
   };
 }
 
+/** Слой качества показа ниже полного: размер, битрейт, частота кадров. */
+export interface ShareLayerPreset {
+  width: number;
+  height: number;
+  maxBitrate: number;
+  maxFramerate: number;
+}
+
+/** Потолок и пол битрейта среднего слоя. 720p на полной частоте кадров для экрана — 2–2,5 Мбит/с. */
+const MID_MIN_BPS = 600_000;
+const MID_MAX_BPS = 2_500_000;
+/** Экономный слой — запасной (#109): лишь бы шло, поэтому 3 к/с. */
+const LOW_FPS = 3;
+const LOW_MIN_BPS = 150_000;
+
+/**
+ * Слои под полным: `[экономный]` или `[экономный, средний]` — ровно в том порядке, в каком их ждут
+ * оба SDK (#191, 24.09). 🔴 Та же лестница — в Rust (`screenshare::share_layer_presets`), числа обязаны
+ * совпадать: зритель не должен различать, из браузера показ или из приложения.
+ *
+ * Почему своя, а не SDK: у показа экрана SDK добавляет РОВНО ОДИН слой (половина, 3 к/с), и
+ * зрителю выбирать было между полным и слайд-шоу. Теперь:
+ * - средний — короткая сторона 720 (у 4K — 1080), ПОЛНАЯ частота кадров, до 2,5 Мбит/с;
+ * - экономный — вдвое меньше среднего, 3 к/с (запасной слой #109, ~150 кбит/с);
+ * - короткая сторона ≤ 720 — среднего нет, остаются полный и экономный, как раньше.
+ *
+ * Размер — ОБЪЯВЛЕННЫЙ (по настройке); SDK считает из него только короткую сторону слоя, а реальный
+ * кадр уменьшает в то же число раз.
+ */
+export function shareLayerPresets(width: number, height: number, maxBitrate: number, fps: number): ShareLayerPreset[] {
+  const short = Math.min(width, height);
+  const scaled = (target: number) => ({
+    width: Math.max(2, Math.round((width * target) / short / 2) * 2),
+    height: Math.max(2, Math.round((height * target) / short / 2) * 2),
+  });
+  const low = (target: number): ShareLayerPreset => ({
+    ...scaled(target),
+    maxBitrate: Math.max(LOW_MIN_BPS, Math.round(((maxBitrate * (target / short) ** 2) * LOW_FPS) / fps)),
+    maxFramerate: LOW_FPS,
+  });
+  if (short <= 720) return [low(Math.round(short / 2))];
+  const midShort = short >= 2160 ? 1080 : 720;
+  const midBps = Math.min(
+    Math.min(Math.max(Math.round(maxBitrate * (midShort / short) ** 2 * 1.5), MID_MIN_BPS), MID_MAX_BPS),
+    Math.round(maxBitrate * 0.6),
+  );
+  return [low(midShort / 2), { ...scaled(midShort), maxBitrate: midBps, maxFramerate: fps }];
+}
+
+/**
+ * Слои для показа ИЗ БРАУЗЕРА. Пусто — оставить SDK как есть: слои выключены, или кодек VP9, у
+ * которого слои делает сам кодировщик (`L3T3_KEY`, три пространственных слоя уже есть).
+ *
+ * ⚠️ Отдельно от `publishOptions`, а не полем внутри: тот закреплён тестом на точное совпадение.
+ */
+export function webShareLayers(s: StreamSettings): ShareLayerPreset[] {
+  if (!s.layers || isSvc(s.codec)) return [];
+  const d = dims(s.resolution);
+  return shareLayerPresets(d.width, d.height, bitrateFor(s), s.fps);
+}
+
 /**
  * Собрать конфиг НАТИВНОГО показа из выбранных настроек — чистая функция, без React и без Tauri.
  *
@@ -224,6 +341,8 @@ export function buildNativeShareConfig(input: {
   codec: string;
   wgcWindow: boolean;
   layers: boolean;
+  gpuPipeline?: boolean;
+  cursor?: boolean;
 } {
   const s = input.settings;
   const dims = RES_OPTIONS.find((r) => r.value === s.resolution) ?? RES_OPTIONS[0];
@@ -239,5 +358,8 @@ export function buildNativeShareConfig(input: {
     codec: s.codec,
     wgcWindow: s.wgcWindow,
     layers: s.layers,
+    // Только выключенное: включённое — это отсутствие поля, и Rust читает его так же (`default_true`).
+    ...(s.gpuPipeline === false ? { gpuPipeline: false } : {}),
+    ...(s.cursor === false ? { cursor: false } : {}),
   };
 }

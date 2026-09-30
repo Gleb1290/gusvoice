@@ -32,6 +32,15 @@ describe('видимость ленты канала', () => {
     assert.equal(isFeedOnScreen({ id: 'c2', currentId: 'c1', mobile: false, mobilePane: 'content' }), false);
     assert.equal(isFeedOnScreen({ id: 'c1', currentId: null, mobile: false, mobilePane: 'content' }), false);
   });
+
+  it('личная беседа видима только в разделе ЛС, а канал — только в разделе сервера', () => {
+    // Ловит тихую отметку прочитанным у выбранной, но сейчас закрытой другим разделом ленты.
+    const base = { id: 'same', currentId: 'same', mobile: false, mobilePane: 'content' as const };
+    assert.equal(isFeedOnScreen({ ...base, kind: 'dm', view: 'server' }), false);
+    assert.equal(isFeedOnScreen({ ...base, kind: 'dm', view: 'dm' }), true);
+    assert.equal(isFeedOnScreen({ ...base, kind: 'channel', view: 'dm' }), false);
+    assert.equal(isFeedOnScreen({ ...base, kind: 'channel', view: 'server' }), true);
+  });
 });
 
 describe('учёт входящего сообщения', () => {

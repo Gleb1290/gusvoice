@@ -24,6 +24,8 @@ pub mod data_channel;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod desktop_capturer;
 pub mod frame_cryptor;
+#[cfg(target_os = "windows")]
+pub mod gv_gpu_capture;
 pub mod helper;
 pub mod jsep;
 pub mod media_stream;

@@ -12,8 +12,8 @@ function role(id: string, permissions = 0n, isEveryone = false): AudienceRole {
   return { id, isEveryone, permissions: permissions.toString() };
 }
 
-function member(userId: string, roleIds: string[] = [], privileged = false): AudienceMember {
-  return { userId, roleIds, privileged };
+function member(userId: string, roleIds: string[] = [], privileged = false, isGuest = false): AudienceMember {
+  return { userId, roleIds, privileged, isGuest };
 }
 
 function overwrite(targetType: 'role' | 'member', targetId: string, allow = 0n, deny = 0n): OverwriteRow {
@@ -26,11 +26,13 @@ function audience(p: {
   categoryOverwrites?: OverwriteRow[];
   channelOverwrites?: OverwriteRow[];
   everyoneRoleId?: string | null;
+  guestsRoleId?: string | null;
 }): string[] {
   return channelAudience({
     members: p.members,
     roles: p.roles ?? [role('everyone', Permission.VIEW_CHANNEL, true)],
     everyoneRoleId: p.everyoneRoleId === undefined ? 'everyone' : p.everyoneRoleId,
+    guestsRoleId: p.guestsRoleId,
     categoryOverwrites: p.categoryOverwrites ?? [],
     channelOverwrites: p.channelOverwrites ?? [],
   });
@@ -171,6 +173,43 @@ describe('аудитория событий канала', () => {
         roles: [role('everyone', 0n, true), role('reader-role', Permission.VIEW_CHANNEL)],
       }),
       ['reader'],
+    );
+  });
+
+  it('канальный запрет роли «Гости» скрывает событие только от гостя', () => {
+    // Ловит расхождение REST и сокета: виртуальная гостевая роль обязана участвовать в оверрайдах.
+    assert.deepEqual(
+      audience({
+        members: [member('guest', [], false, true), member('local')],
+        roles: [role('everyone', Permission.VIEW_CHANNEL, true), role('guests', Permission.VIEW_CHANNEL)],
+        guestsRoleId: 'guests',
+        channelOverwrites: [overwrite('role', 'guests', 0n, Permission.VIEW_CHANNEL)],
+      }),
+      ['local'],
+    );
+  });
+
+  it('гость берёт базовые права из роли «Гости», а местный — из @everyone', () => {
+    // Ловит утечку закрытого для гостей канала через базовое право общей роли.
+    assert.deepEqual(
+      audience({
+        members: [member('guest', [], false, true), member('local')],
+        roles: [role('everyone', Permission.VIEW_CHANNEL, true), role('guests')],
+        guestsRoleId: 'guests',
+      }),
+      ['local'],
+    );
+  });
+
+  it('сервер без системной роли считает гостя по @everyone как до миграции', () => {
+    // Ловит закрытие всех старых серверов, где роль «Гости» ещё не создана.
+    assert.deepEqual(
+      audience({
+        members: [member('guest', [], false, true), member('local')],
+        roles: [role('everyone', Permission.VIEW_CHANNEL, true)],
+        guestsRoleId: null,
+      }),
+      ['guest', 'local'],
     );
   });
 });

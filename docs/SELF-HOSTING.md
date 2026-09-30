@@ -103,6 +103,11 @@ push without Google). Nothing to configure: it learns the address from your serv
   `media.example.com`. Nothing to set up — the installer does it. versitygw keeps files as
   plain files with their headers in extended attributes, so the Docker data directory must be
   on a filesystem with xattr support (ext4/xfs/btrfs — the default everywhere; not NFS without xattr).
+- **DM files** (photos, voice messages, files in direct messages) go to a second, private bucket,
+  `<MINIO_BUCKET>-private`, which the backend creates by itself with no public access; they are served
+  only through the API, each person with their own link. With the bundled storage there is nothing to do.
+  With external S3 whose key reaches only one bucket, create a second bucket without a public policy and
+  set `MINIO_PRIVATE_BUCKET` in `.env` — otherwise file uploads in DMs stay disabled.
 - **Installed before versitygw?** Older boxes kept media in MinIO. The first update copies it
   into the new storage by itself (service `storage-migrate`), checks every file, and keeps the
   old `gusvoice_miniodata` volume untouched. It needs free disk about the size of your media.

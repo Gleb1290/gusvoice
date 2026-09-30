@@ -4,7 +4,7 @@ import websocket from '@fastify/websocket';
 import Fastify from 'fastify';
 import { ZodError } from 'zod';
 import { startActivitySweeper } from './activity.js';
-import { startDailyCleanup } from './cleanup.js';
+import { startAttachmentSweeper, startDailyCleanup } from './cleanup.js';
 import { startSteamPoller } from './steam.js';
 import { startVoiceActivityCollector } from './voiceActivity.js';
 import { runMigrations } from './db/index.js';
@@ -23,7 +23,7 @@ import { registerGateway } from './gateway.js';
 import { verifyMailer } from './mailer.js';
 import { bindSuperAdmin, seedSuperAdmin } from './seed.js';
 import { bootstrapIdentity } from './superAdminRules.js';
-import { ensureMediaBucket } from './storage.js';
+import { ensureMediaBucket, ensurePrivateBucket } from './storage.js';
 import { corsOriginCheck, refreshPeerOrigins } from './corsOrigins.js';
 import { adminRoutes } from './routes/admin.js';
 import { appInfoRoutes } from './routes/appinfo.js';
@@ -32,13 +32,17 @@ import { authRoutes } from './routes/auth.js';
 import { setupRoutes } from './routes/setup.js';
 import { channelRoutes } from './routes/channels.js';
 import { dmRoutes } from './routes/dm.js';
+import { convRoutes } from './routes/conv.js';
 import { downloadRoutes } from './routes/download.js';
+import { attRoutes } from './routes/att.js';
+import { redactLogUrl } from './attachmentRules.js';
 import { economyRoutes } from './routes/economy.js';
 import { diagRoutes } from './routes/diag.js';
 import { inviteRoutes } from './routes/invites.js';
 import { linkPreviewRoutes } from './routes/linkPreview.js';
 import { messageRoutes } from './routes/messages.js';
 import { pushRoutes } from './routes/push.js';
+import { blockRoutes } from './routes/blocks.js';
 import { roleRoutes } from './routes/roles.js';
 import { serverRoutes } from './routes/servers.js';
 import { soundboardRoutes } from './routes/soundboard.js';
@@ -48,7 +52,25 @@ import { unreadRoutes } from './routes/unread.js';
 import { userRoutes } from './routes/users.js';
 import { voiceRoutes } from './routes/voice.js';
 
-const app = Fastify({ logger: true });
+/**
+ * Журнал запросов — как у Fastify по умолчанию, но с вырезанной подписью ссылок на закрытые файлы ЛС (шаг 1в):
+ * ссылка `/api/att/<id>/<смотрящий>/<подпись>` — ключ на предъявителя, в журнале ей не место (`redactLogUrl`).
+ */
+const app = Fastify({
+  logger: {
+    serializers: {
+      req(req) {
+        return {
+          method: req.method,
+          url: redactLogUrl(req.url),
+          host: req.host,
+          remoteAddress: req.ip,
+          remotePort: req.socket?.remotePort,
+        };
+      },
+    },
+  },
+});
 
 // 🔴 CORS сужен до своего клиента, оболочек Tauri и клиентов связанных инстансов (аудит 19.09,
 // F-21; список и кеш — `corsOrigins.ts`). Кук нет, токен в `localStorage`, поэтому чужая страница
@@ -103,9 +125,12 @@ await app.register(
     await api.register(channelRoutes);
     await api.register(messageRoutes);
     await api.register(dmRoutes);
+    // Беседы ЛС (этап 1): с шага 1б живые ЛС лежат в них, и `/auth/me` объявляет `features: ['conv1']`.
+    await api.register(convRoutes);
     // Сводка непрочитанного по всему инстансу — её спрашивает фоновый шлюз (#139, §5.7).
     await api.register(unreadRoutes);
     await api.register(pushRoutes);
+    await api.register(blockRoutes);
     await api.register(roleRoutes);
     await api.register(voiceRoutes);
     await api.register(inviteRoutes);
@@ -114,6 +139,8 @@ await app.register(
     await api.register(soundRoutes);
     await api.register(soundboardRoutes);
     await api.register(downloadRoutes);
+    // Закрытые файлы ЛС (шаг 1в): без входа — доступ решают подпись ссылки и проверка смотрящего (`routes/att.ts`).
+    await api.register(attRoutes);
     await api.register(appInfoRoutes);
     // Диагностика — ТОЛЬКО если инстанс явно её включил (#113). Не «регистрируем и проверяем флаг
     // внутри», а не регистрируем вовсе: тогда выключенный сбор — это отсутствие маршрута, а не
@@ -141,6 +168,8 @@ try {
   await bootstrapIdentity({ seedSuperAdmin, bindSuperAdmin });
   await verifyMailer();
   await ensureMediaBucket();
+  // Закрытый бакет файлов ЛС: без политики; не вышло — загрузки в ЛС отвечают 503, а не уходят в открытый бакет.
+  await ensurePrivateBucket();
   // Федерация поднимается ПОСЛЕ привязки личности и ДО listen: инстанс не должен успеть ответить
   // соседу документом, пока не решено, есть ли у нас печать. Отказ здесь не бросает — он гасит
   // только федерацию (`state.ts`), поэтому `await` без try: внутри уже всё поймано.
@@ -171,6 +200,8 @@ try {
   if (env.federation.enabled) startDirectorySyncWorker();
   // Anti-bot: sweep abandoned unverified registrations (startup + daily).
   startDailyCleanup();
+  // Файлы ЛС (шаг 1в): брошенные и вытесненные загрузки, недоудалённое после «удалить у обоих» — раз в час.
+  startAttachmentSweeper();
   // Expire stale game-activity reports from clients that went silent (#40).
   startActivitySweeper();
   // Steam game-activity poller (#40 Phase 1B) — no-op unless STEAM_API_KEY is configured.

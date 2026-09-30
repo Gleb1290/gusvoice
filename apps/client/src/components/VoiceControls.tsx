@@ -1,6 +1,6 @@
 import { useLocalParticipant, useRoomContext } from '@livekit/components-react';
 import { markDiag, setDiagSharing } from '../diag';
-import { Track } from 'livekit-client';
+import { Track, VideoPreset, type TrackPublishOptions } from 'livekit-client';
 import { useEffect, useRef, useState } from 'react';
 import { comboFromEvent, comboFromMouse, comboToKeyPacked, getHotkeys, isDesktop, isMobile, mouseButtonOf, subscribeHotkeys } from '../hotkeys';
 import {
@@ -30,6 +30,8 @@ import {
   getStreamSettings,
   publishOptions,
   RES_OPTIONS,
+  webShareLayers,
+  type StreamSettings,
 } from '../streamSettings';
 import { toast, toastError } from '../toast';
 import { toggleSelfDeafen, toggleSelfMute } from '../voiceSelf';
@@ -49,6 +51,20 @@ let screenAudioBroken = false;
  * on un-deafen — Discord-style. The screen-share button carries a quality popover
  * (resolution / fps / codec) that applies the saved gv_stream prefs on publish.
  */
+/**
+ * Опции публикации показа ИЗ БРАУЗЕРА вместе со слоями качества (#191, 24.09): полный, средний на
+ * полной частоте кадров и экономный. Без `webShareLayers` SDK давал показу ровно один запасной слой
+ * (половина, 3 к/с), и зрителю выбирать было между полным и слайд-шоу. Лестница — в `streamSettings`.
+ */
+function shareOptions(s: StreamSettings): TrackPublishOptions {
+  const layers = webShareLayers(s);
+  if (!layers.length) return publishOptions(s);
+  return {
+    ...publishOptions(s),
+    screenShareSimulcastLayers: layers.map((l) => new VideoPreset(l.width, l.height, l.maxBitrate, l.maxFramerate)),
+  };
+}
+
 export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly?: boolean; wide?: boolean }) {
   const { localParticipant, isScreenShareEnabled } = useLocalParticipant();
   const room = useRoomContext();
@@ -87,7 +103,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
       return n === 'NotAllowedError' || n === 'AbortError'; // user dismissed the OS picker — not an error
     };
     const start = (audio: boolean) =>
-      localParticipant.setScreenShareEnabled(true, captureOptions({ ...s, audio }), publishOptions({ ...s, audio }));
+      localParticipant.setScreenShareEnabled(true, captureOptions({ ...s, audio }), shareOptions({ ...s, audio }));
 
     // DESKTOP: share VIDEO ONLY (getDisplayMedia audio echoes our own voices and often won't start in
     // WebView2), and stream system audio NATIVELY — WASAPI capture that excludes GusVoice's voices.
@@ -175,6 +191,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
         // беда, а сам ли он выключил или починилось, неизвестно. Уже спотыкались на этом с #100.
         wgcWindow: s.wgcWindow,
         layers: s.layers,
+        cursor: s.cursor !== false,
       });
     }
     // No explicit 'stream' cue here: the companion `#screen` is a SEPARATE participant, so its
@@ -217,7 +234,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
       /* contentHint unsupported — cosmetic */
     }
     await localParticipant.publishTrack(video, {
-      ...publishOptions(s),
+      ...shareOptions(s),
       source: Track.Source.ScreenShare,
       name: 'camera-stream',
     });

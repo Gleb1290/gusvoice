@@ -1,105 +1,88 @@
-import { FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
-import type { Attachment, DmChannel, MessageReplyPreview, ReactionGroup } from '@gusvoice/shared';
-import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
+import { CAP_CONV1, FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
+import type { DmChannel, Message } from '@gusvoice/shared';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { isSuperAdmin, requireAuth } from '../auth.js';
 import { asUserId } from '../superAdminRules.js';
 import { canWriteDm, DM_NO_SHARED_SERVER_ERROR, DM_PEER_GONE_ERROR, openDm } from '../dmRules.js';
-import { attachmentUploadBlock, messageSendBlock, pushDebounced, retryMessage } from '../authGuard.js';
+import { messageSendBlock, pushDebounced, retryMessage } from '../authGuard.js';
+import { acceptDmUpload, refsFromLegacyUrls } from './att.js';
+import { dmDeliveryPlan, reachesPeer } from '../blockRules.js';
+import { blockedBy, isBlockedBy } from '../blocks.js';
+import {
+  conversationRows,
+  createDirect,
+  deleteMessage,
+  deliver,
+  editMessage,
+  findDirect,
+  history,
+  legacyMessageFor,
+  loadAccess,
+  markRead,
+  messageKey,
+  messageTimeByKey,
+  myConversationIds,
+  reactMessage,
+  sendMessage,
+  toLegacyMessage,
+  unreadCounts,
+} from '../conversations.js';
+import type { ConvCursor } from '../convRules.js';
 import { db } from '../db/index.js';
 import { shareServer } from '../db/peerQueries.js';
-import { dmChannels, dmMessageReactions, dmMessages, dmReads, users } from '../db/schema.js';
+import { conversationMembers, users } from '../db/schema.js';
 import { contentPreview, sendPushToUsers } from '../push.js';
 import { publishToUser } from '../realtime.js';
-import { serializeMessage } from '../serialize.js';
-import { attachmentBlocked, isOwnMediaUrl, putAttachment, storageConfigured } from '../storage.js';
-import { id } from '../util.js';
+
+/**
+ * Старые ручки ЛС `/api/dm*` — ПОВЕРХ бесед (ЛС этап 1, шаг 1б, `docs/dm/STAGE1.md`, «Возможности клиента и
+ * совместимость»). Адреса, DTO, id и события `dm.*` — прежние: так работают десктопы 0.8.x, которые вшивают фронт и
+ * живут у людей неделями. Запись и чтение — `conversations.ts` (те же замки, журнал и правила, что у `/api/conv/*`),
+ * `dm_*` после миграции 0079 заморожены и не пишутся.
+ *
+ * 🔴 Каждое изменение рассылается дважды: `dm.*` — соединениям БЕЗ `caps: ['conv1']` (`notCap`), `conv.change` —
+ * соединениям с ней (`deliver`). У одного человека бывают сразу оба клиента, и каждый получает только свою форму.
+ *
+ * Срок жизни — Р15: два тега после перехода клиента на `/api/conv/*` и ещё ≥ 30 дней без запросов от старых версий.
+ */
+
+const OLD = { notCap: CAP_CONV1 } as const;
 
 type UserRow = typeof users.$inferSelect;
-type DmRow = typeof dmChannels.$inferSelect;
-type DmMessageRow = typeof dmMessages.$inferSelect;
 
 function pickUser(u: UserRow): DmChannel['otherUser'] {
   return { id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl };
 }
 
-function serializeDmChannel(row: DmRow, other: UserRow): DmChannel {
+/** Собеседники по беседам: `id беседы → строка собеседника`. */
+async function peersOf(me: string, ids: readonly string[]): Promise<Map<string, UserRow>> {
+  if (ids.length === 0) return new Map();
+  const rows = await db
+    .select({ conversationId: conversationMembers.conversationId, u: users })
+    .from(conversationMembers)
+    .innerJoin(users, eq(conversationMembers.userId, users.id))
+    .where(and(inArray(conversationMembers.conversationId, [...ids]), ne(conversationMembers.userId, me)));
+  return new Map(rows.map((r) => [r.conversationId, r.u]));
+}
+
+/** Беседа в старом DTO. `lastMessageAt` — общее время беседы (придержанное его не двигает), как у `dm_channels`. */
+async function legacyChannel(me: string, conversationId: string): Promise<DmChannel | null> {
+  const [conv, peers] = await Promise.all([conversationRows([conversationId]), peersOf(me, [conversationId])]);
+  const row = conv.get(conversationId);
+  const peer = peers.get(conversationId);
+  if (!row || !peer) return null;
   return {
     id: row.id,
-    otherUser: pickUser(other),
+    otherUser: pickUser(peer),
     createdAt: row.createdAt.toISOString(),
     lastMessageAt: row.lastMessageAt ? row.lastMessageAt.toISOString() : null,
   };
 }
 
-function serializeDmMessage(
-  m: DmMessageRow,
-  author: UserRow,
-  replyTo?: MessageReplyPreview | null,
-  reactions?: ReactionGroup[],
-) {
-  return serializeMessage({
-    id: m.id,
-    channelId: m.dmChannelId,
-    content: m.content,
-    attachments: m.attachments,
-    createdAt: m.createdAt,
-    editedAt: m.editedAt,
-    replyTo: replyTo ?? null,
-    reactions: reactions ?? [],
-    author,
-  });
-}
-
-/** Aggregate DM reactions for a batch of messages into per-message groups, with `me` for the viewer. */
-async function dmReactionsFor(messageIds: string[], viewerId: string): Promise<Map<string, ReactionGroup[]>> {
-  const out = new Map<string, ReactionGroup[]>();
-  if (messageIds.length === 0) return out;
-  const rows = await db.select().from(dmMessageReactions).where(inArray(dmMessageReactions.messageId, messageIds));
-  const agg = new Map<string, Map<string, { count: number; me: boolean }>>();
-  for (const r of rows) {
-    let byEmoji = agg.get(r.messageId);
-    if (!byEmoji) {
-      byEmoji = new Map();
-      agg.set(r.messageId, byEmoji);
-    }
-    const cur = byEmoji.get(r.emoji) ?? { count: 0, me: false };
-    cur.count += 1;
-    if (r.userId === viewerId) cur.me = true;
-    byEmoji.set(r.emoji, cur);
-  }
-  for (const [mid, byEmoji] of agg) {
-    out.set(
-      mid,
-      [...byEmoji.entries()].map(([emoji, v]) => ({ emoji, count: v.count, me: v.me })),
-    );
-  }
-  return out;
-}
-
-/** Compact reply previews for a batch of parent DM-message ids. */
-async function dmReplyPreviewsFor(ids: (string | null)[]): Promise<Map<string, MessageReplyPreview>> {
-  const uniq = [...new Set(ids.filter((x): x is string => !!x))];
-  const out = new Map<string, MessageReplyPreview>();
-  if (uniq.length === 0) return out;
-  const rows = await db
-    .select({ m: dmMessages, u: users })
-    .from(dmMessages)
-    .innerJoin(users, eq(dmMessages.authorId, users.id))
-    .where(inArray(dmMessages.id, uniq));
-  for (const r of rows) out.set(r.m.id, { id: r.m.id, authorName: r.u.displayName, content: r.m.content });
-  return out;
-}
-
-/** Load a DM channel only if `me` is a participant; returns the row and the other user's id. */
-async function loadDm(dmId: string, me: string): Promise<{ row: DmRow; otherId: string } | null> {
-  const [row] = await db.select().from(dmChannels).where(eq(dmChannels.id, dmId)).limit(1);
-  if (!row || (row.userA !== me && row.userB !== me)) return null;
-  return { row, otherId: row.userA === me ? row.userB : row.userA };
-}
-
-const attachmentSchema = z
+/** Вложения отправки ЛС — те же границы и у бесед `/api/conv/*` (`routes/conv.ts`). */
+export const dmAttachmentSchema = z
   .array(
     z.object({
       url: z.string().url(),
@@ -125,52 +108,48 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
   // List my conversations (most-recent first).
   app.get('/dm', async (req) => {
     const me = req.user!.sub;
-    const rows = await db
-      .select()
-      .from(dmChannels)
-      .where(or(eq(dmChannels.userA, me), eq(dmChannels.userB, me)));
-    if (rows.length === 0) return [];
-    const otherIds = rows.map((r) => (r.userA === me ? r.userB : r.userA));
-    const otherUsers = await db.select().from(users).where(inArray(users.id, otherIds));
-    const byId = new Map(otherUsers.map((u) => [u.id, u]));
-
-    // Persisted unread per conversation (migration 0018): other-user messages newer than my
-    // dm_reads mark, 14-day window (same rule as channel reads in buildBootstrap).
-    const unreadBy = new Map<string, number>();
-    const counts = await db.execute(sql`
-      SELECT dm.dm_channel_id AS id, COUNT(*)::int AS unread
-      FROM dm_messages dm
-      LEFT JOIN dm_reads r ON r.dm_channel_id = dm.dm_channel_id AND r.user_id = ${me}
-      WHERE dm.dm_channel_id IN (${sql.join(rows.map((r) => sql`${r.id}`), sql`, `)})
-        AND dm.author_id <> ${me}
-        AND dm.created_at > GREATEST(COALESCE(r.last_read_at, to_timestamp(0)), now() - interval '14 days')
-      GROUP BY dm.dm_channel_id
-    `);
-    for (const row of counts.rows as { id: string; unread: number }[]) unreadBy.set(row.id, row.unread);
-
-    const list = rows
-      .map((r) => ({
-        ...serializeDmChannel(r, byId.get(r.userA === me ? r.userB : r.userA)!),
-        unread: unreadBy.get(r.id) ?? 0,
-      }))
-      .filter((d) => d.otherUser);
+    const ids = await myConversationIds(me);
+    if (ids.length === 0) return [];
+    const [rows, peers, unreadBy] = await Promise.all([conversationRows(ids), peersOf(me, ids), unreadCounts(me, ids)]);
+    const list: DmChannel[] = [];
+    for (const cid of ids) {
+      const row = rows.get(cid);
+      const peer = peers.get(cid);
+      if (!row || !peer) continue;
+      list.push({
+        id: cid,
+        otherUser: pickUser(peer),
+        createdAt: row.createdAt.toISOString(),
+        lastMessageAt: row.lastMessageAt ? row.lastMessageAt.toISOString() : null,
+        unread: unreadBy.get(cid) ?? 0,
+      });
+    }
     list.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
     return list;
   });
 
-  // Advance my read mark for a conversation (persisted unread — migration 0018).
+  /**
+   * «Прочитано» старого клиента. `upTo` = id последнего сообщения на экране → «прочитано до» его ключа (28.09, Codex:
+   * не «до часов сервера»); без тела — до последнего ключа беседы, как прежнее «сейчас». Только вперёд.
+   * Своим старым соединениям — прежнее `read.dm { at }` (время сообщения, до которого прочитано).
+   */
   app.post('/dm/:id/read', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId } = z.object({ id: z.string() }).parse(req.params);
-    const [row] = await db.select().from(dmChannels).where(eq(dmChannels.id, dmId)).limit(1);
-    if (!row || (row.userA !== me && row.userB !== me)) return reply.code(404).send({ error: 'not found' });
-    const at = new Date();
-    await db
-      .insert(dmReads)
-      .values({ userId: me, dmChannelId: dmId, lastReadAt: at })
-      .onConflictDoUpdate({ target: [dmReads.userId, dmReads.dmChannelId], set: { lastReadAt: at } });
-    // То же, что и у каналов: остальные СВОИ устройства гасят значок этой переписки.
-    void publishToUser(me, { t: 'read.dm', dmId, at: at.toISOString() }).catch(() => {});
+    const { upTo } = z.object({ upTo: z.string().min(1).max(64).optional() }).parse(req.body ?? {});
+    const access = await loadAccess(dmId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    const shown = upTo ? await messageKey(dmId, upTo) : null;
+    const key = shown?.sortKey ?? (await conversationRows([dmId])).get(dmId)?.lastSortKey ?? 0;
+    let at = new Date();
+    if (key > 0) {
+      const res = await markRead(me, access, key);
+      if (res.kind === 'ok') {
+        await deliver(res.delivery);
+        at = (await messageTimeByKey(dmId, res.lastReadKey)) ?? at;
+      }
+    }
+    void publishToUser(me, { t: 'read.dm', dmId, at: at.toISOString() }, OLD).catch(() => {});
     return { ok: true };
   });
 
@@ -198,105 +177,67 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
 
     // Новая беседа — только при общем сервере (F0, #139). Правило, порядок шагов и разбор гонки —
     // в `dmRules.ts openDm`; здесь только запросы.
-    const opened = await openDm<DmRow>(
+    let delivery: Parameters<typeof deliver>[0] = null;
+    const opened = await openDm<{ id: string }>(
       {
-        findExisting: async (a, b) => {
-          const [row] = await db
-            .select()
-            .from(dmChannels)
-            .where(and(eq(dmChannels.userA, a), eq(dmChannels.userB, b)))
-            .limit(1);
-          return row ?? null;
-        },
+        findExisting: (a, b) => findDirect(a, b),
         shareServer: (one, two) => shareServer(one, two),
         initiatorIsSuperAdmin: () => isSuperAdmin(asUserId(me)),
-        create: async (a, b) => {
-          const [row] = await db
-            .insert(dmChannels)
-            .values({ id: id(), userA: a, userB: b })
-            .onConflictDoNothing()
-            .returning();
-          return row ?? null;
+        create: async () => {
+          const created = await createDirect(me, userId);
+          delivery = created?.delivery ?? null;
+          return created?.row ?? null;
         },
       },
       me,
       userId,
     );
     if (!opened.ok) return reply.code(403).send({ error: DM_NO_SHARED_SERVER_ERROR });
-    return serializeDmChannel(opened.row, other);
+    void deliver(delivery).catch(() => {});
+    const channel = await legacyChannel(me, opened.row.id);
+    if (!channel) return reply.code(404).send({ error: 'not found' });
+    return channel;
   });
 
-  // Messages of a conversation (newest-last). Cursor: ?before=<ISO timestamp>.
+  // Messages of a conversation (newest-last). Cursor: ?beforeId=<message id> (with ?before=<ISO> as a
+  // fallback for old clients and for a cursor message deleted meanwhile).
   app.get('/dm/:id/messages', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId } = z.object({ id: z.string() }).parse(req.params);
     const query = z
-      .object({ before: z.string().datetime().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) })
+      .object({
+        before: z.string().datetime().optional(),
+        beforeId: z.string().min(1).max(64).optional(),
+        limit: z.coerce.number().int().min(1).max(100).default(50),
+      })
       .parse(req.query);
-
-    const dm = await loadDm(dmId, me);
-    if (!dm) return reply.code(404).send({ error: 'not found' });
-
-    const where = query.before
-      ? and(eq(dmMessages.dmChannelId, dmId), lt(dmMessages.createdAt, new Date(query.before)))
-      : eq(dmMessages.dmChannelId, dmId);
-
-    const rows = await db
-      .select({ m: dmMessages, u: users })
-      .from(dmMessages)
-      .innerJoin(users, eq(dmMessages.authorId, users.id))
-      .where(where)
-      .orderBy(desc(dmMessages.createdAt))
-      .limit(query.limit);
-
-    const list = rows.reverse();
-    const replies = await dmReplyPreviewsFor(list.map((r) => r.m.replyToId));
-    const reactions = await dmReactionsFor(
-      list.map((r) => r.m.id),
-      me,
-    );
-    return list.map((r) =>
-      serializeDmMessage(
-        r.m,
-        r.u,
-        r.m.replyToId ? (replies.get(r.m.replyToId) ?? null) : null,
-        reactions.get(r.m.id) ?? [],
-      ),
-    );
+    // Курсор — ключ порядка сообщения-курсора (перенос 1б повторяет прежний порядок `(время, id)`); удалённое
+    // тем временем — прежний запасной путь по времени.
+    const k = query.beforeId ? await messageKey(dmId, query.beforeId) : null;
+    const before: ConvCursor | undefined = k ? { sortKey: k.sortKey, id: query.beforeId! } : undefined;
+    const beforeTime = !before && query.before ? new Date(query.before) : undefined;
+    const page = await history(me, dmId, { before, beforeTime, limit: query.limit });
+    if (page === null || page === 'no-anchor') return reply.code(404).send({ error: 'not found' });
+    return page.messages.map(toLegacyMessage);
   });
 
-  // Upload one attachment for a conversation; returns its metadata.
+  // Upload one attachment for a conversation; returns its metadata. С шага 1в — в закрытое хранилище, ссылка своя у
+  // каждого смотрящего (`routes/att.ts`); 0.8.x получает её в `url` и отправляет обратно как раньше.
   app.post('/dm/:id/attachments', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId } = z.object({ id: z.string() }).parse(req.params);
-    const dm = await loadDm(dmId, me);
-    if (!dm) return reply.code(404).send({ error: 'not found' });
-    if (!storageConfigured()) return reply.code(503).send({ error: 'attachments storage not configured' });
-
-    const file = await req.file();
-    if (!file) return reply.code(400).send({ error: 'no file' });
-    const buffer = await file.toBuffer();
-    const mime = file.mimetype || 'application/octet-stream';
-    const name = file.filename || 'file';
-    // Reject script-capable web types (P2-1/P3-8) — SVG/HTML could execute if rendered inline.
-    if (attachmentBlocked(mime, name)) return reply.code(415).send({ error: 'этот тип файла запрещён (SVG/HTML)' });
-    // Upload rate-limit (P2-3): the DM path is weaker (only DM-membership gates it) — bound storage abuse.
-    // After buffering (multipart drained), before the bucket write.
-    const upWait = await attachmentUploadBlock(me);
-    if (upWait) return reply.code(429).header('Retry-After', String(upWait)).send({ error: retryMessage(upWait) });
-    const url = await putAttachment(id(), buffer, mime, name, Date.now());
-    const attachment: Attachment = { url, name, contentType: mime, size: buffer.length };
-    return reply.send(attachment);
+    if (!(await loadAccess(dmId, me))) return reply.code(404).send({ error: 'not found' });
+    return acceptDmUpload(req, reply, dmId, me);
   });
 
-  // Send a message (text and/or up to 10 attachments).
+  // Send a message (text and/or up to 10 attachments). Старый клиент — без id отправки и без защиты от повтора.
   app.post('/dm/:id/messages', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId } = z.object({ id: z.string() }).parse(req.params);
     const body = z
       .object({
         content: z.string().max(4000).optional().default(''),
-        attachments: attachmentSchema,
+        attachments: dmAttachmentSchema,
         replyToId: z.string().nullish(),
       })
       .parse(req.body);
@@ -306,56 +247,61 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     // Anti-spam (#5, P1-3): cap outbound message rate per user (channels + DMs share one budget).
     const wait = await messageSendBlock(me);
     if (wait) return reply.code(429).header('Retry-After', String(wait)).send({ error: retryMessage(wait) });
-    // Attachment URLs must point at OUR bucket (#4, P1-2) — reject a smuggled external URL (tracking pixel).
-    if (body.attachments.some((a) => !isOwnMediaUrl(a.url)))
-      return reply.code(400).send({ error: 'вложение должно быть загружено через этот сервер' });
+    // Вложение — только НАША ссылка на файл, выданная мне при загрузке (#4, P1-2; шаг 1в): публичные адреса бакета и
+    // чужие ссылки не принимаются. Моё ли, незавершённое ли, этой ли беседы — решает `sendMessage` под замком.
+    const refs = await refsFromLegacyUrls(body.attachments, me);
+    if (!refs) return reply.code(400).send({ error: 'вложение должно быть загружено через этот сервер' });
 
-    const dm = await loadDm(dmId, me);
+    const access = await loadAccess(dmId, me);
     // Собеседник удалил аккаунт (F0 #139): история остаётся читаемой, но писать больше некому.
     // Само правило (и почему «не участник» — это 404, а не 403) — в `dmRules.ts canWriteDm`.
-    const [peer] = dm
-      ? await db.select({ deletedAt: users.deletedAt }).from(users).where(eq(users.id, dm.otherId)).limit(1)
-      : [];
-    const write = canWriteDm({ member: !!dm, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
-    if (write === 'not-a-member' || !dm) return reply.code(404).send({ error: 'not found' });
+    const [peer] = access?.peerId ? await db.select().from(users).where(eq(users.id, access.peerId)).limit(1) : [];
+    const write = canWriteDm({ member: !!access, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
+    if (write === 'not-a-member' || !access) return reply.code(404).send({ error: 'not found' });
     if (write === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
+    const peerId = access.peerId!;
 
-    // A reply must point at an existing message in this same conversation.
-    let replyToId: string | null = null;
-    if (body.replyToId) {
-      const [parent] = await db.select().from(dmMessages).where(eq(dmMessages.id, body.replyToId)).limit(1);
-      if (!parent || parent.dmChannelId !== dmId) return reply.code(400).send({ error: 'invalid reply target' });
-      replyToId = parent.id;
-    }
+    // Получатель заблокировал автора — «как в Telegram» (#212, `blockRules.dmDeliveryPlan`): сохраняем,
+    // автору всё как обычно, получателю — ничего, и беседа у него не поднимается.
+    const plan = dmDeliveryPlan(await isBlockedBy(peerId, me));
+    const res = await sendMessage(me, access, {
+      clientId: null,
+      content,
+      attachments: refs,
+      replyToId: body.replyToId ?? null,
+      withheld: plan.withheld,
+    });
+    if (res.kind === 'bad-reply') return reply.code(400).send({ error: 'invalid reply target' });
+    if (res.kind === 'bad-attachments') return reply.code(400).send({ error: 'вложение уже отправлено или не найдено' });
+    if (res.kind !== 'created') return reply.code(404).send({ error: 'not found' });
 
+    const mine = await legacyMessageFor(res.row.id, me);
+    if (!mine) return reply.code(404).send({ error: 'not found' });
     const [author] = await db.select().from(users).where(eq(users.id, me)).limit(1);
-    const [row] = await db
-      .insert(dmMessages)
-      .values({ id: id(), dmChannelId: dmId, authorId: me, content, attachments: body.attachments, replyToId })
-      .returning();
-    await db.update(dmChannels).set({ lastMessageAt: row.createdAt }).where(eq(dmChannels.id, dmId));
-
-    const replies = await dmReplyPreviewsFor([replyToId]);
-    const message = serializeDmMessage(row, author, replyToId ? (replies.get(replyToId) ?? null) : null);
-    // Tell the recipient about the conversation (so it appears / re-sorts in their list),
-    // then deliver the message to both participants' own connections.
-    const channelForRecipient: DmChannel = {
-      id: dmId,
-      otherUser: pickUser(author),
-      createdAt: dm.row.createdAt.toISOString(),
-      lastMessageAt: row.createdAt.toISOString(),
-    };
-    await publishToUser(dm.otherId, { t: 'dm.channel', channel: channelForRecipient });
-    await publishToUser(dm.otherId, { t: 'dm.create', channelId: dmId, message });
-    await publishToUser(me, { t: 'dm.create', channelId: dmId, message });
+    if (plan.notifyRecipient) {
+      const conv = (await conversationRows([dmId])).get(dmId);
+      // Беседа получателю — чтобы появилась / поднялась в его списке; потом само сообщение.
+      const channelForRecipient: DmChannel = {
+        id: dmId,
+        otherUser: pickUser(author),
+        createdAt: (conv?.createdAt ?? res.row.createdAt).toISOString(),
+        lastMessageAt: res.row.createdAt.toISOString(),
+      };
+      const theirs = await legacyMessageFor(res.row.id, peerId);
+      await publishToUser(peerId, { t: 'dm.channel', channel: channelForRecipient }, OLD);
+      if (theirs) await publishToUser(peerId, { t: 'dm.create', channelId: dmId, message: theirs }, OLD);
+    }
+    await publishToUser(me, { t: 'dm.create', channelId: dmId, message: mine }, OLD);
+    await deliver(res.delivery);
+    if (!plan.notifyRecipient) return reply.code(201).send(mine);
     // Wake the recipient's registered devices (fire-and-forget; never blocks the response).
     // source = this DM author, so a recipient who muted my DMs won't get a phone push.
     void (async () => {
       // Push-bomb debounce (#5, P1-3): one DM-push per recipient per sender per window, so a burst
       // of DMs can't machine-gun the recipient's phone.
-      if (await pushDebounced(dm.otherId, me)) return;
+      if (await pushDebounced(peerId, me)) return;
       await sendPushToUsers(
-        [dm.otherId],
+        [peerId],
         {
           type: 'dm',
           title: author.displayName,
@@ -364,55 +310,72 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
         },
         { scope: 'dm_user', targetId: me },
       );
-    })();
-    return reply.code(201).send(message);
+    })().catch(() => {});
+    return reply.code(201).send(mine);
   });
 
   // Edit your own message.
   app.patch('/dm/:id/messages/:messageId', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
-    const { content } = z.object({ content: z.string().min(1).max(4000) }).parse(req.body);
-
-    const dm = await loadDm(dmId, me);
-    if (!dm) return reply.code(404).send({ error: 'not found' });
-    const [msg] = await db.select().from(dmMessages).where(eq(dmMessages.id, messageId)).limit(1);
-    if (!msg || msg.dmChannelId !== dmId) return reply.code(404).send({ error: 'not found' });
-    if (msg.authorId !== me) return reply.code(403).send({ error: 'forbidden' });
-
-    const [row] = await db
-      .update(dmMessages)
-      .set({ content: content.trim(), editedAt: new Date() })
-      .where(eq(dmMessages.id, messageId))
-      .returning();
-    const [author] = await db.select().from(users).where(eq(users.id, me)).limit(1);
-    const replies = await dmReplyPreviewsFor([row.replyToId]);
-    const reactions = await dmReactionsFor([row.id], me);
-    const message = serializeDmMessage(
-      row,
-      author,
-      row.replyToId ? (replies.get(row.replyToId) ?? null) : null,
-      reactions.get(row.id) ?? [],
-    );
-    await publishToUser(dm.otherId, { t: 'dm.update', channelId: dmId, message });
-    await publishToUser(me, { t: 'dm.update', channelId: dmId, message });
-    return reply.send(message);
+    const { content: raw } = z.object({ content: z.string().max(4000) }).parse(req.body);
+    const access = await loadAccess(dmId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    // Правка из одних пробелов проходила `.min(1)` ДО обрезки и сохраняла пустую реплику (#212, Codex).
+    // Пустой текст допустим только у сообщения с вложениями — это «убрать подпись», как у отправки.
+    const res = await editMessage(me, access, messageId, raw.trim());
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
+    if (res.kind === 'empty') return reply.code(400).send({ error: 'empty message' });
+    const mine = (await legacyMessageFor(messageId, me)) as Message;
+    // Придержанное собеседник не видел — и правка до него не доходит. Уже доставленное правится у обоих даже
+    // при блокировке: новый текст он всё равно увидит после перезагрузки (`blockRules.reachesPeer`).
+    if (!res.row.withheld && access.peerId) {
+      const theirs = await legacyMessageFor(messageId, access.peerId);
+      if (theirs) await publishToUser(access.peerId, { t: 'dm.update', channelId: dmId, message: theirs }, OLD);
+    }
+    await publishToUser(me, { t: 'dm.update', channelId: dmId, message: mine }, OLD);
+    await deliver(res.delivery);
+    return reply.send(mine);
   });
 
-  // Delete your own message.
+  /**
+   * Удалить сообщение — «как в Telegram» (#212, Р5, решение владельца 28.09):
+   * - `?for=both` (по умолчанию — так удаляет старый клиент): только СВОЁ, у обоих (в беседах — надгробие, Р19:
+   *   исчезает без следа);
+   * - `?for=me`: любое видимое мне сообщение пропадает только у меня, собеседник его по-прежнему видит.
+   * Событие `dm.delete` несёт новое время беседы (`lastMessageAt`) и новое непрочитанное получателя (`unread`):
+   * без первого удалённое последнее сообщение держало беседу наверху списка со своим временем (поймано на S25),
+   * без второго непрочитанное удалённое оставляло у собеседника «1» на пустом месте.
+   */
   app.delete('/dm/:id/messages/:messageId', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
+    const { for: scope } = z.object({ for: z.enum(['me', 'both']).default('both') }).parse(req.query ?? {});
+    const access = await loadAccess(dmId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    const res = await deleteMessage(me, access, messageId, scope);
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
+    if (!res.delivery) return reply.code(204).send(); // повтор уже сделанного удаления — событий второй раз нет
 
-    const dm = await loadDm(dmId, me);
-    if (!dm) return reply.code(404).send({ error: 'not found' });
-    const [msg] = await db.select().from(dmMessages).where(eq(dmMessages.id, messageId)).limit(1);
-    if (!msg || msg.dmChannelId !== dmId) return reply.code(404).send({ error: 'not found' });
-    if (msg.authorId !== me) return reply.code(403).send({ error: 'forbidden' });
-
-    await db.delete(dmMessages).where(eq(dmMessages.id, messageId));
-    await publishToUser(dm.otherId, { t: 'dm.delete', channelId: dmId, messageId });
-    await publishToUser(me, { t: 'dm.delete', channelId: dmId, messageId });
+    if (scope === 'me') {
+      // Только своим устройствам: собеседник не узнаёт, что я у себя что-то удалил.
+      const unread = (await unreadCounts(me, [dmId])).get(dmId) ?? 0;
+      await publishToUser(me, { t: 'dm.delete', channelId: dmId, messageId, unread }, OLD);
+    } else {
+      // Удалённое «у обоих» уходит у собеседника и при блокировке (`blockRules.reachesPeer`); придержанное он не видел.
+      if (!res.withheld && access.peerId) {
+        const unread = (await unreadCounts(access.peerId, [dmId])).get(dmId) ?? 0;
+        await publishToUser(
+          access.peerId,
+          { t: 'dm.delete', channelId: dmId, messageId, lastMessageAt: res.lastMessageAt, unread },
+          OLD,
+        );
+      }
+      await publishToUser(me, { t: 'dm.delete', channelId: dmId, messageId, lastMessageAt: res.lastMessageAt }, OLD);
+    }
+    await deliver(res.delivery);
     return reply.code(204).send();
   });
 
@@ -421,28 +384,25 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     const { id: dmId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
     const { emoji, op } = z.object({ emoji: z.string().min(1).max(32), op: z.enum(['add', 'remove']) }).parse(req.body);
+    const access = await loadAccess(dmId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    const blockedActor = new Set<string>();
+    for (const uid of access.memberIds) if (uid !== me && (await blockedBy(uid)).has(me)) blockedActor.add(uid);
 
-    const dm = await loadDm(dmId, me);
-    if (!dm) return reply.code(404).send({ error: 'not found' });
-    const [msg] = await db.select().from(dmMessages).where(eq(dmMessages.id, messageId)).limit(1);
-    if (!msg || msg.dmChannelId !== dmId) return reply.code(404).send({ error: 'not found' });
-
-    if (op === 'add') {
-      await db.insert(dmMessageReactions).values({ messageId, userId: me, emoji }).onConflictDoNothing();
-    } else {
-      await db
-        .delete(dmMessageReactions)
-        .where(
-          and(
-            eq(dmMessageReactions.messageId, messageId),
-            eq(dmMessageReactions.userId, me),
-            eq(dmMessageReactions.emoji, emoji),
-          ),
-        );
-    }
+    /**
+     * 🔴 Рассылаем только НАСТОЯЩЕЕ изменение (28.09, #212, найдено Codex и воспроизведено).
+     * Повтор запроса (потерянный ответ, двойной клик) вставки не делал — строка уже есть, — но событие
+     * уходило, и клиенты без номера события прибавляли реакцию второй раз: в базе одна, на экране две.
+     * Двойное снятие так же могло вычесть чужую реакцию. Ответ тот же 204: для отправителя повтор — успех.
+     */
+    const res = await reactMessage(me, access, messageId, emoji, op, blockedActor);
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (!res.changed) return reply.code(204).send();
     const event = { t: 'dm.reaction' as const, channelId: dmId, messageId, emoji, userId: me, op };
-    await publishToUser(dm.otherId, event);
-    await publishToUser(me, event);
+    // Реакция заблокированного хранится, но собеседник её не видит ни сейчас, ни в истории.
+    if (access.peerId && reachesPeer(blockedActor.has(access.peerId))) await publishToUser(access.peerId, event, OLD);
+    await publishToUser(me, event, OLD);
+    await deliver(res.delivery);
     return reply.code(204).send();
   });
 }

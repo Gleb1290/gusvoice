@@ -18,7 +18,11 @@
 
 #include <atomic>
 
+#include "modules/desktop_capture/desktop_and_cursor_composer.h"
 #include "modules/desktop_capture/desktop_capture_options.h"
+#ifdef _WIN64
+#include "modules/desktop_capture/win/screen_capturer_win_directx.h"
+#endif
 
 using SourceList = webrtc::DesktopCapturer::SourceList;
 
@@ -41,6 +45,23 @@ void set_wgc_window_capture(bool enabled) {
   g_allow_wgc_window.store(enabled, std::memory_order_relaxed);
 }
 
+#ifdef _WIN64
+// GusVoice (#207, 25.09): capture SCREENS with DXGI Desktop Duplication, WGC only where DXGI is
+// unavailable. While a WGC capture session is alive Windows forces the SOFTWARE cursor for the whole
+// desktop (Microsoft engineer, microsoft/Windows.UI.Composition-Win32-Samples#128; the fix was pulled
+// from 24H2). Over a game that means a cursor drawn by DWM: it stuttered while dragging items in a game
+// inventory, and a visible cursor can push a borderless game out of independent flip. OBS display
+// capture and Chromium (before 24H2) use DXGI for the same reason.
+// Decided ONCE per process so the capture method never flips mid-session (DXGI can be briefly
+// unavailable, e.g. on the secure desktop). Both methods use the SAME screen ids — the
+// EnumDisplayDevices device index (GetScreenList in screen_capture_utils.cc; WGC maps it to an
+// HMONITOR itself via GetHmonitorFromDeviceIndex), so the picker and the share always agree.
+static bool UseDxgiForScreens() {
+  static const bool use_dxgi = webrtc::ScreenCapturerWinDirectx::IsSupported();
+  return use_dxgi;
+}
+#endif /* _WIN64 */
+
 std::unique_ptr<DesktopCapturer> new_desktop_capturer(
     DesktopCapturerOptions options) {
   webrtc::DesktopCaptureOptions webrtc_options =
@@ -52,7 +73,7 @@ std::unique_ptr<DesktopCapturer> new_desktop_capturer(
 #ifdef _WIN64
   switch (options.source_type) {
     case SourceType::Screen:
-      webrtc_options.set_allow_wgc_screen_capturer(true);
+      webrtc_options.set_allow_wgc_screen_capturer(!UseDxgiForScreens());
       break;
     case SourceType::Window:
       webrtc_options.set_allow_wgc_window_capturer(
@@ -90,6 +111,14 @@ std::unique_ptr<DesktopCapturer> new_desktop_capturer(
 
   if (!capturer) {
     return nullptr;
+  }
+  // GusVoice (28.09): курсор в показе. `prefer_cursor_embedded` умеет не каждый способ захвата: WGC
+  // (окно) рисует курсор сам и помечает кадр `may_contain_cursor`, а DXGI (экран) отдаёт стол без
+  // курсора. Обёртка дорисовывает курсор только в кадрах без этой пометки — двойного не будет. Так же
+  // делает Chromium. Миниатюры в окне выбора курсор не просят и идут без обёртки.
+  if (options.include_cursor) {
+    capturer = std::make_unique<webrtc::DesktopAndCursorComposer>(std::move(capturer),
+                                                                  webrtc_options);
   }
   return std::make_unique<DesktopCapturer>(std::move(capturer));
 }

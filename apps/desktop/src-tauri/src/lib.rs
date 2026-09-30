@@ -301,6 +301,9 @@ mod gpu_nvml;
 /// геометрию окон спрашиваем у Win32.
 #[cfg(target_os = "windows")]
 mod occlusion;
+/// Системный тост, клик по которому открывает беседу (#212, Б11) — плагин клик на десктопе не отдаёт.
+#[cfg(desktop)]
+mod os_notify;
 #[cfg(desktop)]
 mod overlay;
 /// Нативная тряска ОКНА для МЕГА пока (#117). Десктоп целиком — двигать окно умеет любая из
@@ -590,6 +593,13 @@ fn gv_hotkey_set_keys(keys: Vec<u32>) {
 /// or its "Открыть" item restores it.
 #[tauri::command]
 fn gv_window_hide(window: tauri::WebviewWindow) {
+    // Окно в трее не видно никому — отрисовку гасим, как при сворачивании (`set_main_webview_shown`).
+    #[cfg(target_os = "windows")]
+    {
+        if window.label() == "main" {
+            set_main_webview_shown(&window, false);
+        }
+    }
     let _ = window.hide();
 }
 
@@ -882,17 +892,23 @@ async fn gv_toast_set_size(app: tauri::AppHandle, w: f64, h: f64) {
 
 /// Enumerate the user's currently-open apps (exe + name + icon) for the overlay "выбранные приложения"
 /// picker. Windows-only; returns an empty list elsewhere. Icon extraction is slowish → off-thread.
+///
+/// `icons: false` — только имена (27.09). Сборщик «во что играет» зовёт это раз в 30 с ради одних имён
+/// exe, а получал иконку КАЖДОГО открытого приложения PNG-строкой base64: извлечение иконок, сжатие и
+/// сотни килобайт JSON через IPC дважды в минуту. Нет параметра — с иконками, как раньше (окно выбора).
 #[tauri::command]
-async fn gv_list_apps() -> Result<serde_json::Value, String> {
+async fn gv_list_apps(icons: Option<bool>) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "windows")]
     {
-        let apps = tauri::async_runtime::spawn_blocking(apps_enum::list_apps)
+        let with_icons = icons.unwrap_or(true);
+        let apps = tauri::async_runtime::spawn_blocking(move || apps_enum::list_apps(with_icons))
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_value(apps).map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = icons;
         Ok(serde_json::Value::Array(vec![]))
     }
 }
@@ -945,6 +961,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
     fn show_main(app: &tauri::AppHandle) {
         if let Some(w) = app.get_webview_window("main") {
+            #[cfg(target_os = "windows")]
+            set_main_webview_shown(&w, true);
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
@@ -1022,6 +1040,62 @@ fn gv_take_deep_link() -> Option<String> {
     }
     let argv: Vec<String> = std::env::args().collect();
     deep_link_arg(&argv)
+}
+
+/// Последнее, что сказали WebView2 про видимость: `Resized` сыплется десятками при перетаскивании
+/// края окна, а звать контроллер нужно только на СМЕНУ «свёрнуто ↔ нет».
+#[cfg(target_os = "windows")]
+static WEBVIEW_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Свёрнутое окно — `IsVisible = false` у контроллера WebView2, развёрнутое — обратно (#207,
+/// плейбук `docs/streaming-playbook/`, тема 04, A1.2).
+///
+/// 🔴 Зачем. Microsoft прямо велит хосту делать это самому: WebView2 — дочернее окно, о сворачивании
+/// родителя он НЕ узнаёт, и страница продолжает рисоваться (в том числе открытый чужой показ). wry
+/// 0.55.1 при `SIZE_MINIMIZED` ничего не делает (`webview2/mod.rs:1225`). С `false` Chromium
+/// перестаёт рисовать и считает страницу скрытой: `visibilityState` = `hidden`, и зритель сам
+/// просит нижний слой показа (#191).
+///
+/// ⚠️ Голос не рвётся: звук и WebRTC живут не в отрисовке, а таймеры звучащей страницы Chromium
+/// сильно не притормаживает. Проверять живьём после каждой правки здесь — свернуть в разговоре.
+/// ⚠️ Только сворачивание. Окно под игрой (#193) гасить так НЕЛЬЗЯ: вернуть отрисовку можно лишь по
+/// опросу раз в ~секунду, и человек, вернувшийся из игры, видел бы пустое окно.
+#[cfg(target_os = "windows")]
+fn sync_webview_visibility(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+    let Ok(hwnd) = window.hwnd() else { return };
+    let shown = unsafe { !IsIconic(hwnd).as_bool() };
+    set_main_webview_shown(window, shown);
+}
+
+/// Сказать WebView2 главного окна «видно / не видно» — только на СМЕНУ.
+///
+/// 🔴 Кроме сворачивания (выше) это же нужно при уходе в трей (27.09): `hide()` прячет окно, а
+/// `IsVisible` контроллера оставался `true`, и приложение в трее весь день рисовало интерфейс, крутило
+/// анимации и аватарки. Показ обратно — `true` ДО `show()`, чтобы окно не всплыло пустым.
+#[cfg(target_os = "windows")]
+fn set_main_webview_shown(window: &tauri::WebviewWindow, shown: bool) {
+    use std::sync::atomic::Ordering;
+    if WEBVIEW_SHOWN.swap(shown, Ordering::Relaxed) == shown {
+        return;
+    }
+    let _ = window.with_webview(move |webview| unsafe {
+        let _ = webview.controller().SetIsVisible(shown);
+    });
+}
+
+/// Идёт ли на переднем плане чужое окно на весь монитор, то есть игра (#207). Клиент по нему
+/// ставит на паузу бесконечные анимации даже там, где окно видно на втором мониторе.
+#[tauri::command]
+fn gv_game_foreground() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        occlusion::game_foreground_now()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 /// Накрыто ли наше окно чужим прямо сейчас (#193). На платформах без Win32 — всегда «видно»:
@@ -1117,6 +1191,8 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             use tauri::{Emitter, Manager};
             if let Some(w) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                set_main_webview_shown(&w, true);
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
@@ -1167,6 +1243,9 @@ pub fn run() {
             gv_window_hide,
             gv_app_quit,
             gv_flash_window,
+            // Атрибут — на КАЖДУЮ строку (разбор выше, у `diag`): на Android модуля нет.
+            #[cfg(desktop)]
+            os_notify::gv_notify_clickable,
             gv_open_external,
             gv_tray_set_state,
             gv_overlay_show,
@@ -1191,6 +1270,7 @@ pub fn run() {
             gv_close_ack,
             gv_window_covered,
             gv_window_cover_pct,
+            gv_game_foreground,
             gv_gpu_accel_get,
             gv_gpu_accel_set
         ])
@@ -1242,6 +1322,11 @@ pub fn run() {
                                     h.exit(0);
                                 }
                             });
+                        }
+                        // Свернули / развернули — погасить или вернуть отрисовку WebView2 (#207).
+                        #[cfg(target_os = "windows")]
+                        if let tauri::WindowEvent::Resized(_) = event {
+                            sync_webview_visibility(&emitter);
                         }
                     });
                 }

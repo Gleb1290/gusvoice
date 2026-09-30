@@ -1683,10 +1683,11 @@ dependencies = [
 
 [[package]]
 name = "gusvoice"
-version = "0.8.2"
+version = "0.8.17"
 dependencies = [
  "base64 0.22.1",
  "livekit",
+ "notify-rust",
  "png 0.17.16",
  "serde",
  "serde_json",
@@ -2306,8 +2307,6 @@ dependencies = [
 [[package]]
 name = "libwebrtc"
 version = "0.3.38"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0088d99d0757751962e6d60e8fcd42b1bfb5affd2b25da45e0735443330905"
 dependencies = [
  "cxx",
  "jni 0.21.1",

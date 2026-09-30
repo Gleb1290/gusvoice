@@ -146,6 +146,27 @@ function absorbRefresh(res: Response): void {
   if (fresh && fresh !== token) setToken(fresh);
 }
 
+/** Человек в моём чёрном списке ЛС (#212). */
+export interface BlockedUser {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+/** Курсор порции истории (`historyPage.olderCursor`). */
+export interface HistoryCursor {
+  /** Время самого старого загруженного — запасной путь для сервера до 28.09. */
+  before: string;
+  /** Его id — по нему новый сервер берёт точное время и не теряет соседей по миллисекунде. */
+  beforeId: string;
+}
+
+function historyQuery(cursor?: HistoryCursor): string {
+  if (!cursor) return '';
+  return `?before=${encodeURIComponent(cursor.before)}&beforeId=${encodeURIComponent(cursor.beforeId)}`;
+}
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const sent = epoch;
   const res = await fetch(`${config.apiUrl}/api${path}`, {
@@ -191,11 +212,16 @@ export const api = {
   login: (username: string, password: string) =>
     req<AuthResponse | TotpRequiredResponse>('POST', '/auth/login', { username, password }),
   // UnifiedPush device registration (Android push — see nativeUnifiedPush.ts). Backend upserts per (user,device).
-  registerPush: (endpoint: string, deviceId: string) =>
-    req<void>('POST', '/push/register', { endpoint, deviceId, platform: 'android' }),
+  // `keys` — ключи шифрования пуша устройства (#213, WebPush): без них бэкенд шлёт пуш без текста.
+  registerPush: (endpoint: string, deviceId: string, keys?: { p256dh: string; auth: string } | null) =>
+    req<void>('POST', '/push/register', { endpoint, deviceId, platform: 'android', ...(keys ? { keys } : {}) }),
   unregisterPush: (deviceId: string) => req<void>('POST', '/push/unregister', { deviceId }),
   // Push-mute rules (account-wide push suppression: a server's @mentions or a person's DMs).
   listPushMutes: () => req<PushMute[]>('GET', '/push/mutes'),
+  // Чёрный список ЛС (#212): кого я заблокировал — с профилями; заблокированный об этом не узнаёт.
+  listBlocks: () => req<BlockedUser[]>('GET', '/blocks'),
+  blockUser: (userId: string) => req<void>('POST', '/blocks', { userId }),
+  unblockUser: (userId: string) => req<void>('DELETE', `/blocks/${userId}`),
   setPushMute: (scope: PushMuteScope, targetId: string) => req<void>('POST', '/push/mute', { scope, targetId }),
   removePushMute: (scope: PushMuteScope, targetId: string) => req<void>('DELETE', '/push/mute', { scope, targetId }),
   loginTotp: (challenge: string, code: string) =>
@@ -483,8 +509,9 @@ export const api = {
   deleteCategoryOverwrite: (categoryId: string, targetType: string, targetId: string) =>
     req<void>('DELETE', `/categories/${categoryId}/overwrites/${targetType}/${targetId}`),
 
-  listMessages: (channelId: string, before?: string) =>
-    req<Message[]>('GET', `/channels/${channelId}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  // Курсор порции — (время, id): сервер берёт точное время из строки `beforeId` (#212, `historyPage.ts`).
+  listMessages: (channelId: string, cursor?: HistoryCursor) =>
+    req<Message[]>('GET', `/channels/${channelId}/messages${historyQuery(cursor)}`),
   sendMessage: (
     channelId: string,
     content: string,
@@ -698,13 +725,18 @@ export const api = {
   // --- direct messages ---
   listDms: () => req<DmChannel[]>('GET', '/dm'),
   openDm: (userId: string) => req<DmChannel>('POST', '/dm', { userId }),
-  listDmMessages: (dmId: string, before?: string) =>
-    req<Message[]>('GET', `/dm/${dmId}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  listDmMessages: (dmId: string, cursor?: HistoryCursor) =>
+    req<Message[]>('GET', `/dm/${dmId}/messages${historyQuery(cursor)}`),
   sendDmMessage: (dmId: string, content: string, attachments: Attachment[] = [], replyToId?: string | null) =>
     req<Message>('POST', `/dm/${dmId}/messages`, { content, attachments, replyToId }),
   editDmMessage: (dmId: string, messageId: string, content: string) =>
     req<Message>('PATCH', `/dm/${dmId}/messages/${messageId}`, { content }),
-  deleteDmMessage: (dmId: string, messageId: string) => req<void>('DELETE', `/dm/${dmId}/messages/${messageId}`),
+  /**
+   * Удалить сообщение ЛС (#212): `both` — у обоих (только своё), `me` — только у себя (любое). Без `scope` сервер
+   * удаляет у обоих — так делал старый клиент.
+   */
+  deleteDmMessage: (dmId: string, messageId: string, scope?: 'me' | 'both') =>
+    req<void>('DELETE', `/dm/${dmId}/messages/${messageId}${scope ? `?for=${scope}` : ''}`),
   uploadDmAttachment: async (dmId: string, file: File): Promise<Attachment> => {
     // Размер картинки меряем параллельно загрузке (#194): лента оставит под неё место до скачивания.
     const dims = measureImageFile(file);
@@ -747,7 +779,9 @@ export const api = {
 
   // --- persisted read marks (migration 0018) ---
   markChannelRead: (channelId: string) => req<{ ok: true }>('POST', `/channels/${channelId}/read`),
-  markDmRead: (dmId: string) => req<{ ok: true }>('POST', `/dm/${dmId}/read`),
+  // `upTo` — id последнего сообщения на экране: «прочитано» ставится до него, а не до часов сервера (#212).
+  markDmRead: (dmId: string, upTo?: string) =>
+    req<{ ok: true }>('POST', `/dm/${dmId}/read`, upTo ? { upTo } : undefined),
 
   // Force-download URL for a chat attachment: the backend streams the MinIO object with
   // Content-Disposition: attachment (the <a download> attribute is a no-op cross-origin).

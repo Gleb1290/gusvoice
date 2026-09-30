@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding, VideoPreset};
 use livekit::prelude::*;
 use livekit::webrtc::desktop_capturer::{
     DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
@@ -68,7 +68,12 @@ const ACTIVE_MARKER: &str = "screenshare-active";
 
 /// Отметка «мы уже сказали про старую карту». Без неё человек, осознанно включивший слой обратно,
 /// получал бы принудительное выключение на каждом показе.
-const TOLD_MARKER: &str = "screenshare-layers-told";
+///
+/// 🔴 Имя с `-2` (0.8.5): клиент один раз возвращает слои ВСЕМ (`returnLayersOnce` в
+/// `streamSettings.ts` — до 06.09 одно падение выключало их навсегда). Под старым именем старая карта,
+/// про которую уже говорили, получила бы слои обратно без предохранителя #112 и снова падала бы.
+/// Новое имя = про карту скажем ещё раз и выключим снова.
+const TOLD_MARKER: &str = "screenshare-layers-told-2";
 
 /// Сколько показов с двумя слоями подряд оборвались падением. Растёт на каждом падении, обнуляется
 /// показом с двумя слоями, дошедшим до кнопки «Завершить».
@@ -161,6 +166,26 @@ const ENC_VS_CAP_SHARE: f64 = 0.6;
 /// ⚠️ **Fail-OPEN**, в отличие от почти всего остального в проекте: не смогли создать капчурер или
 /// перечислить — считаем, что источник жив. Разовый сбой перечисления не повод обрывать живой стрим
 /// у всех зрителей; худшее, что даёт ошибка в эту сторону, — проверим ещё раз через 10 секунд.
+/// Экран с номером libwebrtc (индекс `EnumDisplayDevicesW`) ещё подключён к рабочему столу — ровно так
+/// libwebrtc и строит список экранов (`GetScreenList`).
+///
+/// 🔴 Не через `DesktopCapturer::get_source_list`: для экрана тот поднимает СВОЁ дублирование DXGI всех
+/// мониторов, а монитор, который показывает путь через видеокарту (#207, 4.2), уже продублирован нашим
+/// захватом, и второе дублирование в том же процессе не создаётся. Список приходил пустым, сторож
+/// считал экран пропавшим и через два промаха (~20 с) гасил показ с плашкой «окно закрылось» (26.09,
+/// пробная 0.8.11 у владельца). Старому пути это не мешало: его захват и перечисление делили одно
+/// дублирование libwebrtc.
+fn screen_attached(id: u64) -> bool {
+    use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP};
+    let Ok(index) = u32::try_from(id) else {
+        return false;
+    };
+    let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+    // SAFETY: `dd` — наша структура с верным `cb`, указатель живёт весь вызов.
+    let found = unsafe { EnumDisplayDevicesW(windows::core::PCWSTR::null(), index, &mut dd, 0) }.as_bool();
+    found && (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP).0 != 0
+}
+
 fn source_exists(is_window: bool, id: u64, want_pid: Option<u32>) -> bool {
     // Окно с известным процессом: точный ответ Win32, перечисление даже не трогаем (заодно не
     // ходим каждые 10 секунд обходить все окна системы через COM).
@@ -168,6 +193,8 @@ fn source_exists(is_window: bool, id: u64, want_pid: Option<u32>) -> bool {
         if let Some(pid) = want_pid {
             return crate::apps_enum::window_pid(id) == Some(pid);
         }
+    } else {
+        return screen_attached(id);
     }
     let st = if is_window {
         DesktopCaptureSourceType::Window
@@ -221,6 +248,22 @@ pub struct StartConfig {
     /// один случай: у видеокарты кончились сеансы кодирования, и показ перестал стартовать.
     #[serde(default = "default_true")]
     pub layers: bool,
+    /// Показ ЭКРАНА с кадром внутри видеокарты (#207, шаг 4): DXGI → общая текстура → NVENC без
+    /// оперативки (`webrtc_sys::gv_gpu_capture`). Замер под игрой в упоре видеокарты: рывки игры
+    /// 15–18 → 0–2 за 90 с, показ 31 → 60 к/с, процессор в 13 раз меньше.
+    ///
+    /// Только экран, H.264 и NVIDIA; иначе — старый путь, причина уезжает в `pipeline_note`. По
+    /// умолчанию включено; выключатель — на случай, если новый путь у кого-то подведёт.
+    #[serde(default = "default_true")]
+    pub gpu_pipeline: bool,
+    /// Курсор в кадре показа (28.09). По умолчанию включено; отсутствие поля (клиент прошлой версии)
+    /// = включено.
+    ///
+    /// Экран через видеокарту — рисуем сами (`gv_gpu_capture`); старый путь — обёртка libwebrtc
+    /// (`desktop_capturer.cpp`). Системный курсор при этом не трогаем: программным его делает WGC
+    /// (показ окна), и это было и без курсора в кадре.
+    #[serde(default = "default_true")]
+    pub cursor: bool,
 }
 
 fn default_true() -> bool {
@@ -414,7 +457,19 @@ static STUCK_S: AtomicU32 = AtomicU32::new(0);
 /// навсегда. Именно это число отвечает на вопрос «видеокарта уже разгрузилась?».
 static CAPTURE_NOW_US: AtomicU64 = AtomicU64::new(0);
 
+/// Каким путём идёт показ (#207, шаг 4): `gpu` — кадр не покидает видеокарту, `cpu` — через
+/// оперативку, и почему не `gpu` (пусто — получилось). Уезжает в телеметрию: без этого по отчёту
+/// не отличить «новый путь не помог» от «новый путь не включился».
+static PIPELINE: Mutex<(&'static str, String)> = Mutex::new(("", String::new()));
+
+fn set_pipeline(kind: &'static str, note: impl Into<String>) {
+    if let Ok(mut g) = PIPELINE.lock() {
+        *g = (kind, note.into());
+    }
+}
+
 fn reset_pipe_meters() {
+    set_pipeline("", "");
     PIPE_TOTAL_US.store(0, Ordering::Relaxed);
     PIPE_CONV_US.store(0, Ordering::Relaxed);
     PIPE_FRAMES.store(0, Ordering::Relaxed);
@@ -641,6 +696,248 @@ fn marker_take(path: &Path) -> Option<bool> {
     Some(raw?.first().copied() == Some(b'2'))
 }
 
+/// Потолок и пол битрейта среднего слоя. 720p на полной частоте кадров для экрана — 2–2,5 Мбит/с.
+/// Сервер ближе этого — локалка (#207, 26.09). Задержка TCP-подключения до сервера LiveKit у владельца
+/// ~1 мс, у знакомых через интернет — десятки.
+const LAN_RTT_MS: f64 = 5.0;
+/// Стартовый битрейт оценщика для сервера через интернет. У GCC по умолчанию 300 кбит/с, и полный
+/// слой первые десятки секунд показа идёт мылом; 5 Мбит/с тянет почти любой домашний аплинк, а где не
+/// тянет, оценщик сам сбавит.
+const REMOTE_START_BPS: u64 = 5_000_000;
+/// Запас нижней границы для локалки сверх бюджета лестницы, проценты. 26.09 с границей ровно в бюджет
+/// (15,5 Мбит/с, оценка 15,7) полному слою доставалось 10,4 из 12,9: часть оценки WebRTC держит на
+/// заголовки пакетов и повторы. В локалке запас ничего не стоит.
+const LAN_HEADROOM_PCT: u64 = 130;
+
+/// Пойдёт ли кадр через видеокарту (#207, шаг 4) — решается ДО подключения, от этого зависит dynacast
+/// (0.8.12). Те же условия, что у `gpu_skip` в `start`, плюс «NVENC есть». Откат посреди показа этим не
+/// предсказать — он случается уже после подключения.
+pub fn gpu_path_planned(is_window: bool, gpu_pipeline: bool, codec: &str, nvenc: bool) -> bool {
+    !is_window && gpu_pipeline && codec == "h264" && nvenc
+}
+
+/// Подсказка оценщику канала WebRTC: `(старт, нижняя граница)`, бит/с, 0 — не трогать.
+///
+/// 🔴 26.09 на гигабитной локалке оценщик застрял на 5,9 Мбит/с, а полный слой получал 3,5 из 12,9 —
+/// картинка сыпалась на каждой смене сцены (панель: цели q 0,15 · h 1,88 · f 3,56 = оценка). Для
+/// сервера в локалке узким местом канал быть не может, поэтому старт и нижняя граница = бюджет
+/// лестницы с запасом `LAN_HEADROOM_PCT`. Через интернет — только быстрый старт: нижняя граница там
+/// уронила бы показ тем, у кого аплинк уже бюджета.
+pub fn bitrate_hint(ladder_bps: u64, server_rtt_ms: Option<f64>) -> (u64, u64) {
+    match server_rtt_ms {
+        Some(rtt) if rtt < LAN_RTT_MS => {
+            let floor = ladder_bps * LAN_HEADROOM_PCT / 100;
+            (floor, floor)
+        }
+        _ => (ladder_bps.min(REMOTE_START_BPS), 0),
+    }
+}
+
+/// Задержка TCP-подключения до сервера из адреса LiveKit, мс: лучшая из трёх попыток. `None` — не
+/// достучались (тогда считаем, что сервер через интернет).
+fn server_rtt_ms(url: &str) -> Option<f64> {
+    use std::net::ToSocketAddrs;
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let host_port = rest.split(['/', '?']).next()?;
+    let default_port = if url.starts_with("ws://") || url.starts_with("http://") { 80 } else { 443 };
+    let target =
+        if host_port.contains(':') { host_port.to_string() } else { format!("{host_port}:{default_port}") };
+    let addr = target.to_socket_addrs().ok()?.next()?;
+    let mut best: Option<f64> = None;
+    for _ in 0..3 {
+        let t = Instant::now();
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            best = Some(best.map_or(ms, |b: f64| b.min(ms)));
+        }
+    }
+    best
+}
+
+/// Подсказка, выданная оценщику для текущего показа: `(старт, нижняя граница, задержка до сервера)`.
+static BWE_HINT: Mutex<(u64, u64, f64)> = Mutex::new((0, 0, 0.0));
+
+/// Сколько тиков подряд захват в видеокарте может быть потерян (смена режима экрана, UAC,
+/// полноэкранная игра), прежде чем уйдём на старый путь. ~5 с при 60 к/с.
+const GPU_LOST_TICKS: u32 = 300;
+
+enum GpuEnd {
+    /// Показ остановлен штатно.
+    Stopped,
+    /// Новый путь недоступен или отказал: продолжаем старым, причина уже в `PIPELINE`.
+    Fallback,
+}
+
+/// Захват экрана, при котором кадр не покидает видеокарту (#207, шаг 4.2).
+///
+/// Цикл повторяет старый: пейсинг по дедлайну, те же счётчики конвейера, превью раз в 5 с. Разница
+/// в том, что уходит в источник: не I420 в оперативке, а общая D3D11-текстура, которую кодировщик
+/// NVENC каждого слоя сам переводит в NV12 и уменьшает (`nvidia/gv_d3d11_converter.h`).
+/// «Подготовки кадра» здесь нет вовсе, поэтому `convert_ms` у такого показа — ноль.
+fn run_gpu_capture(
+    display: u64,
+    tw: u32,
+    th: u32,
+    fps: u32,
+    cursor: bool,
+    vs: &NativeVideoSource,
+    stop: &AtomicBool,
+) -> GpuEnd {
+    use webrtc_sys::gv_gpu_capture::ffi as gpu;
+    if !gpu::gpu_capture_supported() {
+        set_pipeline("cpu", "NVENC недоступен");
+        return GpuEnd::Fallback;
+    }
+    let Ok(index) = i32::try_from(display) else {
+        set_pipeline("cpu", "номер экрана вне диапазона");
+        return GpuEnd::Fallback;
+    };
+    let mut cap = gpu::new_gpu_screen_capture(index, tw, th, cursor);
+    let Some(info) = cap.as_ref() else {
+        set_pipeline("cpu", "захват не создан");
+        return GpuEnd::Fallback;
+    };
+    let err = info.init_error().to_string();
+    if !err.is_empty() {
+        set_pipeline("cpu", err);
+        return GpuEnd::Fallback;
+    }
+    let (fw, fh) = (info.frame_width(), info.frame_height());
+    PIPE_SRC_W.store(info.source_width(), Ordering::Relaxed);
+    PIPE_SRC_H.store(info.source_height(), Ordering::Relaxed);
+    let sys = vs.sys_handle();
+    let Some(source) = sys.as_ref() else {
+        set_pipeline("cpu", "нет C++-источника");
+        return GpuEnd::Fallback;
+    };
+    // Курсор не поднялся — показ всё равно идёт через видеокарту, просто без курсора. Причину видно
+    // в «Пути кадра» (панель и телеметрия), иначе «курсора нет» не отличить от «галочка выключена».
+    let cursor_err = if cursor { info.cursor_error().to_string() } else { String::new() };
+    set_pipeline("gpu", if cursor_err.is_empty() { String::new() } else { format!("курсор: {cursor_err}") });
+
+    // 🔴 Один обычный кадр ДО кадров из видеопамяти. Они идут мимо `capture_frame`, SDK их не
+    // считает и до первого «своего» кадра подмешивает чёрные раз в 100 мс — вперемешку с нашими
+    // (вендоренный libwebrtc, GUSVOICE.md). Чёрный честно: Y=16, U=V=128, а не нули — те зелёные.
+    let mut black = I420Buffer::new(fw, fh);
+    {
+        let (y, u, v) = black.data_mut();
+        y.fill(16);
+        u.fill(128);
+        v.fill(128);
+    }
+    vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, black));
+
+    let frame_dur = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+    let mut next = Instant::now();
+    let mut next_preview = Instant::now();
+    let mut lost_run = 0u32;
+    let mut rgba = Vec::new();
+    while !stop.load(Ordering::Relaxed) {
+        let t = Instant::now();
+        let status = cap.pin_mut().capture(source, 0);
+        PIPE_TOTAL_US.fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
+        match status {
+            // Кадр ушёл: новый, повтор (экран не менялся) или повтор вместо пропущенного.
+            0 | 1 | 4 | 5 => {
+                PIPE_FRAMES.fetch_add(1, Ordering::Relaxed);
+                lost_run = 0;
+            }
+            2 => {} // с экрана ещё не пришло ни одного кадра
+            3 => {
+                lost_run += 1;
+                if lost_run >= GPU_LOST_TICKS {
+                    set_pipeline("cpu", "захват DXGI потерян");
+                    return GpuEnd::Fallback;
+                }
+            }
+            -2 => {
+                let why = gpu::native_encode_fail_reason().to_string();
+                set_pipeline("cpu", format!("кодировщик не взял кадр из видеопамяти: {why}"));
+                return GpuEnd::Fallback;
+            }
+            -3 => {
+                set_pipeline("cpu", "кадр захвата не в BGRA (HDR?)");
+                return GpuEnd::Fallback;
+            }
+            _ => {
+                set_pipeline("cpu", format!("захват DXGI: код {status}"));
+                return GpuEnd::Fallback;
+            }
+        }
+        // Превью (#115) без ожидания видеокарты: первый вызов ставит копию в очередь, следующие
+        // забирают её, когда готова.
+        if Instant::now() >= next_preview {
+            let packed = cap.pin_mut().poll_preview(&mut rgba);
+            if packed != 0 {
+                next_preview = Instant::now() + PREVIEW_EVERY;
+                let (w, h) = ((packed >> 32) as usize, (packed & 0xffff_ffff) as usize);
+                if let Ok(mut slot) = PREVIEW.lock() {
+                    *slot = Some((w, h, std::mem::take(&mut rgba)));
+                }
+            }
+        }
+        next += frame_dur;
+        match next.checked_duration_since(Instant::now()) {
+            Some(rem) => std::thread::sleep(rem),
+            None => {
+                PIPE_LATE.fetch_add(1, Ordering::Relaxed);
+                next = Instant::now();
+            }
+        }
+    }
+    GpuEnd::Stopped
+}
+
+const MID_MIN_BPS: u64 = 600_000;
+const MID_MAX_BPS: u64 = 2_500_000;
+/// Экономный слой — запасной (#109): лишь бы шло, поэтому 3 к/с.
+const LOW_FPS: f64 = 3.0;
+const LOW_MIN_BPS: u64 = 150_000;
+
+/// Слои под полным: `[экономный]` или `[экономный, средний]` — в том порядке, в каком их ждёт SDK
+/// (`simulcast_layers`: он снимает с конца средний, потом нижний) (#191, 24.09).
+///
+/// 🔴 Та же лестница — в клиенте (`shareLayerPresets` в `streamSettings.ts`), числа обязаны совпадать:
+/// зритель не должен различать, из браузера показ или из приложения.
+///
+/// Почему своя, а не SDK: у показа экрана SDK добавляет РОВНО ОДИН слой — половина при 3 к/с
+/// (`screenshare::compute_default_simulcast_preset`), с меткой MEDIUM у полного. Слоя HIGH не было,
+/// сервер отдавал на «Среднее» тот же полный слой, и выбирать зрителю было между полным и слайд-шоу.
+/// Теперь:
+/// - средний — короткая сторона 720 (у 4K — 1080), ПОЛНАЯ частота кадров, до 2,5 Мбит/с;
+/// - экономный — вдвое меньше среднего, 3 к/с (запасной слой #109, ~150 кбит/с);
+/// - короткая сторона ≤ 720 — среднего нет, остаются полный и экономный, как раньше.
+///
+/// ⚠️ Каждый слой — свой сеанс NVENC (фабрика оборачивает в `SimulcastEncoderAdapter`), то есть
+/// теперь ТРИ сеанса на показ. Потолок задаёт драйвер (на свежих — 8); упор = «показ не стартует»,
+/// и тогда человеку выключатель слоёв в настройках показа.
+///
+/// Размер — ОБЪЯВЛЕННЫЙ (`cfg.width`×`cfg.height`, по настройке). SDK берёт из пресета только
+/// короткую сторону и уменьшает реальный кадр во столько же раз.
+pub fn share_layer_presets(width: u32, height: u32, max_bitrate: u64, fps: f64) -> Vec<VideoPreset> {
+    let short = width.min(height).max(1);
+    let scaled = |target: u32| -> (u32, u32) {
+        let f = |side: u32| ((((side as f64 * target as f64 / short as f64) / 2.0).round() as u32) * 2).max(2);
+        (f(width), f(height))
+    };
+    let low = |target: u32| -> VideoPreset {
+        let (w, h) = scaled(target);
+        let ratio = (target as f64 / short as f64).powi(2);
+        let bps = ((max_bitrate as f64 * ratio * LOW_FPS / fps.max(1.0)).round() as u64).max(LOW_MIN_BPS);
+        VideoPreset::new(w, h, bps, LOW_FPS)
+    };
+    if short <= 720 {
+        return vec![low(((short as f64) / 2.0).round() as u32)];
+    }
+    let mid_short: u32 = if short >= 2160 { 1080 } else { 720 };
+    let ratio = (mid_short as f64 / short as f64).powi(2);
+    let mid_bps = ((max_bitrate as f64 * ratio * 1.5).round() as u64)
+        .clamp(MID_MIN_BPS, MID_MAX_BPS)
+        .min((max_bitrate as f64 * 0.6).round() as u64);
+    let (mw, mh) = scaled(mid_short);
+    vec![low(mid_short / 2), VideoPreset::new(mw, mh, mid_bps, fps)]
+}
+
 /// Целевые размеры кадра: вписать (sw, sh) в (tw, th) с сохранением пропорций. Только вниз, только
 /// чётные. `None` — уменьшать не нужно, кадр уходит как есть.
 ///
@@ -710,7 +1007,56 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     // приложение умирало. Смерть процесса `Drop` не зовёт, и метка её переживает, как и задумано.
     let mut marker_guard = ActiveMarkerGuard::arm(active_marker.clone(), layers);
 
-    let (room, mut events) = Room::connect(&cfg.url, &cfg.token, RoomOptions::default())
+    // dynacast (0.8.12): ВЫКЛЮЧЕН только когда кадр пойдёт через видеокарту (#207, шаг 4), иначе включён.
+    // Опыт 26.09 показал: «рассыпание» давал оценщик канала, а не dynacast. Но у пути через видеокарту
+    // слои, которые никто не смотрит, почти ничего не стоят (NVENC и перевод цвета на видеокарте), а
+    // каждое включение слоя после паузы адаптер слоёв libwebrtc встречает опорным кадром на ВСЕХ слоях —
+    // лишняя пульсация у всех зрителей, когда кто-то переключает качество. Там, где слой — это работа
+    // процессора (окно, софтверный кодек, не NVIDIA), экономия важнее — как в прошлых выпусках.
+    // Путь кадра может откатиться посреди показа — тогда до конца показа dynacast выключен, это цена
+    // уменьшения двух слоёв на процессоре у NVIDIA-машины, не больше.
+    //
+    // Как было (#207, плейбук 25.09): сервер говорит, какие слои кто-то смотрит, и SDK
+    // выключает остальные. Без него все три слоя (#191) кодировались всегда — три сеанса NVENC и два
+    // уменьшения на процессоре даже без единого зрителя. В SDK по умолчанию `dynacast: false`.
+    // ⚠️ Без зрителей кодировщик честно выдаёт 0 к/с — в телеметрии `enc.fps` это не залипание.
+    // Самолечение (#111) от этого не срабатывает: ему нужна жалоба «на процессор», а пауза слоёв её
+    // не даёт.
+    // `RoomOptions` в SDK `#[non_exhaustive]` — литерал с `..Default` не собирается.
+    // Подсказка оценщику канала (#207, 26.09) — `bitrate_hint`. Ставится ДО подключения: соединения
+    // создаются при входе в комнату, и `SetBitrate` применяется к каждому новому (в т. ч. при
+    // переподключении). Бюджет — вся лестница слоёв.
+    let ladder_bps = cfg.max_bitrate
+        + if layers {
+            share_layer_presets(cfg.width, cfg.height, cfg.max_bitrate, cfg.fps.clamp(5, 60) as f64)
+                .iter()
+                .map(|p| p.encoding.max_bitrate)
+                .sum::<u64>()
+        } else {
+            0
+        };
+    let rtt = {
+        let url = cfg.url.clone();
+        tokio::task::spawn_blocking(move || server_rtt_ms(&url)).await.ok().flatten()
+    };
+    let (hint_start, hint_min) = bitrate_hint(ladder_bps, rtt);
+    webrtc_sys::gv_gpu_capture::ffi::set_bitrate_hint(
+        i32::try_from(hint_start).unwrap_or(i32::MAX),
+        i32::try_from(hint_min).unwrap_or(i32::MAX),
+    );
+    if let Ok(mut g) = BWE_HINT.lock() {
+        *g = (hint_start, hint_min, rtt.unwrap_or(-1.0));
+    }
+
+    let gpu_planned = gpu_path_planned(
+        cfg.is_window,
+        cfg.gpu_pipeline,
+        &cfg.codec,
+        webrtc_sys::gv_gpu_capture::ffi::gpu_capture_supported(),
+    );
+    let mut room_opts = RoomOptions::default();
+    room_opts.dynacast = !gpu_planned;
+    let (room, mut events) = Room::connect(&cfg.url, &cfg.token, room_opts)
         .await
         .map_err(|e| format!("livekit connect: {e}"))?;
     // Drain room events so the channel doesn't grow unbounded; ends when the room closes.
@@ -726,17 +1072,41 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     let want_pid = if is_window { crate::apps_enum::window_pid(want_id) } else { None };
     let fps = cfg.fps.clamp(5, 60);
     let (tw, th) = (cfg.width, cfg.height);
+    let cursor = cfg.cursor;
     let vs = source.clone();
     let stop_thread = stop.clone();
+    // Путь кадра (#207, шаг 4): новый — только для экрана, H.264 и включённой настройки.
+    let gpu_skip: Option<&'static str> = if is_window {
+        Some("показ окна")
+    } else if !cfg.gpu_pipeline {
+        Some("выключено в настройках")
+    } else if cfg.codec != "h264" {
+        Some("кодек не H.264")
+    } else {
+        None
+    };
 
     // Capture runs on its own thread (DesktopCapturer lives entirely here).
     std::thread::spawn(move || {
+        match gpu_skip {
+            None => {
+                if let GpuEnd::Stopped = run_gpu_capture(want_id, tw, th, fps, cursor, &vs, &stop_thread) {
+                    return;
+                }
+                // Отказ — в том числе посреди показа. Дальше старым путём, кодировщики сами
+                // вернутся к CUDA-сессии и начнут с опорного кадра.
+            }
+            Some(note) => set_pipeline("cpu", note),
+        }
         let st = if is_window {
             DesktopCaptureSourceType::Window
         } else {
             DesktopCaptureSourceType::Screen
         };
-        let Some(mut cap) = DesktopCapturer::new(DesktopCapturerOptions::new(st)) else {
+        // Курсор — только здесь, в самом показе: миниатюрам окна выбора и сторожу источника он не нужен.
+        let mut opts = DesktopCapturerOptions::new(st);
+        opts.set_include_cursor(cursor);
+        let Some(mut cap) = DesktopCapturer::new(opts) else {
             return;
         };
         let Some(src) = cap.get_source_list().into_iter().find(|s| s.id() == want_id) else {
@@ -841,24 +1211,22 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
                     max_bitrate: cfg.max_bitrate,
                     max_framerate: fps as f64,
                 }),
-                // 🔴 Слоёв ДВА, и это принципиально (#109). Раньше стоял `false` с доводом
-                // «нижний слой никто не смотрит» — довод оказался неверным: его смотрит тот,
-                // кому плохо. Без запасного слоя зритель с потерями не может получить картинку
-                // полегче и вместо этого просит опорные кадры (PLI) — замерено 1.6 раза в
-                // секунду при норме 0.1. Каждый такой запрос заставляет НАШ кодировщик выдать
-                // опорный кадр, а слой один на всех → картинка пульсирует У ВСЕХ сразу.
-                // Один человек на мобильном интернете (47 % потерь) так уронил весь канал.
+                // 🔴 Слои обязательны (#109). Раньше стоял `false` с доводом «нижний слой никто
+                // не смотрит» — довод оказался неверным: его смотрит тот, кому плохо. Без запасного
+                // слоя зритель с потерями не может получить картинку полегче и вместо этого просит
+                // опорные кадры (PLI) — замерено 1.6 раза в секунду при норме 0.1. Каждый такой
+                // запрос заставляет НАШ кодировщик выдать опорный кадр, а слой один на всех →
+                // картинка пульсирует У ВСЕХ сразу. Один человек на мобильном интернете (47 %
+                // потерь) так уронил весь канал.
                 //
-                // Цена мала: для показа SDK добавляет РОВНО ОДИН слой — половина ширины и
-                // высоты при 3 кадрах в секунду (`screenshare::compute_default_simulcast_preset`),
-                // то есть ~160 кбит/с. Полный слой остаётся нетронутым.
-                // ⚠️ Кодировщик оборачивается в `SimulcastEncoderAdapter` (см. вендоренный
-                // `video_encoder_factory.cpp`), то есть на нижний слой заводится ВТОРОЙ сеанс
-                // NVENC. На современных драйверах лимит сеансов заведомо больше двух, но если
-                // где-то упрёмся — симптом будет «показ не стартует», и тогда сюда возвращаться.
-                // Для этого случая и сделан выключатель `layers` в настройках показа: он вернёт
-                // старое поведение с одним слоем, не заставляя человека ждать нового релиза.
+                // Слоёв ТРИ (#191, 24.09): полный, средний на полной частоте кадров и экономный на
+                // 3 к/с — лестница и цена в `share_layer_presets`. До 0.8.5 SDK добавлял один
+                // половинный на 3 к/с, и выбор качества у зрителя был между полным и слайд-шоу.
+                // Выключатель `layers` в настройках показа возвращает один поток — на случай, если
+                // драйвер не даст столько сеансов NVENC («показ не стартует»).
                 simulcast: layers,
+                simulcast_layers: layers
+                    .then(|| share_layer_presets(cfg.width, cfg.height, cfg.max_bitrate, fps as f64)),
                 ..Default::default()
     };
     let publish = room
@@ -1111,6 +1479,11 @@ async fn republish() -> Result<(), HealError> {
 /// disconnects in a detached task. A fresh `start()` builds its own Session, so a lingering
 /// background close is harmless.
 pub async fn stop() {
+    // Подсказка оценщику — только на время показа: следующий показ меряет сервер заново.
+    webrtc_sys::gv_gpu_capture::ffi::set_bitrate_hint(0, 0);
+    if let Ok(mut g) = BWE_HINT.lock() {
+        *g = (0, 0, 0.0);
+    }
     // Кадр прошлого показа не должен пережить сам показ: иначе следующее наведение мышкой отдало бы
     // картинку того, что человек уже не показывает (#115).
     if let Ok(mut slot) = PREVIEW.lock() {
@@ -1144,14 +1517,47 @@ pub fn preview() -> Option<String> {
 ///    bottleneck, which is otherwise pure guesswork.
 ///  * `encoder` — libwebrtc's encoder name ("NvCodec…" for NVENC, "OpenH264"/"libvpx" for software),
 ///    i.e. whether the GPU is doing the work at all.
+/// Один слой показа в статистике (#207): что сейчас кодируется, а что стоит.
+///
+/// 🔴 С dynacast (25.09) слой, который никто не смотрит, стоит на паузе, и его частота 0. Без этого
+/// списка «показ живой, но никто не смотрит верхний слой» в телеметрии выглядело бы как `fps = 0`.
+#[derive(Serialize, Default, Clone)]
+pub struct LayerStat {
+    pub rid: String,
+    pub active: bool,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub frames_encoded: u32,
+    /// Среднее время кодирования кадра этого слоя с начала показа, мс.
+    pub encode_ms: f64,
+    /// Сколько бит/с WebRTC отдал этому слою из своей оценки канала.
+    pub target_bitrate: f64,
+}
+
 #[derive(Serialize, Default)]
 pub struct ShareStats {
+    /// Все слои показа, см. `LayerStat`.
+    pub layers: Vec<LayerStat>,
+    /// Среднее время кодирования кадра ОСНОВНОГО слоя (того, что ниже в `width`/`fps`), мс.
+    pub encode_ms_per_frame: f64,
     pub width: u32,
     pub height: u32,
     pub fps: f64,
     pub bytes_sent: u64,
     pub packets_sent: u64,
     pub target_bitrate: f64,
+    /// Подсказка оценщику на этот показ (`bitrate_hint`): старт и нижняя граница, бит/с; задержка
+    /// TCP до сервера, мс (-1 — не достучались). Нижняя граница > 0 — сервер в локалке.
+    pub bwe_start_bps: f64,
+    pub bwe_min_bps: f64,
+    pub server_rtt_ms: f64,
+    /// Оценка канала самим WebRTC (`availableOutgoingBitrate` выбранной пары кандидатов), бит/с.
+    ///
+    /// 🔴 Не провод, а то, во что WebRTC ВЕРИТ: из этой оценки он и раздаёт биты слоям. 26.09 полный
+    /// слой получал ~3,5 Мбит/с из 12,9 на гигабитной локалке. Эта цифра отвечает, виноват оценщик
+    /// (застрял низко) или делёж между слоями (оценка высокая, а полному мало).
+    pub bwe_bps: f64,
     pub frames_encoded: u32,
     pub key_frames: u32,
     pub limit_reason: String,
@@ -1193,6 +1599,12 @@ pub struct ShareStats {
     /// Сколько секунд ПОДРЯД держится залипание прямо сейчас (0 — всё в порядке). Показывает и
     /// «почти сработало», иначе о промахах порога мы бы не узнали.
     pub stuck_s: u32,
+
+    // ─── Путь кадра (#207, шаг 4) ───
+    /// `gpu` — кадр не покидает видеокарту, `cpu` — через оперативку. Пусто — показ не начался.
+    pub pipeline: String,
+    /// Почему не `gpu`: показ окна, выключено, кодек, экран не на NVIDIA, HDR, отказ посреди показа.
+    pub pipeline_note: String,
 }
 
 /// Stats for the live native share, or None when nothing is being shared.
@@ -1214,10 +1626,33 @@ pub async fn stats() -> Option<ShareStats> {
     let mut out = ShareStats::default();
     let mut codec_id = String::new();
     let mut best_w = 0u32;
+    // С dynacast слой, который никто не смотрит, стоит (#207). Основным считаем самый крупный из
+    // АКТИВНЫХ — иначе в отчёт попадал бы замерший верхний слой с `fps = 0` при живом показе.
+    let any_active = report.iter().any(|s| {
+        matches!(s, livekit::webrtc::stats::RtcStats::OutboundRtp(o) if o.stream.kind == "video" && o.outbound.active)
+    });
 
     for s in &report {
         if let livekit::webrtc::stats::RtcStats::OutboundRtp(o) = s {
             if o.stream.kind != "video" {
+                continue;
+            }
+            let encode_ms = if o.outbound.frames_encoded > 0 {
+                (o.outbound.total_encode_time / o.outbound.frames_encoded as f64 * 1000.0 * 100.0).round() / 100.0
+            } else {
+                0.0
+            };
+            out.layers.push(LayerStat {
+                rid: o.outbound.rid.clone(),
+                active: o.outbound.active,
+                width: o.outbound.frame_width,
+                height: o.outbound.frame_height,
+                fps: o.outbound.frames_per_second,
+                frames_encoded: o.outbound.frames_encoded,
+                encode_ms,
+                target_bitrate: o.outbound.target_bitrate,
+            });
+            if any_active && !o.outbound.active {
                 continue;
             }
             // 🔴 При двух слоях (#109) таких записей НЕСКОЛЬКО — по одной на слой. Раньше цикл
@@ -1231,6 +1666,7 @@ pub async fn stats() -> Option<ShareStats> {
                 continue;
             }
             best_w = o.outbound.frame_width;
+            out.encode_ms_per_frame = encode_ms;
             out.width = o.outbound.frame_width;
             out.height = o.outbound.frame_height;
             out.fps = o.outbound.frames_per_second;
@@ -1273,6 +1709,14 @@ pub async fn stats() -> Option<ShareStats> {
             livekit::webrtc::stats::RtcStats::Codec(c) if c.rtc.id == codec_id => {
                 out.codec = c.codec.mime_type.clone();
             }
+            // Пара кандидатов, по которой идёт трафик, — в отчёт отправителя она попадает через
+            // транспорт. Невыбранные пары оценки не несут.
+            livekit::webrtc::stats::RtcStats::CandidatePair(c) if c.candidate_pair.nominated => {
+                let bwe = c.candidate_pair.available_outgoing_bitrate;
+                if bwe.is_finite() && bwe > out.bwe_bps {
+                    out.bwe_bps = bwe;
+                }
+            }
             _ => {}
         }
     }
@@ -1295,6 +1739,15 @@ pub async fn stats() -> Option<ShareStats> {
     out.capture_ms_now = CAPTURE_NOW_US.load(Ordering::Relaxed) as f64 / 1000.0;
     out.heals = HEALS.load(Ordering::Relaxed);
     out.stuck_s = STUCK_S.load(Ordering::Relaxed);
+    if let Ok(g) = PIPELINE.lock() {
+        out.pipeline = g.0.to_string();
+        out.pipeline_note = g.1.clone();
+    }
+    if let Ok(g) = BWE_HINT.lock() {
+        out.bwe_start_bps = g.0 as f64;
+        out.bwe_min_bps = g.1 as f64;
+        out.server_rtt_ms = g.2;
+    }
 
     // 🔴 Последний рубеж: НИ ОДНО дробное число не должно уехать нечисловым. `serde_json` пишет
     // NaN и бесконечность как `null`, схема на сервере ждёт число и отбивает ВЕСЬ отчёт целиком —
@@ -1305,6 +1758,8 @@ pub async fn stats() -> Option<ShareStats> {
         &mut out.convert_ms,
         &mut out.fps,
         &mut out.target_bitrate,
+        &mut out.bwe_bps,
+        &mut out.server_rtt_ms,
         &mut out.limit_cpu_s,
         &mut out.limit_bandwidth_s,
         &mut out.rtt_ms,
@@ -1321,6 +1776,99 @@ pub async fn stats() -> Option<ShareStats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn лестница_слоёв_совпадает_с_таблицей_клиента() {
+        // Межъязыковой страж: зритель не должен получать разные RID из браузера и приложения.
+        let cases = [
+            (1280, 720, 2_100_000, 30.0, vec![(640, 360, 150_000, 3.0)]),
+            (1280, 720, 3_360_000, 60.0, vec![(640, 360, 150_000, 3.0)]),
+            (1920, 1080, 4_200_000, 30.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 30.0)]),
+            (1920, 1080, 6_720_000, 60.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 60.0)]),
+            (2560, 1440, 7_000_000, 30.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 30.0)]),
+            (2560, 1440, 11_200_000, 60.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 60.0)]),
+            (3840, 2160, 11_200_000, 30.0, vec![(960, 540, 150_000, 3.0), (1920, 1080, 2_500_000, 30.0)]),
+            (3840, 2160, 17_920_000, 60.0, vec![(960, 540, 150_000, 3.0), (1920, 1080, 2_500_000, 60.0)]),
+        ];
+        for (w, h, bitrate, fps, expected) in cases {
+            let actual: Vec<_> = share_layer_presets(w, h, bitrate, fps)
+                .into_iter()
+                .map(|p| (p.width, p.height, p.encoding.max_bitrate, p.encoding.max_framerate))
+                .collect();
+            assert_eq!(actual, expected, "{w}x{h}@{fps}");
+        }
+    }
+
+    #[test]
+    fn имя_отметки_старой_карты_держит_второе_поколение() {
+        // Откат имени вернул бы старой карте слои без предохранителя после общего возврата настроек.
+        assert_eq!(TOLD_MARKER, "screenshare-layers-told-2");
+    }
+
+    #[test]
+    fn gpu_pipeline_по_умолчанию_включён_и_явно_выключается() {
+        // Старый клиент поля не присылает: без serde-default новый десктоп отверг бы весь старт показа.
+        let base = serde_json::json!({
+            "url": "wss://voice.example.test",
+            "token": "test-token",
+            "sourceId": "screen:1",
+            "isWindow": false,
+            "fps": 30,
+            "width": 1920,
+            "height": 1080,
+            "maxBitrate": 3_000_000,
+            "codec": "h264"
+        });
+        let legacy: StartConfig = serde_json::from_value(base.clone()).expect("старый конфиг должен разбираться");
+        assert!(legacy.gpu_pipeline);
+        let mut disabled = base;
+        disabled["gpuPipeline"] = serde_json::Value::Bool(false);
+        let disabled: StartConfig = serde_json::from_value(disabled).expect("явный false должен разбираться");
+        assert!(!disabled.gpu_pipeline);
+    }
+
+    #[test]
+    fn курсор_по_умолчанию_включён_и_явно_выключается() {
+        // Старый клиент поля не присылает: новый десктоп обязан сохранить прежний вид показа.
+        let base = serde_json::json!({
+            "url": "wss://voice.example.test",
+            "token": "test-token",
+            "sourceId": "screen:1",
+            "isWindow": false,
+            "fps": 30,
+            "width": 1920,
+            "height": 1080,
+            "maxBitrate": 3_000_000,
+            "codec": "h264"
+        });
+        let legacy: StartConfig = serde_json::from_value(base.clone()).expect("старый конфиг должен разбираться");
+        assert!(legacy.cursor);
+        let mut disabled = base;
+        disabled["cursor"] = serde_json::Value::Bool(false);
+        let disabled: StartConfig = serde_json::from_value(disabled).expect("явный false должен разбираться");
+        assert!(!disabled.cursor);
+    }
+
+    #[test]
+    fn gpu_путь_планируется_только_для_экрана_h264_и_nvenc() {
+        // Ловит dynacast, выключенный для пути, который всё равно уйдёт через CPU.
+        assert!(gpu_path_planned(false, true, "h264", true));
+        assert!(!gpu_path_planned(true, true, "h264", true));
+        assert!(!gpu_path_planned(false, false, "h264", true));
+        assert!(!gpu_path_planned(false, true, "vp9", true));
+        assert!(!gpu_path_planned(false, true, "H264", true));
+        assert!(!gpu_path_planned(false, true, "h264", false));
+    }
+
+    #[test]
+    fn подсказка_битрейта_различает_локалку_и_интернет_на_точной_границе() {
+        // Ловит нижнюю границу на интернетном соединении, которая мешала WebRTC честно понижать оценку.
+        assert_eq!(bitrate_hint(10_000_000, Some(1.0)), (13_000_000, 13_000_000));
+        assert_eq!(bitrate_hint(10_000_000, Some(4.99)), (13_000_000, 13_000_000));
+        assert_eq!(bitrate_hint(10_000_000, Some(5.0)), (5_000_000, 0));
+        assert_eq!(bitrate_hint(10_000_000, None), (5_000_000, 0));
+        assert_eq!(bitrate_hint(3_000_000, Some(20.0)), (3_000_000, 0));
+    }
 
     /// Живой случай из разбора #111: подаём 28 кадров, кодировщик отдаёт 4, видеокарта уже
     /// свободна (захват 3.8 мс), жалоба — «процессор». Ради этого всё и делалось.

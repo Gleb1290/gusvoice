@@ -1,5 +1,5 @@
 import type { AdminInstanceSettings, AdminServer, AdminUser, InstanceUpdateInfo, SmtpSettings } from '@gusvoice/shared';
-import { eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { anonymizeAccount } from '../accountDelete.js';
@@ -67,7 +67,14 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/admin/users', async () => {
     // Удалённые (обезличенные) аккаунты в списке не показываем: управлять там нечем (F0 #139).
-    const rows = await db.select().from(users).where(isNull(users.deletedAt));
+    // 🔴 И гостей тоже (23.09, #204): теневые строки соседей стояли в группе «Этот инстанс» как наши
+    // люди — с пустой почтой и кнопками удаления/подтверждения, которые к ним неприменимы. Правило F3:
+    // любой список «наших людей» обязан отсекать `home_instance_id IS NULL`. Гости видны в группе своего
+    // инстанса (каталог соседа), а запрет на инстанс — отдельным путём.
+    const rows = await db
+      .select()
+      .from(users)
+      .where(and(isNull(users.deletedAt), isNull(users.homeInstanceId)));
 
     /**
      * «Скрыт от соседей, но виден» (§5.2.1) — отметка у СКРЫТЫХ людей.

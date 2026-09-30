@@ -153,3 +153,21 @@ export function isGrouped(m: ListMessage, prev: ListMessage | undefined): boolea
   if (!prev || prev.authorId !== m.authorId || m.hasReply) return false;
   return new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() <= GROUP_WINDOW_MS;
 }
+
+/**
+ * Что делает Enter в поле ввода: `true` — отправить, `false` — перенос строки (действие по умолчанию).
+ *
+ * 🔴 До 28.09 поле было однострочным `<input>` (#212): перенос строки нельзя было ни набрать, ни вставить —
+ * многострочное сообщение получалось только через «Изменить». Теперь `<textarea>`, и правила как у Telegram:
+ * - Shift+Enter — перенос;
+ * - идёт набор через IME (китайский, японский, часть экранных клавиатур) — Enter подтверждает слово, не трогаем;
+ * - только сенсор (телефон, в приложении и в браузере) — Enter переносит строку, отправка кнопкой: так ведут
+ *   себя Telegram и WhatsApp на телефоне, а слово «отправить» на клавиатуре легко нажать случайно;
+ * - иначе — отправить.
+ * «Только сенсор» = ОСНОВНОЙ указатель грубый (`pointer: coarse`): ноутбук с сенсорным экраном отправляет по
+ * Enter. ⚠️ Не «нет ни одного точного» (`any-pointer: fine`): у телефона со стилусом (S25 Ultra) он есть, и
+ * Enter отправлял — так 28.09 ушло случайное сообщение при проверке на живом телефоне.
+ */
+export function enterSends(e: { shift: boolean; composing: boolean; touchOnly: boolean }): boolean {
+  return !e.shift && !e.composing && !e.touchOnly;
+}

@@ -11,7 +11,7 @@ import {
   type MessageSticker,
   type ReactionGroup,
 } from '@gusvoice/shared';
-import { and, desc, eq, ilike, inArray, isNotNull, lt } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../auth.js';
@@ -70,27 +70,46 @@ async function replyPreviewsFor(replyToIds: (string | null)[]): Promise<Map<stri
 export async function messageRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
-  // List recent messages (newest-last). Cursor: ?before=<ISO timestamp>.
+  // List recent messages (newest-last). Cursor: ?beforeId=<message id> (?before=<ISO> — fallback).
   app.get('/channels/:id/messages', async (req, reply) => {
     const { id: channelId } = z.object({ id: z.string() }).parse(req.params);
     const query = z
-      .object({ before: z.string().datetime().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) })
+      .object({
+        before: z.string().datetime().optional(),
+        beforeId: z.string().min(1).max(64).optional(),
+        limit: z.coerce.number().int().min(1).max(100).default(50),
+      })
       .parse(req.query);
 
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms) return reply.code(404).send({ error: 'not found' });
     if (!has(perms.permissions, Permission.VIEW_CHANNEL)) return reply.code(403).send({ error: 'forbidden' });
 
-    const where = query.before
-      ? and(eq(messages.channelId, channelId), lt(messages.createdAt, new Date(query.before)))
-      : eq(messages.channelId, channelId);
+    // Курсор (время, id) — та же дыра на границе миллисекунды, что и в ЛС (разбор — `routes/dm.ts`).
+    const cursor = query.beforeId
+      ? (
+          await db
+            .select({ id: messages.id })
+            .from(messages)
+            .where(and(eq(messages.id, query.beforeId), eq(messages.channelId, channelId)))
+            .limit(1)
+        )[0]
+      : undefined;
+    const where = cursor
+      ? and(
+          eq(messages.channelId, channelId),
+          sql`(${messages.createdAt}, ${messages.id}) < (SELECT created_at, id FROM messages WHERE id = ${cursor.id})`,
+        )
+      : query.before
+        ? and(eq(messages.channelId, channelId), lt(messages.createdAt, new Date(query.before)))
+        : eq(messages.channelId, channelId);
 
     const rows = await db
       .select({ m: messages, u: users })
       .from(messages)
       .innerJoin(users, eq(messages.authorId, users.id))
       .where(where)
-      .orderBy(desc(messages.createdAt))
+      .orderBy(desc(messages.createdAt), desc(messages.id))
       .limit(query.limit);
 
     const list = rows.reverse();
@@ -336,18 +355,21 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
   // Edit your own message's text.
   app.patch('/channels/:id/messages/:messageId', async (req, reply) => {
     const { id: channelId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
-    const { content } = z.object({ content: z.string().min(1).max(4000) }).parse(req.body);
+    const { content: raw } = z.object({ content: z.string().max(4000) }).parse(req.body);
+    const content = raw.trim();
 
     const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
     if (!msg || msg.channelId !== channelId) return reply.code(404).send({ error: 'not found' });
     if (msg.authorId !== req.user!.sub) return reply.code(403).send({ error: 'forbidden' });
+    // Пробелы проходили `.min(1)` до обрезки и давали пустую реплику (#212) — разбор в `routes/dm.ts`.
+    if (!content && msg.attachments.length === 0) return reply.code(400).send({ error: 'empty message' });
 
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms) return reply.code(404).send({ error: 'not found' });
 
     const [row] = await db
       .update(messages)
-      .set({ content: content.trim(), editedAt: new Date() })
+      .set({ content, editedAt: new Date() })
       .where(eq(messages.id, messageId))
       .returning();
     const [author] = await db.select().from(users).where(eq(users.id, msg.authorId)).limit(1);
@@ -391,19 +413,26 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms || !has(perms.permissions, Permission.VIEW_CHANNEL)) return reply.code(403).send({ error: 'forbidden' });
 
-    if (op === 'add') {
-      await db.insert(messageReactions).values({ messageId, userId: req.user!.sub, emoji }).onConflictDoNothing();
-    } else {
-      await db
-        .delete(messageReactions)
-        .where(
-          and(
-            eq(messageReactions.messageId, messageId),
-            eq(messageReactions.userId, req.user!.sub),
-            eq(messageReactions.emoji, emoji),
-          ),
-        );
-    }
+    // Рассылаем только настоящее изменение: повтор запроса иначе удваивал реакцию у всех на экране (#212,
+    // разбор — `routes/dm.ts`).
+    const changed =
+      op === 'add'
+        ? await db
+            .insert(messageReactions)
+            .values({ messageId, userId: req.user!.sub, emoji })
+            .onConflictDoNothing()
+            .returning({ id: messageReactions.messageId })
+        : await db
+            .delete(messageReactions)
+            .where(
+              and(
+                eq(messageReactions.messageId, messageId),
+                eq(messageReactions.userId, req.user!.sub),
+                eq(messageReactions.emoji, emoji),
+              ),
+            )
+            .returning({ id: messageReactions.messageId });
+    if (changed.length === 0) return reply.code(204).send();
     await publishToChannel(perms.serverId, channelId, { t: 'message.reaction', channelId, messageId, emoji, userId: req.user!.sub, op });
     return reply.code(204).send();
   });

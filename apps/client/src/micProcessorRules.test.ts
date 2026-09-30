@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { AudioSettings } from './audioSettings.js';
-import { micChainNeeded, micChainSignature } from './micProcessorRules.js';
+import { clampVadThreshold, micChainNeeded, micChainSignature, VAD_THRESHOLD_MIN, VAD_THRESHOLD_MAX } from './micProcessorRules.js';
 
 const settings = (overrides: Partial<AudioSettings> = {}): AudioSettings => ({
   inputDeviceId: '',
@@ -14,15 +14,15 @@ const settings = (overrides: Partial<AudioSettings> = {}): AudioSettings => ({
   pushToTalk: false,
   pttKey: 'Space',
   inputGain: 1,
-  vadThreshold: 0,
+  vadThreshold: VAD_THRESHOLD_MIN,
   pttReleaseMs: 150,
   ...overrides,
 });
 
 describe('нужна ли собственная микрофонная цепь', () => {
-  it('десктопные настройки по умолчанию оставляют дешёвый системный путь', () => {
-    // Ловит ненужную пересборку WebAudio-цепи у каждого десктопного пользователя.
-    assert.equal(micChainNeeded(settings()), false);
+  it('новый порог 1 % собирает цепь даже на десктопе', () => {
+    // Ловит возвращение старого дефолта, который передавал фоновый шум всем собеседникам.
+    assert.equal(micChainNeeded(settings()), true);
   });
 
   it('мобильный RNNoise по умолчанию включает цепь', () => {
@@ -56,9 +56,9 @@ describe('подпись топологии микрофонной цепи', ()
     assert.equal(new Set(signatures).size, signatures.length);
   });
 
-  it('первое включение gain меняет подпись и строит отсутствующую цепь', () => {
-    // Ловит ситуацию, когда переход с raw-микрофона на обработанный не вызывает rebuild.
-    assert.notEqual(micChainSignature(settings()), micChainSignature(settings({ inputGain: 1.2 })));
+  it('старый нулевой порог и новый 1 % дают разные топологии', () => {
+    // Ловит отсутствие перестройки аудиографа при миграции со старого raw-пути.
+    assert.notEqual(micChainSignature(settings({ vadThreshold: 0 })), micChainSignature(settings()));
   });
 
   it('gain и threshold внутри уже построенной цепи обновляются без rebuild', () => {
@@ -75,5 +75,24 @@ describe('подпись топологии микрофонной цепи', ()
       micChainSignature(settings()),
       micChainSignature(settings({ inputDeviceId: 'mic-2', pushToTalk: true, pttKey: 'KeyV' })),
     );
+  });
+});
+
+describe('шкала порога голоса', () => {
+  it('старый ноль, отрицательное число и значение ниже 1 % становятся 1 %', () => {
+    // Ловит сохранение прежнего режима «выкл» через старую настройку или испорченное значение.
+    for (const value of [0, -1, 0.005]) assert.equal(clampVadThreshold(value), VAD_THRESHOLD_MIN);
+  });
+
+  it('отсутствующее, NaN и строковое значение не ломают порог', () => {
+    // Ловит обход нормализации через нестандартное содержимое localStorage.
+    for (const value of [undefined, NaN, '0.3']) assert.equal(clampVadThreshold(value), VAD_THRESHOLD_MIN);
+  });
+
+  it('значения внутри шкалы сохраняются, а выше 60 % прижимаются к максимуму', () => {
+    // Ловит срезание допустимой настройки и пропуск верхнего ограничения.
+    assert.equal(clampVadThreshold(0.3), 0.3);
+    assert.equal(clampVadThreshold(0.6), VAD_THRESHOLD_MAX);
+    assert.equal(clampVadThreshold(0.9), VAD_THRESHOLD_MAX);
   });
 });
