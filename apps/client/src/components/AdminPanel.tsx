@@ -1,13 +1,18 @@
 import type { AdminServer, AdminUser, FederationDirectoryView } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import type { Api } from '../api';
+import { adminApi } from '../adminApi';
+import { instances } from '../config';
+import { useStore } from '../store';
 import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { toast, toastError } from '../toast';
 import { Icon } from './Icon';
+import { DmReports } from './DmReports';
 import { FederationPanel } from './FederationPanel';
 import { InstanceSettingsPanel } from './InstanceSettingsForms';
 import { PeerServersGroup, PeerUsersGroup, ServerFederationCell } from './AdminPeerGroups';
 import { SmtpForm } from './SmtpForm';
+import { RailItem, SettingsHead, SettingsRail, SettingsWindow } from './SettingsShell';
 import { Toggle } from './Toggle';
 import { guestAtLines, guestAtSummary } from '../guestAtMark';
 import { confirmAction } from '../confirm';
@@ -17,6 +22,9 @@ import { pushBackHandler } from '../androidBack';
 const ADMIN_TABS: AdminSectionKey[] = ADMIN_SECTIONS.map((s) => s.key);
 
 export function AdminPanel({ onClose }: { onClose: () => void }) {
+  // Открыта для дома из гостей (`adminApi.ts`) — в шапке чей это инстанс, чтобы не спутать с тем, где стоишь.
+  const homeId = useStore((s) => s.adminInstanceId);
+  const homeName = homeId ? instances().find((i) => i.id === homeId)?.name ?? null : null;
   const [tab, setTab] = useState<AdminSectionKey>('users');
   // Телефон: сперва список разделов, тап — экран раздела (тот же list→detail, что в настройках).
   const [picked, setPicked] = useState(false);
@@ -38,12 +46,12 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
     setLoading(true);
     setError(null);
     try {
-      const [u, s] = await Promise.all([api.adminUsers(), api.adminServers()]);
+      const [u, s] = await Promise.all([adminApi().adminUsers(), adminApi().adminServers()]);
       setUsers(u);
       setServers(s);
       // Каталоги соседей читаем отдельно и не роняем ими вкладку: список СВОИХ людей не должен
       // зависеть от того, доступна ли федерация.
-      api
+      adminApi()
         .federationDirectory()
         .then(setFed)
         .catch(() => setFed({ enabled: false, peers: [] }));
@@ -73,7 +81,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
 
   async function toggleHidden(u: AdminUser) {
     try {
-      const upd = await api.adminSetUserHidden(u.id, !u.hiddenFromPeers);
+      const upd = await adminApi().adminSetUserHidden(u.id, !u.hiddenFromPeers);
       setUsers((list) => list.map((x) => (x.id === upd.id ? upd : x)));
       toast('success', upd.hiddenFromPeers ? 'Скрыт от соседей' : 'Виден соседям');
     } catch (e) {
@@ -83,7 +91,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
 
   async function toggleCreate(u: AdminUser) {
     try {
-      const upd = await api.adminSetCreateServers(u.id, !u.canCreateServers);
+      const upd = await adminApi().adminSetCreateServers(u.id, !u.canCreateServers);
       setUsers((list) => list.map((x) => (x.id === upd.id ? upd : x)));
     } catch (e) {
       toastError(e);
@@ -94,7 +102,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
   // approval itself under the `approval` registration policy (#142): one click makes the account usable.
   async function verifyUser(u: AdminUser) {
     try {
-      const upd = await api.adminVerifyUser(u.id);
+      const upd = await adminApi().adminVerifyUser(u.id);
       setUsers((list) => list.map((x) => (x.id === upd.id ? upd : x)));
       toast('success', 'Пользователь подтверждён', `@${upd.username} теперь может войти.`);
     } catch (e) {
@@ -115,7 +123,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
     });
     if (!ok) return;
     try {
-      await api.adminDeleteUser(u.id);
+      await adminApi().adminDeleteUser(u.id);
       setUsers((list) => list.filter((x) => x.id !== u.id));
       toast('success', 'Аккаунт удалён', `@${u.username}`);
     } catch (e) {
@@ -124,76 +132,53 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className={`modal admin rail-modal admin-rail${picked ? ' picked' : ''}`}
-        onClick={(e) => e.stopPropagation()}
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="admin-title"
-        tabIndex={-1}
-      >
-        {/* Рельс разделов — тот же приём, что в настройках (#153): у каждого раздела появилась
-            строка пояснения, которой в строке вкладок помещаться было негде. */}
-        <div className="set-rail">
-          <div className="set-rail-title">
-            <span>Админ-панель</span>
-            {/* Крестик виден только на телефоне: там список разделов — отдельный экран, и другой
-                кнопки закрытия на нём нет (на десктопе она в шапке раздела справа). */}
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
-          <div
-            className="set-rail-list"
-            role="tablist"
-            aria-label="Разделы админ-панели"
-            aria-orientation="vertical"
-            onKeyDown={onTabsKey}
-          >
-            {ADMIN_SECTIONS.map((s) => (
-              <button
-                key={s.key}
-                type="button"
-                role="tab"
-                id={`admin-tab-${s.key}`}
-                aria-selected={tab === s.key}
-                aria-controls="admin-panel-body"
-                tabIndex={tab === s.key ? 0 : -1}
-                className={`set-rail-item${tab === s.key ? ' active' : ''}`}
-                onClick={() => {
-                  setTab(s.key);
-                  setPicked(true);
-                }}
-              >
-                <Icon name={s.icon} size={16} />
-                <span>
-                  {adminSectionLabel(s, { users: loading ? undefined : users.length, servers: loading ? undefined : servers.length })}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="set-main">
-          <div className="set-head">
-            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
-              <Icon name="chevron-left" size={18} />
-            </button>
-            <div className="set-head-text">
-              <h2 id="admin-title">{currentSection.label}</h2>
-              <div className="set-head-sub">{currentSection.sub}</div>
-            </div>
-            {currentSection.refreshable && (
+    <SettingsWindow
+      variant="admin"
+      picked={picked}
+      onClose={onClose}
+      titleId="admin-title"
+      dialogRef={dialogRef}
+      // Рельс разделов — тот же приём, что в настройках (#153): у каждого раздела появилась строка пояснения, которой
+      // в строке вкладок помещаться было негде.
+      rail={
+        <SettingsRail
+          title={homeName ? `Админ-панель · ${homeName}` : 'Админ-панель'}
+          label="Разделы админ-панели"
+          onClose={onClose}
+          onListKeyDown={onTabsKey}
+        >
+          {ADMIN_SECTIONS.map((s) => (
+            <RailItem
+              key={s.key}
+              id={`admin-tab-${s.key}`}
+              aria-controls="admin-panel-body"
+              tabIndex={tab === s.key ? 0 : -1}
+              icon={s.icon}
+              label={adminSectionLabel(s, { users: loading ? undefined : users.length, servers: loading ? undefined : servers.length })}
+              active={tab === s.key}
+              onClick={() => {
+                setTab(s.key);
+                setPicked(true);
+              }}
+            />
+          ))}
+        </SettingsRail>
+      }
+    >
+        <SettingsHead
+          title={currentSection.label}
+          titleId="admin-title"
+          sub={currentSection.sub}
+          actions={
+            currentSection.refreshable && (
               <button type="button" className="link refresh" onClick={load}>
                 ⟳ обновить
               </button>
-            )}
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
+            )
+          }
+          onBack={() => setPicked(false)}
+          onClose={onClose}
+        />
 
         {error && (
           <div className="error" role="alert">
@@ -204,6 +189,10 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
         {tab === 'instance' ? (
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-instance">
             <InstanceSettingsPanel />
+          </div>
+        ) : tab === 'reports' ? (
+          <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-reports">
+            <DmReports />
           </div>
         ) : tab === 'federation' ? (
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-federation">
@@ -361,9 +350,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
             ))}
           </div>
         )}
-        </div>
-      </div>
-    </div>
+    </SettingsWindow>
   );
 }
 
@@ -388,12 +375,12 @@ function SmtpTab() {
  */
 function EconomyTab() {
   const [minutes, setMinutes] = useState('');
-  const [data, setData] = useState<Awaited<ReturnType<typeof api.adminEconomy>> | null>(null);
+  const [data, setData] = useState<Awaited<ReturnType<Api['adminEconomy']>> | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    api
+    adminApi()
       .adminEconomy()
       .then((r) => {
         if (!alive) return;
@@ -411,7 +398,7 @@ function EconomyTab() {
     if (!Number.isFinite(v) || v < 0) return toastError(new Error('цена — целое число минут, от нуля'));
     setBusy(true);
     try {
-      await api.adminSetEconomy(v);
+      await adminApi().adminSetEconomy(v);
       toast('success', 'Цена сохранена');
     } catch (e) {
       toastError(e);

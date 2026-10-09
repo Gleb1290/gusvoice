@@ -27,7 +27,8 @@ function derive(): TrayState {
   if (!s.voice) return 'idle';
   if (s.selfDeafened) return 'deafened';
   if (s.selfMuted) return 'muted';
-  const me = s.user?.id;
+  // Голос мог пережить переход в другой инстанс (01.10): «я» в комнате — учётка инстанса голоса, не активного.
+  const me = s.voice.selfId ?? s.user?.id;
   const speaking = me ? (s.liveVoice[me]?.speaking ?? false) : false;
   return speaking ? 'speaking' : 'silent';
 }

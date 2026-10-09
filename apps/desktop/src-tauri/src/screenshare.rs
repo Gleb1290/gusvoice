@@ -215,6 +215,10 @@ pub struct ScreenSource {
     pub kind: String, // "screen" | "window"
     pub title: String,
     pub thumb: Option<String>, // data:image/png;base64,... (None → UI shows a monogram)
+    /// Настоящий размер источника по кадру миниатюры (06.10): окно показа по нему считает «≈ N Мбит/с»
+    /// для «Родного». 0 — кадра не было (свёрнутое окно).
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Config the web client passes to `start`. Quality fields mirror `streamSettings.ts`.
@@ -226,8 +230,11 @@ pub struct StartConfig {
     pub source_id: String,
     pub is_window: bool,
     pub fps: u32,
-    pub width: u32,  // target max width  (frames larger than this are scaled down to fit)
-    pub height: u32, // target max height
+    /// Потолок кадра: больше — уменьшаем с сохранением пропорций. `0×0` — «Родное» (06.10): размер
+    /// источника, вписанный в 4K (`native_dims`), а битрейт тогда считаем здесь (`share_bitrate`).
+    pub width: u32,
+    pub height: u32,
+    /// Битрейт полного слоя, бит/с. У «Родного» клиент шлёт 0 — размер источника знает только Rust.
     pub max_bitrate: u64,
     pub codec: String, // "auto" | "vp9" | "h264" | "h265" | "av1"
     /// Захватывать ОКНО через Windows Graphics Capture. По умолчанию `true` — как было.
@@ -264,10 +271,27 @@ pub struct StartConfig {
     /// (показ окна), и это было и без курсора в кадре.
     #[serde(default = "default_true")]
     pub cursor: bool,
+    /// Режим показа (06.10, #207): `detail` — «Чёткость» (текст, таблицы, код), `motion` —
+    /// «Плавность» (игры, видео). До 06.10 нативный показ режим не получал вовсе — он менял только
+    /// битрейт. Теперь: «Чёткость» — до 30 к/с и опорный кадр NVENC до ×10 обычного (без мыла на PLI и
+    /// новом зрителе), «Плавность» — частота как выбрана и опорный ×4. Нет поля — «Чёткость», как
+    /// умолчание клиента.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// «Максимальное качество — не снижать» (06.10, решение владельца). Нижняя граница оценщика канала =
+    /// битрейт пресета с запасом (и через интернет тоже), запасные слои выключены, вся полоса — полному.
+    /// Цена: у зрителя со слабым каналом вместо мыла будут подтормаживания, а без запасного слоя его
+    /// запросы опорных кадров снова бьют по всем (#109). По умолчанию выключено.
+    #[serde(default)]
+    pub max_quality: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_mode() -> String {
+    "detail".to_string()
 }
 
 struct Session {
@@ -324,15 +348,23 @@ pub fn enumerate() -> Vec<ScreenSource> {
     }
     handles
         .into_iter()
-        .map(|(id, kind, title, handle)| ScreenSource { id, kind, title, thumb: handle.join().ok().flatten() })
+        .map(|(id, kind, title, handle)| {
+            let (thumb, width, height) = handle.join().ok().unwrap_or((None, 0, 0));
+            ScreenSource { id, kind, title, thumb, width, height }
+        })
         .collect()
 }
 
 /// Grab one frame from a source and PNG-encode a small thumbnail data-URL. Best-effort: returns None
 /// on timeout or for windows that can't be captured (minimized) — the UI falls back to a monogram.
-fn capture_thumb(kind: DesktopCaptureSourceType, id: u64) -> Option<String> {
-    let mut cap = DesktopCapturer::new(DesktopCapturerOptions::new(kind))?;
-    let source = cap.get_source_list().into_iter().find(|s| s.id() == id)?;
+/// Вместе с миниатюрой — размер кадра источника (0×0 — кадра не было).
+fn capture_thumb(kind: DesktopCaptureSourceType, id: u64) -> (Option<String>, u32, u32) {
+    let Some(mut cap) = DesktopCapturer::new(DesktopCapturerOptions::new(kind)) else {
+        return (None, 0, 0);
+    };
+    let Some(source) = cap.get_source_list().into_iter().find(|s| s.id() == id) else {
+        return (None, 0, 0);
+    };
     let (tx, rx) = mpsc::channel::<(usize, usize, usize, Vec<u8>)>();
     cap.start_capture(Some(source), move |res| {
         if let Ok(f) = res {
@@ -342,10 +374,14 @@ fn capture_thumb(kind: DesktopCaptureSourceType, id: u64) -> Option<String> {
     for _ in 0..8 {
         cap.capture_frame();
         if let Ok((w, h, stride, data)) = rx.recv_timeout(Duration::from_millis(200)) {
-            return if w > 0 && h > 0 { encode_thumb_png(&data, stride, w, h) } else { None };
+            return if w > 0 && h > 0 {
+                (encode_thumb_png(&data, stride, w, h), w as u32, h as u32)
+            } else {
+                (None, 0, 0)
+            };
         }
     }
-    None
+    (None, 0, 0)
 }
 
 /// Ширина миниатюры — и в пикере источников, и в превью показа (#115).
@@ -708,6 +744,32 @@ const REMOTE_START_BPS: u64 = 5_000_000;
 /// (15,5 Мбит/с, оценка 15,7) полному слою доставалось 10,4 из 12,9: часть оценки WebRTC держит на
 /// заголовки пакетов и повторы. В локалке запас ничего не стоит.
 const LAN_HEADROOM_PCT: u64 = 130;
+/// «Мягкий пол» оценщика через интернет (06.10, #207): доля бюджета лестницы, проценты, и потолок
+/// самого пола. Без пола оценка после просадки (Wi-Fi, чужая закачка) падала до 1–3 Мбит/с, а на
+/// статике ей не на чем расти — кодировщику нечего слать; полный слой голодал или выключался вовсе.
+/// Пол 2,5 Мбит/с держит полный слой живым (экономный 0,15 + средний до 1,5 + минимум полного) и ниже
+/// любого проводного аплинка 2026 года; выше не поднимаем — на узком аплинке пол заставил бы показ
+/// давить голос того же человека.
+const REMOTE_SOFT_FLOOR_PCT: u64 = 40;
+const REMOTE_SOFT_FLOOR_MAX_BPS: u64 = 2_500_000;
+/// Во сколько раз опорный кадр NVENC крупнее обычного (`lowDelayKeyFrameScale`, 06.10, #207). До 06.10 —
+/// умолчание «сверхнизкой задержки», 1: опорный кадр (запрос PLI, новый зритель, возврат на полный
+/// слой) получал биты обычного и вспыхивал мылом у всех зрителей.
+///
+/// Синтетический замер на этой сборке (1080p30, 4,2 Мбит/с, опорный кадр раз в 3 с, стенд 06.10):
+/// - ×10 — QP окна с опорным кадром 39 → 31, в следующие 100 мс 43 → 35, весь следующий кадр-секунду
+///   ниже на 3–4; статика и прокрутка на 1–2 QP лучше, частота у зрителя та же;
+/// - ×4 — 39 → 37 и 43 → 40: мягче, всплеск опорного кадра меньше — для «Плавности» (игра);
+/// - буфер VBV 0,25–0,5 с и настройка LOW_LATENCY вместо этого — ХУЖЕ исходного (QP после опорного 47–48):
+///   не берём.
+const DETAIL_KEYFRAME_SCALE: i32 = 10;
+const MOTION_KEYFRAME_SCALE: i32 = 4;
+/// Потолок частоты «Чёткости», к/с: текст и таблицы не нуждаются в 60, а лишние кадры съедают биты
+/// каждого кадра.
+const DETAIL_MAX_FPS: u32 = 30;
+/// «Родное» разрешение вписываем в 4K: выше пресетов не было и нет (битрейт, сеансы NVENC).
+const NATIVE_MAX_W: u32 = 3840;
+const NATIVE_MAX_H: u32 = 2160;
 
 /// Пойдёт ли кадр через видеокарту (#207, шаг 4) — решается ДО подключения, от этого зависит dynacast
 /// (0.8.12). Те же условия, что у `gpu_skip` в `start`, плюс «NVENC есть». Откат посреди показа этим не
@@ -723,15 +785,151 @@ pub fn gpu_path_planned(is_window: bool, gpu_pipeline: bool, codec: &str, nvenc:
 /// сервера в локалке узким местом канал быть не может, поэтому старт и нижняя граница = бюджет
 /// лестницы с запасом `LAN_HEADROOM_PCT`. Через интернет — только быстрый старт: нижняя граница там
 /// уронила бы показ тем, у кого аплинк уже бюджета.
+///
+/// 🔴 06.10: через интернет — ещё и «мягкий пол» (`REMOTE_SOFT_FLOOR_*`): быстрое восстановление после
+/// просадки, полный слой не голодает и не выключается. Высокий пол — только по галочке
+/// «Максимальное качество» (`max_quality_hint`).
 pub fn bitrate_hint(ladder_bps: u64, server_rtt_ms: Option<f64>) -> (u64, u64) {
     match server_rtt_ms {
         Some(rtt) if rtt < LAN_RTT_MS => {
             let floor = ladder_bps * LAN_HEADROOM_PCT / 100;
             (floor, floor)
         }
-        _ => (ladder_bps.min(REMOTE_START_BPS), 0),
+        _ => {
+            let floor = (ladder_bps * REMOTE_SOFT_FLOOR_PCT / 100).min(REMOTE_SOFT_FLOOR_MAX_BPS);
+            (ladder_bps.min(REMOTE_START_BPS).max(floor), floor)
+        }
     }
 }
+
+/// Подсказка оценщику для «Максимального качества» (06.10): старт и нижняя граница = битрейт полного
+/// слоя с тем же запасом, что у локалки (`LAN_HEADROOM_PCT`: часть оценки уходит на заголовки и
+/// повторы) — и через интернет тоже. Слоёв под полным при этой галочке нет.
+pub fn max_quality_hint(full_bps: u64) -> (u64, u64) {
+    let floor = full_bps * LAN_HEADROOM_PCT / 100;
+    (floor, floor)
+}
+
+/// Множитель опорного кадра NVENC под режим показа (`lowDelayKeyFrameScale`). Неизвестный режим — как
+/// «Чёткость» (умолчание клиента).
+pub fn keyframe_scale(mode: &str) -> i32 {
+    if mode == "motion" {
+        MOTION_KEYFRAME_SCALE
+    } else {
+        DETAIL_KEYFRAME_SCALE
+    }
+}
+
+/// Частота кадров показа с учётом режима: «Чёткость» — не выше `DETAIL_MAX_FPS` (06.10, решение
+/// владельца), «Плавность» — как выбрана. Пределы 5–60 — как и раньше.
+pub fn mode_fps(mode: &str, fps: u32) -> u32 {
+    let fps = fps.clamp(5, 60);
+    if mode == "motion" {
+        fps
+    } else {
+        fps.min(DETAIL_MAX_FPS)
+    }
+}
+
+/// Опорные точки битрейта экрана: площадь кадра → бит/с при 30 к/с в «Чёткости» без поправки на
+/// кодек. Ровно таблица клиента (`bitrateFor`: 720p 1,5 · 1080p 3 · 1440p 5 · 4K 8 Мбит/с).
+const BITRATE_ANCHORS: [(f64, f64); 4] = [
+    (1280.0 * 720.0, 1_500_000.0),
+    (1920.0 * 1080.0, 3_000_000.0),
+    (2560.0 * 1440.0, 5_000_000.0),
+    (3840.0 * 2160.0, 8_000_000.0),
+];
+
+/// Базовый битрейт по площади кадра: между опорными точками — по прямой, ниже первой —
+/// пропорционально (не меньше 0,5 Мбит/с), выше последней — как у 4K.
+fn base_bitrate_for_pixels(pixels: f64) -> f64 {
+    let a = &BITRATE_ANCHORS;
+    if pixels <= a[0].0 {
+        return (a[0].1 * pixels / a[0].0).max(500_000.0);
+    }
+    for i in 1..a.len() {
+        if pixels <= a[i].0 {
+            let (p0, b0) = a[i - 1];
+            let (p1, b1) = a[i];
+            return b0 + (b1 - b0) * (pixels - p0) / (p1 - p0);
+        }
+    }
+    a[a.len() - 1].1
+}
+
+/// Битрейт полного слоя для «Родного» разрешения (06.10) — 🔴 ДВОЙНИК `bitrateForDims` в
+/// `streamSettings.ts`, числа обязаны совпадать (там же и подпись «≈ N Мбит/с» в окне показа). На
+/// размерах пресетов даёт ровно их числа. Множители — те же: 60 к/с ×1,6, 15 к/с ×0,75,
+/// «Плавность» ×1,15, H.264 ×1,4. Частота — ВЫБРАННАЯ, а не урезанная «Чёткостью»: клиент считает так же.
+pub fn share_bitrate(width: u32, height: u32, fps: u32, motion: bool, h264: bool) -> u64 {
+    let fps_mul = if fps == 60 {
+        1.6
+    } else if fps == 30 {
+        1.0
+    } else {
+        0.75
+    };
+    let mode_mul = if motion { 1.15 } else { 1.0 };
+    let codec_mul = if h264 { 1.4 } else { 1.0 };
+    let base = base_bitrate_for_pixels(width as f64 * height as f64);
+    (base * fps_mul * mode_mul * codec_mul).round() as u64
+}
+
+/// Вписать «родной» размер в 4K с сохранением пропорций, чётные стороны (06.10).
+pub fn fit_native(width: u32, height: u32) -> (u32, u32) {
+    let (w, h) = (width.max(2), height.max(2));
+    let (bw, bh) = if w >= h { (NATIVE_MAX_W, NATIVE_MAX_H) } else { (NATIVE_MAX_H, NATIVE_MAX_W) };
+    let scale = (bw as f64 / w as f64).min(bh as f64 / h as f64).min(1.0);
+    let even = |v: f64| ((v as u32) & !1).max(2);
+    (even(w as f64 * scale), even(h as f64 * scale))
+}
+
+/// Настоящий размер источника для «Родного» (06.10): экран — режим монитора (`EnumDisplaySettingsW`
+/// по тому же номеру libwebrtc, что `screen_attached`), окно — его прямоугольник. `None` — не узнали.
+fn native_dims(is_window: bool, id: u64) -> Option<(u32, u32)> {
+    if is_window {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        let mut r = RECT::default();
+        // SAFETY: HWND из источника libwebrtc; мёртвый дескриптор даёт ошибку, а не UB.
+        unsafe { GetWindowRect(HWND(id as usize as *mut core::ffi::c_void), &mut r) }.ok()?;
+        let (w, h) = ((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32);
+        // Свёрнутое окно отдаёт прямоугольник-заглушку ~160×28 — по нему битрейт и слои вышли бы крошечными
+        // на весь показ. Меньше 320×180 — «не узнали» (тогда 1080p, а кадр всё равно уходит родным).
+        return (w >= 320 && h >= 180).then_some((w, h));
+    }
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS,
+    };
+    let index = u32::try_from(id).ok()?;
+    let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+    // SAFETY: наши структуры с верным размером, указатели живут весь вызов.
+    if !unsafe { EnumDisplayDevicesW(windows::core::PCWSTR::null(), index, &mut dd, 0) }.as_bool() {
+        return None;
+    }
+    let mut dm = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
+    let name = windows::core::PCWSTR::from_raw(dd.DeviceName.as_ptr());
+    if !unsafe { EnumDisplaySettingsW(name, ENUM_CURRENT_SETTINGS, &mut dm) }.as_bool() {
+        return None;
+    }
+    (dm.dmPelsWidth >= 2 && dm.dmPelsHeight >= 2).then_some((dm.dmPelsWidth, dm.dmPelsHeight))
+}
+
+/// С чем показ запущен НА САМОМ ДЕЛЕ — после «Родного», режима и галочки качества (06.10). Уезжает в
+/// статистику: без этого по отчёту не понять, какой потолок и какой битрейт были у показа.
+#[derive(Clone, Default)]
+struct EffectiveCfg {
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate: u64,
+    mode: String,
+    max_quality: bool,
+    layers: bool,
+    keyframe_scale: i32,
+}
+
+static EFFECTIVE: Mutex<Option<EffectiveCfg>> = Mutex::new(None);
 
 /// Задержка TCP-подключения до сервера из адреса LiveKit, мс: лучшая из трёх попыток. `None` — не
 /// достучались (тогда считаем, что сервер через интернет).
@@ -889,7 +1087,12 @@ fn run_gpu_capture(
 }
 
 const MID_MIN_BPS: u64 = 600_000;
-const MID_MAX_BPS: u64 = 2_500_000;
+/// 🔴 06.10 (#207): 1,5 Мбит/с вместо 2,5. Распределитель libwebrtc отдаёт нижним слоям их цель
+/// ПЕРВЫМИ, а полному — остаток оценки канала: при оценке 6,5 полный 1080p+ получал ~3,85 Мбит/с, и
+/// «высокое качество» лишь размазывало те же биты на больше точек. Средний слой смотрят единицы (зритель
+/// на «Авто» просит полный, свёрнутый — экономный), а у пути через видеокарту он кодируется и без
+/// зрителей (dynacast там выключен, 0.8.12). Миллион — полному слою.
+const MID_MAX_BPS: u64 = 1_500_000;
 /// Экономный слой — запасной (#109): лишь бы шло, поэтому 3 к/с.
 const LOW_FPS: f64 = 3.0;
 const LOW_MIN_BPS: u64 = 150_000;
@@ -904,7 +1107,7 @@ const LOW_MIN_BPS: u64 = 150_000;
 /// (`screenshare::compute_default_simulcast_preset`), с меткой MEDIUM у полного. Слоя HIGH не было,
 /// сервер отдавал на «Среднее» тот же полный слой, и выбирать зрителю было между полным и слайд-шоу.
 /// Теперь:
-/// - средний — короткая сторона 720 (у 4K — 1080), ПОЛНАЯ частота кадров, до 2,5 Мбит/с;
+/// - средний — короткая сторона 720 (у 4K — 1080), ПОЛНАЯ частота кадров, до 1,5 Мбит/с (до 06.10 — 2,5);
 /// - экономный — вдвое меньше среднего, 3 к/с (запасной слой #109, ~150 кбит/с);
 /// - короткая сторона ≤ 720 — среднего нет, остаются полный и экономный, как раньше.
 ///
@@ -985,8 +1188,11 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     };
     let old_gpu = gpu_too_old(crate::gpu_nvml::compute_capability().map(|(major, _)| major));
     let already_told = told_marker.as_deref().is_some_and(Path::exists);
+    // «Максимальное качество» (06.10) выключает запасные слои само: вся полоса — полному. Это выбор
+    // человека, а не наш, поэтому объяснять нечего (`decide_layers` с `requested = false` молчит).
+    let requested_layers = cfg.layers && !cfg.max_quality;
     let (layers, off_reason) =
-        decide_layers(cfg.layers, crashed_with_layers, crash_streak, old_gpu, already_told);
+        decide_layers(requested_layers, crashed_with_layers, crash_streak, old_gpu, already_told);
     if let Some(reason) = off_reason {
         // Отметка «уже говорили» — только про старую карту: это свойство железа, и повторять его
         // человеку незачем. Про падение говорим каждый раз, оно каждый раз новое.
@@ -1007,6 +1213,51 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     // приложение умирало. Смерть процесса `Drop` не зовёт, и метка её переживает, как и задумано.
     let mut marker_guard = ActiveMarkerGuard::arm(active_marker.clone(), layers);
 
+    // ─── С чем показ пойдёт на самом деле (06.10, #207): «Родное», режим, «Максимальное качество» ───
+    let want_id: u64 = cfg.source_id.parse().map_err(|_| "bad source id".to_string())?;
+    // «Родное» (0×0): размер источника, вписанный в 4K. До 06.10 «1080p» на мониторе 1440p или
+    // ультрашироком уменьшалось в НЕЦЕЛОЕ число раз — текст мылился ещё до кодировщика. Не узнали
+    // размер — объявляем 1080p, а кадр всё равно уходит родным (потолок ниже — 4K).
+    let native = cfg.width == 0 || cfg.height == 0;
+    let known = if native { native_dims(cfg.is_window, want_id) } else { None };
+    let (width, height) = if native {
+        let (w, h) = known.unwrap_or((1920, 1080));
+        fit_native(w, h)
+    } else {
+        (cfg.width, cfg.height)
+    };
+    // Потолок кадра для захвата. Окно в «Родном» растягивают на лету, а размер, который не узнали, —
+    // неизвестен: их держит только рамка 4K. Экран с известным размером — ровно он (вписанный в 4K).
+    let (cap_w, cap_h) = if !native {
+        (cfg.width, cfg.height)
+    } else if cfg.is_window || known.is_none() {
+        (NATIVE_MAX_W, NATIVE_MAX_H)
+    } else {
+        (width, height)
+    };
+    let fps = mode_fps(&cfg.mode, cfg.fps);
+    let max_bitrate = if native || cfg.max_bitrate == 0 {
+        share_bitrate(width, height, cfg.fps, cfg.mode == "motion", cfg.codec == "h264")
+    } else {
+        cfg.max_bitrate
+    };
+    let presets = if layers { share_layer_presets(width, height, max_bitrate, fps as f64) } else { Vec::new() };
+    // Множитель опорного кадра NVENC под режим — ДО публикации: кодировщики слоёв рождаются при ней.
+    let kf_scale = keyframe_scale(&cfg.mode);
+    webrtc_sys::gv_gpu_capture::ffi::set_screen_encoder_keyframe_scale(kf_scale);
+    if let Ok(mut g) = EFFECTIVE.lock() {
+        *g = Some(EffectiveCfg {
+            width,
+            height,
+            fps,
+            bitrate: max_bitrate,
+            mode: if cfg.mode == "motion" { "motion".into() } else { "detail".into() },
+            max_quality: cfg.max_quality,
+            layers,
+            keyframe_scale: kf_scale,
+        });
+    }
+
     // dynacast (0.8.12): ВЫКЛЮЧЕН только когда кадр пойдёт через видеокарту (#207, шаг 4), иначе включён.
     // Опыт 26.09 показал: «рассыпание» давал оценщик канала, а не dynacast. Но у пути через видеокарту
     // слои, которые никто не смотрит, почти ничего не стоят (NVENC и перевод цвета на видеокарте), а
@@ -1025,21 +1276,15 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     // `RoomOptions` в SDK `#[non_exhaustive]` — литерал с `..Default` не собирается.
     // Подсказка оценщику канала (#207, 26.09) — `bitrate_hint`. Ставится ДО подключения: соединения
     // создаются при входе в комнату, и `SetBitrate` применяется к каждому новому (в т. ч. при
-    // переподключении). Бюджет — вся лестница слоёв.
-    let ladder_bps = cfg.max_bitrate
-        + if layers {
-            share_layer_presets(cfg.width, cfg.height, cfg.max_bitrate, cfg.fps.clamp(5, 60) as f64)
-                .iter()
-                .map(|p| p.encoding.max_bitrate)
-                .sum::<u64>()
-        } else {
-            0
-        };
+    // переподключении). Бюджет — вся лестница слоёв. «Максимальное качество» (06.10) — свой пол
+    // (`max_quality_hint`): битрейт пресета с запасом, где бы ни был сервер.
+    let ladder_bps = max_bitrate + presets.iter().map(|p| p.encoding.max_bitrate).sum::<u64>();
     let rtt = {
         let url = cfg.url.clone();
         tokio::task::spawn_blocking(move || server_rtt_ms(&url)).await.ok().flatten()
     };
-    let (hint_start, hint_min) = bitrate_hint(ladder_bps, rtt);
+    let (hint_start, hint_min) =
+        if cfg.max_quality { max_quality_hint(max_bitrate) } else { bitrate_hint(ladder_bps, rtt) };
     webrtc_sys::gv_gpu_capture::ffi::set_bitrate_hint(
         i32::try_from(hint_start).unwrap_or(i32::MAX),
         i32::try_from(hint_min).unwrap_or(i32::MAX),
@@ -1062,16 +1307,14 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     // Drain room events so the channel doesn't grow unbounded; ends when the room closes.
     tokio::spawn(async move { while events.recv().await.is_some() {} });
 
-    let source = NativeVideoSource::new(VideoResolution { width: cfg.width, height: cfg.height }, true);
+    let source = NativeVideoSource::new(VideoResolution { width, height }, true);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let want_id: u64 = cfg.source_id.parse().map_err(|_| "bad source id".to_string())?;
     let is_window = cfg.is_window;
     // Процесс окна снимаем ОДИН раз, на старте: дальше сторож сверяется именно с ним, иначе
     // «то же окно» было бы не отличить от «Windows выдала этот номер кому-то другому» (#99).
     let want_pid = if is_window { crate::apps_enum::window_pid(want_id) } else { None };
-    let fps = cfg.fps.clamp(5, 60);
-    let (tw, th) = (cfg.width, cfg.height);
+    let (tw, th) = (cap_w, cap_h);
     let cursor = cfg.cursor;
     let vs = source.clone();
     let stop_thread = stop.clone();
@@ -1208,7 +1451,7 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
                 source: TrackSource::Screenshare,
                 video_codec: codec_of(&cfg.codec),
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: cfg.max_bitrate,
+                    max_bitrate,
                     max_framerate: fps as f64,
                 }),
                 // 🔴 Слои обязательны (#109). Раньше стоял `false` с доводом «нижний слой никто
@@ -1225,8 +1468,7 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
                 // Выключатель `layers` в настройках показа возвращает один поток — на случай, если
                 // драйвер не даст столько сеансов NVENC («показ не стартует»).
                 simulcast: layers,
-                simulcast_layers: layers
-                    .then(|| share_layer_presets(cfg.width, cfg.height, cfg.max_bitrate, fps as f64)),
+                simulcast_layers: layers.then(|| presets.clone()),
                 ..Default::default()
     };
     let publish = room
@@ -1484,6 +1726,11 @@ pub async fn stop() {
     if let Ok(mut g) = BWE_HINT.lock() {
         *g = (0, 0, 0.0);
     }
+    // Множитель опорного кадра и итог «с чем показ шёл» — тоже только на время показа (06.10).
+    webrtc_sys::gv_gpu_capture::ffi::set_screen_encoder_keyframe_scale(0);
+    if let Ok(mut g) = EFFECTIVE.lock() {
+        *g = None;
+    }
     // Кадр прошлого показа не должен пережить сам показ: иначе следующее наведение мышкой отдало бы
     // картинку того, что человек уже не показывает (#115).
     if let Ok(mut slot) = PREVIEW.lock() {
@@ -1533,6 +1780,17 @@ pub struct LayerStat {
     pub encode_ms: f64,
     /// Сколько бит/с WebRTC отдал этому слою из своей оценки канала.
     pub target_bitrate: f64,
+    // ─── «Чёрный ящик» (06.10, #207) — накопительные, разность соседних замеров даёт «за окно» ───
+    /// Сумма QP всех кадров слоя (`qpSum`). Средний QP за окно = Δqp_sum / Δframes_encoded: 20–30 —
+    /// чёткий текст, 40+ — мыло, 51 — предел H.264.
+    pub qp_sum: u64,
+    pub key_frames: u32,
+    /// Сколько байт слой реально отправил (с повторами) и сколько ДОЛЖЕН был выдать кодировщик по своей
+    /// цели (`totalEncodedBytesTarget`). Факт ≪ цели — кодировщику нечего слать (статика); факт > цели —
+    /// перелёт.
+    pub bytes_sent: u64,
+    pub encoded_bytes_target: u64,
+    pub pli: u32,
 }
 
 #[derive(Serialize, Default)]
@@ -1605,6 +1863,27 @@ pub struct ShareStats {
     pub pipeline: String,
     /// Почему не `gpu`: показ окна, выключено, кодек, экран не на NVIDIA, HDR, отказ посреди показа.
     pub pipeline_note: String,
+
+    // ─── «Чёрный ящик» (06.10, #207): качество кадра, цель против факта, с чем показ запущен ───
+    /// Основной слой, накопительно: сумма QP, байты по цели кодировщика, повторы, «огромные» кадры
+    /// (в 2,5 раза больше среднего — смена сцены, опорный кадр). Среднее «за окно» — разностью замеров.
+    pub qp_sum: u64,
+    pub encoded_bytes_target: u64,
+    pub retransmitted_bytes: u64,
+    pub huge_frames: u32,
+    /// Задержка проверок ICE выбранной пары, мс (`currentRoundTripTime`). 🐞 `rtt_ms` у нативного показа
+    /// всегда 1 мс (телеметрия 0.8.12) — верить этому полю и `server_rtt_ms`.
+    pub ice_rtt_ms: f64,
+    /// С чем показ запущен на самом деле: размер (у «Родного» — источника), частота (у «Чёткости» —
+    /// не выше 30), битрейт полного слоя, режим, «Максимальное качество», слои, множитель опорного кадра NVENC.
+    pub cfg_width: u32,
+    pub cfg_height: u32,
+    pub cfg_fps: u32,
+    pub cfg_bitrate: u64,
+    pub mode: String,
+    pub max_quality: bool,
+    pub layers_on: bool,
+    pub keyframe_scale: i32,
 }
 
 /// Stats for the live native share, or None when nothing is being shared.
@@ -1651,6 +1930,11 @@ pub async fn stats() -> Option<ShareStats> {
                 frames_encoded: o.outbound.frames_encoded,
                 encode_ms,
                 target_bitrate: o.outbound.target_bitrate,
+                qp_sum: o.outbound.qp_sum,
+                key_frames: o.outbound.key_frames_encoded,
+                bytes_sent: o.sent.bytes_sent,
+                encoded_bytes_target: o.outbound.total_encoded_bytes_target,
+                pli: o.outbound.pli_count,
             });
             if any_active && !o.outbound.active {
                 continue;
@@ -1688,6 +1972,10 @@ pub async fn stats() -> Option<ShareStats> {
             out.nack = o.outbound.nack_count;
             out.pli = o.outbound.pli_count;
             out.at_ms = o.rtc.timestamp as f64 / 1000.0; // report timestamps are microseconds
+            out.qp_sum = o.outbound.qp_sum;
+            out.encoded_bytes_target = o.outbound.total_encoded_bytes_target;
+            out.retransmitted_bytes = o.outbound.retransmitted_bytes_sent;
+            out.huge_frames = o.outbound.huge_frames_sent;
             codec_id = o.stream.codec_id.clone();
         }
     }
@@ -1715,6 +2003,10 @@ pub async fn stats() -> Option<ShareStats> {
                 let bwe = c.candidate_pair.available_outgoing_bitrate;
                 if bwe.is_finite() && bwe > out.bwe_bps {
                     out.bwe_bps = bwe;
+                }
+                let rtt = c.candidate_pair.current_round_trip_time;
+                if rtt.is_finite() && rtt > 0.0 {
+                    out.ice_rtt_ms = rtt * 1000.0;
                 }
             }
             _ => {}
@@ -1748,6 +2040,16 @@ pub async fn stats() -> Option<ShareStats> {
         out.bwe_min_bps = g.1 as f64;
         out.server_rtt_ms = g.2;
     }
+    if let Some(e) = EFFECTIVE.lock().ok().and_then(|g| g.clone()) {
+        out.cfg_width = e.width;
+        out.cfg_height = e.height;
+        out.cfg_fps = e.fps;
+        out.cfg_bitrate = e.bitrate;
+        out.mode = e.mode;
+        out.max_quality = e.max_quality;
+        out.layers_on = e.layers;
+        out.keyframe_scale = e.keyframe_scale;
+    }
 
     // 🔴 Последний рубеж: НИ ОДНО дробное число не должно уехать нечисловым. `serde_json` пишет
     // NaN и бесконечность как `null`, схема на сервере ждёт число и отбивает ВЕСЬ отчёт целиком —
@@ -1765,9 +2067,18 @@ pub async fn stats() -> Option<ShareStats> {
         &mut out.rtt_ms,
         &mut out.fraction_lost,
         &mut out.at_ms,
+        &mut out.ice_rtt_ms,
     ] {
         if !v.is_finite() {
             *v = 0.0;
+        }
+    }
+    // Слои — тоже: их дробные числа уходят в тот же отчёт.
+    for l in &mut out.layers {
+        for v in [&mut l.fps, &mut l.encode_ms, &mut l.target_bitrate] {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
         }
     }
     Some(out)
@@ -1783,12 +2094,12 @@ mod tests {
         let cases = [
             (1280, 720, 2_100_000, 30.0, vec![(640, 360, 150_000, 3.0)]),
             (1280, 720, 3_360_000, 60.0, vec![(640, 360, 150_000, 3.0)]),
-            (1920, 1080, 4_200_000, 30.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 30.0)]),
-            (1920, 1080, 6_720_000, 60.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 60.0)]),
-            (2560, 1440, 7_000_000, 30.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 30.0)]),
-            (2560, 1440, 11_200_000, 60.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 2_500_000, 60.0)]),
-            (3840, 2160, 11_200_000, 30.0, vec![(960, 540, 150_000, 3.0), (1920, 1080, 2_500_000, 30.0)]),
-            (3840, 2160, 17_920_000, 60.0, vec![(960, 540, 150_000, 3.0), (1920, 1080, 2_500_000, 60.0)]),
+            (1920, 1080, 4_200_000, 30.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 1_500_000, 30.0)]),
+            (1920, 1080, 6_720_000, 60.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 1_500_000, 60.0)]),
+            (2560, 1440, 7_000_000, 30.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 1_500_000, 30.0)]),
+            (2560, 1440, 11_200_000, 60.0, vec![(640, 360, 150_000, 3.0), (1280, 720, 1_500_000, 60.0)]),
+            (3840, 2160, 11_200_000, 30.0, vec![(960, 540, 150_000, 3.0), (1920, 1080, 1_500_000, 30.0)]),
+            (3840, 2160, 17_920_000, 60.0, vec![(960, 540, 150_000, 3.0), (1920, 1080, 1_500_000, 60.0)]),
         ];
         for (w, h, bitrate, fps, expected) in cases {
             let actual: Vec<_> = share_layer_presets(w, h, bitrate, fps)
@@ -1865,9 +2176,93 @@ mod tests {
         // Ловит нижнюю границу на интернетном соединении, которая мешала WebRTC честно понижать оценку.
         assert_eq!(bitrate_hint(10_000_000, Some(1.0)), (13_000_000, 13_000_000));
         assert_eq!(bitrate_hint(10_000_000, Some(4.99)), (13_000_000, 13_000_000));
-        assert_eq!(bitrate_hint(10_000_000, Some(5.0)), (5_000_000, 0));
-        assert_eq!(bitrate_hint(10_000_000, None), (5_000_000, 0));
-        assert_eq!(bitrate_hint(3_000_000, Some(20.0)), (3_000_000, 0));
+        assert_eq!(bitrate_hint(10_000_000, Some(5.0)), (5_000_000, 2_500_000));
+        assert_eq!(bitrate_hint(10_000_000, None), (5_000_000, 2_500_000));
+        assert_eq!(bitrate_hint(3_000_000, Some(20.0)), (3_000_000, 1_200_000));
+    }
+
+    #[test]
+    fn режим_ограничивает_частоту_только_для_чёткости() {
+        // Иначе «Чёткость» зря расходует полосу на 60 fps, а «Плавность» не может сохранить выбранную частоту.
+        assert_eq!(mode_fps("detail", 60), 30);
+        assert_eq!(mode_fps("motion", 60), 60);
+        assert_eq!(mode_fps("detail", 15), 15);
+        assert_eq!(mode_fps("motion", 0), 5);
+        assert_eq!(mode_fps("motion", 90), 60);
+    }
+
+    #[test]
+    fn опорный_кадр_учитывает_режим_и_неизвестное_значение() {
+        // PLI не должен замыливать текст, а режим движения использует меньший множитель для быстрой смены сцен.
+        assert_eq!(keyframe_scale("detail"), 10);
+        assert_eq!(keyframe_scale("motion"), 4);
+        assert_eq!(keyframe_scale("future-mode"), 10);
+    }
+
+    #[test]
+    fn максимальное_качество_держит_полный_слой_с_запасом() {
+        // Галочка должна давать оценщику запас 30% и одинаковый нижний пол, а не обычный мягкий интернетный.
+        assert_eq!(max_quality_hint(10_000_000), (13_000_000, 13_000_000));
+        assert_eq!(max_quality_hint(3_000_000), (3_900_000, 3_900_000));
+    }
+
+    #[test]
+    fn родной_размер_вписывается_в_4k_с_чётными_сторонами_без_увеличения() {
+        // Портрет и сверхширокий источник не должны переворачиваться или обрезаться до нечётного размера.
+        assert_eq!(fit_native(7680, 4320), (3840, 2160));
+        assert_eq!(fit_native(4320, 7680), (2160, 3840));
+        assert_eq!(fit_native(3440, 1440), (3440, 1440));
+        assert_eq!(fit_native(1919, 1081), (1918, 1080));
+        assert_eq!(fit_native(1, 1), (2, 2));
+    }
+
+    #[test]
+    fn новый_и_старый_клиент_совпадают_на_144_сочетаниях_битрейта() {
+        // Стенд #207 сравнивает клиент и Rust на реальных форматах экранов; фиксированные базы из его TS-вывода
+        // не дают двум копиям формулы незаметно разойтись на ориентации или ультрашироких размерах.
+        let cases = [
+            (1280, 720, 1_500_000.0), (1920, 1080, 3_000_000.0),
+            (2560, 1440, 5_000_000.0), (3840, 2160, 8_000_000.0),
+            (3440, 1440, 5_825_000.0), (2560, 1080, 3_857_142.857142857),
+            (1600, 900, 2_175_000.0), (800, 600, 781_250.0),
+            (3840, 2160, 8_000_000.0), (1080, 1920, 3_000_000.0),
+            (3840, 1600, 6_600_000.0), (1366, 768, 1_666_000.0),
+        ];
+        let mut count = 0;
+        for (w, h, base) in cases {
+            for fps in [15, 30, 60] {
+                for motion in [false, true] {
+                    for h264 in [false, true] {
+                        let fps_scale: f64 = match fps { 15 => 0.75, 30 => 1.0, _ => 1.6 };
+                        let mode_scale: f64 = if motion { 1.15 } else { 1.0 };
+                        let codec_scale: f64 = if h264 { 1.4 } else { 1.0 };
+                        let expected = (base * fps_scale * mode_scale * codec_scale).round() as u64;
+                        assert_eq!(share_bitrate(w, h, fps, motion, h264), expected,
+                            "{w}x{h} {fps}fps motion={motion} h264={h264}");
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 144, "матрица обязана покрыть все измерения стенда");
+    }
+
+    #[test]
+    fn старый_конфиг_получает_режим_чёткости_и_выключенный_max_quality() {
+        // Конфиг от версии до #207 не содержит новых ключей и должен запускаться с безопасными значениями.
+        let old = serde_json::json!({
+            "url": "wss://voice.example.test", "token": "test-token", "sourceId": "screen:1",
+            "isWindow": false, "fps": 60, "width": 0, "height": 0, "maxBitrate": 0, "codec": "h264"
+        });
+        let legacy: StartConfig = serde_json::from_value(old.clone()).expect("старый JSON совместим");
+        assert_eq!(legacy.mode, "detail");
+        assert!(!legacy.max_quality);
+        let mut modern = old;
+        modern["mode"] = serde_json::Value::String("motion".into());
+        modern["maxQuality"] = serde_json::Value::Bool(true);
+        let current: StartConfig = serde_json::from_value(modern).expect("новые поля читаются");
+        assert_eq!(current.mode, "motion");
+        assert!(current.max_quality);
     }
 
     /// Живой случай из разбора #111: подаём 28 кадров, кодировщик отдаёт 4, видеокарта уже

@@ -11,7 +11,12 @@ import type {
   VideoCodec,
 } from 'livekit-client';
 
-export type StreamResolution = '720' | '1080' | '1440' | '2160';
+/**
+ * `native` — «Родное» (06.10, #207): размер источника как есть (вписанный в 4K), без уменьшения.
+ * Уменьшение 1440p/ультраширокого до 1080p идёт в НЕЦЕЛОЕ число раз и мылит текст ещё до кодировщика.
+ * Размер знает только тот, кто снимает: десктоп — Rust (`native_dims`), браузер — сам `getDisplayMedia`.
+ */
+export type StreamResolution = 'native' | '720' | '1080' | '1440' | '2160';
 export type StreamFps = 15 | 30 | 60;
 // 'detail' favours sharp text/UI (maintain-resolution); 'motion' favours smooth
 // gameplay/video (maintain-framerate). Maps to the WebRTC contentHint + degradation pref.
@@ -94,6 +99,15 @@ export interface StreamSettings {
    * сохранённые до этой версии настройки, а выключенное остаётся выключенным.
    */
   cursor?: boolean;
+  /**
+   * «Максимальное качество — не снижать» (06.10, #207, решение владельца). Только десктоп: нижняя
+   * граница оценщика канала = битрейт пресета с запасом (и через интернет тоже), запасные слои
+   * выключены, вся полоса — полному. Зритель со слабым каналом получает подтормаживания вместо мыла.
+   *
+   * ⚠️ В браузере галочки нет: нижнюю границу оценщика из JavaScript не поставить без правки SDP.
+   * Необязательное: отсутствие = выключено, как и умолчание.
+   */
+  maxQuality?: boolean;
 }
 
 const KEY = 'gv_stream';
@@ -101,7 +115,9 @@ const KEY = 'gv_stream';
 const LAYERS_BACK_KEY = 'gv_stream_layers_back';
 
 export const STREAM_DEFAULTS: StreamSettings = {
-  resolution: '1080',
+  // «Родное» по умолчанию (06.10, #207): без уменьшения текст и таблицы не мылятся до кодировщика.
+  // ⚠️ Сохранённый выбор человека не трогаем — умолчание действует на тех, кто настроек не сохранял.
+  resolution: 'native',
   fps: 30,
   mode: 'detail',
   // H.264 by default: it's the only codec the GPU can hardware-encode AND every viewer can hardware-
@@ -167,12 +183,44 @@ export function setStreamSettings(next: StreamSettings): void {
   }
 }
 
+/** `native` — 0×0: размер знает тот, кто снимает (см. `StreamResolution`). */
 export const RES_OPTIONS: { value: StreamResolution; label: string; width: number; height: number }[] = [
+  { value: 'native', label: 'Родное', width: 0, height: 0 },
   { value: '720', label: '720p', width: 1280, height: 720 },
   { value: '1080', label: '1080p', width: 1920, height: 1080 },
   { value: '1440', label: '1440p', width: 2560, height: 1440 },
   { value: '2160', label: '4K', width: 3840, height: 2160 },
 ];
+
+/** Потолок «Родного»: выше 4K пресетов не было и нет (битрейт, сеансы кодировщика). Как `NATIVE_MAX_*` в Rust. */
+export const NATIVE_MAX = { width: 3840, height: 2160 } as const;
+
+/**
+ * Размер экрана для «Родного» в БРАУЗЕРЕ — оценка до захвата: экран × масштаб, вписанный в 4K.
+ * Битрейт и слои нужны SDK раньше, чем `getDisplayMedia` скажет настоящий размер; ошиблись (показали
+ * окно, второй монитор) — слои всё равно масштабирует SDK от настоящего кадра, промах только в бюджете.
+ * Вне браузера (тесты) — 1080p.
+ */
+export function nativeScreenEstimate(): { width: number; height: number } {
+  try {
+    const s = globalThis.screen;
+    const dpr = globalThis.devicePixelRatio || 1;
+    if (s && s.width > 0 && s.height > 0) return fitNative(Math.round(s.width * dpr), Math.round(s.height * dpr));
+  } catch {
+    /* нет экрана — ниже умолчание */
+  }
+  return { width: 1920, height: 1080 };
+}
+
+/** Вписать размер в 4K с сохранением пропорций, чётные стороны — двойник `fit_native` в Rust. */
+export function fitNative(width: number, height: number): { width: number; height: number } {
+  const w = Math.max(2, width);
+  const h = Math.max(2, height);
+  const [bw, bh] = w >= h ? [NATIVE_MAX.width, NATIVE_MAX.height] : [NATIVE_MAX.height, NATIVE_MAX.width];
+  const scale = Math.min(bw / w, bh / h, 1);
+  const even = (v: number) => Math.max(2, Math.trunc(v) & ~1);
+  return { width: even(w * scale), height: even(h * scale) };
+}
 
 export const FPS_OPTIONS: StreamFps[] = [15, 30, 60];
 
@@ -183,14 +231,63 @@ export const CODEC_OPTIONS: { value: StreamCodec; label: string }[] = [
 
 const VALID_CODECS = new Set<string>(CODEC_OPTIONS.map((c) => c.value));
 
-function dims(res: StreamResolution): { width: number; height: number } {
-  const o = RES_OPTIONS.find((r) => r.value === res)!;
+/**
+ * Размер кадра по настройке. У «Родного» — `native` (известный размер источника) или оценка экрана
+ * (`nativeScreenEstimate`), уже вписанные в 4K.
+ */
+function dims(res: StreamResolution, native?: { width: number; height: number }): { width: number; height: number } {
+  if (res === 'native') return native && native.width > 0 && native.height > 0 ? fitNative(native.width, native.height) : nativeScreenEstimate();
+  const o = RES_OPTIONS.find((r) => r.value === res) ?? RES_OPTIONS[2];
   return { width: o.width, height: o.height };
 }
 
-/** Target max bitrate (bps) for screen content, tuned per resolution × fps × mode. */
-export function bitrateFor(s: StreamSettings): number {
-  const base: Record<StreamResolution, number> = {
+/**
+ * Опорные точки битрейта экрана: площадь кадра → бит/с при 30 к/с в «Чёткости», VP9 (H.264 — ×1,4).
+ * Ровно прежняя таблица пресетов; 🔴 двойник — `BITRATE_ANCHORS` в Rust (`screenshare.rs`).
+ */
+const BITRATE_ANCHORS: readonly (readonly [number, number])[] = [
+  [1280 * 720, 1_500_000],
+  [1920 * 1080, 3_000_000],
+  [2560 * 1440, 5_000_000],
+  [3840 * 2160, 8_000_000],
+];
+
+/** Базовый битрейт по площади: между опорными точками — по прямой, ниже первой — пропорционально (не меньше 0,5 Мбит/с), выше 4K — как у 4K. */
+function baseBitrateForPixels(pixels: number): number {
+  const a = BITRATE_ANCHORS;
+  if (pixels <= a[0][0]) return Math.max(500_000, (a[0][1] * pixels) / a[0][0]);
+  for (let i = 1; i < a.length; i++) {
+    if (pixels <= a[i][0]) {
+      const [p0, b0] = a[i - 1];
+      const [p1, b1] = a[i];
+      return b0 + ((b1 - b0) * (pixels - p0)) / (p1 - p0);
+    }
+  }
+  return a[a.length - 1][1];
+}
+
+/**
+ * Битрейт полного слоя по НАСТОЯЩЕМУ размеру кадра (06.10, «Родное»). 🔴 Двойник `share_bitrate` в Rust:
+ * десктоп в «Родном» считает его сам (размер источника знает только он), а это окно показа пишет ту же
+ * цифру в «≈ N Мбит/с». На размерах пресетов даёт ровно их числа (`bitrateFor`).
+ */
+export function bitrateForDims(width: number, height: number, s: Pick<StreamSettings, 'fps' | 'mode' | 'codec'>): number {
+  const fpsMul = s.fps === 60 ? 1.6 : s.fps === 30 ? 1 : 0.75;
+  const modeMul = s.mode === 'motion' ? 1.15 : 1;
+  const codecMul = s.codec === 'h264' ? 1.4 : 1;
+  return Math.round(baseBitrateForPixels(width * height) * fpsMul * modeMul * codecMul);
+}
+
+/**
+ * Target max bitrate (bps) for screen content, tuned per resolution × fps × mode. «Родное» — по
+ * `native` (известному размеру источника), иначе по оценке экрана (`nativeScreenEstimate`).
+ */
+export function bitrateFor(s: StreamSettings, native?: { width: number; height: number }): number {
+  if (s.resolution === 'native') {
+    const d = dims('native', native);
+    return bitrateForDims(d.width, d.height, s);
+  }
+  const base: Record<Exclude<StreamResolution, 'native'>, number> = {
     '720': 1_500_000,
     '1080': 3_000_000,
     '1440': 5_000_000,
@@ -204,14 +301,18 @@ export function bitrateFor(s: StreamSettings): number {
   return Math.round(base[s.resolution] * fpsMul * modeMul * codecMul);
 }
 
-/** Human-readable estimate, e.g. "≈ 5.5 Мбит/с". */
-export function bitrateLabel(s: StreamSettings): string {
-  return `${(bitrateFor(s) / 1_000_000).toFixed(1).replace('.0', '')} Мбит/с`;
+/** Human-readable estimate, e.g. "≈ 5.5 Мбит/с". `native` — известный размер источника для «Родного». */
+export function bitrateLabel(s: StreamSettings, native?: { width: number; height: number }): string {
+  return `${(bitrateFor(s, native) / 1_000_000).toFixed(1).replace('.0', '')} Мбит/с`;
 }
 
 const isSvc = (c: StreamCodec): boolean => c === 'vp9';
 
-/** getDisplayMedia constraints for the chosen quality. */
+/**
+ * getDisplayMedia constraints for the chosen quality. «Родное» — размер экрана (`nativeScreenEstimate`,
+ * вписанный в 4K): SDK ставит `ideal`, и тот же размер стоит в битрейте и слоях — без увеличения и без
+ * нецелого уменьшения основного монитора.
+ */
 export function captureOptions(s: StreamSettings): ScreenShareCaptureOptions {
   const d = dims(s.resolution);
   return {
@@ -222,11 +323,26 @@ export function captureOptions(s: StreamSettings): ScreenShareCaptureOptions {
   };
 }
 
+/**
+ * Настройки показа ЭКРАНА из браузера (06.10, #207): VP9 → H.264.
+ *
+ * 🔴 SDK 2.20.0 для VP9-показа экрана ПЕРЕБИВАЕТ наше (`LocalParticipant.ts`, «vp9 svc with screenshare»):
+ * режим `L1T3` вместо `L3T3_KEY` (запасных слоёв нет — защита #109 пропадает) и `contentHint = motion`
+ * (показ идёт как камера — без пробы канала для экрана и с понижением разрешения). Обойти без правки
+ * внутренностей SDK нельзя, поэтому показ экрана из браузера идёт в H.264 с нашей лестницей слоёв.
+ * Камера (вкладка «Камеры») — как выбрана: для неё это и так путь камеры.
+ */
+export function webScreenSettings(s: StreamSettings): StreamSettings {
+  return s.codec === 'vp9' ? { ...s, codec: 'h264' } : s;
+}
+
 /** LiveKit publish options (encoding, codec, degradation) for the chosen quality. */
 export function publishOptions(s: StreamSettings): TrackPublishOptions {
   const svc = isSvc(s.codec);
-  const degradationPreference: RTCDegradationPreference =
-    s.mode === 'motion' ? 'maintain-framerate' : 'maintain-resolution';
+  // 🔴 06.10 (#207): «Плавность» — `balanced`, а не `maintain-framerate`. Последний при нехватке канала
+  // держит частоту ценой РАЗРЕШЕНИЯ: показ экрана уезжал в мыло целиком. `balanced` делит потерю между
+  // частотой и разрешением; «Чёткость» по-прежнему держит разрешение.
+  const degradationPreference: RTCDegradationPreference = s.mode === 'motion' ? 'balanced' : 'maintain-resolution';
   return {
     videoCodec: s.codec as VideoCodec,
     screenShareEncoding: {
@@ -259,9 +375,13 @@ export interface ShareLayerPreset {
   maxFramerate: number;
 }
 
-/** Потолок и пол битрейта среднего слоя. 720p на полной частоте кадров для экрана — 2–2,5 Мбит/с. */
+/**
+ * Потолок и пол битрейта среднего слоя. 🔴 06.10 (#207): потолок 1,5 Мбит/с вместо 2,5 — распределитель
+ * libwebrtc отдаёт нижним слоям их цель ПЕРВЫМИ, а полному — остаток оценки канала: при оценке 6,5
+ * полный 1080p+ получал ~3,85 Мбит/с. Средний слой смотрят единицы. Двойник — `MID_MAX_BPS` в Rust.
+ */
 const MID_MIN_BPS = 600_000;
-const MID_MAX_BPS = 2_500_000;
+const MID_MAX_BPS = 1_500_000;
 /** Экономный слой — запасной (#109): лишь бы шло, поэтому 3 к/с. */
 const LOW_FPS = 3;
 const LOW_MIN_BPS = 150_000;
@@ -273,7 +393,7 @@ const LOW_MIN_BPS = 150_000;
  *
  * Почему своя, а не SDK: у показа экрана SDK добавляет РОВНО ОДИН слой (половина, 3 к/с), и
  * зрителю выбирать было между полным и слайд-шоу. Теперь:
- * - средний — короткая сторона 720 (у 4K — 1080), ПОЛНАЯ частота кадров, до 2,5 Мбит/с;
+ * - средний — короткая сторона 720 (у 4K — 1080), ПОЛНАЯ частота кадров, до 1,5 Мбит/с (до 06.10 — 2,5);
  * - экономный — вдвое меньше среднего, 3 к/с (запасной слой #109, ~150 кбит/с);
  * - короткая сторона ≤ 720 — среднего нет, остаются полный и экономный, как раньше.
  *
@@ -343,23 +463,32 @@ export function buildNativeShareConfig(input: {
   layers: boolean;
   gpuPipeline?: boolean;
   cursor?: boolean;
+  mode: StreamMode;
+  maxQuality?: boolean;
 } {
   const s = input.settings;
-  const dims = RES_OPTIONS.find((r) => r.value === s.resolution) ?? RES_OPTIONS[0];
+  const native = s.resolution === 'native';
+  const dims = RES_OPTIONS.find((r) => r.value === s.resolution) ?? RES_OPTIONS[2];
   return {
     url: input.url,
     token: input.token,
     sourceId: input.sourceId,
     isWindow: input.isWindow,
     fps: s.fps,
-    width: dims.width,
-    height: dims.height,
-    maxBitrate: bitrateFor(s),
+    // «Родное» — 0×0 и битрейт 0: размер источника знает только Rust, он же и считает битрейт тем же
+    // правилом (`share_bitrate` = `bitrateForDims`).
+    width: native ? 0 : dims.width,
+    height: native ? 0 : dims.height,
+    maxBitrate: native ? 0 : bitrateFor(s),
     codec: s.codec,
     wgcWindow: s.wgcWindow,
-    layers: s.layers,
+    // «Максимальное качество» выключает запасные слои само — Rust делает так же, это страховка.
+    layers: s.layers && s.maxQuality !== true,
     // Только выключенное: включённое — это отсутствие поля, и Rust читает его так же (`default_true`).
     ...(s.gpuPipeline === false ? { gpuPipeline: false } : {}),
     ...(s.cursor === false ? { cursor: false } : {}),
+    // Режим доходит до нативного показа с 06.10: «Чёткость» — до 30 к/с и опорный кадр NVENC ×10.
+    mode: s.mode,
+    ...(s.maxQuality === true ? { maxQuality: true } : {}),
   };
 }

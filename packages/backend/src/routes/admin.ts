@@ -24,8 +24,10 @@ import { readInstanceMeta } from '../federation/instanceMeta.js';
 import { sendTestEmail } from '../mailer.js';
 import { serializeUser } from '../serialize.js';
 import { getSmtpConfig, isSmtpConfigured, setSmtpConfig, smtpSource, type SmtpConfig } from '../settings.js';
-import { instanceMeta, registrationPolicy, setInstanceMeta, setRegistrationPolicy } from '../instanceSetup.js';
+import { DM_POLICIES } from '../dmRules.js';
+import { dmPolicy, instanceMeta, registrationPolicy, setDmPolicy, setInstanceMeta, setRegistrationPolicy } from '../instanceSetup.js';
 import { instanceUpdateInfo, writeUpdateRequest } from '../instanceUpdate.js';
+import { closeDmReport, listDmReports } from '../dmReports.js';
 import { normalizeReleaseVersion } from '../instanceUpdateRules.js';
 import { cleanInstanceName, REGISTRATION_POLICIES } from '../setupRules.js';
 import { isSupportedImage, putMedia } from '../storage.js';
@@ -65,7 +67,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ ok: true, avatarPriceMinutes: body.avatarPriceMinutes });
   });
 
-  app.get('/admin/users', async () => {
+  app.get('/admin/users', async (req) => {
     // Удалённые (обезличенные) аккаунты в списке не показываем: управлять там нечем (F0 #139).
     // 🔴 И гостей тоже (23.09, #204): теневые строки соседей стояли в группе «Этот инстанс» как наши
     // люди — с пустой почтой и кнопками удаления/подтверждения, которые к ним неприменимы. Правило F3:
@@ -138,7 +140,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       // «Скрыт от соседей» живёт только здесь, а не в общем `serializeUser`: это знание админ-панели,
       // и обычным клиентам оно не нужно (F2, §5.2.1).
       .map((row) => ({
-        ...serializeUser(row),
+        ...serializeUser(row, req.user!.sub),
         hiddenFromPeers: row.hiddenFromPeers,
         guestAt: guestAt.get(row.id) ?? [],
       }))
@@ -159,7 +161,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: 'user not found' });
     // Рассылка сама двигает время правки каталога и переживает лежачего соседа (событие ляжет в очередь).
     await announceUser(id);
-    return { ...serializeUser(row), hiddenFromPeers: hidden };
+    return { ...serializeUser(row, req.user!.sub), hiddenFromPeers: hidden };
   });
 
   // All servers (guilds) with channel/voice/member counts.
@@ -261,13 +263,21 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const { canCreateServers } = z.object({ canCreateServers: z.boolean() }).parse(req.body);
     const [row] = await db.update(users).set({ canCreateServers }).where(eq(users.id, id)).returning();
     if (!row) return reply.code(404).send({ error: 'user not found' });
-    return serializeUser(row);
+    return serializeUser(row, req.user!.sub);
   });
 
   // Manually verify a user — the super-admin approval that replaces the e-mail code when this
   // instance has no SMTP (turnkey installs without mail). Idempotent; lets the user log in.
   // С мастером установки (#142) это же — одобрение при политике `approval`: одна кнопка «Подтвердить» делает
   // аккаунт полностью рабочим (и почта, и одобрение), двух разных кнопок человеку не нужно.
+  // Жалобы из ЛС («Пожаловаться» на плашке незнакомца, 08.10, #211, С7, `stranger1`): их читает только держатель инстанса.
+  app.get('/admin/dm-reports', async () => ({ reports: await listDmReports() }));
+  app.post('/admin/dm-reports/:id/close', async (req, reply) => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(req.params);
+    if (!(await closeDmReport(id))) return reply.code(404).send({ error: 'not found' });
+    return { ok: true };
+  });
+
   app.post('/admin/users/:id/verify', async (req, reply) => {
     const { id } = z.object({ id: z.string() }).parse(req.params);
     const [current] = await db.select({ approvedAt: users.approvedAt }).from(users).where(eq(users.id, id)).limit(1);
@@ -279,7 +289,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: 'user not found' });
     // Подтверждённый аккаунт впервые попадает в каталог соседей (F2): до этого его там не было.
     await announceUser(id);
-    return serializeUser(row);
+    return serializeUser(row, req.user!.sub);
   });
 
   // Delete a user (super-admin). Main use: "stuck" accounts that registered with a bogus e-mail —
@@ -301,9 +311,10 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // --- Инстанс: название, иконка, политика регистрации (мастер установки #142 и админ-панель) ---------------
+  // и (05.10) кто может начать личную переписку — `dmPolicy` (`dmRules.ts`; нет записи = `shared`).
   app.get('/admin/instance', async (): Promise<AdminInstanceSettings> => {
-    const [meta, policy, smtp] = await Promise.all([instanceMeta(), registrationPolicy(), isSmtpConfigured()]);
-    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, smtpConfigured: smtp };
+    const [meta, policy, smtp, dm] = await Promise.all([instanceMeta(), registrationPolicy(), isSmtpConfigured(), dmPolicy()]);
+    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, smtpConfigured: smtp, dmPolicy: dm };
   });
 
   app.put('/admin/instance', async (req, reply) => {
@@ -311,6 +322,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       .object({
         name: z.string().max(200).nullable().optional(),
         registration: z.enum(REGISTRATION_POLICIES).optional(),
+        dmPolicy: z.enum(DM_POLICIES).optional(),
       })
       .parse(req.body ?? {});
     if (body.name !== undefined) {
@@ -319,6 +331,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       await setInstanceMeta({ name });
     }
     if (body.registration) await setRegistrationPolicy(body.registration);
+    if (body.dmPolicy) await setDmPolicy(body.dmPolicy);
     return reply.send({ ok: true });
   });
 
@@ -328,6 +341,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!file) return reply.code(400).send({ error: 'нет файла' });
     if (!isSupportedImage(file.mimetype)) return reply.code(400).send({ error: 'нужен PNG, JPEG, WebP или GIF' });
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     if (buffer.length > MAX_INSTANCE_ICON_BYTES) return reply.code(413).send({ error: 'файл больше 2 МБ' });
     let iconUrl: string;
     try {

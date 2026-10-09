@@ -6,6 +6,7 @@ import { noticeFromRefusal } from '../accessClosed';
 import { takeInviteLink, usePendingInviteLink } from '../deepLinkInvite';
 import { subscribeToServer } from '../sockets';
 import { useStore } from '../store';
+import { unreadOutsideArchive } from '../dmArchiveRules';
 import { confirmAction } from '../confirm';
 import { activeInstanceId, instances } from '../config';
 import { adminTarget } from '../configRules';
@@ -30,7 +31,8 @@ export function ServerRail() {
   const animatedOn = useAnimatedAvatarsEnabled();
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
-  const unreadDms = useStore((s) => s.unreadDms);
+  // Беседы архива в общий счётчик не входят (07.10, G41, `dmArchiveRules.unreadOutsideArchive`).
+  const unreadDmsN = useStore((s) => unreadOutsideArchive(s.dms, s.unreadDms).length);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   /**
    * Прокрутка списка серверов (19.09). Серверов бывает больше, чем влезает, и список давил на
@@ -101,7 +103,10 @@ export function ServerRail() {
   const [menu, setMenu] = useState<{ pos: MenuPos; id: string; name: string; ownerId: string } | null>(null);
 
   const canCreate = !!(user?.superAdmin || user?.canCreateServers);
-  const admin = adminTarget(instances(), activeInstanceId(), !!user?.superAdmin);
+  // Во время перехода `user` ещё учётка прежнего инстанса (01.10) — права берём из снимка активной записи.
+  const switching = useStore((s) => s.switching);
+  const liveSuper = switching ? !!instances().find((i) => i.id === activeInstanceId())?.superAdmin : !!user?.superAdmin;
+  const admin = adminTarget(instances(), activeInstanceId(), liveSuper);
 
   async function select(id: string) {
     /**
@@ -160,7 +165,7 @@ export function ServerRail() {
         onClick={() => setView('dm')}
       >
         <Goose pose="head" size={30} />
-        {unreadDms.length > 0 && <span className="rail-badge">{unreadDms.length}</span>}
+        {unreadDmsN > 0 && <span className="rail-badge">{unreadDmsN}</span>}
       </button>
       <div className="rail-sep" />
       <div className={railScrollClass(edges, scrolling)} ref={scrollRef} onScroll={onRailScroll}>
@@ -230,11 +235,11 @@ export function ServerRail() {
       </button>
       {/* 🔴 Решает не живой профиль, а `adminTarget` (23.09): стоя гостем у соседа, человек там без прав,
           но администрирует по-прежнему свой инстанс — и кнопка пропадать не должна. Тогда клик ведёт
-          домой и открывает админку уже там. */}
+          админку дома поверх текущего экрана, без перехода (`adminApi.ts`). */}
       {admin && (
         <button
           className="rail-icon admin"
-          title={admin.homeId ? 'Админ-панель вашего инстанса (перейдёт туда)' : 'Админ-панель'}
+          title={admin.homeId ? 'Админ-панель вашего инстанса' : 'Админ-панель'}
           onClick={() => void openOwnAdmin(admin.homeId).catch(toastError)}
         >
           <Icon name="lock" size={20} />

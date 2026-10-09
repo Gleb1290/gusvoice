@@ -2,6 +2,7 @@ import {
   checkEmojiName,
   checkEmojiUpload,
   checkPackImport,
+  checkUserPackQuota,
   DEFAULT_EVERYONE_PERMISSIONS,
   FED_ERRORS,
   FED_FEATURES,
@@ -12,7 +13,7 @@ import {
   Permission,
   permsToString,
   type ServerBootstrap,
-  STICKER_MIME,
+  STICKER_PACKS_PER_USER,
 } from '@gusvoice/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -38,9 +39,18 @@ import {
   highestPosition,
 } from '../permissions.js';
 import { serializeCategory, serializeChannel, serializeRole, serializeServer, serializeUserBrief, statusFieldsOf } from '../serialize.js';
+import { statusSeenBy } from '../statusRules.js';
 import { animatedAvatarFor } from '../shopRules.js';
 import { isSupportedImage, putMedia } from '../storage.js';
-import { downloadSticker, getStickerSet, telegramConfigured, TelegramError } from '../telegram.js';
+import { telegramConfigured } from '../telegram.js';
+import {
+  catalogPackByName,
+  catalogUploadedBy,
+  downloadTelegramPack,
+  ensureCatalogCopy,
+  packStickerData,
+  type StickerData,
+} from '../stickerCatalog.js';
 import { id } from '../util.js';
 
 /** Потолок иконки сервера — как у аватара: 5 МБ. */
@@ -172,7 +182,12 @@ export async function buildBootstrap(serverId: string, userId: string): Promise<
     server: serializeServer(server),
     categories: cats.filter((c) => catVisible(c.id)).map(serializeCategory).sort(byPosition),
     channels: visibleChans
-      .map((c) => serializeChannel({ ...c, isPrivate: !everyoneView.has(c.id), sounds: chSounds.get(c.id) ?? {} }))
+      .map((c) => ({
+        ...serializeChannel({ ...c, isPrivate: !everyoneView.has(c.id), sounds: chSounds.get(c.id) ?? {} }),
+        // «Могу писать» (09.10, «Поделиться в…»): право с учётом переопределений канала — только в bootstrap, потому что
+        // это про смотрящего; в рассылку о канале (`channel.update`) поле не попадает. Старый клиент его игнорирует.
+        canSend: has(chanPerms?.get(c.id) ?? 0n, Permission.SEND_MESSAGES),
+      }))
       .sort(byPosition),
     roles: serverRoles.map(serializeRole).sort(byPosition),
     member: {
@@ -344,6 +359,11 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
 
     // Один момент времени на весь список: иначе две строки могли бы разойтись на границе секунды.
     const now = new Date();
+    // «Невидимый» чужому — обычный `online` без онлайна, то есть «не в сети» (`statusSeenBy`); себе — настоящий.
+    const statusOfMember = (u: Parameters<typeof statusFieldsOf>[0] & { id: string }) => {
+      const st = statusFieldsOf(u, now.getTime());
+      return { ...st, status: statusSeenBy(st.status, u.id, req.user!.sub) };
+    };
     return rows.map(({ m, u }) => ({
       user: {
         id: u.id,
@@ -357,7 +377,7 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
         // Гость — значок инстанса рядом с ником на всех поверхностях (§5.7). Подпись берётся из
         // кеша связок: имя инстанса меняется раз в недели, а ростер собирается постоянно.
         homeInstance: u.homeInstanceId ? instanceLabel(u.homeInstanceId) : null,
-        ...statusFieldsOf(u, Date.now()),
+        ...statusOfMember(u),
       },
       nickname: m.nickname,
       roleIds: rolesByUser.get(u.id) ?? [],
@@ -656,6 +676,7 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'нужен PNG, JPEG, WebP или GIF' });
 
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     if (buffer.length > MAX_ICON_BYTES)
       return reply.code(413).send({ error: `файл больше ${Math.round(MAX_ICON_BYTES / 1024 / 1024)} МБ` });
 
@@ -700,6 +721,7 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     if (!nameCheck.ok) return reply.code(400).send({ error: nameCheck.error });
 
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const existing = await db.select().from(serverEmojis).where(eq(serverEmojis.serverId, serverId));
     const upCheck = checkEmojiUpload(file.mimetype, buffer.length, existing.length);
     if (!upCheck.ok) return reply.code(400).send({ error: upCheck.error });
@@ -747,9 +769,6 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.MANAGE_STICKERS))
       return reply.code(403).send({ error: 'forbidden' });
-    if (!telegramConfigured())
-      return reply.code(503).send({ error: 'импорт стикеров не настроен на этом сервере' });
-
     const parsed = parseStickerSetName(rawName);
     if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
 
@@ -757,58 +776,46 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     if (existing.some((p) => p.name === parsed.name))
       return reply.code(409).send({ error: 'этот набор уже импортирован' });
 
-    let set;
-    try {
-      set = await getStickerSet(parsed.name);
-    } catch (err) {
-      const e = err as TelegramError;
-      return reply.code(e.statusCode ?? 502).send({ error: e.message });
+    /*
+     * Каталог инстанса (С2, #211, миграция 0092): набор, уже лежащий в каталоге, второй раз из Telegram НЕ качается —
+     * набор сервера получает копию строк с теми же файлами (и без токена бота). Новый набор, наоборот, сразу попадает в
+     * каталог (его видят в ЛС все люди инстанса) и тратит предел загрузившего (`STICKER_PACKS_PER_USER`).
+     */
+    const inCatalog = await catalogPackByName(parsed.name);
+    let title: string;
+    let data: StickerData[];
+    let skipped = 0;
+    if (inCatalog) {
+      title = inCatalog.title;
+      data = await packStickerData(inCatalog.id);
+      const sizeCheck = checkPackImport(data.length, existing.length);
+      if (!sizeCheck.ok) return reply.code(400).send({ error: sizeCheck.error });
+    } else {
+      if (!telegramConfigured())
+        return reply.code(503).send({ error: 'импорт стикеров не настроен на этом сервере' });
+      const quota = checkUserPackQuota(await catalogUploadedBy(req.user!.sub));
+      if (!quota.ok)
+        return reply.code(400).send({ error: quota.error, reason: 'stickers.quota', limit: STICKER_PACKS_PER_USER });
+      const got = await downloadTelegramPack(parsed.name, existing.length);
+      if (!got.ok) return reply.code(got.status).send({ error: got.error });
+      title = got.title;
+      data = got.rows;
+      skipped = got.skipped;
     }
-
-    const sizeCheck = checkPackImport(set.stickers.length, existing.length);
-    if (!sizeCheck.ok) return reply.code(400).send({ error: sizeCheck.error });
 
     const packId = id();
-    const rows: (typeof stickers.$inferInsert)[] = [];
-    let skipped = 0;
-    for (const [i, tg] of set.stickers.entries()) {
-      let got;
-      try {
-        got = await downloadSticker(tg.file_id);
-      } catch (err) {
-        const e = err as TelegramError;
-        return reply.code(e.statusCode ?? 502).send({ error: e.message });
-      }
-      // Незнакомый формат или слишком крупный файл — пропускаем ОДИН стикер, а не весь набор:
-      // из-за одной странной записи терять сто нормальных незачем.
-      if (!got) {
-        skipped++;
-        continue;
-      }
-      const stickerId = id();
-      let url: string;
-      try {
-        url = await putMedia('stickers', stickerId, got.buffer, STICKER_MIME[got.format], Date.now());
-      } catch (err) {
-        const e = err as { statusCode?: number; message?: string };
-        return reply.code(e.statusCode ?? 500).send({ error: e.message ?? 'не удалось сохранить стикер' });
-      }
-      rows.push({ id: stickerId, packId, emoji: tg.emoji ?? '', url, format: got.format, position: i });
-    }
-
-    if (!rows.length) return reply.code(400).send({ error: 'ни один стикер набора не удалось загрузить' });
-
     await db.insert(stickerPacks).values({
       id: packId,
       serverId,
       name: parsed.name,
-      title: set.title,
+      title,
       createdBy: req.user!.sub,
     });
-    await db.insert(stickers).values(rows);
+    await db.insert(stickers).values(data.map((r) => ({ id: id(), packId, ...r })));
+    if (!inCatalog) await ensureCatalogCopy({ name: parsed.name, title, createdBy: req.user!.sub }, data);
 
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
-    return { id: packId, name: parsed.name, title: set.title, count: rows.length, skipped };
+    return { id: packId, name: parsed.name, title, count: data.length, skipped };
   });
 
   /**

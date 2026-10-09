@@ -72,7 +72,7 @@ function derive(): { inVoice: boolean; participants: OverlayParticipant[]; hints
   const animOn = animatedAvatarsEnabled();
   const participants: OverlayParticipant[] = roster.map((p) => {
     const live = s.liveVoice[p.userId];
-    const isMe = p.userId === s.user?.id;
+    const isMe = p.userId === (s.voice?.selfId ?? s.user?.id);
     return {
       id: p.userId,
       name: p.displayName,

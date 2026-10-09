@@ -2,6 +2,7 @@ import type { Channel, ServerBootstrap } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
 import { isMobile } from '../hotkeys';
 import { useStore } from '../store';
+import { withoutArchived } from '../dmArchiveRules';
 import { AdminPanel } from './AdminPanel';
 import { ChannelSidebar } from './ChannelSidebar';
 import { MobileCallChip } from './MobileCallChip';
@@ -11,10 +12,23 @@ import { DmChatView } from './DmChatView';
 import { DmSidebar } from './DmSidebar';
 import { EconomyWelcome } from './EconomyWelcome';
 import { FeatherLayer } from './FeatherLayer';
+import { BigReactionLayer } from './BigReactionLayer';
 import { EffectsBench } from './EffectsBench';
 import { GooseBonusHost } from './GooseBonusHost';
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
+import { ChatSwitchHost } from './ChatSwitch';
+import { ContactEditHost } from './ContactEditModal';
+import { DesktopKeysHost } from './DesktopKeys';
 import { closeCheatSheet, toggleCheatSheet, useCheatSheetOpen } from '../cheatSheet';
+import { openDmCompose } from '../dmCompose';
+import { dmEmptyHint } from '../dmRules';
+import { exitSelection, useSelectionOpen } from '../dmSelection';
+import { exitChatSearch } from './ChatSearch';
+import { backFromSchedView, useSchedViewOpen } from '../schedView';
+import { dmBackBadgeCount, dmBackBadgeLabel } from '../dmBackBadge';
+import { useSwipeBack } from '../useSwipeBack';
+import { usePhoneLayout } from '../phoneLayout';
+import { Goose } from './Goose';
 import { Icon } from './Icon';
 import { ImageViewerHost } from './ImageViewerHost';
 import { MobileNav } from './MobileNav';
@@ -24,9 +38,11 @@ import { SidebarResizer } from './SidebarResizer';
 import { PokeModal } from './PokeModal';
 import { ServerClosedModal } from './ServerClosedModal';
 import { ToastHost } from './ToastHost';
+import { CallBar, CallLayer } from './CallLayer';
 import { UserSettingsModal } from './UserSettingsModal';
 import { VoiceChannelView } from './VoiceChannelView';
 import { VoiceConnection } from './VoiceConnection';
+import { feedNavKey, feedNavTarget } from '../feedNavRules';
 
 /** Channels in sidebar order (uncategorized first, then categories by position), text only. */
 function orderedTextChannels(b: ServerBootstrap): Channel[] {
@@ -48,16 +64,22 @@ export function MainLayout() {
   const voice = useStore((s) => s.voice);
   const view = useStore((s) => s.view);
   const dms = useStore((s) => s.dms);
+  // Список бесед ещё не пришёл (беседы без кеша) — пустым его не называем, гусь не мелькает до ответа сервера.
+  const dmListKnown = useStore((s) => !s.convActive || s.conv.pts !== null);
   const currentDmId = useStore((s) => s.currentDmId);
   const mobilePane = useStore((s) => s.mobilePane);
   const setMobilePane = useStore((s) => s.setMobilePane);
   const settingsOpen = useStore((s) => s.settingsOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const adminOpen = useStore((s) => s.adminOpen);
+  const instanceEpoch = useStore((s) => s.instanceEpoch);
+  const switching = useStore((s) => s.switching);
   const setAdminOpen = useStore((s) => s.setAdminOpen);
   const mobileMembersOpen = useStore((s) => s.mobileMembersOpen);
   const setMobileMembersOpen = useStore((s) => s.setMobileMembersOpen);
   const mobileProfileOpen = useStore((s) => s.mobileProfileOpen);
+  // Раскладка телефона (≤ 760 px) — и в приложении, и в мобильном браузере: экрану «Профиля» нужна она, а не оболочка.
+  const phone = usePhoneLayout();
   const incomingPoke = useStore((s) => s.incomingPoke);
   /**
    * Приветствие экономики (03.09). Само открывается ОДИН РАЗ: экономика на этом сервере включена, а в
@@ -72,6 +94,12 @@ export function MainLayout() {
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const welcomeOpen =
     welcomeRequested || (economyEnabledHere && !!me && !me.economyWelcomeSeen && !welcomeDismissed);
+
+  /* Раунд 12: лента ЛС в режиме выделения (`dmSelection.ts`) — «назад» на телефоне становится крестиком «Выйти из
+     выделения». Без выделения кнопка прежняя. */
+  const selecting = useSelectionOpen();
+  // Раунд 12, порция 8: открыт вид «Отложенные» беседы — «назад» ведёт к беседе (`schedView.ts`).
+  const schedOpen = useSchedViewOpen();
 
   // Global keyboard shortcuts (round-7 P8). Voice bindings live in VoiceControls; these are the
   // app-wide nav ones + the `?` cheat sheet. Read live state via getState() so the listener,
@@ -96,7 +124,8 @@ export function MainLayout() {
         toggleCheatSheet();
         return;
       }
-      // Ctrl/⌘+F → message search (server view only; lets the browser keep find on DMs).
+      // Ctrl/⌘+F → message search (server view only). В ЛС его берёт поиск беседы ленты (G05, `ChatSearch.tsx`, сервер с
+      // `search1`); без него — браузерный.
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === 'KeyF') {
         const s = useStore.getState();
         if (s.view !== 'dm' && s.bootstrap) {
@@ -105,18 +134,30 @@ export function MainLayout() {
         }
         return;
       }
-      // Alt+↑/↓ → previous / next text channel (no wrap), never while typing.
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !typing && (e.code === 'ArrowUp' || e.code === 'ArrowDown')) {
+      /* Соседняя лента (07.10, G14, Telegram 03·1.7.3; одно правило для ЛС и каналов — решение владельца 07.10): Alt+↑/↓ —
+         соседняя беседа или текстовый канал списка, Ctrl+Alt+Home/End — первая и последняя; по кругу не ходит. И из поля
+         ввода: курсор почти всегда в нём, а у Telegram эти клавиши глобальные. Окно поверх (подтверждение, лист,
+         настройки) — не наше. */
+      const navKey = feedNavKey(e);
+      if (navKey) {
         const s = useStore.getState();
-        if (s.view === 'dm' || !s.bootstrap) return;
-        const list = orderedTextChannels(s.bootstrap);
-        if (list.length === 0) return;
-        const idx = list.findIndex((c) => c.id === s.currentChannelId);
-        const next = list[Math.max(0, Math.min(list.length - 1, (idx < 0 ? 0 : idx) + (e.code === 'ArrowDown' ? 1 : -1)))];
-        if (next && next.id !== s.currentChannelId) {
-          e.preventDefault();
-          void s.openChannel(next.id);
+        if (document.querySelector('[aria-modal="true"]')) return;
+        if (s.view === 'dm') {
+          const id = feedNavTarget(
+            s.dms.map((d) => d.id),
+            s.currentDmId,
+            navKey,
+          );
+          if (s.dms.length) e.preventDefault();
+          if (id) void s.selectDm(id);
+          return;
         }
+        if (!s.bootstrap) return;
+        const ids = orderedTextChannels(s.bootstrap).map((c) => c.id);
+        if (ids.length) e.preventDefault();
+        const id = feedNavTarget(ids, s.currentChannelId, navKey);
+        if (id) void s.openChannel(id);
+        return;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -126,21 +167,64 @@ export function MainLayout() {
   const channel = bootstrap?.channels.find((c) => c.id === currentChannelId) ?? null;
   const dm = dms.find((d) => d.id === currentDmId) ?? null;
   const isDm = view === 'dm';
+  // Число непрочитанного в ДРУГИХ беседах на «Назад» открытой беседы (телефон, G06): тот же источник, что у строк списка.
+  const unreadDms = useStore((s) => s.unreadDms);
+  const backBadge = isDm && dm ? dmBackBadgeCount(withoutArchived(dms), unreadDms, dm.id) : 0;
+  /* Экран вкладки «Профиль» (design-step8 D3) — в телефонной раскладке, а не только в приложении (05.10): в мобильном
+     браузере вкладка раньше лишь подсвечивалась. Нативного в нём нет — статус, настройки, админка, выход идут через
+     `api` и стор. Шире 760 px его нет: стили экрана живут только в мобильном блоке CSS. */
+  const profileShown = phone && mobileProfileOpen;
 
-  const sidebar = isDm ? <DmSidebar /> : <ChannelSidebar />;
+  /* Отделы ОДНОГО инстанса пересоздаются на каждом переходе (`instanceEpoch`, 01.10): главный экран больше не
+     снимается целиком, и окна прежнего инстанса (настройки сервера, приглашение) иначе пережили бы его. Рейл и
+     голос (`VoiceConnection`) не пересоздаются — первый общий для всех инстансов, второй принадлежит своему. */
+  const sidebar = isDm ? <DmSidebar key={`dm${instanceEpoch}`} /> : <ChannelSidebar key={`ch${instanceEpoch}`} />;
   const showMembers = !isDm && !!bootstrap;
 
   const content = isDm ? (
-    <div className="content">
-      {dm ? <DmChatView key={dm.id} dm={dm} /> : <div className="center muted">Выбери диалог</div>}
+    <div className="content" key={`dmc${instanceEpoch}`}>
+      {/* Телефон: полоса звонка — одна над всем экраном (`CallBar top` ниже), не в ленте. */}
+      {!phone && <CallBar />}
+      {dm ? (
+        <DmChatView key={dm.id} dm={dm} />
+      ) : dmListKnown && dms.length === 0 ? (
+        /* Бесед нет (раунд 11, HANDOFF §4): на ПК гусь — в главной области, там есть место; список слева пуст и без
+           поиска. На телефоне гусь в самом списке (`DmSidebar`). Гостю писать некому вовсе — его подпись и без кнопки. */
+        <div className="empty-goose">
+          <Goose pose="wave" size={150} />
+          <div className="eg-title">Бесед пока нет</div>
+          <div className="eg-sub">
+            {me?.homeInstance ? dmEmptyHint(me.homeInstance) : 'Напишите кому-нибудь — беседа появится в списке слева.'}
+          </div>
+          {!me?.homeInstance && (
+            <button type="button" className="dm-start" onClick={() => openDmCompose()}>
+              <Icon name="edit" size={18} />
+              Написать
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="center muted">Выбери диалог</div>
+      )}
     </div>
   ) : (
-    <div className="content">
-      {!channel && <div className="center muted">Выбери канал</div>}
+    <div className="content" key={`c${instanceEpoch}`}>
+      {!phone && <CallBar />}
+      {!channel && (switching && !bootstrap ? <div className="center" /> : <div className="center muted">Выбери канал</div>)}
       {channel?.type === 'text' && <ChatView key={channel.id} channel={channel} />}
       {channel?.type === 'voice' && <VoiceChannelView channel={channel} connected={voice?.channelId === channel.id} />}
     </div>
   );
+
+  /** «Назад» экрана беседы на телефоне: стрелка в шапке и свайп вправо по экрану (G16, `useSwipeBack`) — одно и то же. */
+  const goBack = () => {
+    if (selecting && exitSelection()) return;
+    // Поиск в беседе (G05): «назад» сначала закрывает его, как у Telegram Android.
+    if (exitChatSearch()) return;
+    if (schedOpen && backFromSchedView()) return;
+    setMobilePane('list');
+  };
+  useSwipeBack(phone && mobilePane === 'content' && (isDm ? !!dm : channel?.type === 'text'), goBack);
 
   const appClass = ['app', `m-${mobilePane}`];
   if (showMembers) appClass.push('has-members');
@@ -151,6 +235,9 @@ export function MainLayout() {
   if (voice && mobilePane === 'content' && currentChannelId === voice.channelId) appClass.push('m-incall');
   // Телефон: открыта переписка — панель вкладок прячется, как у Telegram (#212, CSS `.app.m-chat`).
   if (mobilePane === 'content' && (isDm ? !!dm : channel?.type === 'text')) appClass.push('m-chat');
+  // Телефон: лента серверов сверху — только на вкладке «Серверы» (решение 04.10, макет раунда 11 `ListPhone`). На
+  // «Сообщениях» и в «Профиле» её нет, место отдаётся списку бесед и профилю (CSS `.app.m-norail`; ПК не трогает).
+  if (isDm || profileShown) appClass.push('m-norail');
   // Ворота показа: гусь не лезет поверх настроек, админки, шпаргалки и тыка — и только в голосе,
   // потому что предложение выдаётся ровно сидящим в канале.
   const goosePresentationAllowed =
@@ -165,6 +252,7 @@ export function MainLayout() {
 
   return (
     <div className={appClass.join(' ')}>
+      {phone && <CallBar top />}
       <ServerRail />
       {/* The voice connection persists across channel/DM navigation and provides the LiveKit
           RoomContext to BOTH the sidebar (its VoicePanel) and the content (the voice stage). */}
@@ -181,10 +269,23 @@ export function MainLayout() {
           {content}
         </>
       )}
-      {showMembers && <ServerMembersPanel />}
-      {/* Mobile: a back affordance to return from an open chat/voice to the list pane. */}
-      <button type="button" className="mobile-back" title="Назад" onClick={() => setMobilePane('list')}>
-        <Icon name="chevron-left" size={22} />
+      {showMembers && <ServerMembersPanel key={`m${instanceEpoch}`} />}
+      {/* Mobile: a back affordance to return from an open chat/voice to the list pane. Раунд 12: в режиме выделения ленты
+          ЛС — крестик «Выйти из выделения» на том же месте (макет `Phone`, `.mobile-back` с `close`); в виде «Отложенные»
+          (порция 8) — та же стрелка, но «К беседе» (макет `Phone` с `screen=sched`). */}
+      <button
+        type="button"
+        className="mobile-back"
+        title={selecting ? 'Выйти из выделения' : schedOpen ? 'К беседе' : 'Назад'}
+        aria-label={selecting ? 'Выйти из выделения' : schedOpen ? 'К беседе' : undefined}
+        onClick={goBack}
+      >
+        <Icon name={selecting ? 'close' : 'chevron-left'} size={22} />
+        {backBadge > 0 && !selecting && !schedOpen && (
+          <span className="mobile-back-badge" title={`Непрочитанных в других беседах: ${backBadge}`}>
+            {dmBackBadgeLabel(backBadge)}
+          </span>
+        )}
       </button>
       {/* Mobile: open the members list as a right-hand slide-over (it's hidden in the grid below 760px). */}
       {showMembers && (
@@ -199,13 +300,19 @@ export function MainLayout() {
       )}
       {mobileMembersOpen && <div className="members-backdrop" onClick={() => setMobileMembersOpen(false)} />}
       {/* Mobile B3: the single minimized call surface above the tab bar (replaces VoicePanel + SelfVoiceBar
-          on mobile). Only while connected and not already looking at the full call view. */}
-      {isMobile() && voice && mobilePane === 'list' && !mobileProfileOpen && <MobileCallChip />}
-      {isMobile() && mobileProfileOpen && <MobileProfile />}
+          on mobile). Only while connected and not already looking at the full call view.
+          06.10: и в телефонной раскладке браузера (`phone`, ≤ 760 px — мобильный браузер и узкое окно ПК): мобильные стили
+          прячут там `VoicePanel` и `SelfVoiceBar`, а плашка была только в приложении — в звонке на экране списка не
+          оставалось ничего о звонке. `isMobile()` остаётся: приложение показывает её, как раньше, при любой ширине. */}
+      {(isMobile() || phone) && voice && mobilePane === 'list' && !mobileProfileOpen && <MobileCallChip />}
+      {profileShown && <MobileProfile />}
       <MobileNav />
       {settingsOpen && <UserSettingsModal onClose={() => setSettingsOpen(false)} />}
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {cheatOpen && <HotkeyCheatSheet onClose={closeCheatSheet} />}
+      <ChatSwitchHost />
+      <ContactEditHost />
+      <DesktopKeysHost />
       {welcomeOpen && (
         <EconomyWelcome
           onClose={() => {
@@ -216,10 +323,14 @@ export function MainLayout() {
       )}
       {/* Тык — поверх ВСЕГО, включая открытые настройки: его смысл в том, чтобы заметили сразу. */}
       <PokeModal />
+      {/* Звонок 1:1 в ЛС (С5, `calls1`): входящий и экран звонка — поверх всего, как тык; медиа звонка живёт здесь же. */}
+      <CallLayer />
       <GooseBonusHost presentationAllowed={goosePresentationAllowed} />
       {/* ⚠️ Здесь, а НЕ в оверлее: оверлей висит поверх чужой игры, и осыпание там — оплаченная
           помеха человеку в бою. Оверлей рендерит свой корень, поэтому граница держится структурно. */}
       <FeatherLayer />
+      {/* «Большая» реакция в ЛС (G43): крупный эмодзи поверх ленты — та же шина эффектов, что у перьев. */}
+      <BigReactionLayer />
       {benchOpen && <EffectsBench onClose={() => setBenchOpen(false)} />}
       {/* «Сервер закрыт держателем» — рядом с тыком и по той же причине: человека только что
           выставили с сервера, и узнать об этом он должен сразу, а не открыв настройки. */}

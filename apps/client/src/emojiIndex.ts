@@ -1,7 +1,7 @@
 // Импорт из emojiAliases, а НЕ из emojiShortcodes: последний сам тянет этот модуль, и цикл
 // сломал бы инициализацию (ALIASES читается на верхнем уровне, до присваивания).
 import { EMOJI_SHORTCODES } from './emojiAliases';
-import { type Emoji, mergeAliases, rankEmoji, stripVs } from './emojiSearch';
+import { type Emoji, exactEmoji, mergeAliases, rankEmoji, stripVs } from './emojiSearch';
 
 /**
  * Полная таблица эмодзи — ЛЕНИВО (#68).
@@ -70,6 +70,12 @@ export function loadEmojiIndex(): Promise<EmojiIndex> {
       throw e;
     });
   return inflight;
+}
+
+/** Слово целиком (G53): только точные совпадения, см. `exactEmoji`; таблица догружается так же, как у `searchEmojiNow`. */
+export function exactEmojiNow(word: string, limit = 8): Emoji[] {
+  void loadEmojiIndex().catch(() => {});
+  return exactEmoji(cache?.all ?? FALLBACK, word, limit);
 }
 
 /**

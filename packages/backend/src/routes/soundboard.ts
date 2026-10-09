@@ -125,6 +125,7 @@ export async function soundboardRoutes(app: FastifyInstance): Promise<void> {
      * `resolveAudioMime`.
      */
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const mime = resolveAudioMime(file.mimetype || '', new Uint8Array(buffer));
     if (!mime) {
       return reply.code(400).send({ error: 'формат не поддерживается — нужен MP3, OGG, WAV, WEBM или M4A' });

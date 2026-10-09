@@ -20,6 +20,10 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const PACKAGES = ['packages/shared', 'packages/presence', 'packages/backend', 'apps/client'];
+// Tests outside `src/` still run through an owning package's explicit Node-20-compatible test list.
+const EXTERNAL_TESTS = [
+  { file: 'scripts/check-codemap.test.ts', pkg: 'apps/client', entry: '../../scripts/check-codemap.test.ts' },
+];
 
 /** Все `*.test.ts` внутри каталога, рекурсивно, путями относительно самого пакета. */
 function findTests(dir, base = dir) {
@@ -46,6 +50,19 @@ for (const pkg of PACKAGES) {
       console.error(`❌ ${pkg}/${file} НЕ перечислен в скрипте test — он не запускается`);
       missing += 1;
     }
+  }
+}
+
+for (const { file, pkg, entry } of EXTERNAL_TESTS) {
+  if (!statSync(file, { throwIfNoEntry: false })?.isFile()) {
+    console.error(`❌ внешний тест ${file} из реестра не найден`);
+    missing += 1;
+    continue;
+  }
+  const script = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8')).scripts?.test ?? '';
+  if (!script.split(/\s+/).includes(entry)) {
+    console.error(`❌ ${pkg}/${entry} НЕ перечислен в скрипте test — внешний тест ${file} не запускается`);
+    missing += 1;
   }
 }
 

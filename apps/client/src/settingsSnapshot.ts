@@ -11,9 +11,16 @@
  */
 
 import { AUDIO_DEFAULTS, getAudioSettings } from './audioSettings';
+import { getAutoDownload } from './autoDownload';
+import { AUTO_DOWNLOAD_DEFAULTS } from './autoDownloadRules';
 import { animatedAvatarsDefault, animatedAvatarsEnabled } from './avatarAnimation';
 import { CAMERA_DEFAULT, getCameraPreset } from './cameraSettings';
 import { LINK_PREVIEWS_DEFAULT, linkPreviewsEnabled } from './components/LinkPreview';
+import { DOUBLE_CLICK_DEFAULT, getDoubleClickAction, getQuickReaction, QUICK_REACTION_DEFAULT } from './quickReaction';
+import { getSendMode, SEND_MODE_DEFAULT } from './sendMode';
+import { getListLines, LIST_LINES_DEFAULT } from './dmListView';
+import { EMOJI_SUGGEST_DEFAULT, emojiSuggestEnabled } from './emojiSuggest';
+import { readSwipeSetting, SWIPE_DEFAULT } from './chatSwipe';
 import { liteModeDefault, liteModeEnabled } from './liteMode';
 import { CLOSE_BEHAVIOR_DEFAULT, getCloseBehavior } from './desktopWindow';
 import { getDownloadDir } from './downloads';
@@ -43,10 +50,17 @@ export function readSettings(): SettingsSnapshot {
     animatedAvatars: animatedAvatarsEnabled(),
     liteMode: liteModeEnabled(),
     linkPreviews: linkPreviewsEnabled(),
+    sendMode: getSendMode(),
+    listLines: getListLines(),
+    emojiSuggest: emojiSuggestEnabled(),
+    chatSwipe: readSwipeSetting(),
+    doubleClick: getDoubleClickAction(),
+    quickReaction: getQuickReaction(),
     osNotify: osNotifyLevel(),
     coinNotify: coinNotifyLevel(),
     closeBehavior: getCloseBehavior(),
     downloadDir: getDownloadDir(),
+    autoDownload: getAutoDownload(),
   };
 }
 
@@ -66,9 +80,16 @@ export function factorySettings(): SettingsSnapshot {
     animatedAvatars: animatedAvatarsDefault(),
     liteMode: liteModeDefault(),
     linkPreviews: LINK_PREVIEWS_DEFAULT,
+    sendMode: SEND_MODE_DEFAULT,
+    listLines: LIST_LINES_DEFAULT,
+    emojiSuggest: EMOJI_SUGGEST_DEFAULT,
+    chatSwipe: SWIPE_DEFAULT,
+    doubleClick: DOUBLE_CLICK_DEFAULT,
+    quickReaction: QUICK_REACTION_DEFAULT,
     osNotify: OS_NOTIFY_DEFAULT,
     coinNotify: COIN_NOTIFY_DEFAULT,
     closeBehavior: CLOSE_BEHAVIOR_DEFAULT,
     downloadDir: null,
+    autoDownload: AUTO_DOWNLOAD_DEFAULTS,
   };
 }

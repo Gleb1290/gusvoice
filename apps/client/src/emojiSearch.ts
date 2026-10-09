@@ -66,6 +66,24 @@ export function rankEmoji(entries: Emoji[], query: string, limit = 40): Emoji[] 
   return buckets.flat().slice(0, limit);
 }
 
+/**
+ * Подсказка «слово целиком» (G53, tdesktop `SuggestionsController`, точный запрос без `:`): эмодзи, у которых название,
+ * ключевое слово или код РАВНЫ набранному слову (без префиксов — иначе «при» предлагало бы пол-таблицы). Порядок — как
+ * в таблице, но название и код — раньше ключевого слова («огонь» → 🔥 первым); регистр не важен.
+ */
+export function exactEmoji(entries: Emoji[], word: string, limit = 8): Emoji[] {
+  const q = word.trim().toLowerCase();
+  if (!q) return [];
+  const byName: Emoji[] = [];
+  const byTag: Emoji[] = [];
+  for (const e of entries) {
+    if (e.label.toLowerCase() === q || e.codes.some((c) => c.toLowerCase() === q)) byName.push(e);
+    else if (e.tags.some((t) => t.toLowerCase() === q)) byTag.push(e);
+    if (byName.length >= limit) break;
+  }
+  return [...byName, ...byTag].slice(0, limit);
+}
+
 /** Точный код → эмодзи, для автозамены `:код:` в композере. Регистр не важен. */
 export function emojiByCode(entries: Emoji[], code: string): string | null {
   const q = code.toLowerCase();

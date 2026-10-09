@@ -1,17 +1,28 @@
-import { BROADCAST_MENTIONS, mentionedHandles } from '@gusvoice/shared';
+import {
+  BROADCAST_MENTIONS,
+  mentionedHandles,
+  normalizeNotifyRepeat,
+  normalizeNotifyView,
+  notifyRepeatAllowed,
+  notifyRepeatInWindow,
+  notifyRepeatWaitMs,
+  validTimeZone,
+  type NotifyView,
+} from '@gusvoice/shared';
 import { instanceIdByDomain } from './federation/instanceLabels.js';
 import { getChannelAudience } from './permissions.js';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from './db/index.js';
-import { pushDevices, pushMutes, serverMembers, users } from './db/schema.js';
+import { pushAlways, pushDevices, pushMutes, serverMembers, users } from './db/schema.js';
 import { env } from './env.js';
 import { encryptWebPush, type WebPushKeys } from './pushCrypto.js';
-import { endpointAllowed, redactPushPayload } from './pushRules.js';
+import { deferPush, postponeRepeatPush, recipientActive, scheduleRepeatPush } from './pushDefer.js';
+import { endpointAllowed, maskPushPayload, redactPushPayload, shouldDeferPush } from './pushRules.js';
 import { id } from './util.js';
 
 // Чистые правила — в `pushRules.ts`. Реэкспорт, чтобы роуты продолжали брать `contentPreview`
 // из `push.js` (там же рядом `sendPushToUsers`, который они и зовут).
-export { contentPreview } from './pushRules.js';
+export { contentPreview, forwardPreview, pushThrottleSource, stickerPushText, withSilent } from './pushRules.js';
 
 /**
  * A background-wake push payload. Delivered as the raw POST body to a device's UnifiedPush endpoint;
@@ -19,7 +30,12 @@ export { contentPreview } from './pushRules.js';
  * app process is dead). Web/desktop already notify in-app via the Notification path — this is Android.
  */
 export interface PushPayload {
-  type: 'dm' | 'mention';
+  /**
+   * `call` (08.10, #211, `calls3`) — входящий звонок 1:1: `title` — звонящий (по настройке показа), `body` — «Входящий
+   * звонок» / «Входящий видеозвонок». Уходит сразу и с высоким приоритетом, без отсрочки `pushDefer`; снимается тихим
+   * `type: "read"` (`calls.ts`). Старое приложение строит по нему обычное уведомление по `title`/`body` с переходом в беседу.
+   */
+  type: 'dm' | 'mention' | 'call';
   title: string;
   body: string;
   dmId?: string;
@@ -33,6 +49,50 @@ export interface PushPayload {
    * и без этого поля тап привёл бы в пустоту.
    */
   instanceId?: string;
+  /**
+   * ЛС отправлено «без звука» (С3, признак `conv8`, `pushRules.withSilent`): уведомление показать, но без звука и
+   * вибрации. Есть только у таких пушей (у обычного ключа нет). Едет внутри шифра; дому гостя не уходит (`guestPush`
+   * берёт свои поля). Старое приложение поле не знает и звенит.
+   */
+  silent?: true;
+  /**
+   * Уведомление беседы как у Telegram (07.10, #211, Р1, G17; источник — `NotificationsController.java`: MessagingStyle,
+   * Person с аватаром, ответ из шторки). Только добавления: старое приложение их не знает и строит уведомление по
+   * `title`/`body`, как раньше. `author`/`authorId`/`avatar` — автор сообщения (Person); `group` — название группы
+   * (заголовок беседы; `title` у группы остаётся «Имя в «Название»» для старых); `key` — порядковый ключ сообщения (им
+   * «Пометить прочитанным» зовёт `POST /conv/:id/read`); `mid` — id сообщения; `ts` — время, мс.
+   */
+  author?: string;
+  authorId?: string;
+  avatar?: string;
+  group?: string;
+  key?: number;
+  mid?: string;
+  ts?: number;
+  /**
+   * Входящий звонок (`calls3`, только у `type: "call"`): id звонка (им будущий нативный экран звонка зовёт
+   * `/calls/:id/answer` / `decline`) и `video` — звонок с видео. Только добавления: нынешнее приложение их не читает.
+   */
+  callId?: string;
+  video?: true;
+  /**
+   * Номер повтора «Повторять уведомления» (D10, 08.10; G38, `push3`): есть только у пуша из очереди повторов
+   * (`sendPushToUsers` `opts.repeat`). Повтор несёт то же сообщение (`mid`), и приложение считало его повторной доставкой и
+   * молча отбрасывало (`ConversationNotifier.onMessage`); с этим полем оно снимает уведомление беседы и показывает его снова
+   * со звуком, как Telegram (`NotificationsController.repeatNotificationMaybe`). Только добавление: старое приложение поле не знает.
+   */
+  repeat?: number;
+}
+
+/** Признаки приложения на устройстве пуша (`push_devices.caps`, миграция 0102). */
+export const PUSH_CAPS = ['read1', 'reply1'] as const;
+export type PushCap = (typeof PUSH_CAPS)[number];
+
+/** Разбор `caps` из регистрации: только известные, без повторов; пусто — `null` (как у старого приложения). */
+export function normalizePushCaps(caps: readonly string[] | null | undefined): string | null {
+  const known = new Set<string>(PUSH_CAPS);
+  const list = [...new Set((caps ?? []).filter((c) => known.has(c)))];
+  return list.length > 0 ? list.join(',') : null;
 }
 
 export type PushMuteScope = 'server' | 'dm_user';
@@ -73,15 +133,21 @@ export async function registerPushDevice(
   endpoint: string,
   platform: string | null,
   keys: WebPushKeys | null = null,
+  capsIn: readonly string[] | null = null,
+  tzIn: string | null = null,
 ): Promise<void> {
   const p256dh = keys?.p256dh ?? null;
   const auth = keys?.auth ?? null;
+  // Перерегистрация старым приложением (откат APK) сбрасывает признаки в NULL — сигналы «прочитано» ему не нужны.
+  const caps = normalizePushCaps(capsIn);
+  // Пояс (IANA): непонятное имя — как «не прислал»; прежний пояс при перерегистрации без него остаётся.
+  const tz = validTimeZone(tzIn) ? tzIn : null;
   await db
     .insert(pushDevices)
-    .values({ id: id(), userId, deviceId, endpoint, platform, p256dh, auth, updatedAt: new Date() })
+    .values({ id: id(), userId, deviceId, endpoint, platform, p256dh, auth, caps, tz, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: [pushDevices.userId, pushDevices.deviceId],
-      set: { endpoint, platform, p256dh, auth, updatedAt: new Date() },
+      set: { endpoint, platform, p256dh, auth, caps, tz: sql`coalesce(${tz}, ${pushDevices.tz})`, updatedAt: new Date() },
     });
 }
 
@@ -97,27 +163,51 @@ export async function unregisterPushDevice(userId: string, deviceId: string): Pr
  *
  * `source` (optional) lets recipients opt out per-source: any recipient with a matching push_mute row
  * (e.g. muted this server, or muted DMs from this person) is dropped before their phone is woken.
+ *
+ * G38 (08.10, `push2`): тело — по «Показывать имя / текст» получателя (`users.notify_view`, `pushRules.maskPushPayload`);
+ * получателю, который прямо сейчас за другим устройством (`pushDefer.recipientActive`), пуш ЛС откладывается на 30 с и
+ * не уходит, если сообщение прочитали (`pushDefer.ts`).
  */
 export async function sendPushToUsers(
   recipientIds: string[],
   payload: PushPayload,
   source?: PushSource,
+  /**
+   * `noDefer` — пуш из очереди отложенных (`pushDefer.ts`): второй раз не откладывать. `private` (G38, `push3`) — пуш
+   * личной беседы 1:1: чтит «Личные сообщения» получателя и ставит повтор («Повторять уведомления»); `repeat` — сколько раз
+   * этот пуш уже повторён (из очереди повторов); `firstAt` — когда ушёл первый пуш этой цепочки повторов (мс; у записи
+   * очереди без него — от текущего такта). `burst` (решение владельца 39) — тихая досылка пачки (`authGuard.pushBurst`): тело
+   * уже с `silent: true`; гостю через дом не уходит (дом будит телефон своим пушем без текста — досылка там лишний звонок).
+   */
+  opts: { noDefer?: boolean; private?: boolean; repeat?: number; firstAt?: number; burst?: boolean } = {},
 ): Promise<void> {
   let ids = [...new Set(recipientIds)];
   if (ids.length === 0) return;
+  /**
+   * Окно повторов «сутки от первого пуша» (`notifyRepeatInWindow`) — по настоящему времени, до отправки и до переноса за ПК:
+   * перенос номер не растит, и без этой проверки повтор, просроченный на 48 ч, всё равно уходил (ревью Codex 08.10).
+   */
+  const now = Date.now();
+  const firstAt = opts.repeat && typeof opts.firstAt === 'number' ? opts.firstAt : now;
+  if (opts.repeat && !notifyRepeatInWindow(firstAt, now)) return;
+  /** «Выключить звук» (07.10, `conv13`): им пуш уходит, но с `silent` — уведомление без звука и вибрации. */
+  const quiet = new Set<string>();
   if (source) {
     const muted = await db
-      .select({ userId: pushMutes.userId })
+      .select({ userId: pushMutes.userId, soundOnly: pushMutes.soundOnly })
       .from(pushMutes)
       .where(
         and(
           inArray(pushMutes.userId, ids),
           eq(pushMutes.scope, source.scope),
           eq(pushMutes.targetId, source.targetId),
+          activeMute(),
         ),
       );
-    if (muted.length > 0) {
-      const drop = new Set(muted.map((m) => m.userId));
+    for (const m of muted) if (m.soundOnly) quiet.add(m.userId);
+    const full = muted.filter((m) => !m.soundOnly);
+    if (full.length > 0) {
+      const drop = new Set(full.map((m) => m.userId));
       ids = ids.filter((uid) => !drop.has(uid));
       if (ids.length === 0) return;
     }
@@ -130,12 +220,44 @@ export async function sendPushToUsers(
    * ⚠️ Содержимое сообщения дому НЕ уходит: он получает «вашего человека позвали там-то» и будит
    * телефон своим пушем. Текст клиент забирает у нас, когда человек откроет приложение.
    */
-  const rows = await db
-    .select({ id: users.id, homeInstanceId: users.homeInstanceId, homeUserId: users.homeUserId })
+  const allRows = await db
+    .select({
+      id: users.id,
+      homeInstanceId: users.homeInstanceId,
+      homeUserId: users.homeUserId,
+      notifyView: users.notifyView,
+      notifyDm: users.notifyDm,
+      notifyRepeat: users.notifyRepeat,
+    })
     .from(users)
     .where(inArray(users.id, ids));
+  // «Личные сообщения» выключены (G38, `push3`): пуш личной беседы 1:1 такому получателю не уходит (группы — `notifyGroups`).
+  // Повтор из очереди (`opts.repeat`), а человек уже выключил «Повторять уведомления» — не шлём (ревью 08.10: стоявший в
+  // очереди повтор уходил после выключения).
+  // Исключение «Уведомления включены» (решение владельца 38, `push4`, `push_always`): эта беседа уведомляет и при выключенных
+  // «Личных» — как Telegram `notify2_<did>` = 0 поверх выключенных «Личные чаты». Запрос — только если кто-то выключил «Личные».
+  const always =
+    opts.private && source && allRows.some((r) => r.notifyDm === false)
+      ? await pushAlwaysUsers(
+          allRows.filter((r) => r.notifyDm === false).map((r) => r.id),
+          source.targetId,
+        )
+      : new Set<string>();
+  const rows = allRows.filter(
+    (r) =>
+      (!opts.private || r.notifyDm !== false || always.has(r.id)) && (!opts.repeat || normalizeNotifyRepeat(r.notifyRepeat) > 0),
+  );
+  if (rows.length < allRows.length) {
+    const keep = new Set(rows.map((r) => r.id));
+    ids = ids.filter((uid) => keep.has(uid));
+    if (ids.length === 0) return;
+  }
+  /** «Показывать имя / текст» (G38, `push2`) каждого получателя: тело пуша собирается по ней. */
+  const viewOf = new Map<string, NotifyView>(rows.map((r) => [r.id, normalizeNotifyView(r.notifyView)]));
   const guests = rows.filter((r) => r.homeInstanceId && r.homeUserId);
-  if (guests.length > 0) {
+  // Звонок гостю через дом не будим (`calls3`): у протокола федерации нет вида «звонок», а «вас упомянули» вместо
+  // звонка — ложь; гость слышит звонок по сокету, пропущенный придёт обычным пушем ЛС.
+  if (guests.length > 0 && payload.type !== 'call' && !opts.burst) {
     void import('./federation/guestPush.js')
       .then(({ notifyGuestHomes }) =>
         notifyGuestHomes(
@@ -146,6 +268,8 @@ export async function sendPushToUsers(
       .catch(() => {
         /* дом недоступен — событие осталось в очереди и уедет само */
       });
+  }
+  if (guests.length > 0) {
     const guestIds = new Set(guests.map((g) => g.id));
     ids = ids.filter((uid) => !guestIds.has(uid));
     if (ids.length === 0) return;
@@ -154,12 +278,128 @@ export async function sendPushToUsers(
   // Своим — как раньше, напрямую через наш ntfy. ⚠️ Проверка настройки стоит ЗДЕСЬ, а не в начале:
   // инстанс без своих пушей всё равно обязан разбудить гостя через его дом.
   if (!NTFY_BASE || !NTFY_TOKEN) return;
-  const devices = await db.select().from(pushDevices).where(inArray(pushDevices.userId, ids));
+  /**
+   * Отложенный пуш (G38, `push2`, `pushDefer.ts`): получатель сейчас за другим устройством (кадр шлюза `active`) — пуш
+   * ЛС ждёт 30 с и уходит, только если сообщение не прочитали. Redis не ответил — шлём сразу, как раньше.
+   */
+  if (!opts.noDefer) {
+    const later = ids.filter((uid) => shouldDeferPush(payload, recipientActive(uid)));
+    if (later.length > 0) {
+      const deferred = new Set<string>();
+      await Promise.all(
+        later.map((uid) =>
+          deferPush({ uid, payload, ...(source ? { source } : {}), ...(opts.private ? { private: true as const } : {}) }).then(
+            () => void deferred.add(uid),
+            () => {},
+          ),
+        ),
+      );
+      ids = ids.filter((uid) => !deferred.has(uid));
+      if (ids.length === 0) return;
+    }
+  }
+  /**
+   * Повтор «Повторять уведомления» не уходит, пока человек за ПК (решение владельца 08.10, вопрос 14): телефон не звенит
+   * повтором, когда беседа открыта на соседнем экране. Повтор ждёт, как первый пуш при живом ПК (`PUSH_DEFER_MS`), и
+   * проверяется снова; номер повтора при этом не растёт. Redis не ответил — повтор уходит как раньше.
+   */
+  if (opts.repeat) {
+    const atPc = ids.filter((uid) => recipientActive(uid));
+    if (atPc.length > 0) {
+      const held = new Set<string>();
+      await Promise.all(
+        atPc.map((uid) =>
+          postponeRepeatPush({ uid, payload, ...(source ? { source } : {}), private: true, repeat: opts.repeat, firstAt }).then(
+            () => void held.add(uid),
+            () => {},
+          ),
+        ),
+      );
+      ids = ids.filter((uid) => !held.has(uid));
+      if (ids.length === 0) return;
+    }
+  }
+  let all = await db.select().from(pushDevices).where(inArray(pushDevices.userId, ids));
+  /**
+   * Повтор — только днём (09.10, сверка с Telegram: `repeatNotificationMaybe`, часы 11..22 по местному времени). Получателю,
+   * у которого сейчас ночь по поясу его устройства (`push_devices.tz`), повтор не уходит: встаёт в очередь на начало окна (тот
+   * же ключ, не перезаписывая более свежий; номер повтора и `firstAt` прежние — сутки от первого пуша не продлеваются).
+   * Пояса нет (старое приложение) — окна нет, как раньше.
+   */
+  if (opts.repeat && all.length > 0) {
+    const night = new Set<string>();
+    for (const uid of new Set(all.map((d) => d.userId))) {
+      const mine = all.filter((d) => d.userId === uid && d.tz);
+      const tz = mine.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]?.tz;
+      const wait = notifyRepeatWaitMs(tz, now);
+      if (wait <= 0) continue;
+      night.add(uid);
+      if (notifyRepeatInWindow(firstAt, now + wait)) {
+        void postponeRepeatPush(
+          { uid, payload, ...(source ? { source } : {}), private: true, repeat: opts.repeat, firstAt },
+          now,
+          wait,
+        ).catch(() => {});
+      }
+    }
+    if (night.size > 0) {
+      all = all.filter((d) => !night.has(d.userId));
+      if (all.length === 0) return;
+    }
+  }
+  /*
+   * Входящий звонок (`calls3`) — только приложениям, которые умеют его снять (`read1`, тот же признак, что у
+   * `sendReadSyncPush`; снятие шлёт `calls.unringPush`). Ревью 08.10: приложение без `read1` (все выпущенные APK по v0.8.21)
+   * строило из него обычное уведомление «Входящий звонок», и после ответа на ПК или отклонения оно оставалось висеть —
+   * снятия ему не приходит. Пропущенный звонок такое приложение по-прежнему узнаёт обычным пушем ЛС.
+   */
+  const devices = payload.type === 'call' ? all.filter((d) => (d.caps ?? '').includes('read1')) : all;
   if (devices.length === 0) return;
-  const plain = Buffer.from(JSON.stringify(payload), 'utf8');
-  const redacted = JSON.stringify(REDACT_KEYLESS ? redactPushPayload(payload) : payload);
+  /**
+   * «Повторять уведомления» (G38, `push3`): пуш личной беседы с ключом сообщения уходит — если человек выбрал интервал,
+   * повтор встаёт в очередь (`pushDefer.scheduleRepeatPush`) и уйдёт, пока беседа не прочитана (как Telegram), в пределах
+   * защитного потолка `notifyRepeatAllowed` (24 раза и сутки от первого пуша по плану) и окна `notifyRepeatInWindow` (те же
+   * сутки по настоящему времени: срок следующего повтора за окном — не ставим). Беззвучный пуш («без звука» отправителя, «Выключить звук» беседы) не повторяется.
+   */
+  if (opts.private && payload.type === 'dm' && payload.dmId && typeof payload.key === 'number' && !payload.silent) {
+    const n = (opts.repeat ?? 0) + 1;
+    const minutesOf = new Map(rows.map((r) => [r.id, normalizeNotifyRepeat(r.notifyRepeat)]));
+    for (const uid of new Set(devices.map((d) => d.userId))) {
+      const min = minutesOf.get(uid) ?? 0;
+      if (notifyRepeatAllowed(n, min) && notifyRepeatInWindow(firstAt, now + min * 60_000) && !quiet.has(uid)) {
+        void scheduleRepeatPush({ uid, payload, ...(source ? { source } : {}), private: true, repeat: n, firstAt }, min);
+      }
+    }
+  }
+  /**
+   * Входящий звонок (`calls3`) — высокий приоритет: `Urgency: high` (RFC 8030, Web Push) и `Priority: 5` (ntfy, «срочно»),
+   * чтобы телефон в доze получил его сразу, как `phoneCallRequested` у Telegram через FCM. Остальным пушам — как было.
+   */
+  const urgent: Record<string, string> = payload.type === 'call' ? { Urgency: 'high', Priority: '5' } : {};
+  // Повтор из очереди (D10): номер повтора — в тело пуша, чтобы приложение не приняло его за повторную доставку того же сообщения.
+  // В очередь (`scheduleRepeatPush` выше) уходит исходная нагрузка без поля: номер ставится заново на каждой отправке.
+  const sent: PushPayload = opts.repeat ? { ...payload, repeat: opts.repeat } : payload;
+  const variant = (p: PushPayload) => ({
+    payload: p,
+    plain: Buffer.from(JSON.stringify(p), 'utf8'),
+    redacted: JSON.stringify(REDACT_KEYLESS ? redactPushPayload(p) : p),
+  });
+  // Вариант тела на пару «настройка показа × без звука» — шифр и JSON собираются один раз на пару, не на устройство.
+  const variants = new Map<string, ReturnType<typeof variant>>();
+  const variantFor = (uid: string) => {
+    const view = viewOf.get(uid) ?? 'all';
+    const q = quiet.has(uid);
+    const k = `${view}|${q ? 1 : 0}`;
+    let v = variants.get(k);
+    if (!v) {
+      v = variant(maskPushPayload(q ? { ...sent, silent: true as const } : sent, view));
+      variants.set(k, v);
+    }
+    return v;
+  };
   await Promise.all(
     devices.map(async (d) => {
+      const v = variantFor(d.userId);
       if (!pushEndpointAllowed(d.endpoint)) return;
       /**
        * 🔴 Текст сообщения — только шифром (#213). Устройство прислало ключи → тело aes128gcm (RFC 8291),
@@ -168,13 +408,20 @@ export async function sendPushToUsers(
        * пуш без текста (`redactPushPayload`), когда включён `REDACT_KEYLESS` (до того — как раньше).
        */
       let wire: { body: string | Buffer; headers: Record<string, string> } = {
-        body: redacted,
+        body: v.redacted,
         headers: { 'Content-Type': 'application/json' },
       };
       if (d.p256dh && d.auth) {
         try {
           wire = {
-            body: encryptWebPush(plain, { p256dh: d.p256dh, auth: d.auth }),
+            // `uid` (Р1, G17) — получатель: им приложение выбирает инстанс и токен для «Ответить» / «Прочитано» из
+            // шторки. Только внутри шифра и только приложению с `reply1`; остальным тело прежнее, байт в байт.
+            body: encryptWebPush(
+              d.caps?.split(',').includes('reply1')
+                ? Buffer.from(JSON.stringify({ ...v.payload, uid: d.userId }), 'utf8')
+                : v.plain,
+              { p256dh: d.p256dh, auth: d.auth },
+            ),
             headers: {
               'Content-Type': 'application/octet-stream',
               'Content-Encoding': 'aes128gcm',
@@ -187,7 +434,7 @@ export async function sendPushToUsers(
              это открытый JSON с текстом ЛС: устройство прислало ключи ради шифра и получало открытым. Новое
              приложение без шифра покажет «Новое сообщение». */
           wire = {
-            body: JSON.stringify(redactPushPayload(payload)),
+            body: JSON.stringify(redactPushPayload(v.payload)),
             headers: { 'Content-Type': 'application/json' },
           };
         }
@@ -195,7 +442,7 @@ export async function sendPushToUsers(
       try {
         const res = await fetch(d.endpoint, {
           method: 'POST',
-          headers: { ...wire.headers, Authorization: `Bearer ${NTFY_TOKEN}` },
+          headers: { ...wire.headers, ...urgent, Authorization: `Bearer ${NTFY_TOKEN}` },
           body: wire.body,
           redirect: 'manual', // SSRF (P2-5): NEVER follow a 3xx into the internal network
         });
@@ -207,6 +454,48 @@ export async function sendPushToUsers(
         }
       } catch {
         /* best-effort; the message itself already delivered over the gateway */
+      }
+    }),
+  );
+}
+
+/**
+ * «Беседу прочитали на другом устройстве» (07.10, #211, Р1, G17): тихий пуш моим телефонам, приложение снимает
+ * уведомление беседы (у Telegram — `updateReadHistoryInbox` → `NotificationsController.processReadMessages`).
+ *
+ * 🔴 Только устройствам с признаком `read1` и ключами шифра: старое приложение нагрузку без текста показало бы как
+ * «Новое сообщение». Гостям через дом не шлём (их телефон — у дома; протокол федерации не трогаем). Ошибки глотаются:
+ * само «прочитано» уже записано и разослано по сокетам.
+ */
+export async function sendReadSyncPush(userId: string, conversationId: string, key: number | null): Promise<void> {
+  if (!NTFY_BASE || !NTFY_TOKEN) return;
+  const devices = await db
+    .select()
+    .from(pushDevices)
+    .where(and(eq(pushDevices.userId, userId), sql`${pushDevices.caps} LIKE '%read1%'`));
+  const payload = { type: 'read', title: '', body: '', dmId: conversationId, ...(key !== null ? { key } : {}), uid: userId };
+  const plain = Buffer.from(JSON.stringify(payload), 'utf8');
+  await Promise.all(
+    devices.map(async (d) => {
+      if (!d.p256dh || !d.auth || !pushEndpointAllowed(d.endpoint)) return;
+      try {
+        const res = await fetch(d.endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Encoding': 'aes128gcm',
+            'X-UnifiedPush': '1',
+            Authorization: `Bearer ${NTFY_TOKEN}`,
+          },
+          body: encryptWebPush(plain, { p256dh: d.p256dh, auth: d.auth }),
+          redirect: 'manual', // SSRF (P2-5), как у `sendPushToUsers`
+        });
+        const redirected = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
+        if (redirected || res.status === 404 || res.status === 413) {
+          await db.delete(pushDevices).where(eq(pushDevices.id, d.id)).catch(() => {});
+        }
+      } catch {
+        /* best-effort */
       }
     }),
   );
@@ -285,18 +574,94 @@ export async function resolveMentionedMembers(
   return [...new Set(found)].filter((uid) => uid !== authorId);
 }
 
-/** List a user's active push-mute rules (for bootstrap / settings UI). */
-export async function listPushMutes(userId: string): Promise<{ scope: PushMuteScope; targetId: string }[]> {
-  const rows = await db
-    .select({ scope: pushMutes.scope, targetId: pushMutes.targetId })
-    .from(pushMutes)
-    .where(eq(pushMutes.userId, userId));
-  return rows.map((r) => ({ scope: r.scope as PushMuteScope, targetId: r.targetId }));
+/**
+ * Заглушка действует (07.10, `conv11`): без срока (`until IS NULL` — все прежние строки) или срок ещё не вышел.
+ * Истёкшая строка = не заглушено: пуш уходит, в списке её нет. Удалять её не нужно — следующая заглушка перепишет срок.
+ */
+function activeMute() {
+  return or(isNull(pushMutes.until), gt(pushMutes.until, sql`now()`))!;
 }
 
-/** Mute pushes from a source (server or DM-person) for this user. Idempotent. */
-export async function setPushMute(userId: string, scope: PushMuteScope, targetId: string): Promise<void> {
-  await db.insert(pushMutes).values({ userId, scope, targetId }).onConflictDoNothing();
+/**
+ * List a user's active push-mute rules (for bootstrap / settings UI). Истёкших нет; `until` (07.10, `conv11`,
+ * добавлением) — только у заглушки со сроком: старый клиент поле не знает и видит её «навсегда», пока срок не выйдет.
+ */
+export async function listPushMutes(
+  userId: string,
+): Promise<{ scope: PushMuteScope; targetId: string; until?: string; soundOnly?: true }[]> {
+  const rows = await db
+    .select({ scope: pushMutes.scope, targetId: pushMutes.targetId, until: pushMutes.until, soundOnly: pushMutes.soundOnly })
+    .from(pushMutes)
+    .where(and(eq(pushMutes.userId, userId), activeMute()));
+  return rows.map((r) => ({
+    scope: r.scope as PushMuteScope,
+    targetId: r.targetId,
+    ...(r.until ? { until: r.until.toISOString() } : {}),
+    ...(r.soundOnly ? { soundOnly: true as const } : {}),
+  }));
+}
+
+/**
+ * Mute pushes from a source (server or DM-person) for this user. Idempotent. `seconds` (07.10, `conv11`) — на
+ * сколько от часов СЕРВЕРА (часы клиента не нужны); без него — навсегда, как у старых клиентов. Повтор переписывает
+ * срок: «навсегда» поверх срока и срок поверх «навсегда».
+ */
+export async function setPushMute(
+  userId: string,
+  scope: PushMuteScope,
+  targetId: string,
+  seconds?: number,
+  soundOnly = false,
+): Promise<void> {
+  const until = seconds ? sql`now() + make_interval(secs => ${seconds})` : null;
+  await db
+    .insert(pushMutes)
+    .values({ userId, scope, targetId, until, soundOnly })
+    .onConflictDoUpdate({ target: [pushMutes.userId, pushMutes.scope, pushMutes.targetId], set: { until, soundOnly } });
+  // Полная заглушка снимает исключение «Уведомления включены» той же беседы (`push4`): у беседы одна своя настройка.
+  if (scope === 'dm_user' && !soundOnly) await removePushAlways(userId, targetId);
+}
+
+/**
+ * «Исключения: уведомления включены» (решение владельца 38, `push4`, таблица `push_always`, миграция 0127). У беседы одна
+ * своя настройка, как у Telegram (`notify2_<did>`): полная заглушка снимает «включено», «включено» снимает полную заглушку;
+ * «Выключить звук» (`sound_only`) живёт рядом — беседа уведомляет, но без звука.
+ */
+export async function listPushAlways(userId: string): Promise<{ scope: 'dm_user'; targetId: string }[]> {
+  const rows = await db.select({ targetId: pushAlways.targetId }).from(pushAlways).where(eq(pushAlways.userId, userId));
+  return rows.map((r) => ({ scope: 'dm_user' as const, targetId: r.targetId }));
+}
+
+export async function setPushAlways(userId: string, targetId: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.insert(pushAlways).values({ userId, scope: 'dm_user', targetId }).onConflictDoNothing();
+    await tx
+      .delete(pushMutes)
+      .where(
+        and(
+          eq(pushMutes.userId, userId),
+          eq(pushMutes.scope, 'dm_user'),
+          eq(pushMutes.targetId, targetId),
+          eq(pushMutes.soundOnly, false),
+        ),
+      );
+  });
+}
+
+export async function removePushAlways(userId: string, targetId: string): Promise<void> {
+  await db
+    .delete(pushAlways)
+    .where(and(eq(pushAlways.userId, userId), eq(pushAlways.scope, 'dm_user'), eq(pushAlways.targetId, targetId)));
+}
+
+/** Кто из `ids` включил уведомления этой беседы исключением (`push_always`, `dm_user` + `targetId`). */
+export async function pushAlwaysUsers(ids: readonly string[], targetId: string): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = await db
+    .select({ userId: pushAlways.userId })
+    .from(pushAlways)
+    .where(and(inArray(pushAlways.userId, [...ids]), eq(pushAlways.scope, 'dm_user'), eq(pushAlways.targetId, targetId)));
+  return new Set(rows.map((r) => r.userId));
 }
 
 /** Un-mute a previously muted source. */

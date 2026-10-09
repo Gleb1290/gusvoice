@@ -19,7 +19,10 @@ import { registerRevocationHandlers } from './federation/guestRevocation.js';
 import { registerReportHandlers } from './federation/instanceBan.js';
 import { startDirectorySyncWorker } from './federation/directorySync.js';
 import { federationRoutes } from './routes/federation.js';
-import { registerGateway } from './gateway.js';
+import { isUserActive, isUserDmPresent, registerGateway } from './gateway.js';
+import { sendPushToUsers } from './push.js';
+import { setPushActivityProbe, startPushDeferWorker } from './pushDefer.js';
+import { startScheduledWorker } from './scheduled.js';
 import { verifyMailer } from './mailer.js';
 import { bindSuperAdmin, seedSuperAdmin } from './seed.js';
 import { bootstrapIdentity } from './superAdminRules.js';
@@ -33,8 +36,15 @@ import { setupRoutes } from './routes/setup.js';
 import { channelRoutes } from './routes/channels.js';
 import { dmRoutes } from './routes/dm.js';
 import { convRoutes } from './routes/conv.js';
+import { callRoutes } from './routes/calls.js';
+import { closeOrphanCalls } from './calls.js';
+import { convGroupRoutes } from './routes/convGroups.js';
+import { stickerRoutes } from './routes/stickers.js';
+import { dmFolderRoutes } from './routes/dmFolders.js';
 import { downloadRoutes } from './routes/download.js';
 import { attRoutes } from './routes/att.js';
+import { uploadRoutes } from './routes/uploads.js';
+import { gifFileRoutes, gifRoutes } from './routes/gifs.js';
 import { redactLogUrl } from './attachmentRules.js';
 import { economyRoutes } from './routes/economy.js';
 import { diagRoutes } from './routes/diag.js';
@@ -43,6 +53,7 @@ import { linkPreviewRoutes } from './routes/linkPreview.js';
 import { messageRoutes } from './routes/messages.js';
 import { pushRoutes } from './routes/push.js';
 import { blockRoutes } from './routes/blocks.js';
+import { contactRoutes } from './routes/contacts.js';
 import { roleRoutes } from './routes/roles.js';
 import { serverRoutes } from './routes/servers.js';
 import { soundboardRoutes } from './routes/soundboard.js';
@@ -104,7 +115,12 @@ app.setErrorHandler((err, req, reply) => {
   }
   req.log.error(err);
   const e = err as { statusCode?: number; message?: string };
-  return reply.code(e.statusCode ?? 500).send({ error: e.message ?? 'internal error' });
+  const code = e.statusCode ?? 500;
+  // 🔴 Ревью `bigfile1` (L2, 09.10): текст непредвиденной ошибки (SQL, ключи, пути хранилища) — только в лог. Наружу — текст
+  // лишь у ошибок с явно поставленным кодом, кроме 500 (валидация, «слишком большое тело», `DailyQuotaError` 429,
+  // `TelegramError` 502, «хранилище не настроено» 503): эти тексты писались для человека.
+  const expose = e.statusCode !== undefined && e.statusCode !== 500 && !!e.message;
+  return reply.code(code).send({ error: expose ? e.message : 'internal error' });
 });
 
 // Basic response hygiene: never let a browser MIME-sniff an API/file response into HTML.
@@ -127,10 +143,17 @@ await app.register(
     await api.register(dmRoutes);
     // Беседы ЛС (этап 1): с шага 1б живые ЛС лежат в них, и `/auth/me` объявляет `features: ['conv1']`.
     await api.register(convRoutes);
+    await api.register(convGroupRoutes);
+    // Звонки 1:1 в ЛС (08.10, С5, `calls1`).
+    await api.register(callRoutes);
+    // Стикеры в ЛС (С2, #211): общий каталог наборов инстанса и «мои наборы» (`stickers2`).
+    await api.register(stickerRoutes);
+    await api.register(dmFolderRoutes);
     // Сводка непрочитанного по всему инстансу — её спрашивает фоновый шлюз (#139, §5.7).
     await api.register(unreadRoutes);
     await api.register(pushRoutes);
     await api.register(blockRoutes);
+    await api.register(contactRoutes);
     await api.register(roleRoutes);
     await api.register(voiceRoutes);
     await api.register(inviteRoutes);
@@ -141,6 +164,11 @@ await app.register(
     await api.register(downloadRoutes);
     // Закрытые файлы ЛС (шаг 1в): без входа — доступ решают подпись ссылки и проверка смотрящего (`routes/att.ts`).
     await api.register(attRoutes);
+    // Загрузка кусками в беседу (`bigfile1`, 09.10): свой разборщик сырых байт куска — в своей области.
+    await api.register(uploadRoutes);
+    // «Мои GIF» (Р-7, `gifs1`): файл по подписанной ссылке — без входа, остальное — с ним.
+    await api.register(gifFileRoutes);
+    await api.register(gifRoutes);
     await api.register(appInfoRoutes);
     // Диагностика — ТОЛЬКО если инстанс явно её включил (#113). Не «регистрируем и проверяем флаг
     // внутри», а не регистрируем вовсе: тогда выключенный сбор — это отсутствие маршрута, а не
@@ -202,12 +230,29 @@ try {
   startDailyCleanup();
   // Файлы ЛС (шаг 1в): брошенные и вытесненные загрузки, недоудалённое после «удалить у обоих» — раз в час.
   startAttachmentSweeper();
+  // Отложенные сообщения ЛС (С4, `conv9`): такт раз в 5 с — созревшие по времени и «Когда будет в сети» (в сети —
+  // соединения шлюза этого процесса и статус не «невидимый»).
+  startScheduledWorker({ isOnline: isUserDmPresent });
+  // Отложенный пуш, пока человек за ПК (G38, `push2`): кто «за устройством» — шлюз; созревшие пуши — такт раз в 2 с.
+  setPushActivityProbe(isUserActive);
+  startPushDeferWorker((item) =>
+    sendPushToUsers([item.uid], item.payload, item.source, {
+      noDefer: true,
+      ...(item.private ? { private: true } : {}),
+      ...(item.repeat ? { repeat: item.repeat } : {}),
+      ...(item.repeat && typeof item.firstAt === 'number' ? { firstAt: item.firstAt } : {}),
+    }),
+  );
   // Expire stale game-activity reports from clients that went silent (#40).
   startActivitySweeper();
   // Steam game-activity poller (#40 Phase 1B) — no-op unless STEAM_API_KEY is configured.
   startSteamPoller();
   // Сырая статистика присутствия в голосе для экономики GusCoins — no-op без ECONOMY_STATS_ENABLED.
   startVoiceActivityCollector();
+  // Звонки 1:1, оборванные перезапуском (`calls2`): закрыть записью в ленте — копия живых звонков лежит в Redis.
+  void closeOrphanCalls()
+    .then((n) => n > 0 && app.log.info(`[calls] closed ${n} call(s) cut by restart`))
+    .catch((e) => app.log.warn(e, '[calls] orphan close failed'));
 } catch (err) {
   app.log.error(err);
   process.exit(1);

@@ -12,12 +12,14 @@ import { App } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { isBlockedBrowserShortcut } from './browserShortcuts';
 import { isEditableTag, keepNativeMenu } from './contextMenuRules';
+import { effectiveUserSelect, shouldDropSelection } from './phoneSelectionRules';
 import { VoiceOverlay } from './components/VoiceOverlay';
 import { TipToast } from './components/TipToast';
 import './styles.css';
 import { applyTheme, getTheme } from './theme';
 import { applyUiPrefs } from './uiPrefs';
 import { installAndroidBack } from './androidBack';
+import { installNativeSafeArea } from './nativeSafeArea';
 import { initPushRegistration } from './nativeUnifiedPush';
 import { ensureNotifyPermission } from './notifications';
 import { notifyIfJustUpdated, runDesktopUpdateCheck, startUpdatePolling } from './updater';
@@ -26,6 +28,12 @@ import { httpsUpgradeUrl } from './configRules';
 import { isTauri } from './hotkeys';
 import { installLivekitTweaks } from './livekitTweaks';
 import { applyLiteMode } from './liteMode';
+import { applyBubblesFromUrl } from './dmBubbles';
+import { bindUploadProgress } from './convStore';
+import { bindChunkedUpload } from './api';
+import { dmChunkedUploads } from './attachRules';
+import { CHUNK_FROM_BYTES, uploadInChunks } from './chunkedUpload';
+import { clearUploadProgress, setUploadDone, setUploadProgress } from './uploadProgress';
 
 // До любого подключения к комнате: иначе первые дорожки успеют запустить вечный цикл отрисовки.
 installLivekitTweaks();
@@ -34,6 +42,8 @@ applyUiPrefs();
 applyLiteMode();
 // Системная «назад» на Android: без этого жест выбрасывал из приложения с любого экрана (#157).
 installAndroidBack();
+// Android: системные панели в CSS-переменные — старый WebView не кладёт их в env(safe-area-inset-*) (nativeSafeArea.ts).
+installNativeSafeArea();
 
 const root = createRoot(document.getElementById('root')!);
 
@@ -63,6 +73,15 @@ if (httpsUrl) {
     </ErrorBoundary>,
   );
 } else {
+  // Ссылка-включатель пузырей `/?bubbles=1|0` (тестовым аккаунтам, у которых в настройках нет строки переключателя):
+  // записать и убрать из адреса ДО первой отрисовки — `MessagePane`/`DmChatView` читают переключатель при монтировании.
+  // ⚠️ Именно здесь, а не выше: после проверки на https (иначе значение легло бы в хранилище http-источника, а человека
+  // увело бы на https, где его нет) и только для главного окна (оверлеи грузятся по своему фиксированному адресу).
+  applyBubblesFromUrl(location, history);
+  // Кольца загрузки у вложений строк «в пути» очереди ЛС (07.10): прогресс мимо стора, `convStore.bindUploadProgress`.
+  bindUploadProgress({ progress: setUploadProgress, done: setUploadDone, clear: clearUploadProgress });
+  // Файлы ЛС больше куска — кусками (`bigfile1`, 09.10): привязка в `api.ts`, предел и признак — `attachRules` из `/auth/me`.
+  bindChunkedUpload({ use: (size) => dmChunkedUploads() && size > CHUNK_FROM_BYTES, run: uploadInChunks });
   root.render(
     <ErrorBoundary>
       <App />
@@ -93,6 +112,31 @@ if (httpsUrl) {
     const inLink = !!el.closest?.('a[href]');
     const savableMedia = !!el.closest?.('[data-ctxsave]');
     if (!keepNativeMenu({ editable, hasSelection, inLink, savableMedia })) e.preventDefault();
+  });
+
+  // Телефон: выделение системой там, где `user-select: none`, снимаем сразу (страховка к CSS — иначе тап по кнопке его не снимает
+  // и подпись вкладки горит выделенной «всё время», 0.8.21). Правило — `phoneSelectionRules.ts`, под тестами.
+  const phoneMq = window.matchMedia('(max-width: 760px)');
+  // Значения `user-select` от элемента к предкам; расчёт «что действует» — чистая `effectiveUserSelect` (`phoneSelectionRules.ts`).
+  const userSelectChain = (el: Element | null): string[] => {
+    const out: string[] = [];
+    for (let e = el; e; e = e.parentElement) out.push(getComputedStyle(e).userSelect);
+    return out;
+  };
+  document.addEventListener('selectionchange', () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.anchorNode) return;
+    const at = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode.parentElement;
+    const a = document.activeElement;
+    if (
+      shouldDropSelection({
+        phone: phoneMq.matches,
+        collapsed: false,
+        fieldFocused: a instanceof HTMLElement && (a.isContentEditable || a.matches('textarea, input')),
+        anchorUserSelect: effectiveUserSelect(userSelectChain(at)),
+      })
+    )
+      sel.removeAllRanges();
   });
 
   // Та же дыра, но с клавиатуры: меню погасили, а Ctrl+P печатал чат (проверено тестером). Правило —

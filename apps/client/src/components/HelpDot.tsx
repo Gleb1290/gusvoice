@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react';
-import { clampAxis, toLayoutRect, viewport } from '../popover';
+import { clampAxis, toLayoutRect, viewport, viewportSafe } from '../popover';
 
 /** Стартовая ширина для первого кадра — точная берётся замером, см. useLayoutEffect ниже. */
 const POP_W = 320;
@@ -31,7 +31,8 @@ export function HelpDot({ children, label = 'Подсказка' }: { children: 
     // Anchor to the dot's left edge, then clamp so a wide popup near the right edge slides back in.
     const { vw, vh } = viewport();
     const left = clampAxis(r.left - 6, POP_W, vw, EDGE);
-    const below = vh - r.bottom;
+    // Место снизу — до панели навигации (`--gv-sab`), а не до края окна; `bottom` в CSS — от края окна, поэтому `vh`.
+    const below = viewportSafe().vh - r.bottom;
     setPos(below < 180 ? { left, bottom: vh - r.top + GAP } : { left, top: r.bottom + GAP });
   }
 

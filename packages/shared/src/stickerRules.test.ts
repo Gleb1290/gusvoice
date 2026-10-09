@@ -1,4 +1,24 @@
 import assert from 'node:assert/strict';
+import { checkUserPackQuota, stickerPackMatches, reorderStickerPacks } from './stickerRules';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+
+it('личная квота принимает 39 и отказывает на 40, поиск нормализует ё и перестановка ничего не теряет', () => {
+  // Предел относится к загрузке, а неправильная перестановка не должна молча удалять набор другого устройства.
+  assert.equal(checkUserPackQuota(39).ok,true); assert.equal(checkUserPackQuota(40).ok,false); assert.equal(checkUserPackQuota(41).ok,false);
+  const source = readFileSync(new URL('./stickerRules.ts', import.meta.url), 'utf8');
+  const needle = 'uploaded >= STICKER_PACKS_PER_USER';
+  assert.ok(source.includes(needle));
+  const module = { exports: {} as { checkUserPackQuota: typeof checkUserPackQuota } };
+  runInNewContext(ts.transpileModule(source.replace(needle, 'uploaded > STICKER_PACKS_PER_USER'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+  assert.throws(() => assert.equal(module.exports.checkUserPackQuota(40).ok, false), assert.AssertionError);
+  const pack = { title: 'Ёжики', name: 'HappyHedgehogs' };
+  for (const q of ['', ' ', 'ЕЖ', 'happy']) assert.equal(stickerPackMatches(pack,q),true);
+  assert.equal(stickerPackMatches(pack,'cats'),false);
+  assert.deepEqual(reorderStickerPacks(['a','b'],['b','a']),['b','a']); assert.deepEqual(reorderStickerPacks([],[]),[]);
+  for (const order of [['a'],['a','a'],['a','x'],['a','b','c']]) assert.equal(reorderStickerPacks(['a','b'],order),null);
+});
 import { describe, it } from 'node:test';
 import {
   checkPackImport,
@@ -135,4 +155,33 @@ describe('размер набора', () => {
   it('на один меньше лимита ещё проходит', () => {
     assert.equal(checkPackImport(10, STICKER_PACKS_PER_SERVER - 1).ok, true);
   });
+});
+import { pushStickerId } from './stickerRules';
+
+it('мутант без удаления повтора не проходит контракт списка и вытесненного хвоста', () => {
+  // Ловит серверное удаление нужного стикера из-за ложного переполнения.
+  const source = readFileSync(new URL('./stickerRules.ts',import.meta.url),'utf8');
+  const from = '...list.filter((x) => x !== id)'; assert.ok(source.includes(from));
+  const module = {exports:{}};
+  runInNewContext(ts.transpileModule(source.replace(from,'...list'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports});
+  const mutant = module.exports as typeof import('./stickerRules');
+  assert.throws(()=>assert.equal(mutant.pushStickerId(['a','b'],'a',2).list.join(','),'a,b'),assert.AssertionError);
+});
+
+it('избранный повтор поднимается без вытеснения, шестой вытесняет старейшего', () => {
+  // Ловит удаление правильной записи сервера при повторном добавлении избранного.
+  const xs = ['a', 'b', 'c', 'd', 'e'];
+  assert.deepEqual(pushStickerId(xs, 'c', 5), { list: ['c', 'a', 'b', 'd', 'e'], dropped: [] });
+  assert.deepEqual(pushStickerId(xs, 'f', 5), { list: ['f', 'a', 'b', 'c', 'd'], dropped: ['e'] });
+  assert.deepEqual(pushStickerId([], 'a', 5), { list: ['a'], dropped: [] });
+  for (const max of [0, -1]) assert.deepEqual(pushStickerId(['b'], 'a', max), { list: [], dropped: ['a', 'b'] });
+  assert.deepEqual(xs, ['a', 'b', 'c', 'd', 'e']);
+});
+it('недавние держат 20, двадцать первый вытесняет ровно одного', () => {
+  // Ловит неправильное использование предела избранных у недавних.
+  const xs = Array.from({ length: 20 }, (_, i) => String(i));
+  const next = pushStickerId(xs, 'new', 20);
+  assert.equal(next.list.length, 20);
+  assert.equal(next.list[0], 'new');
+  assert.deepEqual(next.dropped, ['19']);
 });

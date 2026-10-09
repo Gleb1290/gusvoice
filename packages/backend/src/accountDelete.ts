@@ -3,12 +3,15 @@ import { eq, sql } from 'drizzle-orm';
 import { DELETED_DISPLAY_NAME } from './accountRules.js';
 import { anonymizeAccountRows } from './accountRows.js';
 import { clearActivity } from './activity.js';
+import { purgeDeletedOf } from './attachments.js';
 import { forgetTokenGeneration, hashPassword } from './auth.js';
+import { deliverMany, journalForwardedFrom } from './conversations.js';
 import { db } from './db/index.js';
 import { announceUser } from './federation/directoryEvents.js';
 import { revokeAccountEverywhere } from './federation/guestRevocation.js';
 import { users } from './db/schema.js';
 import { broadcastUserProfile } from './gateway.js';
+import { removeGifFiles, savedGifKeysOf } from './gifs.js';
 import { removeFromOtherRooms } from './livekit.js';
 import { publishToServer } from './realtime.js';
 import { removeUserAvatars } from './storage.js';
@@ -38,7 +41,10 @@ export async function anonymizeAccount(userId: string): Promise<void> {
   await revokeAccountEverywhere({ userId }).catch((err) => {
     console.warn(`[account] отзыв гостевых сессий ${userId} не разослан: ${err instanceof Error ? err.message : err}`);
   });
+  let gifKeys: string[] = [];
   const memberOf = await db.transaction(async (tx) => {
+    // «Мои GIF» (0104, `gifs1`): ключи файлов — до удаления строк, сами файлы — после фиксации.
+    gifKeys = await savedGifKeysOf(tx, userId);
     const servers = await anonymizeAccountRows(tx, userId, unusable, new Date());
     await tx
       .update(users)
@@ -52,9 +58,17 @@ export async function anonymizeAccount(userId: string): Promise<void> {
     Promise.resolve().then(() => clearActivity(userId)),
     // Собеседники по ЛС (беседы остаются) видят новое имя и пустой аватар без перезахода.
     Promise.resolve().then(() => broadcastUserProfile(userId, DELETED_DISPLAY_NAME, null, null)),
+    // Копии пересланного от него: имя в снимках «Переслано от» уже обезличено транзакцией, участникам их бесед —
+    // строки журнала и `conv.change`, иначе кеш клиента держал бы прежнее имя (догонка несёт только журнал). Сбой —
+    // сервер и так отдаёт новый снимок; кеш поправится при первой свежей порции ленты.
+    Promise.resolve().then(async () => deliverMany(await journalForwardedFrom(userId))),
     // Участники бывших серверов: ростер без призрака, а шлюз пересобирает, кто чей онлайн видит (#136).
     ...memberOf.map((serverId) => publishToServer(serverId, { t: 'server.invalidate', serverId })),
     removeUserAvatars(userId),
+    // Файлы его отложенных сообщений (`conv10`): транзакция пометила их «удалено» — стереть из хранилища сейчас.
+    purgeDeletedOf(userId),
+    // Файлы «Моих GIF» (`gif/…`, свои копии): строки ушли транзакцией — стереть и файлы.
+    removeGifFiles(gifKeys),
     removeFromOtherRooms(userId, ''),
     removeFromOtherRooms(`${userId}#screen`, ''),
     // Соседям по федерации — надгробие «удалён» (F2, §5.2). Время правки каталога уже сдвинуто самой

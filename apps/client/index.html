@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Страница щипком не масштабируется — ни в приложении, ни в браузере телефона (05.10, как у Telegram Web): щипок по
+         фото, начатый в просмотре, увеличивал всё приложение, и оно оставалось увеличенным. Масштаб — только внутри
+         просмотра фото (Lightbox, свой щипок). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <title>GusVoice</title>
     <!-- Runtime config: written by the container entrypoint from env vars.
          Falls back to Vite build-time env during local `vite dev`. -->

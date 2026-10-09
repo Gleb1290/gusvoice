@@ -16,4 +16,12 @@ void SetBitrateHint(int32_t start_bps, int32_t min_bps);
 int32_t BitrateHintStart();
 int32_t BitrateHintMin();
 
+// GusVoice (#207, 06.10): во сколько раз опорный кадр NVENC может быть больше обычного
+// (`lowDelayKeyFrameScale` при буфере VBV в кадр). Ставит Rust перед публикацией (`screenshare.rs`,
+// `keyframe_scale`), читает кодировщик слоя при создании сессии (`nvidia/h264_encoder_impl.cpp`).
+// 0 — умолчание NVENC, как было до 06.10: при «сверхнизкой задержке» это 1, то есть опорный кадр (PLI,
+// новый зритель, возврат на полный слой) получает биты обычного — у всех зрителей вспыхивает мыло.
+void SetScreenEncoderKeyframeScale(int32_t keyframe_scale);
+int32_t ScreenEncoderKeyframeScale();
+
 }  // namespace livekit

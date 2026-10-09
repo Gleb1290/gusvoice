@@ -10,46 +10,48 @@
 import { activeInstanceId } from './config';
 
 // Namespaced per instance (#7): a voice session belongs to one backend's channel-id space, so after
-// switching instances we must NOT auto-rejoin the old instance's channel. Resolved at call time (the
-// active instance is stable within a session — a switch restarts the app).
-function key(): string {
-  return `gv_voice_session:${activeInstanceId() ?? 'default'}`;
+// switching instances we must NOT auto-rejoin the old instance's channel.
+// 🔴 С 01.10 голос переживает переход между инстансами (смотришь свой дом, а сидишь в голосе у соседа): запись,
+// касание и стирание идут по ИНСТАНСУ ГОЛОСА (`voice.instanceId`), а не по активной записи — иначе касание
+// освежало бы чужую сессию, а выход стирал бы не ту. Восстановление на старте и после обрыва — про активный.
+function key(instanceId: string | null | undefined): string {
+  return `gv_voice_session:${instanceId ?? 'default'}`;
 }
 export const GRACE_MS = 12_000;
 
 export type VoiceSession = { serverId: string; channelId: string; ts: number };
 
-function loadRaw(): VoiceSession | null {
+function loadRaw(instanceId: string | null | undefined = activeInstanceId()): VoiceSession | null {
   try {
-    const v = JSON.parse(localStorage.getItem(key()) || 'null');
+    const v = JSON.parse(localStorage.getItem(key(instanceId)) || 'null');
     return v && typeof v.serverId === 'string' && typeof v.channelId === 'string' ? (v as VoiceSession) : null;
   } catch {
     return null;
   }
 }
 
-export function saveVoiceSession(serverId: string, channelId: string): void {
+export function saveVoiceSession(instanceId: string | null, serverId: string, channelId: string): void {
   try {
-    localStorage.setItem(key(), JSON.stringify({ serverId, channelId, ts: Date.now() }));
+    localStorage.setItem(key(instanceId), JSON.stringify({ serverId, channelId, ts: Date.now() }));
   } catch {
     /* storage unavailable */
   }
 }
 
 /** Refresh the heartbeat timestamp so "last alive" stays current while connected. */
-export function touchVoiceSession(): void {
-  const s = loadRaw();
+export function touchVoiceSession(instanceId: string | null): void {
+  const s = loadRaw(instanceId);
   if (!s) return;
   try {
-    localStorage.setItem(key(), JSON.stringify({ ...s, ts: Date.now() }));
+    localStorage.setItem(key(instanceId), JSON.stringify({ ...s, ts: Date.now() }));
   } catch {
     /* storage unavailable */
   }
 }
 
-export function clearVoiceSession(): void {
+export function clearVoiceSession(instanceId: string | null = activeInstanceId()): void {
   try {
-    localStorage.removeItem(key());
+    localStorage.removeItem(key(instanceId));
   } catch {
     /* storage unavailable */
   }

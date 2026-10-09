@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
 import {
   capAllows,
+  aboutUserSteps,
+  statusBroadcastPlan,
   mayObserveUser,
   membershipDiff,
   parseEnvelope,
@@ -15,6 +18,35 @@ import {
 import { INSTANCE_FEATURES } from './instanceFeatures.js';
 
 const invalidate = { t: 'server.invalidate' as const, serverId: 'server-1' };
+
+it('план статуса скрывает invisible от соседей и online.update невидимого рассылает только своим', () => {
+  // Ловит утечку приватного статуса и неверный флаг перед широковещательной рассылкой.
+  const customStatus = { text: 'занят', emoji: '🔥', expiresAt: null };
+  for (const status of ['invisible', 'online', 'dnd', 'away'] as const) {
+    const plan = statusBroadcastPlan('u', status, customStatus);
+    assert.equal(plan.invisible, status === 'invisible');
+    assert.deepEqual(plan.event, { t: 'user.status', userId: 'u', status, customStatus });
+    const steps = aboutUserSteps('u', plan.event, plan.invisible);
+    assert.deepEqual(steps, status === 'invisible' ? [
+      { who: 'own', msg: plan.event }, { who: 'others', msg: { ...plan.event, status: 'online' } },
+    ] : [{ who: 'all', msg: plan.event }]);
+    assert.equal(steps[0].msg, plan.event);
+  }
+  const event = { t: 'online.update' as const, userId: 'u', online: true };
+  assert.deepEqual(aboutUserSteps('u', event, true), [{ who: 'own', msg: event }]);
+  assert.deepEqual(aboutUserSteps('u', event, false), [{ who: 'all', msg: event }]);
+  assert.deepEqual(aboutUserSteps('u', invalidate, true), [{ who: 'all', msg: invalidate }]);
+  const source = aboutUserSteps.toString();
+  for (const [from, to] of [['&&subjectInvisible', '&&false'], ['who:"own"', 'who:"others"']]) {
+    assert.ok(source.includes(from));
+    const bad = runInNewContext(`(${source.replace(from, to)})`, { __name: (fn: unknown) => fn, statusSeenBy: () => 'online' }) as typeof aboutUserSteps;
+    assert.throws(() => {
+      assert.deepEqual(bad('u', event, true), [{ who: 'own', msg: event }]);
+      const hidden = statusBroadcastPlan('u', 'invisible', null).event;
+      assert.deepEqual(bad('u', hidden, true), [{ who: 'own', msg: hidden }, { who: 'others', msg: { ...hidden, status: 'online' } }]);
+    }, assert.AssertionError);
+  }
+});
 
 describe('разбор внутреннего конверта gateway', () => {
   it('возможности сохраняются только строками, а отсутствие полей остаётся отсутствием', () => {
@@ -145,9 +177,35 @@ describe('решение о доставке соединению', () => {
 });
 
 describe('возможности из identify', () => {
+  it('сервер объявляет conv6 только вместе с прежними возможностями бесед', () => {
+    // Ловит забытый признак С1: клиент не даст удалить чужое у обоих при работающем сервере.
+    for (const feature of ['conv1', 'conv2', 'conv3', 'conv4', 'conv5', 'conv6']) {
+      assert.equal(INSTANCE_FEATURES.filter(x => x === feature).length, 1, feature);
+    }
+  });
   it('сервер объявляет работающую новую форму бесед', () => {
     // Ловит клиент, который не переключится на новую ручку после переноса живых ЛС.
-    assert.deepEqual(INSTANCE_FEATURES, ['conv1']);
+    assert.ok(INSTANCE_FEATURES.includes('conv1'));
+  });
+
+  it('conv7 объявлен ровно один раз и не вытесняет старые возможности бесед', () => {
+    // Ловит включение закрепов без ранее работающих ручек и случайное удаление совместимого признака.
+    for (const feature of ['conv1', 'conv2', 'conv3', 'conv4', 'conv5', 'conv6', 'conv7']) {
+      assert.equal(INSTANCE_FEATURES.filter(x => x === feature).length, 1, feature);
+    }
+  });
+
+  it('сервер объявляет флаги реализованных серверных возможностей ровно по разу', () => {
+    // Иначе клиент скроет уже работающую функцию; особенно легко потерять новый флаг при ручной сборке списка.
+    for (const feature of [
+      'conv1', 'conv2', 'conv3', 'conv4', 'conv5', 'conv6', 'conv7', 'conv8', 'conv9', 'conv10', 'conv11',
+      'conv12', 'conv13', 'voice1', 'voice3', 'circles1', 'users1', 'stickers2', 'stickers3', 'folders1',
+      'archive1', 'stranger1', 'search1', 'reactunread1', 'gsearch1', 'lastseen1', 'lastseen2', 'lastseen3',
+      'presence4', 'pins2', 'linkprev1', 'groups1', 'saved1', 'fwd2', 'groups2', 'gifs1', 'groups3',
+      'media1', 'push2', 'push3', 'calls1', 'calls2', 'media2', 'quote1', 'srvsearch1', 'contacts1', 'bigreact1',
+    ]) {
+      assert.equal(INSTANCE_FEATURES.filter(x => x === feature).length, 1, feature);
+    }
   });
 
   it('шлюз фильтрует обе ветки по возможности самого соединения', () => {
@@ -267,6 +325,36 @@ describe('кому можно знать об онлайне и статусе �
       'friend',
       'stranger',
     ]);
+  });
+
+  it('невидимый скрыт от соседа и супер-админа, но виден своим устройствам', () => {
+    // Приватность статуса важнее административного обзора; собственный снимок должен оставаться честным.
+    const online = ['hidden', 'friend', 'admin'];
+    const invisible = new Set(['hidden']);
+    assert.deepEqual(visibleOnline(online, 'friend', new Set(['hidden']), 'admin', invisible), ['friend'], 'сосед не видит невидимого');
+    assert.deepEqual(visibleOnline(online, 'admin', new Set(), 'admin', invisible), ['friend', 'admin'], 'супер-админ не обходит приватность');
+    assert.deepEqual(visibleOnline(online, 'hidden', new Set(), 'admin', invisible), ['hidden'], 'владелец видит себя онлайн');
+    assert.deepEqual(visibleOnline(online, 'admin', new Set(), 'admin'), online, 'без пятого аргумента сохраняется старое поведение');
+
+    // Мутант: убрать исключение владельца из фильтра — невидимый пропадёт даже из собственного снимка.
+    const functionSource = visibleOnline.toString();
+    const selfCheck = 'id!==viewerId&&invisible?.has(id)';
+    assert.ok(functionSource.includes(selfCheck), 'исходник мутанта должен совпадать с фактическим условием self');
+    const withoutSelfExemption = runInNewContext(`(${functionSource.replace(selfCheck, 'invisible?.has(id)')})`) as typeof visibleOnline;
+    assert.notDeepEqual(withoutSelfExemption(online, 'hidden', new Set(), 'admin', invisible), ['hidden'], 'мутант без исключения владельца должен ломать собственный снимок');
+
+    // Мутант: убрать проверку из цикла — чужой снимок снова раскроет невидимого.
+    const loopCheck = `if(${selfCheck})continue;`;
+    assert.ok(functionSource.includes(loopCheck), 'исходник мутанта должен содержать фильтр внутри цикла');
+    const withoutLoopFilter = runInNewContext(`(${functionSource.replace(loopCheck, '')})`) as typeof visibleOnline;
+    assert.notDeepEqual(withoutLoopFilter(online, 'friend', new Set(['hidden']), 'admin', invisible), ['friend'], 'мутант без loop-фильтра должен раскрыть скрытого соседа');
+
+    // Мутант: оставить скрытие только обычным зрителям — супер-админ ошибочно увидит невидимого.
+    const adminCheck = `if(${selfCheck})continue;`;
+    const adminOnlyLeakSource = functionSource.replace(adminCheck, 'if (id !== viewerId && !isSuper && invisible?.has(id)) continue;');
+    assert.ok(adminOnlyLeakSource !== functionSource, 'мутант супер-админа должен менять проверяемое условие');
+    const adminOnlyLeak = runInNewContext(`(${adminOnlyLeakSource})`) as typeof visibleOnline;
+    assert.notDeepEqual(adminOnlyLeak(online, 'admin', new Set(), 'admin', invisible), ['friend', 'admin'], 'мутант с исключением супер-админа должен раскрыть скрытого');
   });
 });
 

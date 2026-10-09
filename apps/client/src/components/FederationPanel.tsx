@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { FederationOverview, FederationLinkRow } from '@gusvoice/shared';
-import { api } from '../api';
+import type { Api } from '../api';
+import { adminApi } from '../adminApi';
 import { useStore } from '../store';
 import { FederationReports } from './FederationReports';
 import { FederationAudit } from './FederationAudit';
@@ -9,7 +10,7 @@ import { count } from '../plural';
 import { formatBytes, gigabytesToBytes } from '../byteSize';
 import { toast, toastError } from '../toast';
 import { alertDialog, confirmAction } from '../confirm';
-import { overviewAfterError } from '../fedOverview';
+import { neighborNameHint, overviewAfterError } from '../fedOverview';
 
 /**
  * Вкладка «Федерация» в админ-панели (#139, F1, план §4.1.1).
@@ -83,6 +84,17 @@ export function FederationPanel() {
   /** Черновик темы ntfy: пока не сохранили, поле принадлежит человеку, а не ответу сервера. */
   const [topic, setTopic] = useState('');
   const [topicTouched, setTopicTouched] = useState(false);
+  /**
+   * Название с вкладки «Инстанс» — ради подсказки под названием для соседей (#204): это два разных поля. Не узнали
+   * (старый бэкенд, сеть) — подсказки просто нет.
+   */
+  const [localName, setLocalName] = useState<string | null>(null);
+  useEffect(() => {
+    adminApi()
+      .adminInstance()
+      .then((r) => setLocalName(r.name))
+      .catch(() => {});
+  }, []);
 
   /**
    * `quiet` — перечитать НЕ показывая «Загружаем…».
@@ -96,7 +108,7 @@ export function FederationPanel() {
   async function load(quiet = false) {
     if (!quiet) setLoading(true);
     try {
-      const next = await api.federationOverview();
+      const next = await adminApi().federationOverview();
       setData(next);
       setName((prev) => (quiet && prev !== (data?.instance?.name ?? '') ? prev : next.instance?.name ?? ''));
     } catch (e) {
@@ -160,10 +172,11 @@ export function FederationPanel() {
       tone: 'danger',
       confirmLabel: 'Сменить ключ',
       requireText: 'сменить ключ',
+      requireTextWhat: 'фразу «сменить ключ»',
     });
     if (!ok) return;
     await act(async () => {
-      const res = await api.federationRevokeKey();
+      const res = await adminApi().federationRevokeKey();
       await alertDialog(
         'Ключ сменён',
         `Новый отпечаток: ${res.newFingerprint}. Отзыв получили соседей: ${res.notified}` +
@@ -212,6 +225,8 @@ export function FederationPanel() {
 
   const links = data.links ?? [];
   const alerts = data.alerts ?? [];
+  // По СОХРАНЁННОМУ имени, а не по черновику в поле: подсказка про то, что соседи видят сейчас.
+  const nameHint = neighborNameHint(localName, data.instance?.name);
   const alertCfg = data.alertSettings ?? { ntfyTopic: '', email: true, linkDownAfterMinutes: 30 };
   return (
     <div className="admin-body fed-panel">
@@ -236,12 +251,13 @@ export function FederationPanel() {
           <button
             type="button"
             disabled={busy || name === (data.instance?.name ?? '')}
-            onClick={() => act(() => api.federationSetName(name.trim()), 'Название сохранено')}
+            onClick={() => act(() => adminApi().federationSetName(name.trim()), 'Название сохранено')}
           >
             Сохранить
           </button>
         </label>
         <p className="muted">Пусто — соседи увидят домен. Название видят люди на других инстансах.</p>
+        {nameHint && <p className="muted">{nameHint}</p>}
 
         <div className="fed-row">
           <span>Отпечаток ключа</span>
@@ -261,7 +277,7 @@ export function FederationPanel() {
             className={data.paused ? 'danger-text' : ''}
             disabled={busy}
             onClick={() =>
-              act(() => api.federationPause(!data.paused), data.paused ? 'Федерация возобновлена' : 'Федерация приостановлена')
+              act(() => adminApi().federationPause(!data.paused), data.paused ? 'Федерация возобновлена' : 'Федерация приостановлена')
             }
           >
             {data.paused ? 'Возобновить федерацию' : 'Приостановить всю федерацию'}
@@ -295,7 +311,7 @@ export function FederationPanel() {
           <span>Письма держателю</span>
           <Toggle
             checked={alertCfg.email}
-            onChange={() => act(() => api.federationSetAlerts({ email: !alertCfg.email }), 'Сохранено')}
+            onChange={() => act(() => adminApi().federationSetAlerts({ email: !alertCfg.email }), 'Сохранено')}
             title="Письма об оповещениях"
           />
         </label>
@@ -315,7 +331,7 @@ export function FederationPanel() {
             disabled={busy || !topicTouched || topic === alertCfg.ntfyTopic}
             onClick={() =>
               act(async () => {
-                await api.federationSetAlerts({ ntfyTopic: topic.trim() });
+                await adminApi().federationSetAlerts({ ntfyTopic: topic.trim() });
                 setTopicTouched(false);
               }, 'Тема сохранена')
             }
@@ -336,7 +352,7 @@ export function FederationPanel() {
             onBlur={(e) => {
               const v = Number(e.target.value);
               if (!Number.isFinite(v) || v === alertCfg.linkDownAfterMinutes) return;
-              void act(() => api.federationSetAlerts({ linkDownAfterMinutes: v }), 'Порог сохранён');
+              void act(() => adminApi().federationSetAlerts({ linkDownAfterMinutes: v }), 'Порог сохранён');
             }}
           />
           <span className="muted">мин. молчания</span>
@@ -352,7 +368,7 @@ export function FederationPanel() {
             disabled={busy}
             onClick={() =>
               act(async () => {
-                const res = await api.federationIssueCode();
+                const res = await adminApi().federationIssueCode();
                 setIssued(res.code);
               }, 'Код создан')
             }
@@ -370,7 +386,7 @@ export function FederationPanel() {
             disabled={busy || code.trim().length === 0}
             onClick={() =>
               act(async () => {
-                await api.federationLink(code.trim());
+                await adminApi().federationLink(code.trim());
                 setCode('');
               }, 'Заявка отправлена — ждём подтверждения на той стороне')
             }
@@ -470,7 +486,7 @@ export function FederationPanel() {
                     disabled={busy || gigabytesToBytes(quotaDraft[link.instanceId] ?? '') === null}
                     onClick={() =>
                       act(
-                        () => api.federationSetQuota(link.instanceId, { bytes: gigabytesToBytes(quotaDraft[link.instanceId] ?? '') ?? 0 }),
+                        () => adminApi().federationSetQuota(link.instanceId, { bytes: gigabytesToBytes(quotaDraft[link.instanceId] ?? '') ?? 0 }),
                         'Предел изменён',
                       )
                     }
@@ -483,7 +499,7 @@ export function FederationPanel() {
                     type="button"
                     disabled={busy || link.quota.used === 0}
                     title="Счётчик занятого растёт при загрузке и не уменьшается при удалении"
-                    onClick={() => act(() => api.federationSetQuota(link.instanceId, { reset: true }), 'Счётчик обнулён')}
+                    onClick={() => act(() => adminApi().federationSetQuota(link.instanceId, { reset: true }), 'Счётчик обнулён')}
                   >
                     Обнулить счётчик
                   </button>
@@ -494,18 +510,18 @@ export function FederationPanel() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => act(() => api.federationConfirm(link.instanceId), 'Связка подтверждена')}
+                    onClick={() => act(() => adminApi().federationConfirm(link.instanceId), 'Связка подтверждена')}
                   >
                     Подтвердить
                   </button>
                 )}
                 {link.state === 'active' && (
-                  <button type="button" disabled={busy} onClick={() => act(() => api.federationLinkAction(link.instanceId, 'pause'), 'Связка на паузе')}>
+                  <button type="button" disabled={busy} onClick={() => act(() => adminApi().federationLinkAction(link.instanceId, 'pause'), 'Связка на паузе')}>
                     Приостановить
                   </button>
                 )}
                 {link.state === 'paused' && (
-                  <button type="button" disabled={busy} onClick={() => act(() => api.federationLinkAction(link.instanceId, 'resume'), 'Связка возобновлена')}>
+                  <button type="button" disabled={busy} onClick={() => act(() => adminApi().federationLinkAction(link.instanceId, 'resume'), 'Связка возобновлена')}>
                     Возобновить
                   </button>
                 )}
@@ -515,7 +531,7 @@ export function FederationPanel() {
                     disabled={busy}
                     onClick={() =>
                       act(async () => {
-                        const res = await api.federationRebindCode(link.instanceId);
+                        const res = await adminApi().federationRebindCode(link.instanceId);
                         setIssued(res.code);
                       }, 'Код перепривязки создан')
                     }
@@ -530,9 +546,9 @@ export function FederationPanel() {
                     title="Полная сверка каталога и списка серверов прямо сейчас"
                     onClick={() =>
                       act(async () => {
-                        let res: Awaited<ReturnType<typeof api.federationSyncNow>>;
+                        let res: Awaited<ReturnType<Api['federationSyncNow']>>;
                         try {
-                          res = await api.federationSyncNow(link.instanceId);
+                          res = await adminApi().federationSyncNow(link.instanceId);
                         } catch (err) {
                           // Отказы кнопки — не поломка, а «подождите» или «не с этой связкой» (#196 п. 9, #197 п. 7).
                           const text = String((err as Error).message ?? err);
@@ -562,7 +578,7 @@ export function FederationPanel() {
                     type="button"
                     className="danger-text"
                     disabled={busy}
-                    onClick={() => act(() => api.federationLinkAction(link.instanceId, 'block'), 'Связка разорвана')}
+                    onClick={() => act(() => adminApi().federationLinkAction(link.instanceId, 'block'), 'Связка разорвана')}
                   >
                     Разорвать
                   </button>
@@ -595,7 +611,7 @@ export function FederationPanel() {
                     title="Связка, её гости и их история переедут на новый ключ соседа. Сверьте код с держателем голосом или лично."
                     onClick={() =>
                       act(async () => {
-                        await api.federationRebind(link.instanceId, (rebindDraft[link.instanceId] ?? '').trim());
+                        await adminApi().federationRebind(link.instanceId, (rebindDraft[link.instanceId] ?? '').trim());
                         setRebindDraft((m) => ({ ...m, [link.instanceId]: '' }));
                         setRebindOpen((m) => ({ ...m, [link.instanceId]: false }));
                       }, 'Связка перепривязана к новому ключу')

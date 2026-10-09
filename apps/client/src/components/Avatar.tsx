@@ -59,6 +59,8 @@ export function Avatar({
     return (
       <img
         className="avatar-img"
+        // Нативный «призрак» картинки при захвате мышью рвал перетаскивание закреплённых (pointercancel, ревью 09.10).
+        draggable={false}
         style={style}
         src={src}
         alt={name}

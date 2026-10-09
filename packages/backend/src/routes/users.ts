@@ -1,17 +1,24 @@
-import { FED_ERRORS, checkAnimatedAvatar, isAnimatedImage } from '@gusvoice/shared';
+import { FED_ERRORS, NOTIFY_REPEAT_MINUTES, checkAnimatedAvatar, isAnimatedImage } from '@gusvoice/shared';
+import type { UserSearchResponse } from '@gusvoice/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { allActivities, clearActivity, setActivity } from '../activity.js';
 import { requireAuth } from '../auth.js';
+import { rateHit, retryMessage } from '../authGuard.js';
 import { isLocalUser, requireLocalUser } from '../guestGuard.js';
 import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
+import { searchLocalUsers } from '../db/userSearch.js';
+import { normalizeUserQuery, USER_SEARCH_RATE } from '../userSearchRules.js';
 import { broadcastUserProfile, broadcastUserStatus } from '../gateway.js';
 import { announceUser } from '../federation/directoryEvents.js';
 import { getVisibleVoiceChannelIds } from '../permissions.js';
 import { publishToUser } from '../realtime.js';
 import { serializeUser } from '../serialize.js';
+import { LAST_SEEN_BATCH_MAX, lastSeenFor, lastSeenForMany, myLastSeenExceptions, setLastSeenExceptions } from '../lastSeen.js';
+import { LAST_SEEN_EXCEPTIONS_MAX } from '../lastSeenRules.js';
+import { callAllowedFor, myCallExceptions, setCallExceptions } from '../callPrivacy.js';
 import { isSupportedImage, uploadAvatar } from '../storage.js';
 import { avatarRentalActive } from '../shopRules.js';
 
@@ -37,15 +44,48 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         showGameActivity: z.boolean().optional(),
         // Только `true`: «развидеть» приветствие экономики нельзя, оно и так открывается из кошелька.
         economyWelcomeSeen: z.literal(true).optional(),
+        // «Время захода» и «Скрывать время прочтения» (С1, `lastseen1`): кто видит точное «был(а) в сети».
+        lastSeenPrivacy: z.enum(['everyone', 'peers', 'nobody']).optional(),
+        hideReadTime: z.boolean().optional(),
+        // «Кто может звонить» (`presence4`): та же тройка, что у «Времени захода».
+        callPrivacy: z.enum(['everyone', 'peers', 'nobody']).optional(),
+        // Настройки уведомлений (G38, `push2`): «Показывать имя / текст» и «Уведомления из групп».
+        notifyView: z.enum(['all', 'name', 'nothing']).optional(),
+        notifyGroups: z.boolean().optional(),
+        // Остаток (G38, `push3`): «Личные сообщения» и «Повторять уведомления» (минуты из `NOTIFY_REPEAT_MINUTES`).
+        notifyDm: z.boolean().optional(),
+        notifyRepeat: z
+          .number()
+          .int()
+          .refine((v) => NOTIFY_REPEAT_MINUTES.includes(v))
+          .optional(),
       })
       .parse(req.body);
     if (body.displayName !== undefined && !(await isLocalUser(req.user!.sub))) {
       return reply.code(403).send({ error: FED_ERRORS.guestForbidden });
     }
-    const patch: Partial<{ displayName: string; showGameActivity: boolean; economyWelcomeSeenAt: Date }> = {};
+    const patch: Partial<{
+      displayName: string;
+      showGameActivity: boolean;
+      economyWelcomeSeenAt: Date;
+      lastSeenPrivacy: string;
+      hideReadTime: boolean;
+      callPrivacy: string;
+      notifyView: string;
+      notifyGroups: boolean;
+      notifyDm: boolean;
+      notifyRepeat: number;
+    }> = {};
     if (body.displayName !== undefined) patch.displayName = body.displayName;
     if (body.showGameActivity !== undefined) patch.showGameActivity = body.showGameActivity;
     if (body.economyWelcomeSeen) patch.economyWelcomeSeenAt = new Date();
+    if (body.lastSeenPrivacy !== undefined) patch.lastSeenPrivacy = body.lastSeenPrivacy;
+    if (body.hideReadTime !== undefined) patch.hideReadTime = body.hideReadTime;
+    if (body.callPrivacy !== undefined) patch.callPrivacy = body.callPrivacy;
+    if (body.notifyView !== undefined) patch.notifyView = body.notifyView;
+    if (body.notifyGroups !== undefined) patch.notifyGroups = body.notifyGroups;
+    if (body.notifyDm !== undefined) patch.notifyDm = body.notifyDm;
+    if (body.notifyRepeat !== undefined) patch.notifyRepeat = body.notifyRepeat;
     const [row] = Object.keys(patch).length
       ? await db.update(users).set(patch).where(eq(users.id, req.user!.sub)).returning()
       : await db.select().from(users).where(eq(users.id, req.user!.sub));
@@ -156,8 +196,81 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 
   // Snapshot of everyone's current game activity (userId -> game), so a freshly-loaded client can
   // seed its presence without waiting for each player's next report.
+  /**
+   * «В сети» / «был(а) …» человека глазами спрашивающего (С1, #211, `lastseen1`): точное время — только если оба показывают
+   * его друг другу (`lastSeenRules.lastSeenView`), иначе примерное. Нет такого или удалён — 404.
+   */
+  app.get('/users/:id/last-seen', async (req, reply) => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(req.params);
+    if (await limitedLastSeen(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    const view = await lastSeenFor(req.user!.sub, id);
+    if (!view) return reply.code(404).send({ error: 'not found' });
+    // «Кто может звонить» (`presence4`): трубку в шапке ЛС и «Позвонить» в профиле клиент прячет по этому полю. Себе — без поля.
+    if (id === req.user!.sub) return view;
+    return { ...view, canCall: await callAllowedFor(req.user!.sub, id) };
+  });
+
+  /**
+   * Пачка для списка бесед (`lastseen2`): точка «в сети» у строки показывается, только если время захода человека мне видно
+   * (`exact`). Тело `{ ids }` до 200; те же глаза спрашивающего, что у `GET /users/:id/last-seen`.
+   */
+  app.post('/users/last-seen', async (req, reply) => {
+    const { ids } = z.object({ ids: z.array(z.string().min(1).max(64)).max(LAST_SEEN_BATCH_MAX) }).parse(req.body);
+    if (await limitedLastSeen(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    return { items: await lastSeenForMany(req.user!.sub, ids) };
+  });
+
+  /**
+   * Исключения «Времени захода» (G07, `lastseen3`): «Всегда показывать» / «Никогда не показывать». `GET` — мои два списка с
+   * именами; `PUT` — записать оба целиком (Telegram сохраняет их одним действием), ответ — итог после чистки (повторы, себя,
+   * удалённых нет; в обоих списках сразу — остаётся «Никогда»). Гостю — 403: у него здесь нет «Времени захода».
+   */
+  app.get('/users/me/last-seen-exceptions', { preHandler: requireLocalUser }, async (req, reply) => {
+    if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    return myLastSeenExceptions(req.user!.sub);
+  });
+  app.put('/users/me/last-seen-exceptions', { preHandler: requireLocalUser }, async (req, reply) => {
+    const ids = z.array(z.string().min(1).max(64)).max(LAST_SEEN_EXCEPTIONS_MAX);
+    const body = z.object({ always: ids, never: ids }).parse(req.body);
+    if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    return setLastSeenExceptions(req.user!.sub, body.always, body.never);
+  });
+
+  /**
+   * Исключения «Кто может звонить» (`presence4`): «Всегда разрешать» / «Никогда не разрешать» — те же форма, предел и чистка,
+   * что у исключений «Времени захода»; общий с ними лимит частоты.
+   */
+  app.get('/users/me/call-exceptions', { preHandler: requireLocalUser }, async (req, reply) => {
+    if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    return myCallExceptions(req.user!.sub);
+  });
+  app.put('/users/me/call-exceptions', { preHandler: requireLocalUser }, async (req, reply) => {
+    const ids = z.array(z.string().min(1).max(64)).max(LAST_SEEN_EXCEPTIONS_MAX);
+    const body = z.object({ always: ids, never: ids }).parse(req.body);
+    if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    return setCallExceptions(req.user!.sub, body.always, body.never);
+  });
+
   app.get('/users/activities', async () => {
     return { activities: allActivities() };
+  });
+
+  /**
+   * Найти человека своего инстанса по @имени, чтобы написать ему (05.10, признак `users1`): только по логину — точное
+   * совпадение первым, затем по началу; от 3 знаков; до 8 строк, без почты и онлайна. Удалённых, гостей, неподтверждённых,
+   * неодобренных и себя нет. Правила — `userSearchRules.ts`, запрос — `db/userSearch.ts`. Гостю — 403: искать людей
+   * чужого инстанса ему незачем, личка с гостями закрыта (§5.8). Мусор вместо логина — 400 без похода в базу; предел —
+   * 30 поисков в минуту (429, как у остальных пределов).
+   */
+  app.get('/users/search', { preHandler: requireLocalUser }, async (req, reply) => {
+    const me = req.user!.sub;
+    const { q: raw } = z.object({ q: z.string().max(100).optional() }).parse(req.query);
+    const q = normalizeUserQuery(raw);
+    if (!q) return reply.code(400).send({ error: 'Введите логин: от 3 до 32 знаков, латиница, цифры и . _ -' });
+    const wait = await rateHit(`usearch:${me}`, USER_SEARCH_RATE.max, USER_SEARCH_RATE.windowS);
+    if (wait) return reply.code(429).header('Retry-After', String(wait)).send({ error: retryMessage(wait) });
+    const res: UserSearchResponse = { users: await searchLocalUsers(me, q) };
+    return res;
   });
 
   // Upload an avatar image (multipart) -> MinIO -> set avatarUrl.
@@ -167,6 +280,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (!isSupportedImage(file.mimetype)) return reply.code(400).send({ error: 'unsupported image type (png/jpeg/webp/gif)' });
 
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     if (buffer.length > MAX_AVATAR_BYTES) return reply.code(413).send({ error: 'image too large (max 5 MB)' });
     /**
      * 🔴 Анимация здесь НЕ принимается — и это закрытая дыра, а не новое ограничение ради покупки.
@@ -230,6 +344,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: 'no file' });
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const check = checkAnimatedAvatar(file.mimetype, new Uint8Array(buffer));
     if (!check.ok) return reply.code(400).send({ error: check.error });
 
@@ -274,4 +389,14 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     await announceUser(serialized.id);
     return reply.send(serialized);
   });
+}
+
+/** Опрос «был(а) в сети»: шапка и профиль спрашивают по таймеру и на `online.update` — 120 запросов в минуту с запасом. */
+async function limitedLastSeen(userId: string): Promise<boolean> {
+  return (await rateHit(`last-seen:${userId}`, 120, 60)) > 0;
+}
+
+/** Исключения «Времени захода» меняют редко: 30 запросов в минуту с запасом. */
+async function limitedLastSeenExceptions(userId: string): Promise<boolean> {
+  return (await rateHit(`last-seen-exc:${userId}`, 30, 60)) > 0;
 }

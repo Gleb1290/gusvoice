@@ -1,4 +1,4 @@
-import type { Attachment, MessageSticker } from '@gusvoice/shared';
+import type { Attachment, ConvServiceMark, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -12,6 +12,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
@@ -74,6 +75,33 @@ export const users = pgTable('users', {
   steamId: text('steam_id'),
   steamPersona: text('steam_persona'),
   showGameActivity: boolean('show_game_activity').notNull().default(true),
+  /**
+   * «Был(а) в сети» (С1, миграция 0098, #211): момент последнего входа в сеть или выхода из неё (первый/последний сокет
+   * шлюза). `null` — не заходил после миграции («был(а) давно»). Кто видит точное время — `lastSeenPrivacy`
+   * (`everyone` | `peers` | `nobody`, по умолчанию `peers` — решение владельца Р-2), правила — `lastSeenRules.ts`.
+   */
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
+  lastSeenPrivacy: text('last_seen_privacy').notNull().default('peers'),
+  /** «Скрывать время прочтения» (Telegram `hide_read_marks`): действует, только когда время захода от собеседника скрыто. */
+  hideReadTime: boolean('hide_read_time').notNull().default(false),
+  /**
+   * «Кто может звонить» (миграция 0122, #211, `presence4`): `everyone` | `peers` | `nobody` (как «Время захода»; по умолчанию
+   * `everyone` — как было до настройки). Исключения — `privacyExceptions` с ключом `calls`; правило — `callRules.callAllowed`.
+   */
+  callPrivacy: text('call_privacy').notNull().default('everyone'),
+  /**
+   * Настройки уведомлений как у Telegram (G38, миграция 0111, `push2`): «Показывать имя / текст» (`all` | `name` |
+   * `nothing`, `shared/notifyView.ts`) и «Уведомления из групп». Чтит пуш (`push.ts`, `convSendFanout.ts`) и клиент.
+   */
+  notifyView: text('notify_view').notNull().default('all'),
+  notifyGroups: boolean('notify_groups').notNull().default(true),
+  /**
+   * Остаток настроек уведомлений (G38, миграция 0118, `push3`): «Личные сообщения» (`false` — пуш 1:1 не уходит) и
+   * «Повторять уведомления» (минуты, `shared/notifyView.ts`: `NOTIFY_REPEAT_MINUTES`, `0` — не повторять; умолчание 60, как
+   * у Telegram — миграция 0124).
+   */
+  notifyDm: boolean('notify_dm').notNull().default(true),
+  notifyRepeat: integer('notify_repeat').notNull().default(60),
   /**
    * Когда аккаунт удалён (миграция 0061, F0 #139). Строка НЕ стирается — обезличивается, чтобы переписка
    * осталась (`accountRules.ts`). `null` — живой аккаунт. Вход, поиск по логину/почте и уборка
@@ -198,9 +226,8 @@ export const serverEmojis = pgTable('server_emojis', {
  */
 export const stickerPacks = pgTable('sticker_packs', {
   id: text('id').primaryKey(),
-  serverId: text('server_id')
-    .notNull()
-    .references(() => servers.id, { onDelete: 'cascade' }),
+  // NULL — набор общего каталога инстанса (миграция 0092, стикеры в ЛС): его видит любой человек инстанса.
+  serverId: text('server_id').references(() => servers.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   title: text('title').notNull(),
   createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
@@ -218,6 +245,86 @@ export const stickers = pgTable('stickers', {
   format: text('format', { enum: ['webp', 'tgs', 'webm'] }).notNull(),
   position: integer('position').notNull().default(0),
 });
+
+/**
+ * «Мои наборы» стикеров человека (миграция 0092, признак `stickers2`): добавленные себе наборы каталога, в его порядке
+ * (меньше `position` — выше в панели, новый встаёт первым, как у Telegram).
+ */
+export const userStickerPacks = pgTable(
+  'user_sticker_packs',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    packId: text('pack_id')
+      .notNull()
+      .references(() => stickerPacks.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull().default(0),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.packId] }) }),
+);
+
+/**
+ * Избранные стикеры человека (миграция 0100, признак `stickers3`, С2 порция 2): стикеры каталога, новый — первым, не больше
+ * `STICKERS_FAVED_MAX` (как `stickers_faved_limit_default` у Telegram; лишний старый уходит — `stickerLists.ts`).
+ */
+export const userFavedStickers = pgTable(
+  'user_faved_stickers',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    stickerId: text('sticker_id')
+      .notNull()
+      .references(() => stickers.id, { onDelete: 'cascade' }),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.stickerId] }) }),
+);
+
+/** Недавние стикеры человека (миграция 0100, `stickers3`): последние отправленные, не больше `STICKERS_RECENT_MAX`. */
+export const userRecentStickers = pgTable(
+  'user_recent_stickers',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    stickerId: text('sticker_id')
+      .notNull()
+      .references(() => stickers.id, { onDelete: 'cascade' }),
+    usedAt: timestamp('used_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.stickerId] }) }),
+);
+
+/**
+ * Папки бесед ЛС (миграция 0093, признак `folders1`, #211 G40): определения отбора как у Telegram — типы (`flags`),
+ * явно включённые и исключённые беседы. Системная «Личные сообщения» — `system = 'dms'`, одна на человека.
+ */
+export const dmFolders = pgTable(
+  'dm_folders',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    system: text('system'),
+    title: text('title').notNull().default(''),
+    emoticon: text('emoticon'),
+    flags: integer('flags').notNull().default(0),
+    includeIds: text('include_ids').array().notNull().default(sql`'{}'`),
+    excludeIds: text('exclude_ids').array().notNull().default(sql`'{}'`),
+    /** Свой порядок закреплённых в папке сверху вниз (миграция 0131, 09.10, `pinorder2`); пусто — общий по `pinned_at`. */
+    pinnedIds: text('pinned_ids').array().notNull().default(sql`'{}'`),
+    /** Свой набор закреплённых (миграция 0133, 09.10, `pinset1`): `pinned_ids` — набор и порядок, общий закреп в папке не действует. */
+    pinnedOwn: boolean('pinned_own').notNull().default(false),
+    position: integer('position').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ userIdx: index('dm_folders_user_idx').on(t.userId, t.position) }),
+);
 
 // Custom per-server sound pack: an uploaded audio URL per SoundEvent key (join/leave/…).
 export const serverSounds = pgTable(
@@ -420,6 +527,8 @@ export const messageReactions = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     emoji: text('emoji').notNull(),
+    // Момент постановки (миграция 0093): порядок аватарок на чипе реакции.
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }) }),
 );
@@ -468,6 +577,40 @@ export const dmMessages = pgTable('dm_messages', {
   hiddenFor: text('hidden_for').array().notNull().default(sql`'{}'::text[]`),
 });
 
+/**
+ * Жалоба на собеседника из ЛС (миграция 0107, 08.10, #211, С7, Р-10): держателю СВОЕГО инстанса (супер-админу). Жалоба на
+ * гостя соседнего инстанса соседу пока не уходит: личка между инстансами выключена (`FED_ERRORS.dmUnavailable`, до #141).
+ * `evidence` — снимок до пяти последних сообщений собеседника, которые жалующийся видел сам.
+ */
+export const dmReports = pgTable(
+  'dm_reports',
+  {
+    id: text('id').primaryKey(),
+    /**
+     * Ссылки на users БЕЗ внешнего ключа намеренно: аккаунт «удаляют» обезличиванием, а жалоба — запись держателя, она
+     * переживает уход любого из двоих (`accountRules.test.ts` держит перечень FK на users — новая таблица в него не входит).
+     */
+    reporterId: text('reporter_id').notNull(),
+    reportedId: text('reported_id').notNull(),
+    conversationId: text('conversation_id'),
+    /** Одна из `DM_REPORT_REASONS`. */
+    reason: text('reason').notNull(),
+    comment: text('comment'),
+    evidence: jsonb('evidence')
+      .$type<{ messageId: string; text: string; at: number }[]>()
+      .notNull()
+      .default([]),
+    /** `new` | `closed`. */
+    status: text('status').notNull().default('new'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byStatus: index('dm_reports_status_idx').on(t.status, t.createdAt),
+    byPair: index('dm_reports_pair_idx').on(t.reporterId, t.reportedId, t.createdAt),
+  }),
+);
+
 /** Чёрный список (миграция 0076, #212): `blocker` не получает личных сообщений от `blocked`. */
 export const userBlocks = pgTable(
   'user_blocks',
@@ -481,6 +624,74 @@ export const userBlocks = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ pk: primaryKey({ columns: [t.blockerId, t.blockedId] }) }),
+);
+
+/**
+ * Контакты (миграция 0126, #211, `contacts1`): `owner` держит `contact` в своём списке «Контакты»; `name` — его личная подпись
+ * (`null` — собственное имя человека). Список личный; удаление аккаунта стирает строки в обе стороны (`accountRows.ts`).
+ */
+export const userContacts = pgTable(
+  'user_contacts',
+  {
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    contactId: text('contact_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.ownerId, t.contactId] }),
+    byContact: index('user_contacts_contact_idx').on(t.contactId, t.ownerId),
+  }),
+);
+
+/**
+ * Исключения «Времени захода» (миграция 0120, #211, G07, `lastseen3`): `owner` показывает (`always`) или не показывает (`never`)
+ * своё время захода `target` поверх правила Все / Собеседники / Никто. Список личный; удаление аккаунта стирает строки в обе стороны.
+ */
+export const lastSeenExceptions = pgTable(
+  'last_seen_exceptions',
+  {
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    targetId: text('target_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind', { enum: ['always', 'never'] }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.ownerId, t.targetId] }),
+    byTarget: index('last_seen_exceptions_target_idx').on(t.targetId, t.ownerId),
+  }),
+);
+
+/**
+ * Исключения приватности по людям для прочих настроек (миграция 0122, #211, `presence4`): `owner` всегда (`always`) или никогда
+ * (`never`) разрешает `target` то, что закрывает настройка `key`, поверх правила Все / Собеседники / Никто. Пока ключ один —
+ * `calls` («Кто может звонить»). Удаление аккаунта стирает строки в обе стороны (`accountRows.ts`).
+ */
+export const privacyExceptions = pgTable(
+  'privacy_exceptions',
+  {
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    targetId: text('target_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    key: text('key', { enum: ['calls'] }).notNull(),
+    kind: text('kind', { enum: ['always', 'never'] }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.ownerId, t.key, t.targetId] }),
+    byTarget: index('privacy_exceptions_target_idx').on(t.targetId, t.key, t.ownerId),
+  }),
 );
 
 /**
@@ -498,6 +709,9 @@ export const conversations = pgTable('conversations', {
   /** Последний выданный ключ порядка (микросекунды, HLC) — следующий берётся под замком этой строки. */
   lastSortKey: bigint('last_sort_key', { mode: 'number' }).notNull().default(0),
   originInstanceId: text('origin_instance_id'),
+  /** Название и фото группы (миграция 0099, признак `groups1`); у беседы 1:1 — `null`. */
+  title: text('title'),
+  avatarUrl: text('avatar_url'),
 });
 
 export const conversationMembers = pgTable(
@@ -514,6 +728,47 @@ export const conversationMembers = pgTable(
     leftAt: timestamp('left_at', { withTimezone: true }),
     /** «Прочитано до» — ключ последнего прочитанного сообщения, только вперёд. */
     lastReadKey: bigint('last_read_key', { mode: 'number' }).notNull().default(0),
+    /** Черновик (Р7, миграция 0081): между МОИМИ устройствами; пусто — все четыре `null`. */
+    draftText: text('draft_text'),
+    draftReplyTo: text('draft_reply_to'),
+    draftAt: timestamp('draft_at', { withTimezone: true }),
+    /** Метка устройства, записавшего черновик: своё эхо клиент не применяет. */
+    draftDevice: text('draft_device'),
+    /**
+     * Беседу открыл ДРУГОЙ, и она ещё не показана этому участнику (миграция 0086, 05.10, признак `users1`): видна ему,
+     * только когда в ней есть дошедшее до него сообщение или он сам её открыл (`conversations.ts`, `hiddenFromMe`).
+     */
+    pending: boolean('pending').notNull().default(false),
+    /**
+     * Когда Я закрепил беседу наверху списка (миграция 0088, 07.10, признак `conv11`); `null` — не закреплена. Только моя
+     * строка: собеседник о закрепе не узнаёт. Лимит — `convRules.CONV_PIN_LIMIT`.
+     */
+    pinnedAt: timestamp('pinned_at', { withTimezone: true }),
+    /**
+     * «Удалить чат» (миграция 0089, 07.10, признак `conv12`): ключ порядка, до которого Я убрал беседу из списка; `null` —
+     * не убрана. Видна снова, когда до меня дойдёт сообщение с ключом больше (`conversations.ts`, `clearedFromMe`).
+     */
+    hiddenKey: bigint('hidden_key', { mode: 'number' }),
+    /**
+     * Когда Я пометил беседу «непрочитанной» (миграция 0091, 07.10, признак `conv13`); `null` — метки нет. Точка без числа
+     * в моём списке; только моя строка, собеседник не видит. Снимается любым чтением (`conversations.markRead`).
+     */
+    unreadMarkedAt: timestamp('unread_marked_at', { withTimezone: true }),
+    /**
+     * Когда Я убрал беседу из «Частых» (миграция 0130, 09.10, признак `freq2`, G35); `null` — не убирал. `GET /conv/frequent`
+     * не отдаёт её, пока моё последнее сообщение там не новее отметки (`conversations.frequentConversations`).
+     */
+    frequentHiddenAt: timestamp('frequent_hidden_at', { withTimezone: true }),
+    /**
+     * Когда Я убрал беседу в архив (миграция 0096, 07.10, признак `archive1`, G41); `null` — не в архиве. Только моя строка:
+     * собеседник не узнаёт. Новое сообщение возвращает беседу, если она не заглушена (`conversations.unarchiveOnMessage`).
+     */
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    /**
+     * Когда Я скрыл плашку незнакомца крестиком (миграция 0107, 08.10, признак `stranger1`, С7); `null` — не скрывал. Только
+     * моя строка: на всех моих устройствах плашка гаснет вместе (`conv.change`), собеседник не узнаёт. Жалоба тоже скрывает.
+     */
+    strangerHiddenAt: timestamp('stranger_hidden_at', { withTimezone: true }),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.conversationId, t.userId] }),
@@ -538,13 +793,63 @@ export const conversationMessages = pgTable('conversation_messages', {
   // Self-reference; the FK is declared in the migration SQL (avoids a circular type here).
   replyToId: text('reply_to_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * Когда собеседник прочёл (С1, миграция 0098; только беседы 1:1): ставит `markRead` тем сообщениям, которые сдвиг
+   * «прочитано до» накрыл впервые. Отдаётся автору как «Прочитано в 12:34» (`GET /conv/:id/messages/:mid/read-at`).
+   * Одна колонка у участника рядом с `last_read_key` дала бы время ПОСЛЕДНЕГО чтения, а не прочтения этого сообщения.
+   */
+  readAt: timestamp('read_at', { withTimezone: true }),
   editedAt: timestamp('edited_at', { withTimezone: true }),
   /** Надгробие «удалено у обоих»: текст и вложения стёрты, строка живёт, чтобы удаление дошло догонкой. */
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   withheld: boolean('withheld').notNull().default(false),
   hiddenFor: text('hidden_for').array().notNull().default(sql`'{}'::text[]`),
   originInstanceId: text('origin_instance_id'),
+  /** «Переслано от» (миграция 0082, признак `conv5`): автор оригинала, имя на момент пересылки, время оригинала. */
+  forwardedFrom: jsonb('forwarded_from').$type<MessageForwardedFrom | null>(),
+  /**
+   * Отправлено «без звука» (С3, миграция 0084, признак `conv8`): у получателя уведомление без звука, пуш — с
+   * `silent: true`. Свойство отправки — пересылка его не переносит.
+   */
+  silent: boolean('silent').notNull().default(false),
+  /** «Без превью ссылки» (миграция 0101, признак `linkprev1`, G19): получатель карточку ссылки под сообщением не рисует. */
+  noPreview: boolean('no_preview').notNull().default(false),
+  /** «Подпись над медиа» (миграция 0112, признак `media2`, G48): подпись рисуется над фото/альбомом. Пересылка переносит. */
+  captionAbove: boolean('caption_above').notNull().default(false),
+  /** Одноразовое голосовое прослушано (миграция 0115, `voice3`, G54): файл удалён, `ConvMessage.voiceOnceSpent`. */
+  onceSpentAt: timestamp('once_spent_at', { withTimezone: true }),
+  /**
+   * Цитата ответа (миграция 0117, `quote1`, G55): выбранный фрагмент цитируемого или снимок начала его текста у ответа на
+   * сообщение ДРУГОЙ беседы (`convRules.ReplyQuoteMark`). `null` — обычный ответ.
+   */
+  replyQuote: jsonb('reply_quote').$type<{ text: string; offset: number; auto?: true } | null>(),
+  /** Стикер (миграция 0092, признак `stickers2`) — КОПИЕЙ, как `messages.sticker`: удаление набора историю не портит. */
+  sticker: jsonb('sticker').$type<MessageSticker | null>(),
+  /**
+   * Служебная строка ленты (`ConvServiceMark`): закреп (миграция 0097, `pins2`, G28) — `{ kind: 'pin', messageId }`; действие
+   * в группе (07.10, `groups1`) — `{ kind: 'group', type, users?, title? }`. `null` — обычное сообщение.
+   */
+  service: jsonb('service').$type<ConvServiceMark | null>(),
 });
+
+/**
+ * «Прослушано» у голосовых сообщений ЛС (миграция 0090, 07.10, признак `voice1`): строка — этот человек нажал «играть» на
+ * голосовом. Пишет только не-автор; `ConvMessage.voiceListened` собирается из неё (получателю — по его строке, автору — по
+ * строке любого другого участника). Строка уходит каскадом с сообщением.
+ */
+export const conversationVoiceListens = pgTable(
+  'conversation_voice_listens',
+  {
+    messageId: text('message_id')
+      .notNull()
+      .references(() => conversationMessages.id, { onDelete: 'cascade' }),
+    // Без FK на users: аккаунт не удаляется, а обезличивается (`accountRows.ts`) — строка остаётся, как реакции; ссылка лишь
+    // потребовала бы записи в перечень сохраняемых FK (`accountRules.test.ts`).
+    userId: text('user_id').notNull(),
+    listenedAt: timestamp('listened_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId] }) }),
+);
 
 export const conversationMessageReactions = pgTable(
   'conversation_message_reactions',
@@ -557,8 +862,94 @@ export const conversationMessageReactions = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     emoji: text('emoji').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Когда автор сообщения увидел реакцию (G24, миграция 0102); `null` — не видел (непрочитанная реакция). */
+    seenAt: timestamp('seen_at', { withTimezone: true }),
   },
   (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }) }),
+);
+
+/**
+ * Закреп сообщений в беседе (С2, миграция 0083, признак `conv7`): строка — закреп ГЛАЗАМИ одного человека (`userId` —
+ * кто его видит). «Для обоих» — строки обоим с `forBoth`, «для меня» — строка себе. Владелец и закрепивший ссылаются на
+ * участие в беседе, не на `users`: закреп — часть переписки (как владелец `attachments`). Правила — `convRules.ts`
+ * («Закреп»), запись и чтение — `conversations.ts`.
+ */
+export const conversationPins = pgTable(
+  'conversation_pins',
+  {
+    conversationId: text('conversation_id').notNull(),
+    userId: text('user_id').notNull(),
+    messageId: text('message_id')
+      .notNull()
+      .references(() => conversationMessages.id, { onDelete: 'cascade' }),
+    pinnedBy: text('pinned_by').notNull(),
+    pinnedAt: timestamp('pinned_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Поставлен «для обоих» — при откреплении спросить «Также открепить для собеседника». */
+    forBoth: boolean('for_both').notNull().default(false),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.conversationId, t.userId, t.messageId] }),
+    owner: foreignKey({
+      columns: [t.conversationId, t.userId],
+      foreignColumns: [conversationMembers.conversationId, conversationMembers.userId],
+    }).onDelete('cascade'),
+    pinner: foreignKey({
+      columns: [t.conversationId, t.pinnedBy],
+      foreignColumns: [conversationMembers.conversationId, conversationMembers.userId],
+    }).onDelete('cascade'),
+    messageIdx: index('conversation_pins_message_idx').on(t.messageId),
+  }),
+);
+
+/**
+ * Отложенные сообщения (С4, миграция 0085, признак `conv9`): «Отправить позже» (`sendAt`) и «Когда будет в сети»
+ * (`whenOnline`, режим — ровно один, CHECK в миграции). Уходят обычной отправкой из планировщика (`scheduled.ts`), строка
+ * при этом удаляется той же транзакцией. Видит только автор. Автор ссылается на участие в беседе (как владелец
+ * `attachments` и закрепы), а не на `users`: беседа уходит — уходят и её отложенные; удаление аккаунта стирает их явно
+ * (`accountRows.anonymizeAccountRows`). Правила — `scheduleRules.ts`, чтение и события — `conversations.ts`.
+ */
+export const conversationScheduled = pgTable(
+  'conversation_scheduled',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id').notNull(),
+    authorId: text('author_id').notNull(),
+    /** id отправки при создании (уникален на автора); с ним же уйдёт сообщение (`conversation_messages.client_id`). */
+    clientId: text('client_id').notNull(),
+    /** Отпечаток запроса СОЗДАНИЯ (`scheduleRules.schedPayloadHash`): повтор с ним — 200, с другим — 409. Не меняется. */
+    payloadHash: text('payload_hash').notNull(),
+    content: text('content').notNull(),
+    replyToId: text('reply_to_id').references(() => conversationMessages.id, { onDelete: 'set null' }),
+    silent: boolean('silent').notNull().default(false),
+    /** «Подпись над медиа» (миграция 0116, `media2`): уходит в сообщение (ложится в строку только при подписи и вложении). */
+    captionAbove: boolean('caption_above').notNull().default(false),
+    /** «Отправить позже» — когда; `null` — режим «Когда будет в сети». */
+    sendAt: timestamp('send_at', { withTimezone: true }),
+    whenOnline: boolean('when_online').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    editedAt: timestamp('edited_at', { withTimezone: true }),
+    /** Неудачных попыток подряд и когда следующая (отсрочка — `scheduleRules.schedRetryDelayMs`). */
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    lastError: text('last_error'),
+    /** Сервер больше не пытается: `peer-gone` — писать некому, `error` — попытки кончились. Снимает новое время/режим. */
+    failedAt: timestamp('failed_at', { withTimezone: true }),
+    failReason: text('fail_reason', { enum: ['peer-gone', 'error'] }),
+    /**
+     * Вложения отложенного (06.10, миграция 0087, признак `conv10`) — в том же виде, что `conversation_messages.attachments`
+     * (доверенные поля из строки `attachments` + подсказки клиента, ссылка — заглушка): порядок и подсказки до отправки.
+     * Сами строки `attachments` при этом — `scheduled` со ссылкой `scheduled_id` на эту строку. Пусто — только текст.
+     */
+    attachments: jsonb('attachments').$type<Attachment[]>().notNull().default([]),
+  },
+  (t) => ({
+    author: foreignKey({
+      columns: [t.conversationId, t.authorId],
+      foreignColumns: [conversationMembers.conversationId, conversationMembers.userId],
+    }).onDelete('cascade'),
+    clientUq: uniqueIndex('conversation_scheduled_client_uq').on(t.authorId, t.clientId),
+    ownerIdx: index('conversation_scheduled_owner_idx').on(t.conversationId, t.authorId),
+  }),
 );
 
 /** Журнал изменений на человека (Р4): `pts` — номер последнего изменения, `minPts` — последний удалённый. */
@@ -581,7 +972,9 @@ export const userChanges = pgTable(
     conversationId: text('conversation_id')
       .notNull()
       .references(() => conversations.id, { onDelete: 'cascade' }),
-    kind: text('kind', { enum: ['msg', 'read', 'conv'] }).notNull(),
+    // `pin` (С2, миграция 0083) — «мой список закреплённого в беседе изменился», `messageId` пуст.
+    // `sched` (С4, миграция 0085) — «мой список отложенных в беседе изменился», `messageId` пуст, только автору.
+    kind: text('kind', { enum: ['msg', 'read', 'conv', 'draft', 'pin', 'sched'] }).notNull(),
     messageId: text('message_id'),
     at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -607,9 +1000,16 @@ export const attachments = pgTable(
     name: text('name').notNull(),
     contentType: text('content_type').notNull(),
     size: bigint('size', { mode: 'number' }).notNull(),
-    state: text('state', { enum: ['pending', 'attached', 'deleted'] }).notNull().default('pending'),
+    // `scheduled` (06.10, миграция 0087, `conv10`) — ждёт в отложенном сообщении (`scheduledId`), видит только владелец.
+    state: text('state', { enum: ['pending', 'attached', 'deleted', 'scheduled'] }).notNull().default('pending'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    /**
+     * Отложенное, за которым файл «припаркован» (только у `scheduled`, CHECK в миграции 0087). Ссылка с ОТЛОЖЕННОЙ проверкой
+     * (DEFERRABLE INITIALLY DEFERRED — в миграции; здесь не выражается) и без каскада: строку отложенного нельзя удалить,
+     * пока на неё ссылаются её файлы, — писатель в той же транзакции переводит их в `attached`/`deleted` (`scheduled.ts`).
+     */
+    scheduledId: text('scheduled_id').references(() => conversationScheduled.id),
   },
   (t) => ({
     member: foreignKey({
@@ -618,6 +1018,51 @@ export const attachments = pgTable(
     }).onDelete('cascade'),
     messageIdx: index('attachments_message_idx').on(t.messageId),
   }),
+);
+
+/**
+ * Загрузка кусками (`bigfile1`, миграции 0132 и 0134): от начала до сборки; после сборки — строка `attachments` с тем же id.
+ * Куски — `attachmentUploadParts` (ETag для сборки + размер для проверки). Правила — `attachmentRules.ts`, ручки — `routes/uploads.ts`.
+ */
+export const attachmentUploads = pgTable(
+  'attachment_uploads',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id').notNull(),
+    ownerId: text('owner_id').notNull(),
+    storageKey: text('storage_key').notNull().unique(),
+    s3UploadId: text('s3_upload_id').notNull(),
+    name: text('name').notNull(),
+    declaredType: text('declared_type').notNull(),
+    contentType: text('content_type'),
+    size: bigint('size', { mode: 'number' }).notNull(),
+    partSize: integer('part_size').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Сборка идёт с этого момента (0134): «забор» от второго `complete`; старше срока сборки — забирается заново. */
+    completingAt: timestamp('completing_at', { withTimezone: true }),
+    /** Последний кусок (0134): уборка брошенных — по последней активности, а не по началу. */
+    lastPartAt: timestamp('last_part_at', { withTimezone: true }),
+  },
+  (t) => ({
+    member: foreignKey({
+      columns: [t.conversationId, t.ownerId],
+      foreignColumns: [conversationMembers.conversationId, conversationMembers.userId],
+    }).onDelete('cascade'),
+    ownerIdx: index('attachment_uploads_owner_idx').on(t.ownerId, t.createdAt),
+  }),
+);
+
+export const attachmentUploadParts = pgTable(
+  'attachment_upload_parts',
+  {
+    uploadId: text('upload_id')
+      .notNull()
+      .references(() => attachmentUploads.id, { onDelete: 'cascade' }),
+    partNumber: integer('part_number').notNull(),
+    etag: text('etag').notNull(),
+    size: integer('size').notNull(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.uploadId, t.partNumber] }) }),
 );
 
 // Emoji reactions on DM messages. One row per (message, user, emoji) — mirrors messageReactions.
@@ -713,6 +1158,10 @@ export const pushDevices = pgTable(
     /** Ключи шифрования пуша устройства (миграция 0075, #213), base64url. Пусто — пуш без текста. */
     p256dh: text('p256dh'),
     auth: text('auth'),
+    /** Что умеет приложение (миграция 0102, Р1 G17): `read1,reply1` через запятую; NULL — старое, ничего. */
+    caps: text('caps'),
+    /** Часовой пояс устройства, IANA (миграция 0128): повтор уведомления идёт только днём по местному времени. NULL — не знаем, окна нет. */
+    tz: text('tz'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -729,6 +1178,35 @@ export const pushMutes = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     scope: text('scope', { enum: ['server', 'dm_user'] }).notNull(),
+    targetId: text('target_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * До какого времени заглушено (миграция 0088, 07.10, признак `conv11`); `null` — навсегда (все прежние строки и
+     * вставки старых клиентов). Истёкшая строка = не заглушено (`push.ts`: `activeMute`).
+     */
+    until: timestamp('until', { withTimezone: true }),
+    /**
+     * «Выключить звук» (миграция 0091, 07.10, признак `conv13`): уведомление приходит, но без звука и вибрации; `false` —
+     * полная заглушка (все прежние строки). Срок — тот же `until`.
+     */
+    soundOnly: boolean('sound_only').notNull().default(false),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.scope, t.targetId] }) }),
+);
+
+/**
+ * «Исключения: уведомления включены» (миграция 0127, 08.10, решение владельца 38, признак `push4`): строка — пуш этой беседы
+ * уходит, хотя «Личные сообщения» (`users.notify_dm`) или «Уведомления из групп» (`users.notify_groups`) выключены, как
+ * Telegram `notify2_<did>` = 0. `targetId` — как у `push_mutes` `dm_user`: id собеседника или `group:<id беседы>`. Заглушка той же
+ * беседы снимает строку и наоборот (`push.ts` `setPushMute` / `setPushAlways`).
+ */
+export const pushAlways = pgTable(
+  'push_always',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    scope: text('scope', { enum: ['dm_user'] }).notNull(),
     targetId: text('target_id').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1560,3 +2038,22 @@ export const federationAudit = pgTable(
   },
   (t) => ({ byAt: index('federation_audit_at_idx').on(t.at) }),
 );
+
+/**
+ * Мои GIF (миграция 0104, `gifs1`, Р-7): сохранённые GIF человека — своя копия файла в закрытом хранилище (`gif/<id>`),
+ * новые первыми, не больше `GIFS_SAVED_MAX`; `origin` — откуда сохранён (повтор поднимает строку). См. `gifs.ts`.
+ */
+export const userSavedGifs = pgTable('user_saved_gifs', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  storageKey: text('storage_key').notNull(),
+  contentType: text('content_type').notNull(),
+  size: integer('size').notNull(),
+  width: integer('width'),
+  height: integer('height'),
+  durationMs: integer('duration_ms'),
+  origin: text('origin').notNull(),
+  addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+});

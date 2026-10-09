@@ -10,6 +10,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
+import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,11 +27,44 @@ class MainActivity : TauriActivity() {
   private val requestPerms =
     registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
+  // Медиа для клиента (05.10, вложения «как в Telegram»): своя галерея, «Файлы», «Сохранить» / «Копировать изображение» —
+  // MediaBridge.kt. Окна системы — через эти два контракта: регистрировать их можно только при создании активности.
+  private val media = MediaBridge(this)
+  private val requestMediaPerms =
+    registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { media.onPermissionResult() }
+  private val pickDocuments =
+    registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { media.onDocumentsPicked(it) }
+
+  fun launchMediaPermissions(perms: Array<String>) = requestMediaPerms.launch(perms)
+
+  // Системное приложение «Файлы» (DocumentsUI): ACTION_OPEN_DOCUMENT с несколькими, любой тип.
+  fun launchDocumentPicker() = pickDocuments.launch(arrayOf("*/*"))
+
   // The WebView we hand the back gesture to. Captured in onWebViewCreate; null until the shell builds it.
   private var webViewRef: WebView? = null
 
   // Системная строка над выделенным текстом («Вставить / Копировать…») — пока она открыта, «назад» закрывает её.
   private var textActionMode: ActionMode? = null
+
+  private var backCallback: OnBackPressedCallback? = null
+
+  // 🔴 Ход жеста AndroidX отдаёт только ВЕРХНЕМУ обработчику, а `AppPlugin` Tauri вешает свой позже нашего (при загрузке
+  // плагинов вместе с WebView): начало и ход уходили ему и пропадали (эмулятор, Android 15), отпускание доходило до нас
+  // кружным путём через его `activity.onBackPressed()`. На 14+ поднимаем свой наверх; WebView истории не ведёт (одна
+  // страница), так что ветка `goBack` плагина и раньше не срабатывала.
+  private fun raiseBackCallback() {
+    if (Build.VERSION.SDK_INT < 34) return
+    val cb = backCallback ?: return
+    cb.remove()
+    onBackPressedDispatcher.addCallback(this, cb)
+  }
+
+  // Жест «назад» в клиент: фаза, прогресс 0..1, край (0 — левый, 1 — правый), высота пальца в CSS-px.
+  private fun sendBackGesture(phase: String, e: BackEventCompat) {
+    val wv = webViewRef ?: return
+    val y = e.touchY / resources.displayMetrics.density
+    wv.evaluateJavascript("window.__gvBackGesture && window.__gvBackGesture('$phase', ${e.progress}, ${e.swipeEdge}, $y)", null)
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     installRendererGoneGuard()
@@ -45,7 +79,7 @@ class MainActivity : TauriActivity() {
     // The DECISION belongs to the web client: only it knows which sheet/panel/pane is open. We just
     // hand the gesture over; if the client has nothing to close it calls exitApp() itself. That also
     // sidesteps evaluateJavascript being async — we never need its answer.
-    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+    val back = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
         // 🔴 Открыта системная строка над полем («Вставить») — закрываем только её (#212, 29.09, S25): иначе
         // жест уходил клиенту, и тот уводил из беседы в список, а строка закрывалась заодно. У Telegram так же.
@@ -60,7 +94,29 @@ class MainActivity : TauriActivity() {
         }
         wv.evaluateJavascript("window.__gvBack && window.__gvBack()", null)
       }
-    })
+
+      // Предиктивная «назад» Android 14+ (G16): AndroidX сам вешает OnBackAnimationCallback (манифест —
+      // enableOnBackInvokedCallback у MainActivity) и шлёт сюда начало, ход и отмену жеста. Отдаём их клиенту
+      // (`window.__gvBackGesture` в androidBack.ts): решать, вести ли экран за пальцем, снова ему. Отпустил —
+      // handleOnBackPressed выше, тот же путь, что у кнопки. Старые Android сюда не заходят.
+      // Как у Telegram Android: LaunchActivity (OnBackAnimationCallback) -> ActionBarLayout.onBackStarted/onBackProgress.
+      override fun handleOnBackStarted(backEvent: BackEventCompat) {
+        if (Build.VERSION.SDK_INT < 34 || textActionMode != null) return
+        sendBackGesture("start", backEvent)
+      }
+
+      override fun handleOnBackProgressed(backEvent: BackEventCompat) {
+        if (Build.VERSION.SDK_INT < 34 || textActionMode != null) return
+        sendBackGesture("progress", backEvent)
+      }
+
+      override fun handleOnBackCancelled() {
+        if (Build.VERSION.SDK_INT < 34) return
+        webViewRef?.evaluateJavascript("window.__gvBackGesture && window.__gvBackGesture('cancel', 0, 0, 0)", null)
+      }
+    }
+    backCallback = back
+    onBackPressedDispatcher.addCallback(this, back)
 
     // NB: do NOT force AudioManager.MODE_IN_COMMUNICATION here. On Samsung it routes the mic through
     // the VoIP capture path with aggressive HARDWARE ECNS (echo-cancel + noise-suppress), which mutes
@@ -79,6 +135,10 @@ class MainActivity : TauriActivity() {
     // consumePendingDeepLink() on boot/foreground and navigates. Prefs (not memory) so a cold start
     // that reads the intent before the WebView bridge exists doesn't lose the target.
     stashDeepLink(intent)
+    // «Поделиться в GusVoice» (09.10, G79; Telegram `LaunchActivity.handleIntent`): файлы и текст из чужого приложения —
+    // копия в кеш (`MediaBridge.onShareIntent`), выбор беседы — клиент. Пересоздание активности (savedInstanceState) несёт
+    // ТО ЖЕ намерение — второй раз его не предлагаем.
+    if (savedInstanceState == null) media.onShareIntent(intent)
   }
 
   /**
@@ -127,6 +187,7 @@ class MainActivity : TauriActivity() {
     super.onNewIntent(intent)
     setIntent(intent)
     stashDeepLink(intent)
+    media.onShareIntent(intent)
   }
 
   /** Encode a deep-link into prefs: "dm:<id>", "ch:<serverId>:<channelId>" or "invite:<url>". */
@@ -148,6 +209,12 @@ class MainActivity : TauriActivity() {
     val channelId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_CHANNEL).orEmpty()
     val serverId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_SERVER).orEmpty()
     val instanceId = intent?.getStringExtra(UnifiedPushReceiver.EXTRA_INSTANCE).orEmpty()
+    // Тап по уведомлению беседы (Р1, G17): уведомление снято (`autoCancel`) — забыть и его историю, иначе следующий пуш
+    // покажет уже увиденные сообщения.
+    if (dmId.isNotEmpty()) ConversationNotifier.clear(this, dmId)
+    // «Ответить» входящего звонка (G73): снять уведомление звонка; клиент примет звонок по ссылке `call:<callId>:<dmId>`.
+    val answer = intent?.getStringExtra(CallNotifier.EXTRA_ANSWER).orEmpty()
+    if (answer.isNotEmpty()) CallNotifier.dismiss(this, answer)
     /*
      * Отдельный вид ссылки, а не лишнее поле в существующей (#139, F5): у старых сборок клиента
      * "fed:…" просто не совпадёт ни с одним разбором и будет пропущен, тогда как четвёртая часть в
@@ -155,6 +222,7 @@ class MainActivity : TauriActivity() {
      * так, чтобы сторона постарше молча не поняла, а не поняла неправильно.
      */
     val link = when {
+      answer.isNotEmpty() && dmId.isNotEmpty() -> "call:$answer:$dmId"
       dmId.isNotEmpty() -> "dm:$dmId"
       channelId.isNotEmpty() && instanceId.isNotEmpty() -> "fed:$instanceId:$serverId:$channelId"
       channelId.isNotEmpty() -> "ch:$serverId:$channelId"
@@ -192,26 +260,54 @@ class MainActivity : TauriActivity() {
     ViewCompat.setOnApplyWindowInsetsListener(content) { v, insets ->
       val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
       v.setPadding(v.paddingLeft, v.paddingTop, v.paddingRight, ime.bottom)
-      if (ime.bottom == 0) return@setOnApplyWindowInsetsListener insets
-      val out = WindowInsetsCompat.Builder(insets).setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
-      for (type in intArrayOf(
-        WindowInsetsCompat.Type.navigationBars(),
-        WindowInsetsCompat.Type.systemBars(),
-        WindowInsetsCompat.Type.tappableElement(),
-        WindowInsetsCompat.Type.mandatorySystemGestures(),
-      )) {
-        val i = insets.getInsets(type)
-        out.setInsets(type, Insets.of(i.left, i.top, i.right, 0))
+      val out = if (ime.bottom == 0) insets else {
+        val b = WindowInsetsCompat.Builder(insets).setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+        for (type in intArrayOf(
+          WindowInsetsCompat.Type.navigationBars(),
+          WindowInsetsCompat.Type.systemBars(),
+          WindowInsetsCompat.Type.tappableElement(),
+          WindowInsetsCompat.Type.mandatorySystemGestures(),
+        )) {
+          val i = insets.getInsets(type)
+          b.setInsets(type, Insets.of(i.left, i.top, i.right, 0))
+        }
+        b.build()
       }
-      out.build()
+      publishSafeArea(out)
+      out
     }
   }
 
-  // Layer 2: Tauri/wry installs NO WebChromeClient, so the WebView denies getUserMedia by default.
-  // We ADD one (via wry's official onWebViewCreate hook) — nothing existing is replaced. Grant only
-  // the media-capture resources the page requests; the OS grant above is the real gate.
+  /**
+   * 🔴 Системные панели — в страницу сами (08.10, S20+ с WebView 111 и тремя кнопками: панель вкладок уезжала под
+   * «назад / домой / недавние»). WebView до ~M135 при edge-to-edge кладёт в `env(safe-area-inset-*)` только вырез
+   * экрана, а строку состояния и панель навигации — нет (замер на эмуляторе: WebView 124 — низ 0, WebView 145 — 48 px).
+   * Поэтому те же вставки (системные панели ∪ вырез, при открытой клавиатуре низ уже обнулён выше) отдаём странице
+   * CSS-переменными `--gv-sat/-sar/-sab/-sal` в CSS-пикселях; CSS берёт `max(env(…), var(--gv-sa…))` — на новом
+   * WebView оба числа равны, двойного отступа нет. Пока страницы нет — значение ждёт в [safeAreaJson], клиент забирает
+   * его на старте мостом `GusVoiceNative.safeArea()` (и после перезагрузки страницы тоже).
+   */
+  @Volatile private var safeAreaJson = ""
+
+  private fun publishSafeArea(insets: WindowInsetsCompat) {
+    val i = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+    val d = resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
+    fun css(px: Int) = String.format(java.util.Locale.US, "%.2f", px / d)
+    val json = "{\"top\":${css(i.top)},\"right\":${css(i.right)},\"bottom\":${css(i.bottom)},\"left\":${css(i.left)}}"
+    if (json == safeAreaJson) return
+    safeAreaJson = json
+    webViewRef?.evaluateJavascript("window.__gvSafeArea && window.__gvSafeArea($json)", null)
+  }
+
+  // Layer 2: grant the media-capture resources the page requests; the OS grant above is the real gate.
+  // ⚠️ 05.10: wry 0.55.1 ставит СВОЙ RustWebChromeClient сразу ПОСЛЕ этого хука (main_pipe.rs: setWebView →
+  // onWebViewCreate → … → setWebChromeClient), поэтому клиент ниже заменяется и в работе не участвует: разрешения и окно
+  // выбора файлов (onShowFileChooser, несколько файлов — через ClipData) обслуживает клиент wry. Оставлен на случай
+  // другого порядка в будущих wry. «Выбрал файлы — ничего не добавилось» (05.10) — ошибка не здесь, а в клиенте
+  // (MessagePane.addFiles читал уже очищенный FileList).
   override fun onWebViewCreate(webView: WebView) {
     webViewRef = webView
+    webView.post { raiseBackCallback() }
     webView.webChromeClient = object : WebChromeClient() {
       override fun onPermissionRequest(request: PermissionRequest) {
         runOnUiThread {
@@ -229,6 +325,22 @@ class MainActivity : TauriActivity() {
     // our own bundled dist (no untrusted/remote page can reach this interface). Added here — before the
     // initial page load — so window.GusVoiceNative exists by the time the client runs.
     webView.addJavascriptInterface(NativeBridge(), "GusVoiceNative")
+
+    // Объект `GusVoiceMedia` для галереи, «Файлов» и меню фото — байты сообщениями ArrayBuffer (MediaBridge.kt). Тоже до
+    // первой загрузки: объект вставляется в документы, которые начнут грузиться после этого вызова.
+    media.attach(webView)
+  }
+
+  override fun onResume() {
+    super.onResume()
+    // Android 14+: один раз предложить «Полноэкранные уведомления» (входящий звонок поверх блокировки).
+    // Не посреди «Ответить» на звонок (приложение открыто принять его) — тогда не лезем с вопросом.
+    if (intent?.hasExtra(CallNotifier.EXTRA_ANSWER) != true) FullScreenAsk.maybeAsk(this)
+  }
+
+  override fun onDestroy() {
+    media.shutdown()
+    super.onDestroy()
   }
 
   inner class NativeBridge {
@@ -243,6 +355,24 @@ class MainActivity : TauriActivity() {
     fun stopVoiceService() {
       VoiceForegroundService.stop(this@MainActivity)
     }
+
+    // Системные вставки в CSS-пикселях (`publishSafeArea`): JSON {top,right,bottom,left} или "" до первого прохода.
+    @JavascriptInterface
+    fun safeArea(): String = safeAreaJson
+
+    // «Поделиться в GusVoice» со старым WebView (D22, без объекта `GusVoiceMedia`): пришедший текст — JSON или "" (`MediaBridge.legacyShare`).
+    @JavascriptInterface
+    fun sharedText(): String = media.legacySharedJson()
+
+    @JavascriptInterface
+    fun sharedTextDrop(token: String) {
+      media.legacySharedDrop(token)
+    }
+
+    // Файл из ленты со старым WebView (без `GusVoiceMedia`, 09.10): JSON {url, name, mime, then: save|open} → системный
+    // DownloadManager в «Загрузки/GusVoice»; только ссылки «Скачать» своих инстансов (`LegacyDownloads`). Ответ — код.
+    @JavascriptInterface
+    fun downloadFile(json: String): String = LegacyDownloads.start(this@MainActivity, json)
 
     // Back gesture (#157): the client calls this when it has nothing left to close. Задача уходит В
     // ФОН, а не закрывается: голос переживает сворачивание (микрофонная служба переднего плана), и
@@ -324,6 +454,15 @@ class MainActivity : TauriActivity() {
     } catch (e: Exception) {
       android.util.Log.w("GusVoicePush", "pushKeys failed", e)
       ""
+    }
+
+    // Уведомления как у Telegram (Р1, G17): признаки для регистрации пуша и адрес/токен для «Ответить» из шторки.
+    @JavascriptInterface
+    fun notifCaps(): String = NotifAuth.CAPS_JSON
+
+    @JavascriptInterface
+    fun setNotifAuth(json: String) {
+      NotifAuth.set(this@MainActivity, json)
     }
 
     @JavascriptInterface

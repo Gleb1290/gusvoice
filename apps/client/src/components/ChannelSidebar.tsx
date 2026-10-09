@@ -38,6 +38,7 @@ import { economyVisible } from '../economyVisible';
 
 export function ChannelSidebar() {
   const bootstrap = useStore((s) => s.bootstrap);
+  const switching = useStore((s) => s.switching);
   // Корону берём ОДИН раз на компонент: хук нельзя звать внутри списка участников.
   const crownId = useCrownId(bootstrap?.server.id);
   // Подсказки «кто кого типнул» — живут в сторе и гаснут сами (#117).
@@ -122,7 +123,8 @@ export function ChannelSidebar() {
   if (!bootstrap) {
     return (
       <div className="channels">
-        <div className="center muted">Выбери сервер</div>
+        {/* Идёт переход в другой инстанс (01.10, экран больше не закрыт загрузкой) — пусто, а не «Выбери сервер». */}
+        {switching ? <div className="center" /> : <div className="center muted">Выбери сервер</div>}
         {voice && <VoicePanel />}
         <SelfVoiceBar />
       </div>

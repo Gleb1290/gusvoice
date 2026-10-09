@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { after, before, beforeEach, test } from 'node:test';
+import ts from 'typescript';
 import {
   FED_ERRORS,
   FED_EVENTS,
@@ -25,6 +28,8 @@ let receiveEvents: typeof import('../src/federation/eventStream.js').receiveEven
 let resolveMentionedMembers: typeof import('../src/push.js').resolveMentionedMembers;
 
 before(async () => {
+  // Нужна реальная запись события в исходящую очередь для проверки payload жалобы.
+  process.env.FEDERATION_ENABLED = 'true';
   t = await createTestDb();
   preview = await import('../src/federation/invitePreview.js');
   quota = await import('../src/federation/guestQuota.js');
@@ -254,6 +259,74 @@ test('повтор report_id дополняет ту же жалобу без д
   assert.deepEqual(rows.rows[0]?.evidence.map((e) => e.text), ['e1', 'e2', 'e3', 'e4', 'e5']);
 });
 
+test('две исходящие жалобы на человека склеивают причину и в строке, и в событии соседу', async () => {
+  // Без проверки payload локальная запись могла бы выглядеть правильно, а держатель соседнего сервера видел бы только вторую причину.
+  await seedLink('peer');
+  const sender = await import('../src/federation/instanceBan.js');
+  const now = Date.now();
+  const first = await sender.sendReport({ instanceId: 'peer', reportedUserId: 'guest', action: 'server_ban', serverName: 'Стая', reason: 'r1', evidence: [], now });
+  assert.equal(first.ok, true);
+  const second = await sender.sendReport({ instanceId: 'peer', reportedUserId: 'guest', action: 'server_ban', serverName: 'Стая', reason: 'r2', evidence: [], now: now + 1 });
+  assert.equal(second.ok, true);
+  if (!first.ok || !second.ok) assert.fail('обе жалобы должны быть приняты');
+  assert.equal(first.reportId, second.reportId, 'повтор должен приклеиться к исходной жалобе');
+  const out = await t.raw.query<{ report_id: string; reason: string }>("SELECT report_id, reason FROM federation_reports WHERE direction = 'out'");
+  assert.deepEqual(out.rows, [{ report_id: first.reportId, reason: 'r1\nr2' }]);
+  const events = await t.raw.query<{ kind: string; payload: { report_id: string; reason: string } }>(
+    "SELECT kind, payload FROM federation_outbox WHERE instance_id = 'peer' ORDER BY seq",
+  );
+  assert.equal(events.rows.length, 2, 'обе отправки отражены в очереди событий');
+  assert.deepEqual(events.rows.map((row) => [row.kind, row.payload.report_id, row.payload.reason]), [
+    [FED_EVENTS.reportCreate, first.reportId, 'r1'],
+    [FED_EVENTS.reportCreate, first.reportId, 'r1\nr2'],
+  ]);
+
+  // Мутант прежнего поведения (`input.reason ?? existing.reason`) обязан терять r1 и провалить ту же проверку.
+  await seedLink('peer-mutant');
+  const instanceBanSource = readFileSync(new URL('../src/federation/instanceBan.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const mutatedSource = instanceBanSource.replace(
+    'const reason = mergeReportReason(existing.reason, input.reason);',
+    'const reason = input.reason ?? existing.reason;',
+  );
+  assert.notEqual(mutatedSource, instanceBanSource, 'мутант заменил склейку на прежнее затирание');
+  const deps: Record<string, unknown> = {
+    'node:crypto': await import('node:crypto'), 'drizzle-orm': await import('drizzle-orm'),
+    '@gusvoice/shared': await import('@gusvoice/shared'), '../db/index.js': await import('../src/db/index.js'),
+    '../db/schema.js': await import('../src/db/schema.js'), '../env.js': await import('../src/env.js'),
+    '../auth.js': await import('../src/auth.js'), '../livekit.js': await import('../src/livekit.js'),
+    '../realtime.js': await import('../src/realtime.js'), './guestRules.js': await import('../src/federation/guestRules.js'),
+    './guestMembership.js': await import('../src/federation/guestMembership.js'), './eventStream.js': await import('../src/federation/eventStream.js'),
+    './guestAccess.js': await import('../src/federation/guestAccess.js'),
+  };
+  const mutantModule = { exports: {} as Record<string, unknown> };
+  const mutantCode = ts.transpileModule(mutatedSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  runInNewContext(mutantCode, { module: mutantModule, exports: mutantModule.exports, Date, Map, Set, Buffer, Promise,
+    require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `добавлена зависимость мутанта ${id}`); return deps[id]; } });
+  const mutantSender = mutantModule.exports as unknown as typeof sender;
+  const mutantNow = Date.now();
+  await mutantSender.sendReport({ instanceId: 'peer-mutant', reportedUserId: 'guest-mutant', action: 'server_ban', serverName: 'Стая', reason: 'm1', evidence: [], now: mutantNow });
+  await mutantSender.sendReport({ instanceId: 'peer-mutant', reportedUserId: 'guest-mutant', action: 'server_ban', serverName: 'Стая', reason: 'm2', evidence: [], now: mutantNow + 1 });
+  const mutantRow = await t.raw.query<{ reason: string }>("SELECT reason FROM federation_reports WHERE direction = 'out' AND instance_id = 'peer-mutant'");
+  assert.throws(() => assert.deepEqual(mutantRow.rows[0]?.reason, 'm1\nm2'), assert.AssertionError,
+    'мутант затирает m1 и должен провалить ожидание склейки');
+});
+
+test('разные входящие report_id одного человека добавляют причины, а не затирают первую', async () => {
+  // Разные ID — это отдельные жалобы соседа на того же человека; в журнале держателя должны сохраниться обе причины.
+  await seedLink('peer');
+  await t.raw.exec("INSERT INTO users (id, username, display_name, password_hash) VALUES ('reported', 'reported', 'Reported', 'hash')");
+  const incoming = (eventId: string, seq: number, reportId: string, reason: string) => serializeFedEvent({
+    eventId, seq, kind: FED_EVENTS.reportCreate, createdAt: 10_000 + seq,
+    payload: { report_id: reportId, reported_user_id: 'reported', action: 'server_ban', reason, evidence: [] },
+  });
+  await receiveEvents('peer', [incoming('different-a', 1, 'report-A', 'A'), incoming('different-b', 2, 'report-B', 'B')]);
+  const rows = await t.raw.query<{ report_id: string; reason: string }>(
+    "SELECT report_id, reason FROM federation_reports WHERE direction = 'in' AND instance_id = 'peer'",
+  );
+  assert.equal(rows.rows.length, 1, 'разные ID склеиваются в одну запись для человека');
+  assert.deepEqual(rows.rows[0], { report_id: 'report-A', reason: 'A\nB' });
+});
+
 test('событие членства принимается только после нашего поручительства и соблюдает предел индекса', async () => {
   // Ловит возможность соседа объявить гостем любого нашего человека и бесконечно растить его индекс.
   await seedServer();
@@ -404,9 +477,8 @@ test('удаление дома обезличивает гостя и сним�
        'peer', 'home-u', 'u', 9, 4);
     INSERT INTO server_members (server_id, user_id, state) VALUES ('server', 'shadow', 'active')
   `);
-  // В этом процессе Redis — только внешняя best-effort рассылка. Закрываем соединение, чтобы тест
-  // проверял состояние базы, не ожидая несуществующий интеграционный Redis.
-  (await import('../src/realtime.js')).redisPub.disconnect();
+  // Отказ внешнего Redis не должен оставлять publish в вечной offline-очереди при reconnecting.
+  (await import('../src/realtime.js')).redisPub.options.enableOfflineQueue = false;
   assert.equal(await profile.applyGuestProfile('peer', {
     userId: 'home-u', updatedAt: 12, removed: 'deleted',
   }), true);

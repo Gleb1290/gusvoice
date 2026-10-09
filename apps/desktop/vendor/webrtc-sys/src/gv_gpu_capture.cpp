@@ -724,6 +724,10 @@ void set_bitrate_hint(int32_t start_bps, int32_t min_bps) {
   livekit::SetBitrateHint(start_bps, min_bps);
 }
 
+void set_screen_encoder_keyframe_scale(int32_t keyframe_scale) {
+  livekit::SetScreenEncoderKeyframeScale(keyframe_scale);
+}
+
 rust::String native_encode_fail_reason() {
   return rust::String(livekit::NativeEncodeFailReason());
 }

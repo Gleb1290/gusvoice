@@ -1,4 +1,3 @@
-import { api } from './api';
 import { finiteDeep, nativeEncodeStatsFrom, type EncodeStats } from './diagRules';
 import { isDesktop } from './hotkeys';
 import { gvScreenShareStats } from './nativeScreenShare';
@@ -8,7 +7,7 @@ import { diagDecision, getDiagConsent } from './diagConsent';
 import { diagVisible } from './diagVisible';
 import { takeUiMeters, watchLongTasks } from './uiMeters';
 import { isGameForeground, isWindowCovered, windowCoverPct } from './windowCovered';
-import { useStore } from './store';
+import { useStore, voiceApiOf } from './store';
 
 /**
  * Сбор диагностики во время показа экрана (#100 — «на Win10 отваливаются Alt+Tab и клавиша Win»).
@@ -170,6 +169,14 @@ type SubStats = {
   jitter_ms: number;
   /** Кадров в секунду у самого медленного принимаемого потока — «у меня всё тормозит» в цифрах. */
   fps_min: number;
+  /**
+   * «Чёрный ящик» зрителя (06.10, #207), накопительно по всем входящим видео: заморозки картинки
+   * (число и секунды), средний QP принятого (20–30 — чётко, 40+ — мыло) и самая низкая высота кадра.
+   */
+  freezes?: number;
+  freeze_s?: number;
+  qp?: number;
+  h_min?: number;
 };
 
 /** `sharing` размечает срез по фазе: 0 — просто сидим в голосе, 1 — идёт показ. Ради этой разметки
@@ -203,6 +210,8 @@ let sendFailsRow = 0;
 let sendFailsTotal = 0;
 let startedAt = 0;
 let sessionId = '';
+/** Инстанс голоса этой сессии (01.10): последняя порция уходит уже после выхода, когда `store.voice` другой или пуст. */
+let sessionInstanceId: string | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 const listeners = new Set<() => void>();
 
@@ -325,11 +334,19 @@ async function captureStats(): Promise<CaptureStats | null> {
   };
 }
 
+/**
+ * Прошлый ответ оболочки (06.10, «чёрный ящик»): из разности с ним — средний QP и битрейты «за окно»
+ * между срезами. Сбрасывается на смене фазы показа — разность через перезапуск показа врала бы.
+ */
+let lastNative: Awaited<ReturnType<typeof gvScreenShareStats>> = null;
+
 async function nativeEncodeStats(): Promise<EncodeStats | null> {
   // Возвращает null, когда нативного показа нет, — это и есть признак «брать браузерный путь».
   const n = await gvScreenShareStats().catch(() => null);
   if (!n) return null;
-  return nativeEncodeStatsFrom(n);
+  const out = nativeEncodeStatsFrom(n, lastNative);
+  lastNative = n;
+  return out;
 }
 
 /** Нативный показ или браузерный — источник выбирается сам, по наличию нативной сессии. */
@@ -368,18 +385,20 @@ function gpuRenderer(): string {
   }
 }
 
-export async function startDiag(room?: unknown): Promise<void> {
+export async function startDiag(room?: unknown, voiceInstanceId: string | null = null): Promise<void> {
   if (!isDesktop()) return; // счётчики есть только в нативной сборке
   // 🔴 Два разрешения — инстанса и человека (#113). Не сошлись оба — не собираем ВООБЩЕ, а не
   // «собираем и не отправляем»: человек, снявший галочку, вправе рассчитывать, что приложение
   // перестанет лазить в его систему. Разбор — в `diagConsent.ts`.
   if (diagDecision(diagVisible(useStore.getState().user?.diagPreview, config.diagEnabled), getDiagConsent()) !== 'collect') return;
   if (startedAt) return; // уже идёт: повторный вход в тот же канал не начинает новую сессию
+  sessionInstanceId = voiceInstanceId;
   stopDiagTimer();
   samples = [];
   marks = [];
   shares = [];
   sharing = false;
+  lastNative = null;
   watchedRoom = room ?? null;
   startedAt = Date.now();
 
@@ -448,6 +467,11 @@ async function subStats(): Promise<SubStats | null> {
     let lost = 0;
     let jitter = 0;
     let fpsMin = Infinity;
+    let freezes = 0;
+    let freezeS = 0;
+    let qpSum = 0;
+    let decoded = 0;
+    let hMin = Infinity;
     report.forEach((r: Record<string, unknown>) => {
       if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
       streams += 1;
@@ -456,6 +480,16 @@ async function subStats(): Promise<SubStats | null> {
       jitter = Math.max(jitter, ((r.jitter as number) ?? 0) * 1000);
       const f = (r.framesPerSecond as number) ?? 0;
       if (f > 0) fpsMin = Math.min(fpsMin, f);
+      freezes += (r.freezeCount as number) ?? 0;
+      freezeS += (r.totalFreezesDuration as number) ?? 0;
+      // QP считаем только там, где его отдают: без `qpSum` (у Chrome на H.264 с аппаратным декодером его
+      // нет вовсе, стенд 06.10) или с нулём поток в среднее не входит.
+      if (typeof r.qpSum === 'number' && r.qpSum > 0) {
+        qpSum += r.qpSum;
+        decoded += (r.framesDecoded as number) ?? 0;
+      }
+      const h = (r.frameHeight as number) ?? 0;
+      if (h > 0) hMin = Math.min(hMin, h);
     });
     if (!streams) return null;
     return {
@@ -464,6 +498,10 @@ async function subStats(): Promise<SubStats | null> {
       packets_lost: lost,
       jitter_ms: Math.round(jitter * 10) / 10,
       fps_min: Number.isFinite(fpsMin) ? Math.round(fpsMin * 10) / 10 : 0,
+      freezes,
+      freeze_s: Math.round(freezeS * 10) / 10,
+      qp: decoded > 0 ? Math.round((qpSum / decoded) * 10) / 10 : 0,
+      h_min: Number.isFinite(hMin) ? hMin : 0,
     };
   } catch {
     return null;
@@ -518,6 +556,7 @@ export function setDiagSharing(ctx: Record<string, unknown> | null): void {
   const on = ctx !== null;
   if (on === sharing) return;
   sharing = on;
+  lastNative = null;
   if (on) shares.push({ ...ctx, t: Date.now() - startedAt });
   restartTimer();
   void tick();
@@ -577,7 +616,8 @@ async function flush(final: boolean): Promise<void> {
     samples: sentSamples,
   };
   try {
-    await api.sendDiagReport(payload);
+    // В инстанс ГОЛОСА (01.10): пока человек смотрит другой инстанс, отчёт о звонке ушёл бы туда, где звонка нет.
+    await voiceApiOf({ instanceId: sessionInstanceId }).sendDiagReport(payload);
     sendFailsRow = 0;
   } catch (e) {
     sendFailsRow += 1;
@@ -612,6 +652,7 @@ export async function stopDiagAndUpload(): Promise<void> {
   sharing = false;
   shares = [];
   watchedRoom = null;
+  lastNative = null;
   notify();
   await sent;
 }

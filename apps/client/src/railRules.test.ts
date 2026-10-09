@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
+import ts from 'typescript';
 import type { Instance } from './configRules.js';
-import { buildRail, orderedInstances, type RailInput, type RailPlace } from './railRules.js';
+import { buildRail, groupHeadTitle, orderedInstances, serverTitle, type RailInput, type RailPlace } from './railRules.js';
 
 const inst = (id: string, order: number, patch: Partial<Instance> = {}): Instance => ({
   id,
@@ -74,5 +77,29 @@ describe('группы инстансов в рейле', () => {
     const result = buildRail(input({ instances: [home, empty, guest], activeId: guest.id }));
     assert.deepEqual(result.groups.map((g) => g.instanceId), ['home', 'guest']);
     assert.equal(result.showHeaders, true);
+  });
+
+  it('потеря доверия говорит починить связь, обычная недоступность предлагает подождать, замок важнее', () => {
+    // При смене ключа ожидание бесполезно: связь чинится админами; закрытый сервер остаётся отдельным отказом.
+    const baseGroup = { key: 'g', instanceId: 'g', title: 'Сосед', guest: true, live: false, reachable: false,
+      place: place({ linkState: 'trust-lost' }), servers: [] };
+    const server = { id: 's', name: 'Дом', closed: false, unread: 0, mentions: 0 };
+    assert.match(serverTitle(baseGroup, server), /связь с «Сосед» разорвана/);
+    assert.match(groupHeadTitle(baseGroup), /связь разорвана/);
+    const down = { ...baseGroup, place: place({ linkState: 'paused' }) };
+    assert.match(serverTitle(down, server), /сейчас недоступен/);
+    assert.match(groupHeadTitle(down), /сейчас недоступен/);
+    assert.equal(serverTitle(baseGroup, { ...server, closed: true }), 'Дом — закрыт держателем');
+    const original = readFileSync(new URL('./railRules.ts', import.meta.url), 'utf8');
+    const changed = original.replace('if (trustLost(group)) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;', 'if (false) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;');
+    assert.notEqual(changed, original, 'реальный рейл отдельно подписывает потерю доверия');
+    const mod = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module: mod, exports: mod.exports, require: (id: string) => {
+        assert.equal(id, './configRules'); return { serverHost: (url: string) => new URL(url).hostname.replace(/^api\./, '') };
+      } });
+    const mutant = mod.exports as typeof import('./railRules.js');
+    assert.throws(() => assert.match(mutant.serverTitle(baseGroup, server), /связь с «Сосед» разорвана/), assert.AssertionError,
+      'мутант без специальной подписи trust-lost обязан провалить контракт');
   });
 });

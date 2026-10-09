@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
 import { clearEvidence, useEvidence } from '../reportEvidence';
 import { toast, toastError } from '../toast';
 import { Icon } from './Icon';
@@ -55,7 +55,7 @@ export function InstanceBanModal({
   async function submit() {
     setBusy(true);
     try {
-      const res = await api.federationBan({
+      const res = await adminApi().federationBan({
         instanceId,
         userId: user.userId,
         reason: reason.trim() || undefined,

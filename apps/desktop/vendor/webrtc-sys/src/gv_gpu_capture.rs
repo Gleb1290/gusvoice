@@ -22,6 +22,9 @@ pub mod ffi {
         fn gpu_capture_supported() -> bool;
         /// Подсказка оценщику канала WebRTC для следующих соединений (#207). 0 — не трогать.
         fn set_bitrate_hint(start_bps: i32, min_bps: i32);
+        /// Множитель опорного кадра NVENC для следующих кодировщиков показа (06.10). 0 — умолчание
+        /// NVENC, как было до 06.10 (опорный кадр размером с обычный).
+        fn set_screen_encoder_keyframe_scale(keyframe_scale: i32);
         /// Почему кодировщик не взял кадр из видеопамяти (код -2 у `capture`).
         fn native_encode_fail_reason() -> String;
 

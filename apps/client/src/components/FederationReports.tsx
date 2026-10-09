@@ -1,6 +1,6 @@
 import type { FederationBanRow, FederationReportRow } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
 import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
 import { Icon } from './Icon';
@@ -42,7 +42,7 @@ export function FederationReports() {
 
   async function load() {
     try {
-      const [r, b] = await Promise.all([api.federationReports(), api.federationBans()]);
+      const [r, b] = await Promise.all([adminApi().federationReports(), adminApi().federationBans()]);
       setReports(r.reports);
       setBans(b.bans);
     } catch (e) {
@@ -58,7 +58,7 @@ export function FederationReports() {
     if (!replyText.trim()) return;
     setBusy(true);
     try {
-      await api.federationReplyReport(id, replyText.trim());
+      await adminApi().federationReplyReport(id, replyText.trim());
       setReplyTo(null);
       setReplyText('');
       toast('success', 'Ответ отправлен');
@@ -79,7 +79,7 @@ export function FederationReports() {
     if (!ok) return;
     setBusy(true);
     try {
-      await api.federationUnban(b.instanceId, b.userId);
+      await adminApi().federationUnban(b.instanceId, b.userId);
       toast('success', 'Запрет снят');
       await load();
     } catch (e) {

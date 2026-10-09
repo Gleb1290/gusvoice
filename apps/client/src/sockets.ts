@@ -1,13 +1,32 @@
 import {
+  CAP_CONV1,
+  FEATURE_GROUPS1,
+  FEATURE_PRESENCE4,
+  FEATURE_PRESENCE5,
+  FEATURE_BIGREACT1,
   type GatewayClientMessage,
   type GatewayServerMessage,
   mentionsMe,
+  normalizeNotifyView,
+  parseTypingAction,
   type PresenceServerMessage,
+  type TypingAction,
+  typingActionField,
+  typingActionToServer,
+  FEATURE_TYPING2,
   voicePublishBits,
 } from '@gusvoice/shared';
+import { useCall } from './callStore';
+import { serverCalls } from './callView';
+import { useDmStickers } from './dmStickers';
+import { useDmFolders } from './dmFolders';
+import { peerNameNow } from './peerName';
+import { useContacts } from './contacts';
+import { applyRemoteGifs } from './savedGifs';
 import { api, getToken } from './api';
 import { isFeedOnScreen } from './channelRules';
-import { dmIncomingDecision } from './dmListRules';
+import { dmIncomingDecision, dmMuteOf, dmMutedDecision, dmSilentDecision, muteActive, muteSoundOff } from './dmListRules';
+import { feedCovered } from './readByView';
 import { notifyLevel } from './channelPrefs';
 import { isMobile } from './hotkeys';
 import { shouldPulseWallet } from './coinsCue';
@@ -28,17 +47,24 @@ function currencyNow(): string {
   return (s.bootstrap ? s.economy[s.bootstrap.server.id]?.currencyName : null) ?? 'монет';
 }
 import { config, gatewayWsUrl } from './config';
+import { resetGatewayLive, setGatewayLive } from './connState';
 import { flashWindow } from './flashWindow';
 import { shouldNotifyCoin } from './coinNotifyRules';
 import {
   authorName,
+  channelNoticeGroup,
+  clearOsNotifications,
   coinNotifyLevel,
   messagePreview,
   osNotify,
   osNotifyLevel,
   osNotifyRaw,
+  setNotifyPrefs,
   windowFocused,
 } from './notifications';
+import { serverPush2 } from './convSyncRules';
+import { presentNow, watchPresence } from './presenceVisibility';
+import { setBgPresent } from './bgGateways';
 import { passesThrottle, shouldOsNotify } from './notifyRules';
 import { CONNECT_TIMEOUT_MS, PING_MS, socketStale } from './socketHealth';
 import { playClip, playSound } from './sounds';
@@ -53,6 +79,15 @@ import { playClip, playSound } from './sounds';
  */
 type GooseOffer = { serverId: string; offerId: string };
 const gooseListeners = new Set<(o: GooseOffer) => void>();
+
+
+/**
+ * Голос на ЭТОМ сервере этого инстанса (01.10): голос переживает переход между инстансами и может идти на другом
+ * сервере, пока человек смотрит этот, — событие про этот сервер не должно рвать чужой голос.
+ */
+function voiceOnServer(v: VoiceConnection | null, serverId: string): boolean {
+  return !!v && voiceIsHere(v) && (v.serverId === null || v.serverId === serverId);
+}
 
 export function onGooseOffer(fn: (o: GooseOffer) => void): () => void {
   gooseListeners.add(fn);
@@ -81,12 +116,13 @@ import {
   resetSubs,
   wantSub,
 } from './gatewaySubs';
-import { useStore } from './store';
+import { useStore, voiceIsHere, type VoiceConnection } from './store';
 import { fireEffect } from './effectsBus';
 import { pulseChip } from './effectsDom';
 import { shouldPlayTipCue } from './tipMode';
 import { toast, toastError } from './toast';
-import { noteTyping } from './typing';
+import { clearDmActivity, noteDmActivity } from './dmOnline';
+import { dropTyping, noteTyping } from './typing';
 
 let gateway: WebSocket | null = null;
 let presence: WebSocket | null = null;
@@ -221,6 +257,10 @@ export function connectGateway(): void {
   const token = getToken();
   if (!token) return;
   installResumeWatchers();
+  watchNotifyPrefs();
+  watchPresence(sendGatewayVisible);
+  watchPresence(setBgPresent);
+  setBgPresent(presentNow());
   /**
    * 🔴 **Обработчики говорят со СВОИМ сокетом, а не с модульной переменной** (18.09, §5.7).
    *
@@ -246,7 +286,19 @@ export function connectGateway(): void {
       return;
     }
     gatewayLastRecv = Date.now();
-    socket.send(JSON.stringify({ t: 'identify', token }));
+    /* ЛС этап 2: режим бесед объявляет шлюзу `conv1` — и получает `conv.change` вместо `dm.*`. Режим решён в `bootstrap`
+       ДО подключения и посреди сессии не меняется, поэтому соединение никогда не остаётся без обеих форм событий. */
+    const caps = useStore.getState().convActive ? [CAP_CONV1] : undefined;
+    // `presence5` (D4, 08.10): получать `online.away` — «не в сети для ЛС» при открытом сокете. Тоже только режиму бесед.
+    caps?.push(FEATURE_PRESENCE5);
+    // `typing2` (09.10): получать вид действия `round` («записывает видеосообщение»); без него шлюз отдаёт прежнее `voice`.
+    caps?.push(FEATURE_TYPING2);
+    // `groups1` (07.10): события групп ЛС — только соединению с беседами, которое их понимает.
+    // `presence4` (08.10): получать `online.dm` — «Невидимый» в сети для ЛС. `bigreact1` (08.10, G43): эффект `reaction.big`.
+    socket.send(
+      // `hidden` (D4, 08.10): сокет открылся, когда приложение уже в фоне (переподключение свёрнутого Android) — «в сети» не считать.
+      JSON.stringify({ t: 'identify', token, ...(caps ? { caps: [...caps, FEATURE_GROUPS1, FEATURE_PRESENCE4, FEATURE_BIGREACT1] } : {}), ...(presentNow() ? {} : { hidden: true }) }),
+    );
     /**
      * 🔴 **Подписки уходят на `ready`, а НЕ здесь** (#126). Раньше `subscribe` летел вплотную за
      * `identify`, в том же кадре, — а сервер разбирает `identify` асинхронно и такой `subscribe`
@@ -290,7 +342,16 @@ export function connectGateway(): void {
        * и восстановление после обрыва, ради которого `want` переживает переподключение.
        */
       case 'ready': {
+        // Связь есть — в шапке беседы снова статус собеседника, а не «Подключение…» (`connState.ts`).
+        setGatewayLive(true);
+        // Новое соединение — «за устройством сидят» заново (G38): прежняя отметка осталась у закрытого сокета.
+        activeOn = false;
+        if (windowFocused()) noteGatewayActive(true);
         for (const id of subsReady(subs)) sendSubscribe(id);
+        // Беседы: догнать всё, что было без нас, по номеру журнала (и на первом подключении — загрузить список).
+        if (store.convActive) void store.convOnReady();
+        // Звонки (С5, `calls1`): устройство подключилось посреди звонка — узнать, не звонят ли мне сейчас.
+        if (serverCalls(store.serverFeatures)) void useCall.getState().resync();
         return;
       }
       /**
@@ -304,6 +365,8 @@ export function connectGateway(): void {
         return;
       }
       case 'message.create': {
+        // Автор дописал и отправил — его «печатает…» гаснет сразу, а не через 5 с срока (06.10, как у Telegram).
+        dropTyping(msg.channelId, msg.message.author.id);
         if (msg.message.author.id !== store.user?.id) {
           // Per-channel level: 'none' stays silent, 'mentions' reacts only to @-mentions, 'all' to any.
           const channelLevel = notifyLevel(msg.channelId);
@@ -350,6 +413,9 @@ export function connectGateway(): void {
               mentioned ? `${authorName(msg.message)} упомянул вас в ${where}` : `${authorName(msg.message)} в ${where}`,
               messagePreview(msg.message),
               () => void useStore.getState().openChannel(msg.channelId),
+              false,
+              // Тег беседы (как tweb): новое сообщение канала заменяет прежнее; открытие канала их закрывает (`store.openChannel`).
+              { group: channelNoticeGroup(msg.channelId) },
             );
           }
         }
@@ -387,7 +453,7 @@ export function connectGateway(): void {
           .refreshBootstrap(msg.serverId)
           .then(() => {
             const s = useStore.getState();
-            if (s.voice && voicePublishBits(s.bootstrap?.permissions) !== before) void s.refreshVoiceToken();
+            if (voiceOnServer(s.voice, msg.serverId) && voicePublishBits(s.bootstrap?.permissions) !== before) void s.refreshVoiceToken();
           })
           .catch((err: Error & { status?: number }) => {
             // 🔴 Нас больше нет на этом сервере: кик, бан или собственный выход (#92). До #91 кик
@@ -398,7 +464,7 @@ export function connectGateway(): void {
             if (err.status !== 403 && err.status !== 404) return;
             const s = useStore.getState();
             if (s.currentServerId !== msg.serverId) return;
-            if (s.voice) s.leaveVoice();
+            if (voiceOnServer(s.voice, msg.serverId)) s.leaveVoice();
             useStore.setState({ currentServerId: null, bootstrap: null, currentChannelId: null });
             s.setView('dm');
           });
@@ -420,8 +486,8 @@ export function connectGateway(): void {
          */
         const name = store.servers.find((x) => x.id === msg.serverId)?.name ?? 'сервер';
         const s = useStore.getState();
+        if (voiceOnServer(s.voice, msg.serverId)) s.leaveVoice();
         if (s.currentServerId === msg.serverId) {
-          if (s.voice) s.leaveVoice();
           useStore.setState({ currentServerId: null, bootstrap: null, currentChannelId: null });
           s.setView('dm');
         }
@@ -445,8 +511,17 @@ export function connectGateway(): void {
         return;
       }
       case 'online.snapshot':
-        return store.setOnlineSnapshot(msg.users);
+        return store.setOnlineSnapshot(msg.users, msg.dmOnly, msg.dmAway);
+      case 'online.dm':
+        // `presence4`: «Невидимый» в сети для ЛС (на серверах его точки нет). Вышел — локальное «в сети» тоже снимается.
+        if (!msg.online && !store.onlineUsers.includes(msg.userId)) clearDmActivity(msg.userId);
+        return store.setDmOnline(msg.userId, msg.online);
+      case 'online.away':
+        // `presence5` (D4, решение 42): сокет открыт, но для ЛС «не в сети» — приложение скрыто или простаивает. Сервера не трогаем.
+        if (msg.away) clearDmActivity(msg.userId);
+        return store.setDmAway(msg.userId, msg.away);
       case 'online.update':
+        if (!msg.online) clearDmActivity(msg.userId);
         return store.setOnlineUpdate(msg.userId, msg.online);
       case 'user.status':
         return store.applyUserStatus(msg.userId, msg.status, msg.customStatus);
@@ -489,6 +564,9 @@ export function connectGateway(): void {
       case 'poll.counts':
         return store.applyPollCounts(msg.channelId, msg.messageId, msg.options);
       case 'voice.move': {
+        // Голос идёт на ДРУГОМ инстансе (01.10) — перемещение касается другого устройства этой учётки здесь, а не нас:
+        // иначе звонок там молча закончился бы, а LiveKit выкинул бы телефон по дублю личности.
+        if (store.voice && !voiceIsHere(store.voice)) return;
         // A moderator moved us — reconnect to the new channel's room (same path as joining it).
         const ch = store.bootstrap?.channels.find((c) => c.id === msg.channelId);
         void store
@@ -502,21 +580,41 @@ export function connectGateway(): void {
       case 'dm.channel':
         return store.upsertDm(msg.channel);
       case 'dm.create': {
+        // Собеседник отправил — его «печатает…» гаснет сразу (06.10), как в `message.create`.
+        dropTyping(msg.channelId, msg.message.author.id);
         // Что делать с входящим — целиком в `dmListRules.dmIncomingDecision` (#212: Б2 тихое
-        // «прочитано» из сервера, Б8 звук в открытой беседе, чтение только когда смотрят).
-        const d = dmIncomingDecision({
-          mine: msg.message.author.id === store.user?.id,
-          onScreen: isFeedOnScreen({
-            id: msg.channelId,
-            currentId: store.currentDmId,
-            mobile: isMobile(),
-            mobilePane: store.mobilePane,
-            kind: 'dm',
-            view: store.view,
+        // «прочитано» из сервера, Б8 звук в открытой беседе, чтение только когда смотрят); «без звука» (С3) —
+        // `dmSilentDecision` поверх: всё как обычно (счётчик, тост, мигание), гасится только звук.
+        // Заглушена (07.10, G03) — без звука, тоста и мигания; счётчик как обычно (`dmMutedDecision`).
+        const oldDm = store.dms.find((x) => x.id === msg.channelId);
+        const base = dmSilentDecision(
+          dmIncomingDecision({
+            mine: msg.message.author.id === store.user?.id,
+            onScreen: isFeedOnScreen({
+              id: msg.channelId,
+              currentId: store.currentDmId,
+              mobile: isMobile(),
+              mobilePane: store.mobilePane,
+              kind: 'dm',
+              view: store.view,
+            }),
+            focused: windowFocused(),
+            dnd: store.user?.status === 'dnd',
+            covered: feedCovered(),
           }),
-          focused: windowFocused(),
-          dnd: store.user?.status === 'dnd',
-        });
+          msg.message,
+        );
+        const d = dmMutedDecision(
+          base,
+          muteActive(
+            dmMuteOf(
+              { muted: oldDm?.muted, otherUser: { id: oldDm?.otherUser.id ?? msg.message.author.id } },
+              store.pushMutedDmUsers,
+              store.pushMuteUntil,
+            ),
+            Date.now(),
+          ),
+        );
         if (d.countUnread) store.markDmUnread(msg.channelId);
         if (d.markRead) {
           // До этого сообщения, а не до часов сервера: следующее могло прийти, пока шёл таймер.
@@ -526,15 +624,84 @@ export function connectGateway(): void {
         if (d.sound) playSound('dm');
         if (d.osNotify) {
           osNotify(
-            `${authorName(msg.message)} — личное сообщение`,
+            `${peerNameNow(msg.message.author.id, authorName(msg.message))} — личное сообщение`,
             messagePreview(msg.message),
             () => void useStore.getState().selectDm(msg.channelId),
+            false,
+            { silent: msg.message.silent === true, group: msg.channelId },
           );
           // Иконка в панели задач мигает, как у тыка (#212): тост уходит за 5 секунд, а человек в игре
           // его мог не заметить. Фокус не забираем — решает `gv_flash_window`.
           flashWindow();
         }
         return store.appendDmMessage(msg.channelId, msg.message);
+      }
+      /**
+       * ЛС этап 2: изменение в беседе с номером журнала. Звук, тост и счётчик — только для НОВОГО чужого (`created`),
+       * решает то же `dmIncomingDecision`, что и у старого `dm.create`; «без звука» (`m.silent`, С3) — тем же
+       * `dmSilentDecision`, что и там (гасит только звук; уведомление — без звука системы). Применение (с буфером
+       * догонки) — в сторе.
+       */
+      case 'conv.change': {
+        if (!store.convActive) return;
+        const m = msg.message && !('gone' in msg.message) ? msg.message : null;
+        const convId = msg.conversation.id;
+        // Прислал новое сообщение — его «печатает…» гаснет сразу (06.10), а не доживает срок, как в `message.create`.
+        if (msg.created && m) dropTyping(convId, m.author.id);
+        if (msg.created && m && m.author.id !== store.user?.id) noteDmActivity(m.author.id);
+        // Заглушена (07.10, G03): сводка события несёт `muted` (сервер `conv11`), иначе — список заглушек собеседников.
+        const sum = 'left' in msg.conversation ? null : msg.conversation;
+        const muteOf = m
+          ? dmMuteOf(
+              { muted: sum?.muted, otherUser: { id: sum?.otherUser?.id ?? m.author.id } },
+              store.pushMutedDmUsers,
+              store.pushMuteUntil,
+            )
+          : null;
+        const muted = !!m && muteActive(muteOf, Date.now());
+        // «Выключить звук» (07.10, `conv13`): тост есть, звука нет.
+        const soundOff = !!m && muteSoundOff(muteOf, Date.now());
+        const d =
+          msg.created && m
+            ? dmMutedDecision(
+                dmSilentDecision(
+                  dmIncomingDecision({
+                    mine: m.author.id === store.user?.id,
+                    onScreen: isFeedOnScreen({
+                      id: convId,
+                      currentId: store.currentDmId,
+                      mobile: isMobile(),
+                      mobilePane: store.mobilePane,
+                      kind: 'dm',
+                      view: store.view,
+                    }),
+                    focused: windowFocused(),
+                    dnd: store.user?.status === 'dnd',
+                    covered: feedCovered(),
+                  }),
+                  m,
+                ),
+                muted,
+                soundOff,
+              )
+            : null;
+        store.convOnChange(msg, !!d?.countUnread);
+        if (!d || !m) return;
+        // «Прочитано до» считается в момент отправки по ленте на экране — как у `markDmRead(upTo)`.
+        if (d.markRead) scheduleRead(`dm:${convId}`, () => useStore.getState().convReadNow(convId));
+        if (d.sound) playSound('dm');
+        if (d.osNotify) {
+          // Подпись контакта вместо имени, как Telegram (решение владельца 08.10 п.27, `peerName.ts`).
+          osNotify(`${peerNameNow(m.author.id, authorName(m))} — личное сообщение`, messagePreview(m), () => void useStore.getState().selectDm(convId), false, {
+            silent: m.silent === true || soundOff,
+            groupChat: sum?.kind === 'group',
+            dmChat: sum?.kind !== 'group',
+            group: convId,
+            conv: convId,
+          });
+          flashWindow();
+        }
+        return;
       }
       case 'dm.update':
         return store.updateDmMessage(msg.channelId, msg.message);
@@ -545,13 +712,20 @@ export function connectGateway(): void {
         });
       case 'dm.reaction':
         return store.applyDmReaction(msg.channelId, msg.messageId, msg.emoji, msg.userId, msg.op);
+      // «Большая» реакция собеседника (`bigreact1`, G43): только эффект — сама реакция приходит своим путём. Играть ли (беседа
+      // открыта, сообщение на экране, движение не выключено), решает `BigReactionLayer`.
+      case 'reaction.big':
+        if (msg.userId === store.user?.id) return;
+        return fireEffect({ kind: 'bigReaction', conversationId: msg.conversationId, messageId: msg.messageId, emoji: msg.emoji });
       // Прочитал на другом своём устройстве — гасим здесь (событие адресное, приходит только своим).
       case 'read.channel':
         return store.applyRemoteRead({ channelId: msg.channelId, serverId: msg.serverId, at: msg.at });
       case 'read.dm':
         return store.applyRemoteRead({ dmId: msg.dmId, at: msg.at });
       case 'typing':
-        if (msg.userId && msg.userId !== store.user?.id) noteTyping(msg.channelId ?? msg.dmId ?? '', msg.userId);
+        if (msg.userId && msg.userId !== store.user?.id) noteTyping(msg.channelId ?? msg.dmId ?? '', msg.userId, parseTypingAction(msg.action));
+        // G07: «печатает» в ЛС — собеседник «в сети» ещё 30 с (если время захода мне видно, `dmOnline.dotShown`).
+        if (msg.userId && msg.userId !== store.user?.id && msg.dmId) noteDmActivity(msg.userId);
         return;
       case 'poke': {
         // Тык звучит и мигает окном ВСЕГДА, когда дошёл: «не беспокоить» отсекается на сервере, а
@@ -607,6 +781,35 @@ export function connectGateway(): void {
             `${msg.amount} ${currencyNow()}`,
           );
         }
+        return;
+      }
+
+      case 'stickers.update': {
+        // Избранные / недавние / «мои наборы» стикеров изменились на другом устройстве (07.10, С2 порция 2, `stickers3`).
+        useDmStickers.getState().applyRemote(msg);
+        return;
+      }
+
+      case 'call.state': {
+        // Звонок 1:1 сменил фазу (08.10, С5, `calls1`): входящий, ответили (здесь или на другом устройстве), конец.
+        if (msg.call && typeof msg.call.id === 'string') useCall.getState().apply(msg.call);
+        return;
+      }
+
+      case 'gifs.update': {
+        // «Мои GIF» изменились на другом устройстве или этим же (08.10, `groups3`): список целиком.
+        if (Array.isArray(msg.gifs)) applyRemoteGifs(msg.gifs);
+        return;
+      }
+
+      case 'contacts.update': {
+        // Контакты изменились на другом устройстве или этим же (08.10, `contacts1`): список целиком.
+        if (Array.isArray(msg.contacts)) useContacts.getState().apply(msg.contacts);
+        return;
+      }
+      case 'dmFolders.update': {
+        // Папки бесед изменились на другом устройстве или этим же (07.10, G40, `folders1`): список целиком.
+        useDmFolders.getState().apply(msg.folders);
         return;
       }
 
@@ -710,14 +913,74 @@ export function connectGateway(): void {
     // Отправленное на умершем соединении отправленным больше не считается (#126).
     subsDisconnect(subs);
     gateway = null;
+    // Связь потеряна — в шапке беседы «Подключение…» до следующего `ready` (`connState.ts`).
+    setGatewayLive(false);
+    // Беседы: событий больше нет — список и ленты догоняют сами, пока шлюз не вернётся (`convStore.convOnGatewayLost`).
+    if (useStore.getState().convActive) useStore.getState().convOnGatewayLost();
     if (getToken()) reconnect(connectGateway);
   };
 }
 
-/** Tell the gateway "I'm typing" in a channel (serverId+channelId) or a DM (dmId+recipientId). */
-export function sendTyping(target: { serverId?: string; channelId?: string; dmId?: string; recipientId?: string }): void {
+/**
+ * «За устройством сидят» (08.10, #211, G38, `push2`): кадр шлюза `{ t: 'active', on }`. Пока он свежий (30 с на сервере),
+ * пуш ЛС на телефон ждёт 30 с и не уходит, если сообщение прочитали здесь — как у Telegram, где телефон молчит, пока жив
+ * десктоп. `on: true` — окно в фокусе и был ввод (`afk.noteActivity`), не чаще раза в `ACTIVE_SEND_MS`; `on: false` —
+ * окно потеряло фокус. Сервер без `push2` кадр не получает.
+ */
+const ACTIVE_SEND_MS = 10_000;
+let activeOn = false;
+let activeSentAt = 0;
+export function noteGatewayActive(on: boolean): void {
+  if (gateway?.readyState !== WebSocket.OPEN || !serverPush2(useStore.getState().serverFeatures)) return;
+  const now = Date.now();
+  if (on) {
+    if (activeOn && now - activeSentAt < ACTIVE_SEND_MS) return;
+    activeSentAt = now;
+  } else if (!activeOn) {
+    return;
+  }
+  activeOn = on;
+  const msg: GatewayClientMessage = { t: 'active', on };
+  gateway.send(JSON.stringify(msg));
+}
+
+/**
+ * «Видно / скрыто» (08.10, #211, D4/D10): кадр шлюза `{ t: 'visible', on }` на каждой смене `presenceVisibility.presentNow`.
+ * Шлюз считает «в сети» только видимые соединения и не держит пуш на телефон из-за скрытого. Шлём без признака сервера:
+ * старый шлюз неизвестный кадр молча пропускает (`switch` без ветки). Сокет закрыт — состояние уедет в `identify.hidden`.
+ */
+function sendGatewayVisible(on: boolean): void {
   if (gateway?.readyState !== WebSocket.OPEN) return;
-  const msg: GatewayClientMessage = { t: 'typing', ...target };
+  if (!on) activeOn = false;
+  const msg: GatewayClientMessage = { t: 'visible', on };
+  gateway.send(JSON.stringify(msg));
+}
+
+/** Настройки уведомлений из профиля (G38) — в модуль уведомлений, при входе и на каждую смену профиля. Один раз. */
+let notifyPrefsWatched = false;
+function watchNotifyPrefs(): void {
+  if (notifyPrefsWatched) return;
+  notifyPrefsWatched = true;
+  const apply = (u: { notifyView?: unknown; notifyGroups?: boolean; notifyDm?: boolean } | null) =>
+    setNotifyPrefs({ view: normalizeNotifyView(u?.notifyView), groups: u?.notifyGroups !== false, dm: u?.notifyDm !== false });
+  apply(useStore.getState().user);
+  useStore.subscribe((st, prev) => {
+    if (st.user !== prev.user) apply(st.user);
+    // Открыли канал — его всплывашки браузера не нужны (как у tweb; ЛС чистит `DmChatView`). Сам `store.ts` модуль уведомлений не импортирует.
+    if (st.currentChannelId && st.currentChannelId !== prev.currentChannelId) clearOsNotifications(channelNoticeGroup(st.currentChannelId));
+  });
+}
+
+/** Tell the gateway "I'm typing" in a channel (serverId+channelId) or a DM (dmId+recipientId). */
+export function sendTyping(
+  target: { serverId?: string; channelId?: string; dmId?: string; recipientId?: string },
+  wanted: TypingAction = 'typing',
+): void {
+  if (gateway?.readyState !== WebSocket.OPEN) return;
+  // «Печатает» в кадр не пишем (G21): старый сервер и так не знает поля, а кадр остаётся как был.
+  // Сервер без `typing2` не знает `round` и показал бы собеседнику «печатает» — ему шлём прежнее `voice`.
+  const action = typingActionToServer(wanted, useStore.getState().serverFeatures);
+  const msg: GatewayClientMessage = { t: 'typing', ...target, ...typingActionField(action) };
   gateway.send(JSON.stringify(msg));
 }
 
@@ -784,6 +1047,7 @@ export function connectPresence(): void {
 export function disconnectSockets(): void {
   resetSubs(subs); // выход из аккаунта: следующий вход подпишется на серверы СВОЕГО пользователя
   gatewayHadConnected = false; // next connect is a fresh login → initial load handles history, no backfill
+  resetGatewayLive(); // соединения нового входа ещё не было — «Подключение…» в шапке не к чему
   if (gatewayPing) clearInterval(gatewayPing);
   if (presencePing) clearInterval(presencePing);
   gatewayPing = null;

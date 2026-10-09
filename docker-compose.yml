@@ -35,6 +35,11 @@ services:
     # build on every update. Bump deliberately: change BOTH the tag and the digest.
     image: postgres:16.14-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
     restart: unless-stopped
+    # JIT off for the whole database (#211, owner decision 2026-10-08): our queries are short OLTP reads whose cost
+    # ESTIMATE can still run into millions (DM list with thousands of conversations), and LLVM compilation then took
+    # 0.8 s of a 1.3 s request. Same as the image's default entrypoint otherwise. Self-hosting on your own Postgres:
+    # `ALTER SYSTEM SET jit = off; SELECT pg_reload_conf();` (see README "Hardening notes").
+    command: ['postgres', '-c', 'jit=off']
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       # fail-closed: never boot Postgres with an empty/guessable password (P0, #133).
@@ -168,6 +173,9 @@ services:
       # Импорт стикеров из Telegram (#68). Токен бота от @BotFather; пустой => импорт выключен.
       # Бот подойдёт любой: набор читается публичным getStickerSet, состоять где-либо ему не нужно.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # Поиск GIF в ЛС (Р-7): giphy | tenor + ключ; пусто => только «Мои GIF».
+      GIF_PROVIDER: ${GIF_PROVIDER:-}
+      GIF_API_KEY: ${GIF_API_KEY:-}
       # Update button in the admin panel: where the backend learns the newest release (asked only when the super-admin
       # opens the "Instance" tab, cached for 6 h). Empty => no check. The version of THIS backend is baked into the image.
       GV_RELEASES_URL: ${GV_RELEASES_URL-https://api.github.com/repos/Gleb1290/gusvoice/releases/latest}

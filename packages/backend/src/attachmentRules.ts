@@ -213,9 +213,12 @@ export function policyGrantsPublic(policyJson: string): boolean {
   } catch {
     return true; // не разобрали — считаем опасной: закрытое хранилище работает только на доказуемо закрытом бакете
   }
+  // `null`, число, строка — разрешений в документе нет вовсе (как у пустой политики), а не «упасть при подготовке».
+  if (!doc || typeof doc !== 'object') return false;
   const statements = (doc as { Statement?: unknown }).Statement;
   const list = Array.isArray(statements) ? statements : statements ? [statements] : [];
   return list.some((st) => {
+    if (!st || typeof st !== 'object') return false;
     const s = st as { Effect?: unknown; Principal?: unknown };
     if (s.Effect !== 'Allow') return false;
     const p = s.Principal;
@@ -232,7 +235,14 @@ export function policyGrantsPublic(policyJson: string): boolean {
  * по 10 файлов × 25 МиБ, чтобы вытеснение не задело загрузки ТЕКУЩЕЙ отправки.
  */
 export const PENDING_MAX_COUNT = 40;
-export const PENDING_MAX_BYTES = 600 * 1024 * 1024;
+/** Предел объёма незавершённых и пересылки (`convRules.FORWARD_BYTES_MAX`, равны — держат тесты Codex): 6 ГиБ с 09.10 (`bigfile1`; было 600 МиБ). */
+export const PENDING_MAX_BYTES = 6 * 1024 * 1024 * 1024;
+/**
+ * Действующий предел объёма незавершённых с загрузкой кусками (`bigfile1`, 09.10; `attachments.insertPendingRow`) — 6 ГиБ:
+ * альбом из 10 файлов по `BIGFILE_MAX_BYTES` (5 ГиБ) не должен вытеснять сам себя до отправки. Сверху объём держит суточный
+ * предел `DM_DAILY_UPLOAD_BYTES`. С 09.10 `PENDING_MAX_BYTES` / `FORWARD_BYTES_MAX` подняты до того же числа (R127 п.5).
+ */
+export const PENDING_MAX_BYTES_BIGFILE = 6 * 1024 * 1024 * 1024;
 
 /**
  * Какие незавершённые загрузки вытеснить, чтобы новая (`newSize`) уложилась в предел. `existing` — от старых к новым.
@@ -256,3 +266,83 @@ export function pendingEvictions(
 }
 /** Незавершённая загрузка старше этого — удаляется вместе с файлом. */
 export const PENDING_TTL_HOURS = 24;
+
+/*
+ * Загрузка кусками (`bigfile1`, 09.10, решение владельца: файл в ЛС до 500 МБ+; у Telegram 2 ГБ). Куски идут через бэкенд
+ * (`routes/uploads.ts`) в S3 multipart закрытого бакета. Числа — здесь, чистые правила — здесь же (тестируемы без базы).
+ */
+
+/** Предел одного файла ЛС при загрузке кусками, байт. Клиент узнаёт его из `/auth/me` (`dmFileMaxBytes`). */
+export const BIGFILE_MAX_BYTES = 512 * 1024 * 1024;
+/** Прежний предел одиночной загрузки (`@fastify/multipart` `limits.fileSize`) — у старых клиентов и путь без кусков. */
+export const SINGLE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+/** Размер куска (кроме последнего), байт. Не меньше 5 МиБ — нижняя граница S3 для всех кусков, кроме последнего. */
+export const BIGFILE_PART_BYTES = 8 * 1024 * 1024;
+/**
+ * Суточный предел объёма загрузок ЛС на человека (скользящие 24 ч: файлы + начатые загрузки кусками). Антиспам хранилища:
+ * 16 файлов по 512 МиБ в сутки. Сверх — 429 с понятным текстом. Решение за владельцем (у Telegram предела нет).
+ */
+export const DM_DAILY_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
+/** Сколько загрузок кусками человек держит открытыми разом (альбом — 10). Сверх — 429. */
+export const UPLOADS_OPEN_MAX = 12;
+/** Брошенная загрузка кусками старше этого — уборка бросает её в хранилище и стирает строку. */
+export const UPLOAD_TTL_HOURS = 24;
+
+/**
+ * Срок одной копии файла в хранилище (пересылка, ревью `bigfile1` M2): минута + секунда на каждые 4 МиБ — файл в 512 МиБ
+ * получает чуть больше трёх минут, мелкий — минуту, как раньше.
+ */
+export function copyTimeoutMs(size: number): number {
+  return 60_000 + Math.ceil(Math.max(0, size) / (4 * 1024 * 1024)) * 1000;
+}
+
+/** Срок куска в хранилище (`bigUploads.uploadPart`): 8 МиБ даже по медленной связи с хранилищем успевают. */
+export const PART_STORE_TIMEOUT_MS = 60_000;
+/** Срок начала загрузки и отмены в хранилище. */
+export const MULTIPART_OP_TIMEOUT_MS = 30_000;
+/**
+ * Срок сборки файла в хранилище (`bigUploads.completeUpload`): versitygw склеивает куски на диске — до гигабайта за минуты.
+ * Метка сборки (`completing_at`) старше `ASSEMBLY_CLAIM_STALE_MS` (процесс упал посреди сборки) забирается заново.
+ */
+export const ASSEMBLY_TIMEOUT_MS = 10 * 60_000;
+export const ASSEMBLY_CLAIM_STALE_MS = ASSEMBLY_TIMEOUT_MS + 5 * 60_000;
+
+/** Сколько кусков у файла `size` при куске `partSize` (у пустого — один пустой). */
+export function partCount(size: number, partSize = BIGFILE_PART_BYTES): number {
+  return Math.max(1, Math.ceil(size / partSize));
+}
+
+/** Сколько байт обязан нести кусок `n` (с 1); `null` — такого номера у файла нет. */
+export function expectedPartSize(size: number, n: number, partSize = BIGFILE_PART_BYTES): number | null {
+  const count = partCount(size, partSize);
+  if (!Number.isInteger(n) || n < 1 || n > count) return null;
+  return n < count ? partSize : size - (count - 1) * partSize;
+}
+
+/**
+ * Готова ли загрузка к сборке: есть ВСЕ куски 1…N и каждый ровно нужного размера. Ответ — номера недостающих
+ * (или с чужим размером); пусто — можно собирать.
+ */
+export function missingParts(size: number, parts: readonly { part: number; size: number }[], partSize = BIGFILE_PART_BYTES): number[] {
+  const have = new Map(parts.map((p) => [p.part, p.size]));
+  const out: number[] = [];
+  for (let n = 1; n <= partCount(size, partSize); n++) {
+    if (have.get(n) !== expectedPartSize(size, n, partSize)) out.push(n);
+  }
+  return out;
+}
+
+/** Отказ начала загрузки кусками по размеру и суточному объёму; `null` — можно. */
+export function uploadStartBlock(
+  size: number,
+  usedToday: number,
+  openUploads: number,
+  max = BIGFILE_MAX_BYTES,
+  daily = DM_DAILY_UPLOAD_BYTES,
+): { code: 413 | 429; error: string } | null {
+  if (size > max) return { code: 413, error: `Файл больше ${Math.round(max / 1024 / 1024)} МБ — такое не отправить` };
+  if (openUploads >= UPLOADS_OPEN_MAX) return { code: 429, error: 'Слишком много загрузок разом — дождитесь окончания прежних' };
+  if (usedToday + size > daily)
+    return { code: 429, error: `За сутки можно загрузить в личные сообщения до ${Math.round(daily / 1024 / 1024 / 1024)} ГБ — попробуйте позже` };
+  return null;
+}

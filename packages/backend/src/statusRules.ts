@@ -38,3 +38,14 @@ export function statusFieldsOf(
       : { emoji, text, expiresAt: u.customStatusExpiresAt ? u.customStatusExpiresAt.toISOString() : null };
   return { status, customStatus };
 }
+
+/**
+ * Статус человека глазами зрителя (решение владельца 07.10: «невидимый — приватность человека»). Чужому «Невидимый»
+ * отдаётся как обычный `online`: в сети его зритель и так не видит (`userVisibilityHub` прячет онлайн), а `online` без
+ * онлайна клиент рисует «не в сети» без точки (`effectiveDot`) — ровно как у человека, который правда вышел. Так значение
+ * `invisible` не уходит ни соседям, ни гостям с других инстансов. Сам человек (все его устройства) видит настоящее.
+ * `viewerId` пустой — зритель неизвестен, считаем чужим.
+ */
+export function statusSeenBy(status: PresenceStatus, subjectId: string, viewerId: string | null | undefined): PresenceStatus {
+  return status === 'invisible' && subjectId !== viewerId ? 'online' : status;
+}

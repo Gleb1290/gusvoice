@@ -1,6 +1,6 @@
 import type { InstanceUpdateInfo, InstanceUpdateStep } from '@gusvoice/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
 import { updateWatchOutcome } from '../instanceUpdateWatch';
 import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
@@ -91,7 +91,7 @@ export function InstanceUpdateCard() {
   const load = useCallback(
     async (refresh = false) => {
       try {
-        const next = await api.adminInstanceUpdate(refresh);
+        const next = await adminApi().adminInstanceUpdate(refresh);
         setInfo(next);
         setQuietSince(null);
         const s = next.status;
@@ -145,7 +145,7 @@ export function InstanceUpdateCard() {
     if (!ok) return;
     setBusy(true);
     try {
-      await api.adminStartInstanceUpdate(version);
+      await adminApi().adminStartInstanceUpdate(version);
       beginWatch(info);
       await load();
     } catch (e) {

@@ -684,6 +684,7 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: 'нет файла' });
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const check = checkCoinIcon(file.mimetype || '', buffer);
     if (!check.ok) return reply.code(400).send({ error: check.error });
 

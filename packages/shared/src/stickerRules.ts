@@ -87,3 +87,67 @@ export function checkPackImport(stickerCount: number, existingPacks: number): Pa
     return { ok: false, error: `на сервере уже ${STICKER_PACKS_PER_SERVER} наборов — удалите лишние` };
   return { ok: true };
 }
+
+// ── Каталог наборов инстанса и «мои наборы» (С2, #211, признак `stickers2`) ─────────────────────────────────────────
+
+/**
+ * Сколько наборов один человек может привезти в каталог инстанса (решение владельца, 07.10). Считаются только
+ * загруженные им самим: «Добавить» уже лежащего в каталоге набора ничего не качает и предел не тратит.
+ */
+export const STICKER_PACKS_PER_USER = 40;
+/** Сколько наборов может стоять в «моих» — с запасом над Telegram (200), чтобы порядок не стал тяжёлым запросом. */
+export const MY_STICKER_PACKS_MAX = 200;
+
+/** Можно ли человеку загрузить в каталог ещё один набор, если он уже загрузил `uploaded`. */
+export function checkUserPackQuota(uploaded: number): PackCheck {
+  if (uploaded >= STICKER_PACKS_PER_USER)
+    return {
+      ok: false,
+      error: `Вы уже загрузили ${STICKER_PACKS_PER_USER} наборов — больше нельзя. Удалите свой ненужный набор из каталога.`,
+    };
+  return { ok: true };
+}
+
+/**
+ * Поиск по каталогу: по названию и по имени набора у Telegram, без учёта регистра и буквы «ё». Пустой запрос — всё.
+ */
+export function stickerPackMatches(pack: { title: string; name: string }, query: string): boolean {
+  const norm = (s: string) => s.toLocaleLowerCase('ru').replace(/ё/g, 'е').trim();
+  const q = norm(query);
+  if (!q) return true;
+  return norm(pack.title).includes(q) || norm(pack.name).includes(q);
+}
+
+/**
+ * Новый порядок «моих наборов»: `requested` обязан быть ПЕРЕСТАНОВКОЙ текущих `current` (ни лишних, ни пропущенных,
+ * ни повторов) — иначе `null`. Порядок от клиента, который за это время добавил набор на другом устройстве, отбивается,
+ * а не теряет набор молча.
+ */
+export function reorderStickerPacks(current: readonly string[], requested: readonly string[]): string[] | null {
+  if (requested.length !== current.length) return null;
+  const have = new Set(current);
+  const seen = new Set<string>();
+  for (const id of requested) {
+    if (!have.has(id) || seen.has(id)) return null;
+    seen.add(id);
+  }
+  return [...requested];
+}
+
+/**
+ * Избранные стикеры (С2 порция 2, признак `stickers3`): не больше пяти — как `stickers_faved_limit_default` у Telegram
+ * (tdesktop `data_premium_limits.cpp`); шестой вытесняет самый старый (`Stickers::checkFavedLimit`).
+ */
+export const STICKERS_FAVED_MAX = 5;
+/** Недавние стикеры на сервере — столько же, сколько показывает панель Telegram на ПК (`kRecentDisplayLimit` = 20). */
+export const STICKERS_RECENT_MAX = 20;
+
+/**
+ * Список «новый первым» после добавления `id`: прежняя копия уходит, хвост за `max` отрезается. Возвращает и то, что
+ * отрезано (их строки сервер стирает) — чистое правило и для избранных, и для недавних.
+ */
+export function pushStickerId(list: readonly string[], id: string, max: number): { list: string[]; dropped: string[] } {
+  const next = [id, ...list.filter((x) => x !== id)];
+  const keep = Math.max(0, max);
+  return { list: next.slice(0, keep), dropped: next.slice(keep) };
+}

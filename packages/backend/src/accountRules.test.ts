@@ -11,12 +11,18 @@ import {
 } from './accountRules.js';
 import { anonymizeAccountRows } from './accountRows.js';
 import * as dbSchema from './db/schema.js';
+import * as drizzle from 'drizzle-orm';
+import * as accountRules from './accountRules.js';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 
 const CLEARED_USER_FK_TABLES = [
   'channel_reads',
   'coin_balances',
   'diag_reports',
   'dm_reads',
+  'dm_folders',
   'email_verifications',
   'federation_guest_grants',
   'federation_memberships',
@@ -24,9 +30,41 @@ const CLEARED_USER_FK_TABLES = [
   'password_resets',
   'push_devices',
   'push_mutes',
+  'push_always',
   'server_members',
   'user_sync',
+  'user_sticker_packs',
+  'user_faved_stickers',
+  'user_recent_stickers',
+  'user_saved_gifs',
 ].sort();
+
+it('удаление аккаунта очищает push_always — исходниковый пропуск tx.delete пойман', async () => {
+  const check = async (remove: typeof anonymizeAccountRows) => {
+    const deleted: string[] = [];
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+      delete: (table: never) => ({ where: async () => { deleted.push(getTableConfig(table).name); } }),
+      update: () => ({ set: () => ({ where: async () => {} }) }),
+    };
+    await remove(tx as unknown as Parameters<typeof remove>[0], 'user', 'unusable', new Date(0));
+    assert.equal(deleted.filter(name => name === 'push_always').length, 1, 'push_always удаляется в транзакции');
+  };
+  const load = (mutant: boolean) => {
+    const source = readFileSync(new URL('./accountRows.ts', import.meta.url), 'utf8');
+    const anchor = 'await tx.delete(pushAlways).where(eq(pushAlways.userId, userId));';
+    assert.equal(source.split(anchor).length, 2, 'точный якорь tx.delete уникален');
+    const changed = mutant ? source.replace(anchor, '/* пропущена очистка */') : source;
+    if (mutant) assert.notEqual(changed, source);
+    const module = { exports: {} as { anonymizeAccountRows: typeof anonymizeAccountRows } };
+    const deps: Record<string, unknown> = { 'drizzle-orm': drizzle, './db/schema.js': dbSchema, './accountRules.js': accountRules };
+    runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports, require: (id: string) => { assert.ok(id in deps); return deps[id]; } });
+    return module.exports.anonymizeAccountRows;
+  };
+  await check(anonymizeAccountRows); await check(load(false));
+  await assert.rejects(() => check(load(true)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('push_always удаляется'));
+});
 
 const RETAINED_USER_FKS = [
   'audit_log.actor_id',
@@ -62,6 +100,12 @@ const RETAINED_USER_FKS = [
 ].sort();
 
 const CLEARED_NONSTANDARD_USER_FKS = [
+  'last_seen_exceptions.owner_id',
+  'last_seen_exceptions.target_id',
+  'privacy_exceptions.owner_id',
+  'privacy_exceptions.target_id',
+  'user_contacts.owner_id',
+  'user_contacts.contact_id',
   'user_blocks.blocker_id',
   'user_blocks.blocked_id',
 ].sort();
@@ -96,6 +140,13 @@ describe('удаление аккаунта обезличивает, а не с
       steamId: null,
       steamPersona: null,
       showGameActivity: false,
+      lastSeenAt: null,
+      lastSeenPrivacy: 'nobody',
+      hideReadTime: false,
+      notifyView: 'all',
+      notifyGroups: true,
+      notifyDm: true,
+      notifyRepeat: 0,
       approvedAt: null,
       hiddenFromPeers: false,
       directoryUpdatedAt: now,
@@ -112,7 +163,8 @@ describe('удаление аккаунта обезличивает, а не с
     const rowAnonymized = Object.keys(fields);
     // `homeInstanceId`/`homeUserId` сохраняются намеренно (F3, §5.6.2): значок инстанса остаётся у
     // обезличенного гостя, и по этой же паре действует запрет на инстанс.
-    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId'];
+    // callPrivacy — не идентификатор и сам по себе не раскрывается: удалённая учётка не может инициировать звонок.
+    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId', 'callPrivacy'];
     const invalidatedAfterTransaction = ['tokenGeneration'];
     assert.deepEqual(schemaColumns, [...rowAnonymized, ...retained, ...invalidatedAfterTransaction].sort());
   });
@@ -221,10 +273,12 @@ describe('строки аккаунта в соседних таблицах', (
 
     assert.deepEqual(memberOf, ['server-a', 'server-b']);
     assert.equal(operations[0], 'select:server_members');
+    assert.equal(operations[1], 'update:conversation_messages', 'снимки обезличиваются первой записью транзакции');
+    assert.equal(operations[2], 'delete:conversation_scheduled', 'отложенные удаляются второй записью, до остальных таблиц');
     assert.equal(operations.at(-1), 'update:users');
     assert.deepEqual(
       operations.slice(1, -1).sort(),
-      [...CLEARED_USER_FK_TABLES.map((name) => `delete:${name}`), 'delete:user_blocks'].sort(),
+      [...CLEARED_USER_FK_TABLES.map((name) => `delete:${name}`), 'delete:user_blocks', 'delete:last_seen_exceptions', 'delete:privacy_exceptions', 'delete:user_contacts', 'delete:conversation_scheduled', 'update:attachments', 'update:conversation_messages'].sort(),
     );
     assert.deepEqual(updatedFields, anonymizedUserFields('u-1', '$2a$10$unusable', new Date('2026-09-15T12:00:00Z')));
   });

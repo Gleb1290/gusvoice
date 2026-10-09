@@ -6,6 +6,7 @@
 #include <string>
 
 #include "i420_buffer_cuda.h"
+#include "livekit/gv_bitrate_hint.h"
 #include "absl/strings/match.h"
 #include "absl/types/optional.h"
 #include "api/video/video_codec_constants.h"
@@ -301,6 +302,18 @@ int32_t NvidiaH264EncoderImpl::CreateSession(bool native) {
       5;
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+  // GusVoice (#207, 06.10): опорный кадр крупнее обычного. С буфером VBV в один кадр и «сверхнизкой
+  // задержкой» NVENC по умолчанию даёт опорному кадру биты ОБЫЧНОГО (`lowDelayKeyFrameScale` = 1):
+  // запрос PLI, новый зритель, возврат на полный слой — и у всех зрителей вспыхивает мыло. Множитель
+  // ставит Rust (`screenshare.rs`, `keyframe_scale`); 0 — умолчание NVENC, как было.
+  // Синтетический замер на этой же сборке (1080p30, 4,2 Мбит/с, опорный кадр раз в 3 с): QP окна с
+  // опорным кадром 39 → 31 (×10), в следующие 100 мс 43 → 35, статика и прокрутка на 1–2 QP лучше.
+  // Буфер в 0,25–0,5 с и настройка LOW_LATENCY проверены там же и оказались ХУЖЕ (QP после опорного
+  // 47–48) — буфер в кадр и «сверхнизкая задержка» оставлены как были.
+  const int32_t keyframe_scale = livekit::ScreenEncoderKeyframeScale();
+  if (keyframe_scale > 0) {
+    nv_encode_config_.rcParams.lowDelayKeyFrameScale = static_cast<uint8_t>(std::min(keyframe_scale, 10));
+  }
 
   try {
     encoder_->CreateEncoder(&nv_initialize_params_);
@@ -316,7 +329,8 @@ int32_t NvidiaH264EncoderImpl::CreateSession(bool native) {
 
   RTC_LOG(LS_INFO) << "NVIDIA H264 NVENC initialized (" << (native ? "D3D11" : "CUDA")
                    << "): " << codec_.width << "x" << codec_.height << " @ "
-                   << codec_.maxFramerate << "fps, target_bps=" << configuration_.target_bps;
+                   << codec_.maxFramerate << "fps, target_bps=" << configuration_.target_bps
+                   << ", keyframe_scale=" << keyframe_scale;
   // Вторая и следующие сессии рождаются посреди показа: сразу нынешний битрейт, а не стартовый.
   if (has_rates_) {
     SetRates(last_rates_);

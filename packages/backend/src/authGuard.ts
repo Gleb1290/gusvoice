@@ -8,6 +8,7 @@ import {
   retryAfter,
 } from './authRules.js';
 import { realClientIp } from '@gusvoice/shared';
+import { PUSH_QUIET_MAX, pushBurstMode } from './pushRules.js';
 import type { FastifyRequest } from 'fastify';
 import { adminAlertEmail } from './instanceSetup.js';
 import { sendLoginBruteforceAlert } from './mailer.js';
@@ -60,6 +61,18 @@ export async function pushDebounced(recipient: string, source: string): Promise<
   return (await rateHit(`push:${recipient}:${source}`, 1, PUSH_THROTTLE_S)) !== 0;
 }
 
+/**
+ * Пачка сообщений (08.10, #211, решение владельца 39): звонкий пуш — один на (получатель, источник) за `PUSH_THROTTLE_S`, как
+ * раньше (`pushDebounced`); следующие сообщения окна уходят ТИХО (`pushRules.pushBurstMode`), не больше
+ * `pushRules.PUSH_QUIET_MAX` за окно — чтобы в шторке была видна вся пачка, как у Telegram. Окно тихих — своё (ключ `pushq:`),
+ * считается от первой досылки. Redis не ответил — исключение, как у `pushDebounced` (пуш не уходит).
+ */
+export async function pushBurst(recipient: string, source: string): Promise<'loud' | 'quiet' | 'drop'> {
+  if (!(await pushDebounced(recipient, source))) return pushBurstMode(false, false);
+  const quietTaken = (await rateHit(`pushq:${recipient}:${source}`, PUSH_QUIET_MAX, PUSH_THROTTLE_S)) !== 0;
+  return pushBurstMode(true, quietTaken);
+}
+
 /** Rate-limit attachment uploads per user (storage-exhaustion DoS, P2-3): each upload writes to the
  *  shared MinIO bucket immediately, so an unbounded loop could fill the disk. Returns retry-after
  *  seconds if over the limit, else 0. (Operator should ALSO set a bucket quota — see playbook §3.10.) */
@@ -72,6 +85,15 @@ export function attachmentUploadBlock(userId: string): Promise<number> {
  *  Returns retry-after seconds if over the limit, else 0. */
 export function heavyReadBlock(userId: string): Promise<number> {
   return rateHit(`hget:${userId}`, 40, 10);
+}
+
+/**
+ * Поиск по сообщениям ВСЕХ моих серверов (`GET /search/servers`, G35, `srvsearch1`; решение владельца 08.10, вопрос 21) —
+ * свой лимит, жёстче `heavyReadBlock`: один запрос — ILIKE по каналам всех серверов сразу. 20 в минуту на человека: живому
+ * хватает (клиент шлёт после паузы набора), цикл упирается быстро. Retry-after в секундах или 0.
+ */
+export function serverSearchBlock(userId: string): Promise<number> {
+  return rateHit(`srvsearch:${userId}`, 20, 60);
 }
 
 // --- Password brute-force lockout. Пороги, ключ ip+username и ступень — в `authRules.ts`.

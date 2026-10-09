@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   bitrateLabel,
   CODEC_OPTIONS,
+  fitNative,
   FPS_OPTIONS,
   getStreamSettings,
   RES_OPTIONS,
@@ -17,9 +18,11 @@ import { Icon } from './Icon';
 import { Toggle } from './Toggle';
 import { Select } from './Select';
 
+// С 06.10 режим доходит до нативного показа (#207): «Чёткость» — до 30 кадров/с и запас кодировщику на
+// резкий опорный кадр, «Плавность» — частота как выбрана.
 const MODE_HINT: Record<StreamSettings['mode'], string> = {
-  detail: 'Чёткость — резкая картинка для текста и кода.',
-  motion: 'Плавность — лучше для игр и видео.',
+  detail: 'Чёткость — резкая картинка для текста, таблиц и кода, до 30 кадров/с.',
+  motion: 'Плавность — лучше для игр и видео: частота как выбрана.',
 };
 
 const CODEC_HINT: Record<StreamCodec, string> = {
@@ -152,6 +155,10 @@ export function ScreenShareDialog({
   }
 
   const visible = (sources ?? []).filter((s) => (tab === 'window' ? s.kind === 'window' : s.kind === 'screen'));
+  // «Родное» (06.10): битрейт считается по настоящему размеру выбранного источника — тем же правилом,
+  // что в Rust (`bitrateForDims` = `share_bitrate`). Источник не выбран — по размеру экрана.
+  const picked = visible.find((s) => s.id === selectedId);
+  const nativeDims = picked?.width && picked?.height ? fitNative(picked.width, picked.height) : undefined;
 
   async function confirm() {
     if (!selectedId || starting) return;
@@ -447,23 +454,48 @@ export function ScreenShareDialog({
               </div>
             )}
 
+            {/* «Максимальное качество — не снижать» (06.10, #207, решение владельца). Только десктоп: в
+                браузере нижнюю границу оценщика канала не поставить без правки SDP. Камере — ни к чему. */}
+            {isDesktop() && tab !== 'camera' && (
+              <div className="ss-row">
+                <span className="settings-group-label" id="ss-maxq-label">
+                  Максимальное качество — не снижать
+                </span>
+                <Toggle
+                  checked={settings.maxQuality === true}
+                  onChange={(v) => update({ maxQuality: v })}
+                  labelledBy="ss-maxq-label"
+                  describedBy="ss-maxq-hint"
+                />
+                <span className="ss-hint" id="ss-maxq-hint">
+                  {settings.maxQuality === true
+                    ? `Показу всегда отдаётся ≈ ${bitrateLabel(settings, nativeDims)}, одним потоком, без запасных слоёв. Если у зрителя слабый канал — у него будут подтормаживания вместо мыла.`
+                    : 'Выключено: при просадке канала показ временно снижает качество, а зрители со слабой связью получают картинку попроще.'}
+                </span>
+              </div>
+            )}
+
             {/* Запасной слой качества (#109). Показываем на ОБЕИХ вкладках и в вебе: беда не в том,
                 что снимаем, а в том, сколько потоков публикуем. Без запасного слоя зритель с
-                потерями просит опорные кадры, и пульсирует картинка у ВСЕХ зрителей сразу. */}
+                потерями просит опорные кадры, и пульсирует картинка у ВСЕХ зрителей сразу.
+                «Максимальное качество» слои выключает само — тогда переключатель неактивен. */}
             <div className="ss-row">
               <span className="settings-group-label" id="ss-layers-label">
                 Слои качества для зрителей
               </span>
               <Toggle
-                checked={settings.layers}
+                checked={settings.layers && !(isDesktop() && settings.maxQuality === true)}
                 onChange={(v) => update({ layers: v })}
+                disabled={isDesktop() && settings.maxQuality === true}
                 labelledBy="ss-layers-label"
                 describedBy="ss-layers-hint"
               />
               <span className="ss-hint" id="ss-layers-hint">
-                {settings.layers
-                  ? 'Обычный режим. Зритель сам выбирает качество, а со слабым интернетом получает картинку попроще, а не портит её всем остальным. Выключайте, только если показ вообще не запускается.'
-                  : 'Один поток на всех. Показ запустится даже там, где видеокарта не тянет несколько, но зрителю не из чего выбирать качество, а один зритель с плохой связью снова будет портить картинку всему каналу.'}
+                {isDesktop() && settings.maxQuality === true
+                  ? 'Выключены «Максимальным качеством»: вся полоса — одному потоку.'
+                  : settings.layers
+                    ? 'Обычный режим. Зритель сам выбирает качество, а со слабым интернетом получает картинку попроще, а не портит её всем остальным. Выключайте, только если показ вообще не запускается.'
+                    : 'Один поток на всех. Показ запустится даже там, где видеокарта не тянет несколько, но зрителю не из чего выбирать качество, а один зритель с плохой связью снова будет портить картинку всему каналу.'}
               </span>
             </div>
 
@@ -532,7 +564,8 @@ export function ScreenShareDialog({
               </span>
               {/* Derived, not editable — a status readout, so it announces on change instead of on focus. */}
               <span className="ss-bitrate" role="status" aria-labelledby="ss-bitrate-label">
-                ≈ {bitrateLabel(settings)}
+                ≈ {bitrateLabel(settings, nativeDims)}
+                {settings.resolution === 'native' && nativeDims ? ` · ${nativeDims.width}×${nativeDims.height}` : ''}
               </span>
             </div>
           </div>

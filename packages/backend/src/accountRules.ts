@@ -79,6 +79,15 @@ export function anonymizedUserFields(userId: string, unusablePasswordHash: strin
     steamId: null,
     steamPersona: null,
     showGameActivity: false,
+    // «Был(а) в сети» (С1, миграция 0098): след активности стирается; у надгробия время захода скрыто от всех.
+    lastSeenAt: null,
+    lastSeenPrivacy: 'nobody',
+    hideReadTime: false,
+    // Настройки уведомлений (G38, миграция 0111): к умолчанию — у надгробия ни устройств, ни уведомлений.
+    notifyView: 'all',
+    notifyGroups: true,
+    notifyDm: true,
+    notifyRepeat: 0,
     // Удалённый аккаунт не «одобрен»: войти им нельзя ни при какой политике (миграция 0062, #142).
     approvedAt: null,
     // Скрытие от соседей — решение про живого человека; у удалённого прятать уже нечего, и соседям

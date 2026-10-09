@@ -22,7 +22,7 @@ import { env } from '../env.js';
 import { bumpTokenGeneration } from '../auth.js';
 import { removeFromOtherRooms } from '../livekit.js';
 import { publishToUser } from '../realtime.js';
-import { banActive } from './guestRules.js';
+import { banActive, mergeReportReason } from './guestRules.js';
 import { announceMembership } from './guestMembership.js';
 import { onFedEvent, queueEventTo } from './eventStream.js';
 import { CLOSE_REASONS } from './guestAccess.js';
@@ -219,11 +219,14 @@ export async function sendReport(input: {
 
   if (existing) {
     const merged = [...existing.evidence, ...evidence].slice(0, REPORT_EVIDENCE_MAX);
+    // Причины тоже склеиваются (#204): раньше новая затирала прежнюю, и держатель видел только последнюю. Уходит соседу
+    // склеенная — его приём под тем же `report_id` заменяет причину целиком (`mergeReportReason`).
+    const reason = mergeReportReason(existing.reason, input.reason);
     await db
       .update(federationReports)
-      .set({ evidence: merged, reason: input.reason ?? existing.reason, updatedAt: new Date(now) })
+      .set({ evidence: merged, reason, updatedAt: new Date(now) })
       .where(eq(federationReports.id, existing.id));
-    await deliver(input.instanceId, existing.reportId, { ...input, evidence: merged, now });
+    await deliver(input.instanceId, existing.reportId, { ...input, reason, evidence: merged, now });
     return { ok: true, reportId: existing.reportId, merged: true };
   }
 
@@ -416,7 +419,9 @@ export function registerReportHandlers(): void {
         .update(federationReports)
         .set({
           evidence: merged,
-          reason: reason ?? existing.reason,
+          // Другая жалоба соседа (свой `report_id`) на того же человека — её причина добавляется к прежней, а не
+          // затирает её (#204). Дополнение под ИЗВЕСТНЫМ `report_id` выше заменяет причину: её склеил отправитель.
+          reason: mergeReportReason(existing.reason, reason),
           updatedAt: new Date(now),
           ...(merged.length !== existing.evidence.length ? { evidenceAt: new Date(now) } : {}),
         })

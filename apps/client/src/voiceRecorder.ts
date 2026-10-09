@@ -12,6 +12,8 @@ export interface VoiceTake {
   file: File;
   durationMs: number;
   waveform: number[];
+  /** Кружок (`roundRecorder.ts`, `circles1`): квадратное видео стороной `side`; огибающей у него нет (`waveform` пуст). */
+  round?: { side: number };
 }
 
 export function voiceRecordingSupported(): boolean {
@@ -28,7 +30,9 @@ function pickMime(): string {
  * Идёт запись. `stop()` завершает и отдаёт результат, `cancel()` выбрасывает.
  *
  * Дорожку микрофона глушим в ОБОИХ случаях: не остановить её — значит оставить гореть индикатор
- * записи в браузере и держать устройство занятым.
+ * записи в браузере и держать устройство занятым. И в третьем: запись встала САМА (потолок 30:00,
+ * пропало устройство) — человек ещё не нажал ни «отправить», ни корзину, а микрофон уже не нужен
+ * (06.10, сверка с Telegram: индикатор горел до нажатия).
  */
 export interface VoiceRecording {
   stop: () => Promise<VoiceTake>;
@@ -36,6 +40,16 @@ export interface VoiceRecording {
   /** Текущий уровень 0..1 — для полоски «пишется» в композере. */
   level: () => number;
   startedAt: number;
+  /**
+   * Пауза (G13, Telegram Desktop `VoiceRecordBar::stopRecording(StopType::Listen)` / Web K `chatRecording.ts`): рекордер
+   * встаёт, микрофон остаётся за нами, а записанное до паузы отдаётся снимком — его слушают, потом `resume` пишет дальше
+   * в тот же файл, а `stop` отдаёт всё целиком.
+   */
+  pause: () => Promise<VoiceTake>;
+  /** Продолжить запись после `pause` («Продолжить запись», `lng_record_lock_resume`). */
+  resume: () => void;
+  /** Сколько записано без пауз, мс (не больше потолка) — таймер полосы. */
+  elapsed: () => number;
 }
 
 export async function startVoiceRecording(): Promise<VoiceRecording> {
@@ -43,13 +57,18 @@ export async function startVoiceRecording(): Promise<VoiceRecording> {
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
   const mime = pickMime();
-  const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  // 32 кбит/с: речи хватает, а 30 минут (VOICE_MAX_MS) ложатся в ~7 МБ — под потолок загрузки 25 МБ; без этого битрейт выбирал бы браузер.
+  const rec = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32_000 } : { audioBitsPerSecond: 32_000 });
   const chunks: Blob[] = [];
   rec.ondataavailable = (e) => {
     if (e.data.size) chunks.push(e.data);
   };
   rec.start();
   const startedAt = Date.now();
+  /** Записано до последней паузы и начало текущего куска (`null` — стоим на паузе): длина — без пауз. */
+  let activeMs = 0;
+  let runFrom: number | null = startedAt;
+  const elapsed = () => Math.min(activeMs + (runFrom === null ? 0 : Date.now() - runFrom), VOICE_MAX_MS);
 
   // Отдельный анализатор только ради живого уровня в интерфейсе: у MediaRecorder своего нет.
   const ctx = new AudioContext();
@@ -58,21 +77,73 @@ export async function startVoiceRecording(): Promise<VoiceRecording> {
   ctx.createMediaStreamSource(stream).connect(analyser);
   const buf = new Float32Array(analyser.fftSize);
 
+  /** Микрофон и анализатор уже отпущены. Зовут из нескольких мест (конец записи, `stop`, `cancel`) — отпускаем один раз. */
+  let released = false;
   const cleanup = () => {
+    if (released) return;
+    released = true;
     for (const t of stream.getTracks()) t.stop();
     void ctx.close().catch(() => {});
   };
+  /* Рекордер остановился — по любой причине (потолок ниже, пропало устройство, `stop`/`cancel`): микрофон отпускаем
+     сразу. Событие приходит ПОСЛЕ последнего `dataavailable`, так что собранное уже в `chunks`. Раньше отпускал только
+     `stop()`/`cancel()`: на потолке 30:00 запись вставала, а индикатор микрофона горел, пока человек сам не нажмёт
+     «отправить» или корзину. */
+  rec.addEventListener('stop', cleanup);
 
   let done = false;
 
-  // Жёсткий потолок: заснувшая запись иначе живёт, пока не кончится место.
-  const limit = setTimeout(() => {
+  // Жёсткий потолок: заснувшая запись иначе живёт, пока не кончится место. Считается по записанному: пауза его не тратит.
+  let limit = setTimeout(() => {
     if (!done && rec.state === 'recording') rec.stop();
   }, VOICE_MAX_MS);
 
+  /** Снимок записанного: те же куски, что уйдут при `stop`, — WebM из первых кусков играется и раскладывается в волну. */
+  const snapshot = async (): Promise<VoiceTake> => {
+    const type = rec.mimeType || mime || 'audio/webm';
+    const blob = new Blob(chunks, { type });
+    const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
+    const file = new File([blob], `voice-${startedAt}.${ext}`, { type });
+    const waveform = await waveformOf(blob).catch(() => new Array(WAVEFORM_BUCKETS).fill(8));
+    return { file, durationMs: elapsed(), waveform };
+  };
+
   return {
     startedAt,
+    elapsed,
+    pause: async () => {
+      if (rec.state === 'recording') {
+        if (runFrom !== null) activeMs += Date.now() - runFrom;
+        runFrom = null;
+        clearTimeout(limit);
+        // Свежий кусок — после паузы: `requestData` отдаёт накопленное с прошлого `dataavailable`.
+        const flushed = new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 1000);
+          rec.addEventListener('dataavailable', () => { clearTimeout(t); resolve(); }, { once: true });
+        });
+        rec.pause();
+        try {
+          rec.requestData();
+          await flushed;
+        } catch {
+          /* старый движок без requestData на паузе — слушаем то, что уже пришло */
+        }
+      }
+      return snapshot();
+    },
+    resume: () => {
+      if (done || rec.state !== 'paused') return;
+      rec.resume();
+      runFrom = Date.now();
+      limit = setTimeout(() => {
+        if (!done && rec.state === 'recording') rec.stop();
+      }, VOICE_MAX_MS - elapsed());
+    },
     level: () => {
+      // На паузе микрофон не пишет — полоска стоит.
+      if (runFrom === null && !released) return 0;
+      // Микрофон отпущен (запись встала сама) — слушать нечего: ровная полоска, а не чтение из закрытого контекста.
+      if (released) return 0;
       analyser.getFloatTimeDomainData(buf);
       let peak = 0;
       for (const v of buf) {
@@ -101,7 +172,7 @@ export async function startVoiceRecording(): Promise<VoiceRecording> {
           // 🔴 Не больше потолка: запись сама встаёт на VOICE_MAX_MS, а «отправить» или «стоп»
           // человек может нажать и позже — тогда часы насчитали бы лишнее, и сервер отверг бы
           // голосовое целиком (`max(VOICE_MAX_MS)` в схеме приёма). Сказанное пропадало бы молча.
-          const durationMs = Math.min(Date.now() - startedAt, VOICE_MAX_MS);
+          const durationMs = elapsed();
           // Расширение по типу, иначе файл уедет в бакет как `.bin`.
           const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
           const file = new File([blob], `voice-${startedAt}.${ext}`, { type });
@@ -118,7 +189,14 @@ export async function startVoiceRecording(): Promise<VoiceRecording> {
 
 /** Посчитать огибающую по записанному файлу. Считаем ОДИН раз, у отправителя. */
 async function waveformOf(blob: Blob): Promise<number[]> {
-  const ctx = new AudioContext();
+  // Низкая частота декодирования (8 кГц): огибающей хватает с запасом, а 30 минут (VOICE_MAX_MS) при 48 кГц разворачиваются в
+  // ~350 МБ float-отсчётов — на телефоне это вылет. Браузер, не принявший частоту, декодирует как раньше.
+  let ctx: AudioContext;
+  try {
+    ctx = new AudioContext({ sampleRate: 8000 });
+  } catch {
+    ctx = new AudioContext();
+  }
   try {
     const audio = await ctx.decodeAudioData(await blob.arrayBuffer());
     return peaksFrom(audio.getChannelData(0), WAVEFORM_BUCKETS);

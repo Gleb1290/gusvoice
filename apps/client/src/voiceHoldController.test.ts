@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
+import ts from 'typescript';
+import * as holdRules from './voiceHold.js';
 import { createVoiceHoldController, type HoldRecording, type HoldTake, type VoiceHoldDeps } from './voiceHoldController.js';
 
 type Take = HoldTake & { id: string };
@@ -10,7 +14,7 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-function harness(overrides: Partial<VoiceHoldDeps<Take>> = {}) {
+function harness(overrides: Partial<VoiceHoldDeps<Take>> = {}, factory = createVoiceHoldController<Take>) {
   let now = 0;
   let wallNow = 1_000;
   const calls = { cancelled: 0, stopped: 0, sent: [] as string[], released: [] as string[], toasts: [] as string[] };
@@ -35,7 +39,7 @@ function harness(overrides: Partial<VoiceHoldDeps<Take>> = {}) {
     ...overrides,
   };
   return {
-    controller: createVoiceHoldController(deps), recording, take, calls,
+    controller: factory(deps), recording, take, calls,
     setNow(value: number) { now = value; },
     setWallNow(value: number) { wallNow = value; },
   };
@@ -44,6 +48,82 @@ function harness(overrides: Partial<VoiceHoldDeps<Take>> = {}) {
 const point = (id = 1, x = 100, y = 100) => ({ id, x, y });
 
 describe('жизненный цикл удержания голосового сообщения', () => {
+  it('dispose во время незавершённой паузы сразу гасит микрофон, поздний снимок не создаёт превью', async () => {
+    // Регрессия R40: локальный рекордер между rec и pausedRec раньше терялся при уходе со страницы.
+    const paused = deferred<Take>(); const h = harness(); let snapshots = 0;
+    const f = harness({ openMic: async () => ({ ...h.recording, pause: () => paused.promise }), previewUrl: () => { snapshots++; return 'blob:late'; } });
+    await f.controller.start(); const stopping = f.controller.stop(); f.controller.dispose();
+    assert.ok(h.calls.cancelled >= 1, 'устройство закрыто до завершения асинхронного снимка');
+    paused.resolve(h.take); await stopping;
+    assert.equal(snapshots, 0); assert.equal(f.controller.getState().preview, null);
+    assert.equal(f.controller.getState().paused, false); assert.deepEqual(f.calls.sent, []);
+  });
+  it('на ПК уход влево не отменяет, отпускание вне поля отменяет, 999 мс не отправляются', async () => {
+    // Ловит применение мобильной отмены и мобильного порога длины к настольной записи.
+    for (const outside of [false, true]) {
+      const h = harness({ minTakeMs: () => 1000 }); h.take.durationMs = 1000;
+      h.controller.press(point(), { desktop: true }); await tick();
+      h.controller.move(point(1, -200, 100));
+      assert.equal(h.calls.cancelled, 0);
+      h.controller.release({ id: 1, outside }); await tick();
+      assert.deepEqual(h.calls.sent, outside ? [] : ['take']);
+      assert.equal(h.calls.cancelled, outside ? 1 : 0);
+    }
+    const short = harness({ minTakeMs: () => 1000 }); short.take.durationMs = 999;
+    await short.controller.start(); await short.controller.finish();
+    assert.deepEqual(short.calls.sent, []);
+    const raw = readFileSync(new URL('./voiceHoldController.ts', import.meta.url), 'utf8');
+    const altered = raw.replace('take.durationMs < minTake()', 'take.durationMs < minTake() - 1');
+    assert.notEqual(raw, altered);
+    const module = { exports: {} };
+    runInNewContext(ts.transpileModule(altered, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports, require: (id: string) => { assert.equal(id, './voiceHold'); return holdRules; } });
+    const bad = harness({ minTakeMs: () => 1000 }, (module.exports as typeof import('./voiceHoldController')).createVoiceHoldController<Take>);
+    bad.take.durationMs = 999; await bad.controller.start(); await bad.controller.finish();
+    assert.throws(() => assert.deepEqual(bad.calls.sent, []), assert.AssertionError);
+  });
+
+  it('пауза продолжает тот же рекордер, отправка берёт окончательный файл, а не снимок', async () => {
+    // Ловит отправку старого снимка и повторное открытие микрофона при продолжении.
+    let resumes = 0; const h = harness();
+    h.recording.pause = async () => ({ id: 'snapshot', durationMs: 800 });
+    h.recording.resume = () => { resumes++; };
+    await h.controller.start(); await h.controller.stop();
+    assert.equal(h.controller.getState().paused, true);
+    assert.equal(h.calls.stopped, 0);
+    h.controller.resume(); assert.equal(resumes, 1);
+    assert.equal(h.controller.getState().recording, true);
+    assert.deepEqual(h.calls.released, ['blob:snapshot']);
+    await h.controller.stop(); await h.controller.sendPreview();
+    assert.equal(h.calls.stopped, 1);
+    assert.deepEqual(h.calls.sent, ['take']);
+    assert.equal(h.controller.getState().paused, false);
+  });
+
+  it('корзина и dispose гасят рекордер на паузе и освобождают адрес ровно один раз', async () => {
+    // Ловит оставшийся занятым микрофон после удаления прослушивания.
+    for (const action of ['discardPreview', 'dispose'] as const) {
+      const h = harness(); h.recording.pause = async () => h.take;
+      await h.controller.start(); await h.controller.stop();
+      h.controller[action](); h.controller[action]();
+      assert.equal(h.calls.cancelled, 1);
+      assert.deepEqual(h.calls.released, ['blob:take']);
+      assert.deepEqual(h.calls.sent, []);
+    }
+  });
+
+  it('tick использует записанное время без пауз, промах показывает hint вместо тоста', async () => {
+    // Ловит бегущий на паузе таймер и две конкурирующие подсказки после промаха.
+    let hints = 0; const h = harness({ hint: () => { hints++; } });
+    h.recording.elapsed = () => 321;
+    h.controller.press(point()); await tick(); h.setWallNow(99000); h.controller.tick();
+    assert.equal(h.controller.getState().recMs, 321);
+    h.setNow(700); h.controller.release({ id: 1 }); await tick();
+    assert.equal(hints, 1); assert.deepEqual(h.calls.toasts, []);
+    const fallback = harness(); fallback.controller.press(point()); await tick();
+    fallback.setNow(700); fallback.controller.release({ id: 1 });
+    assert.equal(fallback.calls.toasts.length, 1);
+  });
   it('два keyboard-click до открытия микрофона запускают только одну запись', async () => {
     // Регрессия утечки: вторая запись затирала ссылку на первую, и первую уже нельзя было остановить.
     const opened = deferred<HoldRecording<Take>>();

@@ -12,7 +12,7 @@
 
 import type { IconName } from './components/Icon';
 
-export type AdminSectionKey = 'users' | 'servers' | 'instance' | 'federation' | 'smtp' | 'economy';
+export type AdminSectionKey = 'users' | 'servers' | 'instance' | 'reports' | 'federation' | 'smtp' | 'economy';
 
 export interface AdminSection {
   key: AdminSectionKey;
@@ -28,6 +28,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   { key: 'users', label: 'Пользователи', sub: 'Кто есть на инстансе, роли и доступ', icon: 'user', refreshable: true },
   { key: 'servers', label: 'Серверы', sub: 'Сообщества этого инстанса и их владельцы', icon: 'hash', refreshable: true },
   { key: 'instance', label: 'Инстанс', sub: 'Имя, регистрация, обновления и версия', icon: 'settings' },
+  { key: 'reports', label: 'Жалобы', sub: 'Жалобы на собеседников из личных сообщений', icon: 'flag' },
   { key: 'federation', label: 'Федерация', sub: 'Связки с соседями, жалобы и запреты', icon: 'globe' },
   { key: 'smtp', label: 'Почта', sub: 'Отправка писем: коды и восстановление пароля', icon: 'mail' },
   { key: 'economy', label: 'Экономика', sub: 'Гускоины: выключатель и закрытый показ', icon: 'star' },

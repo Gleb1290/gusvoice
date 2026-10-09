@@ -8,8 +8,8 @@
 
 /** Сколько столбиков в полоске. Больше — не разглядеть, меньше — все записи выглядят одинаково. */
 export const WAVEFORM_BUCKETS = 48;
-/** Потолок длины записи. Всё, что длиннее, — это уже файл, а не «голосовое». */
-export const VOICE_MAX_MS = 5 * 60 * 1000;
+/** Потолок длины записи: 30 минут (с 09.10, было 5; при 32 кбит/с файл около 7 МБ — влезает в 25 МБ потолок загрузки). Всё, что длиннее, — это уже файл, а не «голосовое». */
+export const VOICE_MAX_MS = 30 * 60 * 1000;
 
 /**
  * Свернуть звуковые отсчёты в огибающую из целых 0..100.
@@ -50,6 +50,33 @@ export function formatDuration(ms: number): string {
 }
 
 /** Вложение — голосовое сообщение? Признак — наличие огибающей, её ставит только запись. */
+/**
+ * Кружок (`Attachment.round`, 08.10, `circles1`): видео с пометкой сервера. «Прослушано» и «один раз» у него те же, что у
+ * голосового (`isListenable`).
+ */
+export function isRoundVideo(a: { round?: true; contentType: string }): boolean {
+  return a.round === true && a.contentType.startsWith('video/');
+}
+
+/** Вложение, у которого есть «прослушано» (`voice1`) и «один раз» (`voice3`): голосовое или кружок. */
+export function isListenable(a: { waveform?: number[] | null; contentType: string; round?: true }): boolean {
+  return isVoiceMessage(a) || isRoundVideo(a);
+}
+
 export function isVoiceMessage(a: { waveform?: number[] | null; contentType: string }): boolean {
   return !!a.waveform?.length && a.contentType.startsWith('audio/');
+}
+
+/**
+ * Слова об ОДНОМ вложении «как в Telegram» (решение владельца 08.10, п.30) — общие для строки списка бесед
+ * (`dmRowRules.dmAttachmentPreview`) и цитаты ответа (`bubbleRules.replyQuoteLook`): голосовое — «Голосовое сообщение»,
+ * кружок — «Видеосообщение», видео — «Видео» (без длительности), файл — его имя одной строкой (нет имени — «Файл», без
+ * «Файл: »). Имя — как `previewText` у сервера: пробелы схлопнуты, не длиннее 200 знаков.
+ */
+export function attachmentWords(f: { kind: 'voice' | 'file'; video?: boolean; round?: boolean; name?: string | null }): string {
+  if (f.kind === 'voice') return 'Голосовое сообщение';
+  if (f.video) return f.round ? 'Видеосообщение' : 'Видео';
+  const flat = typeof f.name === 'string' ? f.name.replace(/\s+/g, ' ').trim() : '';
+  const chars = [...flat];
+  return chars.length === 0 ? 'Файл' : chars.length <= 200 ? flat : `${chars.slice(0, 199).join('')}…`;
 }

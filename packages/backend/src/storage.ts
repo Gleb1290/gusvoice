@@ -217,10 +217,72 @@ export async function getPrivate(key: string, range?: { start: number; end: numb
     : minio.getObject(env.minio.privateBucket, key);
 }
 
+/**
+ * Копия файла ЛС под новым ключом ВНУТРИ хранилища (S3 CopyObject): пересылка не гонит файл через бэкенд и не просит
+ * клиента залить его заново. Пересланному — свой объект: «удалить у обоих» оригинала его не задевает (04.10, `conv5`).
+ */
+export async function copyPrivate(fromKey: string, toKey: string): Promise<void> {
+  if (!minio) throw new Error('storage not configured');
+  const bucket = env.minio.privateBucket;
+  await minio.copyObject(bucket, toKey, `/${bucket}/${fromKey}`);
+}
+
 /** Удалить файл ЛС. Отсутствующий объект — не ошибка (повтор уборки после частичного сбоя). */
 export async function removePrivate(key: string): Promise<void> {
   if (!minio) throw new Error('storage not configured');
   await minio.removeObject(env.minio.privateBucket, key);
+}
+
+/*
+ * Загрузка кусками (`bigfile1`, 09.10): S3 multipart в закрытый бакет. Куски идут ЧЕРЕЗ бэкенд (`routes/uploads.ts`), а не
+ * по подписанным ссылкам хранилища: закрытый бакет снаружи не виден (адрес хранилища внутренний), CORS и заголовок `ETag`
+ * у versitygw настраивать не нужно, а тип файла и размер каждого куска проверяет сервер.
+ */
+
+/** Начать загрузку кусками; ответ — id загрузки хранилища. */
+export async function createPrivateMultipart(key: string, mime: string): Promise<string> {
+  if (!minio) throw new Error('storage not configured');
+  return minio.initiateNewMultipartUpload(env.minio.privateBucket, key, { 'Content-Type': mime });
+}
+
+/** Положить кусок `part` (с 1); ответ — ETag куска для сборки. */
+export async function putPrivatePart(key: string, uploadId: string, part: number, bytes: Buffer): Promise<string> {
+  if (!minio) throw new Error('storage not configured');
+  const res = await minio.uploadPart(
+    { bucketName: env.minio.privateBucket, objectName: key, uploadID: uploadId, partNumber: part, headers: {} },
+    bytes,
+  );
+  return res.etag;
+}
+
+/** Собрать файл из кусков (по порядку номеров). */
+export async function completePrivateMultipart(key: string, uploadId: string, parts: { part: number; etag: string }[]): Promise<void> {
+  if (!minio) throw new Error('storage not configured');
+  await minio.completeMultipartUpload(env.minio.privateBucket, key, uploadId, parts);
+}
+
+/** Бросить загрузку кусками: хранилище стирает уже лежащие куски. Уже брошенная — не ошибка. */
+export async function abortPrivateMultipart(key: string, uploadId: string): Promise<void> {
+  if (!minio) throw new Error('storage not configured');
+  await minio.abortMultipartUpload(env.minio.privateBucket, key, uploadId).catch((e: { code?: string }) => {
+    if (e?.code !== 'NoSuchUpload') throw e;
+  });
+}
+
+/** Незавершённые загрузки кусками под префиксом (до 10 страниц): уборка брошенных, о которых база уже забыла. */
+export async function listPrivateMultipart(prefix: string): Promise<{ key: string; uploadId: string; initiated: Date }[]> {
+  if (!minio) return [];
+  const out: { key: string; uploadId: string; initiated: Date }[] = [];
+  let keyMarker = '';
+  let uploadIdMarker = '';
+  for (let page = 0; page < 10; page++) {
+    const res = await minio.listIncompleteUploadsQuery(env.minio.privateBucket, prefix, keyMarker, uploadIdMarker, '');
+    for (const u of res.uploads) out.push({ key: u.key, uploadId: u.uploadId, initiated: new Date(u.initiated) });
+    if (!res.isTruncated) break;
+    keyMarker = res.nextKeyMarker;
+    uploadIdMarker = res.nextUploadIdMarker;
+  }
+  return out;
 }
 
 /** Upload a custom server sound (one per server+event) and return its public URL. */

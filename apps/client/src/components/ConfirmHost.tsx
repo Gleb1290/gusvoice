@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useConfirmDialog } from '../confirm';
 import { useFocusTrap } from '../focusTrap';
 import { canConfirm, confirmLabelOf, enterHintOf, hasCancel, submitsOnEnter } from '../confirmRules';
+import { rememberRowVisible } from '../deleteChoiceRules';
 import { Icon } from './Icon';
 
 /**
@@ -25,6 +26,8 @@ export function ConfirmHost() {
   const [error, setError] = useState<string | null>(null);
   /** Галочка окна (`ConfirmSpec.option`) — своя у каждого вопроса. */
   const [option, setOption] = useState(false);
+  /** «Запомнить выбор» под галочкой (`ConfirmSpec.option.remember`). */
+  const [remember, setRemember] = useState(false);
   const okRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -38,6 +41,7 @@ export function ConfirmHost() {
     setBusy(false);
     setError(null);
     setOption(pending?.option?.checked ?? false);
+    setRemember(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- новый вопрос = новый id
   }, [pending?.id]);
 
@@ -127,7 +131,7 @@ export function ConfirmHost() {
       >
         <div className="confirm-top">
           <span className={`confirm-ic${danger ? ' danger' : ''}`}>
-            <Icon name={danger ? 'trash' : 'signal'} size={20} />
+            <Icon name={pending.icon ?? (danger ? 'trash' : 'signal')} size={20} />
           </span>
           <div className="confirm-text">
             <h2 id="confirm-title">{pending.title}</h2>
@@ -172,9 +176,28 @@ export function ConfirmHost() {
                   onChange={(e) => {
                     setOption(e.target.checked);
                     pending.onOption?.(e.target.checked);
+                    // Вернули галочку к исходному — «Запомнить выбор» уходит вместе с отметкой (как у Telegram Desktop).
+                    if (e.target.checked === pending.option?.checked && remember) {
+                      setRemember(false);
+                      pending.onRemember?.(false);
+                    }
                   }}
                 />
                 <span>{pending.option.label}</span>
+              </label>
+            )}
+            {rememberRowVisible(pending.option, option) && (
+              <label className="confirm-option confirm-remember">
+                <input
+                  type="checkbox"
+                  checked={remember}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setRemember(e.target.checked);
+                    pending.onRemember?.(e.target.checked);
+                  }}
+                />
+                <span>Запомнить выбор</span>
               </label>
             )}
 

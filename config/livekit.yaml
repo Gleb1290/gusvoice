@@ -17,6 +17,13 @@ log_level: info
 prometheus_port: 6789
 
 rtc:
+  # Throttle keyframe requests (PLI): at most one per screen-share layer every 2 s (#109, #207, 2026-10-06).
+  # v1.13.1 defaults are 500 ms (low) and 1 s (mid/high): one lossy viewer could make the sharer emit a
+  # keyframe twice a second and smear the picture for everyone. See docs/screenshare-pli-throttle-proposal.md.
+  pli_throttle:
+    low_quality: 2s
+    mid_quality: 2s
+    high_quality: 2s
   tcp_port: 7881 # ICE/TCP fallback, used when a client's network blocks UDP.
   udp_port: 7882 # Single-port UDP mux for ALL RTC media (no 50000-60000 range needed).
   use_external_ip: true # Discover & advertise the host's public IP via STUN (set node_ip below if wrong).

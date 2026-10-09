@@ -52,7 +52,7 @@ export async function createTestDb(): Promise<TestDb> {
   const raw = new PGlite();
   const db = drizzle(raw, { schema });
 
-  const { migrationsDir, migrationOrder, setDbForTests } = await import('../src/db/index.js');
+  const { migrationsDir, migrationOrder, migrationPlan, setDbForTests } = await import('../src/db/index.js');
   const files = migrationOrder(await readdir(migrationsDir));
   await raw.exec(`CREATE TABLE IF NOT EXISTS _migrations (
     name TEXT PRIMARY KEY,
@@ -60,6 +60,19 @@ export async function createTestDb(): Promise<TestDb> {
   )`);
   for (const file of files) {
     const sql = await readFile(join(migrationsDir, file), 'utf8');
+    const plan = migrationPlan(sql);
+    if (!plan.transaction) {
+      // `-- gv:no-transaction` (`CONCURRENTLY`): по шагам вне транзакции — как в `runMigrations`.
+      for (const step of plan.steps) {
+        try {
+          await raw.exec(step.sql);
+        } catch (err) {
+          if (!step.optional) throw err;
+        }
+      }
+      await raw.exec(`INSERT INTO _migrations (name) VALUES ('${file}')`);
+      continue;
+    }
     // Файл целиком в одной транзакции — как в `runMigrations`: половина применённой миграции хуже, чем ни одной.
     await raw.exec(`BEGIN;\n${sql}\nINSERT INTO _migrations (name) VALUES ('${file}');\nCOMMIT;`);
   }

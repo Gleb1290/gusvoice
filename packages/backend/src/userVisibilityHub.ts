@@ -1,5 +1,5 @@
-import type { GatewayServerMessage } from '@gusvoice/shared';
-import { mayObserveUser, membershipDiff, visibleOnline } from './gatewayRules.js';
+import { FEATURE_PRESENCE4, FEATURE_PRESENCE5, type GatewayServerMessage } from '@gusvoice/shared';
+import { aboutUserSteps, mayObserveUser, membershipDiff, visibleOnline, type DeliverWho } from './gatewayRules.js';
 
 /**
  * Кто про кого знает на шлюзе (#136) — БЕЗ Redis, базы, Fastify и таймеров приложения.
@@ -16,6 +16,8 @@ import { mayObserveUser, membershipDiff, visibleOnline } from './gatewayRules.js
 /** Минимум, который хабу нужен от соединения: кто за ним стоит (null — ещё не представился). */
 export interface HubConn {
   userId: string | null;
+  /** Возможности из `identify.caps` (`presence4` — получать `online.dm`); нет — ничего нового соединению не шлём. */
+  caps?: ReadonlySet<string>;
 }
 
 export interface UserVisibilityDeps<C extends HubConn> {
@@ -58,6 +60,26 @@ export interface UserVisibilityHub<C extends HubConn> {
   sendOnlineSnapshot(conn: C): Promise<void>;
   /** Новый состав сервера: если менялся — пересобрать видимость задетым. */
   applyServerMembers(serverId: string, next: Set<string>): Promise<void>;
+  /**
+   * Связь между этими людьми поменялась не через сервер (блокировка и разблокировка, 05.10): забыть их «соседей» и
+   * прислать каждому их соединению свежий снимок онлайна — как `applyServerMembers` задетым.
+   */
+  refreshPeers(userIds: readonly string[]): Promise<void>;
+  /**
+   * Статус «Невидимый» (приватность ЛС, 07.10): для всех, кроме самого человека, он «не в сети» — в снимках и в
+   * `online.update`. Форма событий прежняя, меняются только значения. Смена флага у человека в сети тут же рассылается
+   * соседям как `online.update` (ушёл / появился). Звать ДО рассылки `user.status` и до `goOnline` при `identify`.
+   */
+  setInvisible(userId: string, invisible: boolean): void;
+  /** Невидим ли человек сейчас (для тестов и диагностики). */
+  isInvisible(userId: string): boolean;
+  /**
+   * «Не в сети для ЛС» при открытом сокете (08.10, #211, D4, решение 42): приложение скрыто или простаивает. Соседям с
+   * `presence5` — `online.away` на каждой смене (и `false`, когда человек вышел совсем: звать ПОСЛЕ рассылки `online.update`),
+   * в снимке — `dmAway`. Серверный онлайн и `online.update` не трогает. `true` — значение поменялось.
+   */
+  setDmAway(userId: string, away: boolean): boolean;
+  isDmAway(userId: string): boolean;
 }
 
 const DEFAULT_PEERS_TTL_MS = 60_000;
@@ -95,6 +117,10 @@ export function createUserVisibilityHub<C extends HubConn>(deps: UserVisibilityD
   const byUser = new Map<string, Set<C>>();
   /** userId -> сколько у него живых сокетов (онлайн, пока > 0). */
   const online = new Map<string, number>();
+  /** Кто в статусе «Невидимый» (по последней известной шлюзу записи; живёт, пока жив процесс). */
+  const invisible = new Set<string>();
+  /** «Не в сети для ЛС» при открытом сокете (D4, `presence5`): приложение скрыто или простаивает, не в голосе и не в звонке. */
+  const dmAway = new Set<string>();
 
   /**
    * С кем у человека есть общий сервер или ЛС (#136) — кому можно знать о его онлайне и статусе.
@@ -145,13 +171,66 @@ export function createUserVisibilityHub<C extends HubConn>(deps: UserVisibilityD
     return entry.p;
   }
 
+  /** Разослать событие О человеке: всем, кому можно знать (`all`), только его устройствам (`own`) или всем, кроме них (`others`). */
+  function deliver(subjectId: string, msg: GatewayServerMessage, who: DeliverWho): void {
+    void peersOf(subjectId).then((peers) => {
+      const data = JSON.stringify(msg);
+      const su = superAdminId();
+      for (const [uid, set] of byUser) {
+        if (who === 'own' ? uid !== subjectId : who === 'others' && uid === subjectId) continue;
+        if (!mayObserveUser(uid, subjectId, peers, su)) continue;
+        for (const c of set) send(c, data);
+      }
+    });
+  }
+
+  /**
+   * `presence4` (решение владельца 08.10): «Невидимый» — только про серверы, в ЛС он в сети. Соседям с `caps: ['presence4']`
+   * уходит `online.dm` — «в сети для ЛС» (`online` = true) или «уже нет» (вышел / снял «Невидимый»). Старые соединения его не
+   * получают: для них невидимый по-прежнему не в сети.
+   */
+  /** `presence5` (D4): `online.away` тем же, кому можно знать о человеке, кроме его самого. */
+  function deliverAway(subjectId: string, away: boolean): void {
+    void peersOf(subjectId).then((peers) => {
+      const data = JSON.stringify({ t: 'online.away', userId: subjectId, away } satisfies GatewayServerMessage);
+      const su = superAdminId();
+      for (const [uid, set] of byUser) {
+        if (uid === subjectId || !mayObserveUser(uid, subjectId, peers, su)) continue;
+        for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5)) send(c, data);
+      }
+    });
+  }
+
+  function deliverDm(subjectId: string, value: boolean): void {
+    void peersOf(subjectId).then((peers) => {
+      const data = JSON.stringify({ t: 'online.dm', userId: subjectId, online: value } satisfies GatewayServerMessage);
+      const su = superAdminId();
+      for (const [uid, set] of byUser) {
+        if (uid === subjectId || !mayObserveUser(uid, subjectId, peers, su)) continue;
+        for (const c of set) if (c.caps?.has(FEATURE_PRESENCE4)) send(c, data);
+      }
+    });
+  }
+
   async function sendOnlineSnapshot(conn: C): Promise<void> {
     const uid = conn.userId;
     if (!uid) return;
     const peers = await peersOf(uid);
     // Пока ждали базу, соединение могло закрыться или представиться другим — снимок уже не его.
     if (conn.userId !== uid) return;
-    send(conn, JSON.stringify({ t: 'online.snapshot', users: visibleOnline(online.keys(), uid, peers, superAdminId()) }));
+    const users = visibleOnline(online.keys(), uid, peers, superAdminId(), invisible);
+    // `presence4`: невидимые соседи в сети — отдельным списком, только для ЛС (`deliverDm`).
+    const dmOnly = conn.caps?.has(FEATURE_PRESENCE4)
+      ? visibleOnline(online.keys(), uid, peers, superAdminId()).filter((id) => id !== uid && invisible.has(id))
+      : null;
+    // `presence5` (D4): кто из видимых этому соединению в сети на серверах, но «не в сети» для ЛС.
+    const dmAwayIds = conn.caps?.has(FEATURE_PRESENCE5)
+      ? [...users, ...(dmOnly ?? [])].filter((id) => id !== uid && dmAway.has(id))
+      : null;
+    send(
+      conn,
+      JSON.stringify({ t: 'online.snapshot', users, ...(dmOnly ? { dmOnly } : {}), ...(dmAwayIds ? { dmAway: dmAwayIds } : {}) }),
+    );
   }
 
   return {
@@ -208,14 +287,37 @@ export function createUserVisibilityHub<C extends HubConn>(deps: UserVisibilityD
      * `mayObserveUser` отбивает их ещё раз. Событие сериализуется один раз на всю рассылку.
      */
     deliverAboutUser(subjectId, msg) {
-      void peersOf(subjectId).then((peers) => {
-        const data = JSON.stringify(msg);
-        const su = superAdminId();
-        for (const [uid, set] of byUser) {
-          if (!mayObserveUser(uid, subjectId, peers, su)) continue;
-          for (const c of set) send(c, data);
-        }
-      });
+      // Решение «кому и что» — чистая `aboutUserSteps` (`gatewayRules.ts`): «Невидимому» онлайн-события только своим устройствам,
+      // его статус `invisible` — своим настоящий, остальным обычный `online` (07.10, «приватность человека»).
+      for (const step of aboutUserSteps(subjectId, msg, invisible.has(subjectId))) deliver(subjectId, step.msg, step.who);
+      // `presence4`: вход / выход «Невидимого» соседям не рассылается, но в ЛС он в сети — `online.dm` новым клиентам.
+      if (msg.t === 'online.update' && invisible.has(subjectId)) deliverDm(subjectId, msg.online);
+    },
+
+    setInvisible(userId, value) {
+      if (invisible.has(userId) === value) return;
+      if (value) invisible.add(userId);
+      else invisible.delete(userId);
+      // Человек в сети и стал невидимым — соседям «вышел»; перестал быть невидимым — «зашёл». Себе ничего: у него и так «в сети».
+      if (online.has(userId)) deliver(userId, { t: 'online.update', userId, online: !value }, 'others');
+      // `presence4`: в ЛС он остаётся в сети — стал невидимым: «в сети для ЛС»; перестал: снять (обычный `online.update` уже ушёл).
+      if (online.has(userId)) deliverDm(userId, value);
+    },
+
+    isInvisible(userId) {
+      return invisible.has(userId);
+    },
+
+    setDmAway(userId, away) {
+      if (dmAway.has(userId) === away) return false;
+      if (away) dmAway.add(userId);
+      else dmAway.delete(userId);
+      deliverAway(userId, away);
+      return true;
+    },
+
+    isDmAway(userId) {
+      return dmAway.has(userId);
     },
 
     sendOnlineSnapshot,
@@ -228,6 +330,14 @@ export function createUserVisibilityHub<C extends HubConn>(deps: UserVisibilityD
       for (const uid of affected) peersCache.delete(uid);
       const jobs: Promise<void>[] = [];
       for (const uid of affected) for (const c of byUser.get(uid) ?? []) jobs.push(sendOnlineSnapshot(c));
+      await Promise.all(jobs);
+    },
+
+    async refreshPeers(userIds) {
+      const people = [...new Set(userIds)];
+      for (const uid of people) peersCache.delete(uid);
+      const jobs: Promise<void>[] = [];
+      for (const uid of people) for (const c of byUser.get(uid) ?? []) jobs.push(sendOnlineSnapshot(c));
       await Promise.all(jobs);
     },
   };

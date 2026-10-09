@@ -336,6 +336,7 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'формат не поддерживается — нужен PNG, JPEG, WEBP или GIF' });
     }
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     if (buffer.length > 512 * 1024) return reply.code(400).send({ error: 'файл больше 512 КБ' });
 
     const url = await putMedia('channel-icons', channelId, buffer, mime, Date.now());

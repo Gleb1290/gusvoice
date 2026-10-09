@@ -21,6 +21,7 @@ import { ServerSoundsPanel } from './ServerSoundsPanel';
 import { economyVisible } from '../economyVisible';
 import { confirmAction } from '../confirm';
 import { Select } from './Select';
+import { RailItem, SettingsHead, SettingsRail, SettingsWindow } from './SettingsShell';
 
 
 export function ServerSettingsModal({
@@ -242,71 +243,79 @@ export function ServerSettingsModal({
   }
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className={`modal admin rail-modal server-rail${picked ? ' picked' : ''}`}
-        onClick={(e) => e.stopPropagation()}
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="ss-title"
-        tabIndex={-1}
-      >
-        {/* Рельс разделов — как в настройках пользователя и в админке (23.09): десять слов в строку
-            вкладок уже не помещались, и ни одно не говорило, что внутри. */}
-        <div className="set-rail">
-          <div className="set-rail-title">
-            {/* Имя сервера, а не «Настройки сервера»: у человека их несколько, и строка выделенного
-                раздела не говорит, ЧЕЙ это раздел. */}
-            <span className="rail-title-text" title={server.name}>
-              {server.name}
-            </span>
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
-          <div
-            className="set-rail-list"
-            role="tablist"
-            aria-label="Разделы настроек сервера"
-            aria-orientation="vertical"
-            onKeyDown={onTabsKey}
-          >
-            {tabs.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                id={`ss-tab-${t.key}`}
-                aria-selected={tab === t.key}
-                aria-controls="ss-panel-body"
-                tabIndex={tab === t.key ? 0 : -1}
-                className={`set-rail-item${tab === t.key ? ' active' : ''}`}
-                onClick={() => {
-                  setTab(t.key);
-                  setPicked(true);
-                }}
-              >
-                <Icon name={t.icon} size={16} />
-                <span>{t.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
+    <SettingsWindow
+      variant="server"
+      picked={picked}
+      onClose={onClose}
+      titleId="ss-title"
+      dialogRef={dialogRef}
+      // Рельс разделов — как в настройках пользователя и в админке (23.09): десять слов в строку вкладок уже не
+      // помещались, и ни одно не говорило, что внутри.
+      rail={
+        <SettingsRail
+          // Имя сервера, а не «Настройки сервера»: у человека их несколько, и строка выделенного раздела не говорит,
+          // ЧЕЙ это раздел.
+          title={server.name}
+          named
+          label="Разделы настроек сервера"
+          onClose={onClose}
+          onListKeyDown={onTabsKey}
+        >
+          {tabs.map((t) => (
+            <RailItem
+              key={t.key}
+              id={`ss-tab-${t.key}`}
+              aria-controls="ss-panel-body"
+              tabIndex={tab === t.key ? 0 : -1}
+              icon={t.icon}
+              label={t.label}
+              active={tab === t.key}
+              onClick={() => {
+                setTab(t.key);
+                setPicked(true);
+              }}
+            />
+          ))}
+        </SettingsRail>
+      }
+      outside={
+        <>
+          {cropFile && (
+            <AvatarCropModal
+              file={cropFile}
+              busy={busy}
+              onCancel={() => setCropFile(null)}
+              onCrop={(b) => void uploadIcon(b)}
+            />
+          )}
 
-        <div className="set-main">
-          <div className="set-head">
-            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
-              <Icon name="chevron-left" size={18} />
-            </button>
-            <div className="set-head-text">
-              <h2 id="ss-title">{current?.label ?? 'Настройки сервера'}</h2>
-              {current && <div className="set-head-sub">{current.sub}</div>}
+          {permCat && (
+            <div className="modal-overlay" onClick={() => setPermCat(null)}>
+              <div className="modal channel-settings" onClick={(e) => e.stopPropagation()}>
+                <div className="admin-head">
+                  <h2>Доступ · {permCat.name}</h2>
+                  <button type="button" className="icon-close" title="Закрыть" onClick={() => setPermCat(null)}>
+                    <Icon name="close" size={18} />
+                  </button>
+                </div>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  Эти права наследуют все каналы категории как базу. Права отдельного канала (вкладка «Доступ» у
+                  канала) переопределяют их — приватность канала важнее доступа категории.
+                </div>
+                <CategoryPermissionsEditor category={permCat} />
+              </div>
             </div>
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
+          )}
+        </>
+      }
+    >
+        <SettingsHead
+          title={current?.label ?? 'Настройки сервера'}
+          titleId="ss-title"
+          sub={current?.sub}
+          onBack={() => setPicked(false)}
+          onClose={onClose}
+        />
 
         {/*
           🔴 Прокрутка вкладок. Без неё модалка с `max-height: 85vh` просто ОБРЕЗАЛА содержимое:
@@ -479,36 +488,7 @@ export function ServerSettingsModal({
         )}
         </div>
         )}
-        </div>
-      </div>
-
-      {cropFile && (
-        <AvatarCropModal
-          file={cropFile}
-          busy={busy}
-          onCancel={() => setCropFile(null)}
-          onCrop={(b) => void uploadIcon(b)}
-        />
-      )}
-
-      {permCat && (
-        <div className="modal-overlay" onClick={() => setPermCat(null)}>
-          <div className="modal channel-settings" onClick={(e) => e.stopPropagation()}>
-            <div className="admin-head">
-              <h2>Доступ · {permCat.name}</h2>
-              <button type="button" className="icon-close" title="Закрыть" onClick={() => setPermCat(null)}>
-                <Icon name="close" size={18} />
-              </button>
-            </div>
-            <div className="muted" style={{ fontSize: 13 }}>
-              Эти права наследуют все каналы категории как базу. Права отдельного канала (вкладка «Доступ» у
-              канала) переопределяют их — приватность канала важнее доступа категории.
-            </div>
-            <CategoryPermissionsEditor category={permCat} />
-          </div>
-        </div>
-      )}
-    </div>
+    </SettingsWindow>
   );
 }
 

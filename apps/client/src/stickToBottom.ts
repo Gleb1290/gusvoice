@@ -123,3 +123,48 @@ export function jumpDownLabel(unseenBelow: number): string {
   if (unseenBelow === 1) return '1 новое';
   return `${unseenBelow} новых`;
 }
+
+/**
+ * Куда ведёт «Вниз» (G26, Telegram 03·3.3.1–3.3.2, 03·3.1.2, Н9–Н10): к первому непрочитанному, если его верх НИЖЕ
+ * нижней кромки ленты (`firstUnreadTop` и `viewBottom` — в одних координатах; `null` — непрочитанного в ленте нет), иначе
+ * в конец. Так же — повторный клик по уже открытой беседе в списке.
+ */
+export function jumpDownTarget(firstUnreadTop: number | null, viewBottom: number): 'unread' | 'end' {
+  return firstUnreadTop !== null && firstUnreadTop >= viewBottom ? 'unread' : 'end';
+}
+
+/**
+ * Рисовать ли черту «Новые сообщения» при открытии (G26, Telegram ПК Н8: «первое непрочитанное выше последнего экрана»):
+ * от черты до конца ленты больше высоты её окна. Иначе всё непрочитанное помещается на последний экран — беседа
+ * открывается внизу и без черты. Окно ленты не у хвоста беседы (`atTail = false`) — конец дальше, черта нужна всегда.
+ */
+export function unreadDividerNeeded(dividerToEnd: number, viewHeight: number, atTail: boolean): boolean {
+  return !atTail || dividerToEnd > viewHeight;
+}
+
+/**
+ * Порог «вниз» в беседе, px от нижней кромки: как у Telegram Desktop (`chat_helpers.style` `historyToDownShownAfter: 480px`,
+ * `HistoryWidget::cornerButtonsDownShown`: `scrollTop + historyToDownShownAfter < scrollTopMax`). Ближе к низу кнопка не
+ * мешает читать — до конца и так один взмах колеса.
+ */
+export const JUMP_DOWN_SHOWN_AFTER = 480;
+
+/** Отлистал ли человек от нижней кромки дальше порога кнопки «вниз». */
+export function isFarFromBottom(box: ScrollBox, after: number = JUMP_DOWN_SHOWN_AFTER): boolean {
+  return box.scrollTop + after < box.scrollHeight - box.clientHeight;
+}
+
+/**
+ * Видна ли круглая «вниз» в беседе (пузыри, `MessagePane`), как у Telegram Desktop: дальше порога от низа; или внизу ещё
+ * не загруженное (`hasNewer`); или есть куда вернуться по цитате (`back`); или ниже видимого есть непрочитанное (`unread`)
+ * и человек не у самого низа.
+ */
+export function shouldShowCornerDown(s: {
+  far: boolean;
+  nearBottom: boolean;
+  hasNewer: boolean;
+  back: boolean;
+  unread: number;
+}): boolean {
+  return s.far || s.hasNewer || s.back || (!s.nearBottom && s.unread > 0);
+}

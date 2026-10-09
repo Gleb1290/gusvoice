@@ -304,6 +304,12 @@ mod occlusion;
 /// Системный тост, клик по которому открывает беседу (#212, Б11) — плагин клик на десктопе не отдаёт.
 #[cfg(desktop)]
 mod os_notify;
+/// Тост беседы с полем ответа и «Прочитано» (Р1, G17) — WinRT напрямую: у notify-rust поля ввода нет.
+#[cfg(desktop)]
+mod notify_conv;
+/// Число непрочитанных ЛС на значке панели задач и в трее (Р1, G39).
+#[cfg(desktop)]
+mod unread_badge;
 #[cfg(desktop)]
 mod overlay;
 /// Нативная тряска ОКНА для МЕГА пока (#117). Десктоп целиком — двигать окно умеет любая из
@@ -692,21 +698,9 @@ fn gv_open_external(url: String) -> Result<(), String> {
 fn gv_tray_set_state(app: tauri::AppHandle, state: String) {
     #[cfg(desktop)]
     {
-        let Some(tray) = app.tray_by_id("main") else {
-            return;
-        };
-        let (icon, tip) = match state.as_str() {
-            "speaking" => (Some(tauri::include_image!("tray-icons/speaking.png")), "GusVoice — говорите"),
-            "silent" => (Some(tauri::include_image!("tray-icons/silent.png")), "GusVoice — микрофон включён"),
-            "muted" => (Some(tauri::include_image!("tray-icons/muted.png")), "GusVoice — микрофон выключен"),
-            "deafened" => (Some(tauri::include_image!("tray-icons/deafened.png")), "GusVoice — звук выключен"),
-            // idle / unknown → restore the default logo.
-            _ => (app.default_window_icon().cloned(), "GusVoice"),
-        };
-        if let Some(icon) = icon {
-            let _ = tray.set_icon(Some(icon));
-        }
-        let _ = tray.set_tooltip(Some(tip));
+        // Значок по состоянию + счётчик непрочитанных поверх (Р1, G39) — общий путь с `gv_set_unread_badge`.
+        unread_badge::set_tray_state(&state);
+        unread_badge::refresh_tray(&app);
     }
     #[cfg(not(desktop))]
     {
@@ -1246,6 +1240,12 @@ pub fn run() {
             // Атрибут — на КАЖДУЮ строку (разбор выше, у `diag`): на Android модуля нет.
             #[cfg(desktop)]
             os_notify::gv_notify_clickable,
+            #[cfg(desktop)]
+            notify_conv::gv_notify_conversation,
+            #[cfg(desktop)]
+            notify_conv::gv_notify_remove,
+            #[cfg(desktop)]
+            unread_badge::gv_set_unread_badge,
             gv_open_external,
             gv_tray_set_state,
             gv_overlay_show,

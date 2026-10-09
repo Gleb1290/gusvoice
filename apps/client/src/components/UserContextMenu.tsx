@@ -1,4 +1,6 @@
-import { type CustomStatus, has, Permission, permsFromString, type Role } from '@gusvoice/shared';
+import { type CustomStatus, has, Permission, permsFromString, type Role, type UserLastSeen } from '@gusvoice/shared';
+import { explainCallPrivacy, useCall } from '../callStore';
+import { serverCalls } from '../callView';
 import { ConnectionQuality, type Participant, type RemoteTrack } from 'livekit-client';
 import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
@@ -16,9 +18,17 @@ import { ContextMenu, MenuDivider, MenuHeader, MenuItem, MenuSection, type MenuP
 import { Icon } from './Icon';
 import { PokeComposer } from './PokeModal';
 import { ProfileEconomy } from './ProfileEconomy';
+import { SharedMediaRows } from './SharedMedia';
 import { useAnimatedAvatarUrl } from '../avatarAnimation';
 import { confirmAction } from '../confirm';
 import { StatusDot } from './StatusDot';
+import { useLastSeen } from '../useLastSeen';
+import { dotShown, serverHidesOnline, serverPresence4, useLocalOnline } from '../dmOnline';
+import { lastSeenLabel } from '../lastSeenText';
+import { contactLabel, serverContacts } from '../contactRules';
+import { useContactList, useContacts } from '../contacts';
+import { removeContactAsk } from './ContactEditModal';
+import { showUserAudio } from '../userAudioRules';
 
 export type UserMenuTarget = {
   userId: string; // user id == LiveKit participant identity
@@ -28,6 +38,10 @@ export type UserMenuTarget = {
   voiceChannelId?: string | null; // the voice channel the target is currently in → enables moderation
   micMuted?: boolean; // mic-muted hint when there's no live participant (e.g. from the presence list)
   serverMuted?: boolean; // muted by a moderator (from presence) — distinct from self-mute
+  /** Логин, если он известен зовущему, а в ростере сервера человека нет (собеседник из ЛС, шапка беседы). */
+  username?: string;
+  /** Беседа ЛС, из которой открыт профиль (G29, `media1`): карточка показывает её общие медиа. */
+  convId?: string;
 };
 
 /**
@@ -42,10 +56,13 @@ export function useUserMenu() {
     e.stopPropagation();
     setState({ pos: { x: e.clientX, y: e.clientY }, target, view });
   };
+  /** То же без события мыши — точка задана зовущим (пункт меню «⋮» шапки беседы, клавиатура); на телефоне — всё равно лист. */
+  const openAt = (pos: MenuPos, target: UserMenuTarget, view: 'menu' | 'profile' = 'menu') =>
+    setState({ pos, target, view });
   const menu = state ? (
     <UserContextMenu target={state.target} pos={state.pos} initialView={state.view} onClose={() => setState(null)} />
   ) : null;
-  return { open, menu };
+  return { open, openAt, menu };
 }
 
 type View = 'menu' | 'connection' | 'profile' | 'roles' | 'move' | 'ban' | 'nickname' | 'poke' | 'mega-poke';
@@ -279,25 +296,33 @@ function ProfileCard({
   username,
   isSelf,
   status,
+  lastSeen,
   customStatus,
   roles,
   joinedAt,
   onBack,
   onDm,
+  onCall,
   onEdit,
   onReopen,
+  onSharedMedia,
 }: {
   target: UserMenuTarget;
   username?: string;
   isSelf: boolean;
   status: DotStatus;
+  lastSeen: UserLastSeen | null;
   customStatus: CustomStatus | null;
   roles: Role[];
   joinedAt?: string;
   onBack: () => void;
   onDm: () => void;
+  /** «Позвонить» (С5, `calls1`): только когда сервер умеет звонки; нет пропа — кнопки нет. */
+  onCall?: () => void;
   onEdit: () => void;
   onReopen: () => void;
+  /** Нажали строку общих медиа (G29): карточка закрывается, окно медиа открывается поверх. */
+  onSharedMedia?: () => void;
 }) {
   const joined = monthYear(joinedAt);
   // Game activity (#40) — read live from the store so it updates while the card is open.
@@ -312,6 +337,7 @@ function ProfileCard({
   const animatedAvatarUrl = useAnimatedAvatarUrl()(target.userId) ?? null;
   // Откуда человек — из того же общего ростера и по той же причине, что и анимация.
   const guestHome = useGuestHome()(target.userId);
+  const seen = lastSeen ? lastSeenLabel(lastSeen, new Date(), true) : null;
   // Запрет личек двусторонний (§5.8): гостю закрыта переписка и с местными, поэтому спрашиваем
   // правило, а не одно лишь «гость ли собеседник».
   const dmBlocked = dmBlockText(useStore((s) => s.user?.homeInstance), guestHome);
@@ -348,6 +374,8 @@ function ProfileCard({
           {isSelf && <span className="pcard-badge">это вы</span>}
         </div>
         {username && <div className="pcard-handle">@{username}</div>}
+        {/* «В сети» / «был(а) вчера в 21:05» (С1, `lastseen1`) — полная форма, как в профиле Telegram Desktop (`OnlineTextFull`). */}
+        {seen && <div className="pcard-handle pcard-seen">{seen}</div>}
         {/* Откуда человек — сразу под @ником: в карточку приходят смотреть на человека, и «он с
             другого инстанса» здесь такая же часть ответа, как его роли. */}
         <GuestLine home={guestHome} />
@@ -395,6 +423,8 @@ function ProfileCard({
           </div>
         )}
 
+        {target.convId && <SharedMediaRows convId={target.convId} onOpen={onSharedMedia} />}
+
         <div className="pcard-actions">
           {isSelf ? (
             <button type="button" className="pcard-cta" onClick={onEdit}>
@@ -409,6 +439,11 @@ function ProfileCard({
               <button type="button" className="pcard-cta" onClick={onDm}>
                 <Icon name="mail" size={16} /> Написать в ЛС
               </button>
+              {onCall && (
+                <button type="button" className="pcard-more" title="Позвонить" aria-label="Позвонить" onClick={onCall}>
+                  <Icon name="phone" size={18} />
+                </button>
+              )}
               <button type="button" className="pcard-more" title="Ещё" onClick={onReopen}>
                 <Icon name="more" size={18} />
               </button>
@@ -441,13 +476,20 @@ export function UserContextMenu({
   const onlineUsers = useStore((s) => s.onlineUsers);
   const userStatuses = useStore((s) => s.userStatuses);
   const openDmWith = useStore((s) => s.openDmWith);
+  const callsOn = useStore((s) => s.convActive && serverCalls(s.serverFeatures) && !s.blockedUsers.some((u) => u.id === target.userId));
   const requestMention = useStore((s) => s.requestMention);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const pushMutedDmUsers = useStore((s) => s.pushMutedDmUsers);
   const setPushMuted = useStore((s) => s.setPushMuted);
   const audio = useUserAudio(target.userId);
+  // Громкость и «Заглушить для себя» — только для того, кто сейчас в голосе (C3): в текстовой группе им делать нечего.
+  const inVoicePresence = useStore((s) => Object.values(s.presence).some((l) => l.some((v) => v.userId === target.userId)));
   // Гость ли человек — из общего ростера; по этому же полю решается, предлагать ли ему личку.
   const menuGuestHome = useGuestHome()(target.userId);
+  // Контакты (08.10, `contacts1`): только между своими людьми инстанса — гостю и с гостем пунктов нет (сервер ответит 400/403).
+  const contactsOn = useStore((s) => serverContacts(s.serverFeatures)) && !me?.homeInstance && !menuGuestHome && target.userId !== me?.id;
+  const contacts = useContactList(contactsOn);
+  const targetContact = contacts?.find((c) => c.id === target.userId) ?? null;
   // Галочка «Пожаловаться» и корзина приложенных сообщений живут рядом с окном бана (§5.11).
   const [banReport, setBanReport] = useState(false);
   const banEvidence = useEvidence(target.userId);
@@ -460,7 +502,24 @@ export function UserContextMenu({
   const [banReason, setBanReason] = useState('');
 
   const isSelf = !!me && me.id === target.userId;
-  const online = onlineUsers.includes(target.userId);
+  /* `presence4` (решения владельца 08.10): карточка из ЛС — «в сети» по присутствию всегда (и «Невидимый», `dmOnlineUsers`, и
+     «Никто»); карточка на сервере — только точка шлюза (невидимый не в сети, «Время захода» не влияет). Без `presence4` — Р-2
+     (`lastseen2`): скрытое время прячет и точку. */
+  const p4 = useStore((s) => serverPresence4(s.serverFeatures));
+  const inDm = useStore((s) => s.view === 'dm');
+  const dmOnlineHere = useStore((s) => p4 && inDm && s.dmOnlineUsers.includes(target.userId));
+  // `presence5` (D4, решение 42): карточка из ЛС — свёрнутое или простаивающее приложение не в сети; на сервере — как раньше.
+  const dmAwayHere = useStore((s) => inDm && !!s.dmAwayUsers?.includes(target.userId));
+  const rawOnline = (onlineUsers.includes(target.userId) || dmOnlineHere) && !dmAwayHere;
+  const hidesOnline = useStore((s) => serverHidesOnline(s.serverFeatures));
+  // Решение 48 (08.10): карточка из сервера — по серверным правилам («в сети» при открытом сокете), из ЛС — по правилам ЛС.
+  const profileSeen = useLastSeen(isSelf ? null : target.userId, inDm ? 'dm' : 'server');
+  const localOnline = useLocalOnline(isSelf ? null : target.userId);
+  const online = isSelf
+    ? rawOnline
+    : p4
+      ? rawOnline || (inDm && localOnline)
+      : dotShown(rawOnline, profileSeen?.exact, hidesOnline, localOnline);
   const p = target.participant ?? null;
   /**
    * Аватар в шапке меню — и он же открывается по клику.
@@ -483,7 +542,7 @@ export function UserContextMenu({
   const dot = effectiveDot(rawStatus, online, isSelf);
   const liveCustom = (isSelf ? me?.customStatus : st?.customStatus) ?? st?.customStatus ?? null;
   const customStatus =
-    liveCustom && (liveCustom.emoji || liveCustom.text) && customStatusVisible(rawStatus, online, isSelf) ? liveCustom : null;
+    liveCustom && (liveCustom.emoji || liveCustom.text) && customStatusVisible(rawStatus, rawOnline, isSelf) ? liveCustom : null;
 
   // Enrich the target from the cached member roster: @username, roles, join date.
   const member = members.find((m) => m.user.id === target.userId);
@@ -529,7 +588,7 @@ export function UserContextMenu({
     if (!member && bootstrap) void loadMembers(bootstrap.server.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootstrap?.server.id]);
-  const username = member?.user.username ?? (isSelf ? me?.username : undefined);
+  const username = member?.user.username ?? (isSelf ? me?.username : undefined) ?? target.username;
   const roles = useMemo(() => {
     if (!bootstrap || !member) return [] as Role[];
     const set = new Set(member.roleIds);
@@ -648,13 +707,30 @@ export function UserContextMenu({
           username={username}
           isSelf={isSelf}
           status={dot}
+          // `presence4`: в сети — строка «в сети», а не «был(а) недавно» из ответа сервера (он считает «недавно» для скрытого времени).
+          lastSeen={profileSeen && online && !isSelf && !profileSeen.online ? { ...profileSeen, online: true, at: null, approx: null } : profileSeen}
           customStatus={customStatus}
           roles={roles}
           joinedAt={member?.joinedAt}
           onBack={() => setView('menu')}
           onDm={() => run(() => openDmWith(target.userId))}
+          onCall={
+            callsOn && !isSelf
+              ? profileSeen?.canCall === false
+                ? // Запрет звонков (`presence4`, п.25): кнопка остаётся, нажатие объясняет (как Telegram), звонка нет.
+                  () => explainCallPrivacy(target.name)
+                : () =>
+                    run(async () => {
+                      // Звонок живёт в беседе: открыть (или завести) беседу 1:1 и позвонить из неё, как «Позвонить» в профиле Telegram.
+                      const id = await useStore.getState().convOpenWith(target.userId);
+                      await useStore.getState().selectDm(id);
+                      await useCall.getState().start(id);
+                    })
+              : undefined
+          }
           onEdit={() => run(() => setSettingsOpen(true))}
           onReopen={() => setView('menu')}
+          onSharedMedia={onClose}
         />
       </ContextMenu>
     );
@@ -926,56 +1002,60 @@ export function UserContextMenu({
 
       {!isSelf && (
         <>
-          {/* Personal, client-only audio — persisted across sessions, applies in voice. */}
-          <div className="ctx-vol2">
-            <div className="ctx-vol2-head">
-              <button
-                type="button"
-                className={`ctx-vol2-spk ${audio.muted ? 'on' : ''}`}
-                title={audio.muted ? 'Включить звук' : 'Заглушить для себя'}
-                onClick={() => audio.toggleMuted()}
-              >
-                <Icon name={audio.muted ? 'volume-off' : 'volume'} size={16} />
-              </button>
-              <span className="ctx-vol2-label">Громкость</span>
-              <button
-                type="button"
-                className={`ctx-vol2-pct ${audio.muted ? 'muted' : volPct > 100 ? 'boost' : ''}`}
-                title="Сбросить к 100%"
-                onClick={() => audio.reset()}
-              >
-                {audio.muted ? 'выкл' : `${volPct}%`}
-              </button>
-              <button type="button" className="ctx-vol2-reset" title="Сбросить к 100%" onClick={() => audio.reset()}>
-                <Icon name="reset" size={13} />
-              </button>
+          {showUserAudio({ isSelf, hasParticipant: !!target.participant, voiceChannelId: target.voiceChannelId, inPresence: inVoicePresence }) && (
+            <>
+            {/* Personal, client-only audio — persisted across sessions, applies in voice. */}
+            <div className="ctx-vol2">
+              <div className="ctx-vol2-head">
+                <button
+                  type="button"
+                  className={`ctx-vol2-spk ${audio.muted ? 'on' : ''}`}
+                  title={audio.muted ? 'Включить звук' : 'Заглушить для себя'}
+                  onClick={() => audio.toggleMuted()}
+                >
+                  <Icon name={audio.muted ? 'volume-off' : 'volume'} size={16} />
+                </button>
+                <span className="ctx-vol2-label">Громкость</span>
+                <button
+                  type="button"
+                  className={`ctx-vol2-pct ${audio.muted ? 'muted' : volPct > 100 ? 'boost' : ''}`}
+                  title="Сбросить к 100%"
+                  onClick={() => audio.reset()}
+                >
+                  {audio.muted ? 'выкл' : `${volPct}%`}
+                </button>
+                <button type="button" className="ctx-vol2-reset" title="Сбросить к 100%" onClick={() => audio.reset()}>
+                  <Icon name="reset" size={13} />
+                </button>
+              </div>
+              <div className="ctx-vol2-track">
+                <input
+                  className="ctx-vol-range"
+                  type="range"
+                  min={0}
+                  max={MAX_VOLUME}
+                  step={0.05}
+                  value={audio.muted ? 0 : audio.volume}
+                  onChange={(e) => {
+                    if (audio.muted) audio.setMuted(false);
+                    audio.setVolume(parseFloat(e.target.value));
+                  }}
+                  onDoubleClick={() => audio.reset()}
+                  title="Громкость (только для вас)"
+                  style={{ ['--p']: volFrac } as CSSProperties}
+                />
+                <div className="ctx-vol2-detent" />
+              </div>
             </div>
-            <div className="ctx-vol2-track">
-              <input
-                className="ctx-vol-range"
-                type="range"
-                min={0}
-                max={MAX_VOLUME}
-                step={0.05}
-                value={audio.muted ? 0 : audio.volume}
-                onChange={(e) => {
-                  if (audio.muted) audio.setMuted(false);
-                  audio.setVolume(parseFloat(e.target.value));
-                }}
-                onDoubleClick={() => audio.reset()}
-                title="Громкость (только для вас)"
-                style={{ ['--p']: volFrac } as CSSProperties}
-              />
-              <div className="ctx-vol2-detent" />
-            </div>
-          </div>
-          <MenuItem
-            icon={audio.muted ? 'volume-off' : 'mic-off'}
-            label={audio.muted ? 'Включить звук' : 'Заглушить для себя'}
-            sub="только для вас"
-            active={audio.muted}
-            onClick={() => audio.toggleMuted()}
-          />
+            <MenuItem
+              icon={audio.muted ? 'volume-off' : 'mic-off'}
+              label={audio.muted ? 'Включить звук' : 'Заглушить для себя'}
+              sub="только для вас"
+              active={audio.muted}
+              onClick={() => audio.toggleMuted()}
+            />
+            </>
+          )}
 
           <MenuDivider />
           {p && <MenuItem icon="activity" label="Инфо о подключении" onClick={() => setView('connection')} />}
@@ -987,6 +1067,24 @@ export function UserContextMenu({
           {!dmBlockText(me?.homeInstance, menuGuestHome) && (
             <MenuItem icon="mail" label="Написать в ЛС" onClick={() => run(() => openDmWith(target.userId))} />
           )}
+          {/* Контакты (`contacts1`), как меню профиля Telegram: «Добавить в контакты» или «Изменить» / «Удалить контакт». */}
+          {contactsOn && contacts && (() => {
+            const person = {
+              id: target.userId,
+              username: username ?? target.name,
+              // Настоящее имя, не подпись (в ЛС `target.name` — подпись контакта, `peerName.ts`): его ждёт окно «Изменить контакт».
+              displayName: member?.user.displayName ?? targetContact?.displayName ?? target.name,
+              avatarUrl: target.avatarUrl ?? null,
+            };
+            return targetContact ? (
+              <>
+                <MenuItem icon="edit" label="Изменить контакт" onClick={() => run(() => useContacts.getState().openEdit(person, 'edit'))} />
+                <MenuItem icon="trash" label="Удалить контакт" onClick={() => run(() => removeContactAsk(person, contactLabel(targetContact)))} />
+              </>
+            ) : (
+              <MenuItem icon="user-plus" label="Добавить в контакты" onClick={() => run(() => useContacts.getState().openEdit(person, 'add'))} />
+            );
+          })()}
           {/* Вставляем ИМЯ ПОЛЬЗОВАТЕЛЯ, а не отображаемое: упоминание ловится по username
               (`shared/mentions.ts`), и `@Маша` не разбудил бы никого — пункт меню делал вид, что
               сработал, а человек упоминания не получал. */}

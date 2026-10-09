@@ -1,5 +1,6 @@
 // Aliased: React's KeyboardEvent would shadow the DOM one used by the window listener below.
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { layerAbove } from './androidBack';
 
 /**
  * Modal manners in one place: Esc closes, focus starts inside the dialog and goes back to whatever
@@ -23,7 +24,8 @@ export function useDialogChrome<T extends HTMLElement = HTMLDivElement>(onClose:
     const opener = document.activeElement as HTMLElement | null;
     ref.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) closeRef.current();
+      // Над окном открыт лист/меню — Esc принадлежит ему (C1): иначе «назад» закрыла бы и слой, и окно.
+      if (e.key === 'Escape' && !e.defaultPrevented && !layerAbove(ref.current)) closeRef.current();
     };
     window.addEventListener('keydown', onKey);
     return () => {

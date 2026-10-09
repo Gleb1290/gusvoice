@@ -1,5 +1,7 @@
 import { api } from './api';
 import { IDLE_MS, effectiveLastActive, shouldGoAway, shouldReturnOnVoice, shouldReturnOnline } from './afkRules';
+import { windowFocused } from './notifications';
+import { noteGatewayActive } from './sockets';
 import { useStore } from './store';
 
 /**
@@ -80,9 +82,25 @@ async function setStatus(status: 'online' | 'away') {
   }
 }
 
+/**
+ * Подписчики на признак жизни (08.10, D4, решение 44): «в сети» в ЛС гаснет после 30 с без ввода и загорается на первом
+ * вводе — `presenceVisibility.ts` берёт тот же ввод, что и авто-«отошёл», а не ставит второй набор слушателей.
+ */
+const activityListeners = new Set<() => void>();
+export function onActivity(fn: () => void): void {
+  activityListeners.add(fn);
+}
+/** Когда был последний ввод в самом приложении (мс). */
+export function lastActivityAt(): number {
+  return lastActive;
+}
+
 /** Любой признак жизни: ввод, движение мыши, речь, переключение микрофона. */
 export function noteActivity(): void {
   lastActive = Date.now();
+  for (const fn of activityListeners) fn();
+  // «За устройством сидят» (G38, `push2`): только когда окно в фокусе — речь и хоткеи из игры телефон не глушат.
+  if (windowFocused()) noteGatewayActive(true);
   if (shouldReturnOnline({ status: myStatus(), autoAway: isAutoAway() })) void setStatus('online');
 }
 
@@ -94,7 +112,7 @@ function onMove(): void {
 }
 
 /** Простой ввода по всей системе (десктоп). `null` = веб/Android или команда недоступна. */
-async function osIdleMs(): Promise<number | null> {
+export async function osIdleMs(): Promise<number | null> {
   const c = (window as unknown as { __TAURI__?: { core?: { invoke: (cmd: string) => Promise<unknown> } } })
     .__TAURI__?.core;
   if (!c) return null;
@@ -131,15 +149,19 @@ export function initAfk(): void {
   window.addEventListener('pointermove', onMove, opts);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') noteActivity();
+    else noteGatewayActive(false);
   });
   window.addEventListener('focus', noteActivity);
+  // Окно ушло из фокуса — телефон снова получает пуш сразу (G38): у Telegram Desktop «не в сети» через 5 с после blur.
+  window.addEventListener('blur', () => noteGatewayActive(false));
 
   // Голос как признак присутствия. Работает и когда приложение в фоне, а человек играет и говорит —
   // именно тот случай, когда прежняя версия упорно держала «отошёл».
   let wasSpeaking = false;
   let wasMuted = useStore.getState().selfMuted;
   useStore.subscribe((s) => {
-    const meId = s.user?.id;
+    // «Я» в комнате — учётка инстанса голоса (голос переживает переход, 01.10).
+    const meId = s.voice?.selfId ?? s.user?.id;
     const speaking = meId ? (s.liveVoice[meId]?.speaking ?? false) : false;
     if (speaking && !wasSpeaking) noteActivity();
     wasSpeaking = speaking;

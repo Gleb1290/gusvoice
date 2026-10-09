@@ -10,6 +10,8 @@
  * round 8. Здесь — поведение, которое от облика не зависит и от него не изменится.
  */
 
+import type { IconName } from './components/Icon';
+
 /**
  * Насколько тяжёлое действие подтверждаем.
  *
@@ -35,10 +37,28 @@ export interface ConfirmSpec {
    */
   requireText?: string;
   /**
+   * Что именно набирается — для подсказки «сначала наберите …» (#203). Не задано — «имя»: так в удалении сервера и
+   * человека, где набирают имя. В окне смены ключа набирают фразу «сменить ключ», и подсказка про имя сбивала с толку.
+   */
+  requireTextWhat?: string;
+  /**
    * Галочка под текстом — второе решение в том же вопросе (#212: «Также удалить для …» при удалении в ЛС).
    * Ответ читает `confirmWithOption`; `confirmAction` её просто показывает.
    */
-  option?: { label: string; checked: boolean };
+  option?: {
+    label: string;
+    checked: boolean;
+    /**
+     * Под галочкой — «Запомнить выбор», пока она стоит не так, как при открытии (Telegram Desktop `DeleteMessagesBox`). Ответ
+     * читает `confirmWithOption` (`remember`); запоминание — дело вызывающего (`deleteChoiceRules`).
+     */
+    remember?: boolean;
+  };
+  /**
+   * Значок в кружке окна. Не задан — как раньше: у `danger` корзина, у остальных `signal`. Нужен, когда опасное окно — не про
+   * удаление (запуск файла — предупреждающий значок, а не корзина).
+   */
+  icon?: IconName;
 }
 
 /** Подпись кнопки подтверждения по умолчанию: у «прочитал» она другая по смыслу. */
@@ -82,6 +102,6 @@ export function submitsOnEnter(spec: ConfirmSpec, typed: string): boolean {
  * заканчивать им диалоги, должен увидеть почему, а не решить, что окно сломалось.
  */
 export function enterHintOf(spec: ConfirmSpec, typed = ''): string {
-  if (spec.requireText) return canConfirm(spec, typed) ? 'подтвердить' : 'сначала наберите имя';
+  if (spec.requireText) return canConfirm(spec, typed) ? 'подтвердить' : `сначала наберите ${spec.requireTextWhat ?? 'имя'}`;
   return spec.tone === 'danger' ? 'здесь не подтверждает' : 'подтвердить';
 }

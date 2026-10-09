@@ -1,4 +1,5 @@
-import { isServerMessageType, type GatewayServerMessage } from '@gusvoice/shared';
+import { isServerMessageType, type CustomStatus, type GatewayServerMessage, type PresenceStatus } from '@gusvoice/shared';
+import { statusSeenBy } from './statusRules.js';
 
 /**
  * Чистые правила доставки по сокету — БЕЗ Redis, базы и Fastify.
@@ -126,18 +127,25 @@ export function mayObserveUser(
 /**
  * Снимок «кто онлайн» для одного зрителя (#136): только те, о ком ему можно знать.
  * `viewerPeers` — набор зрителя (см. симметрию в `mayObserveUser`).
+ *
+ * `invisible` — кто сейчас в статусе «Невидимый»: для всех, КРОМЕ себя самого, такой человек «не в сети», даже для
+ * супер-админа (приватность важнее ростера). Свои устройства невидимого видят его настоящий онлайн.
  */
 export function visibleOnline(
   onlineIds: Iterable<string>,
   viewerId: string,
   viewerPeers: ReadonlySet<string>,
   superAdminId: string | null,
+  invisible?: ReadonlySet<string>,
 ): string[] {
   // ⚠️ Здесь набор — ЗРИТЕЛЯ, поэтому ищем в нём субъекта (`has(id)`), а не зрителя, как в
   // `mayObserveUser`. Перепутать легко: первая версия так и сделала, и снимок пустел у всех.
   const isSuper = !!superAdminId && viewerId === superAdminId;
   const out: string[] = [];
-  for (const id of onlineIds) if (isSuper || id === viewerId || viewerPeers.has(id)) out.push(id);
+  for (const id of onlineIds) {
+    if (id !== viewerId && invisible?.has(id)) continue;
+    if (isSuper || id === viewerId || viewerPeers.has(id)) out.push(id);
+  }
   return out;
 }
 
@@ -185,4 +193,44 @@ export function typingRoute(
     return { kind: 'channel', serverId: msg.serverId, channelId: msg.channelId };
   }
   return null;
+}
+
+/** Кому из «тех, кому о человеке можно знать» уходит событие: всем, только его устройствам или всем, кроме них. */
+export type DeliverWho = 'all' | 'own' | 'others';
+
+/** Один шаг рассылки события О человеке: кому и что именно (тело может отличаться от исходного). */
+export interface AboutUserStep {
+  who: DeliverWho;
+  msg: GatewayServerMessage;
+}
+
+/**
+ * Решение «кому и какое событие разослать о человеке» БЕЗ сокетов и базы (выделено из `userVisibilityHub.deliverAboutUser`
+ * для проверки без живого соединения; поведение прежнее). `subjectInvisible` — стоит ли у человека «Невидимый» СЕЙЧАС.
+ * - `online.update` невидимого — только его устройствам (соседям «зашёл/вышел» не рассылается);
+ * - `user.status` со значением `invisible` — двумя шагами: своим устройствам настоящий, остальным — `statusSeenBy`
+ *   (обычный `online`: клиент без онлайна рисует «не в сети», значение `invisible` наружу не уходит);
+ * - всё остальное — всем, кому можно знать.
+ */
+export function aboutUserSteps(subjectId: string, msg: GatewayServerMessage, subjectInvisible: boolean): AboutUserStep[] {
+  if (msg.t === 'user.status' && msg.status === 'invisible') {
+    return [
+      { who: 'own', msg },
+      { who: 'others', msg: { ...msg, status: statusSeenBy(msg.status, subjectId, null) } },
+    ];
+  }
+  const ownOnly = msg.t === 'online.update' && subjectInvisible;
+  return [{ who: ownOnly ? 'own' : 'all', msg }];
+}
+
+/**
+ * Что делает смена статуса в шлюзе (`broadcastUserStatus`): выставить ли человеку флаг «Невидимый» (ДО рассылки — соседям уйдёт
+ * `online.update` «вышел/зашёл») и само событие `user.status`, которое потом пройдёт через `aboutUserSteps`.
+ */
+export function statusBroadcastPlan(
+  userId: string,
+  status: PresenceStatus,
+  customStatus: CustomStatus | null,
+): { invisible: boolean; event: GatewayServerMessage } {
+  return { invisible: status === 'invisible', event: { t: 'user.status', userId, status, customStatus } };
 }

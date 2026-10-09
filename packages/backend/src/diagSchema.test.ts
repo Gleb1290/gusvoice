@@ -16,6 +16,17 @@ const report = (samples: unknown[]) => ({
   samples,
 });
 
+it('чёрный ящик сохраняет новые числа слоёв и конфиг, вырезая неизвестные поля на каждом уровне',()=>{
+  // HTTP 200 без новых полей в JSONB сделал бы жалобу снова неразбираемой.
+  const layer={rid:'f',active:1,w:1920,h:1080,fps:30,encode_ms:1,target_kbps:9000,qp:27,kbps:8000,enc_kbps:8500,key_frames:12};
+  const cfg={w:1920,h:1080,fps:30,kbps:9000,mode:'detail',maxq:1,kf:10};
+  const added={qp:27,kbps:8000,enc_kbps:8500,retx_kbps:10,huge_frames:1,ice_rtt_ms:17};
+  const parsed=parseDiagReport(report([sample({enc:enc({...added,layers:[{...layer,private:'drop'}],cfg:{...cfg,private:'drop'},private:'drop'})})]));
+  assert.ok(parsed,'срез с новым чёрным ящиком принят');const actual=parsed.samples.ok[0]?.enc;assert.ok(actual,'enc не потерялся');
+  for(const [key,value] of Object.entries(added))assert.equal((actual as Record<string,unknown>)[key],value);
+  assert.deepEqual(actual.layers,[layer]);assert.deepEqual(actual.cfg,cfg);assert.ok(!('private' in actual),'неизвестное enc поле удалено');
+});
+
 const enc = (patch: Record<string, unknown> = {}) => ({
   frames_encoded: 0,
   frames_sent: 0,

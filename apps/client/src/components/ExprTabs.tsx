@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { hoverPanelOpened } from '../hoverPanel';
 
 /**
  * Нижняя полоса вкладок «Эмодзи | Стикеры» в пикере строки ввода (#159, как в Telegram).
@@ -8,14 +9,16 @@ import type { ReactNode } from 'react';
  * стикеры — соседняя вкладка. Сами пикеры остаются раздельными (см. `StickerPicker`), общая у них
  * только эта полоса.
  */
-export type ExprTab = 'emoji' | 'stickers';
+/** `gifs` (07.10, `gifs1`, Р-7) — третья вкладка «GIF», как у Telegram (`tabbed_selector.cpp`: Эмодзи | Стикеры | GIF). */
+export type ExprTab = 'emoji' | 'stickers' | 'gifs';
 
 const KEY = 'gv_expr_tab';
 
 /** Какую вкладку открыть: ту, что была последней. Удобство одного человека — хранится в браузере. */
 export function getExprTab(): ExprTab {
   try {
-    return localStorage.getItem(KEY) === 'stickers' ? 'stickers' : 'emoji';
+    const v = localStorage.getItem(KEY);
+    return v === 'stickers' || v === 'gifs' ? v : 'emoji';
   } catch {
     return 'emoji';
   }
@@ -35,6 +38,8 @@ export function setExprTab(t: ExprTab): void {
  * Без вкладок (реакции, статус) и с мышью поведение прежнее.
  */
 export function exprAutoFocus(footer: ReactNode | undefined): boolean {
+  // Панель, открытая наведением (G61), поле ввода не отбирает: человек продолжает печатать.
+  if (hoverPanelOpened()) return false;
   if (!footer) return true;
   try {
     return !window.matchMedia('(pointer: coarse)').matches;
@@ -43,7 +48,18 @@ export function exprAutoFocus(footer: ReactNode | undefined): boolean {
   }
 }
 
-export function ExprTabs({ tab, onTab }: { tab: ExprTab; onTab: (t: ExprTab) => void }) {
+export function ExprTabs({
+  tab,
+  onTab,
+  stickers = true,
+  gifs = false,
+}: {
+  tab: ExprTab;
+  onTab: (t: ExprTab) => void;
+  /** Есть ли вкладка «Стикеры» (наборы есть) и «GIF» (сервер с `gifs1`). */
+  stickers?: boolean;
+  gifs?: boolean;
+}) {
   const item = (t: ExprTab, label: string) => (
     <button
       type="button"
@@ -62,7 +78,8 @@ export function ExprTabs({ tab, onTab }: { tab: ExprTab; onTab: (t: ExprTab) => 
   return (
     <div className="expr-tabs" role="tablist" aria-label="Что отправить">
       {item('emoji', 'Эмодзи')}
-      {item('stickers', 'Стикеры')}
+      {stickers && item('stickers', 'Стикеры')}
+      {gifs && item('gifs', 'GIF')}
     </div>
   );
 }

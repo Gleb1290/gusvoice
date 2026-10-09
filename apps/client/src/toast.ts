@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 import { fedErrorText, isFedErrorCode } from './fedErrorText';
+import { humanLengthError } from './longTextRules';
 
 export type ToastType = 'success' | 'info' | 'warn' | 'error';
 
@@ -12,6 +13,10 @@ export interface Toast {
   /** When true, ToastHost never auto-dismisses this toast — it stays until the user clicks ✕.
    *  Use for low-frequency, must-not-miss heads-ups (e.g. "обновлён до vX"). Still non-blocking. */
   sticky?: boolean;
+  /** Кнопка справа в тосте («Отмена» у «Чат в архиве»): щелчок закрывает тост и зовёт `onClick`. Добавлено 07.10 (G41). */
+  action?: { label: string; onClick: () => void };
+  /** Сколько тост висит, мс (по умолчанию 3,8 с; тост с кнопкой — дольше, чтобы успеть нажать). */
+  durationMs?: number;
 }
 
 interface ToastState {
@@ -34,8 +39,13 @@ export const useToasts = create<ToastState>((set) => ({
 
 /** Fire a toast from anywhere (component or not). Pass `{ sticky: true }` for a toast that stays
  *  until the user closes it. Returns the toast id (for programmatic dismiss). */
-export function toast(type: ToastType, title: string, subtitle?: string, opts?: { sticky?: boolean }): number {
-  return useToasts.getState().push({ type, title, subtitle, sticky: opts?.sticky });
+export function toast(
+  type: ToastType,
+  title: string,
+  subtitle?: string,
+  opts?: { sticky?: boolean; action?: Toast['action']; durationMs?: number },
+): number {
+  return useToasts.getState().push({ type, title, subtitle, sticky: opts?.sticky, action: opts?.action, durationMs: opts?.durationMs });
 }
 
 /**
@@ -54,7 +64,8 @@ export function toastError(e: unknown, title?: string): void {
    * гостю в списке участников выдавал человеку тост «federation.dm_unavailable». Таких мест
    * столько же, сколько вызовов `toastError`, и следующее забудется так же, как забылось это.
    */
-  const msg = (isFedErrorCode(raw) && fedErrorText(raw)) || raw;
+  // Сырая строка проверки длины от сервера постарше («String must contain at most 4000 character(s)») — словами (07.10).
+  const msg = (isFedErrorCode(raw) && fedErrorText(raw)) || humanLengthError(raw) || raw;
   if (title) toast('error', title, msg);
   else toast('error', msg);
 }

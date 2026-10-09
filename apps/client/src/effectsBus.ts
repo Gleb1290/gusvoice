@@ -39,7 +39,19 @@ export interface Shake {
   benchOverrides?: Partial<EffectConditions>;
 }
 
-export type EffectRequest = Feathers | Shake;
+/**
+ * «Большая» реакция (08.10, `bigreact1`, G43): крупный эмодзи поверх ленты над сообщением — у отправителя сразу по удержанию,
+ * у собеседника по событию `reaction.big`. Играть ли (беседа открыта, сообщение на экране, нет reduced-motion и лёгкого режима),
+ * решает слой `BigReactionLayer` по `shouldPlayBigEffect`.
+ */
+export interface BigReaction {
+  kind: 'bigReaction';
+  conversationId: string;
+  messageId: string;
+  emoji: string;
+}
+
+export type EffectRequest = Feathers | Shake | BigReaction;
 
 type Listener = (req: EffectRequest) => void;
 

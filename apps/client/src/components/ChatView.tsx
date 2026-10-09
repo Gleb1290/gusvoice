@@ -2,6 +2,8 @@ import { type Channel, has, type Message, Permission, permsFromString, type Role
 import { useChannelVisit } from '../channelVisit';
 import { useMemo, useEffect, useState } from 'react';
 import { api } from '../api';
+import { hasMoreOlder, olderCursor } from '../historyPage';
+import { setUploadDone, setUploadProgress, uploadAborted, uploadSignal } from '../uploadProgress';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
 import { isMobile } from '../hotkeys';
@@ -45,12 +47,26 @@ export function ChatView({ channel }: { channel: Channel }) {
   const emojiById = useEmojiById();
   const stickerPacks = useStickerPacks();
   const typingIds = useTyping(channel.id);
+  /* Черновик канала (06.10, сверка с Telegram): лента пересоздаётся при смене канала (`key` в `MainLayout`), и набранное
+     терялось. Читается ОДИН раз при создании ленты (подписка на него перерисовывала бы канал на каждую букву); пишет его сама
+     лента — с задержкой и сразу при размонтировании. Только в памяти (`store.channelDrafts`): у каналов нет серверных черновиков. */
+  const [initialDraft] = useState(() => useStore.getState().channelDrafts[channel.id]);
   const typingUsers = typingIds
     .filter((uid) => uid !== user?.id)
     .map((uid) => {
       const m = members.find((x) => x.user.id === uid);
       return { id: uid, name: m ? nameOf(uid, m.user.displayName) : 'кто-то' };
     });
+
+  /* Поставивший реакцию (G75, #211): аватарки на чипах и окно «кто поставил» в канале — имя (ник на сервере, если есть) и аватар
+     из участников сервера. Не участник (вышел) — `null`: чип тогда с числом. Ссылка новая, когда меняется состав участников. */
+  const reactorOf = useMemo(() => {
+    const byId = new Map(members.map((x) => [x.user.id, x]));
+    return (id: string) => {
+      const x = byId.get(id);
+      return x ? { name: x.nickname ?? x.user.displayName, avatarUrl: x.user.avatarUrl ?? null } : null;
+    };
+  }, [members]);
 
   const autocomplete = useMemo(
     () => ({
@@ -88,10 +104,18 @@ export function ChatView({ channel }: { channel: Channel }) {
 
   return (
     <MessagePane
+      reactorOf={reactorOf}
       serverId={serverId}
       newSince={newSince}
       scrollKey={visitKey}
       feedId={channel.id}
+      // Медиатека канала для просмотра (G11): порции старше окна ленты; лента канала всегда у хвоста — новее нечего.
+      loadMediaPage={async (dir, edge) => {
+        const cursor = dir < 0 ? olderCursor([edge]) : null;
+        if (!cursor) return { messages: [], more: false };
+        const page = await api.listMessages(channel.id, cursor);
+        return { messages: page, more: hasMoreOlder(page) };
+      }}
       onLoadOlder={() => loadOlderMessages(channel.id)}
       pollChannelId={channel.id}
       title={
@@ -129,12 +153,37 @@ export function ChatView({ channel }: { channel: Channel }) {
         ]);
         appendMessage(channel.id, msg);
       }}
+      draft={initialDraft}
+      onDraftChange={(text, replyToId) => useStore.getState().setChannelDraft(channel.id, text, replyToId)}
       typingUsers={typingUsers}
-      onTyping={() => sendTyping({ serverId: channel.serverId, channelId: channel.id })}
+      // Каналы серверов показывают только «печатает» (G21 — виды действия у ЛС): запись и загрузку не рассылаем.
+      onTyping={(action) => {
+        if (!action || action === 'typing') sendTyping({ serverId: channel.serverId, channelId: channel.id });
+      }}
       meId={user?.id}
-      onSend={async (content, files, replyToId) => {
-        const attachments = await Promise.all(files.map((f) => api.uploadAttachment(channel.id, f)));
+      onSend={async (content, files, replyToId, sendKey) => {
+        const signal = uploadSignal(sendKey);
+        // Прогресс файлов — кольцам строки «в пути», отмена — обрыв загрузки (07.10, `uploadProgress`).
+        const attachments = await Promise.all(
+          files.map((f, i) =>
+            api
+              .uploadAttachment(channel.id, f, {
+                signal,
+                onProgress: (loaded, total) => setUploadProgress(sendKey, i, loaded, total),
+              })
+              .then((a) => {
+                setUploadDone(sendKey, i);
+                return a;
+              }),
+          ),
+        );
+        if (signal?.aborted) throw uploadAborted();
         const msg = await api.sendMessage(channel.id, content, attachments, replyToId);
+        // «Отменить отправку», пока летел сам запрос: сообщение уже есть — убрать, как просили.
+        if (signal?.aborted) {
+          await api.deleteMessage(channel.id, msg.id).catch(() => appendMessage(channel.id, msg));
+          throw uploadAborted();
+        }
         appendMessage(channel.id, msg);
       }}
       onEdit={async (m, content) => {

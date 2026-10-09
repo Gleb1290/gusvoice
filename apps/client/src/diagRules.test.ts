@@ -91,5 +91,41 @@ describe('метрики нативного кодировщика', () => {
     assert.equal(out.server_rtt_ms, 0);
     assert.equal(out.layers, undefined);
     assert.equal(out.pipeline, undefined);
+    assert.equal(out.qp, undefined, 'оболочка без qp_sum не сообщает выдуманный нулевой QP');
+    assert.equal(out.kbps, undefined, 'без накопительных байтов старый отчёт сохраняет прежнюю форму');
+    assert.equal(out.cfg, undefined, 'эффективная конфигурация отсутствует у старого протокола');
+  });
+
+  it('nativeEncodeStatsFrom предыдущего среза считает чёрный ящик и слой за окно', () => {
+    // Диагностика должна объяснять последние секунды, а не делить накопленные счётчики на всё время показа.
+    const layer = {
+      rid: 'f', active: true, width: 1920, height: 1080, fps: 30, frames_encoded: 10, encode_ms: 2,
+      qp_sum: 200, key_frames: 1, bytes_sent: 1_000, encoded_bytes_target: 1_200,
+    };
+    const prev = nativeStats({
+      at_ms: 1_000, frames_encoded: 10, qp_sum: 200, bytes_sent: 1_000,
+      encoded_bytes_target: 1_200, retransmitted_bytes: 500,
+      width: 1920, height: 1080, layers: [layer],
+    });
+    const current = nativeStats({
+      at_ms: 3_000, frames_encoded: 50, qp_sum: 1_600, bytes_sent: 126_000,
+      encoded_bytes_target: 101_200, retransmitted_bytes: 25_500, huge_frames: 6, ice_rtt_ms: 12.34,
+      cfg_width: 3840, cfg_height: 2160, cfg_fps: 30, cfg_bitrate: 8_000_000,
+      mode: 'motion', max_quality: true, layers_on: false, keyframe_scale: 10,
+      width: 1920, height: 1080,
+      layers: [{ ...layer, frames_encoded: 50, qp_sum: 1_600, key_frames: 4, bytes_sent: 126_000, encoded_bytes_target: 101_200 }],
+    });
+    const out = nativeEncodeStatsFrom(current, prev);
+    assert.equal(out.qp, 35, 'QP — среднее по 40 новым кадрам');
+    assert.equal(out.kbps, 500, 'фактически отправлено 500 кбит/с за интервал');
+    assert.equal(out.enc_kbps, 400, 'цель кодировщика — 400 кбит/с за интервал');
+    assert.equal(out.retx_kbps, 100, 'повторные байты рассчитаны по разности');
+    assert.equal(out.huge_frames, 6, 'сохраняются накопительные большие кадры');
+    assert.equal(out.ice_rtt_ms, 12.3, 'проверки ICE округлены до десятых');
+    assert.deepEqual(out.cfg, { w: 3840, h: 2160, fps: 30, kbps: 8000, mode: 'motion', maxq: 1, kf: 10 });
+    assert.equal(out.layers?.[0]?.qp, 35, 'QP слоя вычислен из его собственного предыдущего счётчика');
+    assert.equal(out.layers?.[0]?.kbps, 500, 'байты слоя тоже переводятся в скорость за окно');
+    assert.equal(out.layers?.[0]?.enc_kbps, 400, 'цель слоя не смешана с фактической скоростью');
+    assert.equal(out.layers?.[0]?.key_frames, 4, 'опорные кадры слоя остаются накопительными');
   });
 });

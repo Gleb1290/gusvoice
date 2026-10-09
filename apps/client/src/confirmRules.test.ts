@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
+import ts from 'typescript';
 import { canConfirm, confirmLabelOf, enterHintOf, hasCancel, submitsOnEnter } from './confirmRules.js';
 
 describe('правила окна подтверждения', () => {
@@ -35,5 +38,22 @@ describe('правила окна подтверждения', () => {
     assert.equal(enterHintOf(spec, 'serve'), 'сначала наберите имя');
     assert.equal(submitsOnEnter(spec, 'SERVER'), true);
     assert.equal(enterHintOf(spec, 'SERVER'), 'подтвердить');
+  });
+
+  it('подсказка называет фразу смены ключа, а для обычного контрольного слова — имя', () => {
+    // Если подсказка велит ввести имя, человек не поймёт, что смена ключа требует отдельную фразу.
+    const key = { title: 'Сменить ключ?', tone: 'danger' as const, requireText: 'сменить ключ', requireTextWhat: 'фразу «сменить ключ»' };
+    assert.equal(enterHintOf(key), 'сначала наберите фразу «сменить ключ»');
+    assert.equal(enterHintOf({ title: 'Удалить?', requireText: 'сервер' }), 'сначала наберите имя');
+    assert.equal(enterHintOf(key, ' СМЕНИТЬ КЛЮЧ '), 'подтвердить');
+    const original = readFileSync(new URL('./confirmRules.ts', import.meta.url), 'utf8');
+    const changed = original.replace('spec.requireTextWhat ?? \'имя\'', '\'имя\'');
+    assert.notEqual(changed, original, 'реальный модуль содержит специальную подсказку');
+    const mod = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module: mod, exports: mod.exports });
+    const mutant = mod.exports as typeof import('./confirmRules.js');
+    assert.throws(() => assert.equal(mutant.enterHintOf(key), 'сначала наберите фразу «сменить ключ»'), assert.AssertionError,
+      'мутант общей подсказки «имя» обязан провалить контракт смены ключа');
   });
 });

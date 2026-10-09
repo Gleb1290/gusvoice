@@ -6,7 +6,7 @@ import { activeInstanceId, instances } from '../config';
 import { useFederationEnabled } from '../federationClient';
 import { ensureGuestSession, GuestJoinError, openInstance } from '../guestJoin';
 import { refusalText } from '../inviteCheckRules';
-import { buildRail, serverTitle, type RailGroupView, type RailPlace, type RailServerView } from '../railRules';
+import { buildRail, groupHeadTitle, serverTitle, type RailGroupView, type RailPlace, type RailServerView } from '../railRules';
 import { guestEntryRebound } from '../configRules';
 import { setPendingOpen } from '../pendingOpen';
 import { useStore } from '../store';
@@ -48,6 +48,13 @@ export function RailGroups({
   /** Ответ дома получен — с этого мига пустота значит «мест нет», а не «ещё не спросили». */
   const [placesLoaded, setPlacesLoaded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  /* Переход в другой инстанс больше не перемонтирует рейл (01.10): пока новый инстанс не отдал свои серверы, его
+     группа рисуется из снимка реестра — иначе она на миг пустела бы; нажатая кнопка отпускается, когда переход
+     закончился (раньше это делало перемонтирование). */
+  const switching = useStore((s) => s.switching);
+  useEffect(() => {
+    if (!switching) setBusy(null);
+  }, [switching]);
 
   // Реестр читается ОДИН раз за отрисовку: `instances()` каждый раз разбирает JSON из хранилища, а
   // рейл перерисовывается на каждое изменение непрочитанного.
@@ -60,6 +67,9 @@ export function RailGroups({
   useEffect(() => onBgUnread(setBg), []);
 
   useEffect(() => {
+    // Места — про ДОМ, откуда пришли (01.10: рейл больше не пересоздаётся на переходе): другой дом — спрашиваем заново.
+    setPlaces([]);
+    setPlacesLoaded(false);
     if (!fed || !atHome) return;
     let alive = true;
     api
@@ -75,12 +85,12 @@ export function RailGroups({
     return () => {
       alive = false;
     };
-  }, [fed, atHome]);
+  }, [fed, atHome, activeId]);
 
   const { groups, showHeaders } = buildRail({
     instances: registry,
     activeId,
-    liveServers: servers,
+    liveServers: switching && servers.length === 0 ? (registry.find((i) => i.id === activeId)?.servers ?? []) : servers,
     closedServerIds: Object.keys(closedServers),
     liveUnread: unreadServers,
     liveMentions: mentionServers,
@@ -202,7 +212,7 @@ export function RailGroups({
               <button
                 type="button"
                 className={`rail-group-head go${group.reachable ? '' : ' off'}`}
-                title={group.reachable ? `Перейти в «${group.title}»` : `${group.title} · сейчас недоступен`}
+                title={groupHeadTitle(group)}
                 disabled={!group.reachable || busy === `head:${group.key}`}
                 onClick={() => void goToInstance(group)}
               >

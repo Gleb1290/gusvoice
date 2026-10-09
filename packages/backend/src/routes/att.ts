@@ -16,6 +16,7 @@ import {
   attachmentSigValid,
   attachmentStore,
   createPending,
+  DailyQuotaError,
   privateAttachmentsReady,
 } from '../attachments.js';
 import { attachmentUploadBlock, clientIp, rateHit, retryMessage } from '../authGuard.js';
@@ -47,6 +48,16 @@ const clientHints = {
   height: z.number().int().positive().max(20_000).nullish(),
   waveform: z.array(z.number().int().min(0).max(100)).max(WAVEFORM_BUCKETS).nullish(),
   durationMs: z.number().int().positive().max(VOICE_MAX_MS).nullish(),
+  /** «Отправить как файл» (`linkprev1`): картинка и видео остаются карточкой файла. */
+  asFile: z.literal(true).nullish(),
+  /** GIF (`gifs1`): видео без звука по кругу; сервер оставит пометку только у видео и `image/gif`. */
+  gif: z.literal(true).nullish(),
+  /** Спойлер (`media2`): фото и видео у получателя размыты до нажатия; сервер оставит пометку только у них. */
+  spoiler: z.literal(true).nullish(),
+  /** «Прослушать один раз» (`voice3`, G54): сервер оставит пометку только у голосового беседы 1:1. */
+  once: z.literal(true).nullish(),
+  /** Кружок (`circles1`, G68): сервер оставит пометку только у квадратного видео до минуты. */
+  round: z.literal(true).nullish(),
 };
 
 /** Вложения новой отправки `/api/conv/:id/messages`: id загрузки + подсказки клиента. */
@@ -72,6 +83,8 @@ export async function acceptDmUpload(
   const file = await req.file();
   if (!file) return reply.code(400).send({ error: 'no file' });
   const buffer = await file.toBuffer();
+  // 🔴 Обрезанный по пределу файл (09.10, стенд): `toBuffer` бросает не всегда — бывало 200 и файл ровно 25 МиБ вместо 26.
+  if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' });
   const declared = file.mimetype || 'application/octet-stream';
   // Имя уезжает в заголовок выдачи и в ленту собеседника: без управляющих символов и подмены расширения (U+202E).
   const name = sanitizeFilename(file.filename || 'file');
@@ -80,9 +93,25 @@ export async function acceptDmUpload(
   // Upload rate-limit (P2-3) — after buffering (multipart drained), before the bucket write.
   const upWait = await attachmentUploadBlock(me);
   if (upWait) return reply.code(429).header('Retry-After', String(upWait)).send({ error: retryMessage(upWait) });
+  // Суточный объём (`bigfile1`): одиночные загрузки считаются в тот же предел, что и куски. Проверка — внутри замка вставки
+  // (`createPending` `daily`, ревью L3): снаружи параллельные загрузки проходили её вдвоём.
   const contentType = resolveAttachmentMime(declared, buffer.subarray(0, 64));
-  const id = await createPending({ ownerId: me, conversationId, name, contentType, bytes: buffer });
-  return { id, url: attachmentLink(id, me, await tokenGenOf(me)), name, contentType, size: buffer.length };
+  let id: string;
+  try {
+    id = await createPending({ ownerId: me, conversationId, name, contentType, bytes: buffer, daily: true });
+  } catch (e) {
+    if (e instanceof DailyQuotaError) return reply.code(429).send({ error: e.message });
+    throw e;
+  }
+  return uploadedAttachmentDto({ id, name, contentType, size: buffer.length }, me);
+}
+
+/** Ответ загрузки (одиночной и кусками): старый DTO вложения + `id`; ссылка — для самого загрузившего. */
+export async function uploadedAttachmentDto(
+  a: { id: string; name: string; contentType: string; size: number },
+  me: string,
+): Promise<Attachment & { id: string }> {
+  return { id: a.id, url: attachmentLink(a.id, me, await tokenGenOf(me)), name: a.name, contentType: a.contentType, size: a.size };
 }
 
 /**

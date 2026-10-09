@@ -10,14 +10,16 @@ const TYPE_ICON: Record<ToastType, IconName> = {
 };
 
 const DISMISS_MS = 3800;
+/** Тост с кнопкой висит дольше: успеть нажать «Отмена» (Telegram Android `UndoView` — пять секунд). */
+const DISMISS_ACTION_MS = 5000;
 
-function ToastCard({ id, type, title, subtitle, sticky }: Toast) {
+function ToastCard({ id, type, title, subtitle, sticky, action, durationMs }: Toast) {
   const dismiss = useToasts((s) => s.dismiss);
   useEffect(() => {
     if (sticky) return; // sticky toasts persist until the user clicks ✕
-    const t = setTimeout(() => dismiss(id), DISMISS_MS);
+    const t = setTimeout(() => dismiss(id), durationMs ?? (action ? DISMISS_ACTION_MS : DISMISS_MS));
     return () => clearTimeout(t);
-  }, [id, dismiss, sticky]);
+  }, [id, dismiss, sticky, durationMs, action]);
 
   return (
     <div className={`toast ${type}`} role="status">
@@ -29,6 +31,18 @@ function ToastCard({ id, type, title, subtitle, sticky }: Toast) {
         <div className="toast-title">{title}</div>
         {subtitle ? <div className="toast-sub">{subtitle}</div> : null}
       </div>
+      {action && (
+        <button
+          type="button"
+          className="toast-act"
+          onClick={() => {
+            dismiss(id);
+            action.onClick();
+          }}
+        >
+          {action.label}
+        </button>
+      )}
       <button type="button" className="toast-x" title="Закрыть" onClick={() => dismiss(id)}>
         <Icon name="close" size={14} />
       </button>

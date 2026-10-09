@@ -17,6 +17,7 @@
  */
 
 import { fedErrorText, isFedErrorCode } from './fedErrorText';
+import { humanLengthError } from './longTextRules';
 
 export type OutgoingStatus = 'sending' | 'failed';
 
@@ -56,7 +57,8 @@ export function outgoingRetry<T extends OutgoingMessage<unknown>>(list: readonly
 export function sendErrorText(e: unknown): string | null {
   if ((e as { switched?: boolean } | null)?.switched === true) return null;
   const raw = e instanceof Error ? e.message : String(e);
-  return (isFedErrorCode(raw) && fedErrorText(raw)) || raw || 'не удалось отправить';
+  // Сырая строка проверки длины (zod) от сервера постарше — словами (07.10).
+  return (isFedErrorCode(raw) && fedErrorText(raw)) || humanLengthError(raw) || raw || 'не удалось отправить';
 }
 
 /** Подпись вложений в строке «в пути»: «photo.png», «photo.png и ещё 2». */

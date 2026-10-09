@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { statusFieldsOf } from './statusRules.js';
+import { statusFieldsOf, statusSeenBy } from './statusRules.js';
 
 describe('сериализация presence и кастомного статуса', () => {
   it('все четыре поддерживаемых presence-статуса сохраняются', () => {
@@ -70,6 +70,18 @@ describe('сериализация presence и кастомного статус
       statusFieldsOf({ presenceStatus: 'dnd', customStatusText: 'Занят', customStatusExpiresAt: new Date(1_000) }, 1_000),
       { status: 'dnd', customStatus: null },
     );
+  });
+
+  it('invisible сериализуется как online только для чужого и неизвестного зрителя', () => {
+    // Невидимость — приватная настройка: нельзя раскрывать её соседу, но владельцу нужно показывать выбранное значение.
+    assert.equal(statusSeenBy('invisible', 'hidden', 'friend'), 'online');
+    assert.equal(statusSeenBy('invisible', 'hidden', null), 'online', 'неизвестный viewer не получает приватный статус');
+    assert.equal(statusSeenBy('invisible', 'hidden', undefined), 'online');
+    assert.equal(statusSeenBy('invisible', 'hidden', 'hidden'), 'invisible', 'собственные устройства видят настоящее значение');
+    for (const status of ['online', 'dnd', 'away'] as const) {
+      assert.equal(statusSeenBy(status, 'hidden', 'friend'), status, `${status} не маскируется`);
+      assert.equal(statusSeenBy(status, 'hidden', 'hidden'), status, `${status} остаётся тем же владельцу`);
+    }
   });
 });
 

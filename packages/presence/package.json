@@ -14,7 +14,7 @@
   "dependencies": {
     "@fastify/websocket": "11.2.0",
     "@gusvoice/shared": "workspace:*",
-    "fastify": "5.8.5",
+    "fastify": "5.12.5",
     "ioredis": "5.11.1",
     "jsonwebtoken": "9.0.3",
     "livekit-server-sdk": "2.15.5",

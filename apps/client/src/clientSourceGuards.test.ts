@@ -128,6 +128,16 @@ describe('провода компонентов, не требующие React-�
     assert.match(fn, /const latest = readLatest\.get\(key\)[\s\S]*?latest\?\.\(\)/);
   });
 
+  it('шлюз объявляет bigreact1 и принимает только чужую реакцию для эффекта', () => {
+    // Эффект не нужен собственному отправителю, а старый сервер не должен получать неизвестную возможность.
+    assert.match(sockets, /FEATURE_BIGREACT1/);
+    const identify = sockets.match(/JSON\.stringify\(\{ t: 'identify',[^\n]+/)?.[0] ?? '';
+    assert.match(identify, /caps: \[\.\.\.caps, FEATURE_GROUPS1, FEATURE_PRESENCE4, FEATURE_BIGREACT1\]/);
+    const event = sockets.slice(sockets.indexOf("case 'reaction.big':"), sockets.indexOf("case 'read.channel':"));
+    assert.match(event, /if \(msg\.userId === store\.user\?\.id\) return/);
+    assert.match(event, /fireEffect\(\{ kind: 'bigReaction', conversationId: msg\.conversationId, messageId: msg\.messageId, emoji: msg\.emoji \}\)/);
+  });
+
   it('обе ленты показывают ошибку вместо вечного скелетона, а ЛС умеют грузить старую порцию', () => {
     // Ловит тупик после сетевого сбоя и исчезнувшую прокрутку истории личной беседы.
     for (const source of [chat, dmChat]) {
@@ -162,6 +172,19 @@ describe('провода компонентов, не требующие React-�
     const dmCreate = sockets.match(/case 'dm\.create':[\s\S]*?return store\.appendDmMessage/)?.[0] ?? '';
     assert.match(dmCreate, /if \(d\.osNotify\)[\s\S]*?osNotify\([\s\S]*?flashWindow\(\)/);
     assert.match(notifications, /core\.invoke\('gv_notify_clickable'[\s\S]*?\.catch\(\(\) => \{[\s\S]*?deliverViaPlugin/);
+  });
+
+  it('браузерное тихое уведомление сохраняет показ, добавляя silent только по true', () => {
+    // Иначе тихая отправка теряет само уведомление или обычные нотификации получают новую опцию.
+    assert.match(notifications, /new Notification\(title, silent \? \{ body, silent: true \} : \{ body \}\)/);
+    assert.match(sockets, /silent: m\.silent === true/);
+    const legacy = sockets.slice(sockets.indexOf("case 'dm.create':"), sockets.indexOf("case 'conv.change':"));
+    const fresh = sockets.slice(sockets.indexOf("case 'conv.change':"), sockets.indexOf("case 'dm.update':"));
+    for (const source of [legacy, fresh]) {
+      assert.match(source, /dmSilentDecision\(/);
+      assert.match(source, /if \(d\.sound\) playSound\('dm'\)/);
+      assert.match(source, /if \(d\.osNotify\)[\s\S]*osNotify\([\s\S]*silent:[\s\S]*flashWindow\(\)/);
+    }
   });
 
   it('Android-назад знает верхние просмотрщики, но не перехватывает общую подложку настроек', () => {

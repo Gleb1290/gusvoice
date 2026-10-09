@@ -8,6 +8,9 @@ export interface ScreenSource {
   kind: 'screen' | 'window';
   title: string;
   thumb?: string | null; // data:image/png;base64,... (null → render a monogram)
+  /** Настоящий размер источника (06.10) — для «≈ N Мбит/с» у «Родного». 0/нет — не узнали. */
+  width?: number;
+  height?: number;
 }
 
 /** Mirrors the Rust `StartConfig` (camelCase). Quality fields come from `streamSettings.ts`. */
@@ -29,6 +32,10 @@ export interface NativeShareConfig {
   gpuPipeline?: boolean;
   /** Курсор в кадре показа (28.09). Отсутствие = включено. */
   cursor?: boolean;
+  /** Режим показа (06.10): «Чёткость» — до 30 к/с и опорный кадр NVENC ×10, «Плавность» — ×4. Нет — «Чёткость». */
+  mode?: 'detail' | 'motion';
+  /** «Максимальное качество — не снижать» (06.10). Отсутствие = выключено. */
+  maxQuality?: boolean;
 }
 
 type TauriCore = { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
@@ -147,6 +154,14 @@ export interface NativeLayerStat {
   encode_ms: number;
   /** Сколько бит/с WebRTC отдал слою; у оболочки старше 0.8.11 нет. */
   target_bitrate?: number;
+  // ─── «Чёрный ящик» (06.10) — накопительные; у оболочки старше нет ───
+  /** Сумма QP слоя: средний QP за окно = Δqp_sum / Δframes_encoded. */
+  qp_sum?: number;
+  key_frames?: number;
+  /** Отправлено байт (с повторами) и сколько кодировщик ДОЛЖЕН был выдать по своей цели. */
+  bytes_sent?: number;
+  encoded_bytes_target?: number;
+  pli?: number;
 }
 
 export interface NativeShareStats {
@@ -207,6 +222,24 @@ export interface NativeShareStats {
   pipeline?: string;
   /** Почему не `gpu` (показ окна, выключено, не NVIDIA, HDR…); пусто — получилось. */
   pipeline_note?: string;
+
+  // ─── «Чёрный ящик» (06.10, #207); у оболочки старше полей нет ───
+  /** Основной слой, накопительно: сумма QP, байты по цели кодировщика, повторы, «огромные» кадры. */
+  qp_sum?: number;
+  encoded_bytes_target?: number;
+  retransmitted_bytes?: number;
+  huge_frames?: number;
+  /** Задержка проверок ICE, мс — в отличие от `rtt_ms` (у нативного показа всегда 1 мс) настоящая. */
+  ice_rtt_ms?: number;
+  /** С чем показ запущен на самом деле (после «Родного», режима и «Максимального качества»). */
+  cfg_width?: number;
+  cfg_height?: number;
+  cfg_fps?: number;
+  cfg_bitrate?: number;
+  mode?: string;
+  max_quality?: boolean;
+  layers_on?: boolean;
+  keyframe_scale?: number;
 }
 
 /**

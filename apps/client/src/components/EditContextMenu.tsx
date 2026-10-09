@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { isEditableTag, ownEditMenu } from '../contextMenuRules';
+import { FORMAT_MENU, selectionHasFormat } from '../fieldFormat';
+import { formatField, isFormatField } from '../fieldFormatDom';
 import { isMobile } from '../hotkeys';
 import { selectedSlice, spliceText } from '../textEdit';
 import { toast } from '../toast';
@@ -47,7 +49,7 @@ function selectedText(el: EditTarget): string {
 }
 
 export function EditContextMenu() {
-  const [menu, setMenu] = useState<{ pos: MenuPos; el: EditTarget; selection: string } | null>(null);
+  const [menu, setMenu] = useState<{ pos: MenuPos; el: EditTarget; selection: string; level?: 'fmt' } | null>(null);
 
   useEffect(() => {
     const onCtx = (e: MouseEvent) => {
@@ -102,11 +104,38 @@ export function EditContextMenu() {
     close();
   };
 
+  /* Подменю «Форматирование» (G20, Telegram Desktop 02·4.4) — только в поле сообщения (`data-fmt`): пункты с клавишами,
+     черта, «Без форматирования» (неактивно, если снимать нечего). Пункт меню — тем же переходом уровня, что «Выключить
+     уведомления» в меню беседы (`DmRowMenu`). */
+  if (menu.level === 'fmt') {
+    const apply = (kind: Parameters<typeof formatField>[1]) => () => {
+      close();
+      formatField(el, kind);
+    };
+    return (
+      <ContextMenu key="fmt" pos={menu.pos} onClose={close} width={264}>
+        {FORMAT_MENU.map((it) => (
+          <MenuItem key={it.kind} label={it.label} shortcut={it.shortcut} onClick={apply(it.kind)} />
+        ))}
+        <MenuDivider />
+        <MenuItem
+          label="Без форматирования"
+          shortcut="Ctrl+Shift+N"
+          disabled={!selectionHasFormat(el.value, el.selectionStart ?? 0, el.selectionEnd ?? 0)}
+          onClick={apply('clear')}
+        />
+      </ContextMenu>
+    );
+  }
+
   return (
-    <ContextMenu pos={menu.pos} onClose={close} width={200}>
+    <ContextMenu pos={menu.pos} onClose={close} width={isFormatField(el) ? 232 : 200}>
       <MenuItem label="Вырезать" shortcut="Ctrl+X" disabled={!selection} onClick={cut} />
       <MenuItem icon="copy" label="Копировать" shortcut="Ctrl+C" disabled={!selection} onClick={copy} />
       <MenuItem label="Вставить" shortcut="Ctrl+V" onClick={paste} />
+      {isFormatField(el) && (
+        <MenuItem label="Форматирование" submenu disabled={!selection} onClick={() => setMenu({ ...menu, level: 'fmt' })} />
+      )}
       <MenuDivider />
       <MenuItem label="Выделить всё" shortcut="Ctrl+A" onClick={selectAll} />
     </ContextMenu>

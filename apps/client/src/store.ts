@@ -2,6 +2,7 @@ import type {
   Channel,
   CustomStatus,
   DmChannel,
+  DmReportReason,
   GameActivity,
   Message,
   Poll,
@@ -14,10 +15,34 @@ import type {
   VoiceParticipant,
 } from '@gusvoice/shared';
 import { create } from 'zustand';
-import { api, setToken, type BlockedUser, type PushMuteScope } from './api';
-import { activeInstanceId, logoutFamily, rememberInstanceServers } from './config';
+import { api, apiFor, getToken, setToken, type Api, type BlockedUser, type PushMuteScope } from './api';
+import { activeInstanceId, config, instances, logoutFamily, rememberInstanceServers } from './config';
+import { convCacheKey } from './convCacheRules';
 import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads } from './channelRules';
-import { applyDmDelete, byRecent, mergeDmChannel, mergeDmUpdate, seedDmList } from './dmListRules';
+import { applyDmDelete, byRecent, mergeDmChannel, mergeDmUpdate, pinOrderStamps, seedDmList } from './dmListRules';
+import { createConvActions, feedWindowSwitch, type ConvActions, type ConvDeps } from './convStore';
+import type { FeedPlace } from './feedWindowRules';
+import {
+  emptyConvState,
+  patchConvPinned,
+  patchConvPinOrder,
+  patchConvReadAll,
+  patchConvUnreadMark,
+  patchConvArchived,
+  patchConvStrangerHidden,
+  patchReactionsRead,
+  clearReactionUnread,
+  patchPeer,
+  patchPeerMute,
+  serverKeepsDrafts,
+  serverPush4,
+  serverSendsPeerRead,
+  summariesToDms,
+  updateDrafts,
+  type ConvState,
+} from './convSyncRules';
+import type { OutboxItem } from './outboxRules';
+import { clearConvCacheWipe, deleteConvCache, markConvCacheWipe } from './convCache';
 import { hasMoreOlder, mergeLatestPage, mergeOlderPage, olderCursor } from './historyPage';
 import { markChannelSeen } from './channelPrefs';
 import { rememberPlace } from './lastPlace';
@@ -37,6 +62,11 @@ import { clampStreamVolume, loadStreamVolumes } from './streamAudioRules';
 import { shouldAutoRejoin } from './voiceCueRules';
 import { clearVoiceSession, rejoinableVoiceSession, restorableVoiceSession, saveVoiceSession, type VoiceSession } from './voiceSession';
 
+/** Обновлённый снимок сервера `serverId` убирает голос, только если голос на этом сервере этого инстанса и канала больше не видно. */
+function dropsVoice(v: VoiceConnection | null, serverId: string, visible: Set<string>): boolean {
+  return !!v && voiceIsHere(v) && (v.serverId === null || v.serverId === serverId) && !visible.has(v.channelId);
+}
+
 /** Per-channel sound overrides from the bootstrap, keyed channelId → {event: url} (drops empties). */
 function channelSoundMap(channels: { id: string; sounds?: Record<string, string> }[]): Record<string, Record<string, string>> {
   const m: Record<string, Record<string, string>> = {};
@@ -44,11 +74,48 @@ function channelSoundMap(channels: { id: string; sounds?: Record<string, string>
   return m;
 }
 
-/** Sort conversations by most-recent activity (lastMessageAt, else createdAt). */
-interface VoiceConnection {
+/**
+ * Черновик пересылки в беседу (`fwdDrafts`): `from` — беседа-источник, `messages` — снимок выбранных по порядку её ленты
+ * (полоса над полем рисует имена и превью без похода в чужую ленту), `hideSender` / `hideCaptions` — «скрыть имя /
+ * подписи» (признак сервера `fwd2`; Telegram `Data::ForwardOptions`).
+ */
+export interface FwdDraft {
+  from: string;
+  messages: Message[];
+  hideSender: boolean;
+  hideCaptions: boolean;
+}
+
+/**
+ * Голос, в котором сидим. 🔴 С 01.10 он переживает переход между инстансами (Discord-модель: смотришь свой дом, а
+ * голос идёт у соседа), поэтому знает, ЧЕЙ он: запись реестра, сервер, подписи для плашки и профиль, с которым
+ * зашли. Всё это заполняет `joinVoice` в момент входа — потом активный инстанс может быть уже другим.
+ */
+export interface VoiceConnection {
   channelId: string;
   url: string;
   token: string;
+  /** Запись реестра, где идёт голос; `null` — реестра нет (веб без записей), переходов тогда не бывает. */
+  instanceId: string | null;
+  serverId: string | null;
+  channelName: string;
+  serverName: string;
+  /** Имя инстанса голоса — для строки «Вы в голосе на «X»», когда на экране другой. */
+  instanceName: string;
+  /** Как нас видят в комнате: живой `user` после перехода — учётка ДРУГОГО инстанса. */
+  self: { displayName: string; avatarUrl: string | null } | null;
+  /** Наш id в комнате (личность LiveKit = id учётки на инстансе голоса) — трей и оверлей ищут «себя» по нему. */
+  selfId: string | null;
+}
+
+/** Клиент API инстанса голоса: активный — обычный `api`, иначе привязанный к записи (`apiFor`). */
+export function voiceApiOf(v: Pick<VoiceConnection, 'instanceId'> | null): Api {
+  return v?.instanceId && v.instanceId !== activeInstanceId() ? apiFor(v.instanceId) : api;
+}
+
+/** Голос идёт на том инстансе, что сейчас на экране (или реестра нет). */
+export function voiceIsHere(v: Pick<VoiceConnection, 'instanceId'> | null): boolean {
+  return !v?.instanceId || v.instanceId === activeInstanceId();
 }
 
 /** Live LiveKit connection state for the joined voice session — drives the self-bar status colour. */
@@ -65,7 +132,7 @@ export interface LiveVoiceState {
 /** Which workspace the middle of the app shows: a server's channels, or direct messages. */
 export type AppView = 'server' | 'dm';
 
-interface State {
+interface State extends ConvActions {
   user: User | null;
   servers: Server[];
   currentServerId: string | null;
@@ -76,6 +143,17 @@ interface State {
   members: ServerMemberInfo[];
   presence: PresenceMap;
   onlineUsers: string[]; // userIds with an active gateway connection
+  /**
+   * `presence4`: «Невидимые» на серверах, но в сети для ЛС (`online.dm`, `online.snapshot.dmOnly`). Только ЛС — шапка, карточка
+   * из ЛС, строки списков (`dmOnline.ts`); серверные списки смотрят лишь `onlineUsers`.
+   */
+  dmOnlineUsers: string[];
+  /**
+   * `presence5` (08.10, D4, решение 42): в сети на серверах, но «не в сети» для ЛС — приложение скрыто или простаивает, и
+   * человек не в голосе и не в звонке (`online.away`, `online.snapshot.dmAway`). Только ЛС (`dmOnline.dmPresent`); серверные
+   * списки смотрят лишь `onlineUsers`. Меняется только этими событиями: выход из сети совсем шлюз завершает `away: false`.
+   */
+  dmAwayUsers: string[];
   /** userId -> chosen presence state + custom status (from member rosters + user.status broadcasts). */
   userStatuses: Record<string, { status: PresenceStatus; customStatus: CustomStatus | null }>;
   /** userId -> game they're currently playing (#40; seeded from GET /users/activities + user.activity). */
@@ -162,6 +240,47 @@ interface State {
 
   // direct messages
   view: AppView;
+  /**
+   * Признаки сервера из `/auth/me` (`features`, ЛС этап 1). Отдельно от `user`: `setAuth` получает `User` и из ручек
+   * без `features` (вход, статус, профиль) — внутри `user` признаки терялись (разведка 30.09). `null` — не узнавали.
+   */
+  serverFeatures: string[] | null;
+  /**
+   * Режим бесед (ЛС этап 2, `docs/dm/STAGE2.md`): решается ОДИН раз в `bootstrap`, до подключения шлюза, — по нему
+   * шлюзу уходит `caps: ['conv1']`, и старые события `dm.*` этому соединению больше не приходят. Посреди сессии не
+   * меняется: переключатель устройства перезагружает страницу.
+   */
+  convActive: boolean;
+  /**
+   * Просьба ленте беседы `id` уйти «вниз» (G26): повторный выбор уже открытой беседы в списке — Telegram ПК 03·3.1.2.
+   * `n` растёт с каждой просьбой — `MessagePane` ведёт себя как кнопка «Вниз».
+   */
+  feedDownAsk: { id: string; n: number } | null;
+  /** Состояние бесед в режиме бесед (`convSyncRules.ts`); в старом режиме пустое. */
+  conv: ConvState;
+  /** Ключ записи кеша бесед на диске (`convCacheRules.convCacheKey`), решён в `bootstrap`; при выходе запись стирается. */
+  convCacheKey: string | null;
+  /** Исходящие бесед по беседе (шаг 2в): переживают смену беседы, голос и перезапуск; ведёт `convStore`. */
+  outbox: Record<string, OutboxItem[]>;
+  /** Черновики бесед на этом устройстве (шаг 2д): текст и ответ; пустой — удалён. Пишутся в кеш на диске. */
+  drafts: Record<string, { text: string; replyToId: string | null }>;
+  /** Где человек ушёл из беседы, если не снизу (шаг 2г, `convSetPlace`). Пишется в кеш на диске. */
+  places: Record<string, FeedPlace>;
+  /** Беседы с черновиком, не записанным на сервер (Р7, ведёт `convStore`). Пишется в кеш на диске. */
+  draftDirty: string[];
+  /** Счётчик черновиков, пришедших с других устройств (Р7): открытая лента по нему кладёт текст в поле. */
+  draftRev: Record<string, number>;
+  setDraft: (convId: string, text: string, replyToId: string | null) => void;
+  /**
+   * Черновики каналов серверов (06.10, сверка с Telegram): лента канала пересоздаётся при смене канала (`key` в
+   * `MainLayout`), и набранное терялось. Только в памяти этого устройства: у каналов нет серверного хранилища черновиков
+   * (оно — у бесед, `conv3`), поэтому ни записи на сервер, ни диска, ни других устройств. Уходят с выходом и сменой инстанса.
+   */
+  channelDrafts: Record<string, { text: string; replyToId: string | null }>;
+  setChannelDraft: (channelId: string, text: string, replyToId: string | null) => void;
+  setServerFeatures: (features: string[] | null) => void;
+  setConvActive: (on: boolean) => void;
+  setConvCacheKey: (key: string | null) => void;
   dms: DmChannel[];
   currentDmId: string | null;
   /** Bumped by requestMention; the active composer inserts `@name` once per new value. */
@@ -179,6 +298,11 @@ interface State {
   /** Whether the admin panel is open (lifted to the store so BOTH the desktop rail button and the
    *  mobile Профиль tab can open it — the rail's admin icon is hidden on mobile). */
   adminOpen: boolean;
+  /**
+   * Чья админка открыта (01.10): запись реестра ДОМА, когда человек стоит гостем у соседа, — запросы идут туда
+   * (`adminApi.ts`), без перехода и обрыва голоса; `null` — активный инстанс.
+   */
+  adminInstanceId: string | null;
   /** Whether the message-search modal is open (lifted so the Ctrl+F shortcut can open it). */
   searchOpen: boolean;
   dmMessages: Record<string, Message[]>;
@@ -193,19 +317,76 @@ interface State {
    *  or a person's DMs — in-app delivery is unaffected. Edited via context menus. */
   pushMutedServers: string[];
   pushMutedDmUsers: string[];
+  /**
+   * Сроки заглушек собеседников (07.10, сервер `conv11`): id человека → до какого времени; нет записи у заглушённого —
+   * навсегда. Нужен, когда сводка беседы поля `muted` не несёт (старый путь `/api/dm`); иначе источник — сводка.
+   */
+  pushMuteUntil: Record<string, string>;
+  /**
+   * Исключения «Уведомления включены» (08.10, решение владельца 38, сервер `push4`): цели (`dm_user` — id собеседника или
+   * `group:<id беседы>`), которые уведомляют при выключенных «Личных» / группах. Грузится с заглушками, меняется `setPushAlways`.
+   */
+  pushAlwaysTargets: string[];
   /** Чёрный список ЛС (#212) — кого я заблокировал. Грузится на старте, меняется `setBlocked`. */
   blockedUsers: BlockedUser[];
 
   setAuth: (user: User) => void;
-  logout: () => void;
+  /**
+   * Выйти. Возвращает обещание: переписка на диске (кеш бесед) стирается асинхронно, и перезагрузка сразу после выхода
+   * оборвала бы стирание — места вызова ждут его (не дольше секунды) перед `location.reload()`.
+   */
+  logout: () => Promise<void>;
   loadPushMutes: () => Promise<void>;
   loadBlocks: () => Promise<void>;
   /** Заблокировать / разблокировать (сразу в списке, откат при ошибке сервера). */
   setBlocked: (user: BlockedUser, blocked: boolean) => Promise<void>;
-  /** Optimistically toggle a push-mute (server or dm_user); reverts + rethrows on API failure. */
-  setPushMuted: (scope: PushMuteScope, targetId: string, muted: boolean) => Promise<void>;
+  /**
+   * Optimistically toggle a push-mute (server or dm_user); reverts + rethrows on API failure. `seconds` (07.10, сервер
+   * `conv11`) — на срок, без него навсегда; у `dm_user` правится и сводка беседы (значок, серый счётчик — сразу).
+   */
+  setPushMuted: (scope: PushMuteScope, targetId: string, muted: boolean, seconds?: number, soundOnly?: boolean) => Promise<void>;
+  /** Исключение «Уведомления включены» беседы (решение владельца 38, `push4`); включение снимает полную заглушку на сервере. */
+  setPushAlways: (targetId: string, on: boolean) => Promise<void>;
+  /**
+   * Закрепить / открепить беседу наверху своего списка (07.10, сервер `conv11`): сразу у себя, затем ручка; отказ
+   * (лимит — `reason: 'conv_pin_limit'`, сеть) откатывает и пробрасывается — тост решает зовущий.
+   */
+  setConvPinned: (convId: string, pinned: boolean) => Promise<void>;
+  /**
+   * Переставить закреплённые беседы одного списка (08.10, сервер `pinorder1`): `ids` — новый порядок сверху вниз. Сразу у
+   * себя (те же отметки, что поставит сервер), затем ручка; ответ сервера — его отметки. Отказ откатывает и пробрасывается.
+   */
+  reorderConvPins: (ids: string[]) => Promise<void>;
+  /** «Пометить как непрочитанное / прочитанное» (G04, сервер `conv13`): точка у себя сразу, сервер подтвердит событием. */
+  setConvUnreadMark: (convId: string, marked: boolean) => Promise<void>;
+  /** «В архив» / «Вернуть из архива» (07.10, `archive1`, G41): у себя сразу, откат при сбое. */
+  setConvArchived: (convId: string, archived: boolean) => Promise<void>;
+  /** Крестик на плашке незнакомца (08.10, `stranger1`, С7): гаснет сразу, откат при сбое; на сервере — в моей строке участника. */
+  hideStrangerBar: (convId: string) => Promise<void>;
+  /** «Пожаловаться» из плашки незнакомца (08.10, `stranger1`, С7): плашка гаснет сразу (сервер скрывает её жалобой), откат при сбое. */
+  reportStranger: (convId: string, reason: DmReportReason, comment?: string) => Promise<{ merged: boolean }>;
+  /**
+   * Реакции на мои сообщения увидены (G24, `reactunread1`): `ids` — показанные на экране, `null` — все («Прочитать все»). У себя
+   * сразу (число в сводке и `reactionUnread` у сообщений), на сервере — `POST /conv/:id/reactions-read`; сбой — откат.
+   */
+  readConvReactions: (convId: string, ids: string[] | null) => Promise<void>;
+  /** «Прочитать все» (G04, `conv13`): все беседы с непрочитанным или пометкой; число затронутых. */
+  readAllConvs: () => Promise<number>;
+  /** «Пометить как прочитанное» из меню строки (G04, `conv13`): беседа читается до последнего сообщения и теряет точку. */
+  markConvRead: (convId: string) => Promise<void>;
+  /**
+   * «Очистить историю» беседы (07.10, сервер `conv12`, G01): у меня или у обоих. Лента и список меняются событиями
+   * сервера (удаления), как у удаления пачкой; сбой пробрасывается — тост решает зовущий.
+   */
+  clearConvHistory: (convId: string, scope: 'me' | 'both') => Promise<void>;
+  /**
+   * «Удалить чат» (07.10, сервер `conv12`, G01): беседа уходит из списка (событие сервера `ConvLeft`) до нового
+   * сообщения. Открытая — закрывается сразу: на ПК пустая главная область, на телефоне — список.
+   */
+  hideConv: (convId: string, scope: 'me' | 'both') => Promise<void>;
   loadServers: () => Promise<void>;
-  openServer: (serverId: string) => Promise<void>;
+  /** `channelId` (08.10, G35 «Серверы»): открыть сразу этот канал, а не первый — иначе первый канал отметился бы прочитанным. */
+  openServer: (serverId: string, channelId?: string) => Promise<void>;
   refreshBootstrap: (serverId: string) => Promise<void>;
   resyncAfterReconnect: () => Promise<void>;
   patchServerSound: (event: string, url: string | null) => void;
@@ -226,6 +407,8 @@ interface State {
   /** keepSession: don't clear the persisted voice session — used by the reconnect-grace visual leave so
    *  a restart within the grace window auto-rejoins (#11). A user-initiated leave clears it. */
   leaveVoice: (keepSession?: boolean) => void;
+  /** Модератор переместил нас, пока голос идёт на ДРУГОМ инстансе (01.10): новый токен у инстанса голоса. */
+  moveVoiceTo: (channelId: string) => Promise<void>;
   /** On boot: rejoin the last voice channel if it dropped within the grace window (crash / quick restart). */
   restoreVoiceSession: (session?: VoiceSession) => Promise<void>;
   /** Сеть вернулась в уже запущенном приложении — вернуться в канал, из которого выбило (#11). */
@@ -254,15 +437,47 @@ interface State {
   setView: (view: AppView) => void;
   loadDms: () => Promise<void>;
   openDmWith: (userId: string) => Promise<void>;
+  /** «Избранное» (08.10, `saved1`): открыть беседу с самим собой, заведя её при первом разе (Ctrl+0, «Переслать» → «Избранное»). */
+  openSaved: () => Promise<void>;
   requestMention: (name: string) => void;
   setMobilePane: (pane: 'list' | 'content') => void;
   setMobileMembersOpen: (open: boolean) => void;
   setMobileProfileOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
   setEconomyWelcomeOpen: (open: boolean) => void;
-  setAdminOpen: (open: boolean) => void;
+  setAdminOpen: (open: boolean, instanceId?: string | null) => void;
   setSearchOpen: (open: boolean) => void;
   selectDm: (dmId: string) => Promise<void>;
+  /**
+   * Страж ухода из беседы (G13, #211): пока идёт запись голосового, смена беседы спрашивает, выбросить ли её — как
+   * Telegram Desktop (`HistoryWidget` зовёт `VoiceRecordBar::showDiscardBox` перед показом другой беседы). Ставит лента,
+   * где идёт запись (`MessagePane`); спрашивают `openServer`, `openChannel`, `selectDm`. Нет стража — уход без ожидания.
+   * `target` — куда уходим; `true` — можно.
+   */
+  leaveGuard: ((target: string | undefined) => boolean | Promise<boolean>) | null;
+  /** Поставить страж; вернёт снятие (снимает только свой). */
+  setLeaveGuard: (fn: (target: string | undefined) => boolean | Promise<boolean>) => () => void;
+  /**
+   * «Ответить в другом чате» (08.10, G55, `quote1`): ответ, ждущий открытия беседы `convId` — её лента ставит его в поле
+   * (полоса ответа с цитатой) и снимает отсюда. `message` — цитируемое ИЗ ДРУГОЙ беседы, `quote` — выбранный фрагмент.
+   */
+  crossReply: { convId: string; message: Message; quote: { text: string; offset: number } | null } | null;
+  setCrossReply: (v: { convId: string; message: Message; quote: { text: string; offset: number } | null } | null) => void;
+  /**
+   * «Поделиться в GusVoice» (09.10, G79): файлы и текст из чужого приложения ждут ленту выбранной беседы
+   * (`components/ShareIncoming.tsx` кладёт, `MessagePane` забирает и обнуляет: файлы — в окно отправки / на полосу у поля,
+   * текст — в поле). Не отправляется само.
+   */
+  sharedIn: { convId: string; files: File[]; text: string } | null;
+  setSharedIn: (v: { convId: string; files: File[]; text: string } | null) => void;
+  /**
+   * Черновик пересылки (08.10, решение владельца п.9; Telegram Desktop `History::setForwardDraft`, полоса над полем —
+   * `HistoryView::Controls::ForwardPanel`): по беседе-получателю. Как у Telegram — только в памяти этого окна: между
+   * устройствами не ездит и перезагрузку не переживает, переключение бесед — переживает. Ставит лента-источник
+   * («Переслать» в одну беседу, бросок на строку списка), снимают × полосы, Esc и отправка (`MessagePane`).
+   */
+  fwdDrafts: Record<string, FwdDraft>;
+  setFwdDraft: (convId: string, draft: FwdDraft | null) => void;
   /** Перечитать последнюю порцию беседы и слить с кешем (открытие, повтор, пробуждение). */
   refreshDmHistory: (dmId: string) => Promise<void>;
   /** Подтянуть порцию более старых сообщений беседы; `false` — дно. */
@@ -288,7 +503,9 @@ interface State {
   occupancy: Record<string, Occupancy>;
   setOccupancy: (channelId: string, ms: number | null) => void;
   mergePresence: (channelId: string, participants: VoiceParticipant[]) => void;
-  setOnlineSnapshot: (users: string[]) => void;
+  setOnlineSnapshot: (users: string[], dmOnly?: string[], dmAway?: string[]) => void;
+  setDmOnline: (userId: string, online: boolean) => void;
+  setDmAway: (userId: string, away: boolean) => void;
   setOnlineUpdate: (userId: string, online: boolean) => void;
   applyUserStatus: (userId: string, status: PresenceStatus, customStatus: CustomStatus | null) => void;
   applySelfStatus: (status: PresenceStatus, statusAuto: boolean) => void;
@@ -351,6 +568,35 @@ function loadSelfVoice(): { muted: boolean; deafened: boolean } {
   }
 }
 
+/** Настоящее окружение действий бесед (`convStore.ConvDeps`): сеть, часы и таймеры окна, `online`. Тесты дают своё. */
+function browserConvDeps(): ConvDeps {
+  return {
+    api,
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    onOnline: (fn) => {
+      try {
+        window.addEventListener('online', fn);
+      } catch {
+        /* без окна — только по `ready` и таймерам */
+      }
+    },
+    isMobile,
+    markChannelSeen,
+    windowed: () => feedWindowSwitch(),
+    draftsOnServer: () => serverKeepsDrafts(useStore.getState().serverFeatures),
+    // Метка устройства на эту загрузку страницы (Р7): своё эхо черновика не применяется. `crypto` в харнессе тестов нет.
+    draftDevice: `d${Math.random().toString(36).slice(2, 12)}`,
+    // ✓✓ (Р6): сервер с `conv4` — сводки из кеша без `peerReadKey` догонка перечитает списком.
+    peerReadsOnServer: () => serverSendsPeerRead(useStore.getState().serverFeatures),
+    // Нет сети у устройства — не ушедшее сразу «не отправлено» (уйдёт само по `online`), а не минута повторов (05.10).
+    deviceOffline: () => typeof navigator !== 'undefined' && navigator.onLine === false,
+    // «Прочитано» по видимому (G09): лента сообщает увиденное (`MessagePane.onSeen` → `convSeen`), отметка — не дальше.
+    readByView: () => true,
+  };
+}
+
 export const useStore = create<State>((set, get) => ({
   user: null,
   servers: [],
@@ -361,6 +607,8 @@ export const useStore = create<State>((set, get) => ({
   members: [],
   presence: {},
   onlineUsers: [],
+  dmOnlineUsers: [],
+  dmAwayUsers: [],
   userStatuses: {},
   userActivities: {},
   unreadCounts: {},
@@ -386,6 +634,36 @@ export const useStore = create<State>((set, get) => ({
   switching: false,
 
   view: 'server',
+  serverFeatures: null,
+  convActive: false,
+  feedDownAsk: null,
+  conv: emptyConvState(),
+  convCacheKey: null,
+  outbox: {},
+  drafts: {},
+  places: {},
+  draftDirty: [],
+  draftRev: {},
+  channelDrafts: {},
+  setChannelDraft: (channelId, text, replyToId) =>
+    set((s) => {
+      // Правило то же, что у бесед: пустой — удалён, то же значение — тот же объект (стор не будим на каждую букву).
+      const channelDrafts = updateDrafts(s.channelDrafts, channelId, text, replyToId);
+      return channelDrafts === s.channelDrafts ? s : { channelDrafts };
+    }),
+  setDraft: (convId, text, replyToId) => {
+    const before = get().drafts;
+    set((s) => {
+      const drafts = updateDrafts(s.drafts, convId, text, replyToId);
+      return drafts === s.drafts ? s : { drafts };
+    });
+    // Р7: изменился на ЭТОМ устройстве — на сервер, к остальным моим устройствам (без `conv3` — ничего).
+    if (get().drafts !== before) get().convDraftChanged(convId);
+  },
+  ...createConvActions(set, get, browserConvDeps()),
+  setServerFeatures: (features) => set({ serverFeatures: features }),
+  setConvActive: (on) => set({ convActive: on }),
+  setConvCacheKey: (key) => set({ convCacheKey: key }),
   dms: [],
   currentDmId: null,
   mentionRequest: null,
@@ -395,12 +673,15 @@ export const useStore = create<State>((set, get) => ({
   settingsOpen: false,
   economyWelcomeOpen: false,
   adminOpen: false,
+  adminInstanceId: null,
   searchOpen: false,
   dmMessages: {},
   historyFailed: [],
   unreadDms: [],
   pushMutedServers: [],
   pushMutedDmUsers: [],
+  pushMuteUntil: {},
+  pushAlwaysTargets: [],
   blockedUsers: [],
 
   setAuth: (user) =>
@@ -439,23 +720,53 @@ export const useStore = create<State>((set, get) => ({
     // re-authenticates from the stored gv_token on the reload that follows logout()
     // (the button "did nothing" — it reloaded straight back into the app).
     setToken(null);
+    // Записи кеша бесед всей семьи (дом + его гостевые записи) — ДО `logoutFamily`: выход из гостей выходит и из дома,
+    // а ключ сессии (`convCacheKey`) у гостя — гостевой, и домашняя переписка осталась бы на диске.
+    const cacheKeys = new Set<string>();
+    const ownKey = get().convCacheKey;
+    if (ownKey) cacheKeys.add(ownKey);
+    const registry = instances();
+    const cur = registry.find((i) => i.id === activeInstanceId());
+    const homeId = cur?.guestOf ?? cur?.id;
+    for (const i of registry) {
+      if (!i.userId || !homeId || (i.id !== homeId && i.guestOf !== homeId)) continue;
+      cacheKeys.add(convCacheKey(i, i.apiUrl || config.apiUrl, i.userId));
+    }
     // 🔴 И у ДОМА, и у всех его гостевых записей: гостевая сессия живёт поручительством дома, и
     // «выйти» означает выйти из своего аккаунта, а не только с чужого инстанса. Без этого выход из
     // гостей возвращал человека домой вошедшим — то есть «кнопка не сработала» (найдено 19.09).
     logoutFamily(activeInstanceId());
-    clearVoiceSession();
+    clearVoiceSession(get().voice?.instanceId ?? activeInstanceId());
     setCustomSounds({});
     setChannelSounds({});
+    get().convReset();
+    // Переписка на диске уходит вместе с выходом: на общем компьютере следующий человек её не увидит. Метка — на случай,
+    // если стирание оборвётся перезагрузкой: тогда его доделает следующий запуск (`App.decideConvMode`).
+    for (const k of cacheKeys) markConvCacheWipe(k);
+    // Метка снимается только после настоящего стирания: не открылась база — дочистит следующий запуск.
+    const wiped = Promise.all(
+      [...cacheKeys].map((k) =>
+        deleteConvCache(k).then((ok) => {
+          if (ok) clearConvCacheWipe(k);
+        }),
+      ),
+    ).then(() => {});
     set({
+      serverFeatures: null,
+      convActive: false,
+      convCacheKey: null,
       user: null,
       servers: [],
       currentServerId: null,
       bootstrap: null,
       currentChannelId: null,
       messagesByChannel: {},
+      channelDrafts: {},
       members: [],
       presence: {},
       onlineUsers: [],
+      dmOnlineUsers: [],
+      dmAwayUsers: [],
       userActivities: {},
       unreadCounts: {},
       mentionCounts: {},
@@ -470,8 +781,11 @@ export const useStore = create<State>((set, get) => ({
       unreadDms: [],
       pushMutedServers: [],
       pushMutedDmUsers: [],
+      pushMuteUntil: {},
+      pushAlwaysTargets: [],
       blockedUsers: [],
     });
+    return Promise.race([wiped, new Promise<void>((r) => setTimeout(r, 1000))]);
   },
 
   loadPushMutes: async () => {
@@ -480,10 +794,35 @@ export const useStore = create<State>((set, get) => ({
       set({
         pushMutedServers: mutes.filter((m) => m.scope === 'server').map((m) => m.targetId),
         pushMutedDmUsers: mutes.filter((m) => m.scope === 'dm_user').map((m) => m.targetId),
+        pushMuteUntil: Object.fromEntries(
+          mutes.filter((m) => m.scope === 'dm_user' && typeof m.until === 'string').map((m) => [m.targetId, m.until!]),
+        ),
       });
     } catch {
       /* push mutes are a nicety — never block boot over them */
     }
+    // Исключения «Уведомления включены» (`push4`): у старого сервера пути нет — без признака не спрашиваем.
+    if (serverPush4(get().serverFeatures)) {
+      try {
+        set({ pushAlwaysTargets: (await api.listPushAlways()).map((a) => a.targetId) });
+      } catch {
+        /* как заглушки — не мешает запуску */
+      }
+    }
+  },
+
+  setPushAlways: async (targetId, on) => {
+    const prev = get().pushAlwaysTargets;
+    set({ pushAlwaysTargets: on ? [...new Set([...prev, targetId])] : prev.filter((x) => x !== targetId) });
+    try {
+      if (on) await api.setPushAlways(targetId);
+      else await api.removePushAlways(targetId);
+    } catch (e) {
+      set({ pushAlwaysTargets: prev });
+      throw e;
+    }
+    // Включение сняло полную заглушку беседы на сервере — перечитать заглушки (сводку беседы обновит событие сервера).
+    if (on && get().pushMutedDmUsers.includes(targetId)) await get().loadPushMutes();
   },
 
   loadBlocks: async () => {
@@ -506,18 +845,193 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  setPushMuted: async (scope, targetId, muted) => {
+  setPushMuted: async (scope, targetId, muted, seconds, soundOnly) => {
     const key = scope === 'server' ? 'pushMutedServers' : 'pushMutedDmUsers';
     const prev = get()[key];
     const next = muted ? [...new Set([...prev, targetId])] : prev.filter((x) => x !== targetId);
     set({ [key]: next } as Pick<State, typeof key>);
+    // 07.10 (`conv11`): у собеседника — срок в `pushMuteUntil` и сводка беседы с ним (до события сервера с точным сроком).
+    const prevUntil = get().pushMuteUntil;
+    const prevConv = get().conv;
+    // Полная заглушка снимает исключение «Уведомления включены» (`push4`; сервер — так же, `push.setPushMute`).
+    const prevAlways = get().pushAlwaysTargets;
+    if (scope === 'dm_user' && muted && !soundOnly && prevAlways.includes(targetId)) {
+      set({ pushAlwaysTargets: prevAlways.filter((x) => x !== targetId) });
+    }
+    if (scope === 'dm_user') {
+      const until = muted && seconds ? new Date(Date.now() + seconds * 1000).toISOString() : null;
+      const { [targetId]: _old, ...rest } = prevUntil;
+      const conv = patchPeerMute(prevConv, targetId, muted ? { until, ...(soundOnly ? { soundOnly: true as const } : {}) } : null);
+      set({
+        pushMuteUntil: until ? { ...rest, [targetId]: until } : rest,
+        ...(conv !== prevConv ? { conv, dms: summariesToDms(conv.summaries) } : {}),
+      });
+    }
     try {
-      if (muted) await api.setPushMute(scope, targetId);
+      if (muted) await api.setPushMute(scope, targetId, seconds, soundOnly);
       else await api.removePushMute(scope, targetId);
     } catch (e) {
-      set({ [key]: prev } as Pick<State, typeof key>); // revert on failure
+      set({ [key]: prev, pushAlwaysTargets: prevAlways } as Pick<State, typeof key | 'pushAlwaysTargets'>); // revert on failure
+      if (scope === 'dm_user') {
+        const conv = patchPeerMute(get().conv, targetId, Object.values(prevConv.summaries).find((x) => x.otherUser?.id === targetId)?.muted ?? null);
+        set({ pushMuteUntil: prevUntil, ...(conv !== get().conv ? { conv, dms: summariesToDms(conv.summaries) } : {}) });
+      }
       throw e;
     }
+  },
+
+  reorderConvPins: async (ids) => {
+    const s0 = get();
+    const before: Record<string, string | null> = {};
+    for (const id of ids) before[id] = s0.conv.summaries[id]?.pinnedAt ?? null;
+    const put = (stamps: Record<string, string | null>) => {
+      const s = get();
+      const conv = patchConvPinOrder(s.conv, stamps);
+      if (conv !== s.conv) set({ conv, dms: summariesToDms(conv.summaries) });
+    };
+    put(pinOrderStamps(ids, Date.now()));
+    try {
+      const res = await api.convPinOrder(ids);
+      put(Object.fromEntries(res.pins.map((p) => [p.id, p.pinnedAt])));
+    } catch (e) {
+      put(before);
+      throw e;
+    }
+  },
+
+  setConvPinned: async (convId, pinned) => {
+    const before = get().conv.summaries[convId]?.pinnedAt ?? null;
+    const put = (at: string | null) => {
+      const s = get();
+      const conv = patchConvPinned(s.conv, convId, at);
+      if (conv !== s.conv) set({ conv, dms: summariesToDms(conv.summaries) });
+    };
+    put(pinned ? new Date().toISOString() : null);
+    try {
+      const res = await api.convSetPinned(convId, pinned);
+      put(res.pinnedAt);
+    } catch (e) {
+      put(before);
+      throw e;
+    }
+  },
+
+  readConvReactions: async (convId, ids) => {
+    const s0 = get();
+    const list0 = s0.dmMessages[convId] as (Message & { reactionUnread?: true })[] | undefined;
+    const flagged = list0 ? list0.filter((m) => m.reactionUnread && (!ids || ids.includes(m.id))).length : 0;
+    const conv = patchReactionsRead(s0.conv, convId, ids ? flagged : null);
+    const list = list0 ? clearReactionUnread(list0, ids) : undefined;
+    if (conv === s0.conv && (!list || list === list0)) return;
+    set({
+      conv,
+      dms: conv === s0.conv ? s0.dms : summariesToDms(conv.summaries),
+      ...(list && list !== list0 ? { dmMessages: { ...s0.dmMessages, [convId]: list as Message[] } } : {}),
+    });
+    try {
+      await api.convReactionsRead(convId, ids ?? undefined);
+    } catch (e) {
+      const s = get();
+      const back = s.conv.summaries[convId] && s0.conv.summaries[convId] ? { ...s.conv, summaries: { ...s.conv.summaries, [convId]: { ...s.conv.summaries[convId], unreadReactions: s0.conv.summaries[convId].unreadReactions } } } : s.conv;
+      set({ conv: back, dms: summariesToDms(back.summaries), ...(list0 ? { dmMessages: { ...s.dmMessages, [convId]: list0 } } : {}) });
+      throw e;
+    }
+  },
+
+  hideStrangerBar: async (convId) => {
+    const before = get().conv;
+    const conv = patchConvStrangerHidden(before, convId);
+    if (conv !== before) set({ conv, dms: summariesToDms(conv.summaries) });
+    try {
+      await api.convHideStranger(convId);
+    } catch (e) {
+      const s = get();
+      const sum = before.summaries[convId];
+      if (sum && !s.conv.summaries[convId]?.stranger) {
+        const back = { ...s.conv, summaries: { ...s.conv.summaries, [convId]: sum } };
+        set({ conv: back, dms: summariesToDms(back.summaries) });
+      }
+      throw e;
+    }
+  },
+
+  reportStranger: async (convId, reason, comment) => {
+    const res = await api.convReport(convId, { reason, ...(comment ? { comment } : {}) });
+    const conv = patchConvStrangerHidden(get().conv, convId);
+    if (conv !== get().conv) set({ conv, dms: summariesToDms(conv.summaries) });
+    return { merged: res.merged };
+  },
+
+  setConvArchived: async (convId, archived) => {
+    const before = get().conv.summaries[convId]?.archived === true;
+    const put = (on: boolean) => {
+      const s = get();
+      const conv = patchConvArchived(s.conv, convId, on);
+      if (conv !== s.conv) set({ conv, dms: summariesToDms(conv.summaries) });
+    };
+    put(archived);
+    try {
+      await api.convSetArchived(convId, archived);
+    } catch (e) {
+      put(before);
+      throw e;
+    }
+  },
+
+  setConvUnreadMark: async (convId, marked) => {
+    const before = get().conv.summaries[convId]?.markedUnread === true;
+    const put = (on: boolean) => {
+      const s = get();
+      const conv = patchConvUnreadMark(s.conv, convId, on);
+      if (conv !== s.conv) set({ conv, dms: summariesToDms(conv.summaries) });
+    };
+    put(marked);
+    // Telegram Desktop (03·3.1.4): пометка открытой беседы «непрочитанной» закрывает её. На телефоне открытая беседа —
+    // отдельный экран, а меню строки открывают из списка: закрывать нечего.
+    if (marked && get().currentDmId === convId && !isMobile()) set({ currentDmId: null });
+    try {
+      await api.convSetUnreadMark(convId, marked);
+    } catch (e) {
+      put(before);
+      throw e;
+    }
+  },
+
+  markConvRead: async (convId) => {
+    const s0 = get();
+    const sum = s0.conv.summaries[convId];
+    if (!sum) return;
+    const key = sum.lastMessage?.sortKey;
+    const conv = patchConvReadAll(s0.conv, convId);
+    if (conv !== s0.conv) set({ conv, dms: summariesToDms(conv.summaries), unreadDms: s0.unreadDms.filter((x) => x !== convId) });
+    try {
+      // Чтение до последнего сообщения снимает точку на сервере само; пустая беседа с точкой — только снять её.
+      if (key !== undefined) await api.convRead(convId, key);
+      else await api.convSetUnreadMark(convId, false);
+    } catch (e) {
+      const s = get();
+      const back = { ...s.conv, summaries: { ...s.conv.summaries, [convId]: sum } };
+      set({ conv: back, dms: summariesToDms(back.summaries), ...(sum.unread > 0 ? { unreadDms: [...s.unreadDms, convId] } : {}) });
+      throw e;
+    }
+  },
+
+  readAllConvs: async () => {
+    const res = await api.convReadAll();
+    // Сервер пришлёт каждой беседе событие со сводкой без непрочитанного; до него — гасим у себя, чтобы список не мигал.
+    const s = get();
+    const conv = patchConvReadAll(s.conv);
+    if (conv !== s.conv) set({ conv, dms: summariesToDms(conv.summaries), unreadDms: [] });
+    return res.count;
+  },
+
+  clearConvHistory: async (convId, scope) => {
+    await api.convClear(convId, scope);
+  },
+
+  hideConv: async (convId, scope) => {
+    await api.convHide(convId, scope);
+    if (get().currentDmId === convId) set({ currentDmId: null, mobilePane: 'list' });
   },
 
   loadServers: async () => {
@@ -532,7 +1046,10 @@ export const useStore = create<State>((set, get) => ({
     if (id) rememberInstanceServers(id, servers.map((x) => ({ id: x.id, name: x.name, iconUrl: x.iconUrl ?? null })));
   },
 
-  openServer: async (serverId) => {
+  openServer: async (serverId, channelId) => {
+    // Идёт запись голосового — сначала спросить (G13, `leaveGuard`); без записи — без ожидания, как раньше.
+    const guard = get().leaveGuard;
+    if (guard && !(await guard(serverId))) return;
     const bootstrap = await api.getServer(serverId);
     const firstText = bootstrap.channels.find((c) => c.type === 'text') ?? null;
     set((s) => {
@@ -546,6 +1063,11 @@ export const useStore = create<State>((set, get) => ({
         currentChannelId: null,
         members: [],
         view: 'server',
+        /* Канал закрыт строкой выше — значит, на телефоне перед глазами должен быть СПИСОК каналов (#204). Раньше экран
+           оставался тем, что был: открыли сервер, стоя в ленте (окно приглашения поверх переписки, правка канала или
+           сервера, которая перечитывает его этим же вызовом), — и человек смотрел на пустое «Выбери канал», пока не
+           нажмёт «назад». На ПК и в узком окне браузера ниже сразу откроется первый канал — `openChannel` вернёт `content`. */
+        mobilePane: 'list',
         unreadServers,
         mentionServers,
         ...seedReads(s, bootstrap, null),
@@ -556,7 +1078,9 @@ export const useStore = create<State>((set, get) => ({
     void get().loadMembers(serverId);
     // On mobile, land on the channel LIST — don't auto-open the first text channel (that sets
     // mobilePane:'content' and dumps the user into a wall of chat). Desktop opens it (two-pane layout).
-    if (firstText && !isMobile()) await get().openChannel(firstText.id);
+    const target = channelId ? (bootstrap.channels.find((c) => c.id === channelId) ?? null) : null;
+    if (target) await get().openChannel(target.id);
+    else if (firstText && !isMobile()) await get().openChannel(firstText.id);
   },
 
   // Member roster (with roles + join dates) for the user menu / profile card. Best-effort,
@@ -585,8 +1109,10 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({
       bootstrap,
       currentChannelId: s.currentChannelId && visible.has(s.currentChannelId) ? s.currentChannelId : null,
-      voice: s.voice && !visible.has(s.voice.channelId) ? null : s.voice,
-      liveVoice: s.voice && !visible.has(s.voice.channelId) ? {} : s.liveVoice,
+      // Голос рвём, только если он НА ЭТОМ сервере этого инстанса: голос на другом сервере (или у соседа, пока
+      // смотрим дом) пропал бы от того, что кто-то поправил роль там, где мы просто смотрим.
+      voice: dropsVoice(s.voice, serverId, visible) ? null : s.voice,
+      liveVoice: dropsVoice(s.voice, serverId, visible) ? {} : s.liveVoice,
       ...seedReads(s, bootstrap, s.currentChannelId),
     }));
     setCustomSounds(bootstrap.sounds);
@@ -621,14 +1147,17 @@ export const useStore = create<State>((set, get) => ({
         /* keep the cached messages if the refetch fails */
       }
     }
-    if (currentDmId) await get().refreshDmHistory(currentDmId);
-    // Список бесед тоже: пока спали, могли написать в другую беседу — значок и порядок догоняют здесь
-    // (#212, Б3: раньше перезапрашивалась только открытая беседа).
-    await get()
-      .loadDms()
-      .catch(() => {
-        /* значки догонят при следующем открытии списка */
-      });
+    // Режим бесед догоняет ЛС сам — по номеру журнала на `ready` шлюза (`convStore.convOnReady`), без перечитки.
+    if (!get().convActive) {
+      if (currentDmId) await get().refreshDmHistory(currentDmId);
+      // Список бесед тоже: пока спали, могли написать в другую беседу — значок и порядок догоняют здесь
+      // (#212, Б3: раньше перезапрашивалась только открытая беседа).
+      await get()
+        .loadDms()
+        .catch(() => {
+          /* значки догонят при следующем открытии списка */
+        });
+    }
     if (currentServerId) {
       try {
         await get().refreshBootstrap(currentServerId);
@@ -693,6 +1222,7 @@ export const useStore = create<State>((set, get) => ({
    * правила порций теперь общие (`historyPage.ts`).
    */
   loadOlderDmMessages: async (dmId) => {
+    if (get().convActive) return get().convLoadOlder(dmId);
     const cursor = olderCursor(get().dmMessages[dmId] ?? []);
     if (!cursor) return false;
     const older = await api.listDmMessages(dmId, cursor);
@@ -714,6 +1244,7 @@ export const useStore = create<State>((set, get) => ({
    *   а не до часов сервера — и только если беседа всё ещё на экране.
    */
   refreshDmHistory: async (dmId) => {
+    if (get().convActive) return get().convOpen(dmId);
     const hadCache = !!get().dmMessages[dmId];
     set((s) => (s.historyFailed.includes(dmId) ? { historyFailed: s.historyFailed.filter((x) => x !== dmId) } : s));
     const load = api
@@ -776,6 +1307,8 @@ export const useStore = create<State>((set, get) => ({
    * считать одно и то же дважды (тот же довод, что и у согласования вкладок).
    */
   applyRemoteRead: ({ channelId, dmId, serverId, at }) => {
+    // Режим бесед: «прочитано» с другого устройства приходит сводкой в `conv.change` — `read.dm` не нужен.
+    if (dmId && !channelId && get().convActive) return;
     const s0 = get();
     const id = channelId ?? dmId;
     if (!id) return;
@@ -805,6 +1338,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   readDmNow: (dmId) => {
+    if (get().convActive) {
+      if (!get().unreadDms.includes(dmId) && !get().conv.summaries[dmId]?.unread) return;
+      get().convReadNow(dmId);
+      publishTabEvent({ kind: 'read-dm', dmId });
+      return;
+    }
     const s0 = get();
     if (!s0.unreadDms.includes(dmId) && !s0.dms.find((d) => d.id === dmId)?.unread) return;
     set((s) => ({
@@ -818,6 +1357,8 @@ export const useStore = create<State>((set, get) => ({
   },
 
   openChannel: async (channelId) => {
+    const guard = get().leaveGuard;
+    if (guard && !(await guard(channelId))) return;
     const channel = get().bootstrap?.channels.find((c) => c.id === channelId);
     set((s) => {
       const { [channelId]: _clearedM, ...mentionCounts } = s.mentionCounts;
@@ -859,10 +1400,32 @@ export const useStore = create<State>((set, get) => ({
   },
 
   joinVoice: async (channelId) => {
+    const prev = get().voice;
     const { url, token } = await api.voiceToken(channelId);
-    set({ voice: { channelId, url, token } });
-    const serverId = get().currentServerId;
-    if (serverId) saveVoiceSession(serverId, channelId);
+    const s = get();
+    const instanceId = activeInstanceId();
+    // Канал на открытом сервере — его сервер; нет (перемещение модератором, пока смотрим другой сервер) — прежний.
+    const ch = s.bootstrap?.channels.find((c) => c.id === channelId);
+    const serverId = ch ? s.currentServerId : (prev?.serverId ?? s.currentServerId);
+    const inst = instanceId ? instances().find((i) => i.id === instanceId) : null;
+    set({
+      voice: {
+        channelId,
+        url,
+        token,
+        instanceId,
+        serverId,
+        channelName: ch?.name ?? (prev?.channelId === channelId ? prev.channelName : 'Голосовой канал'),
+        serverName: s.servers.find((x) => x.id === serverId)?.name ?? '',
+        instanceName: inst?.name?.trim() || inst?.domain || '',
+        self: s.user ? { displayName: s.user.displayName, avatarUrl: s.user.avatarUrl ?? null } : null,
+        selfId: s.user?.id ?? null,
+      },
+    });
+    // Голос был на другом инстансе — он закончился (голос всегда один, решение 01.10): его сессию стираем, иначе
+    // возврат туда в течение грейса затянул бы обратно в прежний канал.
+    if (prev && prev.instanceId !== instanceId) clearVoiceSession(prev.instanceId);
+    if (serverId) saveVoiceSession(instanceId, serverId, channelId);
   },
 
   // Re-mint the LiveKit token for the channel we're in (same channelId) so updated publish
@@ -872,15 +1435,30 @@ export const useStore = create<State>((set, get) => ({
     const v = get().voice;
     if (!v) return;
     try {
-      const { url, token } = await api.voiceToken(v.channelId);
-      set({ voice: { channelId: v.channelId, url, token } });
+      // К инстансу ГОЛОСА, а не к тому, что на экране (`voiceApiOf`): после перехода активный — другой.
+      const { url, token } = await voiceApiOf(v).voiceToken(v.channelId);
+      const cur = get().voice;
+      if (!cur || cur.channelId !== v.channelId || cur.instanceId !== v.instanceId) return;
+      set({ voice: { ...cur, url, token } });
     } catch {
       /* keep the current connection if the re-mint fails */
     }
   },
 
+  moveVoiceTo: async (channelId) => {
+    const v = get().voice;
+    if (!v) return;
+    const { url, token } = await voiceApiOf(v).voiceToken(channelId);
+    const cur = get().voice;
+    if (!cur || cur.instanceId !== v.instanceId) return;
+    // Снимка того сервера здесь нет — имени канала не знаем, подпись общая до возврата туда.
+    set({ voice: { ...cur, channelId, url, token, channelName: 'Голосовой канал' } });
+    if (cur.serverId) saveVoiceSession(cur.instanceId, cur.serverId, channelId);
+  },
+
   leaveVoice: (keepSession = false) => {
-    if (!keepSession) clearVoiceSession();
+    const v = get().voice;
+    if (!keepSession) clearVoiceSession(v ? v.instanceId : activeInstanceId());
     set({ voice: null, liveVoice: {}, voiceState: 'disconnected' });
   },
 
@@ -897,6 +1475,9 @@ export const useStore = create<State>((set, get) => ({
   },
 
   restoreVoiceSession: async (session?: VoiceSession) => {
+    // Уже в голосе (например, он пережил переход между инстансами) — не перехватывать навигацию и не
+    // переподключать живую комнату новым токеном.
+    if (get().voice) return;
     const sess = session ?? restorableVoiceSession();
     if (!sess) return;
     if (!get().servers.some((s) => s.id === sess.serverId)) {
@@ -980,8 +1561,29 @@ export const useStore = create<State>((set, get) => ({
   // ----- direct messages -----
 
   setView: (view) => set({ view }),
+  crossReply: null,
+  setCrossReply: (crossReply) => set({ crossReply }),
+  sharedIn: null,
+  setSharedIn: (sharedIn) => set({ sharedIn }),
+  fwdDrafts: {},
+  setFwdDraft: (convId, draft) =>
+    set((s) => {
+      if (draft) return { fwdDrafts: { ...s.fwdDrafts, [convId]: draft } };
+      if (!(convId in s.fwdDrafts)) return {};
+      const next = { ...s.fwdDrafts };
+      delete next[convId];
+      return { fwdDrafts: next };
+    }),
+  leaveGuard: null,
+  setLeaveGuard: (fn) => {
+    set({ leaveGuard: fn });
+    return () => {
+      if (get().leaveGuard === fn) set({ leaveGuard: null });
+    };
+  },
 
   loadDms: async () => {
+    if (get().convActive) return get().convEnsureList();
     const dms = await api.listDms();
     // Непрочитанное с сервера (dm_reads); беседа НА ЭКРАНЕ не горит. Раньше «на экране» было просто
     // `currentDmId`, и беседа, из которой ушли в сервер, теряла значок при загрузке списка (#212, Б2).
@@ -1008,10 +1610,16 @@ export const useStore = create<State>((set, get) => ({
   setMobileProfileOpen: (open) => set({ mobileProfileOpen: open }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setEconomyWelcomeOpen: (open) => set({ economyWelcomeOpen: open }),
-  setAdminOpen: (open) => set({ adminOpen: open }),
+  // Закрытие НЕ сбрасывает `adminInstanceId`: ответ, долетевший после закрытия (сохранили и сразу закрыли), перечитывает
+  // своё у дома, а не уходит к соседу гостевым токеном. Сбрасывает следующее открытие и переход.
+  setAdminOpen: (open, instanceId = null) => set(open ? { adminOpen: true, adminInstanceId: instanceId } : { adminOpen: false }),
   setSearchOpen: (open) => set({ searchOpen: open }),
 
   openDmWith: async (userId) => {
+    if (get().convActive) {
+      const id = await get().convOpenWith(userId);
+      return get().selectDm(id);
+    }
     const dm = await api.openDm(userId);
     get().upsertDm(dm);
     set((s) => ({
@@ -1026,7 +1634,32 @@ export const useStore = create<State>((set, get) => ({
     await get().refreshDmHistory(dm.id);
   },
 
+  openSaved: async () => {
+    if (!get().convActive) return;
+    const id = await get().convOpenSaved();
+    if (id) await get().selectDm(id);
+  },
+
   selectDm: async (dmId) => {
+    const guard = get().leaveGuard;
+    if (guard && !(await guard(dmId))) return;
+    /* 🔴 Беседа уже на экране (02.10, стенд 2г, вид телефона): повторный выбор — клик по ней в списке, тап по пушу
+       открытой беседы — открывал её заново, а открытие без живого шлюза просит порцию и ЗАМЕНЯЕТ окно под человеком:
+       лента теряла подгруженное ниже места и съезжала на десятки пикселей. Лента и так живая (события шлюза или
+       догонка) — дочитать и догнать. Окно из кеша или ленты ещё нет — открываем, как раньше. */
+    const s0 = get();
+    const shown =
+      s0.convActive &&
+      !!s0.dmMessages[dmId] &&
+      !s0.conv.windows[dmId]?.stale &&
+      isFeedOnScreen({
+        id: dmId,
+        currentId: s0.currentDmId,
+        mobile: isMobile(),
+        mobilePane: s0.mobilePane,
+        kind: 'dm',
+        view: s0.view,
+      });
     set((s) => ({
       view: 'dm',
       currentDmId: dmId,
@@ -1037,6 +1670,15 @@ export const useStore = create<State>((set, get) => ({
     publishTabEvent({ kind: 'read-dm', dmId });
     const instDm = activeInstanceId();
     if (instDm) rememberPlace({ instanceId: instDm, dmId });
+    if (shown) {
+      // Повторный клик по открытой беседе — «в конец» (G26, Telegram ПК 03·3.1.2): ведёт сама лента, как кнопка «Вниз».
+      set((s) => ({ feedDownAsk: { id: dmId, n: (s.feedDownAsk?.n ?? 0) + 1 } }));
+      get().readDmNow(dmId);
+      await get()
+        .convEnsureList()
+        .catch(() => {});
+      return;
+    }
     await get().refreshDmHistory(dmId);
   },
 
@@ -1125,13 +1767,30 @@ export const useStore = create<State>((set, get) => ({
             if (m.id !== messageId) return m;
             const reactions = [...(m.reactions ?? [])];
             const idx = reactions.findIndex((r) => r.emoji === emoji);
+            /* Список поставивших (G75, `ReactionGroup.reactors`: сервер отдаёт его группам до трёх человек) ведём вместе с
+               числом, пока он у группы есть: аватарки на чипе не отстают от живых событий. У группы без списка (людей больше
+               трёх или старый сервер) его и не заводим — чип с числом, как было. Момент постановки — наш, часы сервера не нужны:
+               порядок задаёт сам список (новый — в конец). */
             if (op === 'add') {
-              if (idx === -1) reactions.push({ emoji, count: 1, me: mine });
-              else reactions[idx] = { ...reactions[idx], count: reactions[idx].count + 1, me: reactions[idx].me || mine };
+              const who = { userId, at: new Date().toISOString() };
+              if (idx === -1) reactions.push({ emoji, count: 1, me: mine, reactors: [who] });
+              else {
+                const cur = reactions[idx];
+                // Повтор того же человека (эхо своего же события, повтор WS) — не второй голос: число не растёт (Codex R39).
+                const dup = cur.reactors?.some((x) => x.userId === userId) || (mine && cur.me);
+                if (!dup) {
+                  const reactors = cur.reactors ? [...cur.reactors, who] : cur.reactors;
+                  reactions[idx] = { ...cur, count: cur.count + 1, me: cur.me || mine, ...(reactors ? { reactors } : {}) };
+                }
+              }
             } else if (idx !== -1) {
-              const count = reactions[idx].count - 1;
+              const cur = reactions[idx];
+              const count = cur.count - 1;
               if (count <= 0) reactions.splice(idx, 1);
-              else reactions[idx] = { ...reactions[idx], count, me: mine ? false : reactions[idx].me };
+              else {
+                const reactors = cur.reactors?.filter((x) => x.userId !== userId);
+                reactions[idx] = { ...cur, count, me: mine ? false : cur.me, ...(reactors ? { reactors } : {}) };
+              }
             }
             return { ...m, reactions };
           }),
@@ -1151,13 +1810,26 @@ export const useStore = create<State>((set, get) => ({
             if (m.id !== messageId) return m;
             const reactions = [...(m.reactions ?? [])];
             const idx = reactions.findIndex((r) => r.emoji === emoji);
+            /* «Кто поставил» (07.10, `reactors` — сервер бесед): старый путь событий (`dm.reaction`) несёт только дельту —
+               список ведём той же дельтой, момент — время прихода. Список разошёлся с числом — чип покажет число
+               (`chipFaces`). */
+            const at = new Date().toISOString();
             if (op === 'add') {
-              if (idx === -1) reactions.push({ emoji, count: 1, me: mine });
-              else reactions[idx] = { ...reactions[idx], count: reactions[idx].count + 1, me: reactions[idx].me || mine };
+              if (idx === -1) reactions.push({ emoji, count: 1, me: mine, reactors: [{ userId, at }] });
+              else {
+                const r = reactions[idx];
+                const dup = r.reactors?.some((x) => x.userId === userId) || (mine && r.me);
+                if (!dup) {
+                  const reactors = r.reactors ? [...r.reactors, { userId, at }] : r.reactors;
+                  reactions[idx] = { ...r, count: r.count + 1, me: r.me || mine, ...(reactors ? { reactors } : {}) };
+                }
+              }
             } else if (idx !== -1) {
-              const count = reactions[idx].count - 1;
+              const r = reactions[idx];
+              const count = r.count - 1;
+              const reactors = r.reactors?.filter((x) => x.userId !== userId);
               if (count <= 0) reactions.splice(idx, 1);
-              else reactions[idx] = { ...reactions[idx], count, me: mine ? false : reactions[idx].me };
+              else reactions[idx] = { ...r, count, me: mine ? false : r.me, ...(reactors ? { reactors } : {}) };
             }
             return { ...m, reactions };
           }),
@@ -1257,7 +1929,25 @@ export const useStore = create<State>((set, get) => ({
       return { presence };
     }),
 
-  setOnlineSnapshot: (users) => set({ onlineUsers: users }),
+  setOnlineSnapshot: (users, dmOnly, dmAway) => set({ onlineUsers: users, dmOnlineUsers: dmOnly ?? [], dmAwayUsers: dmAway ?? [] }),
+
+  setDmAway: (userId, away) =>
+    set((s) => ({
+      dmAwayUsers: away
+        ? s.dmAwayUsers.includes(userId)
+          ? s.dmAwayUsers
+          : [...s.dmAwayUsers, userId]
+        : s.dmAwayUsers.filter((u) => u !== userId),
+    })),
+
+  setDmOnline: (userId, online) =>
+    set((s) => ({
+      dmOnlineUsers: online
+        ? s.dmOnlineUsers.includes(userId)
+          ? s.dmOnlineUsers
+          : [...s.dmOnlineUsers, userId]
+        : s.dmOnlineUsers.filter((u) => u !== userId),
+    })),
 
   setOnlineUpdate: (userId, online) =>
     set((s) => ({
@@ -1336,16 +2026,27 @@ export const useStore = create<State>((set, get) => ({
     // Звуки сервера — ссылки на файлы ПРЕЖНЕГО инстанса: оставь их, и новый сервер зазвучит чужими.
     setCustomSounds({});
     setChannelSounds({});
+    // Беседы прежнего инстанса: идущая догонка обрывается, признаки и режим решаются заново в `bootstrap`.
+    get().convReset();
     set((s) => ({
-      user: null,
+      serverFeatures: null,
+      convActive: false,
+      convCacheKey: null,
+      // У цели есть вход — человек остаётся на экране до `setAuth` нового инстанса (без экрана загрузки и формы
+      // входа, 01.10); входа нет — `null`, впереди экран входа, как раньше.
+      user: getToken() ? s.user : null,
       servers: [],
       currentServerId: null,
       bootstrap: null,
       currentChannelId: null,
       messagesByChannel: {},
+      // Черновики каналов прежнего инстанса — чужие каналы: в новом им не место (и id там другие).
+      channelDrafts: {},
       members: [],
       presence: {},
       onlineUsers: [],
+      dmOnlineUsers: [],
+      dmAwayUsers: [],
       userStatuses: {},
       userActivities: {},
       unreadCounts: {},
@@ -1353,9 +2054,8 @@ export const useStore = create<State>((set, get) => ({
       unreadServers: {},
       mentionServers: {},
       occupancy: {},
-      voice: null,
-      liveVoice: {},
-      voiceState: 'disconnected',
+      // Голос НЕ трогаем (01.10): он принадлежит своему инстансу (`voice.instanceId`) и идёт, пока человек смотрит
+      // другой — как в Discord. Рвёт его только выход, вход в другой канал или потеря записи.
       economy: {},
       incomingPoke: null,
       watchedStreams: [],
@@ -1375,12 +2075,15 @@ export const useStore = create<State>((set, get) => ({
       unreadDms: [],
       pushMutedServers: [],
       pushMutedDmUsers: [],
+      pushMuteUntil: {},
+      pushAlwaysTargets: [],
       blockedUsers: [],
       mentionRequest: null,
       // Окна прежнего инстанса закрываем: настройки сервера, админка и поиск говорили о том, чего
       // здесь уже нет.
       settingsOpen: false,
       adminOpen: false,
+      adminInstanceId: null,
       searchOpen: false,
       mobileMembersOpen: false,
       mobileProfileOpen: false,
@@ -1488,8 +2191,8 @@ export const useStore = create<State>((set, get) => ({
   applyUserProfile: (userId, displayName, avatarUrl, animatedAvatarUrl) =>
     // Сам разнос — в чистом `profilePatch.ts` под тестами: копий профиля пять, и #129 родился на
     // том, что одна осталась в стороне. Здесь остаётся только тонкая обёртка над стором.
-    set((s) =>
-      applyUserProfilePatch(
+    set((s) => {
+      const patched = applyUserProfilePatch(
         {
           members: s.members,
           messagesByChannel: s.messagesByChannel,
@@ -1498,8 +2201,11 @@ export const useStore = create<State>((set, get) => ({
           user: s.user,
         },
         { userId, displayName, avatarUrl, animatedAvatarUrl },
-      ),
-    ),
+      );
+      // Режим бесед: список ЛС собирается из сводок — собеседника правим и в них (`convSyncRules.patchPeer`).
+      const conv = patchPeer(s.conv, userId, displayName, avatarUrl);
+      return conv === s.conv ? patched : { ...patched, conv };
+    }),
 
   // Само правило — в `channelRules.applyUnread` (чистое, под тестами): куда лечь счётчику, решает
   // оно, а стор только отдаёт ему состояние.

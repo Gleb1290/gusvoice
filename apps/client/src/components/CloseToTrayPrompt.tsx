@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { getCloseBehavior, hideToTray, onCloseRequested, quitApp, setCloseBehavior } from '../desktopWindow';
 import { Icon } from './Icon';
 
+/** Событие «закрыть окно» с клавиатуры (Ctrl+W / Ctrl+F4): решает та же настройка, что и у крестика. */
+export const CLOSE_REQUEST_EVENT = 'gv-close-request';
+
 /**
  * Desktop-only: handles the window's X. The Tauri shell prevents the default close and emits
  * `gv-close-requested`; here we act on the saved preference (свернуть в трей / выйти) or, when it's
@@ -13,7 +16,7 @@ export function CloseToTrayPrompt() {
   const [remember, setRemember] = useState(true);
 
   useEffect(() => {
-    return onCloseRequested(() => {
+    const act = () => {
       const b = getCloseBehavior();
       if (b === 'tray') hideToTray();
       else if (b === 'quit') quitApp();
@@ -22,7 +25,14 @@ export function CloseToTrayPrompt() {
         setRemember(true);
         setOpen(true);
       }
-    });
+    };
+    // Ctrl+W / Ctrl+F4 (`DesktopKeys.tsx`) = тот же крестик окна: настройка «Закрытие окна» (спросить / в трей / выйти).
+    window.addEventListener(CLOSE_REQUEST_EVENT, act);
+    const off = onCloseRequested(act);
+    return () => {
+      window.removeEventListener(CLOSE_REQUEST_EVENT, act);
+      off();
+    };
   }, []);
 
   function confirm() {

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import {
   codeForEmojiIn,
   type Emoji,
   emojiByCode,
+  exactEmoji,
   mergeAliases,
   rankEmoji,
   stripVs,
@@ -76,6 +80,31 @@ describe('порядок выдачи', () => {
     ];
     assert.deepEqual(rankEmoji(entries, 'target', 1).map((e) => e.emoji), ['🎯']);
   });
+});
+
+it('подсказка слова целиком принимает только точные имена, коды и теги в нужном порядке', () => {
+  // Префикс в пустом поле не должен внезапно предлагать полтаблицы, а тег не должен обгонять название.
+  const check = (fn: typeof exactEmoji) => {
+    assert.equal(fn(SET, 'огонь').map((e) => e.emoji).join(','), '🔥,🧯');
+    assert.equal(fn(SET, 'FIRE').map((e) => e.emoji).join(','), '🔥');
+    assert.equal(fn(SET, 'при').length, 0);
+    assert.equal(fn(SET, 'ого').length, 0);
+    assert.equal(fn(SET, 'кот').map((e) => e.emoji).join(','), '🐈');
+    assert.equal(fn(SET, 'огонь', 1).map((e) => e.emoji).join(','), '🔥');
+  };
+  check(exactEmoji);
+  const source = readFileSync(new URL('./emojiSearch.ts', import.meta.url), 'utf8');
+  const mutant = (from: string, to: string): typeof exactEmoji => {
+    assert.ok(source.includes(from), 'точка мутации найдена');
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+    return (module.exports as typeof import('./emojiSearch.js')).exactEmoji;
+  };
+  check(mutant('export function exactEmoji(', 'export function exactEmoji('));
+  assert.throws(() => check(mutant('e.label.toLowerCase() === q', 'e.label.toLowerCase().startsWith(q)')), assert.AssertionError,
+    'мутант превращает точную подсказку в список префиксов');
+  assert.throws(() => check(mutant('return [...byName, ...byTag].slice(0, limit);', 'return [...byTag, ...byName].slice(0, limit);')), assert.AssertionError,
+    'мутант ставит совпадение по тегу выше названия');
 });
 
 describe('рукописные алиасы поверх таблицы', () => {

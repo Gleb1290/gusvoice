@@ -176,9 +176,42 @@ const Sample = z.object({
             encode_ms: z.number(),
             /** Цель слоя, кбит/с (с 0.8.11): как WebRTC поделил оценку канала между слоями. */
             target_kbps: z.number().optional(),
+            /**
+             * «Чёрный ящик» (06.10, #207): средний QP слоя за окно между срезами, что слой реально
+             * отправил и сколько кодировщик ДОЛЖЕН был выдать по своей цели (кбит/с), опорных с начала.
+             */
+            qp: z.number().optional(),
+            kbps: z.number().optional(),
+            enc_kbps: z.number().optional(),
+            key_frames: z.number().optional(),
           }),
         )
         .max(4)
+        .optional(),
+      /**
+       * «Чёрный ящик» показа (06.10, #207) — разбор жалоб «мылится/сыпется» по числам, а не по словам.
+       * `qp` — средний QP основного слоя за окно (20–30 — чёткий текст, 40+ — мыло, 51 — предел H.264);
+       * `kbps`/`enc_kbps` — что ушло и сколько кодировщик должен был выдать по своей цели (факт ≪ цели —
+       * статика, оценке не на чем расти); `retx_kbps` — повторы; `huge_frames` — «огромные» кадры
+       * (смена сцены, опорные); `ice_rtt_ms` — задержка по ICE (у `rtt_ms` нативного показа всегда 1).
+       * `cfg` — с чем показ запущен на самом деле: «Родное», режим, «Максимальное качество», множитель опорного кадра NVENC.
+       */
+      qp: z.number().optional(),
+      kbps: z.number().optional(),
+      enc_kbps: z.number().optional(),
+      retx_kbps: z.number().optional(),
+      huge_frames: z.number().optional(),
+      ice_rtt_ms: z.number().optional(),
+      cfg: z
+        .object({
+          w: z.number(),
+          h: z.number(),
+          fps: z.number(),
+          kbps: z.number(),
+          mode: cappedString(8),
+          maxq: z.union([z.literal(0), z.literal(1)]),
+          kf: z.number(),
+        })
         .optional(),
     })
     .optional(),
@@ -226,6 +259,15 @@ const Sample = z.object({
       packets_lost: z.number(),
       jitter_ms: z.number(),
       fps_min: z.number(),
+      /**
+       * «Чёрный ящик» зрителя (06.10, #207), накопительно по входящим видео: заморозки картинки (число и
+       * секунды), средний QP принятого и самая низкая высота кадра. Необязательные — прошлые клиенты их
+       * не шлют.
+       */
+      freezes: z.number().optional(),
+      freeze_s: z.number().optional(),
+      qp: z.number().optional(),
+      h_min: z.number().optional(),
     })
     .optional(),
   /**

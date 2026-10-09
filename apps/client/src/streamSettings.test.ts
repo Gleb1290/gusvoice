@@ -1,16 +1,34 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+
+it('битрейт клиента совпадает с 144 опорными сочетаниями Rust на обычных и нестандартных экранах',()=>{
+  // Та же измеренная таблица используется Rust-тестом share_bitrate: изменение одного двойника не останется незаметным.
+  const cases=[
+    [1280,720,1500000],[1920,1080,3000000],[2560,1440,5000000],[3840,2160,8000000],
+    [3440,1440,5825000],[2560,1080,3857142.857142857],[1600,900,2175000],[800,600,781250],
+    [3840,2160,8000000],[1080,1920,3000000],[3840,1600,6600000],[1366,768,1666000],
+  ];
+  let count=0;
+  for(const [w,h,base] of cases)for(const fps of [15,30,60] as const)for(const mode of ['detail','motion'] as const)for(const codec of ['vp9','h264'] as const){
+    const expected=Math.round(base!*(fps===15?0.75:fps===30?1:1.6)*(mode==='motion'?1.15:1)*(codec==='h264'?1.4:1));
+    assert.equal(bitrateForDims(w!,h!,{fps,mode,codec}),expected,`${w}×${h} ${fps} ${mode} ${codec}`);count++;
+  }
+  assert.equal(count,144);
+});
 import {
   bitrateFor,
   bitrateLabel,
+  bitrateForDims,
   buildNativeShareConfig,
   captureOptions,
+  fitNative,
   getStreamSettings,
   publishOptions,
   returnLayersOnce,
   shareLayerPresets,
   setStreamSettings,
   STREAM_DEFAULTS,
+  webScreenSettings,
   webShareLayers,
   type StreamSettings,
 } from './streamSettings.js';
@@ -57,6 +75,8 @@ describe('сохранённые настройки показа', () => {
       layers: true,
       streamPreview: true,
     });
+    assert.equal(STREAM_DEFAULTS.resolution, 'native', 'новый пользователь начинает с родного размера');
+    assert.equal(getStreamSettings().resolution, '720', 'сохранённый выбор не переписывается новым умолчанием');
   });
 
   it('явно выключенный WGC сохраняется, а не возвращается к опасному default', () => {
@@ -133,7 +153,7 @@ describe('параметры захвата и публикации экрана
     assert.deepEqual(publishOptions(settings({ codec: 'vp9', mode: 'motion', fps: 60 })), {
       videoCodec: 'vp9',
       screenShareEncoding: { maxBitrate: 2_760_000, maxFramerate: 60, priority: 'high' },
-      degradationPreference: 'maintain-framerate',
+      degradationPreference: 'balanced',
       simulcast: true,
       scalabilityMode: 'L3T3_KEY',
     });
@@ -206,6 +226,7 @@ describe('провод настроек в нативный показ', () => {
         height: 1440,
         maxBitrate: 12_880_000,
         codec: 'h264',
+        mode: 'motion',
         wgcWindow: false,
         layers: false,
       },
@@ -218,7 +239,7 @@ describe('лестница слоёв показа', () => {
     // Ловит перестановку RID: тогда сервер называет экономный слой средним и переключает не туда.
     assert.deepEqual(shareLayerPresets(2560, 1440, 7_000_000, 30), [
       { width: 640, height: 360, maxBitrate: 150_000, maxFramerate: 3 },
-      { width: 1280, height: 720, maxBitrate: 2_500_000, maxFramerate: 30 },
+      { width: 1280, height: 720, maxBitrate: 1_500_000, maxFramerate: 30 },
     ]);
   });
 
@@ -226,7 +247,7 @@ describe('лестница слоёв показа', () => {
     // Ловит лишний кодировщик у 720p и слишком мелкий средний слой у 4K.
     assert.deepEqual(shareLayerPresets(3840, 2160, 8_000_000, 60), [
       { width: 960, height: 540, maxBitrate: 150_000, maxFramerate: 3 },
-      { width: 1920, height: 1080, maxBitrate: 2_500_000, maxFramerate: 60 },
+      { width: 1920, height: 1080, maxBitrate: 1_500_000, maxFramerate: 60 },
     ]);
     assert.deepEqual(shareLayerPresets(1280, 720, 1_500_000, 30), [
       { width: 640, height: 360, maxBitrate: 150_000, maxFramerate: 3 },
@@ -236,7 +257,7 @@ describe('лестница слоёв показа', () => {
   it('средний слой соблюдает пол, потолок и долю общего бюджета', () => {
     // Ловит как голодный 720p, так и слой, съедающий больше 60 % канала основного потока.
     assert.equal(shareLayerPresets(1920, 1080, 1_000_000, 30)[1]?.maxBitrate, 600_000);
-    assert.equal(shareLayerPresets(1920, 1080, 20_000_000, 30)[1]?.maxBitrate, 2_500_000);
+    assert.equal(shareLayerPresets(1920, 1080, 20_000_000, 30)[1]?.maxBitrate, 1_500_000);
     assert.equal(shareLayerPresets(1920, 1080, 1_500_000, 30)[1]?.maxBitrate, 900_000);
   });
 
@@ -261,12 +282,12 @@ describe('лестница слоёв показа', () => {
     const cases = [
       ['720', 30, 2_100_000, [[640, 360, 150_000, 3]]],
       ['720', 60, 3_360_000, [[640, 360, 150_000, 3]]],
-      ['1080', 30, 4_200_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 30]]],
-      ['1080', 60, 6_720_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 60]]],
-      ['1440', 30, 7_000_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 30]]],
-      ['1440', 60, 11_200_000, [[640, 360, 150_000, 3], [1280, 720, 2_500_000, 60]]],
-      ['2160', 30, 11_200_000, [[960, 540, 150_000, 3], [1920, 1080, 2_500_000, 30]]],
-      ['2160', 60, 17_920_000, [[960, 540, 150_000, 3], [1920, 1080, 2_500_000, 60]]],
+      ['1080', 30, 4_200_000, [[640, 360, 150_000, 3], [1280, 720, 1_500_000, 30]]],
+      ['1080', 60, 6_720_000, [[640, 360, 150_000, 3], [1280, 720, 1_500_000, 60]]],
+      ['1440', 30, 7_000_000, [[640, 360, 150_000, 3], [1280, 720, 1_500_000, 30]]],
+      ['1440', 60, 11_200_000, [[640, 360, 150_000, 3], [1280, 720, 1_500_000, 60]]],
+      ['2160', 30, 11_200_000, [[960, 540, 150_000, 3], [1920, 1080, 1_500_000, 30]]],
+      ['2160', 60, 17_920_000, [[960, 540, 150_000, 3], [1920, 1080, 1_500_000, 60]]],
     ] as const;
     const dims = { '720': [1280, 720], '1080': [1920, 1080], '1440': [2560, 1440], '2160': [3840, 2160] } as const;
     for (const [resolution, fps, bitrate, expected] of cases) {
@@ -276,4 +297,43 @@ describe('лестница слоёв показа', () => {
       assert.deepEqual(shareLayerPresets(w, h, bitrate, fps).map((x) => [x.width, x.height, x.maxBitrate, x.maxFramerate]), expected);
     }
   });
+});
+
+it('битрейт «Родного» совпадает с пресетами для всех режимов, fps и кодеков', () => {
+  // Межъязыковой договор с Rust должен совпасть на контрольных размерах, а не только в одном частном пресете.
+  const presets = [
+    ['720', 1280, 720], ['1080', 1920, 1080], ['1440', 2560, 1440], ['2160', 3840, 2160],
+  ] as const;
+  for (const [resolution, width, height] of presets) for (const fps of [15, 30, 60] as const)
+    for (const mode of ['detail', 'motion'] as const) for (const codec of ['vp9', 'h264'] as const) {
+      const s = settings({ resolution, fps, mode, codec });
+      assert.equal(bitrateForDims(width, height, s), bitrateFor(s), `${resolution}p${fps} ${mode} ${codec}`);
+    }
+});
+
+it('fitNative вписывает альбом и портрет в 4K, не увеличивая мелкий источник', () => {
+  // Перепутанные габариты на ультрашироком/портретном мониторе дают сжатие и мыло до кодировщика.
+  assert.deepEqual(fitNative(7680, 4320), { width: 3840, height: 2160 });
+  assert.deepEqual(fitNative(4320, 7680), { width: 2160, height: 3840 });
+  assert.deepEqual(fitNative(1919, 1081), { width: 1918, height: 1080 });
+});
+
+it('экран в браузере заменяет несовместимый VP9 на H.264, не меняя настройки камеры', () => {
+  // LiveKit перезаписывает VP9 screen share в L1T3/motion; камеры этот экранный обход затрагивать не должен.
+  const vp9 = settings({ codec: 'vp9', mode: 'motion', resolution: 'native' });
+  assert.deepEqual(webScreenSettings(vp9), { ...vp9, codec: 'h264' });
+  const h264 = settings({ codec: 'h264' });
+  assert.equal(webScreenSettings(h264), h264, 'совместимый экранный кодек не создаёт лишнюю замену');
+});
+
+it('«Родное» отправляет размер и битрейт на расчёт Rust, максимум качества убирает слои', () => {
+  // Rust знает фактический размер источника; подстановка 1080p на клиенте ломает единый бюджет оценщика.
+  const base = { url: 'wss://voice.example.test', token: 'test-token', sourceId: 'screen:2', isWindow: false };
+  const native = buildNativeShareConfig({ ...base, settings: settings({ resolution: 'native' }) });
+  assert.equal(native.width, 0, 'ширина источника не выдумывается клиентом');
+  assert.equal(native.height, 0, 'высота источника не выдумывается клиентом');
+  assert.equal(native.maxBitrate, 0, 'битрейт источника рассчитывает нативная сторона');
+  const max = buildNativeShareConfig({ ...base, settings: settings({ maxQuality: true }) });
+  assert.equal(max.maxQuality, true, 'галочка доходит до нативного конфига');
+  assert.equal(max.layers, false, 'максимальное качество отключает запасные кодирующие слои');
 });

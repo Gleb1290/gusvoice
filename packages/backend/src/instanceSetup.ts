@@ -4,10 +4,12 @@
  *
  * ⚠️ Всё живёт в УЖЕ существующей `instance_settings` (ключ → JSON), рядом с `smtp` и `economy`.
  */
+import type { DmPolicy } from '@gusvoice/shared';
 import { and, eq, isNull } from 'drizzle-orm';
 import { superAdminId } from './auth.js';
 import { db } from './db/index.js';
 import { instanceSettings, users } from './db/schema.js';
+import { DM_POLICY_KEY, parseDmPolicy } from './dmRules.js';
 import { env } from './env.js';
 import {
   INSTANCE_KEY,
@@ -39,6 +41,15 @@ export async function registrationPolicy(): Promise<RegistrationPolicy> {
 
 export async function setRegistrationPolicy(policy: RegistrationPolicy): Promise<void> {
   await writeSetting(REGISTRATION_KEY, { policy });
+}
+
+/** Кто может начать личную переписку (05.10): нет записи или мусор — `shared`, как было (`dmRules.parseDmPolicy`). */
+export async function dmPolicy(): Promise<DmPolicy> {
+  return parseDmPolicy(await readSetting(DM_POLICY_KEY));
+}
+
+export async function setDmPolicy(policy: DmPolicy): Promise<void> {
+  await writeSetting(DM_POLICY_KEY, { policy });
 }
 
 export async function instanceMeta(): Promise<{ name: string | null; iconUrl: string | null }> {

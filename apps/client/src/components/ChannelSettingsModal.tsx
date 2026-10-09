@@ -20,6 +20,7 @@ import { ChannelPermissionsEditor } from './ChannelPermissionsEditor';
 import { ChannelSoundsPanel } from './ChannelSoundsPanel';
 import { ChannelGlyph, Icon, isCustomIcon, type IconName } from './Icon';
 import { Select } from './Select';
+import { RailItem, SettingsHead, SettingsRail, SettingsWindow } from './SettingsShell';
 
 type ChannelTab = 'main' | 'access' | 'general';
 
@@ -195,68 +196,45 @@ export function ChannelSettingsModal({
   }
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className={`modal channel-settings rail-modal channel-rail${picked ? ' picked' : ''}`}
-        onClick={(e) => e.stopPropagation()}
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="ch-title"
-        tabIndex={-1}
-      >
-        <div className="set-rail">
-          <div className="set-rail-title">
-            <span className="ch-settings-title" title={channel.name}>
-              <ChannelGlyph c={{ type: channel.type, icon }} size={16} />
-              <span className="rail-title-text">{channel.name}</span>
-            </span>
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
-          <div
-            className="set-rail-list"
-            role="tablist"
-            aria-label="Разделы настроек канала"
-            aria-orientation="vertical"
-            onKeyDown={onTabsKey}
-          >
-            {sections.map((x) => (
-              <button
-                key={x.key}
-                type="button"
-                role="tab"
-                id={`ch-tab-${x.key}`}
-                aria-selected={tab === x.key}
-                aria-controls="ch-panel-body"
-                tabIndex={tab === x.key ? 0 : -1}
-                className={`set-rail-item${tab === x.key ? ' active' : ''}`}
-                onClick={() => {
-                  setTab(x.key);
-                  setPicked(true);
-                }}
-              >
-                <Icon name={x.icon} size={16} />
-                <span>{x.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="set-main">
-          <div className="set-head">
-            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
-              <Icon name="chevron-left" size={18} />
-            </button>
-            <div className="set-head-text">
-              <h2 id="ch-title">{current?.label ?? 'Настройки канала'}</h2>
-              {current && <div className="set-head-sub">{current.sub}</div>}
-            </div>
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
+    <SettingsWindow
+      variant="channel"
+      picked={picked}
+      onClose={onClose}
+      titleId="ch-title"
+      dialogRef={dialogRef}
+      rail={
+        <SettingsRail
+          title={channel.name}
+          glyph={<ChannelGlyph c={{ type: channel.type, icon }} size={16} />}
+          label="Разделы настроек канала"
+          onClose={onClose}
+          onListKeyDown={onTabsKey}
+        >
+          {sections.map((x) => (
+            <RailItem
+              key={x.key}
+              id={`ch-tab-${x.key}`}
+              aria-controls="ch-panel-body"
+              tabIndex={tab === x.key ? 0 : -1}
+              icon={x.icon}
+              label={x.label}
+              active={tab === x.key}
+              onClick={() => {
+                setTab(x.key);
+                setPicked(true);
+              }}
+            />
+          ))}
+        </SettingsRail>
+      }
+    >
+        <SettingsHead
+          title={current?.label ?? 'Настройки канала'}
+          titleId="ch-title"
+          sub={current?.sub}
+          onBack={() => setPicked(false)}
+          onClose={onClose}
+        />
 
         <div className="admin-scroll" id="ch-panel-body" role="tabpanel" aria-labelledby={`ch-tab-${tab}`}>
         {tab === 'main' ? (
@@ -392,9 +370,7 @@ export function ChannelSettingsModal({
           <ChannelPermissionsEditor channel={channel} onChanged={refresh} />
         )}
         </div>
-        </div>
-      </div>
-    </div>
+    </SettingsWindow>
   );
 }
 

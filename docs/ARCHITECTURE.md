@@ -43,7 +43,7 @@ used on both sides (mentions, emoji, stickers, polls). It is consumed as TypeScr
 apps/client            web client (React + Vite)
 apps/desktop           Tauri v2 shell: Windows desktop app and the Android app
   src-tauri/src        Rust: tray, overlay window, global push-to-talk, native screen-share and audio (Windows)
-  src-tauri/gen/android  Kotlin side of the Android app (background voice, push)
+  src-tauri/gen/android  Kotlin side of the Android app (background voice, push, media bridge for the attachment gallery)
   vendor/webrtc-sys    fork of LiveKit's webrtc-sys with NVIDIA NVENC on Windows (see its NOTICE.md)
 packages/backend       API, gateway, migrations (drizzle/*.sql)
 packages/presence      voice presence service
@@ -108,7 +108,8 @@ Settings that the instance owner changes at runtime (e-mail, registration policy
 - **Desktop (Windows)** — Tauri v2 wrapping the same UI. Release builds from the project's Releases are "picker"
   builds: on first start they ask for the server address and can hold several servers. The UI is bundled inside the
   app, so it updates with the app (built-in updater), not with the server.
-- **Android** — the same Tauri project built for Android: background voice service, UnifiedPush notifications.
+- **Android** — the same Tauri project built for Android: background voice service, UnifiedPush notifications, an in-app
+  photo/video gallery for attachments (MediaStore through a WebView message channel) and the system file picker.
 
 Because clients update separately from servers — and servers will talk to each other — changes to the API, the
 WebSocket protocol and anything another instance sees must stay backward compatible: additions only, unknown fields

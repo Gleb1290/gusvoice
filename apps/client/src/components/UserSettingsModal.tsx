@@ -1,5 +1,21 @@
+import {
+  CAP_CONV1,
+  FEATURE_CONV2,
+  normalizeNotifyRepeat,
+  normalizeNotifyView,
+  notifyRepeatLabel,
+  notifyShowsName,
+  notifyShowsText,
+  notifyViewOf,
+  NOTIFY_REPEAT_MAX,
+  NOTIFY_REPEAT_MINUTES,
+} from '@gusvoice/shared';
+import { hasFolderEditRequest, useFoldersOn } from './DmFolderBar';
+import { DataStorageSettings } from './DataStorageSettings';
+import { DmFolderSettings } from './DmFolderSettings';
 import type { CSSProperties } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { pushBackHandler } from '../androidBack';
 import { activeAnchor, atBottomOf, groupLabelAt } from '../settingsAnchor';
 import { markChangedSeen, markGroupSeen, seedSeenOnce, seenChangedPrints, seenGroups } from '../settingsSeen';
@@ -32,6 +48,8 @@ import { chooseDownloadDir, getDownloadDir, setDownloadDir } from '../downloads'
 import { comboFromEvent, comboFromMouse, formatCombo, getHotkeys, type Hotkeys, isAndroid, isDesktop, isMobile, isTauri, setHotkeys } from '../hotkeys';
 import { hasPushDistributor } from '../nativeUnifiedPush';
 import { useStore } from '../store';
+import { convClientSwitch, feedWindowSwitch, setConvClientSwitch, setFeedWindowSwitch } from '../convStore';
+import { dmBubblesSwitch, setDmBubblesSwitch } from '../dmBubbles';
 import {
   coinNotifyLevel,
   notifyPermissionState,
@@ -60,7 +78,9 @@ import { toast, toastError } from '../toast';
 import { Avatar } from './Avatar';
 import { AvatarCropModal } from './AvatarCropModal';
 import { Icon, type IconName } from './Icon';
+import { NotifyExceptions } from './NotifyExceptions';
 import { Select } from './Select';
+import { RailAnchor, RailAnchors, RailItem, SettingsHead, SettingsRail, SettingsSearch, SettingsWindow } from './SettingsShell';
 import {
   changedDotOn,
   groupPrints,
@@ -85,6 +105,20 @@ import { Toggle } from './Toggle';
 import { animatedAvatarsEnabled, setAnimatedAvatarsEnabled } from '../avatarAnimation';
 import { liteModeEnabled, setLiteModeEnabled } from '../liteMode';
 import { linkPreviewsEnabled, setLinkPreviewsEnabled } from './LinkPreview';
+import { getSendMode, setSendMode, type SendMode } from '../sendMode';
+import { emojiSuggestEnabled, setEmojiSuggestEnabled } from '../emojiSuggest';
+import { setListLines, useListLines, type ListLines } from '../dmListView';
+import { ChatSwipeSetting } from './DmListSwipe';
+import {
+  type DoubleClickAction,
+  getDoubleClickAction,
+  getQuickReaction,
+  quickBarOrder,
+  setDoubleClickAction,
+  setQuickReaction,
+} from '../quickReaction';
+import { QUICK_REACTIONS } from './ContextMenu';
+import { EmojiPicker } from './EmojiPicker';
 import {
   forgetTrustedLinkAuthors,
   linkWarningsOff,
@@ -92,6 +126,12 @@ import {
   trustedLinkAuthors,
 } from '../linkGuard';
 import { DiagSettingsSection } from './DiagConsent';
+import type { LastSeenPrivacy } from '@gusvoice/shared';
+import { serverLastSeen } from '../lastSeenText';
+import { LastSeenExceptionsBlock } from './LastSeenExceptions';
+import { serverCallPrivacy } from '../lastSeenExceptionsRules';
+import { serverCalls } from '../callView';
+import { serverPush2, serverPush3 } from '../convSyncRules';
 
 
 
@@ -122,6 +162,126 @@ function StreamCursorSetting() {
         Зрители видят ваш курсор поверх экрана или окна. Если игра прячет курсор, его не видно и в показе.
         Применяется при следующем запуске показа.
       </div>
+    </>
+  );
+}
+
+const LAST_SEEN_OPTIONS: { value: LastSeenPrivacy; label: string }[] = [
+  { value: 'everyone', label: 'Все' },
+  { value: 'peers', label: 'Собеседники' },
+  { value: 'nobody', label: 'Никто' },
+];
+
+/**
+ * «Время захода» (С1, #211, `lastseen1`) — Telegram «Конфиденциальность → Время захода» (`settings_privacy_controllers.cpp`
+ * `LastSeenPrivacyController`): кто видит точное «был(а) в сети». «Мои контакты» у нас — собеседники и люди с общих серверов
+ * (решение владельца Р-2, по умолчанию). Ниже, когда выбрано не «Все», — «Скрывать время прочтения» (там же у Telegram).
+ * Настройка серверная: живёт в профиле (`PATCH /users/me`), другие устройства получают её с профилем.
+ */
+function LastSeenPrivacySetting() {
+  const on = useStore((s) => serverLastSeen(s.serverFeatures));
+  // `presence4` (решения владельца 08.10): «в сети» в ЛС видно всегда, «Невидимый» — только серверы; подсказка — по серверу.
+  const p4 = useStore((s) => serverCallPrivacy(s.serverFeatures));
+  const user = useStore((s) => s.user);
+  const setAuth = useStore((s) => s.setAuth);
+  if (!on || !user) return null;
+  const value = user.lastSeenPrivacy ?? 'peers';
+  const save = (body: { lastSeenPrivacy?: LastSeenPrivacy; hideReadTime?: boolean }) =>
+    api.updateProfile(body).then(setAuth, toastError);
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-lastseen" style={{ marginTop: 22 }}>
+        Время захода
+      </div>
+      <div className="muted set-sub-label" style={{ fontSize: 13 }} id="set-lastseen-label">
+        Кто видит время последнего захода
+      </div>
+      <div className="seg" role="group" aria-labelledby="set-lastseen-label">
+        {LAST_SEEN_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={value === o.value}
+            className={value === o.value ? 'on' : ''}
+            onClick={() => value !== o.value && void save({ lastSeenPrivacy: o.value })}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      {p4 ? (
+        <div className="muted" style={{ fontSize: 13 }}>
+          «Собеседники» — люди, с которыми у вас есть переписка или общий сервер. Вы не будете видеть время последнего захода
+          тех, от кого скрыли своё: вместо точного времени будет видно примерное (недавно, на этой неделе, в этом месяце).
+          «В сети» в личных сообщениях видно всегда, пока вы в сети. Режим «Невидимый» действует только на серверах.
+        </div>
+      ) : (
+        <div className="muted" style={{ fontSize: 13 }}>
+          «Собеседники» — люди, с которыми у вас есть переписка или общий сервер. Вы не будете видеть время последнего захода
+          тех, от кого скрыли своё: вместо точного времени будет видно примерное (недавно, на этой неделе, в этом месяце). Те, кому
+          время захода скрыто, не видят и «в сети» — только «был(а) недавно».
+          В режиме «Невидимый» время захода скрыто от всех.
+        </div>
+      )}
+      <LastSeenExceptionsBlock privacy={value} />
+      {value !== 'everyone' && (
+        <>
+          <div className="settings-row">
+            <span>Скрывать время прочтения</span>
+            <Toggle
+              checked={user.hideReadTime === true}
+              onChange={(v) => void save({ hideReadTime: v })}
+              label="Скрывать время прочтения"
+            />
+          </div>
+          <div className="muted" style={{ fontSize: 13 }}>
+            Если включено, люди, от которых вы скрыли время последнего захода, не смогут видеть, во сколько вы прочли их
+            сообщения. Вы также не будете видеть, во сколько они прочли ваши.
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * «Кто может звонить» (08.10, #211, решение владельца, `presence4`) — Telegram «Конфиденциальность → Звонки» (tdesktop
+ * `settings_privacy_controllers.cpp` `CallsPrivacyController`, `lng_edit_privacy_calls_header` «Who can call me»): та же тройка,
+ * что у «Времени захода» (по умолчанию «Все» — как было), и те же исключения («Всегда разрешать» / «Никогда не разрешать»).
+ * Серверная: `PATCH /users/me` + `callPrivacy`.
+ */
+function CallPrivacySetting() {
+  const on = useStore((s) => serverCallPrivacy(s.serverFeatures) && serverCalls(s.serverFeatures));
+  const user = useStore((s) => s.user);
+  const setAuth = useStore((s) => s.setAuth);
+  if (!on || !user) return null;
+  const value = user.callPrivacy ?? 'everyone';
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-calls" style={{ marginTop: 22 }}>
+        Звонки
+      </div>
+      <div className="muted set-sub-label" style={{ fontSize: 13 }} id="set-calls-label">
+        Кто может мне звонить
+      </div>
+      <div className="seg" role="group" aria-labelledby="set-calls-label">
+        {LAST_SEEN_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={value === o.value}
+            className={value === o.value ? 'on' : ''}
+            onClick={() => value !== o.value && void api.updateProfile({ callPrivacy: o.value }).then(setAuth, toastError)}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <div className="muted" style={{ fontSize: 13 }}>
+        «Собеседники» — люди из принятых бесед: вы им отвечали, они в контактах или у вас общий сервер. Незнакомцам, которые только
+        написали вам, звонить нельзя. Тем, кому нельзя, при нажатии на трубку объясняется, почему.
+      </div>
+      <LastSeenExceptionsBlock privacy={value} setting="calls" />
     </>
   );
 }
@@ -708,7 +868,7 @@ function AudioVideoTab() {
 function AppearanceTab() {
   const [theme, setT] = useState<Theme>(getTheme());
   const [scale, setScale] = useState<UiScale>(getUiScale());
-  const [sidebar, setSidebar] = useState<number>(getSidebarWidth());
+  const [sidebar, setSidebar] = useState<number>(() => Math.max(getSidebarWidth(), SIDEBAR_MIN)); // «только аватары» (72) на ползунке — нижняя граница
   // Настройки ссылок (#63/#64) — пер-девайсные, в localStorage, аккаунт не синкают.
   const [previews, setPreviews] = useState(linkPreviewsEnabled);
   const [warnOff, setWarnOff] = useState(linkWarningsOff);
@@ -826,6 +986,8 @@ function AppearanceTab() {
         </>
       )}
 
+      <ListViewSetting />
+
       <div className="settings-group-label" id="set-g-lite">Оптимизированный режим</div>
       <div className="settings-row">
         <span>Оптимизированный режим</span>
@@ -911,7 +1073,216 @@ function AppearanceTab() {
           Забыть доверенных отправителей ({trusted})
         </button>
       )}
+      {!isMobile() && <SendModeSetting />}
+      <EmojiSuggestSetting />
+      <DoubleClickSetting />
+      {isMobile() && <ChatSwipeSetting />}
     </div>
+  );
+}
+
+/**
+ * «Вид списка бесед» (G34, Telegram Android «Вид списка чатов»: «Две строки» / «Три строки», `SharedConfig.useThreeLinesLayout`):
+ * в трёх строках строка выше (70 → 76 dp), текст последнего сообщения идёт в две строки, имя автора в группе — отдельной.
+ * Настройка устройства (`dmListView.ts`); на ПК список ещё сворачивается в аватары — тянуть колонку за правый край.
+ */
+function ListViewSetting() {
+  const lines = useListLines();
+  const opts: { val: ListLines; label: string; sub: string }[] = [
+    { val: 'two', label: 'Две строки', sub: 'Имя и одна строка сообщения' },
+    { val: 'three', label: 'Три строки', sub: 'Сообщение в две строки, автор в группе — отдельной строкой' },
+  ];
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-listview" style={{ marginTop: 18 }}>
+        Вид списка бесед
+      </div>
+      <div role="group" aria-labelledby="set-g-listview" style={{ display: 'contents' }}>
+        {opts.map((o) => (
+          <button
+            key={o.val}
+            type="button"
+            aria-pressed={lines === o.val}
+            className={`close-opt ${lines === o.val ? 'on' : ''}`}
+            onClick={() => setListLines(o.val)}
+          >
+            <span className="close-opt-text">
+              <span>{o.label}</span>
+              <span className="close-opt-sub">{o.sub}</span>
+            </span>
+            {lines === o.val && <Icon name="check" size={16} />}
+          </button>
+        ))}
+      </div>
+      {!isMobile() && (
+        <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+          Колонку списка можно стянуть за правый край до конца — останутся только аватары с отметками непрочитанного.
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * «Подсказывать эмодзи» (G53, Telegram Desktop «Настройки чатов → Подсказывать замену эмодзи»): полоса эмодзи над полем по
+ * `:слову` и по слову целиком. По умолчанию включено; настройка устройства (`emojiSuggest.ts`).
+ */
+function EmojiSuggestSetting() {
+  const [on, setOn] = useState(emojiSuggestEnabled);
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-emoji" style={{ marginTop: 18 }}>
+        Подсказки эмодзи
+      </div>
+      <div className="settings-row">
+        <span>Подсказывать эмодзи при наборе</span>
+        <Toggle
+          checked={on}
+          onChange={(v) => {
+            setEmojiSuggestEnabled(v);
+            setOn(v);
+          }}
+          label="Подсказывать эмодзи при наборе"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+        Набери «:» и две буквы (например, «:огон»), либо одно слово в пустом поле («привет») — над полем появится полоса эмодзи.
+        {/* C4: на телефоне нет клавиш — там подсказку выбирают касанием (без Tab/Enter/Esc). */}
+        {isMobile() ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}
+        «:код:» с закрывающим двоеточием заменяется и без подсказок.
+      </div>
+    </>
+  );
+}
+
+/**
+ * «Отправка по Enter / по Ctrl+Enter» (07.10, G36) — как в Telegram Desktop: «Настройки чатов → Сообщения», два варианта.
+ * Наш аналог «Настроек чатов» — раздел «Вид» (тема, масштаб, лента). Настройка устройства (`sendMode.ts`); в приложении
+ * для телефона её нет — там Enter переносит строку, отправка кнопкой (`enterSends`).
+ */
+function SendModeSetting() {
+  const [mode, setMode] = useState<SendMode>(getSendMode);
+  const opts: { val: SendMode; label: string; sub: string }[] = [
+    { val: 'enter', label: 'Отправка по Enter', sub: 'Shift+Enter и Ctrl+Enter — новая строка' },
+    { val: 'ctrl-enter', label: 'Отправка по Ctrl+Enter', sub: 'Enter — новая строка' },
+  ];
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-send" style={{ marginTop: 18 }}>
+        Отправка сообщений
+      </div>
+      {/* display:contents — варианты остаются прямыми детьми `.settings-pane`, как у «При нажатии на крестик». */}
+      <div role="group" aria-labelledby="set-g-send" style={{ display: 'contents' }}>
+        {opts.map((o) => (
+          <button
+            key={o.val}
+            type="button"
+            aria-pressed={mode === o.val}
+            className={`close-opt ${mode === o.val ? 'on' : ''}`}
+            onClick={() => {
+              setSendMode(o.val);
+              setMode(o.val);
+            }}
+          >
+            <span className="close-opt-text">
+              <span>{o.label}</span>
+              <span className="close-opt-sub">{o.sub}</span>
+            </span>
+            {mode === o.val && <Icon name="check" size={16} />}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/**
+ * «Двойной клик по сообщению» (07.10, G45) — как в Telegram Desktop («Настройки чатов»: «Ответ по двойному клику» /
+ * «Реакция по двойному клику»; у нас третий — «Ничего», как `DoubleClickQuickAction::None`) и выбор быстрой реакции: её
+ * ставит двойной клик, у Telegram — «любимая» первая в полосе. По умолчанию — реакция 👍 (решение владельца; у Telegram —
+ * ответ). Настройка устройства (`quickReaction.ts`); на телефоне — двойной тап.
+ */
+function DoubleClickSetting() {
+  const [action, setAction] = useState<DoubleClickAction>(getDoubleClickAction);
+  const [quick, setQuick] = useState(getQuickReaction);
+  const [pick, setPick] = useState<DOMRect | null>(null);
+  const opts: { val: DoubleClickAction; label: string; sub: string }[] = [
+    { val: 'react', label: 'Ставить реакцию', sub: 'Повторный двойной клик снимает её' },
+    { val: 'reply', label: 'Отвечать на сообщение', sub: 'Двойной клик открывает ответ в поле ввода' },
+    { val: 'none', label: 'Ничего', sub: 'Двойной клик выделяет слово' },
+  ];
+  const choose = (emoji: string) => {
+    setQuickReaction(emoji);
+    setQuick(getQuickReaction());
+  };
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-dblclick" style={{ marginTop: 18 }}>
+        Двойной клик по сообщению
+      </div>
+      <div role="group" aria-labelledby="set-g-dblclick" style={{ display: 'contents' }}>
+        {opts.map((o) => (
+          <button
+            key={o.val}
+            type="button"
+            aria-pressed={action === o.val}
+            className={`close-opt ${action === o.val ? 'on' : ''}`}
+            onClick={() => {
+              setDoubleClickAction(o.val);
+              setAction(o.val);
+            }}
+          >
+            <span className="close-opt-text">
+              <span>{o.label}</span>
+              <span className="close-opt-sub">{o.sub}</span>
+            </span>
+            {action === o.val && <Icon name="check" size={16} />}
+          </button>
+        ))}
+      </div>
+      {action === 'react' && (
+        <div className="quick-react-pick">
+          <span className="quick-react-label" id="set-quick-reaction">
+            Быстрая реакция
+          </span>
+          <div className="quick-react-row" role="group" aria-labelledby="set-quick-reaction">
+            {quickBarOrder(QUICK_REACTIONS, quick).map((e) => (
+              <button
+                key={e}
+                type="button"
+                className={`quick-react-btn ${e === quick ? 'on' : ''}`}
+                aria-pressed={e === quick}
+                onClick={() => choose(e)}
+              >
+                {e}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="quick-react-btn more"
+              aria-label="Другая реакция"
+              title="Другая реакция"
+              onClick={(e) => setPick(e.currentTarget.getBoundingClientRect())}
+            >
+              <Icon name="chevron-down" size={18} />
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Через портал: окно настроек анимируется `transform`, а у предка с ним `position: fixed` считается от него, не от окна. */}
+      {pick &&
+        createPortal(
+          <EmojiPicker
+            anchor={pick}
+            onPick={(emoji, custom) => {
+              if (!custom) choose(emoji);
+              setPick(null);
+            }}
+            onClose={() => setPick(null)}
+          />,
+          document.body,
+        )}
+    </>
   );
 }
 
@@ -936,7 +1307,7 @@ function AccountTab({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       await api.deleteAccount(deletePw);
-      logout();
+      await logout();
       onClose();
       location.reload();
     } catch (e) {
@@ -965,6 +1336,8 @@ function AccountTab({ onClose }: { onClose: () => void }) {
     try {
       const res = await api.verify(newEmail.trim(), emailCode);
       setToken(res.token);
+      // Ссылки на закрытые файлы ЛС выданы под прежний токен — перечитать ленту (этап 2, шаг 2б).
+      useStore.getState().convTokenChanged();
       setAuth(res.user);
       setEmailMode('idle');
       setNewEmail('');
@@ -1149,8 +1522,8 @@ function AccountTab({ onClose }: { onClose: () => void }) {
       <div className="settings-group-label" id="set-g-email">Email</div>
       {emailMode === 'idle' ? (
         <div className="settings-row">
-          <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user.email || '—'}</span>
+          <span className="acc-email">
+            <span className="acc-email-val">{user.email || '—'}</span>
             {user.email && <span className={`acc-badge ${user.verified ? 'ok' : 'warn'}`}>{user.verified ? 'подтверждён' : 'не подтверждён'}</span>}
           </span>
           <button type="button" onClick={() => { setNewEmail(''); setEmailPw(''); setEmailMode('edit'); }}>Изменить</button>
@@ -1196,8 +1569,8 @@ function AccountTab({ onClose }: { onClose: () => void }) {
         <button
           type="button"
           className="leave"
-          onClick={() => {
-            logout();
+          onClick={async () => {
+            await logout();
             onClose();
             location.reload();
           }}
@@ -1249,9 +1622,9 @@ function AccountTab({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             className="leave"
-            onClick={() => {
+            onClick={async () => {
               clearServer();
-              logout();
+              await logout();
               onClose();
               location.reload();
             }}
@@ -1366,7 +1739,10 @@ function SecurityTab() {
     try {
       const res = await api.changePassword(curPw, newPw);
       // The change revokes every session; the backend hands THIS device a fresh token.
-      if (res.token) setToken(res.token);
+      if (res.token) {
+        setToken(res.token);
+        useStore.getState().convTokenChanged();
+      }
       setCurPw('');
       setNewPw('');
       setConfirmPw('');
@@ -1383,6 +1759,7 @@ function SecurityTab() {
     try {
       const res = await api.logoutAll(loPw);
       setToken(res.token); // this device keeps a fresh token; every other session is dead
+      useStore.getState().convTokenChanged();
       setLoPw('');
       toast('success', 'Готово', 'Все остальные устройства разлогинены');
     } catch (e) {
@@ -1743,6 +2120,10 @@ function AndroidInstallTab() {
             приёмник уйдёт на публичный ntfy.sh. Логин и регистрация <b>не нужны</b>.
           </li>
           <li>
+            <b>Там же, в «Advanced» (Расширенные) → «Connection protocol» (Протокол соединения), выберите WebSockets.</b>{' '}
+            С протоколом по умолчанию за прокси сервера уведомления могут опаздывать на десятки минут.
+          </li>
+          <li>
             Вернитесь в GusVoice — при первом запуске он попросит выбрать приёмник (ntfy), разрешите. Всё.
           </li>
         </ol>
@@ -1758,6 +2139,76 @@ function AndroidInstallTab() {
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * ЛС этап 2 (`docs/dm/STAGE2.md`, «Переключение»): новый путь ЛС через беседы на ЭТОМ устройстве — для приёмки
+ * владельцем до включения всем. Смена перезагружает страницу: шлюз должен подключиться заново с другими `caps`.
+ */
+function ConvClientTestRow() {
+  const [on, setOn] = useState(convClientSwitch());
+  const [feedWin, setFeedWin] = useState(feedWindowSwitch());
+  const [bubbles, setBubbles] = useState(dmBubblesSwitch());
+  const features = useStore((s) => s.serverFeatures);
+  const active = useStore((s) => s.convActive);
+  const supported = !!features?.includes(CAP_CONV1) && !!features?.includes(FEATURE_CONV2);
+  return (
+    <>
+      <div className="settings-group-label" id="set-g-conv-test" style={{ marginTop: 22 }}>
+        Новые ЛС
+      </div>
+      <div className="settings-row">
+        <span>Личные сообщения через беседы</span>
+        <Toggle
+          checked={on}
+          onChange={(v) => {
+            setConvClientSwitch(v);
+            setOn(v);
+            location.reload();
+          }}
+          label="Личные сообщения через беседы"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+        Включены у всех, где сервер умеет беседы. Выключить — только на этом устройстве, если с ЛС что-то не так:
+        вернётся прежний путь. Сейчас: {active ? 'включено' : supported ? 'выключено' : 'сервер не умеет беседы'}. После
+        переключения страница перезагрузится.
+      </div>
+      <div className="settings-row" style={{ marginTop: 12 }}>
+        <span>Лента бесед: окно и переходы</span>
+        <Toggle
+          checked={feedWin}
+          onChange={(v) => {
+            setFeedWindowSwitch(v);
+            setFeedWin(v);
+            location.reload();
+          }}
+          label="Лента бесед: окно и переходы"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+        Беседа открывается у первого непрочитанного или там, где вы её оставили; клик по цитате ведёт к сообщению, «Назад»
+        — обратно; длинная история не копится в памяти. Включено у всех. Выключить — только на этом устройстве, если с
+        лентой что-то не так: вернётся прежняя. После переключения страница перезагрузится.
+      </div>
+      <div className="settings-row" style={{ marginTop: 12 }}>
+        <span>Пузыри в ЛС, как в Telegram (проверка)</span>
+        <Toggle
+          checked={bubbles}
+          onChange={(v) => {
+            setDmBubblesSwitch(v);
+            setBubbles(v);
+            location.reload();
+          }}
+          label="Пузыри в ЛС, как в Telegram"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+        Свои сообщения — справа на цветном пузыре, собеседника — слева, время внутри. Каналы не меняются. Только на этом
+        устройстве, пока идёт проверка.
+      </div>
+    </>
   );
 }
 
@@ -1982,6 +2433,102 @@ function NotifyPermissionRow() {
   );
 }
 
+/**
+ * Настройки уведомлений как у Telegram (08.10, #211, G38, `push2`): «Показывать имя отправителя» / «Показывать текст
+ * сообщения» (tdesktop `settings_notifications.cpp`: галочки «Имя» и «Текст»; без имени нет и текста — `ShowNothing`) и
+ * «Уведомления из групп» (там же, «Уведомления для чатов → Группы»). Серверные: живут в профиле (`PATCH /users/me`),
+ * действуют на пуш телефона (сервер), всплывашку браузера и тост десктопа (`notifications.osNotify`).
+ */
+function NotifyContentSetting({ onClose }: { onClose: () => void }) {
+  const on = useStore((s) => serverPush2(s.serverFeatures));
+  const push3 = useStore((s) => serverPush3(s.serverFeatures));
+  const user = useStore((s) => s.user);
+  const setAuth = useStore((s) => s.setAuth);
+  if (!on || !user) return null;
+  const view = normalizeNotifyView(user.notifyView);
+  const save = (body: {
+    notifyView?: ReturnType<typeof normalizeNotifyView>;
+    notifyGroups?: boolean;
+    notifyDm?: boolean;
+    notifyRepeat?: number;
+  }) =>
+    api.updateProfile(body).then(setAuth, toastError);
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="settings-group-label" id="set-g-notify-view">
+        Что показывать в уведомлениях
+      </div>
+      <div className="settings-row">
+        <span>Показывать имя отправителя</span>
+        <Toggle
+          checked={notifyShowsName(view)}
+          onChange={(v) => void save({ notifyView: notifyViewOf(v, v && notifyShowsText(view)) })}
+          label="Показывать имя отправителя"
+        />
+      </div>
+      <div className="settings-row">
+        <span>Показывать текст сообщения</span>
+        <Toggle
+          checked={notifyShowsText(view)}
+          onChange={(v) => void save({ notifyView: notifyViewOf(v || notifyShowsName(view), v) })}
+          label="Показывать текст сообщения"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 13 }}>
+        Действует на телефоне, на компьютере и в браузере. Если скрыто, придёт просто «Новое сообщение». Пока вы за
+        компьютером, телефон ждёт 30 секунд и молчит, если сообщение уже прочитано.
+      </div>
+      {push3 && (
+        <>
+          <div className="settings-group-label" id="set-g-notify-dm" style={{ marginTop: 22 }}>
+            Личные сообщения
+          </div>
+          <div className="settings-row">
+            <span>Сообщения в личных беседах</span>
+            <Toggle checked={user.notifyDm !== false} onChange={(v) => void save({ notifyDm: v })} label="Уведомления из личных бесед" />
+          </div>
+          <div className="muted" style={{ fontSize: 13 }}>
+            Выключите — личные сообщения будут приходить без уведомлений (на телефон, в браузер и на компьютер).
+          </div>
+        </>
+      )}
+      <div className="settings-group-label" id="set-g-notify-groups" style={{ marginTop: 22 }}>
+        Уведомления из групп
+      </div>
+      <div className="settings-row">
+        <span>Сообщения в группах</span>
+        <Toggle
+          checked={user.notifyGroups !== false}
+          onChange={(v) => void save({ notifyGroups: v })}
+          label="Уведомления из групп"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 13 }}>
+        Выключите — сообщения групп будут приходить без уведомлений. Личные сообщения уведомляют, как раньше.
+      </div>
+      <NotifyExceptions onOpen={onClose} />
+      {push3 && (
+        <>
+          <div className="settings-group-label" id="set-g-notify-repeat" style={{ marginTop: 22 }}>
+            Повторять уведомления
+          </div>
+          <Select
+            value={String(normalizeNotifyRepeat(user.notifyRepeat))}
+            onChange={(v) => void save({ notifyRepeat: Number(v) })}
+            title="Повторять уведомления"
+            ariaLabel="Повторять уведомления"
+            options={NOTIFY_REPEAT_MINUTES.map((m) => ({ value: String(m), label: notifyRepeatLabel(m) }))}
+          />
+          <div className="muted" style={{ fontSize: 13 }}>
+            Если личное сообщение висит непрочитанным, на телефон придёт напоминание — не больше {NOTIFY_REPEAT_MAX} раз подряд.
+            Прочитали или выключили звук беседы — напоминания прекращаются.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** «Системные уведомления» — OS-level toasts while the window is unfocused (#77: три положения). */
 function OsNotifyPanel() {
   const [level, setLevel] = useState<OsNotifyLevel>(osNotifyLevel());
@@ -2128,8 +2675,9 @@ function CoinNotifyPanel() {
       <div className="muted" style={{ fontSize: 12 }}>
         Типы и щипки — как и остальные уведомления, только когда окно не в фокусе и не стоит «не
         беспокоить». «Все в канале» показывают и чужие, но не чаще одного раза в 20 секунд; когда
-        типают или щипают лично тебя, уведомление приходит всегда. ⚠️ В полноэкранной игре Windows
-        прячет уведомления — оттуда доходит только звук.
+        типают или щипают лично тебя, уведомление приходит всегда.
+        {/* C4: «полноэкранная игра Windows» — про десктоп, на телефоне предупреждение не нужно. */}
+        {!isMobile() && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}
       </div>
       {hint && (
         <div className="muted" role="alert" style={{ fontSize: 12, color: 'var(--danger, #e5484d)', marginTop: 4 }}>
@@ -2170,15 +2718,18 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
   const mobile = isMobile();
   // «Мои инстансы» — там, где у приложения свой реестр инстансов (десктоп, Android); в вебе инстанс один.
   const multi = multiInstanceEnabled();
+  const superAdmin = useStore((s) => !!s.user?.superAdmin);
+  // Папки бесед ЛС (G40) — только при сервере `folders1` и новых ЛС; из меню вкладки окно открывается сразу на них.
+  const folders = useFoldersOn();
   const sections = useMemo(
-    () => visibleSections({ federation: fed, desktop, mobile, multi }),
-    [fed, desktop, mobile, multi],
+    () => visibleSections({ federation: fed, desktop, mobile, multi, superAdmin, folders }),
+    [fed, desktop, mobile, multi, superAdmin, folders],
   );
-  const [section, setSection] = useState<SectionKey>('sound');
+  const [section, setSection] = useState<SectionKey>(() => (hasFolderEditRequest() ? 'folders' : 'sound'));
   const [query, setQuery] = useState('');
   const [anchor, setAnchor] = useState<string | null>(null);
   // Телефон: сперва список разделов, тап — экран раздела (list→detail, как везде в приложении).
-  const [picked, setPicked] = useState(false);
+  const [picked, setPicked] = useState(hasFolderEditRequest);
 
   /**
    * Системная «назад» на телефоне: из раздела — к списку разделов, и только потом закрытие окна.
@@ -2432,36 +2983,24 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className={`modal admin rail-modal settings-modal${picked ? ' picked' : ''}`}
-        onClick={(e) => e.stopPropagation()}
-        onClickCapture={refreshMarks}
-        onChangeCapture={refreshMarks}
-        onKeyUpCapture={refreshMarks}
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-title"
-        tabIndex={-1}
-      >
-        <div className="set-rail">
-          {/* 🔴 Только для телефона: там рельс — САМОСТОЯТЕЛЬНЫЙ экран, а крестик живёт в шапке
-              раздела, которой здесь нет. Без этой строки окно нечем закрыть: системная «назад»
-              выбрасывает из приложения целиком (проверено на устройстве). */}
-          <div className="set-rail-head">
-            <span>Настройки</span>
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
-          </div>
-          <div className="set-search">
-            <Icon name="search" size={15} />
-            <input
-              ref={searchRef}
+    <SettingsWindow
+      variant="user"
+      picked={picked}
+      onClose={onClose}
+      titleId="settings-title"
+      dialogRef={dialogRef}
+      onClickCapture={refreshMarks}
+      onChangeCapture={refreshMarks}
+      onKeyUpCapture={refreshMarks}
+      rail={
+        <SettingsRail
+          title="Настройки"
+          label="Разделы настроек"
+          onClose={onClose}
+          search={
+            <SettingsSearch
+              inputRef={searchRef}
               value={query}
-              placeholder="Поиск"
-              aria-label="Поиск по настройкам"
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Escape' && query) {
@@ -2471,176 +3010,155 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
                 if (e.key === 'Enter' && hits[0]) goTo(hits[0].section, hits[0].id);
               }}
             />
-            <kbd>Ctrl K</kbd>
-          </div>
-          <div className="set-rail-list" role="tablist" aria-label="Разделы настроек" aria-orientation="vertical">
-            {sections.map((s) => (
-              <div key={s.key}>
-                <button
-                  type="button"
-                  role="tab"
-                  id={`set-tab-${s.key}`}
-                  aria-selected={section === s.key}
-                  className={`set-rail-item${section === s.key ? ' active' : ''}`}
-                  onClick={() => openSection(s.key)}
-                  {...hoverAck(s.groups.map((g) => g.id))}
-                >
-                  <Icon name={s.icon} size={16} />
-                  <span>{s.label}</span>
-                  {s.groups.some((g) => dotOn(g.id)) && (
-                    <span className="set-dot" role="img" aria-label="есть изменения" />
-                  )}
-                  {s.groups.some((g) => !seen.has(g.id)) && (
-                    <span className="set-dot new" role="img" aria-label="есть непросмотренное" />
-                  )}
-                </button>
-                {section === s.key && s.groups.length > 1 && (
-                  <div className="set-rail-anchors">
-                    {s.groups.filter((g) => live.length === 0 || live.includes(g.id)).map((g) => (
-                      <button
-                        key={g.id}
-                        type="button"
-                        className={`set-rail-anchor${anchor === g.id ? ' on' : ''}`}
-                        onClick={() => goTo(s.key, g.id)}
-                        onMouseEnter={() => {
-                          noteSeen(g.id);
-                          hoverAck([g.id]).onMouseEnter();
-                        }}
-                        onMouseLeave={hoverAck([g.id]).onMouseLeave}
-                      >
-                        {g.label}
-                        {dotOn(g.id) && (
-                          <span className="set-dot" role="img" aria-label="есть изменения" />
-                        )}
-                        {!seen.has(g.id) && <span className="set-dot new" role="img" aria-label="не просмотрено" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
+          }
+        >
+          {sections.map((s) => (
+            <div key={s.key}>
+              <RailItem
+                id={`set-tab-${s.key}`}
+                icon={s.icon}
+                label={s.label}
+                active={section === s.key}
+                changed={s.groups.some((g) => dotOn(g.id))}
+                unseen={s.groups.some((g) => !seen.has(g.id))}
+                onClick={() => openSection(s.key)}
+                {...hoverAck(s.groups.map((g) => g.id))}
+              />
+              {section === s.key && s.groups.length > 1 && (
+                <RailAnchors>
+                  {s.groups.filter((g) => live.length === 0 || live.includes(g.id)).map((g) => (
+                    <RailAnchor
+                      key={g.id}
+                      on={anchor === g.id}
+                      changed={dotOn(g.id)}
+                      unseen={!seen.has(g.id)}
+                      onClick={() => goTo(s.key, g.id)}
+                      onMouseEnter={() => {
+                        noteSeen(g.id);
+                        hoverAck([g.id]).onMouseEnter();
+                      }}
+                      onMouseLeave={hoverAck([g.id]).onMouseLeave}
+                    >
+                      {g.label}
+                    </RailAnchor>
+                  ))}
+                </RailAnchors>
+              )}
+            </div>
+          ))}
+        </SettingsRail>
+      }
+    >
+      <SettingsHead
+        title={current.label}
+        titleId="settings-title"
+        sub={current.sub}
+        // Счётчик молчит, когда всё заводское: «изменено 0 из 14» — это шум в каждом окне у каждого, кто
+        // настройки не трогал. Клик ведёт к первой изменённой группе и подсвечивает все изменённые тем же
+        // приёмом, что и поиск (`set-hit` гаснет сам — это подсказка, а не состояние).
+        // ⚠️ Живёт вместе с точками (решение владельца 23.09): все изменения раздела увидены — счётчика нет,
+        // поменяли что-то снова — появится вместе с точкой.
+        changed={headMark && current.groups.some((g) => dotOn(g.id)) ? headMark : undefined}
+        onShowChanged={showChanged}
+        onBack={() => setPicked(false)}
+        onClose={onClose}
+      />
+
+      {hits.length > 0 && (
+        <div className="set-results" role="listbox" aria-label="Результаты поиска">
+          <div className="set-results-label">НАЙДЕНО · {hits.length}</div>
+          {hits.map((h) => (
+            <button key={h.id} type="button" className="set-result" onClick={() => goTo(h.section, h.id)}>
+              <Icon name={sectionOf(h.section).icon} size={16} />
+              <span className="set-result-text">
+                <span className="set-result-title">{h.title}</span>
+                <span className="set-result-path">{h.path}</span>
+              </span>
+              <Icon name="chevron-right" size={14} />
+            </button>
+          ))}
+        </div>
+      )}
+      {query.length >= SEARCH_MIN && hits.length === 0 && (
+        <div className="set-results">
+          <div className="set-nothing">
+            Ничего не нашлось по «{query}». Попробуйте другое слово — например, «звук» или «пароль».
           </div>
         </div>
+      )}
 
-        <div className="set-main">
-          <div className="set-head">
-            <button type="button" className="set-back" onClick={() => setPicked(false)} aria-label="К разделам">
-              <Icon name="chevron-left" size={18} />
-            </button>
-            <div className="set-head-text">
-              <h2 id="settings-title">{current.label}</h2>
-              <div className="set-head-sub">
-                {current.sub}
-                {/* Счётчик молчит, когда всё заводское: «изменено 0 из 14» — это шум в каждом окне
-                    у каждого, кто настройки не трогал. */}
-                {/* 🔴 Счётчик — КНОПКА: он называет число, а человек хочет увидеть, что именно.
-                    Клик ведёт к первой изменённой группе и подсвечивает все изменённые тем же
-                    приёмом, что и поиск (`set-hit` гаснет сам — это подсказка, а не состояние). */}
-                {/* ⚠️ Живёт вместе с точками (решение владельца 23.09): все изменения раздела увидены —
-                    счётчика нет, поменяли что-то снова — появится вместе с точкой. */}
-                {headMark && current.groups.some((g) => dotOn(g.id)) && (
-                  <button type="button" className="set-head-mark" onClick={showChanged}>
-                    · {headMark}
-                  </button>
-                )}
-              </div>
+      <div
+        className="settings-body"
+        id="settings-body"
+        role="tabpanel"
+        aria-labelledby={`set-tab-${section}`}
+        ref={bodyRef}
+        onMouseOver={(e) => setHoverLabel(bodyRef.current ? groupLabelAt(e.target as Element, bodyRef.current) : null)}
+        onMouseLeave={() => setHoverLabel(null)}
+      >
+        {/* Обёртка с ключом по разделу: на ней живёт появление содержимого. Анимировать сам
+            блок прокрутки нельзя — его пересоздание рвало бы слежение за скроллом. */}
+        <div className="set-pane-anim" key={section}>
+        {section === 'sound' && <AudioVideoTab />}
+        {section === 'notif' && (
+          <div className="settings-pane">
+            <NotifyPermissionRow />
+            <OsNotifyPanel />
+            <NotifyContentSetting onClose={onClose} />
+            <CoinNotifyPanel />
+            {/* Плашка «кто кого типнул» переехала сюда из «Аудио и видео»: искали её здесь. */}
+            {desktop && <ToastSettingsPanel />}
+            <div className="settings-group-label" id="set-g-sounds">
+              Звуки уведомлений
             </div>
-            <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-              <Icon name="close" size={18} />
-            </button>
+            <SoundSettingsPanel />
           </div>
-
-          {hits.length > 0 && (
-            <div className="set-results" role="listbox" aria-label="Результаты поиска">
-              <div className="set-results-label">НАЙДЕНО · {hits.length}</div>
-              {hits.map((h) => (
-                <button key={h.id} type="button" className="set-result" onClick={() => goTo(h.section, h.id)}>
-                  <Icon name={sectionOf(h.section).icon} size={16} />
-                  <span className="set-result-text">
-                    <span className="set-result-title">{h.title}</span>
-                    <span className="set-result-path">{h.path}</span>
-                  </span>
-                  <Icon name="chevron-right" size={14} />
-                </button>
-              ))}
-            </div>
-          )}
-          {query.length >= SEARCH_MIN && hits.length === 0 && (
-            <div className="set-results">
-              <div className="set-nothing">
-                Ничего не нашлось по «{query}». Попробуйте другое слово — например, «звук» или «пароль».
-              </div>
-            </div>
-          )}
-
-          <div
-            className="settings-body"
-            id="settings-body"
-            role="tabpanel"
-            aria-labelledby={`set-tab-${section}`}
-            ref={bodyRef}
-            onMouseOver={(e) => setHoverLabel(bodyRef.current ? groupLabelAt(e.target as Element, bodyRef.current) : null)}
-            onMouseLeave={() => setHoverLabel(null)}
-          >
-            {/* Обёртка с ключом по разделу: на ней живёт появление содержимого. Анимировать сам
-                блок прокрутки нельзя — его пересоздание рвало бы слежение за скроллом. */}
-            <div className="set-pane-anim" key={section}>
-            {section === 'sound' && <AudioVideoTab />}
-            {section === 'notif' && (
+        )}
+        {section === 'look' && (
+          <>
+            <AppearanceTab />
+            {desktop && (
               <div className="settings-pane">
-                <NotifyPermissionRow />
-                <OsNotifyPanel />
-                <CoinNotifyPanel />
-                {/* Плашка «кто кого типнул» переехала сюда из «Аудио и видео»: искали её здесь. */}
-                {desktop && <ToastSettingsPanel />}
-                <div className="settings-group-label" id="set-g-sounds">
-                  Звуки уведомлений
-                </div>
-                <SoundSettingsPanel />
+                <OverlaySettingsPanel />
               </div>
             )}
-            {section === 'look' && (
+          </>
+        )}
+        {section === 'account' && (
+          <>
+            <AccountTab onClose={onClose} />
+            <SecurityTab />
+            <LastSeenPrivacySetting />
+            <CallPrivacySetting />
+            <BlockedUsersSetting />
+          </>
+        )}
+        {section === 'federation' && (
+          <>
+            {multi && <InstancesPanel onClose={onClose} />}
+            {fed && (
               <>
-                <AppearanceTab />
-                {desktop && (
-                  <div className="settings-pane">
-                    <OverlaySettingsPanel />
+                <div className="settings-pane">
+                  <div className="settings-group-label" id="set-g-guest">
+                    Где я гость
                   </div>
-                )}
+                </div>
+                <GuestPlacesPanel />
               </>
             )}
-            {section === 'account' && (
-              <>
-                <AccountTab onClose={onClose} />
-                <SecurityTab />
-                <BlockedUsersSetting />
-              </>
-            )}
-            {section === 'federation' && (
-              <>
-                {multi && <InstancesPanel onClose={onClose} />}
-                {fed && (
-                  <>
-                    <div className="settings-pane">
-                      <div className="settings-group-label" id="set-g-guest">
-                        Где я гость
-                      </div>
-                    </div>
-                    <GuestPlacesPanel />
-                  </>
-                )}
-              </>
-            )}
-            {section === 'apps' && (
-              <>
-                {isTauri() ? <DesktopTab /> : <WindowsDownload />}
-                <AndroidInstallTab />
-              </>
-            )}
-            </div>
-          </div>
+          </>
+        )}
+        {section === 'data' && <DataStorageSettings />}
+        {section === 'folders' && <DmFolderSettings />}
+        {section === 'apps' && (
+          <>
+            {isTauri() ? <DesktopTab /> : <WindowsDownload />}
+            <AndroidInstallTab />
+            {superAdmin && <ConvClientTestRow />}
+          </>
+        )}
         </div>
       </div>
-    </div>
+    </SettingsWindow>
   );
 }

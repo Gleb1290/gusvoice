@@ -65,6 +65,7 @@ import {
   type StreamQualityPref,
 } from '../streamQuality';
 import { isWindowCovered } from '../windowCovered';
+import { reportBadPicture, useBadPictureAvailable } from '../badPicture';
 import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
 
 // `ownerOf` живёт в `streamAudioRules` — там же, где правило громкости стрима. Держать здесь вторую
@@ -208,6 +209,8 @@ function ScreenViewer({
   ];
   const [qualityMenu, setQualityMenu] = useState<MenuPos | null>(null);
   const [receiving, setReceiving] = useState<string | null>(null);
+  // «Плохая картинка» (06.10, #207): отметка момента + статистика приёма — `badPicture.ts`.
+  const badPicture = useBadPictureAvailable();
   useEffect(() => {
     if (!qualityMenu) return;
     let alive = true;
@@ -394,6 +397,17 @@ function ScreenViewer({
           ))}
           {choices.length === 0 && <MenuSection>Показывающий шлёт один слой — понизить нельзя</MenuSection>}
           {receiving && <MenuSection>Сейчас приходит {receiving}</MenuSection>}
+          {badPicture && (
+            <MenuItem
+              icon="activity"
+              label="Плохая картинка"
+              sub="отметить момент: уйдёт статистика приёма"
+              onClick={() => {
+                setQualityMenu(null);
+                void reportBadPicture(pubForQuality, track.participant.identity, qualityPref);
+              }}
+            />
+          )}
         </ContextMenu>
       )}
     </div>

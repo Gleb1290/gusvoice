@@ -11,7 +11,6 @@ import {
   setHotkeyMouseMask,
   startNativeStreamAudio,
 } from '../nativeStreamAudio';
-import { api } from '../api';
 import { gvForegroundWindow, gvScreenShareStart, nativeScreenShareAvailable } from '../nativeScreenShare';
 import {
   hasNativeAudio,
@@ -22,7 +21,7 @@ import {
 } from '../nativeShareSession';
 import { toggleOverlayEnabled } from '../overlaySettings';
 import { playSound } from '../sounds';
-import { useStore } from '../store';
+import { useStore, voiceApiOf, voiceIsHere } from '../store';
 import {
   bitrateFor,
   buildNativeShareConfig,
@@ -30,6 +29,7 @@ import {
   getStreamSettings,
   publishOptions,
   RES_OPTIONS,
+  webScreenSettings,
   webShareLayers,
   type StreamSettings,
 } from '../streamSettings';
@@ -86,7 +86,9 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
   const selfMuted = useStore((s) => s.selfMuted);
   const selfDeafened = useStore((s) => s.selfDeafened);
   // Саундборд: канал, в котором сижу голосом, и позиция каталога — из общего снимка, без запроса.
-  const voiceChannelId = useStore((s) => s.voice?.channelId);
+  // Голос на ДРУГОМ инстансе (смотрим дом, 01.10) — саундборда нет: его цена и каталог из экономики открытого
+  // сервера, а выстрел ушёл бы не в тот инстанс.
+  const voiceChannelId = useStore((s) => (voiceIsHere(s.voice) ? s.voice?.channelId : undefined));
   const sbEntry = useStore((s) => {
     const sid = s.bootstrap?.server.id;
     const eco = sid ? s.economy[sid] : undefined;
@@ -97,7 +99,8 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
 
   // Start the share with the user's saved quality (resolution / fps / codec / bitrate).
   async function startShare() {
-    const s = getStreamSettings();
+    // Показ экрана из браузера — H.264 даже при выбранном VP9 (06.10): SDK для VP9 ломает слои (`webScreenSettings`).
+    const s = webScreenSettings(getStreamSettings());
     const isCancel = (e: unknown) => {
       const n = (e as DOMException)?.name;
       return n === 'NotAllowedError' || n === 'AbortError'; // user dismissed the OS picker — not an error
@@ -167,7 +170,8 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     const channelId = useStore.getState().voice?.channelId;
     if (!channelId) throw new Error('Вы не в голосовом канале');
     const s = getStreamSettings();
-    const { url, token } = await api.voiceScreenToken(channelId);
+    // Токен показа — у инстанса ГОЛОСА: пока на экране другой, активный `api` ушёл бы туда с чужим id канала.
+    const { url, token } = await voiceApiOf(useStore.getState().voice).voiceScreenToken(channelId);
     // Сборка конфига — чистая функция в `streamSettings.ts`: здесь её не доказать тестом, а ошибка
     // в проводе «настройка → Rust» молча вернула бы человеку выключенное им (см. её комментарий).
     await gvScreenShareStart(buildNativeShareConfig({ url, token, sourceId, isWindow, settings: s }));
@@ -184,7 +188,8 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
         resolution: s.resolution,
         fps: s.fps,
         codec: s.codec,
-        maxBitrate: bitrateFor(s),
+        // «Родное» — 0: битрейт по настоящему размеру источника считает Rust, он — в срезах (`enc.cfg`).
+        maxBitrate: s.resolution === 'native' ? 0 : bitrateFor(s),
         audio: s.audio,
         // 🔴 Состояние переключателей. Мы выпустили два и НЕ записывали, в каком они положении, —
         // из-за этого нельзя было ответить на прямой вопрос «помог ли фикс»: у человека пропала
@@ -192,6 +197,9 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
         wgcWindow: s.wgcWindow,
         layers: s.layers,
         cursor: s.cursor !== false,
+        // 06.10 (#207): режим и «Максимальное качество» — тоже переключатели, от которых зависит картинка.
+        mode: s.mode,
+        maxQuality: s.maxQuality === true,
       });
     }
     // No explicit 'stream' cue here: the companion `#screen` is a SEPARATE participant, so its
@@ -216,7 +224,9 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
   // Audio (if enabled) = the DEVICE'S OWN audio input, matched by groupId (capture cards expose one) —
   // raw, no echo-cancel/NS/AGC; the native system-audio capture is deliberately NOT used here.
   async function startCameraShare({ deviceId }: { deviceId: string }) {
-    const s = getStreamSettings();
+    const saved = getStreamSettings();
+    // «Родное» у камеры — 1080p (06.10): «родного» размера у камеры нет, без пожелания она отдаёт 640×480.
+    const s: StreamSettings = saved.resolution === 'native' ? { ...saved, resolution: '1080' } : saved;
     const dims = RES_OPTIONS.find((r) => r.value === s.resolution)!;
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {

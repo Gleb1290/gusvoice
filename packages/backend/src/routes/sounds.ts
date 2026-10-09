@@ -35,6 +35,7 @@ export async function soundRoutes(app: FastifyInstance): Promise<void> {
     if (!file) return reply.code(400).send({ error: 'no file' });
     // Тип решают БАЙТЫ, а не подпись браузера: разбор в `resolveAudioMime`.
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const mime = resolveAudioMime(file.mimetype || '', new Uint8Array(buffer));
     if (!mime) {
       return reply.code(400).send({ error: 'формат не поддерживается — нужен MP3, OGG, WAV, WEBM или M4A' });
@@ -104,6 +105,7 @@ export async function soundRoutes(app: FastifyInstance): Promise<void> {
     if (!file) return reply.code(400).send({ error: 'no file' });
     // Тип решают БАЙТЫ, а не подпись браузера: разбор в `resolveAudioMime`.
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const mime = resolveAudioMime(file.mimetype || '', new Uint8Array(buffer));
     if (!mime) {
       return reply.code(400).send({ error: 'формат не поддерживается — нужен MP3, OGG, WAV, WEBM или M4A' });

@@ -1,13 +1,26 @@
 import type { Message } from '@gusvoice/shared';
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { api } from '../api';
+import { replyQuoteLook } from '../bubbleRules';
 import { useNameResolver } from '../memberName';
+import { roomBelow, toLayoutRect, viewportSafe } from '../popover';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
 import { Icon } from './Icon';
 
 function when(iso: string): string {
   return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+
+/**
+ * Закреплённое сообщение канала одной строкой — правилом цитат раунда 10 (`replyQuoteLook`), как строка списка закреплённых
+ * ЛС (`convSyncRules.pinPreview(…, true)`): миниатюры в списке нет, поэтому у фото с подписью впереди «Фото · ». Раньше
+ * всё без текста было «вложение» (замечание приёмки 05.10). Ни текста, ни вложений, ни стикера (опрос) — пусто, как было.
+ */
+function pinLine(m: Message): string {
+  if (!m.content && !m.attachments.length && !m.sticker) return '';
+  const look = replyQuoteLook({ content: m.content, deleted: false }, m);
+  return look.kind === 'photo' && m.content.trim() ? `Фото · ${look.text}` : look.text;
 }
 
 /**
@@ -73,7 +86,7 @@ export function PinnedMessages({ channelId, canManage }: { channelId: string; ca
                         <span className="pin-author">{nameOf(m.author.id, m.author.displayName)}</span>
                         <span className="pin-when">{m.pinnedAt ? when(m.pinnedAt) : ''}</span>
                       </div>
-                      <div className="pin-text">{m.content || (m.attachments.length ? 'вложение' : '')}</div>
+                      <div className="pin-text">{pinLine(m)}</div>
                     </div>
                     {canManage && (
                       <button type="button" className="pin-unpin" title="Открепить" onClick={() => void unpin(m)}>
@@ -86,6 +99,114 @@ export function PinnedMessages({ channelId, canManage }: { channelId: string; ca
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/** Строка списка закреплённых беседы ЛС — уже готовыми словами (имя, время, текст одной строкой). */
+export interface DmPinsItem {
+  /** id закреплённого сообщения. */
+  id: string;
+  author: string;
+  /** «сегодня, 21:08» (`convSyncRules.pinWhenLabel`). */
+  when: string;
+  /** Текст по правилу цитат (`convSyncRules.pinPreview(…, true)`). */
+  text: string;
+}
+
+/**
+ * Все закреплённые беседы ЛС (раунд 12, порция 7; HANDOFF §2.3, §10; макет `Desktop-pins-3-list`) — тот же поповер
+ * `.pins-pop` раунда 7, что у канала, но строки БЕЗ аватаров (решение владельца 04.10), время — Manrope (`.pin-bar
+ * .pin-when` в блоке «Раунд 12»), значок шапки 16 в своей обёртке, как в макете. Нажатие строки — переход к сообщению,
+ * крестик — открепить (что спросить — решает зовущий). Ставит его полоса закрепа (`PinnedBar`, `children`); подложку
+ * `.pins-backdrop` кладёт зовущий. Поповер — `aria-modal`: под ним подложка на весь экран, Esc зовущего при нём молчит.
+ */
+export function DmPinsList({
+  items,
+  onOpen,
+  onUnpin,
+  onUnpinAll,
+  onHide,
+}: {
+  items: readonly DmPinsItem[];
+  onOpen: (id: string) => void;
+  onUnpin: (id: string) => void;
+  /** «Открепить все N» (Telegram `UnpinAllMessages`): что спросить и как открепить — решает зовущий. Нет — пункта нет. */
+  onUnpinAll?: () => void;
+  /** «Скрыть закреплённые» (Telegram `HidePinnedBar`): полоса скрыта только у меня, до нового закреплённого. Нет — пункта нет. */
+  onHide?: () => void;
+}) {
+  const openByKey = (e: KeyboardEvent<HTMLDivElement>, id: string) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    onOpen(id);
+  };
+  /* Не ниже доступной области (разведка наплывов 09.10, ландшафт 740×360: список уходил на 174 px за низ): потолок — от
+     своего верха до панели навигации, дальше прокручивается тело списка (`.pin-bar .pins-pop` — колонка). Пересчёт при
+     повороте и клавиатуре. */
+  const popRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const fit = () => {
+      const el = popRef.current;
+      if (!el) return;
+      el.style.maxHeight = `${roomBelow(toLayoutRect(el.getBoundingClientRect()).top, viewportSafe())}px`;
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    window.visualViewport?.addEventListener('resize', fit);
+    return () => {
+      window.removeEventListener('resize', fit);
+      window.visualViewport?.removeEventListener('resize', fit);
+    };
+  }, []);
+  return (
+    <div ref={popRef} className="pins-pop" role="dialog" aria-modal="true" aria-label="Закреплённые сообщения">
+      <div className="pins-head">
+        <span className="pins-head-icon">
+          <Icon name="pin" size={16} />
+        </span>
+        <span className="pins-title">Закреплённые</span>
+        <span className="pins-count">{items.length}</span>
+      </div>
+      <div className="pins-body">
+        {items.map((it) => (
+          <div className="pin-item" key={it.id} onClick={() => onOpen(it.id)}>
+            <div className="pin-main" role="button" tabIndex={0} onKeyDown={(e) => openByKey(e, it.id)}>
+              <div className="pin-head">
+                <span className="pin-author">{it.author}</span>
+                <span className="pin-when">{it.when}</span>
+              </div>
+              <div className="pin-text">{it.text}</div>
+            </div>
+            <button
+              type="button"
+              className="pin-unpin"
+              aria-label="Открепить"
+              title="Открепить"
+              onClick={(e) => {
+                e.stopPropagation();
+                onUnpin(it.id);
+              }}
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+      {(onUnpinAll || onHide) && (
+        <div className="pins-foot">
+          {onUnpinAll && (
+            <button type="button" className="pins-foot-btn danger" onClick={onUnpinAll}>
+              {`Открепить все ${items.length}`}
+            </button>
+          )}
+          {onHide && (
+            <button type="button" className="pins-foot-btn" onClick={onHide}>
+              Скрыть закреплённые
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Что наш FileProvider (${applicationId}.fileprovider) вообще может отдать — только то, что MediaBridge выдаёт наружу:
+  копия для буфера обмена (cache/gv-media/clip), «Открыть» (cache/gv-media/open), «Поделиться» (cache/gv-media/share).
+  Не весь кеш и не внешняя память: ссылка вида content://<пакет>.fileprovider/… на остальное не строится и не открывается
+  (было `cache-path path="."` + `external-path path="."` из шаблона — `inbox`, `put`, кеш WebView были бы в зоне доступа).
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-  <external-path name="my_images" path="." />
-  <cache-path name="my_cache_images" path="." />
+  <cache-path name="gv_clip" path="gv-media/clip/" />
+  <cache-path name="gv_open" path="gv-media/open/" />
+  <cache-path name="gv_share" path="gv-media/share/" />
 </paths>

@@ -16,13 +16,15 @@ import type {
   User,
   UserBrief,
 } from '@gusvoice/shared';
-import { previewAllows } from '@gusvoice/shared';
+import { normalizeNotifyRepeat, normalizeNotifyView, previewAllows } from '@gusvoice/shared';
 import { isSuperAdmin } from './auth.js';
 import { asUserId } from './superAdminRules.js';
 import { env } from './env.js';
 import { instanceLabel } from './federation/instanceLabels.js';
-import { statusFieldsOf } from './statusRules.js';
+import { statusFieldsOf, statusSeenBy } from './statusRules.js';
 import { animatedAvatarFor, avatarRentalActive } from './shopRules.js';
+import { normalizeCallPrivacy } from './callRules.js';
+import { normalizeLastSeenPrivacy } from './lastSeenRules.js';
 
 type UserRow = {
   id: string;
@@ -49,6 +51,13 @@ type UserRow = {
   steamId?: string | null;
   steamPersona?: string | null;
   showGameActivity?: boolean | null;
+  lastSeenPrivacy?: string | null;
+  hideReadTime?: boolean | null;
+  callPrivacy?: string | null;
+  notifyView?: string | null;
+  notifyGroups?: boolean | null;
+  notifyDm?: boolean | null;
+  notifyRepeat?: number | null;
   createdAt: Date;
 };
 
@@ -56,7 +65,12 @@ type UserRow = {
 // и прочие продолжали брать её отсюда, вместе с остальными сериализаторами.
 export { statusFieldsOf } from './statusRules.js';
 
-export function serializeUser(u: UserRow): User {
+/**
+ * `viewerId` — кто смотрит, если не сам человек (админ-панель): тогда «Невидимый» уходит как `online` (`statusSeenBy`).
+ * Без него — свой профиль, статус настоящий.
+ */
+export function serializeUser(u: UserRow, viewerId?: string): User {
+  const st = statusFieldsOf(u, Date.now());
   return {
     id: u.id,
     /**
@@ -102,7 +116,8 @@ export function serializeUser(u: UserRow): User {
      */
     diagPreview: env.diagEnabled,
     twoFactorEnabled: u.totpEnabled ?? false,
-    ...statusFieldsOf(u, Date.now()),
+    ...st,
+    status: viewerId === undefined ? st.status : statusSeenBy(st.status, u.id, viewerId),
     // Только себе: `serializeUser` вызывается для собственного профиля и админ-панели, участников
     // сервера сериализует `servers.ts` через `statusFieldsOf` без этого поля (#118).
     statusAuto: u.presenceAuto ?? false,
@@ -110,6 +125,24 @@ export function serializeUser(u: UserRow): User {
     steamLinked: !!u.steamId,
     steamPersona: u.steamPersona ?? null,
     showGameActivity: u.showGameActivity ?? true,
+    // «Время захода» (С1, `lastseen1`) — только в своём профиле: чужую настройку не показываем даже админке.
+    ...(viewerId === undefined
+      ? {
+          lastSeenPrivacy: normalizeLastSeenPrivacy(u.lastSeenPrivacy),
+          hideReadTime: u.hideReadTime ?? false,
+          // «Кто может звонить» (`presence4`) — тоже только своему профилю.
+          callPrivacy: normalizeCallPrivacy(u.callPrivacy),
+        }
+      : {}),
+    // Настройки уведомлений (G38, `push2`) — тоже только своему профилю.
+    ...(viewerId === undefined
+      ? {
+          notifyView: normalizeNotifyView(u.notifyView),
+          notifyGroups: u.notifyGroups ?? true,
+          notifyDm: u.notifyDm ?? true,
+          notifyRepeat: normalizeNotifyRepeat(u.notifyRepeat),
+        }
+      : {}),
     createdAt: u.createdAt.toISOString(),
   };
 }

@@ -7,6 +7,8 @@
  * "увеличение интерфейса" means. zoom is reliable on every target (Chromium: web, Windows WebView2,
  * Android System WebView).
  */
+import { useSyncExternalStore } from 'react';
+import { effectiveListWidth, LIST_NARROW_W } from './dmListView';
 import { installViewportVars, refreshViewportVars } from './popover';
 
 const SIDEBAR_KEY = 'gv_sidebar_w';
@@ -29,22 +31,54 @@ const SCALE_ZOOM: Record<UiScale, number> = { sm: 0.9, md: 1, lg: 1.15, xl: 1.3 
 
 export function getSidebarWidth(): number {
   const v = parseInt(localStorage.getItem(SIDEBAR_KEY) || '', 10);
+  if (v === LIST_NARROW_W) return v; // «только аватары» (G34) — отдельное значение вне 180…480
   return Number.isFinite(v) ? clampWidth(v) : SIDEBAR_DEFAULT;
 }
 export function clampWidth(px: number): number {
   return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(px)));
 }
+
+/* Узкая колонка «только аватары» (G34) есть только у списка бесед: у каналов сервера колонка всегда обычная. Список бесед при
+   показе поднимает `narrowAllowed` (`setNarrowAllowed`), сохранённая ширина при этом не меняется. */
+let storedWidth = SIDEBAR_DEFAULT;
+let narrowAllowed = false;
+const widthSubs = new Set<() => void>();
+function shownWidth(): number {
+  return effectiveListWidth(storedWidth, narrowAllowed, SIDEBAR_DEFAULT);
+}
 export function applySidebarWidth(px: number): void {
-  document.documentElement.style.setProperty('--sidebar-w', `${px}px`);
+  storedWidth = px;
+  document.documentElement.style.setProperty('--sidebar-w', `${shownWidth()}px`);
+  for (const f of widthSubs) f();
 }
 export function setSidebarWidth(px: number): void {
-  const w = clampWidth(px);
+  const w = px === LIST_NARROW_W ? LIST_NARROW_W : clampWidth(px);
   try {
     localStorage.setItem(SIDEBAR_KEY, String(w));
   } catch {
     /* storage unavailable */
   }
   applySidebarWidth(w);
+}
+/** Открыт список бесед — «только аватары» разрешены (G34); закрыт — колонка снова обычной ширины. */
+export function setNarrowAllowed(on: boolean): void {
+  if (narrowAllowed === on) return;
+  narrowAllowed = on;
+  applySidebarWidth(storedWidth);
+}
+export function isNarrowAllowed(): boolean {
+  return narrowAllowed;
+}
+/** Колонка списка сейчас в режиме «только аватары». */
+export function useSidebarNarrow(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      widthSubs.add(cb);
+      return () => widthSubs.delete(cb);
+    },
+    () => narrowAllowed && storedWidth === LIST_NARROW_W,
+    () => false,
+  );
 }
 
 export function getUiScale(): UiScale {

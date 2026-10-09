@@ -4,56 +4,87 @@ import {
   Permission,
   POLL_MAX_HOURS,
   POLL_MAX_OPTIONS,
+  SERVER_SEARCH_MIN_CHARS,
   VOICE_MAX_MS,
   WAVEFORM_BUCKETS,
   type Attachment,
   type MessageReplyPreview,
   type MessageSticker,
   type ReactionGroup,
+  type ReactionReactor,
+  type ServerSearchResponse,
 } from '@gusvoice/shared';
 import { and, desc, eq, ilike, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../auth.js';
-import { attachmentUploadBlock, heavyReadBlock, messageSendBlock, pushDebounced, retryMessage } from '../authGuard.js';
+import {
+  attachmentUploadBlock,
+  heavyReadBlock,
+  messageSendBlock,
+  pushDebounced,
+  retryMessage,
+  serverSearchBlock,
+} from '../authGuard.js';
 import { db } from '../db/index.js';
 import { pollsFor, vote, votersOf } from '../polls.js';
+import { MESSAGE_TEXT_MAX, replyAttachmentPreview, TEXT_TOO_LONG } from '../convRules.js';
 import { channelReads, channels, messageReactions, messages, polls, stickerPacks, stickers, users } from '../db/schema.js';
-import { getChannelPermissions, getServerChannelPermissions } from '../permissions.js';
+import { getChannelPermissions, getServerChannelPermissions, searchableChannelIds } from '../permissions.js';
 import { contentPreview, resolveMentionedMembers, sendPushToUsers } from '../push.js';
 import { publishToChannel, publishToUser } from '../realtime.js';
 import { serializeMessage, serializeUserBrief } from '../serialize.js';
 import { attachmentBlocked, isOwnMediaUrl, putAttachment, storageConfigured } from '../storage.js';
 import { id } from '../util.js';
+import { searchAllServers, splitCursor } from '../serverSearch.js';
 import { releaseQuota, reserveQuota } from '../federation/guestQuota.js';
+
+/** Сколько поставивших канал отдаёт списком на чип реакции (аватарки на чипе — до трёх, как у Telegram Desktop). */
+const REACTORS_INLINE_MAX = 3;
 
 /** Aggregate reactions for a batch of messages into per-message groups, with `me` for the viewer. */
 async function reactionsFor(messageIds: string[], viewerId: string): Promise<Map<string, ReactionGroup[]>> {
   const out = new Map<string, ReactionGroup[]>();
   if (messageIds.length === 0) return out;
   const rows = await db.select().from(messageReactions).where(inArray(messageReactions.messageId, messageIds));
-  const agg = new Map<string, Map<string, { count: number; me: boolean }>>();
+  const agg = new Map<string, Map<string, { count: number; me: boolean; reactors: ReactionReactor[] }>>();
   for (const r of rows) {
     let byEmoji = agg.get(r.messageId);
     if (!byEmoji) {
       byEmoji = new Map();
       agg.set(r.messageId, byEmoji);
     }
-    const cur = byEmoji.get(r.emoji) ?? { count: 0, me: false };
+    const cur = byEmoji.get(r.emoji) ?? { count: 0, me: false, reactors: [] };
     cur.count += 1;
     if (r.userId === viewerId) cur.me = true;
+    cur.reactors.push({ userId: r.userId, at: r.createdAt.toISOString() });
     byEmoji.set(r.emoji, cur);
   }
   for (const [mid, byEmoji] of agg) {
     out.set(
       mid,
-      [...byEmoji.entries()].map(([emoji, v]) => ({ emoji, count: v.count, me: v.me })),
+      [...byEmoji.entries()].map(([emoji, v]) => {
+        const g: ReactionGroup = { emoji, count: v.count, me: v.me };
+        // «Кто поставил» (G75, #211; Telegram Desktop `kMaxRecentUserpics`): список — только пока людей немного (чип рисует их
+        // аватарки вместо числа); в каналах людей бывают сотни, большим группам список не шлём — чип с числом, как было.
+        // Только добавление к DTO (правило 11): `count` и `me` прежние.
+        if (v.count <= REACTORS_INLINE_MAX) {
+          g.reactors = [...v.reactors].sort((x, y) => x.at.localeCompare(y.at) || x.userId.localeCompare(y.userId));
+        }
+        return g;
+      }),
     );
   }
   return out;
 }
 
-/** Build compact reply previews (author name + content) for a batch of parent message ids. */
+/**
+ * Build compact reply previews (author name + content) for a batch of parent message ids.
+ * 05.10: плюс вид вложений цитируемого (`convRules.replyAttachmentPreview`: число, вид, длительность, имя файла, видео;
+ * стикер — вид `sticker`) — цитата на сообщение вне загруженного окна пишет «Фото» / «Видео» / «Стикер», а не
+ * «вложение». Миниатюры нет: цитата канала — одна строка словами. Цитируемое всегда из того же канала (проверка при
+ * отправке), так что смотрящему оно и так видно.
+ */
 async function replyPreviewsFor(replyToIds: (string | null)[]): Promise<Map<string, MessageReplyPreview>> {
   const ids = [...new Set(replyToIds.filter((x): x is string => !!x))];
   const out = new Map<string, MessageReplyPreview>();
@@ -63,7 +94,14 @@ async function replyPreviewsFor(replyToIds: (string | null)[]): Promise<Map<stri
     .from(messages)
     .innerJoin(users, eq(messages.authorId, users.id))
     .where(inArray(messages.id, ids));
-  for (const r of rows) out.set(r.m.id, { id: r.m.id, authorName: r.u.displayName, content: r.m.content });
+  for (const r of rows) {
+    out.set(r.m.id, {
+      id: r.m.id,
+      authorName: r.u.displayName,
+      content: r.m.content,
+      ...replyAttachmentPreview(r.m.attachments, !!r.m.sticker),
+    });
+  }
   return out;
 }
 
@@ -153,9 +191,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!perms) return reply.code(404).send({ error: 'not a member' });
 
     // Only channels the user can both VIEW and READ_HISTORY are searchable.
-    let visible = [...perms.entries()]
-      .filter(([, p]) => has(p, Permission.VIEW_CHANNEL) && has(p, Permission.READ_HISTORY))
-      .map(([cid]) => cid);
+    let visible = searchableChannelIds(perms);
     if (q.channelId) visible = visible.filter((cid) => cid === q.channelId);
     if (visible.length === 0) return [];
 
@@ -176,6 +212,27 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       req.user!.sub,
     );
     return rows.map((r) => serializeMessage({ ...r.m, author: r.u, reactions: reactions.get(r.m.id) ?? [] }));
+  });
+
+  // Поиск по ВСЕМ моим серверам этого инстанса (G35, `srvsearch1`): вкладка «Серверы» в поиске из списка ЛС. Права — те же, что
+  // выше (`searchableChannelIds` по `getServerChannelPermissions`), см. `serverSearch.ts`. Курсор `before` — из `next` прошлой порции.
+  app.get('/search/servers', async (req, reply) => {
+    const q = z
+      .object({
+        q: z.string().trim().min(2).max(200),
+        before: z.string().max(100).optional(),
+        limit: z.coerce.number().int().min(1).max(50).default(25),
+      })
+      .parse(req.query);
+    const before = q.before ? splitCursor(q.before) : undefined;
+    if (q.before && !before) return reply.code(400).send({ error: 'bad cursor' });
+    // От 3 знаков (решение владельца 21, `SERVER_SEARCH_MIN_CHARS`): короче — пусто, без похода в базу и без траты лимита.
+    if ([...q.q].length < SERVER_SEARCH_MIN_CHARS) return { hits: [], next: null } satisfies ServerSearchResponse;
+    // Свой, более жёсткий лимит (`serverSearchBlock`: 20 в минуту), а не общий `heavyReadBlock` 40 / 10 с: запрос идёт по
+    // каналам ВСЕХ моих серверов сразу.
+    const rl = await serverSearchBlock(req.user!.sub);
+    if (rl) return reply.code(429).header('Retry-After', String(rl)).send({ error: retryMessage(rl) });
+    return searchAllServers(req.user!.sub, { q: q.q, before: before ?? undefined, limit: q.limit });
   });
 
   // Advance my read mark for a channel (persisted unread — migration 0018).
@@ -212,6 +269,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: 'no file' });
     const buffer = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' }); // обрезан по пределу multipart — см. att.ts
     const mime = file.mimetype || 'application/octet-stream';
     const name = file.filename || 'file';
     // Reject script-capable web types (P2-1/P3-8) — SVG/HTML could execute if rendered inline.
@@ -251,7 +309,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const { id: channelId } = z.object({ id: z.string() }).parse(req.params);
     const body = z
       .object({
-        content: z.string().max(4000).optional().default(''),
+        content: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG).optional().default(''),
         attachments: z
           .array(
             z.object({
@@ -355,7 +413,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
   // Edit your own message's text.
   app.patch('/channels/:id/messages/:messageId', async (req, reply) => {
     const { id: channelId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
-    const { content: raw } = z.object({ content: z.string().max(4000) }).parse(req.body);
+    const { content: raw } = z.object({ content: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG) }).parse(req.body);
     const content = raw.trim();
 
     const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
@@ -367,11 +425,12 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms) return reply.code(404).send({ error: 'not found' });
 
-    const [row] = await db
-      .update(messages)
-      .set({ content, editedAt: new Date() })
-      .where(eq(messages.id, messageId))
-      .returning();
+    // Текст не изменился (06.10, сверка с Telegram): «правка» без изменений не ставит «изм.» и не рассылается — как у бесед
+    // (`conversations.editMessage`). Ответ прежний — сообщение как есть (старый клиент подставляет его себе в ленту).
+    const unchanged = content === msg.content;
+    const [row] = unchanged
+      ? [msg]
+      : await db.update(messages).set({ content, editedAt: new Date() }).where(eq(messages.id, messageId)).returning();
     const [author] = await db.select().from(users).where(eq(users.id, msg.authorId)).limit(1);
     const replies = await replyPreviewsFor([row.replyToId]);
     const message = serializeMessage({
@@ -379,7 +438,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       author,
       replyTo: row.replyToId ? (replies.get(row.replyToId) ?? null) : null,
     });
-    await publishToChannel(perms.serverId, channelId, { t: 'message.update', channelId, message });
+    if (!unchanged) await publishToChannel(perms.serverId, channelId, { t: 'message.update', channelId, message });
     return reply.send(message);
   });
 

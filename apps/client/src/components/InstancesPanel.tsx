@@ -9,6 +9,7 @@ import {
 } from '../config';
 import { adoptActiveInstance, switchInstance } from '../instanceSwitch';
 import { confirmAction } from '../confirm';
+import { useStore } from '../store';
 import { Avatar } from './Avatar';
 import { Icon } from './Icon';
 import { AddInstanceModal } from './AddInstanceModal';
@@ -67,6 +68,11 @@ export function InstancesPanel({ onClose }: { onClose: () => void }) {
     });
     if (!ok) return;
     const wasActive = inst.id === currentHome;
+    // Голос на убираемой записи (или её гостевой) заканчиваем: он переживает переходы (01.10), но не потерю записи —
+    // «выйти на этом устройстве» не должно оставлять микрофон в комнате того инстанса.
+    const v = useStore.getState().voice;
+    if (v?.instanceId && readInstances().some((i) => i.id === v.instanceId && (i.id === inst.id || i.guestOf === inst.id)))
+      useStore.getState().leaveVoice();
     removeInstance(inst.id);
     refresh();
     // Убрали ту запись, в которой стояли: активной стала соседняя — принимаем её, иначе приложение

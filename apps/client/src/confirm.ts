@@ -24,12 +24,16 @@ interface Pending extends ConfirmSpec {
   run?: () => Promise<void>;
   /** Человек переключил галочку `option` — окно сообщает сразу, ответ собирает `confirmWithOption`. */
   onOption?: (checked: boolean) => void;
+  /** Человек отметил (снял) «Запомнить выбор» — `ConfirmSpec.option.remember`. */
+  onRemember?: (remember: boolean) => void;
 }
 
 interface ConfirmState {
   pending: Pending | null;
   answer: (ok: boolean) => void;
-  request: (spec: ConfirmSpec & { run?: () => Promise<void>; onOption?: (checked: boolean) => void }) => Promise<boolean>;
+  request: (
+    spec: ConfirmSpec & { run?: () => Promise<void>; onOption?: (checked: boolean) => void; onRemember?: (remember: boolean) => void },
+  ) => Promise<boolean>;
 }
 
 let nextId = 1;
@@ -67,15 +71,21 @@ export function confirmAction(spec: ConfirmSpec & { run?: () => Promise<void> })
  */
 export async function confirmWithOption(
   spec: ConfirmSpec & { option: NonNullable<ConfirmSpec['option']> },
-): Promise<{ option: boolean } | null> {
+): Promise<{ option: boolean; remember?: true } | null> {
   let checked = spec.option.checked;
+  let remember = false;
   const ok = await useConfirmDialog.getState().request({
     ...spec,
     onOption: (v) => {
       checked = v;
     },
+    onRemember: (v) => {
+      remember = v;
+    },
   });
-  return ok ? { option: checked } : null;
+  // «Запомнить» действует, только пока видна его строка: вернули галочку к исходному — выбор запоминать нечем.
+  if (!ok) return null;
+  return remember && !!spec.option.remember && checked !== spec.option.checked ? { option: checked, remember: true } : { option: checked };
 }
 
 /** Сообщить и дождаться «Понятно» — замена `alert()`. */

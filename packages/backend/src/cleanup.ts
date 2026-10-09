@@ -1,6 +1,7 @@
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import { pruneJournal } from './convJournal.js';
 import { purgeAttachments } from './attachments.js';
+import { purgeStaleUploads } from './bigUploads.js';
 import { db } from './db/index.js';
 import { diagReports, users, voiceActivity } from './db/schema.js';
 import { env } from './env.js';
@@ -196,6 +197,13 @@ export function startAttachmentSweeper(): void {
       if (n > 0) console.log(`[cleanup] removed ${n} DM file(s)`);
     } catch (err) {
       console.error('[cleanup] DM files purge failed:', (err as Error).message);
+    }
+    // Брошенные загрузки кусками (`bigfile1`): строки старше суток и незавершённые в хранилище, о которых база забыла.
+    try {
+      const n = await purgeStaleUploads();
+      if (n > 0) console.log(`[cleanup] aborted ${n} stale DM upload(s)`);
+    } catch (err) {
+      console.error('[cleanup] DM uploads purge failed:', (err as Error).message);
     }
   };
   const first = setTimeout(run, 60_000);

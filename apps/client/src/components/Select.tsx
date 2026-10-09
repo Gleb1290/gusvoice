@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { placeDropdown, toLayoutRect } from '../popover';
+import { placeDropdown, toLayoutRect, viewportSafe } from '../popover';
 import {
   type SelectOption,
   filterOptions,
@@ -119,7 +119,7 @@ export function Select({
     if (!t || !el) return;
     const rect = toLayoutRect(t.getBoundingClientRect());
     setWidth(rect.width);
-    setPlace(placeDropdown(rect, rect.width, el.offsetHeight));
+    setPlace(placeDropdown(rect, rect.width, el.offsetHeight, 8, viewportSafe()));
   }, [open, isMobile, shown.length]);
 
   useEffect(() => {
@@ -144,6 +144,17 @@ export function Select({
       window.removeEventListener('resize', close);
       window.removeEventListener('blur', close);
     };
+  }, [open, isMobile]);
+
+  // Лист на телефоне закрывается Esc/«назад» сам: у него нет поля с фокусом, и без этого слушателя
+  // `stepBack` (Esc на window) закрывал окно под листом, а лист оставался (C1).
+  useEffect(() => {
+    if (!open || !isMobile) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onEsc);
+    return () => window.removeEventListener('keydown', onEsc);
   }, [open, isMobile]);
 
   // Поле поиска ловит фокус само: длинный список открывают, чтобы найти, а не чтобы любоваться.

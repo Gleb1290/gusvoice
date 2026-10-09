@@ -1,10 +1,11 @@
-import { api, getToken } from './api';
+import { api, deviceTimeZone, getToken } from './api';
 import { activeInstanceId, config, instances } from './config';
 import { switchInstance } from './instanceSwitch';
 import { setPendingOpen } from './pendingOpen';
 import { parsePushKeys } from './pushKeys';
 import { isAndroid } from './hotkeys';
 import { subscribeToServer } from './sockets';
+import { useCall } from './callStore';
 import { useStore } from './store';
 import { offerInviteLink } from './deepLinkInvite';
 
@@ -35,6 +36,17 @@ interface GusVoicePushBridge {
    * ключ не покидает телефон. Нет метода (старый APK) — регистрируемся без ключей, пуш придёт без текста.
    */
   pushKeys?(): string;
+  /**
+   * Уведомления как у Telegram (Р1, G17): что умеет приложение — JSON-массив признаков (`["read1","reply1"]`), уходит в
+   * `/api/push/register` как `caps`. Нет метода (старый APK) — признаков нет, сервер шлёт как раньше.
+   */
+  notifCaps?(): string;
+  /**
+   * Чем отвечать из шторки (Р1, G17): JSON `[{apiUrl, token, userId, active}]` по всем инстансам со входом. Нативка
+   * выбирает запись по `uid` из пуша и шлёт «Ответить» / «Прочитано» сама, без открытия приложения. Пустой список —
+   * выход: стереть.
+   */
+  setNotifAuth?(json: string): void;
 }
 
 function bridge(): GusVoicePushBridge | null {
@@ -43,6 +55,36 @@ function bridge(): GusVoicePushBridge | null {
   // The same object carries the #89 voice methods; guard on a push method so an older installed APK
   // (voice-bridge only) is treated as "no push".
   return b && typeof b.registerForPush === 'function' ? (b as GusVoicePushBridge) : null;
+}
+
+/** Признаки приложения из моста (`notifCaps`); сбой или старый APK — `undefined` (регистрация без признаков). */
+function notifCaps(b: GusVoicePushBridge): string[] | undefined {
+  if (typeof b.notifCaps !== 'function') return undefined;
+  try {
+    const v: unknown = JSON.parse(b.notifCaps());
+    return Array.isArray(v) ? v.filter((c): c is string => typeof c === 'string').slice(0, 10) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Передать нативке, чем отвечать из шторки (Р1, G17): адрес и токен каждого инстанса со входом. Токен и так лежит в
+ * хранилище этого же приложения (localStorage WebView); нативка держит копию в своих личных настройках. Зовётся при
+ * старте, входе, возврате в приложение и выходе. Нет метода (старый APK) — ничего.
+ */
+export function syncNotifAuth(): void {
+  const b = bridge();
+  if (!b || typeof b.setNotifAuth !== 'function') return;
+  const active = activeInstanceId();
+  const list = instances()
+    .filter((i) => i.token && i.apiUrl)
+    .map((i) => ({ apiUrl: i.apiUrl, token: i.token, userId: i.userId ?? '', active: i.id === active }));
+  try {
+    b.setNotifAuth(JSON.stringify(list));
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Ключи шифрования из моста; любой сбой — `null` (регистрация без ключей лучше, чем никакой). Разбор — `pushKeys.ts`. */
@@ -75,6 +117,7 @@ let registered = false;
  */
 export function startPushRegistration(): void {
   const b = bridge();
+  if (b && getToken()) syncNotifAuth();
   if (!b || registered || inFlight || !getToken()) return;
 
   // Preferred: EMBEDDED distributor (no second app). Needs the instance's ntfy address from discovery
@@ -91,7 +134,7 @@ export function startPushRegistration(): void {
     inFlight = false;
     if (endpoint && getToken()) {
       registered = true;
-      void api.registerPush(endpoint, deviceId(), pushKeys(b)).catch((e) => {
+      void api.registerPush(endpoint, deviceId(), pushKeys(b), notifCaps(b), deviceTimeZone()).catch((e) => {
         registered = false; // let a later foreground/boot retry
         console.warn('[push] backend register failed', e);
       });
@@ -120,7 +163,7 @@ export function startPushRegistration(): void {
       window.clearInterval(iv);
       inFlight = false;
       registered = true;
-      void api.registerPush(endpoint, deviceId(), pushKeys(b)).catch((e) => {
+      void api.registerPush(endpoint, deviceId(), pushKeys(b), notifCaps(b), deviceTimeZone()).catch((e) => {
         registered = false; // let a later foreground/boot retry
         console.warn('[push] backend register failed', e);
       });
@@ -139,6 +182,19 @@ export function stopPushRegistration(): void {
   if (!b) return;
   // Tell the backend first (we still hold the token), then drop the distributor registration.
   void api.unregisterPush(deviceId()).catch(() => {});
+  // Ответ из шторки (Р1) — без токена вышедшего инстанса: запись активного выпадает, остальные остаются.
+  try {
+    const active = activeInstanceId();
+    b.setNotifAuth?.(
+      JSON.stringify(
+        instances()
+          .filter((i) => i.token && i.apiUrl && i.id !== active)
+          .map((i) => ({ apiUrl: i.apiUrl, token: i.token, userId: i.userId ?? '', active: false })),
+      ),
+    );
+  } catch {
+    /* ignore */
+  }
   try {
     b.unregisterPush();
   } catch {
@@ -178,6 +234,22 @@ async function navigateDeepLink(link: string): Promise<void> {
     // Ссылка-приглашение (#139, F4): открываем ОКНО ПРОВЕРКИ, а не вступаем. Решение о входе
     // принимает человек, увидев карточку сервера, — ссылка из мессенджера этого права не даёт.
     offerInviteLink(link.slice('invite:'.length));
+    return;
+  }
+  if (link.startsWith('call:')) {
+    /*
+     * «Ответить» входящего звонка из уведомления / полноэкранного экрана Android (G73, `CallNotifier.kt`): открыть беседу и
+     * принять звонок обычным путём (`callStore.answer`). Звонок берём у сервера (`resync`) — сокет шлюза после холодного
+     * старта мог ещё не прислать `call.state`; уже не звонит (отменили, ответили на ПК) — остаёмся в беседе.
+     */
+    const [callId, dmId] = link.slice(5).split(':');
+    if (!callId || !dmId) return;
+    await s.loadDms();
+    await s.selectDm(dmId);
+    const call = useCall.getState();
+    if (call.call?.id !== callId) await call.resync();
+    const now = useCall.getState().call;
+    if (now?.id === callId && now.phase === 'ringing') await useCall.getState().answer();
     return;
   }
   if (link.startsWith('dm:')) {
@@ -227,23 +299,28 @@ async function navigateDeepLink(link: string): Promise<void> {
  * (once authed) and on every foreground. No-op on web/desktop, when signed out, or when there's
  * nothing pending. Errors (e.g. a stale/inaccessible target) are swallowed — a failed jump must never
  * break resume.
+ *
+ * `true` — забрали ссылку, которая ВЕДЁТ куда-то (беседа, канал, сосед): тогда запуск не открывает «последнее место»
+ * поверх неё. Приглашение только показывает окно проверки и никуда не ведёт — для него `false`, иначе после закрытия
+ * окна человек остался бы на пустом экране.
  */
-export function consumeDeepLink(): void {
+export function consumeDeepLink(): boolean {
   const b = bridge();
-  if (!b || navigating || !getToken() || typeof b.consumePendingDeepLink !== 'function') return;
+  if (!b || navigating || !getToken() || typeof b.consumePendingDeepLink !== 'function') return false;
   let link = '';
   try {
     link = b.consumePendingDeepLink();
   } catch {
     /* older APK without the method */
   }
-  if (!link) return;
+  if (!link) return false;
   navigating = true;
   void navigateDeepLink(link)
     .catch((e) => console.warn('[push] deep-link navigation failed', e))
     .finally(() => {
       navigating = false;
     });
+  return !link.startsWith('invite:');
 }
 
 /** Run registration at boot (if already logged in) and whenever the app returns to the foreground. */

@@ -321,12 +321,34 @@ export function buildRail(input: RailInput): RailView {
 }
 
 /**
+ * Связка с соседом потеряла доверие (`trust-lost`): у одной из сторон сменился ключ (#203).
+ *
+ * 🔴 Своя подпись, а не «сейчас недоступен». Сосед при этом отвечает, и само это не пройдёт: связку чинит только
+ * перепривязка руками админов (`linkRules.ts`, §5.1.3). «Недоступен» звал бы подождать — и человек ждал бы, вместо
+ * того чтобы сказать своему админу. Слова — те же, что у отказа `federation.trust_lost` (`fedErrorText`): у одной
+ * причины один текст.
+ */
+const TRUST_LOST_WHY = 'инстансы больше не доверяют друг другу. Это чинит админ вашего инстанса';
+
+function trustLost(group: RailGroupView): boolean {
+  return !group.reachable && group.place?.linkState === 'trust-lost';
+}
+
+/**
  * Подпись к кнопке сервера. Она же единственное место, где человеку объясняют, почему сервер не
  * открывается, — других слов у кнопки в рейле нет.
  */
 export function serverTitle(group: RailGroupView, server: RailServerView): string {
   if (server.closed) return `${server.name} — закрыт держателем`;
+  if (trustLost(group)) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;
   if (!group.reachable) return `${server.name} — «${group.title}» сейчас недоступен`;
   if (group.live) return server.name;
   return `${server.name} · ${group.title}`;
+}
+
+/** Подпись к заголовку чужой группы (кнопка «перейти в инстанс»); недоступная — словами, почему (#203). */
+export function groupHeadTitle(group: RailGroupView): string {
+  if (trustLost(group)) return `${group.title} · связь разорвана: ${TRUST_LOST_WHY}`;
+  if (!group.reachable) return `${group.title} · сейчас недоступен`;
+  return `Перейти в «${group.title}»`;
 }

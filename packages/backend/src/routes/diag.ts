@@ -1,11 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { and, eq, gt, sql } from 'drizzle-orm';
 import { diagReports } from '../db/schema.js';
 import { id } from '../util.js';
 import { diagReportTooBig } from '../diagRules.js';
 import { parseDiagReport } from '../diagSchema.js';
+import { BAD_PICTURE_PER_HOUR, isBadPictureBody, parseBadPicture } from '../diagBadPicture.js';
 
 /**
  * Приём отчётов диагностики из клиента (#100).
@@ -22,6 +23,26 @@ export async function diagRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
   app.post('/diag/report', async (req, reply) => {
+    // «Плохая картинка» от зрителя (06.10, #207) — та же таблица, свой вид отчёта (`diagBadPicture.ts`).
+    // Рядом со срезами показывающего: свести их — `scripts/ops/bad-picture.sh`.
+    if (isBadPictureBody(req.body)) {
+      const mark = parseBadPicture(req.body);
+      if (!mark) return reply.code(400).send({ error: 'некорректная отметка' });
+      const [{ count }] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(diagReports)
+        .where(
+          and(
+            eq(diagReports.userId, req.user!.sub),
+            eq(diagReports.kind, 'badpic'),
+            gt(diagReports.createdAt, sql`now() - interval '1 hour'`),
+          ),
+        );
+      if (count >= BAD_PICTURE_PER_HOUR) return reply.code(429).send({ error: 'слишком много отметок' });
+      await db.insert(diagReports).values({ id: id(), userId: req.user!.sub, kind: 'badpic', payload: mark });
+      return { ok: true };
+    }
+
     // ⚠️ Великанов отсекаем ДО разбора, по сырым длинам. Раньше проверка стояла ПОСЛЕ, и ветка 413
     // была недостижима: потолок в самой схеме срабатывал раньше и отдавал 400 (нашёл Codex). Так
     // отсечение и дешевле — гигантский массив не разбирается впустую.

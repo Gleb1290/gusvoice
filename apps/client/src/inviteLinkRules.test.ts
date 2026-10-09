@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
-import { inviteCodeFromPath, inviteLink, parseInviteParam, stripInviteParam } from './inviteLinkRules.js';
+import ts from 'typescript';
+import { inviteCodeFromPath, inviteLink, isBrokenInvitePath, parseInviteParam, stripInviteParam } from './inviteLinkRules.js';
 
 describe('ссылки приглашения веб-клиента', () => {
   it('код длиной ровно 4 и 64 символа принимается, соседние границы отвергаются', () => {
@@ -33,5 +36,26 @@ describe('ссылки приглашения веб-клиента', () => {
     assert.equal(inviteCodeFromPath('/i/Ab12'), 'Ab12');
     assert.equal(inviteCodeFromPath('/x/Ab12'), null);
     assert.equal(inviteCodeFromPath('/i/abc'), null);
+  });
+
+  it('битый процент в пути даёт broken-link вместо URIError, а percent-код принимается', () => {
+    // Ссылка из чужого чата может быть обрезана или испорчена; она не должна валить весь экран входа.
+    for (const path of ['/i/%', '/i/%E0%A4', '/i/abc', '/i/']) {
+      assert.doesNotThrow(() => inviteCodeFromPath(path), `разбор ${path} не должен бросать`);
+      assert.equal(inviteCodeFromPath(path), null, `${path} не содержит пригодного кода`);
+      assert.equal(isBrokenInvitePath(path), true, `${path} явно распознаётся как битое приглашение`);
+    }
+    assert.equal(inviteCodeFromPath('/i/Ab%31%32'), 'Ab12', 'валидная percent-форма декодируется');
+    for (const path of ['/i/Ab12', '/x/%', '/i', '/']) assert.equal(isBrokenInvitePath(path), false, `${path} не помечается битым приглашением`);
+
+    const pathSource = readFileSync(new URL('./inviteLinkRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const changed = pathSource.replace('  } catch {\n    return null;\n  }', '  } catch {\n    throw new URIError("broken escape");\n  }');
+    assert.notEqual(changed, pathSource, 'реальный модуль содержит обработку URIError');
+    const mod = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module: mod, exports: mod.exports, URLSearchParams, URIError });
+    const mutant = mod.exports as typeof import('./inviteLinkRules.js');
+    assert.throws(() => assert.doesNotThrow(() => mutant.inviteCodeFromPath('/i/%'), 'битый путь остаётся безопасным'), assert.AssertionError,
+      'мутант без безопасного отказа обязан провалить контракт');
   });
 });

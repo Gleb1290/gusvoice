@@ -2,7 +2,7 @@ import { useRoomContext } from '@livekit/components-react';
 import { Track } from 'livekit-client';
 import { useEffect, useRef, useState } from 'react';
 import { gvScreenShareStats } from '../nativeScreenShare';
-import { formatLayerTargets } from '../streamDebugRules';
+import { encWindow, formatLayerTargets, formatShareCfg, type EncCounters } from '../streamDebugRules';
 import { Icon } from './Icon';
 
 /**
@@ -50,6 +50,15 @@ type Raw = {
   rttMs: number;
   fractionLost: number;
   packetsLost: number;
+  // ─── «Чёрный ящик» (06.10, #207) ───
+  /** Сумма QP основного слоя (накопительно) — средний QP за секунду считается разностью. 0 — не знаем. */
+  qpSum: number;
+  /** Сколько байт кодировщик ДОЛЖЕН был выдать по своей цели (накопительно). 0 — не знаем. */
+  encBytesTarget: number;
+  /** Задержка проверок ICE, мс — у нативного показа `rttMs` всегда 1, этой верить. 0 — нет данных. */
+  iceRttMs: number;
+  /** С чем показ запущен на самом деле (только нативный): «2560×1440 · 30 к/с · 7.0 Мбит/с · Чёткость…». */
+  shareCfg: string;
 };
 
 const LIMIT_RU: Record<string, string> = {
@@ -101,6 +110,19 @@ async function sampleNative(): Promise<Raw | null> {
     rttMs: s.rtt_ms,
     fractionLost: s.fraction_lost,
     packetsLost: s.packets_lost,
+    qpSum: s.qp_sum ?? 0,
+    encBytesTarget: s.encoded_bytes_target ?? 0,
+    iceRttMs: s.ice_rtt_ms ?? 0,
+    shareCfg: formatShareCfg({
+      width: s.cfg_width,
+      height: s.cfg_height,
+      fps: s.cfg_fps,
+      bitrate: s.cfg_bitrate,
+      mode: s.mode,
+      maxQuality: s.max_quality,
+      layers: s.layers_on,
+      keyframeScale: s.keyframe_scale,
+    }),
   };
 }
 
@@ -116,15 +138,26 @@ async function sampleWeb(report: RTCStatsReport | undefined): Promise<Raw | null
     layerTargets: '',
     pipeline: '',
     server: '',
+    qpSum: 0,
+    encBytesTarget: 0,
+    iceRttMs: 0,
+    shareCfg: '',
   };
   const layers: { rid: string; active: boolean; bps: number }[] = [];
   let codecId = '';
   const codecs = new Map<string, string>();
+  // Основной слой — САМЫЙ КРУПНЫЙ (06.10): раньше в строки попадал последний из отчёта, какой придётся.
+  let bestArea = -1;
   report.forEach((r: Record<string, unknown> & { type: string; id: string }) => {
     if (r.type === 'outbound-rtp' && r.kind === 'video') {
       const d = r as unknown as Record<string, number & string>;
       const active = (r as unknown as { active?: boolean }).active !== false;
       layers.push({ rid: String(d.rid ?? ''), active, bps: Number(d.targetBitrate) || 0 });
+      const area = (Number(d.frameWidth) || 0) * (Number(d.frameHeight) || 0);
+      if (area < bestArea) return;
+      bestArea = area;
+      out.qpSum = Number(d.qpSum) || 0;
+      out.encBytesTarget = Number(d.totalEncodedBytesTarget) || 0;
       out.width = Number(d.frameWidth) || 0;
       out.height = Number(d.frameHeight) || 0;
       out.fps = Number(d.framesPerSecond) || 0;
@@ -153,6 +186,8 @@ async function sampleWeb(report: RTCStatsReport | undefined): Promise<Raw | null
     } else if (r.type === 'candidate-pair' && (r as unknown as { nominated?: boolean }).nominated) {
       const bwe = Number((r as unknown as { availableOutgoingBitrate?: number }).availableOutgoingBitrate) || 0;
       out.bwe = Math.max(out.bwe ?? 0, bwe);
+      const rtt = Number((r as unknown as { currentRoundTripTime?: number }).currentRoundTripTime) || 0;
+      if (rtt > 0) out.iceRttMs = rtt * 1000;
     }
   });
   if (out.width === undefined) return null;
@@ -164,8 +199,9 @@ async function sampleWeb(report: RTCStatsReport | undefined): Promise<Raw | null
 export function StreamDebugPanel({ native, onClose }: { native: boolean; onClose: () => void }) {
   const room = useRoomContext();
   const [cur, setCur] = useState<Raw | null>(null);
-  const [kbps, setKbps] = useState(0);
-  const prev = useRef<{ bytes: number; at: number } | null>(null);
+  // Окно в секунду между замерами (06.10): факт, цель кодировщика и средний QP — разностью счётчиков.
+  const [win, setWin] = useState<{ qp: number | null; kbps: number; encKbps: number | null } | null>(null);
+  const prev = useRef<EncCounters | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -178,10 +214,17 @@ export function StreamDebugPanel({ native, onClose }: { native: boolean; onClose
       if (!alive) return;
       setCur(next);
       if (next) {
-        const p = prev.current;
         // Bitrate is a delta: consecutive byte counters over the time between the two reports.
-        if (p && next.atMs > p.at) setKbps(((next.bytesSent - p.bytes) * 8) / (next.atMs - p.at));
-        prev.current = { bytes: next.bytesSent, at: next.atMs };
+        const c: EncCounters = {
+          atMs: next.atMs,
+          frames: next.framesEncoded,
+          qpSum: next.qpSum,
+          bytesSent: next.bytesSent,
+          encBytesTarget: next.encBytesTarget,
+        };
+        const w = encWindow(prev.current, c);
+        if (w) setWin(w);
+        prev.current = c;
       }
     };
     void tick();
@@ -193,15 +236,26 @@ export function StreamDebugPanel({ native, onClose }: { native: boolean; onClose
   }, [native, room]);
 
   const limited = cur && cur.limit !== 'none' && cur.limit !== '';
+  const kbps = win?.kbps ?? 0;
   const rows: [string, string, boolean?][] = cur
     ? [
         ['Источник', native ? 'нативный (десктоп)' : 'браузер (getDisplayMedia)'],
+        ...(cur.shareCfg ? ([['Показ', cur.shareCfg]] as [string, string][]) : []),
         ...(cur.pipeline ? ([['Путь кадра', cur.pipeline]] as [string, string][]) : []),
         ['Кодек', cur.codec],
         ['Энкодер', cur.encoder || '—'],
         ['Разрешение', cur.width ? `${cur.width}×${cur.height}` : '—'],
         ['Кадров/с', cur.fps ? cur.fps.toFixed(1) : '—'],
-        ['Битрейт', `${(kbps / 1000).toFixed(2)} Мбит/с${cur.targetBitrate ? ` (цель ${(cur.targetBitrate / 1e6).toFixed(2)})` : ''}`],
+        // Цель против факта (06.10): «цель WebRTC» — сколько распределитель отдал слою, «кодировщик» —
+        // сколько тот должен был выдать по своей цели за секунду. Факт ≪ цели — на экране статика.
+        [
+          'Битрейт',
+          `${(kbps / 1000).toFixed(2)} Мбит/с${cur.targetBitrate ? ` · цель ${(cur.targetBitrate / 1e6).toFixed(2)}` : ''}${
+            win?.encKbps !== null && win?.encKbps !== undefined ? ` · кодировщик ${(win.encKbps / 1000).toFixed(2)}` : ''
+          }`,
+        ],
+        // QP: 20–30 — чёткий текст, 40+ — мыло, 51 — предел H.264.
+        ['QP (среднее за секунду)', win?.qp !== null && win?.qp !== undefined ? win.qp.toFixed(1) : '—', (win?.qp ?? 0) >= 38],
         ['Канал по оценке WebRTC', cur.bwe ? `${(cur.bwe / 1e6).toFixed(1)} Мбит/с` : '—'],
         ...(cur.server ? ([['Сервер', cur.server]] as [string, string][]) : []),
         ...(cur.layerTargets ? ([['Цели слоёв, Мбит/с', cur.layerTargets]] as [string, string][]) : []),
@@ -209,7 +263,8 @@ export function StreamDebugPanel({ native, onClose }: { native: boolean; onClose
         ['Из-за процессора', `${cur.limitCpuS.toFixed(1)} с`, cur.limitCpuS > 1],
         ['Из-за канала', `${cur.limitBwS.toFixed(1)} с`, cur.limitBwS > 1],
         ['Смен разрешения', String(cur.resChanges), cur.resChanges > 0],
-        ['Пинг до сервера', cur.rttMs ? `${Math.round(cur.rttMs)} мс` : '—'],
+        // По проверкам ICE (06.10): отчёт получателя у нативного показа всегда говорит «1 мс».
+        ['Пинг до сервера', cur.iceRttMs || cur.rttMs ? `${Math.round(cur.iceRttMs || cur.rttMs)} мс` : '—'],
         ['Потери', `${(cur.fractionLost * 100).toFixed(1)}% (${cur.packetsLost} пакетов)`, cur.fractionLost > 0.02],
         ['Кадров закодировано', `${cur.framesEncoded} (ключевых ${cur.keyFrames})`],
         ['Запросы пересылки', `NACK ${cur.nack} · PLI ${cur.pli}`],

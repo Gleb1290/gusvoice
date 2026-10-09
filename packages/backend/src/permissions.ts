@@ -165,6 +165,16 @@ function resolveLayered(ctx: MemberContext, userId: string, catOws: OverwriteRow
   return resolveLayeredPure(ctx.serverPermissions, subject, catOws, chanOws);
 }
 
+/**
+ * Каналы, по которым можно искать сообщения: человек их видит И может читать историю. ОДНА проверка для поиска по серверу
+ * (`GET /servers/:id/search`) и по всем серверам (`GET /search/servers`, `srvsearch1`) — свои упрощённые права в поиске запрещены.
+ */
+export function searchableChannelIds(perms: ReadonlyMap<string, bigint>): string[] {
+  return [...perms.entries()]
+    .filter(([, p]) => has(p, Permission.VIEW_CHANNEL) && has(p, Permission.READ_HISTORY))
+    .map(([cid]) => cid);
+}
+
 /** Effective permissions for EVERY channel of a server for one member (single batched pass). */
 export async function getServerChannelPermissions(serverId: string, userId: string): Promise<Map<string, bigint> | null> {
   const ctx = await getMemberContext(serverId, userId);

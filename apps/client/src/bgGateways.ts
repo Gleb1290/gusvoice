@@ -40,6 +40,24 @@ export type BgUnreadMap = Record<string, BgUnread>;
 let state: BgUnreadMap = {};
 const listeners = new Set<(m: BgUnreadMap) => void>();
 
+/**
+ * События ГОЛОСА с фонового инстанса (01.10). Голос переживает переход между инстансами: человек смотрит дом, а
+ * сидит у соседа — и шлюз соседа у него теперь фоновый. Перемещение модератором и закрытие сервера должны дойти до
+ * голоса и так; применяет их подписчик (`App`), сам модуль стор не трогает (иначе цикл импорта `api → bgGateways`).
+ */
+export type BgVoiceEvent = {
+  instanceId: string;
+  msg: Extract<GatewayServerMessage, { t: 'voice.move' }> | Extract<GatewayServerMessage, { t: 'server.access_closed' }>;
+};
+const voiceListeners = new Set<(e: BgVoiceEvent) => void>();
+
+export function onBgVoiceEvent(fn: (e: BgVoiceEvent) => void): () => void {
+  voiceListeners.add(fn);
+  return () => {
+    voiceListeners.delete(fn);
+  };
+}
+
 export function bgUnread(): BgUnreadMap {
   return state;
 }
@@ -174,7 +192,8 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
       return;
     }
     link.lastRecv = Date.now();
-    socket.send(JSON.stringify({ t: 'identify', token: inst.token }));
+    // D4 (08.10): приложение скрыто — соседский шлюз тоже не считает нас «в сети» (`setBgPresent`).
+    socket.send(JSON.stringify({ t: 'identify', token: inst.token, ...(bgPresent ? {} : { hidden: true }) }));
     link.ping = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN) return;
       if (socketStale(link.lastRecv, Date.now())) {
@@ -228,6 +247,11 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
         bumpDm(link.instanceId);
         return;
       }
+      case 'voice.move':
+      case 'server.access_closed': {
+        for (const l of voiceListeners) l({ instanceId: link.instanceId, msg });
+        return;
+      }
       default:
         return;
     }
@@ -250,6 +274,20 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
  * НИКОГДА: её шлюз ведёт `sockets.ts` — со стором, историями и звуками. Два сокета на один инстанс
  * означали бы двойной счёт и двойные уведомления.
  */
+/**
+ * «Видно / скрыто» (08.10, #211, D4) для соседских шлюзов — то же, что кадр `visible` шлюзу текущего инстанса
+ * (`sockets.sendGatewayVisible`): свёрнутое приложение не «в сети» и там. Старый соседский шлюз кадр молча пропускает.
+ */
+let bgPresent = true;
+export function setBgPresent(on: boolean): void {
+  if (bgPresent === on) return;
+  bgPresent = on;
+  const frame = JSON.stringify({ t: 'visible', on });
+  for (const link of links.values()) {
+    if (link.socket?.readyState === WebSocket.OPEN) link.socket.send(frame);
+  }
+}
+
 export function syncBgGateways(activeId: string | null): void {
   const want = new Map<string, Instance>();
   for (const inst of instances()) {

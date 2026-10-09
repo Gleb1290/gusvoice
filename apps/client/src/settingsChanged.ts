@@ -20,6 +20,7 @@
  */
 
 import type { AudioSettings } from './audioSettings';
+import { AUTO_DOWNLOAD_DEFAULTS, type AutoDownloadSettings } from './autoDownloadRules';
 import type { CameraPreset } from './cameraSettings';
 import type { CoinNotifyLevel } from './coinNotifyRules';
 import type { CloseBehavior } from './desktopWindow';
@@ -48,11 +49,25 @@ export interface SettingsSnapshot {
   /** Оптимизированный режим (`liteMode.ts`). Необязательное: старые снимки в тестах его не знают. */
   liteMode?: boolean;
   linkPreviews: boolean;
+  /** Отправка по Enter или Ctrl+Enter (`sendMode.ts`, G36). Необязательное: старые снимки в тестах его не знают. */
+  sendMode?: 'enter' | 'ctrl-enter';
+  /** Вид списка бесед: две или три строки (`dmListView.ts`, G34). Необязательное: старые снимки его не знают. */
+  listLines?: 'two' | 'three';
+  /** Подсказывать эмодзи при наборе (`emojiSuggest.ts`, G53). Необязательное: старые снимки в тестах его не знают. */
+  emojiSuggest?: boolean;
+  /** Свайп по чату (`chatSwipe.ts`, G42): `'auto'` — как у Telegram. Необязательное по той же причине. */
+  chatSwipe?: string;
+  /** Двойной клик по сообщению: реакция / ответ / ничего (`quickReaction.ts`, G45). Необязательное: старые снимки его не знают. */
+  doubleClick?: 'react' | 'reply' | 'none';
+  /** Быстрая реакция двойного клика (`quickReaction.ts`, G45). Необязательное: старые снимки его не знают. */
+  quickReaction?: string;
   osNotify: OsNotifyLevel;
   coinNotify: CoinNotifyLevel;
   closeBehavior: CloseBehavior;
   /** null = папка не выбрана, спросим при первом скачивании. */
   downloadDir: string | null;
+  /** «Данные и память» (`autoDownload.ts`, G32). Необязательное: старые снимки в тестах его не знают. */
+  autoDownload?: AutoDownloadSettings;
 }
 
 /** Один сравниваемый пункт. Вернуть массив — значит «считать это одним решением» (см. положение). */
@@ -93,6 +108,8 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
     (s) => s.stream.layers,
     (s) => s.stream.gpuPipeline !== false,
     (s) => s.stream.streamPreview,
+    // «Максимальное качество» (06.10): отсутствие = выключено, как умолчание.
+    (s) => s.stream.maxQuality === true,
   ],
   'set-g-stream-cursor': [(s) => s.stream.cursor !== false],
   'set-g-osn': [(s) => s.osNotify],
@@ -113,9 +130,15 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
   'set-g-theme': [(s) => s.theme],
   'set-g-scale': [(s) => s.uiScale],
   'set-g-sidebar': [(s) => s.sidebarWidth],
+  'set-g-listview': [(s) => s.listLines ?? 'two'],
   'set-g-avatars': [(s) => s.animatedAvatars],
   'set-g-lite': [(s) => s.liteMode ?? false],
   'set-g-links': [(s) => s.linkPreviews],
+  'set-g-send': [(s) => s.sendMode ?? 'enter'],
+  'set-g-emoji': [(s) => s.emojiSuggest ?? true],
+  // Режим и эмодзи — одна настройка в глазах человека («двойной клик ставит вот это»): одно решение.
+  'set-g-swipe': [(s) => s.chatSwipe ?? 'auto'],
+  'set-g-dblclick': [(s) => [s.doubleClick ?? 'react', s.quickReaction ?? '👍']],
   'set-g-overlay': [
     (s) => s.overlay.enabled,
     (s) => s.overlay.mode,
@@ -131,6 +154,20 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
     ],
     (s) => s.overlay.opacity,
     (s) => s.overlay.onlyInVoice,
+  ],
+  // Сетка «тип × источник» — одно решение «что качать само»; пределы — по пункту на ползунок (G32).
+  'set-g-autodl': [
+    (s) => {
+      const a = s.autoDownload ?? AUTO_DOWNLOAD_DEFAULTS;
+      return [a.photo, a.video, a.gif];
+    },
+    (s) => (s.autoDownload ?? AUTO_DOWNLOAD_DEFAULTS).photoLimitMb,
+    (s) => (s.autoDownload ?? AUTO_DOWNLOAD_DEFAULTS).videoLimitMb,
+  ],
+  'set-g-autoplay': [
+    (s) => (s.autoDownload ?? AUTO_DOWNLOAD_DEFAULTS).autoplayGif,
+    (s) => (s.autoDownload ?? AUTO_DOWNLOAD_DEFAULTS).autoplayVideo,
+    (s) => (s.autoDownload ?? AUTO_DOWNLOAD_DEFAULTS).autoplayRound,
   ],
   'set-g-close': [(s) => s.closeBehavior],
   'set-g-downloads': [(s) => s.downloadDir],

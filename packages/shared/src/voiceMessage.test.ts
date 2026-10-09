@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { formatDuration, isVoiceMessage, peaksFrom, WAVEFORM_BUCKETS } from './voiceMessage.js';
+import { attachmentWords, formatDuration, isVoiceMessage, peaksFrom, VOICE_MAX_MS, WAVEFORM_BUCKETS } from './voiceMessage.js';
+
+it('R125 предел голосового равен тридцати минутам, а не прежним пяти', () => {
+  // Общий предел согласует таймер рекордера и приём вложения без потери длинной записи.
+  assert.equal(VOICE_MAX_MS, 30 * 60 * 1000);
+});
 
 describe('огибающая', () => {
   it('длина всегда равна числу корзин', () => {
@@ -97,4 +102,55 @@ describe('признак голосового', () => {
   it('картинка с подделанной огибающей голосовым не считается', () => {
     assert.equal(isVoiceMessage({ waveform: [1, 2], contentType: 'image/png' }), false);
   });
+});
+
+it('слова вложения не добавляют длительность или префикс файла, кружок отличается от видео', () => {
+  // Один общий словарь не даёт цитате и списку бесед расходиться после смены формата превью.
+  const cases: [Parameters<typeof attachmentWords>[0], string][] = [
+    [{ kind: 'voice' }, 'Голосовое сообщение'],
+    [{ kind: 'file', video: true }, 'Видео'],
+    [{ kind: 'file', video: true, round: true }, 'Видеосообщение'],
+    [{ kind: 'file', name: 'report.pdf' }, 'report.pdf'],
+    [{ kind: 'file', name: '  мой\n\t файл.pdf  ' }, 'мой файл.pdf'],
+    [{ kind: 'file', name: '' }, 'Файл'],
+    [{ kind: 'file', name: ' \n ' }, 'Файл'],
+    [{ kind: 'file', name: null }, 'Файл'],
+    [{ kind: 'file' }, 'Файл'],
+    [{ kind: 'file', round: true, name: 'audio.ogg' }, 'audio.ogg'],
+  ];
+  const check = (words: typeof attachmentWords) => {
+    for (const [input, expected] of cases) assert.equal(words(input), expected);
+  };
+  check(attachmentWords);
+  const source = attachmentWords.toString().replace(/\\u([0-9a-f]{4})/gi, (_match, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+  // nosemgrep: gv-no-eval — тест исполняет свой attachmentWords.toString(), нормализованный регуляркой, и фиксированные мутанты; чужого ввода нет.
+  const load = (s: string): typeof attachmentWords => new Function(`return (${s})`)(); // nosemgrep: gv-no-eval
+  check(load(source));
+  for (const [from, to] of [
+    ['Голосовое сообщение', 'Голосовое сообщение · 0:42'],
+    ['f.round?', 'false?'],
+    ['?flat:', '?"Файл: "+flat:'],
+  ]) {
+    assert.ok(source.includes(from), 'якорь словарного мутанта найден');
+    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+  }
+});
+
+it('имя файла ровно в 200 знаков сохраняется, длиннее обрезается целыми кодовыми точками', () => {
+  // Ловит лишнее многоточие на границе и половину эмодзи в конце короткого превью.
+  const check = (words: typeof attachmentWords) => {
+    assert.equal(words({ kind: 'file', name: 'я'.repeat(200) }), 'я'.repeat(200));
+    assert.equal(words({ kind: 'file', name: 'я'.repeat(201) }), 'я'.repeat(199) + '…');
+    assert.equal(words({ kind: 'file', name: 'x'.repeat(300) }), 'x'.repeat(199) + '…');
+    assert.equal(words({ kind: 'file', name: '🪿'.repeat(201) }), '🪿'.repeat(199) + '…');
+  };
+  check(attachmentWords);
+  const source = attachmentWords.toString();
+  // nosemgrep: gv-no-eval — тест исполняет свой attachmentWords.toString() с фиксированными граничными мутантами; чужого ввода нет.
+  const load = (s: string): typeof attachmentWords => new Function(`return (${s})`)(); // nosemgrep: gv-no-eval
+  check(load(source));
+  for (const [from, to] of [['chars.length<=200', 'chars.length<200'], ['[...flat]', 'flat.split("")']]) {
+    assert.ok(source.includes(from), 'якорь граничного мутанта найден');
+    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+  }
 });

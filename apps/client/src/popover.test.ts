@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { clampAxis, placeByAnchor, placeByPoint, type Viewport } from './popover.js';
+import { clampAxis, placeByAnchor, placeByPoint, placeStackByPoint, placeByHalf, type Viewport } from './popover.js';
 
 const VP: Viewport = { vw: 320, vh: 240 };
 const rect = (left: number, top: number, width: number, height: number): DOMRect => ({
@@ -97,5 +97,46 @@ describe('меню в точке курсора', () => {
       left: 8,
       top: 8,
     });
+  });
+});
+
+describe('меню раунда 12 с полосой реакций', () => {
+  it('карточка остаётся в квадранте клика, а отступ полосы берётся из её реального offsetTop', () => {
+    // Если зашить высоту полосы в JS, CSS gap сменится отдельно и полоса налезет на карточку.
+    assert.deepEqual(placeStackByPoint(120, 80, 120, 100, { left: 10, top: 30, w: 100, h: 70 }, 8, VP), { left: 110, top: 50 });
+    assert.deepEqual(placeStackByPoint(120, 80, 120, 100, { left: 10, top: 12, w: 100, h: 70 }, 8, VP), { left: 110, top: 68 });
+    assert.deepEqual(placeStackByPoint(120, 80, 120, 100, { left: 10, top: 0, w: 100, h: 70 }, 8, VP), { left: 110, top: 80 });
+  });
+  it('полоса и карточка вместе клампятся у правого и нижнего края', () => {
+    // Кламп только карточки обрежет полосу над ней либо вынесет её за край экрана.
+    assert.deepEqual(placeStackByPoint(300, 220, 120, 100, { left: 10, top: 30, w: 100, h: 70 }, 8, VP), { left: 190, top: 120 });
+    assert.deepEqual(placeStackByPoint(4, 4, 140, 130, { left: 20, top: 45, w: 100, h: 70 }, 8, VP), { left: 8, top: 8 });
+  });
+});
+
+describe('меню у строки по половине экрана', () => {
+  it('положение якоря ровно на середине и на один пиксель по обе стороны выбирает нужную сторону', () => {
+    // Строгий знак сравнения важен на midpoint: ±1 не должны менять сторону раньше пересечения центра.
+    assert.deepEqual(placeByHalf(rect(20, 104, 60, 32), 100, 40, 'start', 8, 8, VP), { left: 20, top: 144 });
+    assert.deepEqual(placeByHalf(rect(20, 103, 60, 32), 100, 40, 'start', 8, 8, VP), { left: 20, top: 143 });
+    assert.deepEqual(placeByHalf(rect(20, 105, 60, 32), 100, 40, 'start', 8, 8, VP), { left: 20, top: 57 });
+  });
+  it('нижняя половина ставит меню над якорем и align end совмещает правые края', () => {
+    // Иначе мобильное меню закрывает сам пузырь либо уходит от края автора.
+    assert.deepEqual(placeByHalf(rect(220, 170, 60, 30), 100, 80, 'end', 8, 8, VP), { left: 180, top: 82 });
+  });
+  it('верхняя половина ставит меню под якорем, нижняя половина — над ним', () => {
+    // Обычный выбор стороны не должен инвертироваться только из-за того, что противоположная просторнее.
+    assert.deepEqual(placeByHalf(rect(20, 20, 60, 30), 100, 80, 'start', 8, 8, VP), { left: 20, top: 58 });
+    assert.deepEqual(placeByHalf(rect(20, 200, 60, 30), 100, 80, 'start', 8, 8, VP), { left: 20, top: 112 });
+  });
+  it('верхняя половина с длинным меню, не вмещающимся ни с одной стороны, клампит его в окно', () => {
+    // Наивное размещение длинной карточки под якорем полностью унесёт её за нижний край.
+    assert.deepEqual(placeByHalf(rect(20, 20, 60, 30), 100, 300, 'start', 8, 8, VP), { left: 20, top: 8 });
+  });
+  it('прижимает меню к верхней/левой кромке и не уводит слишком широкий слой в минус', () => {
+    // Позиция якоря — предпочтение, а не разрешение обрезать меню краем окна.
+    assert.deepEqual(placeByHalf(rect(0, 20, 20, 20), 100, 80, 'start', 8, 8, VP), { left: 8, top: 48 });
+    assert.deepEqual(placeByHalf(rect(10, 100, 20, 20), 400, 300, 'start', 8, 8, VP), { left: 8, top: 8 });
   });
 });

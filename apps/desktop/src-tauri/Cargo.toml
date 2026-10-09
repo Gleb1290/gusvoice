@@ -1,6 +1,6 @@
 [package]
 name = "gusvoice"
-version = "0.8.17"
+version = "0.8.22"
 description = "GusVoice desktop client"
 license = "AGPL-3.0-only"
 edition = "2021"
@@ -83,6 +83,12 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell",
   "Win32_Graphics_Gdi",
   "Win32_Storage_FileSystem",
+  # Тост беседы с полем ответа (`notify_conv.rs`, Р1 G17): WinRT-уведомления напрямую. Те же фичи уже включает
+  # tauri-winrt-notification (под notify-rust) — объединение фич, нового кода в сборке почти нет.
+  "Foundation",
+  "Foundation_Collections",
+  "Data_Xml_Dom",
+  "UI_Notifications",
 ] }
 windows-core = "0.61"
 

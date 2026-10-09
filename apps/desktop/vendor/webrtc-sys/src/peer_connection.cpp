@@ -22,6 +22,7 @@
 #include <memory>
 
 #include "api/data_channel_interface.h"
+#include "api/field_trials_view.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "livekit/candidate.h"
@@ -113,9 +114,41 @@ int32_t BitrateHintStart() {
 int32_t BitrateHintMin() {
   return g_hint_min_bps.load(std::memory_order_relaxed);
 }
+
+// GusVoice (#207, 06.10): множитель опорного кадра NVENC для показа — см. livekit/gv_bitrate_hint.h.
+// Здесь, а не в кодировщике: тот собирается только с NVENC, а мост из Rust есть в любой сборке.
+namespace {
+std::atomic<int32_t> g_enc_keyframe_scale{0};
+}  // namespace
+
+void SetScreenEncoderKeyframeScale(int32_t keyframe_scale) {
+  g_enc_keyframe_scale.store(keyframe_scale, std::memory_order_relaxed);
+}
+
+int32_t ScreenEncoderKeyframeScale() {
+  return g_enc_keyframe_scale.load(std::memory_order_relaxed);
+}
 }  // namespace livekit
 
 namespace livekit_ffi {
+
+namespace {
+// GusVoice (#207, 06.10): полевые испытания соединений нативного показа — см. `Initialize`. Класса
+// `webrtc::FieldTrials` в готовом libwebrtc нет (`api/field_trials.cc` в сборку не вошёл, ссылка не
+// линкуется), поэтому — простой ответ по имени испытания. Остальные имена — пусто, то есть умолчания
+// libwebrtc: глобальной строки испытаний в приложении никто не ставит.
+class GvFieldTrials : public webrtc::FieldTrialsView {
+ public:
+  std::string Lookup(absl::string_view key) const override {
+    // Значение — часть строки испытания после имени: «WebRTC-Bwe-ProbingConfiguration/<это>/».
+    if (key == "WebRTC-Bwe-ProbingConfiguration") return "alr_interval:2s";
+    return "";
+  }
+  std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
+    return std::make_unique<GvFieldTrials>();
+  }
+};
+}  // namespace
 
 PeerConnection::PeerConnection(
     std::shared_ptr<RtcRuntime> rtc_runtime,
@@ -134,6 +167,17 @@ PeerConnection::~PeerConnection() {
 bool PeerConnection::Initialize(
     webrtc::PeerConnectionInterface::RTCConfiguration config) {
   webrtc::PeerConnectionDependencies deps{this};
+  // GusVoice (#207, 06.10): проба канала на статике чаще. Через этот WebRTC в приложении идёт только
+  // нативный показ экрана (голос и веб-показ живут в WebView со своим WebRTC), а своих полевых
+  // испытаний у фабрики нет — так что строка ниже заменяет пустоту, а не чужие настройки.
+  //
+  // Для экрана (`is_screencast`) libwebrtc сам включает периодическую пробу канала в «простое» (ALR,
+  // `WebRTC-ProbingScreenshareBwe`, по умолчанию включён): когда кодировщику нечего слать (таблица,
+  // рабочий стол), оценке не на чем расти, и раз в `alr_interval` идёт короткая проба на удвоенную
+  // оценку — с продолжением, пока канал отвечает. По умолчанию раз в 5 с: после просадки на статике
+  // картинка дотягивалась долго. 2 с — чаще, но проба короткая (от 15 мс), выше суммарного потолка
+  // слоёв не идёт, а на высоте оценки её нет вовсе.
+  deps.trials = std::make_unique<GvFieldTrials>();
   auto result =
       pc_factory_->CreatePeerConnectionOrError(config, std::move(deps));
 

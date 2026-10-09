@@ -34,8 +34,17 @@ test('транзакционное обезличивание сохраняет
     INSERT INTO conversation_messages (id, conversation_id, author_id, sort_key, content)
       VALUES ('conv-m', 'conv', 'victim', 1, 'kept conversation history');
     INSERT INTO user_sync (user_id, pts) VALUES ('victim', 1);
+    INSERT INTO dm_folders (id,user_id,title,flags) VALUES ('victim-folder','victim','Папка',1);
     INSERT INTO user_changes (user_id, pts, conversation_id, kind, message_id)
       VALUES ('victim', 1, 'conv', 'msg', 'conv-m');
+    INSERT INTO sticker_packs (id,server_id,name,title,created_by) VALUES ('keep-pack',NULL,'KeepBirds','Птицы','keeper');
+    INSERT INTO stickers (id,pack_id,emoji,url,format,position) VALUES ('keep-sticker','keep-pack','🪶','https://media.test/keep','webp',0);
+    INSERT INTO user_faved_stickers (user_id,sticker_id) VALUES ('victim','keep-sticker'),('keeper','keep-sticker');
+    INSERT INTO user_recent_stickers (user_id,sticker_id) VALUES ('victim','keep-sticker'),('keeper','keep-sticker');
+    INSERT INTO privacy_exceptions (owner_id,target_id,key,kind) VALUES
+      ('victim','keeper','calls','always'),('keeper','victim','calls','never');
+    INSERT INTO user_contacts (owner_id,contact_id,name) VALUES
+      ('victim','keeper','Мой контакт'),('keeper','victim','Удаляемый человек');
   `);
 
   const memberOf = await t.db.transaction(async (tx) => {
@@ -52,6 +61,10 @@ test('транзакционное обезличивание сохраняет
   assert.equal(victim?.tokenGeneration, 6);
   assert.equal(victim?.deletedAt?.toISOString(), deletedAt.toISOString());
   assert.equal(victim?.approvedAt, null);
+  assert.equal((await t.raw.query(`SELECT 1 FROM privacy_exceptions WHERE owner_id='victim' OR target_id='victim'`)).rows.length, 0,
+    'удаление аккаунта убирает право звонить и запрет звонить ему — в обе стороны');
+  assert.equal((await t.raw.query(`SELECT 1 FROM user_contacts WHERE owner_id='victim' OR contact_id='victim'`)).rows.length, 0,
+    'удаление аккаунта стирает и его личный список, и чужие подписи на него');
   assert.equal((await t.db.select().from(messages)).length, 1);
   assert.equal((await t.db.select().from(dmMessages)).length, 1);
   assert.deepEqual((await t.raw.query(`SELECT id FROM conversation_messages`)).rows, [{ id: 'conv-m' }]);
@@ -59,6 +72,12 @@ test('транзакционное обезличивание сохраняет
     [{ user_id: 'victim' }]);
   assert.equal((await t.raw.query(`SELECT 1 FROM user_sync WHERE user_id = 'victim'`)).rows.length, 0);
   assert.equal((await t.raw.query(`SELECT 1 FROM user_changes WHERE user_id = 'victim'`)).rows.length, 0);
+  assert.equal((await t.raw.query(`SELECT 1 FROM dm_folders WHERE user_id = 'victim'`)).rows.length, 0);
+  // Личные предпочтения удалённого исчезают, но общий каталог и чужие списки сохраняются.
+  for (const table of ['user_faved_stickers','user_recent_stickers']) {
+    assert.deepEqual((await t.raw.query(`SELECT user_id FROM ${table}`)).rows,[{user_id:'keeper'}]);
+  }
+  assert.equal((await t.raw.query(`SELECT 1 FROM stickers WHERE id='keep-sticker'`)).rows.length,1);
   assert.equal(await (await import('../src/auth.js')).tokenGenValid('victim', 5), false);
   await t.raw.exec(`
     INSERT INTO users (id, username, email, display_name, password_hash)

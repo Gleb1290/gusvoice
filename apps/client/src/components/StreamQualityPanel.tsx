@@ -10,6 +10,7 @@ import {
 } from '../streamSettings';
 import { Toggle } from './Toggle';
 import { Select } from './Select';
+import { isDesktop } from '../hotkeys';
 
 /**
  * Screen-share quality controls. Reused both in the in-call quality popover (with a
@@ -103,10 +104,34 @@ export function StreamQualityPanel({ live, onRestart }: { live?: boolean; onRest
         options={CODEC_OPTIONS.map((c) => ({ value: c.value, label: c.label }))}
       />
 
+      {/* В браузере показ ЭКРАНА идёт в H.264 (06.10, #207): SDK для VP9 ломает слои и режим экрана. */}
+      {!isDesktop() && s.codec === 'vp9' && (
+        <div className="muted stream-hint">В браузере показ экрана идёт в H.264: с VP9 у показа пропадают слои качества.</div>
+      )}
+
       <div className="settings-row" style={{ marginTop: 10 }}>
         <span>Звук из вкладки / системы</span>
         <Toggle checked={s.audio} onChange={(v) => update({ audio: v })} label="Транслировать звук" />
       </div>
+
+      {/* «Максимальное качество — не снижать» (06.10, #207) — только десктоп: в браузере нижнюю
+          границу оценщика канала не поставить без правки SDP. */}
+      {isDesktop() && (
+        <>
+          <div className="settings-row" style={{ marginTop: 10 }}>
+            <span>Максимальное качество — не снижать</span>
+            <Toggle
+              checked={s.maxQuality === true}
+              onChange={(v) => update({ maxQuality: v })}
+              label="Максимальное качество — не снижать"
+            />
+          </div>
+          <div className="muted stream-hint">
+            Показу всегда отдаётся полный битрейт, одним потоком, без запасных слоёв. Если у зрителя слабый канал — у
+            него будут подтормаживания вместо мыла.
+          </div>
+        </>
+      )}
 
       <div className="stream-estimate">
         Битрейт: <strong>≈ {bitrateLabel(s)}</strong>

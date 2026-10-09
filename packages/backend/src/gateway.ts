@@ -3,16 +3,18 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import Redis from 'ioredis';
 import { superAdminId, tokenGenValid, verifyToken } from './auth.js';
 import { clientIp, rateHit } from './authGuard.js';
-import { isBlockedBy } from './blocks.js';
+import { isBlockedBy, onBlockChange } from './blocks.js';
 import { db } from './db/index.js';
 import { loadPeers } from './db/peerQueries.js';
-import { conversationMembers, serverMembers } from './db/schema.js';
-import { eq, sql } from 'drizzle-orm';
+import { conversationMembers, conversations, serverMembers, users } from './db/schema.js';
+import { and, eq, sql } from 'drizzle-orm';
 import { env } from './env.js';
-import { capAllows, parseCaps, parseEnvelope, shouldDeliver } from './gatewayRules.js';
+import { capAllows, parseCaps, parseEnvelope, shouldDeliver, statusBroadcastPlan } from './gatewayRules.js';
 import { relayTyping, type TypingDeps } from './gatewayTyping.js';
 import { getChannelAudience, getMemberContext } from './permissions.js';
+import { connActive } from './pushRules.js';
 import { publishToChannel } from './realtime.js';
+import { createSessionVisibility, HIDDEN_OFFLINE_MS } from './sessionVisibility.js';
 import { createUserVisibilityHub } from './userVisibilityHub.js';
 
 interface WsLike {
@@ -58,9 +60,90 @@ const hub = createUserVisibilityHub<Conn>({
   send: (conn, data) => conn.socket.send(data),
 });
 
-/** Whether the user currently has ≥1 live gateway socket — used to gate offline push (push.ts). */
+/**
+ * «В сети» на СЕРВЕРАХ: у человека есть хоть один живой сокет шлюза (как Discord; решение владельца 42, 08.10). Опрос Steam.
+ * Для ЛС — `isUserDmPresent`.
+ */
 export function isUserOnline(userId: string): boolean {
   return hub.isOnline(userId);
+}
+
+/**
+ * «В сети» в ЛС (08.10, #211, D4, решения 42–44): есть хоть одно соединение, где человек «здесь» — приложение видно и не
+ * простаивает, или он в голосе / звонке (клиент сообщает кадром `visible`; клиент без кадра — здесь всегда, как раньше).
+ * Отсюда «был(а)» (`lastSeen.ts`) и «Когда будет в сети» (`scheduled.ts`).
+ */
+export function isUserDmPresent(userId: string): boolean {
+  return (presentCount.get(userId) ?? 0) > 0;
+}
+
+/** Сколько у человека соединений «здесь» (`sessionVisibility`: видимые, скрытые уходят через `HIDDEN_OFFLINE_MS`). */
+const presentCount = new Map<string, number>();
+
+/**
+ * «Не в сети для ЛС» при открытом сокете (`presence5`): пересчитать и, если поменялось, разослать `online.away` и отметить
+ * «был(а)». Звать после каждой смены `presentCount` и после рассылки `online.update` о выходе (тогда уходит `away: false`).
+ */
+function syncDmAway(userId: string): void {
+  const away = hub.isOnline(userId) && !isUserDmPresent(userId);
+  if (hub.setDmAway(userId, away)) touchLastSeen(userId);
+}
+
+/**
+ * Видимость соединений (D4): в счёт «здесь» для ЛС попадают только видимые; скрытое уходит через `HIDDEN_OFFLINE_MS`.
+ * Серверный онлайн (`hub.goOnline`/`goOffline`) — по сокетам, как раньше.
+ */
+const visibility = createSessionVisibility<Conn>({
+  graceMs: HIDDEN_OFFLINE_MS,
+  schedule: (fn, ms) => {
+    const t = setTimeout(fn, ms);
+    t.unref?.();
+    return t;
+  },
+  cancel: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+  show: (conn) => {
+    if (!conn.userId) return;
+    presentCount.set(conn.userId, (presentCount.get(conn.userId) ?? 0) + 1);
+    syncDmAway(conn.userId);
+  },
+  hide: (conn) => {
+    if (!conn.userId) return;
+    const n = (presentCount.get(conn.userId) ?? 1) - 1;
+    if (n <= 0) presentCount.delete(conn.userId);
+    else presentCount.set(conn.userId, n);
+    syncDmAway(conn.userId);
+  },
+});
+
+/**
+ * «За устройством сидят» (08.10, #211, G38, `push2`): последний кадр `{ t: 'active', on: true }` каждого соединения
+ * человека. Кадр `on: false` (окно потеряло фокус) и закрытие соединения запись снимают.
+ */
+const activeAt = new Map<string, Map<Conn, number>>();
+
+function noteConnActive(conn: Conn, on: boolean): void {
+  if (!conn.userId) return;
+  let m = activeAt.get(conn.userId);
+  if (on) {
+    if (!m) activeAt.set(conn.userId, (m = new Map()));
+    m.set(conn, Date.now());
+    return;
+  }
+  m?.delete(conn);
+  if (m && m.size === 0) activeAt.delete(conn.userId);
+}
+
+/**
+ * Человек прямо сейчас за каким-то своим устройством (ПК, вкладка, открытое приложение): пуш ЛС на телефон
+ * откладывается (`pushDefer.ts`). Окно — `pushRules.ACTIVE_WINDOW_MS`.
+ */
+export function isUserActive(userId: string): boolean {
+  const m = activeAt.get(userId);
+  if (!m) return false;
+  const now = Date.now();
+  // D10 (08.10): скрытое соединение (свёрнутое приложение, спрятанная вкладка) «за устройством» не считается.
+  for (const [conn, at] of m) if (!visibility.isHidden(conn) && connActive(at, now)) return true;
+  return false;
 }
 
 /**
@@ -81,7 +164,10 @@ async function onServerInvalidate(serverId: string): Promise<void> {
  * чужой «невидимый» маскируют в «не в сети» сами. Получатели — см. `deliverAboutUser` (#136).
  */
 export function broadcastUserStatus(userId: string, status: PresenceStatus, customStatus: CustomStatus | null): void {
-  hub.deliverAboutUser(userId, { t: 'user.status', userId, status, customStatus });
+  // Сперва флаг «Невидимый» (соседям уйдёт online.update «вышел/зашёл»), потом само событие статуса.
+  const plan = statusBroadcastPlan(userId, status, customStatus);
+  hub.setInvisible(userId, plan.invisible);
+  hub.deliverAboutUser(userId, plan.event);
 }
 
 /**
@@ -142,7 +228,9 @@ async function dmPeerOf(dmId: string, senderId: string): Promise<string | null> 
     const rows = await db
       .select({ userId: conversationMembers.userId })
       .from(conversationMembers)
-      .where(eq(conversationMembers.conversationId, dmId))
+      .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+      // Только 1:1 (07.10, `groups1`): группа из двоих — не пара, и пара в кеше устарела бы с первым добавленным.
+      .where(and(eq(conversationMembers.conversationId, dmId), eq(conversations.kind, 'direct')))
       .limit(3);
     // Не беседа 1:1 (нет такой или в ней не двое) — отрицательные ответы НЕ кэшируем, иначе память растёт от мусорных id.
     if (rows.length !== 2) return null;
@@ -154,11 +242,33 @@ async function dmPeerOf(dmId: string, senderId: string): Promise<string | null> 
   return null;
 }
 
+/**
+ * Беседа уже показана человеку (`conversations.conversationShownTo`, 05.10) — для «печатает». Показанная обратно не
+ * прячется, поэтому «да» помним до конца процесса; «нет» не помним — его снимет первое же дошедшее сообщение.
+ * ⚠️ Модуль бесед — лениво: шлюз грузят и тесты на PGlite (через `routes/users.ts`), им лишний граф ни к чему.
+ */
+const shownConvs = new Set<string>();
+
+async function convShownTo(dmId: string, userId: string): Promise<boolean> {
+  const key = `${dmId}:${userId}`;
+  if (shownConvs.has(key)) return true;
+  const { conversationShownTo } = await import('./conversations.js');
+  const shown = await conversationShownTo(dmId, userId);
+  if (shown) {
+    if (shownConvs.size > 20_000) shownConvs.clear(); // грубый потолок
+    shownConvs.add(key);
+  }
+  return shown;
+}
+
 /** Зависимости пересылки «печатает…» — настоящие; в тесте Codex подставляет свои (`gatewayTyping.ts`). */
 const typingDeps: TypingDeps<WsLike> = {
   rateHit,
   dmPeerOf,
   isBlockedBy,
+  shownTo: convShownTo,
+  // Группа (07.10, `groups1`): остальные действующие участники. Модуль — лениво, как `convShownTo`.
+  groupPeersOf: async (dmId, senderId) => (await import('./convGroups.js')).groupPeersOf(dmId, senderId),
   connsOf: (userId) => hub.connsOf(userId),
   send,
   getChannelAudience,
@@ -193,6 +303,9 @@ export function registerGateway(app: FastifyInstance): void {
   // server-scoped events (gw:server:<id>) and per-user DM events (gw:user:<id>).
   const sub = new Redis(env.redisUrl);
   sub.psubscribe('gw:server:*', 'gw:user:*');
+  // Блокировка и разблокировка (05.10): связь «через беседу» между этими двумя появилась или пропала (`loadPeers`) —
+  // забыть их соседей и прислать им свежий снимок онлайна, а не ждать срока кэша (60 с).
+  onBlockChange((blockerId, blockedId) => void hub.refreshPeers([blockerId, blockedId]).catch(() => {}));
   sub.on('pmessage', (_pattern, channel, message) => {
     const env = parseEnvelope(message);
     if (!env) return; // fail-closed: неразобранное не рассылаем (см. gatewayRules)
@@ -243,7 +356,7 @@ export function registerGateway(app: FastifyInstance): void {
     let identifying: Promise<void> | null = null;
 
     /** Разбор `identify` одним куском: его дожидаются остальные сообщения этого соединения (#126). */
-    const handleIdentify = async (token: string, caps: unknown): Promise<void> => {
+    const handleIdentify = async (token: string, caps: unknown, hidden: boolean): Promise<void> => {
         try {
           const claims = verifyToken(token);
           // Session revocation: a bumped generation (logout-everywhere / password change)
@@ -262,10 +375,25 @@ export function registerGateway(app: FastifyInstance): void {
             conn.tokenGen = claims.gen ?? 0;
             // Только при ПЕРВОМ `identify`: повторный на том же соединении не меняет форму уже идущих событий.
             conn.caps = parseCaps(caps);
+            // Невидимый ли человек — узнать ДО `goOnline`: его «зашёл в сеть» соседям не рассылается. Не ответила база —
+            // остаётся последняя известная шлюзу запись.
+            try {
+              const [row] = await db.select({ s: users.presenceStatus }).from(users).where(eq(users.id, claims.sub)).limit(1);
+              if (row) hub.setInvisible(claims.sub, row.s === 'invisible');
+            } catch {
+              /* последняя известная запись */
+            }
             hub.attach(conn, claims.sub);
             // Первый сокет человека — только тогда «зашёл в сеть» (вкладок и устройств бывает много).
-            if (hub.goOnline(claims.sub))
+            const first = hub.goOnline(claims.sub);
+            // ЛС (D4): сокет, открытый уже в фоне (`identify.hidden`), «здесь» не считается, пока клиент не скажет `visible`.
+            // `online.away` — ДО `online.update`: иначе соседский клиент на миг покажет в ЛС «в сети».
+            visibility.open(conn, hidden);
+            syncDmAway(claims.sub);
+            if (first) {
               hub.deliverAboutUser(claims.sub, { t: 'online.update', userId: claims.sub, online: true });
+              touchLastSeen(claims.sub);
+            }
           }
           send(socket, { t: 'ready', userId: conn.userId });
           // Только те, с кем есть общий сервер или ЛС, — а не весь инстанс (#136).
@@ -290,7 +418,7 @@ export function registerGateway(app: FastifyInstance): void {
       }
 
       if (msg.t === 'identify') {
-        identifying = handleIdentify(msg.token, msg.caps);
+        identifying = handleIdentify(msg.token, msg.caps, msg.hidden === true);
         await identifying;
         identifying = null;
         return;
@@ -340,6 +468,13 @@ export function registerGateway(app: FastifyInstance): void {
         }
         case 'unsubscribe':
           return unsubscribe(conn, msg.serverId);
+        case 'active':
+          // G38 (`push2`): признак жизни устройства — только для отложенного пуша, никому не рассылается.
+          return noteConnActive(conn, msg.on === true);
+        case 'visible':
+          // D4 (08.10): «здесь / нет» для ЛС — в сети в ЛС только такие соединения; ушедшее — через `HIDDEN_OFFLINE_MS`.
+          if (msg.on !== true) noteConnActive(conn, false);
+          return visibility.set(conn, msg.on !== true);
         case 'typing':
           // Ephemeral, cosmetic — но граница авторизации тут такая же, как у сообщений (#88); вся ветка — `gatewayTyping.ts`.
           return relayTyping(typingDeps, { userId: conn.userId, servers: conn.servers }, msg);
@@ -360,14 +495,34 @@ export function registerGateway(app: FastifyInstance): void {
       if (n <= 0) connsByIp.delete(ip);
       else connsByIp.set(ip, n);
       allConns.delete(conn);
+      noteConnActive(conn, false);
       hub.detach(conn);
       for (const serverId of conn.servers) byServer.get(serverId)?.delete(conn);
       conn.servers.clear();
       // Ушёл последний сокет — только тогда «вышел из сети».
-      if (conn.userId && hub.goOffline(conn.userId))
+      if (conn.userId && hub.goOffline(conn.userId)) {
         hub.deliverAboutUser(conn.userId, { t: 'online.update', userId: conn.userId, online: false });
+        touchLastSeen(conn.userId);
+      }
+      // ЛС (D4): после `online.update` — тогда соседям уходит и `online.away: false`, если человек был «не здесь».
+      visibility.close(conn);
+      if (conn.userId) syncDmAway(conn.userId);
     };
     socket.on('close', cleanup);
     socket.on('error', cleanup);
   });
+}
+
+/**
+ * «Был(а) в сети» (С1, #211): момент входа в сеть и выхода из неё — первый и последний сокет человека. Пока он в сети,
+ * клиент показывает «в сети», так что время между ними не нужно. Ошибка базы не мешает шлюзу: отметка просто старше.
+ */
+function touchLastSeen(userId: string): void {
+  void db
+    .update(users)
+    .set({ lastSeenAt: new Date() })
+    .where(eq(users.id, userId))
+    .catch(() => {
+      /* следующая отметка поправит */
+    });
 }

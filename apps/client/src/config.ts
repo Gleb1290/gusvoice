@@ -12,6 +12,8 @@ import {
 } from './configRules';
 import { isTauri } from './hotkeys';
 import { endGuestSessions as endGuestSessionsWith, logoutFamilyCore } from './logoutFamilyRules';
+import { deleteConvCache, deleteConvCacheForInstance } from './convCache';
+import { cacheWipeOnRemove } from './convCacheRules';
 
 // Чистые правила (нормализация адреса, переход реестра) — в `configRules.ts`, там же и типы.
 // Реэкспорт, чтобы компоненты продолжали импортировать их из `./config`.
@@ -236,6 +238,11 @@ export function removeInstance(id: string): void {
   const all = readInstances();
   endGuestSessions(all.filter((i) => i.guestOf === id));
   const list = all.filter((i) => i.id !== id && i.guestOf !== id);
+  // Кеш бесед этого инстанса и его гостевых записей (ЛС этап 2, `convCache.ts`) уходит вместе с записью реестра — но не
+  // кеш другой записи того же сервера (`convCacheRules.cacheWipeOnRemove`).
+  const wipe = cacheWipeOnRemove(all.filter((x) => x.id === id || x.guestOf === id), list);
+  for (const inst of wipe.instances) void deleteConvCacheForInstance(inst);
+  for (const key of wipe.keys) void deleteConvCache(key);
   writeInstances(list);
   const active = readActiveId();
   if (active === null || !list.some((i) => i.id === active)) writeActiveId(list[0]?.id ?? null);

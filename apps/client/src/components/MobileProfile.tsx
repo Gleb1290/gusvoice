@@ -103,9 +103,9 @@ export function MobileProfile() {
         <button
           type="button"
           className="prof-row danger"
-          onClick={() => {
+          onClick={async () => {
             setMobileProfileOpen(false);
-            logout();
+            await logout();
             location.reload();
           }}
         >

@@ -1,6 +1,6 @@
 import type { SmtpSettings } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
 import { toast, toastError } from '../toast';
 import { Toggle } from './Toggle';
 
@@ -26,7 +26,7 @@ export function SmtpForm({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api
+    adminApi()
       .adminGetSmtp()
       .then(setS)
       .catch((e) => toastError(e));
@@ -40,7 +40,7 @@ export function SmtpForm({
     if (!s) return;
     setBusy(true);
     try {
-      const r = await api.adminSetSmtp({
+      const r = await adminApi().adminSetSmtp({
         host: s.host.trim(),
         port: s.port,
         secure: s.secure,
@@ -49,7 +49,7 @@ export function SmtpForm({
         from: s.from.trim(),
       });
       setPass('');
-      setS(await api.adminGetSmtp());
+      setS(await adminApi().adminGetSmtp());
       toast('success', r.cleared ? 'Почта отключена' : 'Настройки почты сохранены');
       onSaved?.(!r.cleared);
     } catch (e) {
@@ -66,7 +66,7 @@ export function SmtpForm({
     }
     setBusy(true);
     try {
-      await api.adminTestSmtp(testTo.trim());
+      await adminApi().adminTestSmtp(testTo.trim());
       toast('success', 'Тестовое письмо отправлено', `Проверьте ящик ${testTo.trim()}.`);
     } catch (e) {
       toastError(e);

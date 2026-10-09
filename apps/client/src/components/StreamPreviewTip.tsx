@@ -11,7 +11,7 @@ import { animatedAvatarsEnabled } from '../avatarAnimation';
 import { cardGesture } from '../cardGesture';
 import { createHoverHold, type HoverHold } from '../hoverHold';
 import { topRoles, type RoleForBadge } from '../memberRoles';
-import { clampAxis, toLayoutRect, viewport } from '../popover';
+import { clampAxis, toLayoutRect, viewportSafe } from '../popover';
 import { customStatusVisible, effectiveDot, type DotStatus } from '../status';
 import { useStore } from '../store';
 import { toastError } from '../toast';
@@ -77,12 +77,12 @@ const TIP_GRACE_MS = 260;
  * Уходим вправо, в область содержимого; если справа не влезает (узкое окно) — влево.
  */
 function place(anchor: DOMRect, w: number, h: number): { left: number; top: number } {
-  const { vw, vh } = viewport();
+  const { vw, vh, top: top0 = 0, left: left0 = 0 } = viewportSafe();
   let left = anchor.right + GAP;
   if (left + w > vw - 8) left = anchor.left - w - GAP;
   // По вертикали цепляемся за строку, но приподнимаем: так центр карточки оказывается примерно
   // напротив курсора, а не уезжает вниз.
-  return { left: clampAxis(left, w, vw, 8), top: clampAxis(anchor.top - h / 2 + 12, h, vh, 8) };
+  return { left: clampAxis(left, w, vw, 8, left0), top: clampAxis(anchor.top - h / 2 + 12, h, vh, 8, top0) };
 }
 
 export interface StreamPreviewTarget {

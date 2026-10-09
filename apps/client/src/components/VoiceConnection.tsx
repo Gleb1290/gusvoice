@@ -22,7 +22,7 @@ import { stopNativeShareIfActive } from '../nativeShareSession';
 import { onNativeKeyPtt, onNativePtt, setPttKey, setPttMouseButton } from '../nativeStreamAudio';
 import { startNativeVoiceService, stopNativeVoiceService } from '../nativeVoiceService';
 import { playSound } from '../sounds';
-import { useStore, type LiveVoiceState, type VoiceState } from '../store';
+import { useStore, voiceApiOf, voiceIsHere, type LiveVoiceState, type VoiceState } from '../store';
 import { creditScreenOwners, ownerOf, streamAudioVolume } from '../streamAudioRules';
 import { toastError } from '../toast';
 import { lostCueDelayMs } from '../voiceCueRules';
@@ -37,7 +37,6 @@ import { diagVisible } from '../diagVisible';
 import { noteVadTick } from '../uiMeters';
 import { isWindowCovered, onWindowCovered } from '../windowCovered';
 import { DiagConsentDialog } from './DiagConsent';
-import { api } from '../api';
 import { setSelfMuted } from '../voiceSelf';
 import { GRACE_MS, touchVoiceSession } from '../voiceSession';
 import { vadFloor, vadInitial, vadOpenLevel, vadStep, type VadState } from '../speakingVad';
@@ -81,8 +80,15 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   const selfMuted = useStore((s) => s.selfMuted);
   const selfDeafened = useStore((s) => s.selfDeafened);
   // Live profile — pushed onto our LiveKit participant so voice tiles refresh on a name/avatar edit.
-  const userDisplayName = useStore((s) => s.user?.displayName);
-  const userAvatarUrl = useStore((s) => s.user?.avatarUrl ?? null);
+  // Голос на другом инстансе (смотрим дом) — живой `user` уже учётка ТОГО инстанса; в комнату идёт профиль, с которым
+  // зашли (`voice.self`), иначе собеседники увидели бы чужое имя, а на время перехода — пустой аватар.
+  // Решает ЛИЧНОСТЬ, а не инстанс: при возврате к инстансу голоса `user` ещё учётка того, откуда пришли (до `setAuth`).
+  const userDisplayName = useStore((s) =>
+    s.user && (!s.voice?.selfId || s.voice.selfId === s.user.id) ? s.user.displayName : (s.voice?.self?.displayName ?? s.user?.displayName),
+  );
+  const userAvatarUrl = useStore((s) =>
+    s.user && (!s.voice?.selfId || s.voice.selfId === s.user.id) ? (s.user.avatarUrl ?? null) : (s.voice?.self?.avatarUrl ?? null),
+  );
 
   const room = useMemo(() => {
     // Apply the user's saved audio prefs (devices + browser DSP) to this session's capture.
@@ -148,10 +154,23 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voice.channelId]);
 
+  /* 🔴 Голос живёт, пока смонтирован главный экран (01.10: переход между инстансами его больше не снимает). Сняли
+     его с голосом в сторе — переход в инстанс без входа, «инстанс не отвечает», 401 — комната уже отключается
+     cleanup'ом ниже, и голос надо закончить по-настоящему: иначе стор считал бы человека в голосе (трей, оверлей),
+     а при возврате главного экрана комната сама подключилась бы со старым токеном и открытым микрофоном. */
+  useEffect(
+    () => () => {
+      if (useStore.getState().voice) useStore.getState().leaveVoice();
+    },
+    [],
+  );
+
   // Android background voice (#89): hold a microphone foreground service for the whole in-voice lifetime
   // so locking the screen / backgrounding the app can't let the OS (Samsung especially) suspend mic
   // capture and silently drop the call. VoiceConnection stays mounted across channel switches AND the
   // reconnect-grace window, so this starts once on join and stops on leave. No-op off the Android build.
+  // 🔴 Смонтировались при скрытой странице (свернул до ответа с токеном, авто-возврат после обрыва) — сама служба
+  // стартует при возврате на экран: с Android 14 её микрофон из фона ронял приложение (#210, `nativeVoiceService.ts`).
   useEffect(() => {
     startNativeVoiceService();
     return () => {
@@ -245,7 +264,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // Диагностика (#100) живёт ровно столько же, сколько сидение в голосе. Начинать её со старта
     // ПОКАЗА было ошибкой: первый же замер снимался уже с включённым показом, и отделить «сколько
     // добавил показ» от «сколько машина ела и так» было не с чем. Пока показа нет — замеры редкие.
-    void startDiag(room);
+    void startDiag(room, voice.instanceId);
 
     return () => {
       clearGrace();
@@ -350,7 +369,8 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         const track = room.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.videoTrack?.mediaStreamTrack;
         return grabPreview(track ?? null);
       },
-      send: (image) => api.putStreamPreview(channelId, image),
+      // В инстанс ГОЛОСА: пока на экране другой, превью ушло бы туда с чужим id канала.
+      send: (image) => voiceApiOf(useStore.getState().voice).putStreamPreview(channelId, image),
       enabled: () => getStreamSettings().streamPreview,
       setTimer: (fn, ms) => window.setTimeout(fn, ms),
       clearTimer: (id) => window.clearTimeout(id),
@@ -467,10 +487,12 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // crash/restart within the grace window then auto-rejoins this exact channel on the next launch (#11).
   useEffect(() => {
     if (state !== 'connected') return;
-    touchVoiceSession();
-    const id = setInterval(touchVoiceSession, GRACE_MS / 3);
+    // По инстансу ГОЛОСА: после перехода активный — другой, и касание освежало бы чужую сессию.
+    const touch = () => touchVoiceSession(voice.instanceId);
+    touch();
+    const id = setInterval(touch, GRACE_MS / 3);
     return () => clearInterval(id);
-  }, [state]);
+  }, [state, voice.instanceId]);
 
   // Apply our self mute/deafen INTENT to the live room whenever it changes or we (re)connect. Deafen
   // forces the mic off (the mute pref is preserved, so un-deafen restores it); PTT owns the mic while
@@ -533,7 +555,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (selfDeafened) return;
     const reapply = () => {
-      for (const p of room.remoteParticipants.values()) applyUserAudio(p);
+      for (const p of room.remoteParticipants.values()) applyUserAudio(p, voice.instanceId);
     };
     reapply();
     const unsub = subscribeUserAudio(reapply);
@@ -1021,7 +1043,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
             // Согласился уже ПОСЛЕ входа в канал — сбор при входе не стартовал, потому что ответа
             // ещё не было. Заводим сейчас, иначе разрешение подействовало бы только со следующего
             // захода, и человек решил бы, что кнопка ничего не делает.
-            void startDiag(room);
+            void startDiag(room, voice.instanceId);
           }}
         />
       )}

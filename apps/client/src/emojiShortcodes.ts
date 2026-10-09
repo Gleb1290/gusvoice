@@ -12,7 +12,7 @@
 export { EMOJI_SHORTCODES, type EmojiEntry } from './emojiAliases';
 
 import { EMOJI_SHORTCODES, type EmojiEntry } from './emojiAliases';
-import { loadedIndex, searchEmojiNow } from './emojiIndex';
+import { exactEmojiNow, loadedIndex, searchEmojiNow } from './emojiIndex';
 import { codeForEmojiIn, emojiByCode, stripVs } from './emojiSearch';
 
 const BY_EMOJI = new Map(EMOJI_SHORTCODES.map((e) => [stripVs(e.emoji), e.codes[0]]));
@@ -45,6 +45,11 @@ export function emojiForCode(code: string): string | null {
  */
 export function searchEmoji(query: string, limit = 8): EmojiEntry[] {
   return searchEmojiNow(query, limit).map((e) => ({ emoji: e.emoji, codes: e.codes }));
+}
+
+/** Подсказки «слово целиком» (G53): эмодзи, у которых слово — название, ключевое слово или код. */
+export function exactEmojiEntries(word: string, limit = 8): EmojiEntry[] {
+  return exactEmojiNow(word, limit).map((e) => ({ emoji: e.emoji, codes: e.codes }));
 }
 
 /** Код, который показываем рядом с подсказкой — первый, совпавший с набранным. */

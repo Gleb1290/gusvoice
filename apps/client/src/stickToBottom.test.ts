@@ -1,5 +1,30 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import * as jump from './stickToBottom';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+
+it('«Вниз» сначала ведёт к черте на нижней границе, окно не у хвоста сохраняет черту всегда', () => {
+  // Равная нижней кромке черта иначе теряется при первом нажатии «Вниз».
+  assert.equal(jump.jumpDownTarget(null, 100), 'end');
+  assert.equal(jump.jumpDownTarget(99, 100), 'end');
+  assert.equal(jump.jumpDownTarget(100, 100), 'unread');
+  assert.equal(jump.jumpDownTarget(101, 100), 'unread');
+  assert.equal(jump.unreadDividerNeeded(100, 100, true), false);
+  assert.equal(jump.unreadDividerNeeded(101, 100, true), true);
+  assert.equal(jump.unreadDividerNeeded(0, 100, false), true);
+  const source = readFileSync(new URL('./stickToBottom.ts', import.meta.url), 'utf8');
+  for (const [from, to, check] of [
+    ['firstUnreadTop >= viewBottom', 'firstUnreadTop > viewBottom', (api: typeof jump) => assert.equal(api.jumpDownTarget(100, 100), 'unread')],
+    ['!atTail || dividerToEnd > viewHeight', 'dividerToEnd > viewHeight', (api: typeof jump) => assert.equal(api.unreadDividerNeeded(0, 100, false), true)],
+  ] as const) {
+    assert.ok(source.includes(from), 'мутируется действующее правило');
+    const module = { exports: {} };
+    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+    assert.throws(() => check(module.exports as typeof jump), assert.AssertionError);
+  }
+});
 import {
   HISTORY_TRIGGER_PX,
   NEAR_BOTTOM_PX,
@@ -66,4 +91,32 @@ describe('прилипание ленты к низу', () => {
     assert.equal(jumpDownLabel(99), '99 новых');
     assert.equal(jumpDownLabel(100), '99+ новых');
   });
+});
+
+it('кнопка вниз появляется за 480 px и по каждому самостоятельному основанию', () => {
+  // Ровно 480 px ещё скрывают кнопку, а неравные источники появления не должны затереть друг друга.
+  const box = (distance: number) => ({ scrollTop: 1000 - distance, scrollHeight: 2000, clientHeight: 1000 });
+  const check = (api: typeof jump) => {
+    assert.equal(api.JUMP_DOWN_SHOWN_AFTER, 480);
+    assert.equal(api.isFarFromBottom(box(480)), false);
+    assert.equal(api.isFarFromBottom(box(481)), true);
+    assert.equal(api.shouldShowCornerDown({ far: true, nearBottom: false, hasNewer: false, back: false, unread: 0 }), true);
+    assert.equal(api.shouldShowCornerDown({ far: false, nearBottom: true, hasNewer: true, back: false, unread: 0 }), true);
+    assert.equal(api.shouldShowCornerDown({ far: false, nearBottom: true, hasNewer: false, back: true, unread: 0 }), true);
+    assert.equal(api.shouldShowCornerDown({ far: false, nearBottom: false, hasNewer: false, back: false, unread: 1 }), true);
+    assert.equal(api.shouldShowCornerDown({ far: false, nearBottom: true, hasNewer: false, back: false, unread: 1 }), false);
+    assert.equal(api.shouldShowCornerDown({ far: false, nearBottom: false, hasNewer: false, back: false, unread: 0 }), false);
+  };
+  check(jump);
+  const source = readFileSync(new URL('./stickToBottom.ts', import.meta.url), 'utf8');
+  const load = (code: string): typeof jump => {
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+    return module.exports as typeof jump;
+  };
+  check(load(source));
+  const wrongThreshold = source.replace('box.scrollTop + after < box.scrollHeight - box.clientHeight', 'box.scrollTop + after > box.scrollHeight - box.clientHeight');
+  assert.notEqual(wrongThreshold, source, 'пороговый мутант изменил условие');
+  assert.throws(() => check(load(wrongThreshold)), assert.AssertionError,
+    'мутант с > скрывает кнопку на расстоянии 481 px');
 });

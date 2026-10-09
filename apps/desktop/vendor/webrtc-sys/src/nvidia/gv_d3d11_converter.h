@@ -169,7 +169,11 @@ class GvD3D11Converter {
     cd.OutputFrameRate = {60, 1};
     cd.OutputWidth = UINT(dst_w);
     cd.OutputHeight = UINT(dst_h);
-    cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+    // GusVoice (#207, 06.10): качество уменьшения, а не скорость. Показ экрана уменьшает стол в
+    // НЕЦЕЛОЕ число раз (1440p → 1080p, ультраширокий → 1080p, 1440p → 720p у среднего слоя), и
+    // быстрый фильтр мылил текст ещё до кодировщика. Цена — доли миллисекунды на видеокарте (замер 4.0:
+    // копия + перевод под три слоя 0,27 мс); слою без уменьшения (родное разрешение) всё равно.
+    cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
     const HRESULT hr = vdev_->CreateVideoProcessorEnumerator(&cd, &vpe_);
     if (FAILED(hr)) return Fail("CreateVideoProcessorEnumerator", hr);
     UINT flags = 0;

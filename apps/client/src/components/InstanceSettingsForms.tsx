@@ -1,12 +1,13 @@
-import type { AdminInstanceSettings, RegistrationPolicy } from '@gusvoice/shared';
+import type { AdminInstanceSettings, DmPolicy, RegistrationPolicy } from '@gusvoice/shared';
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
+import { LOCAL_NAME_FED_HINT } from '../fedOverview';
 import { toast, toastError } from '../toast';
 import { InstanceUpdateCard } from './InstanceUpdateCard';
 
 /**
- * Настройки инстанса: название, иконка, кто может регистрироваться (#142).
- * Одни и те же куски показывает мастер установки и вкладка «Инстанс» админ-панели.
+ * Настройки инстанса: название, иконка, кто может регистрироваться (#142), кто может начать личную переписку (05.10,
+ * только вкладка админ-панели). Одни и те же куски показывает мастер установки и вкладка «Инстанс» админ-панели.
  */
 
 const POLICY_CARDS: { value: RegistrationPolicy; title: string; text: string; recommended?: boolean }[] = [
@@ -68,6 +69,45 @@ export function RegistrationPolicyPicker({
   );
 }
 
+/** Кто может начать личную переписку (05.10, `dmPolicy`; нет настройки — `shared`). Карточки — те же, что у регистрации. */
+const DM_POLICY_CARDS: { value: DmPolicy; title: string; text: string }[] = [
+  {
+    value: 'shared',
+    title: 'Участники общего сервера',
+    text: 'Написать первым можно только тому, с кем есть общий сервер. Уже начатые переписки продолжаются при любом выборе.',
+  },
+  {
+    value: 'anyone',
+    title: 'Все на этом сервере GusVoice',
+    text:
+      'Любого человека можно найти по @имени и написать ему. Защита: не больше 10 новых переписок в час с незнакомыми, ' +
+      'у получателя переписка появляется только с первым сообщением, блокировка работает.',
+  },
+];
+
+export function DmPolicyPicker({ value, onChange }: { value: DmPolicy; onChange: (p: DmPolicy) => void }) {
+  return (
+    <div className="reg-policy" role="radiogroup" aria-label="Кто может начать личную переписку">
+      {DM_POLICY_CARDS.map((c) => (
+        <label key={c.value} className={`reg-card${value === c.value ? ' selected' : ''}`}>
+          <input
+            type="radio"
+            name="dm-policy"
+            value={c.value}
+            checked={value === c.value}
+            onChange={() => onChange(c.value)}
+          />
+          <span className="reg-card-dot" aria-hidden="true" />
+          <span className="reg-card-body">
+            <span className="reg-card-title">{c.title}</span>
+            <span className="reg-card-text">{c.text}</span>
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /** Квадрат с иконкой инстанса (или первой буквой названия) и кнопками «Загрузить» / «Убрать». */
 export function InstanceIconPicker({
   iconUrl,
@@ -84,7 +124,7 @@ export function InstanceIconPicker({
   async function upload(file: File) {
     setBusy(true);
     try {
-      const r = await api.adminUploadInstanceIcon(file);
+      const r = await adminApi().adminUploadInstanceIcon(file);
       onChange(r.iconUrl);
     } catch (e) {
       toastError(e, 'Не удалось загрузить иконку');
@@ -96,7 +136,7 @@ export function InstanceIconPicker({
   async function remove() {
     setBusy(true);
     try {
-      await api.adminDeleteInstanceIcon();
+      await adminApi().adminDeleteInstanceIcon();
       onChange(null);
     } catch (e) {
       toastError(e);
@@ -143,13 +183,25 @@ export function InstanceSettingsPanel() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api
+    adminApi()
       .adminInstance()
       .then((r) => {
         setS(r);
         setName(r.name ?? '');
       })
       .catch((e) => toastError(e));
+  }, []);
+
+  /**
+   * Федерация на этом инстансе поднята — тогда под названием подсказка, что у соседей оно ДРУГОЕ (#204). Не узнали
+   * (сеть, старый бэкенд) — подсказки нет, как и было.
+   */
+  const [fedOn, setFedOn] = useState(false);
+  useEffect(() => {
+    adminApi()
+      .instance()
+      .then((i) => setFedOn(i.federation === true))
+      .catch(() => {});
   }, []);
 
   if (!s) {
@@ -160,10 +212,10 @@ export function InstanceSettingsPanel() {
     );
   }
 
-  async function save(patch: { name?: string | null; registration?: RegistrationPolicy }) {
+  async function save(patch: { name?: string | null; registration?: RegistrationPolicy; dmPolicy?: DmPolicy }) {
     setBusy(true);
     try {
-      await api.adminSetInstance(patch);
+      await adminApi().adminSetInstance(patch);
       setS((cur) => (cur ? { ...cur, ...patch } : cur));
       toast('success', 'Сохранено');
     } catch (e) {
@@ -180,6 +232,7 @@ export function InstanceSettingsPanel() {
         <span>Название инстанса</span>
         <input value={name} maxLength={64} onChange={(e) => setName(e.target.value)} placeholder="Например, Гнездо" />
       </label>
+      {fedOn && <p className="muted inst-name-hint">{LOCAL_NAME_FED_HINT}</p>}
       <div className="smtp-actions">
         <button
           type="button"
@@ -200,6 +253,16 @@ export function InstanceSettingsPanel() {
         smtpConfigured={s.smtpConfigured}
         onChange={(registration) => void save({ registration })}
       />
+      {/* Бэкенд постарше поля не присылает — выбора нет: его ручка настройку не примет. */}
+      {s.dmPolicy !== undefined && (
+        <>
+          <hr className="smtp-sep" />
+          <div className="field">
+            <span>Кто может начать личную переписку</span>
+          </div>
+          <DmPolicyPicker value={s.dmPolicy} onChange={(dmPolicy) => void save({ dmPolicy })} />
+        </>
+      )}
     </div>
   );
 }

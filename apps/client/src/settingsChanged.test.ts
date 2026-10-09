@@ -2,10 +2,35 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { changedDotOn, GROUP_ITEMS, groupPrints, samePrints, sameValue, type SettingsSnapshot } from './settingsChanged.js';
 import type { StreamSettings } from './streamSettings.js';
+import { visibleSections } from './settingsNav';
+import { readFileSync } from 'node:fs';
+
+it('отправка и двойной клик сохраняют заводские умолчания и отмечают только свою группу во всех слоях настроек', () => {
+  // Новая настройка не должна потеряться из снимка, поискового раздела или индикатора изменений.
+  const base = snapshot(); const explicit = { ...base, sendMode: 'enter' as const, doubleClick: 'react' as const, quickReaction: '👍' };
+  assert.deepEqual(groupPrints(base), groupPrints(explicit));
+  for (const [patch, group] of [[{ sendMode: 'ctrl-enter' }, 'set-g-send'], [{ doubleClick: 'reply' }, 'set-g-dblclick'], [{ quickReaction: '🔥' }, 'set-g-dblclick']] as const) {
+    const changed = groupPrints({ ...explicit, ...patch });
+    assert.deepEqual(Object.keys(changed).filter((k) => changed[k] !== groupPrints(explicit)[k]), [group]);
+  }
+  const groups = visibleSections({ federation: false, desktop: true, mobile: false }).flatMap((s) => s.groups.map((g) => g.id));
+  for (const id of ['set-g-send', 'set-g-dblclick']) assert.ok(groups.includes(id));
+  const snap = readFileSync(new URL('./settingsSnapshot.ts', import.meta.url), 'utf8');
+  for (const field of ['sendMode', 'doubleClick', 'quickReaction']) assert.match(snap, new RegExp(`${field}:`));
+  const modal = readFileSync(new URL('./components/UserSettingsModal.tsx', import.meta.url), 'utf8');
+  for (const id of ['set-g-send', 'set-g-dblclick']) assert.ok(modal.includes(id));
+});
 
 const stream = (gpuPipeline?: boolean): StreamSettings => ({
   resolution: '1080', fps: 30, mode: 'detail', codec: 'h264', audio: true,
   wgcWindow: true, layers: true, streamPreview: true, ...(gpuPipeline === undefined ? {} : { gpuPipeline }),
+});
+it('настройка свайпа видна только на телефоне, pin помечает изменённой только свою группу', () => {
+  // Ловит неработающую настольную настройку и отсутствие маркера изменённого действия.
+  const groups=(mobile:boolean)=>visibleSections({federation:false,desktop:!mobile,mobile}).flatMap(s=>s.groups.map(g=>g.id));
+  assert.equal(groups(false).includes('set-g-swipe'),false); assert.equal(groups(true).includes('set-g-swipe'),true);
+  const base=snapshot(); const changed=groupPrints({...base,chatSwipe:'pin'});
+  assert.deepEqual(Object.keys(changed).filter(k=>changed[k]!==groupPrints(base)[k]),['set-g-swipe']);
 });
 
 function groupChanges(group: string, now: SettingsSnapshot, factory: SettingsSnapshot): number {

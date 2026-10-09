@@ -37,6 +37,7 @@ export async function blockedBy(blockerId: string): Promise<Set<string>> {
 export async function blockUser(blockerId: string, blockedId: string): Promise<void> {
   await db.insert(userBlocks).values({ blockerId, blockedId }).onConflictDoNothing();
   cache.delete(blockerId);
+  notifyBlockChange(blockerId, blockedId);
 }
 
 export async function unblockUser(blockerId: string, blockedId: string): Promise<void> {
@@ -44,6 +45,31 @@ export async function unblockUser(blockerId: string, blockedId: string): Promise
     .delete(userBlocks)
     .where(and(eq(userBlocks.blockerId, blockerId), eq(userBlocks.blockedId, blockedId)));
   cache.delete(blockerId);
+  notifyBlockChange(blockerId, blockedId);
+}
+
+/**
+ * Кто хочет знать о смене чёрного списка (05.10): шлюз сбрасывает кэш «соседей» обоих и шлёт им свежий снимок онлайна —
+ * связь «через беседу» между заблокированными не считается (`db/peerQueries.loadPeers`), и без сброса онлайн висел бы
+ * до 60 с. Слушатель, а не импорт шлюза: этот модуль грузят тесты на PGlite, а шлюз тянет Redis. Процесс тот же один,
+ * что и у кеша выше.
+ */
+type BlockListener = (blockerId: string, blockedId: string) => void;
+const blockListeners = new Set<BlockListener>();
+
+export function onBlockChange(fn: BlockListener): () => void {
+  blockListeners.add(fn);
+  return () => blockListeners.delete(fn);
+}
+
+function notifyBlockChange(blockerId: string, blockedId: string): void {
+  for (const fn of blockListeners) {
+    try {
+      fn(blockerId, blockedId);
+    } catch {
+      /* слушатель не роняет запись блокировки */
+    }
+  }
 }
 
 /** Для тестов: сбросить кеш после записи в базу мимо модуля. */

@@ -1,7 +1,48 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import type { GatewayServerMessage } from '@gusvoice/shared';
+import { aboutUserSteps, mayObserveUser, membershipDiff, visibleOnline } from './gatewayRules.js';
 import { createUserVisibilityHub, type HubConn } from './userVisibilityHub.js';
+import { statusSeenBy } from './statusRules.js';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import * as shared from '@gusvoice/shared';
+import * as gatewayRules from './gatewayRules.js';
+
+function loadPresence5(from?: string, to?: string): typeof createUserVisibilityHub {
+  let source = readFileSync(new URL('./userVisibilityHub.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  if (from) { assert.equal(source.split(from).length, 2, 'якорь presence5 уникален'); const changed = source.replace(from, to!); assert.notEqual(changed, source); source = changed; }
+  const module = { exports: {} as { createUserVisibilityHub: typeof createUserVisibilityHub } };
+  const deps: Record<string, unknown> = { '@gusvoice/shared': shared, './gatewayRules.js': gatewayRules };
+  runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module, exports: module.exports, setTimeout, clearTimeout, require: (id: string) => { assert.ok(id in deps); return deps[id]; } });
+  return module.exports.createUserVisibilityHub;
+}
+async function checkPresence5(make: typeof createUserVisibilityHub) {
+  const sent: { name: string; data: string }[] = [];
+  const hub = make<Conn>({ loadPeers: async () => new Set(['subject', 'peer']), now: () => 0, superAdminId: () => 'admin', send: (c, data) => sent.push({ name: c.name, data }) });
+  const caps = new Set([shared.FEATURE_PRESENCE5]);
+  const conns: Conn[] = [{ name: 'self', userId: 'subject', caps }, { name: 'new', userId: 'peer', caps }, { name: 'old', userId: 'peer' },
+    { name: 'stranger', userId: 'stranger', caps }, { name: 'admin', userId: 'admin', caps }];
+  for (const c of conns) hub.attach(c, c.userId!);
+  hub.goOnline('subject'); hub.goOnline('peer');
+  assert.equal(hub.setDmAway('subject', true), true); assert.equal(hub.setDmAway('subject', true), false);
+  await hub.peersOf('subject'); await Promise.resolve();
+  assert.deepEqual(sent.map(row => row.name), ['new', 'admin'], 'away только новым соседям и не самому');
+  for (const row of sent) assert.deepEqual(JSON.parse(row.data), { t: 'online.away', userId: 'subject', away: true });
+  sent.length = 0; await hub.sendOnlineSnapshot(conns[1]!); await hub.sendOnlineSnapshot(conns[2]!);
+  assert.deepEqual(JSON.parse(sent[0]!.data), { t: 'online.snapshot', users: ['subject', 'peer'], dmAway: ['subject'] }, 'новый снимок включает dmAway');
+  assert.equal(sent[1]!.data, '{"t":"online.snapshot","users":["subject","peer"]}', 'старый снимок байт в байт прежний');
+  sent.length = 0; hub.setDmAway('subject', false); hub.setDmAway('subject', false); await Promise.resolve(); await Promise.resolve();
+  assert.equal(hub.isDmAway('subject'), false); assert.equal(sent.length, 2, 'возврат доставляется один раз каждому новому наблюдателю');
+}
+it('presence5: away фильтруется по праву, caps и владельцу, снимок совместим со старым', async () => { await checkPresence5(createUserVisibilityHub); await checkPresence5(loadPresence5()); });
+for (const [name, from, to, failure] of [
+  ['нет фильтра возможностей', 'for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5)) send(c, data);', 'for (const c of set) send(c, data);', 'away только новым'],
+  ['событие своему соединению', 'if (uid === subjectId || !mayObserveUser(uid, subjectId, peers, su)) continue;\n        for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5))', 'if (!mayObserveUser(uid, subjectId, peers, su)) continue;\n        for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5))', 'away только новым'],
+  ['dmAway старому клиенту', 'const dmAwayIds = conn.caps?.has(FEATURE_PRESENCE5)', 'const dmAwayIds = true', 'старый снимок байт'],
+]) it(`presence5: исходниковый мутант «${name}» пойман`, async () => { await checkPresence5(loadPresence5()); await assert.rejects(() => checkPresence5(loadPresence5(from, to)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure!)); });
 
 interface Conn extends HubConn {
   name: string;
@@ -227,6 +268,205 @@ describe('хаб видимости пользователей (#143)', () => {
     loading.resolve(new Set());
     await Promise.all(jobs);
     assert.equal(sends, 0);
+  });
+
+  it('невидимый не светится соседям, смена видимости даёт только переходы online соседям', async () => {
+    // Равенство статуса и офлайн-переходы не должны создавать шум; собственные устройства всегда знают реальный online.
+    const sent: { name: string; message: GatewayServerMessage }[] = [];
+    const peers = new Set(['hidden', 'friend', 'admin']);
+    const hub = createUserVisibilityHub<Conn>({
+      loadPeers: async (id) => (id === 'hidden' ? peers : new Set(['hidden'])),
+      now: () => 0,
+      superAdminId: () => 'admin',
+      send: (conn, data) => sent.push({ name: conn.name, message: JSON.parse(data) as GatewayServerMessage }),
+    });
+    const conns: Conn[] = [
+      { name: 'hidden-1', userId: 'hidden' },
+      { name: 'hidden-2', userId: 'hidden' },
+      { name: 'friend', userId: 'friend' },
+      { name: 'admin', userId: 'admin' },
+    ];
+    for (const c of conns) hub.attach(c, c.userId!);
+    hub.setInvisible('hidden', true);
+    hub.goOnline('hidden');
+    hub.goOnline('friend');
+    hub.goOnline('admin');
+
+    await hub.sendOnlineSnapshot(conns[2]!);
+    await hub.sendOnlineSnapshot(conns[3]!);
+    await hub.sendOnlineSnapshot(conns[0]!);
+    assert.deepEqual(sent.splice(0).map(({ name, message }) => [name, message]), [
+      ['friend', { t: 'online.snapshot', users: ['friend'] }],
+      ['admin', { t: 'online.snapshot', users: ['friend', 'admin'] }],
+      ['hidden-1', { t: 'online.snapshot', users: ['hidden', 'friend', 'admin'] }],
+    ], 'чужие снимки исключают invisible и собственный включает владельца');
+
+    hub.setInvisible('hidden', false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.splice(0).map(({ name, message }) => [name, message]), [
+      ['friend', { t: 'online.update', userId: 'hidden', online: true }],
+      ['admin', { t: 'online.update', userId: 'hidden', online: true }],
+    ], 'выход из invisible сообщает о появлении только соседям');
+
+    hub.setInvisible('hidden', true);
+    hub.setInvisible('hidden', true);
+    hub.deliverAboutUser('hidden', { t: 'online.update', userId: 'hidden', online: true });
+    hub.deliverAboutUser('hidden', activity('hidden'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.map(({ name, message }) => [name, message]), [
+      ['friend', { t: 'online.update', userId: 'hidden', online: false }],
+      ['admin', { t: 'online.update', userId: 'hidden', online: false }],
+      ['hidden-1', { t: 'online.update', userId: 'hidden', online: true }],
+      ['hidden-2', { t: 'online.update', userId: 'hidden', online: true }],
+      ['hidden-1', { t: 'user.activity', userId: 'hidden', activity: null }],
+      ['hidden-2', { t: 'user.activity', userId: 'hidden', activity: null }],
+      ['friend', { t: 'user.activity', userId: 'hidden', activity: null }],
+      ['admin', { t: 'user.activity', userId: 'hidden', activity: null }],
+    ], 'online.update невидимого доходит только его устройствам, а activity — всем законным наблюдателям');
+    sent.length = 0;
+
+    hub.setInvisible('offline', true);
+    hub.setInvisible('hidden', false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.splice(0).map(({ name, message }) => [name, message]), [
+      ['friend', { t: 'online.update', userId: 'hidden', online: true }],
+      ['admin', { t: 'online.update', userId: 'hidden', online: true }],
+    ], 'невидимость снимается и онлайн-событие возникает ровно один раз');
+    hub.setInvisible('hidden', true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.splice(0).map(({ name, message }) => [name, message]), [
+      ['friend', { t: 'online.update', userId: 'hidden', online: false }],
+      ['admin', { t: 'online.update', userId: 'hidden', online: false }],
+    ], 'повторное включение переводит соседей в offline');
+    hub.setInvisible('offline', true);
+    hub.setInvisible('hidden', false);
+    hub.setInvisible('hidden', false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.map(({ name, message }) => [name, message]), [
+      ['friend', { t: 'online.update', userId: 'hidden', online: true }],
+      ['admin', { t: 'online.update', userId: 'hidden', online: true }],
+    ], 'повторное значение не создаёт дополнительного события');
+    assert.equal(hub.isInvisible('offline'), true, 'офлайн-статус запоминается без ложной рассылки');
+    assert.equal(hub.isInvisible('hidden'), false, 'повторное значение остаётся идемпотентным');
+
+    // Исполняем мутированные копии реальной фабрики: guards ниже должны отличать все три регрессии.
+    const factorySource = createUserVisibilityHub.toString();
+    const makeMutant = (source: string) => runInNewContext(`(${source})`, {
+      __name: (fn: (...args: unknown[]) => unknown) => fn,
+      withTimeout: <T>(promise: Promise<T>) => promise,
+      DEFAULT_PEERS_TTL_MS: 60_000,
+      DEFAULT_PEERS_LOAD_TIMEOUT_MS: 10_000,
+      DEFAULT_PEERS_CACHE_MAX: 5_000,
+      mayObserveUser,
+      membershipDiff,
+      visibleOnline,
+    }) as typeof createUserVisibilityHub;
+    const noOnlineCheckNeedle = 'if(online.has(userId))deliver(userId,{t:"online.update",userId,online:!value},"others")';
+    assert.ok(factorySource.includes(noOnlineCheckNeedle), 'исходник мутанта должен совпадать с offline guard');
+    const noOnlineCheckSource = factorySource.replace(noOnlineCheckNeedle, 'deliver(userId,{t:"online.update",userId,online:!value},"others")');
+    const noOnlineCheck = makeMutant(noOnlineCheckSource);
+    const offlineSent: string[] = [];
+    const offlineMutantHub = noOnlineCheck<Conn>({
+      loadPeers: async () => new Set(['observer']), now: () => 0, superAdminId: () => null,
+      send: (conn) => offlineSent.push(conn.name),
+    });
+    offlineMutantHub.attach({ name: 'observer', userId: 'observer' }, 'observer');
+    offlineMutantHub.setInvisible('offline', true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(offlineSent, ['observer'], 'мутант без online.has рассылает ложный offline о незашедшем человеке');
+
+    const othersNeedle = 'deliver(userId,{t:"online.update",userId,online:!value},"others")';
+    assert.ok(factorySource.includes(othersNeedle), 'исходник мутанта должен содержать рассылку только соседям');
+    const allInsteadOfOthers = makeMutant(factorySource.replace(othersNeedle, 'deliver(userId,{t:"online.update",userId,online:!value},"all")'));
+    const allSent: string[] = [];
+    const allMutantHub = allInsteadOfOthers<Conn>({
+      loadPeers: async () => new Set(['observer']), now: () => 0, superAdminId: () => null,
+      send: (conn) => allSent.push(conn.name),
+    });
+    allMutantHub.attach({ name: 'subject', userId: 'subject' }, 'subject');
+    allMutantHub.attach({ name: 'observer', userId: 'observer' }, 'observer');
+    allMutantHub.goOnline('subject');
+    allMutantHub.setInvisible('subject', true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(allSent.sort(), ['observer', 'subject'], 'мутант others→all шлёт переход самому владельцу');
+
+    const deleteNeedle = 'else invisible.delete(userId)';
+    assert.ok(factorySource.includes(deleteNeedle), 'исходник мутанта должен очищать флаг при возврате из invisible');
+    const staleInvisible = makeMutant(factorySource.replace(deleteNeedle, 'else {}'));
+    const staleHub = staleInvisible({
+      loadPeers: async () => new Set(['observer']), now: () => 0, superAdminId: () => null, send: () => undefined,
+    });
+    staleHub.goOnline('subject');
+    staleHub.setInvisible('subject', true);
+    staleHub.setInvisible('subject', false);
+    assert.equal(staleHub.isInvisible('subject'), true, 'мутант без delete оставляет человека скрытым после возврата в online');
+  });
+
+  it('user.status отдаёт invisible своим устройствам и online соседям, не маскируя остальные статусы', async () => {
+    // REST и socket должны скрывать один и тот же privacy-state: супер-админ не становится исключением из правила.
+    const sent: { name: string; message: GatewayServerMessage }[] = [];
+    const hub = createUserVisibilityHub<Conn>({
+      loadPeers: async () => new Set(['friend', 'admin']),
+      now: () => 0,
+      superAdminId: () => 'admin',
+      send: (conn, data) => sent.push({ name: conn.name, message: JSON.parse(data) as GatewayServerMessage }),
+    });
+    for (const conn of [
+      { name: 'hidden', userId: 'hidden' },
+      { name: 'friend', userId: 'friend' },
+      { name: 'admin', userId: 'admin' },
+    ]) hub.attach(conn, conn.userId);
+    const invisible: GatewayServerMessage = { t: 'user.status', userId: 'hidden', status: 'invisible', customStatus: null };
+    hub.deliverAboutUser('hidden', invisible);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.splice(0).map(({ name, message }) => [name, message]), [
+      ['hidden', invisible],
+      ['friend', { ...invisible, status: 'online' }],
+      ['admin', { ...invisible, status: 'online' }],
+    ], 'только владелец видит invisible, включая служебного супер-админа');
+
+    for (const status of ['online', 'dnd', 'away'] as const) {
+      const message: GatewayServerMessage = { t: 'user.status', userId: 'hidden', status, customStatus: null };
+      hub.deliverAboutUser('hidden', message);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(sent.splice(0).map(({ name, message: delivered }) => [name, delivered]), [
+        ['hidden', message], ['friend', message], ['admin', message],
+      ], `${status} остаётся неизменным для своих и соседей`);
+    }
+
+    // Мутации запускают настоящее тело фабрики с той же чистой зависимостью видимости.
+    const source = aboutUserSteps.toString();
+    const needle = 'status:statusSeenBy(msg.status,subjectId,null)';
+    assert.ok(source.includes(needle), 'мутационный якорь должен совпадать с веткой приватного user.status');
+    const makeMutant = (body: string) => runInNewContext(`(${createUserVisibilityHub.toString()})`, {
+      __name: (fn: (...args: unknown[]) => unknown) => fn,
+      withTimeout: <T>(promise: Promise<T>) => promise,
+      DEFAULT_PEERS_TTL_MS: 60_000,
+      DEFAULT_PEERS_LOAD_TIMEOUT_MS: 10_000,
+      DEFAULT_PEERS_CACHE_MAX: 5_000,
+      mayObserveUser, membershipDiff, visibleOnline,
+      aboutUserSteps: runInNewContext(`(${body})`, { __name: (fn: unknown) => fn, statusSeenBy }),
+    }) as typeof createUserVisibilityHub;
+
+    const assertMutationRejected = async (mutantFactory: typeof createUserVisibilityHub, label: string) => {
+      const got: { name: string; message: GatewayServerMessage }[] = [];
+      const mutatedHub = mutantFactory<Conn>({
+        loadPeers: async () => new Set(['friend']), now: () => 0, superAdminId: () => null,
+        send: (conn, data) => got.push({ name: conn.name, message: JSON.parse(data) as GatewayServerMessage }),
+      });
+      mutatedHub.attach({ name: 'hidden', userId: 'hidden' }, 'hidden');
+      mutatedHub.attach({ name: 'friend', userId: 'friend' }, 'friend');
+      mutatedHub.deliverAboutUser('hidden', invisible);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.throws(() => assert.deepEqual(got.map(({ name, message }) => [name, message]), [
+        ['hidden', invisible], ['friend', { ...invisible, status: 'online' }],
+      ], 'owner and peer must receive privacy-filtered variants'), assert.AssertionError, label);
+    };
+    assert.ok(source.includes('who:"others"'));
+    const allInsteadOfOthers = makeMutant(source.replace('who:"others"', 'who:"all"'));
+    await assertMutationRejected(allInsteadOfOthers, 'мутант others→all показывает маскированное состояние владельцу повторно');
+    const noPrivacyBranch = makeMutant(source.replace(needle, 'status:msg.status'));
+    await assertMutationRejected(noPrivacyBranch, 'удалённая ветка рассылает invisible всем получателям как есть');
   });
 
   it('неизменный состав сервера не сбрасывает кэш и не рассылает снимки', async () => {

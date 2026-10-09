@@ -9,7 +9,7 @@ const classes = [...pane.matchAll(/className="att-btn\s+([\w-]+)"/g)].map((m) =>
 describe('кнопки мобильного композера', () => {
   it('тест знает каждую разновидность att-btn из компонента', () => {
     // Ловит добавление новой кнопки, которую забыли распределить между строкой и шторкой телефона.
-    assert.deepEqual([...new Set(classes)].sort(), ['attach', 'emoji', 'plus', 'poll', 'voice']);
+    assert.deepEqual([...new Set(classes)].sort(), ['attach', 'emoji', 'plus', 'poll', 'sched', 'textfile', 'voice']);
   });
 
   it('кнопка плюса скрыта по умолчанию и явно включается первой только в мобильной раскладке', () => {
@@ -22,5 +22,7 @@ describe('кнопки мобильного композера', () => {
     // Ловит возврат переполненной строки на 411 px и исчезновение двери в кастомные эмодзи.
     assert.match(css, /\.att-btn\.attach,\s*\.app\.m-content \.composer \.att-btn\.voice,\s*\.app\.m-content \.composer \.att-btn\.poll\s*\{\s*display:\s*none;/s);
     assert.match(css, /\.app\.m-content \.composer \.att-btn\.emoji\s*\{\s*order:\s*3;/s);
+    assert.match(css, /\.app\.m-content \.composer \.att-btn\.sched\s*\{\s*order:\s*2;/s);
+    assert.match(css, /\.app\.m-content \.composer \.att-btn\.textfile\s*\{\s*order:\s*2;/s);
   });
 });

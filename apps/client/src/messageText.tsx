@@ -8,7 +8,7 @@ import { useState } from 'react';
  * inject markup no matter what it contains. That's the whole security model here: user text never
  * becomes HTML, it becomes text nodes inside elements we chose.
  *
- * Supported: `**bold**`, `*italic*` / `_italic_`, `~~strike~~`, `` `code` ``, ```fenced blocks```,
+ * Supported: `**bold**`, `*italic*` / `_italic_` / `__italic__`, `<u>underline</u>`, `~~strike~~`, `` `code` ``, ```fenced blocks```,
  * `> quote`, `||spoiler||`, bare http(s) links, @mentions. Deliberately NOT a full Markdown: no
  * images, no raw HTML, no link syntax with a custom label — a label that lies about its destination
  * is the oldest phishing trick there is, and the URL is what we want people to read.
@@ -33,12 +33,16 @@ const INLINE = new RegExp(
     '(\\|\\|[\\s\\S]+?\\|\\|)', // 2 spoiler
     '(\\*\\*[^*\\n]+\\*\\*)', // 3 bold
     '(~~[^~\\n]+~~)', // 4 strike
-    '(\\*[^*\\n]+\\*)', // 5 italic *
-    // 6 italic _ — with word boundaries, so snake_case_names and my_file_name.txt stay literal
+    // 5 подчёркнутый — маркер HTML-разметки Telegram (`<u>`): своего markdown у него нет (G20). Только эта пара, не HTML.
+    '(<u>[^\\n]+?</u>)',
+    // 6 italic __ — markdown Telegram (G51); границы слова, как у `_`, чтобы `__init__` в тексте осталось буквами
+    '((?<![\\p{L}\\p{N}_])__[^\\n]+?__(?![\\p{L}\\p{N}_]))',
+    '(\\*[^*\\n]+\\*)', // 7 italic *
+    // 8 italic _ — with word boundaries, so snake_case_names and my_file_name.txt stay literal
     '((?<![\\p{L}\\p{N}])_[^_\\n]+_(?![\\p{L}\\p{N}]))',
-    '(https?://[^\\s<>"]+)', // 7 link
-    `${MENTION_LEFT_GUARD}(@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?)`, // 8 mention (+ @домен у гостя)
-    // 9 кастомное эмодзи сервера `:name:` (#18). Перед двоеточием обязан идти НЕ буквенно-цифровой
+    '(https?://[^\\s<>"]+)', // 9 link
+    `${MENTION_LEFT_GUARD}(@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?)`, // 10 mention (+ @домен у гостя)
+    // 11 кастомное эмодзи сервера `:name:` (#18). Перед двоеточием обязан идти НЕ буквенно-цифровой
     // символ и не двоеточие — иначе `10:30:00` превращается в эмодзи `:30:`, а `host:8080:` в `:8080:`.
     '((?<![\\p{L}\\p{N}_:]):[a-z0-9_]{2,32}:)',
   ].join('|'),
@@ -100,7 +104,7 @@ function inline(
   for (const m of text.matchAll(INLINE)) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const k = `${key}-${i++}`;
-    const [, code, spoiler, bold, strike, ital1, ital2, link, mention, emoji] = m;
+    const [, code, spoiler, bold, strike, under, italDbl, ital1, ital2, link, mention, emoji] = m;
     if (code) {
       out.push(
         <code className="md-code" key={k}>
@@ -113,6 +117,10 @@ function inline(
       out.push(<strong key={k}>{inline(bold.slice(2, -2), k, onLink, onEmoji)}</strong>);
     } else if (strike) {
       out.push(<s key={k}>{inline(strike.slice(2, -2), k, onLink, onEmoji)}</s>);
+    } else if (under) {
+      out.push(<u key={k}>{inline(under.slice(3, -4), k, onLink, onEmoji)}</u>);
+    } else if (italDbl) {
+      out.push(<em key={k}>{inline(italDbl.slice(2, -2), k, onLink, onEmoji)}</em>);
     } else if (ital1 || ital2) {
       const raw = (ital1 ?? ital2) as string;
       out.push(<em key={k}>{inline(raw.slice(1, -1), k, onLink, onEmoji)}</em>);

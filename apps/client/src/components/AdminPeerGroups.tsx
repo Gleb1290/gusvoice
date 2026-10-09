@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AdminServer, FederationPeerGroup } from '@gusvoice/shared';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
 import { count } from '../plural';
 import { InstanceBanModal } from './InstanceBanModal';
 import { Toggle } from './Toggle';
@@ -50,7 +50,7 @@ function PeerAvatar({ instanceId, user }: { instanceId: string; user: Federation
   useEffect(() => {
     if (url || !user.avatarHash) return;
     let alive = true;
-    api
+    adminApi()
       .federationPeerAvatar(instanceId, user.userId)
       .then((res) => {
         if (alive) setUrl(res.url);
@@ -82,14 +82,14 @@ export function PeerUsersGroup({ peer }: { peer: FederationPeerGroup }) {
   // галочка «Пожаловаться», и что показать, когда сосед жалоб не принимает.
   useEffect(() => {
     if (!open || reports !== null) return;
-    api
+    adminApi()
       .federationOverview()
       .then((o) => {
         const link = o.links.find((l) => l.instanceId === peer.instanceId);
         setReports(!!link?.features.includes('reports'));
       })
       .catch(() => setReports(false));
-    api
+    adminApi()
       .federationPeerContacts(peer.instanceId)
       .then((c) => setContacts(c.contacts))
       .catch(() => setContacts([]));
@@ -198,7 +198,7 @@ export function ServerFederationCell({
   async function save(nextEnabled: boolean, nextExclusions: string[]) {
     setBusy(true);
     try {
-      const res = await api.adminSetServerFederation(server.id, nextEnabled, nextExclusions);
+      const res = await adminApi().adminSetServerFederation(server.id, nextEnabled, nextExclusions);
       onChanged(res.federatedAccess, res.federationExclusions);
     } finally {
       setBusy(false);

@@ -4,7 +4,7 @@ import { loadedIndex, loadEmojiIndex, type EmojiIndex } from '../emojiIndex';
 import { type Emoji, rankEmoji, withSkinTone } from '../emojiSearch';
 import { EMOJI_SHORTCODES } from '../emojiAliases';
 import { codeForEmoji } from '../emojiShortcodes';
-import { clampAxis, placeByAnchor, toLayoutRect, viewport } from '../popover';
+import { clampAxis, placeByAnchor, toLayoutRect, viewport, viewportSafe } from '../popover';
 import { exprAutoFocus } from './ExprTabs';
 
 const RECENT_KEY = 'gv_emoji_recent';
@@ -45,6 +45,21 @@ const HINT_MS = 1000;
 type Cell = { char: string; base?: Emoji; custom?: ServerEmoji };
 
 /**
+ * Якорь панели: снимок `anchor` (рамка кнопки при открытии) или, если известна кнопка, её живая рамка, растянутая до верхней кромки
+ * поля ввода вокруг — панель встаёт над ПОЛЕМ, а не над кнопкой, которая у нижней кромки растущего поля.
+ */
+function liveAnchor(anchor: DOMRect, el: Element | undefined): DOMRect {
+  if (!el?.isConnected) return anchor;
+  const b = el.getBoundingClientRect();
+  const field = el.closest('.composer');
+  if (!field) return b;
+  const f = field.getBoundingClientRect();
+  const top = Math.min(b.top, f.top);
+  const bottom = Math.max(b.bottom, f.bottom);
+  return new DOMRect(b.left, top, b.width, bottom - top);
+}
+
+/**
  * Emoji picker popover anchored above a trigger button. Used by message reactions and the
  * composer. Renders a transparent backdrop that closes it on outside-click / Escape.
  *
@@ -59,12 +74,20 @@ type Cell = { char: string; base?: Emoji; custom?: ServerEmoji };
  */
 export function EmojiPicker({
   anchor,
+  anchorEl,
   onPick,
   onClose,
   custom,
   footer,
+  docked,
 }: {
   anchor: DOMRect;
+  /**
+   * Кнопка-источник в поле ввода: если дана, место считается по ЖИВОМУ полю (`.composer` вокруг кнопки), а не по снимку `anchor` —
+   * поле растёт после открытия (подсказка при крупном шрифте переносится на вторую строку, текст в несколько строк) и панель
+   * налезала на него на 30 px (приёмка S20+, font_scale 1.3). Размер поля сторожит ResizeObserver.
+   */
+  anchorEl?: Element;
   /** Юникодный символ, либо (для кастомного) сам символ-заглушка + запись эмодзи вторым аргументом. */
   onPick: (emoji: string, custom?: ServerEmoji) => void;
   onClose: () => void;
@@ -75,6 +98,11 @@ export function EmojiPicker({
    * символ, а в личке серверных эмодзи нет по определению (#18).
    */
   custom?: ServerEmoji[];
+  /**
+   * Закреплена колонкой справа от ленты (G61, `exprDock.ts`): без подложки, без места по якорю, Esc не закрывает; занимает
+   * всю колонку (`.expr-dock`).
+   */
+  docked?: boolean;
 }) {
   const recents = getRecents();
   const mine = custom ?? [];
@@ -103,31 +131,38 @@ export function EmojiPicker({
   }, []);
 
   useEffect(() => {
+    if (docked) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, docked]);
 
   useLayoutEffect(() => {
+    if (docked) return;
     function place() {
       const el = popRef.current;
       if (!el) return;
       // offsetWidth/Height уже вёрсточные — а вот anchor пришёл из getBoundingClientRect и потому
       // экранный. Без перевода при масштабе ≠ 100% поповер уезжает на zoom-долю экрана.
       const { offsetWidth: w, offsetHeight: h } = el;
-      setPos(placeByAnchor(toLayoutRect(anchor), w, h, M));
+      setPos(placeByAnchor(toLayoutRect(liveAnchor(anchor, anchorEl)), w, h, M, viewportSafe()));
     }
     place();
+    // Поле ввода выросло / сжалось (его верхняя кромка двигает якорь) — поставить заново.
+    const field = anchorEl?.isConnected ? anchorEl.closest('.composer') : null;
+    const ro = field && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+    if (field) ro?.observe(field);
     window.addEventListener('resize', place);
     // The keyboard opening fires visualViewport resize, not window resize.
     window.visualViewport?.addEventListener('resize', place);
     return () => {
+      ro?.disconnect();
       window.removeEventListener('resize', place);
       window.visualViewport?.removeEventListener('resize', place);
     };
-  }, [anchor]);
+  }, [anchor, anchorEl, docked]);
 
   /** Запасной набор до загрузки таблицы: рукописные алиасы, показываются одной кучей. */
   const fallback: Emoji[] = useMemo(
@@ -210,18 +245,18 @@ export function EmojiPicker({
 
   return (
     <>
-      <div className="emoji-backdrop" onClick={onClose} />
+      {!docked && <div className="emoji-backdrop" onClick={onClose} />}
       <div
-        className={`emoji-pop${footer ? ' expr' : ''}`}
+        className={`emoji-pop${footer ? ' expr' : ''}${docked ? ' docked' : ''}`}
         ref={popRef}
         // Hidden for the first paint only: placement needs the rendered size, so there is one frame
         // where we don't know where it goes — showing it at 0,0 first would read as a jump.
-        style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
+        style={docked ? undefined : pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="emoji-search">
           <input
-            autoFocus={exprAutoFocus(footer)}
+            autoFocus={!docked && exprAutoFocus(footer)}
             value={query}
             placeholder="Поиск: огонь, кот, пицца…"
             aria-label="Поиск эмодзи"

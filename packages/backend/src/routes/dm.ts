@@ -1,14 +1,16 @@
-import { CAP_CONV1, FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
+import { FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
 import type { DmChannel, Message } from '@gusvoice/shared';
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { isSuperAdmin, requireAuth } from '../auth.js';
 import { asUserId } from '../superAdminRules.js';
-import { canWriteDm, DM_NO_SHARED_SERVER_ERROR, DM_PEER_GONE_ERROR, openDm } from '../dmRules.js';
-import { messageSendBlock, pushDebounced, retryMessage } from '../authGuard.js';
+import { canWriteDm, DM_NEW_LIMIT, DM_PEER_GONE_ERROR, dmOpenRefusal, openDm } from '../dmRules.js';
+import { messageSendBlock, pushDebounced, rateHit, retryMessage } from '../authGuard.js';
+import { dmPolicy } from '../instanceSetup.js';
+import { reachableUser } from '../userSearchRules.js';
 import { acceptDmUpload, refsFromLegacyUrls } from './att.js';
-import { dmDeliveryPlan, reachesPeer } from '../blockRules.js';
+import { dmDeliveryPlan } from '../blockRules.js';
 import { blockedBy, isBlockedBy } from '../blocks.js';
 import {
   conversationRows,
@@ -22,19 +24,29 @@ import {
   loadAccess,
   markRead,
   messageKey,
-  messageTimeByKey,
   myConversationIds,
   reactMessage,
+  revealDirect,
   sendMessage,
   toLegacyMessage,
   unreadCounts,
 } from '../conversations.js';
 import type { ConvCursor } from '../convRules.js';
+import { MESSAGE_TEXT_MAX, TEXT_TOO_LONG } from '../convRules.js';
+import { contactNamesFor } from '../contacts.js';
+import { pushNameFor } from '../contactRules.js';
 import { db } from '../db/index.js';
 import { shareServer } from '../db/peerQueries.js';
 import { conversationMembers, users } from '../db/schema.js';
 import { contentPreview, sendPushToUsers } from '../push.js';
-import { publishToUser } from '../realtime.js';
+import {
+  pickLegacyUser,
+  publishLegacyDelete,
+  publishLegacyEdit,
+  publishLegacyReaction,
+  publishLegacyRead,
+  publishLegacySend,
+} from '../dmLegacyEvents.js';
 
 /**
  * Старые ручки ЛС `/api/dm*` — ПОВЕРХ бесед (ЛС этап 1, шаг 1б, `docs/dm/STAGE1.md`, «Возможности клиента и
@@ -42,19 +54,16 @@ import { publishToUser } from '../realtime.js';
  * живут у людей неделями. Запись и чтение — `conversations.ts` (те же замки, журнал и правила, что у `/api/conv/*`),
  * `dm_*` после миграции 0079 заморожены и не пишутся.
  *
- * 🔴 Каждое изменение рассылается дважды: `dm.*` — соединениям БЕЗ `caps: ['conv1']` (`notCap`), `conv.change` —
- * соединениям с ней (`deliver`). У одного человека бывают сразу оба клиента, и каждый получает только свою форму.
+ * 🔴 Каждое изменение рассылается дважды: `dm.*` — соединениям БЕЗ `caps: ['conv1']` (`dmLegacyEvents.ts`, его же зовут
+ * ручки `/api/conv/*`), `conv.change` — соединениям с ней (`deliver`). У одного человека бывают сразу оба клиента, и
+ * каждый получает только свою форму.
  *
  * Срок жизни — Р15: два тега после перехода клиента на `/api/conv/*` и ещё ≥ 30 дней без запросов от старых версий.
  */
 
-const OLD = { notCap: CAP_CONV1 } as const;
-
 type UserRow = typeof users.$inferSelect;
 
-function pickUser(u: UserRow): DmChannel['otherUser'] {
-  return { id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl };
-}
+const pickUser = (u: UserRow): DmChannel['otherUser'] => pickLegacyUser(u);
 
 /** Собеседники по беседам: `id беседы → строка собеседника`. */
 async function peersOf(me: string, ids: readonly string[]): Promise<Map<string, UserRow>> {
@@ -108,7 +117,7 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
   // List my conversations (most-recent first).
   app.get('/dm', async (req) => {
     const me = req.user!.sub;
-    const ids = await myConversationIds(me);
+    const ids = await myConversationIds(me, true);
     if (ids.length === 0) return [];
     const [rows, peers, unreadBy] = await Promise.all([conversationRows(ids), peersOf(me, ids), unreadCounts(me, ids)]);
     const list: DmChannel[] = [];
@@ -131,7 +140,10 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
   /**
    * «Прочитано» старого клиента. `upTo` = id последнего сообщения на экране → «прочитано до» его ключа (28.09, Codex:
    * не «до часов сервера»); без тела — до последнего ключа беседы, как прежнее «сейчас». Только вперёд.
-   * Своим старым соединениям — прежнее `read.dm { at }` (время сообщения, до которого прочитано).
+   * Своим старым соединениям — прежнее `read.dm { at }` (время сообщения, до которого прочитано), и только когда
+   * отметка СДВИНУЛАСЬ: повтор — без событий, как у `/conv/:id/read` (разбор Codex 01.10; свои устройства уже получили
+   * событие при настоящем сдвиге — какой бы ручкой он ни случился). Собеседнику — только `conv.change` из `deliver`
+   * (Р6, ✓✓ — `markRead` пишет журнал и ему), `read.dm` — никогда: его 0.8.x принял бы событие за своё «прочитано».
    */
   app.post('/dm/:id/read', async (req, reply) => {
     const me = req.user!.sub;
@@ -141,15 +153,15 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     if (!access) return reply.code(404).send({ error: 'not found' });
     const shown = upTo ? await messageKey(dmId, upTo) : null;
     const key = shown?.sortKey ?? (await conversationRows([dmId])).get(dmId)?.lastSortKey ?? 0;
-    let at = new Date();
+    let readKey: number | null = null;
     if (key > 0) {
       const res = await markRead(me, access, key);
-      if (res.kind === 'ok') {
+      if (res.kind === 'ok' && res.delivery) {
         await deliver(res.delivery);
-        at = (await messageTimeByKey(dmId, res.lastReadKey)) ?? at;
+        readKey = res.lastReadKey;
       }
     }
-    void publishToUser(me, { t: 'read.dm', dmId, at: at.toISOString() }, OLD).catch(() => {});
+    if (readKey !== null) void publishLegacyRead(me, dmId, readKey).catch(() => {});
     return { ok: true };
   });
 
@@ -175,9 +187,11 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ error: FED_ERRORS.dmUnavailable });
     }
 
-    // Новая беседа — только при общем сервере (F0, #139). Правило, порядок шагов и разбор гонки —
-    // в `dmRules.ts openDm`; здесь только запросы.
+    // Новая беседа — по политике инстанса (F0 #139: общий сервер; 05.10: `dmPolicy`, предел новых без общего сервера —
+    // 429). Правило, порядок шагов и разбор гонки — в `dmRules.ts openDm`; здесь только запросы. Те же правила, что у
+    // `POST /conv/direct`: и пустая новая беседа у получателя не видна, и чужую неоткрытую моё «Написать» показывает мне.
     let delivery: Parameters<typeof deliver>[0] = null;
+    let createdNew = false as boolean;
     const opened = await openDm<{ id: string }>(
       {
         findExisting: (a, b) => findDirect(a, b),
@@ -186,14 +200,24 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
         create: async () => {
           const created = await createDirect(me, userId);
           delivery = created?.delivery ?? null;
+          createdNew = !!created;
           return created?.row ?? null;
         },
+        policy: () => dmPolicy(),
+        peerReachable: () => reachableUser(other),
+        spendNewDm: () => rateHit(`dm-new:${me}`, DM_NEW_LIMIT.max, DM_NEW_LIMIT.windowS),
       },
       me,
       userId,
     );
-    if (!opened.ok) return reply.code(403).send({ error: DM_NO_SHARED_SERVER_ERROR });
+    if (!opened.ok) {
+      const no = dmOpenRefusal(opened);
+      if (no.retryAfter) reply.header('Retry-After', String(no.retryAfter));
+      return reply.code(no.status).send(no.body);
+    }
+    const revealed = createdNew ? null : await revealDirect(me, opened.row.id);
     void deliver(delivery).catch(() => {});
+    if (revealed) void deliver(revealed).catch(() => {});
     const channel = await legacyChannel(me, opened.row.id);
     if (!channel) return reply.code(404).send({ error: 'not found' });
     return channel;
@@ -236,7 +260,7 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     const { id: dmId } = z.object({ id: z.string() }).parse(req.params);
     const body = z
       .object({
-        content: z.string().max(4000).optional().default(''),
+        content: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG).optional().default(''),
         attachments: dmAttachmentSchema,
         replyToId: z.string().nullish(),
       })
@@ -278,20 +302,7 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     const mine = await legacyMessageFor(res.row.id, me);
     if (!mine) return reply.code(404).send({ error: 'not found' });
     const [author] = await db.select().from(users).where(eq(users.id, me)).limit(1);
-    if (plan.notifyRecipient) {
-      const conv = (await conversationRows([dmId])).get(dmId);
-      // Беседа получателю — чтобы появилась / поднялась в его списке; потом само сообщение.
-      const channelForRecipient: DmChannel = {
-        id: dmId,
-        otherUser: pickUser(author),
-        createdAt: (conv?.createdAt ?? res.row.createdAt).toISOString(),
-        lastMessageAt: res.row.createdAt.toISOString(),
-      };
-      const theirs = await legacyMessageFor(res.row.id, peerId);
-      await publishToUser(peerId, { t: 'dm.channel', channel: channelForRecipient }, OLD);
-      if (theirs) await publishToUser(peerId, { t: 'dm.create', channelId: dmId, message: theirs }, OLD);
-    }
-    await publishToUser(me, { t: 'dm.create', channelId: dmId, message: mine }, OLD);
+    await publishLegacySend(me, peerId, dmId, res.row, plan.notifyRecipient, mine);
     await deliver(res.delivery);
     if (!plan.notifyRecipient) return reply.code(201).send(mine);
     // Wake the recipient's registered devices (fire-and-forget; never blocks the response).
@@ -300,15 +311,18 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
       // Push-bomb debounce (#5, P1-3): one DM-push per recipient per sender per window, so a burst
       // of DMs can't machine-gun the recipient's phone.
       if (await pushDebounced(peerId, me)) return;
+      // Подпись автора в контактах получателя (решение владельца 08.10 п.27, `contacts.contactNamesFor`).
+      const title = pushNameFor(await contactNamesFor(me, [peerId]), peerId, author.displayName);
       await sendPushToUsers(
         [peerId],
         {
           type: 'dm',
-          title: author.displayName,
-          body: contentPreview(content, body.attachments.length),
+          title,
+          body: contentPreview(content, res.row.attachments),
           dmId,
         },
         { scope: 'dm_user', targetId: me },
+        { private: true },
       );
     })().catch(() => {});
     return reply.code(201).send(mine);
@@ -318,7 +332,7 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
   app.patch('/dm/:id/messages/:messageId', async (req, reply) => {
     const me = req.user!.sub;
     const { id: dmId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
-    const { content: raw } = z.object({ content: z.string().max(4000) }).parse(req.body);
+    const { content: raw } = z.object({ content: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG) }).parse(req.body);
     const access = await loadAccess(dmId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
     // Правка из одних пробелов проходила `.min(1)` ДО обрезки и сохраняла пустую реплику (#212, Codex).
@@ -328,13 +342,8 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
     if (res.kind === 'empty') return reply.code(400).send({ error: 'empty message' });
     const mine = (await legacyMessageFor(messageId, me)) as Message;
-    // Придержанное собеседник не видел — и правка до него не доходит. Уже доставленное правится у обоих даже
-    // при блокировке: новый текст он всё равно увидит после перезагрузки (`blockRules.reachesPeer`).
-    if (!res.row.withheld && access.peerId) {
-      const theirs = await legacyMessageFor(messageId, access.peerId);
-      if (theirs) await publishToUser(access.peerId, { t: 'dm.update', channelId: dmId, message: theirs }, OLD);
-    }
-    await publishToUser(me, { t: 'dm.update', channelId: dmId, message: mine }, OLD);
+    // Правка без изменений (`delivery` пуст) — событий нет: сообщение не менялось.
+    if (res.delivery) await publishLegacyEdit(me, access.peerId, dmId, messageId, res.row.withheld, mine);
     await deliver(res.delivery);
     return reply.send(mine);
   });
@@ -344,6 +353,8 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
    * - `?for=both` (по умолчанию — так удаляет старый клиент): только СВОЁ, у обоих (в беседах — надгробие, Р19:
    *   исчезает без следа);
    * - `?for=me`: любое видимое мне сообщение пропадает только у меня, собеседник его по-прежнему видит.
+   * Чужое «у обоих» (С1, признак `conv6`) — только новыми ручками `/api/conv/*`, здесь по-прежнему 403: умолчание `both`
+   * осталось от клиентов, которые удаляли только своё (`conversations.DeleteOptions`).
    * Событие `dm.delete` несёт новое время беседы (`lastMessageAt`) и новое непрочитанное получателя (`unread`):
    * без первого удалённое последнее сообщение держало беседу наверху списка со своим временем (поймано на S25),
    * без второго непрочитанное удалённое оставляло у собеседника «1» на пустом месте.
@@ -359,22 +370,9 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
     if (!res.delivery) return reply.code(204).send(); // повтор уже сделанного удаления — событий второй раз нет
 
-    if (scope === 'me') {
-      // Только своим устройствам: собеседник не узнаёт, что я у себя что-то удалил.
-      const unread = (await unreadCounts(me, [dmId])).get(dmId) ?? 0;
-      await publishToUser(me, { t: 'dm.delete', channelId: dmId, messageId, unread }, OLD);
-    } else {
-      // Удалённое «у обоих» уходит у собеседника и при блокировке (`blockRules.reachesPeer`); придержанное он не видел.
-      if (!res.withheld && access.peerId) {
-        const unread = (await unreadCounts(access.peerId, [dmId])).get(dmId) ?? 0;
-        await publishToUser(
-          access.peerId,
-          { t: 'dm.delete', channelId: dmId, messageId, lastMessageAt: res.lastMessageAt, unread },
-          OLD,
-        );
-      }
-      await publishToUser(me, { t: 'dm.delete', channelId: dmId, messageId, lastMessageAt: res.lastMessageAt }, OLD);
-    }
+    // «У меня» — только своим устройствам; «у обоих» уходит у собеседника и при блокировке (`blockRules.reachesPeer`),
+    // придержанное он не видел.
+    await publishLegacyDelete(me, access.peerId, dmId, messageId, scope, res);
     await deliver(res.delivery);
     return reply.code(204).send();
   });
@@ -398,10 +396,8 @@ export async function dmRoutes(app: FastifyInstance): Promise<void> {
     const res = await reactMessage(me, access, messageId, emoji, op, blockedActor);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (!res.changed) return reply.code(204).send();
-    const event = { t: 'dm.reaction' as const, channelId: dmId, messageId, emoji, userId: me, op };
     // Реакция заблокированного хранится, но собеседник её не видит ни сейчас, ни в истории.
-    if (access.peerId && reachesPeer(blockedActor.has(access.peerId))) await publishToUser(access.peerId, event, OLD);
-    await publishToUser(me, event, OLD);
+    await publishLegacyReaction(me, access.peerId, dmId, messageId, emoji, op, !!access.peerId && blockedActor.has(access.peerId));
     await deliver(res.delivery);
     return reply.code(204).send();
   });

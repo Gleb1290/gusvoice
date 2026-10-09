@@ -1,9 +1,11 @@
-import { clampWidth, setSidebarWidth } from '../uiPrefs';
+import { snapListWidth } from '../dmListView';
+import { clampWidth, isNarrowAllowed, setSidebarWidth, SIDEBAR_MAX, SIDEBAR_MIN } from '../uiPrefs';
 
 /**
  * A thin drag handle on the right edge of the channel/DM sidebar (#6). Dragging updates the
  * `--sidebar-w` CSS var live (the `.app` grid column reads it) and persists on release. The 72px
- * offset is the server rail's fixed width. Hidden on mobile (the grid collapses there).
+ * offset is the server rail's fixed width. Hidden on mobile (the grid collapses there). In the DM list, dragging below
+ * half the minimal column (tdesktop `columnMinimalWidthLeft / 2`) collapses it to avatars only (G34, `dmListView.ts`).
  */
 export function SidebarResizer() {
   const onPointerDown = (e: React.PointerEvent) => {
@@ -14,7 +16,9 @@ export function SidebarResizer() {
     // out, else any scale ≠ 100% snaps the sidebar by the zoom factor the instant you grab the handle —
     // which read as "the sidebar won't resize" (#100).
     const zoom = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
-    const move = (ev: PointerEvent) => setSidebarWidth(ev.clientX / zoom - RAIL);
+    // Полоса папок ЛС (`--dm-strip-w`) — часть колонки, но не списка: ширину списка считаем без неё.
+    const strip = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dm-strip-w')) || 0;
+    const move = (ev: PointerEvent) => setSidebarWidth(snapListWidth(ev.clientX / zoom - RAIL - strip, isNarrowAllowed(), SIDEBAR_MIN, SIDEBAR_MAX));
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);

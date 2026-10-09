@@ -1,6 +1,6 @@
 import type { FederationAuditRow } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { adminApi } from '../adminApi';
 import { toastError } from '../toast';
 
 /**
@@ -53,7 +53,7 @@ export function FederationAudit() {
 
   useEffect(() => {
     let alive = true;
-    api
+    adminApi()
       .federationAudit()
       .then((r) => alive && setRows(r.entries))
       .catch((e) => alive && toastError(e));

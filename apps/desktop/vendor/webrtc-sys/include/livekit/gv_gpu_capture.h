@@ -63,6 +63,10 @@ std::unique_ptr<GpuScreenCapture> new_gpu_screen_capture(int32_t display_index,
 // Подсказка оценщику канала для следующих соединений (livekit/gv_bitrate_hint.h). 0 — не трогать.
 void set_bitrate_hint(int32_t start_bps, int32_t min_bps);
 
+// Множитель опорного кадра NVENC для следующих кодировщиков показа (livekit/gv_bitrate_hint.h, 06.10).
+// 0 — умолчание NVENC, как было до 06.10.
+void set_screen_encoder_keyframe_scale(int32_t keyframe_scale);
+
 // Почему кодировщик не взял кадр из видеопамяти (код -2 у `capture`). Пусто — не отказывал.
 rust::String native_encode_fail_reason();
 

@@ -1,8 +1,12 @@
 import { useMaybeRoomContext } from '@livekit/components-react';
 import { ConnectionQuality, type Room } from 'livekit-client';
 import { useEffect, useRef, useState } from 'react';
+import { instances } from '../config';
+import { openInstance } from '../guestJoin';
+import { setPendingOpen } from '../pendingOpen';
 import { playSound } from '../sounds';
-import { useStore } from '../store';
+import { useStore, voiceIsHere, type VoiceConnection } from '../store';
+import { toastError } from '../toast';
 import { Icon } from './Icon';
 import { VoiceControls } from './VoiceControls';
 
@@ -217,6 +221,21 @@ function statRow(label: string, value: string, color: string | undefined, points
  * VoiceConnection's RoomContext (MainLayout wraps the sidebar), so VoiceControls works here. Mic /
  * deafen / settings stay in the SelfVoiceBar below — exactly like Discord's account panel.
  */
+/**
+ * Вернуться туда, где идёт голос (01.10): голос пережил переход в другой инстанс, человек смотрит дом, а сидит у
+ * соседа. Тот же путь, что клик по серверу соседа в рейле: намерение «открыть этот канал» — и переход.
+ */
+export function returnToVoice(v: VoiceConnection): void {
+  if (!v.instanceId) return;
+  // Записи голоса больше нет (убрали инстанс) — возвращаться некуда, голос заканчиваем.
+  if (!instances().some((i) => i.id === v.instanceId)) {
+    useStore.getState().leaveVoice();
+    return;
+  }
+  if (v.serverId) setPendingOpen({ instanceId: v.instanceId, serverId: v.serverId, channelId: v.channelId });
+  void openInstance(v.instanceId).catch(toastError);
+}
+
 export function VoicePanel() {
   const voice = useStore((s) => s.voice);
   const voiceState = useStore((s) => s.voiceState);
@@ -229,14 +248,22 @@ export function VoicePanel() {
   const connStats = useSelfConnStats(room, voiceState === 'connected', statsHot);
   if (!voice) return null;
 
-  const ch = bootstrap?.channels.find((c) => c.id === voice.channelId);
-  const channelName = ch?.name ?? 'Голосовой канал';
+  // Голос на другом инстансе (смотрим дом) — подписи из того, что запомнили при входе: снимка того сервера тут нет.
+  const here = voiceIsHere(voice);
+  const ch = here ? bootstrap?.channels.find((c) => c.id === voice.channelId) : undefined;
+  const channelName = ch?.name ?? voice.channelName;
   // Server name only when the voice channel belongs to the server we're currently looking at.
-  const serverName = ch ? (servers.find((s) => s.id === currentServerId)?.name ?? '') : '';
+  const serverName = ch ? (servers.find((s) => s.id === currentServerId)?.name ?? '') : here ? '' : voice.serverName;
   const connected = voiceState === 'connected';
 
   return (
     <div className="voice-panel">
+      {/* Решение владельца 01.10: отдельная строка над плашкой, когда голос идёт на другом инстансе; клик — вернуться. */}
+      {!here && (
+        <button type="button" className="vp-away" onClick={() => returnToVoice(voice)}>
+          Вы в голосе на «{voice.instanceName || 'другом инстансе'}» · <span className="vp-away-go">вернуться</span>
+        </button>
+      )}
       <div className="vp-status" onMouseEnter={() => setStatsHot(true)} onMouseLeave={() => setStatsHot(false)}>
         <span className={`vp-sig ${connected ? 'ok' : 'warn'}`}>
           <Icon name="signal" size={18} />

@@ -10,7 +10,9 @@
 import { useEffect, useState } from 'react';
 import type { Participant } from 'livekit-client';
 import { ParticipantEvent, Track } from 'livekit-client';
+import { activeInstanceId } from './config';
 import { scopedGetItem, scopedSetItem } from './instanceScope';
+import { scopedStorageKey } from './instanceScopeRules';
 
 /** Ключ ПО ИНСТАНСУ (F0 #139): здесь id пользователей, а они принадлежат инстансу — `instanceScopeRules.ts`. */
 const KEY = 'gv_user_audio';
@@ -107,13 +109,30 @@ export function subscribeUserAudio(fn: (userId: string) => void): () => void {
 }
 
 /**
+ * Громкость человека в комнате голоса, который идёт на ДРУГОМ инстансе (01.10: смотрим дом, сидим у соседа). Кеш
+ * модуля — про активный инстанс, а люди в комнате — с инстанса голоса: без этого переход подставил бы им чужие
+ * громкости, и все приглушённые в живом звонке зазвучали бы на 100 %. Читаем прямо из хранилища, без кеша — их
+ * в этот момент никто не правит (ползунки комнаты на экране только у её инстанса).
+ */
+function gainOn(instanceId: string, userId: string): number {
+  try {
+    const p = (JSON.parse(localStorage.getItem(scopedStorageKey(KEY, instanceId)) || '{}') as Store)[userId];
+    if (!p) return 1;
+    return p.muted ? 0 : (p.volume ?? 1);
+  } catch {
+    return 1;
+  }
+}
+
+/**
  * Push the stored gain onto a live LiveKit participant (no-op for local/unsupported).
+ * `instanceId` — инстанс комнаты (`voice.instanceId`); другой, чем активный, — громкости берутся оттуда.
  * Wrapped in try/catch: without webAudioMix, setVolume writes HTMLMediaElement.volume which
  * throws IndexSizeError for values >1 — that must never bubble up and blank the whole app.
  */
-export function applyUserAudio(p: Participant) {
+export function applyUserAudio(p: Participant, instanceId?: string | null) {
   if (p.isLocal) return;
-  const gain = effectiveGain(p.identity);
+  const gain = instanceId && instanceId !== activeInstanceId() ? gainOn(instanceId, p.identity) : effectiveGain(p.identity);
   // 🔴 Только МИКРОФОН, трек за треком (#71). Раньше здесь стоял `participant.setVolume()`, а он в
   // LiveKit бьёт по ВСЕМ аудиотрекам участника — включая звук его демонстрации экрана. Это не
   // «забывало приглушить» неоткрытый стрим, а активно включало его на полную: эффект дёргается на

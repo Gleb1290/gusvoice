@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, type SoundboardClip } from '../api';
-import { placeByAnchor, toLayoutRect, viewport } from '../popover';
+import { placeByAnchor, toLayoutRect, viewport, viewportSafe } from '../popover';
 import { hintLeft } from '../hintPlacement';
 import { useStore } from '../store';
 import { toastError } from '../toast';
@@ -78,7 +78,7 @@ export function SoundboardPicker({
     function place() {
       const el = box.current;
       if (!el) return;
-      setPos(placeByAnchor(toLayoutRect(anchor), el.offsetWidth, el.offsetHeight, 8));
+      setPos(placeByAnchor(toLayoutRect(anchor), el.offsetWidth, el.offsetHeight, 8, viewportSafe()));
     }
     place();
     window.addEventListener('resize', place);

@@ -25,6 +25,17 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- #212: вибро-отклик. Chromium в WebView без этого разрешения молча игнорирует `navigator.vibrate`. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- G73: входящий звонок поверх экрана (`CallNotifier`, как у Telegram). Android 14+ даёт его не всем — проверка
+         `canUseFullScreenIntent`, без него уведомление звонка всплывает обычным heads-up. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Своя галерея во вложениях (05.10, MediaBridge.kt): фото и видео устройства. Android 13+ — READ_MEDIA_IMAGES/VIDEO,
+         Android 14+ — ещё частичный доступ (человек выбирает, какие фото видно приложению), ниже 13 — чтение памяти.
+         Спрашиваются при первом открытии галереи, не на старте. Запись в галерею («Сохранить», Android 10+) своих файлов
+         разрешения не требует — WRITE_EXTERNAL_STORAGE не нужен. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -43,6 +54,7 @@
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
+            android:enableOnBackInvokedCallback="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -62,6 +74,26 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="gusvoice" />
+            </intent-filter>
+            <!-- «Поделиться в GusVoice» (09.10, G79): системное «Поделиться» из галереи, браузера, «Файлов» → выбор беседы в
+                 клиенте → вложения и текст в её поле (ничего не уходит без нажатия). Набор типов — как у Telegram Android
+                 (`AndroidManifest.xml` у `LaunchActivity`). Разбор — `ShareIntent.kt`, копия байтов — `MediaBridge.onShareIntent`;
+                 singleTask → в запущенное приложение приходит через `onNewIntent`. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 
@@ -99,6 +131,27 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Holds the connection to the app's own push server (UnifiedPush) so messages arrive while the app is closed" />
         </service>
+
+        <!-- Действия уведомления беседы (Р1, G17): «Ответить» из шторки, «Прочитано», смахивание. Только наши PendingIntent. -->
+        <receiver
+            android:name=".NotifActionReceiver"
+            android:exported="false" />
+
+        <!-- Входящий звонок (G73): полноэкранный экран поверх блокировки (`fullScreenIntent` уведомления CALL) и
+             «Отклонить» без открытия приложения. Своя задача (`taskAffinity` пустой), не в «Недавних»: закрылся —
+             под ним блокировка, а не приложение. Не экспортированы: открывают только наши PendingIntent. -->
+        <activity
+            android:name=".IncomingCallActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.gusvoice" />
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false" />
 
         <!-- Restart the embedded push distributor after reboot (only if it was enabled). -->
         <receiver

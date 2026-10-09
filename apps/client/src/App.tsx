@@ -1,9 +1,10 @@
-import type { AuthResponse, SetupStatus } from '@gusvoice/shared';
+import { CAP_CONV1, FEATURE_CONV2, type AuthResponse, type SetupStatus } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
 import { api, getToken, setToken } from './api';
 import {
   activeInstance,
   activeInstanceId,
+  config,
   instances,
   needsServerPick,
   noteActiveSuperAdmin,
@@ -17,31 +18,74 @@ import { takePendingOpen } from './pendingOpen';
 import { isMobile, isTauri } from './hotkeys';
 import { onDeepLink } from './desktopWindow';
 import { captureInviteFromUrl, clearPendingInvite, pendingInvite, rememberInvite } from './pendingInvite';
-import { inviteCodeFromPath } from './inviteLinkRules';
+import { BROKEN_INVITE_HINT, BROKEN_INVITE_TITLE, inviteCodeFromPath, isBrokenInvitePath } from './inviteLinkRules';
 import { offerInviteLink } from './deepLinkInvite';
+import { noticeFromRefusal } from './accessClosed';
 import { InviteLanding } from './components/InviteLanding';
 import { EditContextMenu } from './components/EditContextMenu';
 import { Login } from './components/Login';
 import { InstanceUnreachable } from './components/InstanceUnreachable';
 import { ConfirmHost } from './components/ConfirmHost';
+import { MuteCustomHost } from './components/MuteCustomHost';
+import { StickerSetModal } from './components/StickerSetModal';
 import { ServerPicker } from './components/ServerPicker';
 import { SetupAdminWizard, SetupConfigureWizard } from './components/SetupWizard';
 import { MainLayout } from './components/MainLayout';
-import { syncBgGateways } from './bgGateways';
+import { ShareIncoming } from './components/ShareIncoming';
+import { onBgVoiceEvent, syncBgGateways } from './bgGateways';
 import { connectGateway, connectPresence } from './sockets';
 import { consumeDeepLink, startPushRegistration } from './nativeUnifiedPush';
-import { useStore } from './store';
+import { useStore, voiceIsHere } from './store';
+import { setNotifyAlwaysProbe } from './notifications';
+import { convClientSwitch } from './convStore';
+import { clearConvCacheWipe, deleteConvCache, finishConvCacheWipes, readConvCache } from './convCache';
+import { convCacheKey } from './convCacheRules';
+import { onConvCacheFlushed, startConvCacheWriter } from './convCacheWriter';
 import { initVoiceTray } from './voiceTray';
+import { initUnreadBadge } from './unreadBadge';
 import { initOverlay } from './overlay';
 import { initTipToast } from './tipToast';
 import { initAfk } from './afk';
 import { initDownloads } from './downloads';
 import { startDeviceWatch } from './deviceWatch';
 import { stopGameActivity, syncGameActivity } from './gameActivity';
-import { toast } from './toast';
+import { toast, toastError } from './toast';
+import { playSound } from './sounds';
 import { CloseToTrayPrompt } from './components/CloseToTrayPrompt';
 import { LastCrashNotice } from './components/LastCrashNotice';
 import { UpdatePanel } from './components/UpdatePanel';
+import { setDmFileLimit } from './attachRules';
+
+/**
+ * Всплывашка беседы при выключенных «Личных» / группах (решение владельца 38, `push4`): исключение «Уведомления включены»
+ * держится по цели заглушки (id собеседника или `group:<id беседы>`), а `osNotify` знает только id беседы — сопоставляем здесь (не в `store.ts`: его тесты подменяют импорты по списку).
+ */
+setNotifyAlwaysProbe((convId) => {
+  if (!convId) return false;
+  const s = useStore.getState();
+  if (s.pushAlwaysTargets.length === 0) return false;
+  const d = s.dms.find((x) => x.id === convId);
+  return !!d && s.pushAlwaysTargets.includes(d.otherUser.id);
+});
+
+/** Запись черновиков при срочной записи кеша (Р7) подключается один раз на всё время жизни страницы. */
+let draftFlushHooked = false;
+
+/**
+ * Отказ открыть сервер на старте (намерение после перехода, прошлое место): «закрыт держателем» — окном (#203).
+ *
+ * 🔴 Гостя закрыли, пока его не было, а старт глотает отказы молча: человек приходил на пустое «Выбери сервер» без
+ * единого слова. Окно и замок в рейле — те же, что у клика по серверу (`ServerRail.select`) и у события
+ * `server.access_closed`. Отказ летит дальше как был — следующий `.catch` глушит его, как и раньше.
+ */
+function explainClosedServer(serverId: string): (err: unknown) => never {
+  return (err) => {
+    const s = useStore.getState();
+    const notice = noticeFromRefusal(err, { id: serverId, name: s.servers.find((x) => x.id === serverId)?.name ?? 'сервер' });
+    if (notice) s.noteAccessClosed(notice);
+    throw err;
+  };
+}
 
 export function App() {
   const user = useStore((s) => s.user);
@@ -66,15 +110,22 @@ export function App() {
   // or 5xx error (e.g. backend mid-deploy) must NOT nuke the session — we retry a few times and,
   // failing that, keep the token so a later reload recovers. (Prior bug: ANY error here → setToken(null)
   // → mass logout whenever the backend blipped, which a burst of deploys made painfully common.)
-  async function loadMe(): Promise<'ok' | 'unauthorized' | 'unreachable'> {
+  async function loadMe(): Promise<'ok' | 'unauthorized' | 'unreachable' | 'stale'> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const me = await api.me();
         setAuth(me);
+        // Признаки сервера — отдельно от `user` (ЛС этап 2): другие ручки кладут `User` без них.
+        // Предел файла ЛС (`bigfile1`) — до признаков: их смена перерисует беседу уже с новым пределом.
+        setDmFileLimit(me.features, me.dmFileMaxBytes);
+        useStore.getState().setServerFeatures(me.features ?? []);
         // Снимок для кнопки админки, пока человек будет гостем у соседа (`adminTarget`, 23.09).
         noteActiveSuperAdmin(!!me.superAdmin);
         return 'ok';
       } catch (e) {
+        // Пока ходили, человек кликнул в другой инстанс (рейл больше не закрыт экраном загрузки, 01.10): ответ не наш,
+        // и повтор ушёл бы уже к новому инстансу — его ведёт следующий заход.
+        if ((e as { switched?: boolean }).switched) return 'stale';
         if ((e as { status?: number }).status === 401) {
           setToken(null);
           /**
@@ -126,6 +177,61 @@ export function App() {
    * очистку хранилища. Ветка 401 в `loadMe` — про другой случай (токен есть, но хост его не
    * принял) и остаётся отдельно.
    */
+  /**
+   * ЛС этап 2 (`docs/dm/STAGE2.md`): говорить ли с ЛС через беседы. Решается ДО подключения шлюза — от этого зависит
+   * `caps` в `identify`. После входа по паролю `loadMe` не звали, признаков нет — узнаём их здесь; не узнали — старый
+   * путь (он работает с любым сервером).
+   */
+  async function decideConvMode(stale: () => boolean = () => false): Promise<void> {
+    const st = useStore.getState();
+    let features = st.serverFeatures;
+    if (features === null) {
+      features = await api
+        .me()
+        .then((me) => {
+          setDmFileLimit(me.features, me.dmFileMaxBytes);
+          return me.features ?? [];
+        })
+        .catch(() => null);
+      if (stale()) return;
+      if (features) st.setServerFeatures(features);
+    }
+    // Оба признака: у сервера 0.8.17 есть `conv1`, но нет `created` и старой рассылки — там остаёмся на старом пути.
+    const active = !!features?.includes(CAP_CONV1) && !!features?.includes(FEATURE_CONV2) && convClientSwitch();
+    st.setConvActive(active);
+    const me = useStore.getState().user;
+    if (!active || !me) return;
+    /* Шаг 2б: первый кадр из кеша на диске — список бесед и хвосты лент до их запросов; догонка на `ready` пойдёт с
+       номера из кеша. Ключ — инстанс + человек (другой аккаунт того же инстанса — другая запись). */
+    const key = convCacheKey(activeInstance(), config.apiUrl, me.id);
+    st.setConvCacheKey(key);
+    // Стирание, оборванное прошлой перезагрузкой после выхода, — доделать ДО чтения кеша.
+    await finishConvCacheWipes();
+    // Человек уже ушёл в другой инстанс — кеш ЭТОГО в стор нового не вливаем (01.10: переход не закрыт экраном).
+    if (stale()) return;
+    // Не стёрлось (база не открылась), а человек уже снова вошёл — это его же запись: метку снять, иначе следующий запуск
+    // стёр бы уже новые черновики и неотправленное.
+    clearConvCacheWipe(key);
+    const rec = await readConvCache(key);
+    if (stale()) return;
+    if (rec) {
+      try {
+        useStore.getState().convHydrate(rec);
+      } catch {
+        // Запись прошла проверку, но подъём упал — запуск важнее кеша: чистое состояние, запись долой, список из сети.
+        useStore.getState().convReset();
+        void deleteConvCache(key);
+      }
+    }
+    startConvCacheWriter();
+    // Черновики на сервер при уходе в фон, закрытии окна и переходе в другой инстанс (Р7) — ПОСЛЕ того, как лента
+    // отдала свой отложенный черновик в стор; `keepalive` — запрос переживёт выгрузку страницы.
+    if (!draftFlushHooked) {
+      draftFlushHooked = true;
+      onConvCacheFlushed(() => useStore.getState().convFlushDrafts(true));
+    }
+  }
+
   function bounceStrandedGuestHome(): boolean {
     if (getToken()) return false;
     const cur = activeInstance();
@@ -138,8 +244,12 @@ export function App() {
     return true;
   }
 
-  async function bootstrap() {
+  /** `stale` — заход устарел: человек уже ушёл в другой инстанс (переход больше не прячет экран, 01.10). */
+  async function bootstrap(stale: () => boolean = () => false) {
+    await decideConvMode(stale);
+    if (stale()) return;
     await loadServers();
+    if (stale()) return;
     // Load push-mute rules so context-menu toggles reflect state (best-effort, non-blocking).
     void loadPushMutes();
     // Чёрный список ЛС (#212): кнопка в беседе и раздел настроек показывают, кого я заблокировал.
@@ -164,7 +274,9 @@ export function App() {
     // (crash / quick restart), rejoin it now — mute/deafen come back from the persisted self state.
     void restoreVoiceSession();
     // Android push deep-link (#118): a cold start from a notification tap has a pending target — jump to it.
-    consumeDeepLink();
+    // Забрали ссылку из пуша — «последнее место» ниже её не перебивает: переход идёт асинхронно, и в режиме бесед
+    // (список из кеша, без сети) сервер из прошлого места открывался раньше беседы и затирал её.
+    const tookLink = consumeDeepLink();
     /**
      * Открылись по ссылке-приглашению (§4.2.2): адресом `/i/<код>` в вебе или схемой `gusvoice://`
      * на десктопе и Android. Окно проверки поднимет рейл, как только увидит намерение.
@@ -182,23 +294,32 @@ export function App() {
      *
      * ⚠️ После `loadServers()`: сервер должен уже быть в списке, иначе рейл откроет его и тут же
      * перерисуется без него. Отказ глотаем молча — членство могли снять, пока приложение
-     * перезапускалось, и вываливать это ошибкой на старте не за что.
+     * перезапускалось, и вываливать это ошибкой на старте не за что. Кроме «закрыт держателем» —
+     * его сперва объясняет окно (`explainClosedServer`, #203).
      */
     const pending = takePendingOpen(activeInstanceId());
     if (pending?.serverId) {
       await useStore
         .getState()
         .openServer(pending.serverId)
+        .catch(explainClosedServer(pending.serverId))
         .catch(() => {});
+      if (stale()) return;
       // Тап по пушу ведёт в КАНАЛ, а не просто на сервер: человек шёл читать то, о чём его позвали.
-      if (pending.channelId) {
+      // Сервер не открылся (закрыт держателем, членство сняли) — канал не трогаем: без своего сервера
+      // он открылся бы пустым «Выбери канал».
+      if (pending.channelId && useStore.getState().currentServerId === pending.serverId) {
         await useStore
           .getState()
           .openChannel(pending.channelId)
           .catch(() => {});
+        /* Отказ «ушли в другой инстанс» глотается вместе с прочими — без проверки устаревший заход шёл дальше, к
+           приглашению, уже через API НОВОГО инстанса: чужой код там 404, его стирали и показывали ошибку (Codex, 01.10). */
+        if (stale()) return;
       }
     }
     await joinPendingInvite();
+    if (stale()) return;
     /**
      * Последним делом — вернуть человека туда, где он был до перезагрузки (`lastPlace.ts`).
      *
@@ -207,17 +328,19 @@ export function App() {
      * прошлым местом было бы грубо.
      *
      * ⚠️ Запись из хранилища — подсказка, а не приказ: сервер могли закрыть, канал удалить, права
-     * отобрать. Поэтому `openServer`/`openChannel` зовутся с глушением отказа, а на телефоне канал
-     * не открываем вовсе — там переход на сервер обязан показать СПИСОК каналов, а не вывалить
-     * человека сразу в стену переписки (то же правило, что в `openServer`).
+     * отобрать. Поэтому `openServer`/`openChannel` зовутся с глушением отказа («закрыт держателем»
+     * сперва объясняет окно, #203), а на телефоне канал не открываем вовсе — там переход на сервер
+     * обязан показать СПИСОК каналов, а не вывалить человека сразу в стену переписки (то же правило,
+     * что в `openServer`).
      */
     const st = useStore.getState();
-    if (!st.currentServerId && !st.currentDmId) {
+    if (!tookLink && !st.currentServerId && !st.currentDmId) {
       const place = lastPlace(activeInstanceId());
       if (place?.dmId) {
         await useStore.getState().selectDm(place.dmId).catch(() => {});
       } else if (place?.serverId) {
-        await useStore.getState().openServer(place.serverId).catch(() => {});
+        await useStore.getState().openServer(place.serverId).catch(explainClosedServer(place.serverId)).catch(() => {});
+        if (stale()) return;
         if (place.channelId && !isMobile() && useStore.getState().currentServerId === place.serverId) {
           await useStore.getState().openChannel(place.channelId).catch(() => {});
         }
@@ -232,10 +355,14 @@ export function App() {
   async function joinPendingInvite() {
     const code = pendingInvite();
     if (!code) return;
+    const epoch = useStore.getState().instanceEpoch;
     try {
       const boot = await api.acceptInvite(code);
+      // Вступили — код потрачен при любом исходе дальше.
       clearPendingInvite();
       await loadServers();
+      // Человек уже на другом инстансе — «вы на сервере» про прежний там только сбило бы с толку.
+      if (useStore.getState().instanceEpoch !== epoch) return;
       toast('success', `Вы на сервере «${boot.server.name}»`);
     } catch (e) {
       const status = (e as { status?: number }).status;
@@ -260,8 +387,13 @@ export function App() {
   }
 
   useEffect(() => {
+    // Переписка на диске, чьё стирание при выходе оборвала перезагрузка (ЛС этап 2), — стереть при любом запуске,
+    // не дожидаясь входа.
+    void finishConvCacheWipes();
     // Desktop tray mirror (mute/deafen/speaking bubble) — self-gates to Tauri builds, no-op on web.
     initVoiceTray();
+    // Десктоп: число непрочитанных ЛС на значке панели задач и в трее (Р1, G39); снятие тостов прочитанной беседы.
+    initUnreadBadge();
     // Desktop in-game overlay controller — pushes the voice roster to the overlay window; no-op on web.
     initOverlay();
     // Контроллер всплывающей плашки «кто кого типнул» — второе оверлейное окно; в вебе выходит сразу.
@@ -284,6 +416,13 @@ export function App() {
     if (queryInvite && offerInviteLink(queryInvite)) {
       window.history.replaceState({}, '', window.location.pathname.replace(/^\/join\/?$/, '/'));
     }
+    /**
+     * Битая ссылка `/i/…` — кода не разобрать (#200). Адрес убираем сразу (перезагрузка не должна повторять того же),
+     * а сказать словами можно, только когда станет ясно, какой экран увидит человек: вошедшему — тостом, остальным —
+     * строкой на экране входа (тостов там нет вовсе, `ToastHost` живёт в `MainLayout`).
+     */
+    const brokenInvite = isBrokenInvitePath(window.location.pathname);
+    if (brokenInvite) window.history.replaceState({}, '', '/');
     (async () => {
       // Статус мастера спрашиваем параллельно с профилем. Ошибка (старый бэкенд без ручки) = мастера нет.
       const status = api.setupStatus().catch(() => null);
@@ -294,8 +433,9 @@ export function App() {
         setSetup(await status);
         return; // дальше поведёт эффект на `instanceEpoch` — уже на домашней записи
       }
+      let state: Awaited<ReturnType<typeof loadMe>> | null = null;
       if (getToken()) {
-        const state = await loadMe();
+        state = await loadMe();
         setUnreachable(state === 'unreachable');
         if (state === 'ok') {
           try {
@@ -304,6 +444,12 @@ export function App() {
             /* transient — session stays; a reload re-runs bootstrap */
           }
         }
+      }
+      // «Инстанс не отвечает» — ни тоста, ни экрана входа там нет; ушли в другой инстанс, пока грузились (`stale`), —
+      // человек уже занят другим. В обоих случаях объяснение про ссылку было бы не к месту.
+      if (brokenInvite && state !== 'unreachable' && state !== 'stale') {
+        if (useStore.getState().user) toast('error', BROKEN_INVITE_TITLE, BROKEN_INVITE_HINT);
+        else setLoginNotice(`${BROKEN_INVITE_TITLE}. ${BROKEN_INVITE_HINT}`);
       }
       setSetup(await status);
       setLoading(false);
@@ -324,28 +470,34 @@ export function App() {
    */
   useEffect(() => {
     if (instanceEpoch === 0) return;
-    let alive = true;
-    setLoading(true);
+    /* 🔴 Переход между инстансами больше НЕ показывает экран загрузки (01.10): главный экран остаётся на месте —
+       рейл, человек внизу и голос, который принадлежит своему инстансу (`instanceSwitch.ts`), а середина ждёт свой
+       сервер. Раньше «Loading…» снимал весь `MainLayout`, вместе с ним и комнату голоса — моргало и выкидывало.
+       Экран не закрыт — значит, рейл нажимают и во время захода: каждый шаг проверяет, не устарел ли он. */
+    const stale = () => useStore.getState().instanceEpoch !== instanceEpoch;
+    // Экран «не отвечает» был про ПРЕЖНИЙ инстанс — без сброса он говорил бы это про новый, пока идёт заход.
+    setUnreachable(false);
     (async () => {
       if (!bounceStrandedGuestHome() && getToken()) {
         const state = await loadMe();
-        if (alive) setUnreachable(state === 'unreachable');
+        if (stale() || state === 'stale') return;
+        setUnreachable(state === 'unreachable');
+        // Вход не принят: `switchedInstance` больше не стирает человека, раз у цели был токен, — стираем здесь, иначе
+        // на экране остался бы прежний профиль вместо формы входа (или увода гостя домой — он уже запущен).
+        if (state === 'unauthorized') useStore.setState({ user: null });
         if (state === 'ok') {
           try {
-            await bootstrap();
+            await bootstrap(stale);
           } catch {
             /* сеть моргнула — сессия остаётся, перезагрузка добьёт */
           }
         }
       }
-      if (alive) {
+      if (!stale()) {
         setLoading(false);
         useStore.setState({ switching: false });
       }
     })();
-    return () => {
-      alive = false;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceEpoch]);
 
@@ -355,6 +507,27 @@ export function App() {
     if (user) syncGameActivity();
     else stopGameActivity();
   }, [user]);
+
+  /* Голос на ДРУГОМ инстансе (смотрим дом, а сидим у соседа, 01.10): его события приходят фоновым шлюзом. Пока
+     голос на экранном инстансе, их ведёт основной шлюз (`sockets.ts`) — здесь только чужой. */
+  useEffect(
+    () =>
+      onBgVoiceEvent(({ instanceId, msg }) => {
+        const s = useStore.getState();
+        const v = s.voice;
+        if (!v || v.instanceId !== instanceId || voiceIsHere(v)) return;
+        if (msg.t === 'server.access_closed') {
+          if (!v.serverId || v.serverId === msg.serverId) s.leaveVoice();
+          return;
+        }
+        playSound('move', msg.channelId);
+        void s
+          .moveVoiceTo(msg.channelId)
+          .then(() => toast('info', 'Вас переместили в другой канал'))
+          .catch((e) => toastError(e, 'Не удалось переместиться'));
+      }),
+    [],
+  );
 
   // Выдернули микрофон или наушники — переходим на то, что осталось (#131). Слежение живёт ЗДЕСЬ, а
   // не в голосовом соединении: устройство выдёргивают и когда в канале не сидят, и тогда в
@@ -401,7 +574,7 @@ export function App() {
     />
   ) : needsServerPick() ? (
     <ServerPicker />
-  ) : loading || switching ? (
+  ) : loading || (switching && !user) ? (
     <div className="center muted">Loading…</div>
   ) : unreachable ? (
     /* Сессия цела, отвечать некому. Форма входа здесь была бы неправдой — см. `InstanceUnreachable`. */
@@ -437,7 +610,11 @@ export function App() {
       }}
     />
   ) : (
-    <MainLayout />
+    <>
+      <MainLayout />
+      {/* «Поделиться в GusVoice» (09.10, G79): окно выбора беседы для пришедшего из чужого приложения (только Android). */}
+      <ShareIncoming />
+    </>
   );
 
   return (
@@ -451,10 +628,14 @@ export function App() {
       <LastCrashNotice />
       {/* Своё меню правки в полях ввода вместо родного браузерного (#75). */}
       <EditContextMenu />
+      {/* Окно набора стикеров (С2, `stickers2`): из ленты ЛС и каналов, из каталога в панели. */}
+      <StickerSetModal />
       {/* 🔴 Окно подтверждения — ЗДЕСЬ, а не в `MainLayout`: подтверждать приходится и до того, как
           главный экран собран (выбор инстанса, мастер, «инстанс не отвечает»). Ошибку `ToastHost`,
           который в такие минуты не виден, не повторяем. */}
       <ConfirmHost />
+      {/* «Свой срок…» у «Без звука» (`mute2`): выбор даты и времени; меню, из которого его открыли, уже закрыто. */}
+      <MuteCustomHost />
     </>
   );
 }
