@@ -10,13 +10,18 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { fitStageGrid, stageAvatarSize } from '../stageGridRules';
 import { stageHasVideo } from '../stageAutoShowRules';
 import * as stageOrderRules from '../stageOrderRules';
+import type { StageOrderLayout } from '../stageOrderPrefs';
+import * as stageLayoutRules from '../stageLayoutRules';
 
 const source = readFileSync(new URL('./VoiceChannelView.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 type Options = { phone?: boolean; mobile?: boolean; touch?: boolean; hide?: boolean; watched?: boolean;
   cameras?: boolean; streams?: boolean; connected?: boolean; muted?: boolean; mutedCamera?: boolean; companionScreen?: boolean; volume?: number;
   cols?: number; savedOrder?: string[]; dragPreview?: string[]; tip?: 'none' | 'button' | 'hold'; channelId?: string | null; bothStreams?: boolean; economy?: boolean;
-  noCameraPeople?: number };
-type DragInput = { enabled: boolean; order: readonly string[]; onCommit(order: string[]): void };
+  noCameraPeople?: number; stageStreams?: string[]; watchedIds?: string[]; stageKey?: string;
+  layout?: stageLayoutRules.StageLayout; speakerId?: string | null; selfId?: string; includeSelf?: boolean; stageAudio?: string[];
+  savedModes?: Partial<Record<stageOrderRules.StageOrderMode, string[]>>;
+  modePreviews?: Partial<Record<stageOrderRules.StageOrderMode, string[]>> };
+type DragInput = { enabled: boolean; gridRef: React.RefObject<HTMLDivElement>; order: readonly string[]; onCommit(order: string[]): void };
 const noop = () => {};
 const peer = { identity: 'peer', name: 'Анна', sid: 'peer', isLocal: false, attributes: {} };
 const companion = { ...peer, identity: 'peer#screen', sid: 'companion' };
@@ -25,18 +30,26 @@ const screen = { participant: peer }; // Без публикации: нет н�
 
 async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraViewer', options: Options,
   check: (f: { host: HTMLDivElement; render(): Promise<void>; click(selector: string): Promise<void>;
+    setLayout(layout: stageLayoutRules.StageLayout): Promise<void>; watched(): string[];
     calls: { toggles: number; volumes: number[]; prefs: boolean[]; newHooks: number;
       autoShow: { hasVideo: boolean; hideNoVideo: boolean; channelId: string | null }[];
-      orderReads: { channelId: string | null; cols: number }[]; orderWrites: { channelId: string; cols: number; order: string[] }[];
-      drags: DragInput[]; pointerDown: number } }) => Promise<void>, raw = source) {
+      orderReads: { channelId: string | null; cols: StageOrderLayout }[];
+      orderWrites: { channelId: string; cols: StageOrderLayout; order: string[] }[];
+      drags: DragInput[]; pointerDown: number; pointerInstances: number[];
+      clearWatched: number; watch: string[]; unwatch: string[]; layouts: stageLayoutRules.StageLayout[]; events: string[];
+      speaker: { ids: string[]; enabled: boolean }[] } }) => Promise<void>, raw = source) {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   const calls = { toggles: 0, volumes: [] as number[], prefs: [] as boolean[], newHooks: 0,
     autoShow: [] as { hasVideo: boolean; hideNoVideo: boolean; channelId: string | null }[],
-    orderReads: [] as { channelId: string | null; cols: number }[],
-    orderWrites: [] as { channelId: string; cols: number; order: string[] }[], drags: [] as DragInput[], pointerDown: 0 };
+    orderReads: [] as { channelId: string | null; cols: StageOrderLayout }[],
+    orderWrites: [] as { channelId: string; cols: StageOrderLayout; order: string[] }[],
+    drags: [] as DragInput[], pointerDown: 0, pointerInstances: [] as number[],
+    clearWatched: 0, watch: [] as string[], unwatch: [] as string[], layouts: [] as stageLayoutRules.StageLayout[],
+    events: [] as string[], speaker: [] as { ids: string[]; enabled: boolean }[] };
+  let nextDragInstance = 0;
   const unexpected: string[] = [];
   let hide = options.hide ?? false;
   let volume = options.volume ?? 1.4;
@@ -44,30 +57,50 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
   const useHide = () => { calls.newHooks++; return React.useSyncExternalStore(
     React.useCallback((fn: () => void) => { subscribers.add(fn); return () => { subscribers.delete(fn); }; }, []), () => hide); };
   const setHide = (v: boolean) => { hide = v; calls.prefs.push(v); for (const fn of subscribers) fn(); };
-  const room = { localParticipant: { setAttributes: async () => {}, setCameraEnabled: async () => {}, getTrackPublication: () => undefined },
+  let revision = 0;
+  let disposing = false;
+  const stateSubscribers = new Set<() => void>();
+  const subscribeState = (fn: () => void) => { stateSubscribers.add(fn); return () => { stateSubscribers.delete(fn); }; };
+  const getRevision = () => revision;
+  const useRevision = () => React.useSyncExternalStore(subscribeState, getRevision);
+  const changed = () => { revision++; if (!disposing) for (const fn of stateSubscribers) fn(); };
+  const setLayout = (layout: stageLayoutRules.StageLayout) => {
+    calls.layouts.push(layout); calls.events.push(`layout:${layout}`); options.layout = layout; changed();
+  };
+  const room = { localParticipant: { identity: options.selfId ?? 'self', setAttributes: async () => {}, setCameraEnabled: async () => {}, getTrackPublication: () => undefined },
     on: (..._args: unknown[]) => room, off: (..._args: unknown[]) => room };
   const state = { voice: { channelId: options.channelId === undefined ? 'channel' : options.channelId }, presence: {},
     bootstrap: options.economy ? { server: { id: 'server' } } : null,
     economy: options.economy ? { server: { enabled: true, wallet: { balance: 123 }, currencyName: 'перья' } } : {},
-    watchedStreams: options.watched ? options.bothStreams ? ['peer', 'peer#screen'] : ['peer'] : [],
-    mutedStreams: [], streamVolumes: {}, pendingWatch: null, clearWatchedStreams: noop, clearPendingWatch: noop,
-    watchStream: noop, unwatchStream: noop, toggleStreamMute: noop, setStreamVolume: noop, joinVoice: async () => {},
+    watchedStreams: options.watchedIds ?? (options.watched ? options.bothStreams ? ['peer', 'peer#screen'] : ['peer'] : []),
+    mutedStreams: [], streamVolumes: {}, pendingWatch: null,
+    clearWatchedStreams: () => { calls.clearWatched++; calls.events.push('clear');
+      if (state.watchedStreams.length) { state.watchedStreams = []; changed(); } }, clearPendingWatch: noop,
+    watchStream: (id: string) => { calls.watch.push(id); calls.events.push(`watch:${id}`);
+      if (!state.watchedStreams.includes(id)) { state.watchedStreams = [...state.watchedStreams, id]; changed(); } },
+    unwatchStream: (id: string) => { calls.unwatch.push(id); calls.events.push(`unwatch:${id}`);
+      if (state.watchedStreams.includes(id)) { state.watchedStreams = state.watchedStreams.filter(x => x !== id); changed(); } },
+    toggleStreamMute: noop, setStreamVolume: noop, joinVoice: async () => {},
     selfMuted: false, selfDeafened: false, leaveVoice: noop };
   const icon = ({ name }: { name: string }) => React.createElement('i', { 'data-icon': name });
   const deps: Record<string, unknown> = {
     react: React, 'react/jsx-runtime': jsx,
     '@livekit/components-react': { useParticipants: () => [peer, companion,
+      ...(options.includeSelf ? [{ ...peer, identity: options.selfId ?? 'self', sid: 'local', name: 'Я', isLocal: true }] : []),
       ...Array.from({ length: Math.max(0, (options.noCameraPeople ?? 1) - 1) }, (_, i) =>
         ({ ...peer, identity: `guest-${i}`, sid: `guest-${i}`, name: `Гость ${i}` }))], useRoomContext: () => room,
       // MobileCallBar читает настоящий контракт хука, а не Participant напрямую.
       useLocalParticipant: () => ({ localParticipant: room.localParticipant, isCameraEnabled: false }),
-      useTracks: (spec: { source: string }[]) => spec[0].source === 'screen' ? (options.streams ?
+      useTracks: (spec: { source: string }[]) => spec[0].source === 'screen' ? (options.stageStreams ?
+        options.stageStreams.map(id => ({ participant: { ...peer, identity: id, sid: id }, publication: { trackSid: `screen-${id}` } })) : options.streams ?
         options.bothStreams ? [{ ...screen, publication: { trackSid: 'screen-browser' } },
           { ...screen, participant: companion, publication: { trackSid: 'screen-native' } }]
           : [{ ...screen, participant: options.companionScreen ? companion : peer }] : [])
+        : spec[0].source === 'audio' ? (options.stageAudio ?? []).map(id => ({ participant: { ...peer, identity: id } }))
         : spec[0].source === 'camera' ? (options.cameras ?
           [{ ...camera, publication: { ...camera.publication, isMuted: !!options.mutedCamera } }] : []) : [],
-      VideoTrack: ({ className }: { className: string }) => React.createElement('div', { className }),
+      VideoTrack: ({ className, trackRef }: { className: string; trackRef?: { participant: { identity: string } } }) =>
+        React.createElement('div', { className, 'data-track-id': trackRef?.participant.identity }),
     },
     'livekit-client': { Track: { Source: { ScreenShare: 'screen', ScreenShareAudio: 'audio', Camera: 'camera' } }, RoomEvent: {} },
     '../hotkeys': { isMobile: () => !!options.mobile },
@@ -75,18 +108,30 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     // Камера/микрофон не являются предметом этих проверок режима перетаскивания.
     '../cameraSettings': { getCameraPreset: () => 'normal' },
     '../voiceSelf': { toggleSelfMute: noop, toggleSelfDeafen: noop },
-    '../store': { useStore: (select: (s: typeof state) => unknown) => select(state) },
+    '../store': { useStore: (select: (s: typeof state) => unknown) => { useRevision(); return select(state); } },
+    '../stageLayoutPrefs': { useStageLayout: () => { useRevision(); return options.layout ?? 'auto'; }, setStageLayout: setLayout },
+    '../stageLayoutRules': stageLayoutRules,
+    '../useStageSpeaker': { useStageSpeaker: (ids: string[], enabled: boolean) => {
+      useRevision(); calls.speaker.push({ ids: [...ids], enabled }); return enabled ? options.speakerId ?? null : null;
+    } },
+    './StageLayoutPicker': { StageLayoutPicker: () => null },
     '../memberName': { useNameResolver: () => (_id: string, name: string) => name, useVoiceName: () => (p: typeof peer) => p.name },
     '../stageViewPrefs': { useHideNoVideo: useHide, setHideNoVideo: setHide },
     '../stageOrderRules': stageOrderRules,
-    '../stageOrderPrefs': { useStageOrder: (channelId: string | null, cols: number) => {
-      calls.orderReads.push({ channelId, cols }); return options.savedOrder ?? null;
-    }, saveStageOrder: (channelId: string, cols: number, order: string[]) => calls.orderWrites.push({ channelId, cols, order: [...order] }),
+    '../stageOrderPrefs': { useStageOrder: (channelId: string | null, cols: StageOrderLayout) => {
+      calls.orderReads.push({ channelId, cols });
+      return typeof cols === 'number' ? options.savedOrder ?? null : options.savedModes?.[cols] ?? null;
+    }, saveStageOrder: (channelId: string, cols: StageOrderLayout, order: string[]) => calls.orderWrites.push({ channelId, cols, order: [...order] }),
       useHasStageOrder: () => false, resetStageOrder: noop },
-    '../useStageDrag': { useStageDrag: (input: DragInput) => { calls.drags.push(input); return {
-      preview: options.dragPreview ?? null, dragging: false,
-      nestRef: { current: null }, onPointerDown: () => calls.pointerDown++,
-    }; } },
+    '../useStageDrag': { useStageDrag: (input: DragInput) => {
+      const instance = React.useRef<number>();
+      if (instance.current === undefined) instance.current = nextDragInstance++;
+      const index = instance.current;
+      const nestRef = React.useRef<HTMLDivElement>(null);
+      calls.drags.push(input);
+      return { preview: index < 3 ? options.modePreviews?.[stageOrderRules.STAGE_ORDER_MODES[index]] ?? null : options.dragPreview ?? null,
+        dragging: false, nestRef, onPointerDown: () => { calls.pointerDown++; calls.pointerInstances.push(index); } };
+    } },
     '../stageAutoShowRules': { stageHasVideo },
     // Таймер проверяется отдельным тестом настоящего хука; здесь проверяем его входы из сцены.
     '../useStageAutoShow': { useStageAutoShow: (input: { hasVideo: boolean; hideNoVideo: boolean; channelId: string | null }) => {
@@ -134,15 +179,17 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
       } });
     const props = component === 'VoiceChannelView' ? { channel: { id: 'channel', name: 'Гусиная', type: 'voice' }, connected: options.connected ?? true }
       : { track: screen, hasAudio: true, audioMuted: !!options.muted, volume, viewers: [],
-        onToggleAudio: () => calls.toggles++, onVolume: (v: number) => { calls.volumes.push(v); volume = v; }, onClose: noop };
+        onToggleAudio: () => calls.toggles++, onVolume: (v: number) => { calls.volumes.push(v); volume = v; }, onClose: noop, stageKey: options.stageKey };
     const render = async () => { await React.act(async () => { root.render(React.createElement(module.exports[component],
       'volume' in props ? { ...props, volume } : props));
       for (let i = 0; i < 5; i++) await Promise.resolve(); }); };
     const click = async (selector: string) => { const el = host.querySelector<HTMLElement>(selector); assert.ok(!!el, `Есть ${selector}`);
       await React.act(async () => el!.click()); };
-    await render(); await check({ host, render, click, calls });
+    await render(); await check({ host, render, click, calls, watched: () => [...state.watchedStreams],
+      setLayout: async layout => { await React.act(async () => setLayout(layout)); } });
     assert.deepEqual(unexpected, [], 'Сцена не использует неописанные побочные границы');
   } finally {
+    disposing = true;
     await React.act(async () => root.unmount()); host.remove(); await GlobalRegistrator.unregister();
     if (previous) Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', previous); else Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   }
@@ -208,7 +255,7 @@ it('R169 превью переставляет существующую каме
   });
 });
 
-it('R169 телефон, просмотр, чаевые и неизмеренная сетка выключают перетаскивание', async () => {
+it('R169 телефон, просмотр, чаевые и неизмеренная сетка выключают именно жест сетки под окно', async () => {
   // Удержание под тип и телефонные жесты не должны конкурировать с перестановкой.
   for (const options of [{ phone: true }, { mobile: true }, { watched: true, streams: true },
     { tip: 'button' as const }, { tip: 'hold' as const }, { cols: 0 }, { channelId: null }]) {
@@ -265,6 +312,343 @@ it('R169 мутант ключа хранения без текущих коло
   const anchor = 'saveStageOrder(channelId, gridCols, order)';
   assert.equal(source.split(anchor).length - 1, 1); await commitScene();
   await assert.rejects(() => commitScene(source.replace(anchor, 'saveStageOrder(channelId, 1, order)')), assert.AssertionError);
+});
+
+const watchOptions = (): Options => ({ cols: 3, noCameraPeople: 3,
+  stageStreams: ['peer', 'peer#screen', 'guest-0', 'guest-1'], watchedIds: ['peer', 'peer#screen'] });
+const modeSelectors = ['.stage-watch-grid', '.stage-streams', '.stage-people'] as const;
+const modeDefaults = [['s:peer', 's:peer#screen'], ['s:guest-0', 's:guest-1'], ['p:peer', 'p:guest-0', 'p:guest-1']];
+const savedModes: NonNullable<Options['savedModes']> = {
+  'watch-streams': ['s:peer#screen', 's:peer'], 'watch-cards': ['s:guest-1', 's:guest-0'],
+  'watch-people': ['p:guest-1', 'p:peer', 'p:guest-0'],
+};
+const tileKeys = (host: HTMLElement, selector: string) => [...host.querySelectorAll(`${selector} > [data-stage-key]`)]
+  .map(el => el.getAttribute('data-stage-key'));
+
+async function watchWiring(raw = source) {
+  await fixture('VoiceChannelView', { ...watchOptions(), savedModes, savedOrder: ['p:peer'] }, async ({ host, calls }) => {
+    const drags = calls.drags.slice(-4);
+    assert.equal(drags.length, 4, 'R246 три режима и сетка создают четыре жеста');
+    assert.deepEqual(calls.orderReads.slice(-4).map(x => x.cols), [...stageOrderRules.STAGE_ORDER_MODES, 0], 'R246 сетка читает настройку последней');
+    assert.deepEqual(drags.map(x => x.enabled), [true, true, true, false], 'R246 в просмотре активны три режима, не сетка');
+    assert.equal(new Set(drags.map(x => x.gridRef)).size, 4, 'R246 у каждого жеста свой ref');
+    for (let i = 0; i < 3; i++) {
+      const mode = stageOrderRules.STAGE_ORDER_MODES[i];
+      const container = host.querySelector(modeSelectors[i]);
+      assert.equal(drags[i].gridRef.current === container, true, `R246 ref ${mode} подключён к своему контейнеру`);
+      assert.deepEqual(Array.from(drags[i].order), savedModes[mode], `R246 свой сохранённый порядок ${mode}`);
+      assert.deepEqual(tileKeys(host, modeSelectors[i]), savedModes[mode], `R246 настоящий DOM ${mode}`);
+      assert.equal(container?.classList.contains('stage-dnd'), true, `R246 CSS жеста ${mode}`);
+      await React.act(async () => container!.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true })));
+      drags[i].onCommit([...modeDefaults[i]].reverse());
+    }
+    assert.deepEqual(calls.pointerInstances, [0, 1, 2], 'R246 контейнеры вызывают собственный обработчик, сетка не участвует');
+    assert.deepEqual(calls.orderWrites, stageOrderRules.STAGE_ORDER_MODES.map((cols, i) => ({
+      channelId: 'channel', cols, order: [...modeDefaults[i]].reverse(),
+    })), 'R246 завершение пишет собственный mode, не колонки и не соседний режим');
+  }, raw);
+}
+it('R246 ПК в просмотре подключает три независимых жеста, порядка и записи; жест сетки остаётся последним', () => watchWiring());
+
+async function watchGuards(raw = source) {
+  // Класс ошибки: один общий enabled позволяет тянуть одиночный показ или забирает телефонное удержание под тип.
+  const cases: [Partial<Options>, boolean[]][] = [
+    [{}, [true, true, true, false]],
+    [{ watchedIds: ['peer'] }, [false, true, true, false]],
+    [{ stageStreams: ['peer', 'peer#screen', 'guest-0'] }, [true, false, true, false]],
+    [{ noCameraPeople: 1 }, [true, true, false, false]],
+    [{ phone: true }, [false, false, false, false]], [{ mobile: true }, [false, false, false, false]],
+    [{ tip: 'button' }, [false, false, false, false]], [{ tip: 'hold' }, [false, false, false, false]],
+    [{ channelId: null }, [false, false, false, false]],
+    [{ watchedIds: [] }, [false, false, false, true]],
+  ];
+  for (const [extra, enabled] of cases) await fixture('VoiceChannelView', { ...watchOptions(), ...extra }, async ({ host, calls }) => {
+    assert.deepEqual(calls.drags.slice(-4).map(x => x.enabled), enabled, `R246 enabled ${JSON.stringify(extra)}`);
+    const watchingDesktop = !extra.phone && !extra.mobile && extra.watchedIds?.length !== 0;
+    for (const selector of modeSelectors) {
+      const el = host.querySelector(selector);
+      if (el) assert.equal(el.classList.contains('stage-dnd'), watchingDesktop, `R246 .stage-dnd ${selector} ${JSON.stringify(extra)}`);
+    }
+  }, raw);
+}
+it('R246 число плиток каждого режима, телефон, узкое окно, Alt и канал независимо ограничивают жесты просмотра', () => watchGuards());
+
+it('R246 Alt выключает жесты без скачка сохранённого порядка; телефон и узкое окно используют исходный порядок', async () => {
+  // Класс ошибки: запрет жеста ошибочно принимается за сброс раскладки; либо ПК-порядок протекает в телефон.
+  const options = { ...watchOptions(), savedModes };
+  await fixture('VoiceChannelView', options, async ({ host, render, calls }) => {
+    const before = modeSelectors.map(selector => tileKeys(host, selector));
+    options.tip = 'button'; await render();
+    assert.deepEqual(modeSelectors.map(selector => tileKeys(host, selector)), before);
+    assert.deepEqual(calls.drags.slice(-4).map(x => x.enabled), [false, false, false, false]);
+    assert.deepEqual(calls.orderWrites, [], 'переключение Alt не записывает раскладку');
+    options.tip = 'none'; await render();
+    assert.deepEqual(modeSelectors.map(selector => tileKeys(host, selector)), before);
+    assert.deepEqual(calls.drags.slice(-4).map(x => x.enabled), [true, true, true, false]);
+  });
+  for (const extra of [{ mobile: true }, { phone: true }]) await fixture('VoiceChannelView', { ...watchOptions(), savedModes, ...extra }, async ({ host }) => {
+    assert.deepEqual(modeSelectors.map(selector => tileKeys(host, selector)), modeDefaults);
+  });
+});
+
+it('R246 превью каждого режима переставляет только свои плитки, не пересоздавая видео соседних показов', () => {
+  // Класс ошибки: общее превью портит соседний контейнер либо remount видео сбрасывает просмотр.
+  const options = watchOptions();
+  return fixture('VoiceChannelView', options, async ({ host, render }) => {
+    const videos = [...host.querySelectorAll('.stage-watch-grid .screen-video')];
+    for (let i = 0; i < 3; i++) {
+      options.modePreviews = { [stageOrderRules.STAGE_ORDER_MODES[i]]: [...modeDefaults[i]].reverse() };
+      await render();
+      for (let j = 0; j < 3; j++) assert.deepEqual(tileKeys(host, modeSelectors[j]), j === i ? [...modeDefaults[j]].reverse() : modeDefaults[j]);
+      const current = [...host.querySelectorAll('.stage-watch-grid .screen-video')];
+      assert.equal(current.length, videos.length);
+      assert.equal(current.every(video => videos.includes(video)), true, 'узлы открытого видео не перемонтируются');
+    }
+  });
+});
+
+it('R246 режим без сохранения не пишет исходный порядок, но перестановка и возврат сохранённого пишутся в свой mode', async () => {
+  // Класс ошибки: пустое удержание создаёт мусорную настройку или возврат к исходному не сохраняется.
+  for (const saved of [undefined, savedModes]) await fixture('VoiceChannelView', { ...watchOptions(), savedModes: saved }, async ({ calls }) => {
+    const drags = calls.drags.slice(-4);
+    for (let i = 0; i < 3; i++) drags[i].onCommit([...modeDefaults[i]]);
+    assert.equal(calls.orderWrites.length, saved ? 3 : 0);
+    calls.orderWrites.length = 0;
+    for (let i = 0; i < 3; i++) drags[i].onCommit([...modeDefaults[i]].reverse());
+    assert.deepEqual(calls.orderWrites, stageOrderRules.STAGE_ORDER_MODES.map((cols, i) => ({ channelId: 'channel', cols, order: [...modeDefaults[i]].reverse() })));
+  });
+});
+
+async function fullscreenKey(raw = source) {
+  await fixture('ScreenViewer', { mobile: true, stageKey: 's:peer#screen' }, async ({ host, click }) => {
+    assert.equal(host.querySelector('.screen-viewer')?.getAttribute('data-stage-key'), 's:peer#screen');
+    await click('[title="На весь экран"]');
+    assert.equal(!!host.querySelector('.screen-viewer.pseudo-fs'), true);
+    assert.equal(host.querySelector('.screen-viewer')?.hasAttribute('data-stage-key'), false, 'R246 полноэкранный показ не является плиткой перетаскивания');
+    await click('[title="На весь экран"]');
+    assert.equal(host.querySelector('.screen-viewer')?.getAttribute('data-stage-key'), 's:peer#screen');
+  }, raw);
+}
+it('R246 ScreenViewer снимает stage-key на весь экран и возвращает после сворачивания', () => fullscreenKey());
+
+it('R246 перепутанный обработчик контейнера или ключ записи режима обнаруживается настоящей сценой', async () => {
+  // Класс ошибки: видимые плитки верны, но жест/сохранение ошибочно принадлежат соседнему контейнеру.
+  await watchWiring();
+  for (const [anchor, replacement, message] of [
+    ['onPointerDown={cardsDnd.drag.onPointerDown}', 'onPointerDown={watchDnd.drag.onPointerDown}', 'R246 контейнеры вызывают собственный обработчик'],
+    ['saveStageOrder(channelId, mode, order)', 'saveStageOrder(channelId, 3, order)', 'R246 завершение пишет собственный mode'],
+  ]) {
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(() => watchWiring(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(message));
+  }
+});
+
+it('R246 игнорирование Alt, узкого окна, числа показов или сохранённого порядка убивает соответствующий сценарий', async () => {
+  // Класс ошибки: правильно подключённый жест активируется не там либо DOM игнорирует настройку своего режима.
+  await watchGuards(); await watchWiring();
+  for (const [anchor, replacement] of [
+    ["const tipFree = activeTipMode === 'none';", 'const tipFree = true;'],
+    ['const watchDragOn = watching && !mobile && !phoneLayout;', 'const watchDragOn = watching && !mobile;'],
+    ['tipFree && watchedScreens.length > 1', 'tipFree'],
+  ]) {
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(() => watchGuards(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes('R246 enabled'));
+  }
+  const anchor = 'byStageKey(watchDnd.shown, watchKeys, watchedScreens.map';
+  assert.equal(source.split(anchor).length - 1, 1);
+  await assert.rejects(() => watchWiring(source.replace(anchor, 'byStageKey(watchKeys, watchKeys, watchedScreens.map')),
+    e => e instanceof assert.AssertionError && e.message.includes('R246 настоящий DOM watch-streams'));
+});
+
+it('R246 контрфакт stage-key в полноэкранном показе обнаруживается после реального раскрытия', async () => {
+  await fullscreenKey();
+  const anchor = 'data-stage-key={pseudo ? undefined : stageKey}';
+  assert.equal(source.split(anchor).length - 1, 1);
+  await assert.rejects(() => fullscreenKey(source.replace(anchor, 'data-stage-key={stageKey}')),
+    e => e instanceof assert.AssertionError && e.message.includes('R246 полноэкранный показ'));
+});
+
+const openStreamIds = (host: HTMLElement) => [...host.querySelectorAll('.stage-watch-grid .screen-video')]
+  .map(el => el.getAttribute('data-track-id'));
+
+it('R248 переход из просмотра в Сетку закрывает открытые показы и возвращает равные карточки', () => {
+  // Класс ошибки: смена вида сохраняет намерение слушать крупный показ и не возвращает сетку.
+  return fixture('VoiceChannelView', { cols: 2, streams: true, watched: true }, async ({ host, calls, setLayout, watched }) => {
+    assert.deepEqual(openStreamIds(host), ['peer']);
+    await setLayout('grid');
+    assert.equal(calls.clearWatched, 1); assert.deepEqual(watched(), []);
+    assert.equal(host.querySelectorAll('.stage-grid .stream-card').length, 1);
+    assert.deepEqual(openStreamIds(host), []);
+    assert.equal(calls.speaker.at(-1)?.enabled, false);
+  });
+});
+
+async function gridToFocus(raw = source) {
+  await fixture('VoiceChannelView', { layout: 'grid', cols: 2, stageStreams: ['peer', 'guest-0'] }, async ({ host, calls, click, watched }) => {
+    assert.equal(host.querySelectorAll('.stage-grid .stream-card').length, 2);
+    await click('.stage-grid [data-stage-key="s:guest-0"]');
+    assert.deepEqual(calls.events, ['layout:focus', 'watch:guest-0'], 'R248 grid-focus: выбор Фокуса предшествует намерению смотреть');
+    assert.deepEqual(watched(), ['guest-0']); assert.deepEqual(openStreamIds(host), ['guest-0']);
+    assert.equal(!!host.querySelector('.stage-grid'), false);
+    assert.equal(host.querySelectorAll('.stage-streams .stream-card').length, 1);
+    assert.deepEqual(calls.watch, ['guest-0'], 'R248 grid-focus: первый показ не открывается автоматически поверх ручного выбора');
+    assert.equal(host.querySelector('.pseudo-fs'), null, 'обычный клик не означает полный экран');
+  }, raw);
+}
+it('R248 клик по показу в Сетке сначала выбирает Фокус, потом смотрит выбранный показ без fullscreen', () => gridToFocus());
+
+async function autoOpenOther(raw = source) {
+  for (const layout of ['focus', 'side'] as const) await fixture('VoiceChannelView', {
+    layout, selfId: 'self', stageStreams: ['self', 'self#screen', 'peer', 'guest-0'], stageAudio: ['peer'],
+  }, async ({ host, calls, watched }) => {
+    assert.deepEqual(calls.watch, ['peer'], `R248 auto-other: ${layout} открывает первый чужой, не свой и не спутник`);
+    assert.deepEqual(watched(), ['peer']); assert.deepEqual(openStreamIds(host), ['peer']);
+    assert.equal(host.querySelectorAll('.stage-watch-grid .screen-audio').length, 1, 'автооткрытый показ получает управление своим звуком');
+    assert.equal(host.querySelectorAll('.stage-streams .stream-card').length, 3);
+  }, raw);
+  for (const layout of ['focus', 'side'] as const) await fixture('VoiceChannelView', {
+    layout, selfId: 'self', stageStreams: ['self', 'self#screen'],
+  }, async ({ host, calls, watched }) => {
+    assert.deepEqual(calls.watch, [], `R248 auto-other: ${layout} не подписывается, если показы только свои`);
+    assert.deepEqual(watched(), []); assert.deepEqual(openStreamIds(host), []);
+  }, raw);
+}
+it('R248 Фокус и Сбоку сами открывают первый чужой показ со звуком, но не свой и не собственного спутника', () => autoOpenOther());
+
+it('R248 закрытый автоматический показ и его прежние соседи не открываются снова, новый показ открывается', async () => {
+  // Класс ошибки: unwatch немедленно отменяется автоэффектом либо seen навсегда блокирует новые презентации.
+  for (const layout of ['focus', 'side'] as const) {
+    const options: Options = { layout, stageStreams: ['peer', 'guest-0'] };
+    await fixture('VoiceChannelView', options, async ({ host, calls, click, render, watched }) => {
+      assert.deepEqual(openStreamIds(host), ['peer']);
+      await click('.stage-watch-grid [title="Закрыть стрим"]'); await render();
+      assert.deepEqual(calls.unwatch, ['peer']); assert.deepEqual(watched(), []);
+      assert.deepEqual(calls.watch, ['peer']); assert.deepEqual(openStreamIds(host), []);
+      options.stageStreams = ['peer', 'guest-0', 'guest-1']; await render();
+      assert.deepEqual(calls.watch, ['peer', 'guest-1']); assert.deepEqual(watched(), ['guest-1']);
+      assert.deepEqual(openStreamIds(host), ['guest-1']);
+    });
+  }
+});
+
+async function oneBigReplacement(raw = source) {
+  for (const layout of ['focus', 'side', 'speaker'] as const) await fixture('VoiceChannelView', {
+    layout, cameras: true, noCameraPeople: 2, stageStreams: ['peer', 'guest-0'], watchedIds: ['peer'], speakerId: 'peer',
+  }, async ({ host, calls, click, watched }) => {
+    await click('.stage-streams [data-stage-key="s:guest-0"]');
+    assert.deepEqual(watched(), ['guest-0'], `R248 one-big: ${layout} заменяет прежний показ, а не добавляет второй`);
+    assert.deepEqual(openStreamIds(host), ['guest-0']); assert.equal(!!host.querySelector('.stage-big-person'), false);
+    assert.deepEqual(calls.events, ['unwatch:peer', 'watch:guest-0']);
+    await click('.stage-people [data-stage-key="p:peer"] [title="Развернуть камеру"]');
+    assert.deepEqual(watched(), [], `R248 one-big: ${layout} камера закрывает показ`);
+    assert.equal(host.querySelectorAll('.stage-watch-grid .screen-viewer').length, 1);
+    assert.equal(!!host.querySelector('.stage-watch-grid [data-icon="camera"]'), true);
+    await click('.stage-streams [data-stage-key="s:guest-0"]');
+    assert.deepEqual(watched(), ['guest-0']); assert.deepEqual(openStreamIds(host), ['guest-0']);
+    assert.equal(host.querySelectorAll('.stage-watch-grid .screen-viewer').length, 1, `R248 one-big: ${layout} показ заменяет камеру`);
+    assert.equal(!!host.querySelector('.stage-watch-grid [data-icon="camera"]'), false);
+  }, raw);
+}
+it('R248 Фокус, Сбоку и Говорящий при открытии заменяют прежний показ или камеру, не плодят крупные вьюверы', () => oneBigReplacement());
+
+it('R248 Говорящий крупно показывает текущего человека без дубля, а ручной показ получает приоритет', () => {
+  // Класс ошибки: активный говорящий дублируется в ростере или выталкивает вручную выбранную презентацию.
+  const options: Options = { layout: 'speaker', noCameraPeople: 3, includeSelf: true, speakerId: 'peer', stageStreams: ['peer'] };
+  return fixture('VoiceChannelView', options, async ({ host, calls, render, click }) => {
+    assert.equal(host.querySelector('.stage-big-person .stage-name')?.textContent?.trim(), peer.name);
+    assert.deepEqual(tileKeys(host, '.stage-people'), ['p:self', 'p:guest-0', 'p:guest-1']);
+    assert.deepEqual(calls.speaker.at(-1), { ids: ['peer', 'guest-0', 'guest-1'], enabled: true });
+    options.speakerId = 'guest-0'; await render();
+    assert.equal(host.querySelector('.stage-big-person .stage-name')?.textContent?.trim(), 'Гость 0');
+    assert.deepEqual(tileKeys(host, '.stage-people'), ['p:peer', 'p:self', 'p:guest-1']);
+    assert.deepEqual(calls.watch, [], 'Говорящий не открывает показы по голосу');
+    await click('.stage-streams [data-stage-key="s:peer"]');
+    assert.equal(host.querySelector('.stage-big-person'), null); assert.deepEqual(openStreamIds(host), ['peer']);
+    assert.equal(tileKeys(host, '.stage-people').includes('p:guest-0'), true);
+    options.speakerId = 'guest-1'; await render();
+    assert.deepEqual(openStreamIds(host), ['peer']); assert.equal(host.querySelector('.stage-big-person'), null);
+  });
+});
+
+it('R248 хук говорящего получает только других людей и включается только в режимах один крупно', async () => {
+  // Класс ошибки: self/спутник попадает в кандидаты либо отслеживание крупного включено в обычной сетке.
+  for (const layout of stageLayoutRules.STAGE_LAYOUTS) await fixture('VoiceChannelView', {
+    layout, includeSelf: true, selfId: 'self', noCameraPeople: 2,
+  }, async ({ calls }) => {
+    assert.deepEqual(calls.speaker.at(-1), { ids: ['peer', 'guest-0'], enabled: ['focus', 'side', 'speaker'].includes(layout) });
+  });
+});
+
+it('R248 вход в Говорящий закрывает автоматический показ, но оставляет ручной; закрытие возвращает говорящего', async () => {
+  // Класс ошибки: источник просмотра забывается, поэтому смена режима либо глушит ручной показ, либо удерживает автоматический.
+  for (const manual of [false, true]) await fixture('VoiceChannelView', {
+    layout: manual ? 'auto' : 'focus', stageStreams: ['peer'], watchedIds: manual ? ['peer'] : [], speakerId: 'peer',
+  }, async ({ host, calls, setLayout, watched, click }) => {
+    assert.deepEqual(openStreamIds(host), ['peer']);
+    await setLayout('speaker');
+    assert.deepEqual(watched(), manual ? ['peer'] : []);
+    assert.deepEqual(calls.unwatch, manual ? [] : ['peer']);
+    assert.equal(!!host.querySelector('.stage-big-person'), !manual);
+    if (manual) {
+      await click('.stage-watch-grid [title="Закрыть стрим"]');
+      assert.equal(!!host.querySelector('.stage-big-person'), true); assert.deepEqual(openStreamIds(host), []);
+    }
+  });
+});
+
+async function sideOrders(raw = source) {
+  const options: Options = { layout: 'side', noCameraPeople: 3, stageStreams: ['peer', 'guest-0', 'guest-1'], watchedIds: ['peer'],
+    savedModes: { 'side-cards': ['s:guest-1', 's:guest-0'], 'side-people': ['p:guest-0', 'p:guest-1', 'p:peer'],
+      'watch-cards': ['s:guest-0', 's:guest-1'], 'watch-people': ['p:peer', 'p:guest-0', 'p:guest-1'] } };
+  await fixture('VoiceChannelView', options, async ({ host, calls }) => {
+    assert.equal(!!host.querySelector('.voice-stage.watching.side > .stage-main .screen-viewer'), true);
+    assert.equal(host.querySelectorAll('.voice-stage.side > .stage-side > .stage-streams').length, 1);
+    assert.equal(host.querySelectorAll('.voice-stage.side > .stage-side > .stage-people').length, 1);
+    assert.deepEqual(calls.orderReads.slice(-4).map(x => x.cols), ['watch-streams', 'side-cards', 'side-people', 0], 'R248 side-order: отдельные ключи боковой раскладки');
+    assert.deepEqual(tileKeys(host, '.stage-side .stage-streams'), options.savedModes!['side-cards']);
+    assert.deepEqual(tileKeys(host, '.stage-side .stage-people'), options.savedModes!['side-people']);
+    const drags = calls.drags.slice(-4);
+    assert.deepEqual(drags.map(x => x.enabled), [false, true, true, false]);
+    assert.equal(drags[1].gridRef.current, host.querySelector('.stage-side .stage-streams'));
+    assert.equal(drags[2].gridRef.current, host.querySelector('.stage-side .stage-people'));
+    drags[1].onCommit(['s:guest-0', 's:guest-1']); drags[2].onCommit(['p:peer', 'p:guest-1', 'p:guest-0']);
+    assert.deepEqual(calls.orderWrites, [
+      { channelId: 'channel', cols: 'side-cards', order: ['s:guest-0', 's:guest-1'] },
+      { channelId: 'channel', cols: 'side-people', order: ['p:peer', 'p:guest-1', 'p:guest-0'] },
+    ]);
+  }, raw);
+}
+it('R248 Сбоку отделяет крупное и правую колонку, читает и пишет side-cards и side-people вместо watch', () => sideOrders());
+
+it('R248 телефон и узкое окно с сохранённым Сбоку работают как Авто, выбор не перезаписывается', async () => {
+  // Класс ошибки: desktop-колонка включается на телефоне или fallback портит настройку устройства.
+  for (const extra of [{ phone: true }, { mobile: true }]) for (const watched of [false, true]) {
+    const options: Options = { layout: 'side', streams: true, watched, ...extra };
+    await fixture('VoiceChannelView', options, async ({ host, calls }) => {
+      assert.equal(!!host.querySelector('.voice-stage.side, .stage-main, .stage-side'), false);
+      assert.deepEqual(openStreamIds(host), watched ? ['peer'] : []);
+      assert.deepEqual(calls.watch, [], 'fallback Авто сам не открывает показ');
+      assert.deepEqual(calls.layouts, []); assert.equal(options.layout, 'side');
+      assert.equal(calls.orderReads.some(x => x.cols === 'side-cards' || x.cols === 'side-people'), false);
+    });
+  }
+});
+
+async function layoutMutant(anchor: string, replacement: string, check: (raw?: string) => Promise<void>, prefix: string) {
+  assert.equal(source.split(anchor).length - 1, 1, 'R248 якорь мутанта уникален');
+  await check();
+  await assert.rejects(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix));
+}
+it('R248 контрфакт отсутствия замены крупного обнаруживается при открытии второго показа', () =>
+  layoutMutant('for (const w of watchedIds) if (w !== id) unwatch(w);', '// старый показ не закрыт', oneBigReplacement, 'R248 one-big:'));
+it('R248 контрфакт клика в Сетке без перехода в Фокус обнаруживается порядком намерений', () => {
+  const anchor = "setStageLayout('focus');\n    } else if (oneBig) {\n      for (const w of watchedIds) if (w !== id) unwatch(w);";
+  return layoutMutant(anchor, anchor.replace("setStageLayout('focus');", '// Фокус не выбран'), gridToFocus, 'R248 grid-focus:');
+});
+it('R248 контрфакт автооткрытия своего показа обнаруживается при наличии чужих и только своих', () =>
+  layoutMutant('screenIds.filter((id) => ownerOf(id) !== selfId)', 'screenIds', autoOpenOther, 'R248 auto-other:'));
+it('R248 контрфакты ключей watch вместо side обнаруживаются отдельными чтениями и порядком DOM', async () => {
+  for (const mode of ['cards', 'people']) await layoutMutant(`side ? 'side-${mode}' : 'watch-${mode}'`, `'watch-${mode}'`, sideOrders, 'R248 side-order:');
 });
 
 it('R163 ПК без просмотра объединяет показ, камеру и людей одной сеткой, спутник не дублируется', () => fixture('VoiceChannelView', { streams: true, cameras: true }, async ({ host }) => {

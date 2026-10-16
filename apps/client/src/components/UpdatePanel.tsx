@@ -65,7 +65,9 @@ export function UpdatePanel() {
   const isError = phase === 'error';
 
   const title = isAvailable
-    ? `Доступно обновление ${v}`.trim()
+    ? viaSplash
+      ? `Доступна версия ${v}`.trim()
+      : `Доступно обновление ${v}`.trim()
     : isDownloading
       ? `Загрузка обновления ${v}`.trim()
       : isInstalling
@@ -75,7 +77,7 @@ export function UpdatePanel() {
           : 'Не удалось обновиться';
   const subtitle = isAvailable
     ? viaSplash
-      ? 'поставится при перезапуске'
+      ? 'приложение перезапустится на пару секунд'
       : 'обновить можно, когда удобно'
     : isDownloading
       ? 'загрузка · GusVoice'
@@ -141,7 +143,7 @@ export function UpdatePanel() {
         {isAvailable && (
           <div className="update-actions">
             <button className="update-btn-primary" onClick={(e) => { e.stopPropagation(); void applyPendingUpdate(); }}>
-              {viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}
+              Обновить
             </button>
             <button className="update-btn-ghost" onClick={(e) => { e.stopPropagation(); snoozeUpdate(); }}>
               Позже
@@ -201,7 +203,7 @@ export function UpdatePanel() {
               )}
               {isAvailable && (
                 <button className="update-btn-primary" onClick={() => { setShowNotes(false); void applyPendingUpdate(); }}>
-                  {viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}
+                  Обновить
                 </button>
               )}
             </div>

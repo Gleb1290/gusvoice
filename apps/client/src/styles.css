@@ -3995,6 +3995,181 @@ span.att-pending {
      «внутри» содержимого. Прижимаем к началу: лишние ряды честно уезжают вниз, под прокрутку. */
   align-content: flex-start;
 }
+/* 🔴 Полоса закрытых показов при просмотре — компактная, как полоса людей (16.10, жалоба владельца:
+   пять карточек по 400 px ложились двумя большими рядами и сплющивали открытый показ в узкую ленту).
+   Карточка — высотой с плитку человека, превью на всю карточку, имя поверх; полоса в один ряд,
+   лишнее — под прокрутку (автопрокрутка у края при перетаскивании это уже умеет). */
+.voice-stage.watching .stage-streams {
+  /* Один ряд, лишние уезжают вправо под ГОРИЗОНТАЛЬНУЮ прокрутку (решение владельца 16.10: «как лента»).
+     Высота — по карточке; полоса прокрутки сама добавляется к высоте блока и карточку не срезает.
+     `safe center`: влезают — по центру, не влезают — от левого края (обычный `center` срезал бы начало). */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: flex-start;
+  justify-content: safe center;
+}
+.voice-stage.watching .stream-card {
+  position: relative;
+  flex: 0 0 auto;
+  width: calc(var(--stage-tile-h) * 16 / 9);
+  max-width: none;
+  height: var(--stage-tile-h);
+}
+.voice-stage.watching .stream-card:hover:not([data-drag]) {
+  /* Подъём на 2 px срезался бы краем полосы с прокруткой. `:not([data-drag])` — иначе это правило (оно специфичнее)
+     перебивало бы поджатие удержания (`data-drag="pressing"` у контейнера жеста) и подсказка «сейчас поднимется» пропадала. */
+  transform: none;
+}
+.voice-stage.watching .stream-card-preview {
+  height: 100%;
+  aspect-ratio: auto;
+}
+.voice-stage.watching .stream-card-foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.72));
+  color: #fff;
+}
+/* 🔴 Вид сцены «Сбоку» (#221, 16.10, как Sidebar у Google Meet): крупное слева, колонка остальных справа —
+   закрытые показы и люди, каждая часть со своей вертикальной прокруткой (автопрокрутка у края при перетаскивании
+   работает по прокручиваемому контейнеру жеста). Плитки компактные — высотой с плитку человека, 16:9. Крупное
+   получает всю оставшуюся площадь. «Фокус» и «Говорящий» — те же полосы снизу, что режим просмотра (выше). */
+.voice-stage.watching.side {
+  --stage-side-w: calc(var(--stage-tile-h) * 16 / 9);
+  flex-direction: row;
+}
+.voice-stage.side .stage-main {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.voice-stage.side .stage-side {
+  flex: 0 0 auto;
+  /* + запас под полосу прокрутки, чтобы она не наезжала на плитки. */
+  width: calc(var(--stage-side-w) + 12px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.voice-stage.side .stage-streams,
+.voice-stage.side .stage-people {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  justify-content: flex-start;
+  align-content: flex-start;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  gap: var(--sp-3);
+}
+.voice-stage.side .stage-streams {
+  /* Карточкам — до половины колонки, когда есть и люди; остальное — людям. */
+  flex: 0 1 auto;
+  max-height: 50%;
+}
+.voice-stage.side .stage-people {
+  flex: 1 1 0;
+}
+.voice-stage.side .stage-streams:only-child {
+  max-height: none;
+}
+.voice-stage.side .stage-side .stage-tile,
+.voice-stage.side .stage-side .stream-card {
+  flex: 0 0 auto;
+  width: var(--stage-side-w);
+  height: var(--stage-tile-h);
+}
+/* Крупный человек (режим «Говорящий» и «Фокус»/«Сбоку» без показа, #221): его плитка — во всю площадь крупного,
+   камера целиком (не обрезая), без камеры — крупная аватарка по центру. */
+.stage-big-person > .stage-tile {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.stage-big-person > .stage-tile .stage-cam {
+  object-fit: contain;
+  background: #000;
+}
+/* Мини-схема вида сцены (#221, `StageLayoutMini`): клетки из `currentColor`, крупная — ярче. */
+.stage-mini {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 15px;
+  gap: var(--sp-1);
+}
+/* Клетки квадратные: меньший угол шкалы (`--r-1` 6px) больше самой клетки ~4px — превратил бы её в кружок. */
+.stage-mini > span {
+  border-radius: 0;
+  background: currentColor;
+  opacity: 0.45;
+}
+.stage-mini > span.big {
+  opacity: 0.95;
+}
+.stage-mini.auto {
+  grid-template: repeat(2, 1fr) / repeat(2, 1fr);
+}
+.stage-mini.auto > b {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  color: currentColor;
+}
+.stage-mini.auto > span {
+  opacity: 0.25;
+}
+.stage-mini.grid {
+  grid-template: repeat(2, 1fr) / repeat(3, 1fr);
+}
+.stage-mini.focus,
+.stage-mini.speaker {
+  grid-template: 2fr 1fr / repeat(3, 1fr);
+}
+.stage-mini.focus > .big,
+.stage-mini.speaker > .big {
+  grid-column: 1 / -1;
+}
+/* «Говорящий» — в крупной клетке «человек»: кружок в цвет фона. */
+.stage-mini.speaker > .big {
+  background: radial-gradient(circle at 50% 50%, var(--bg-2) 0 2.5px, currentColor 3px);
+}
+.stage-mini.side {
+  grid-template: repeat(3, 1fr) / 2fr 1fr;
+}
+.stage-mini.side > .big {
+  grid-row: 1 / -1;
+}
+.ctx-item.stage-layout-item .ctx-ico {
+  width: 20px;
+  align-items: center;
+}
+/* Два инструмента сцены в шапке рядом, прижаты вправо (у кнопки-одиночки было своё `margin-left: auto`). */
+.voice-header-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+.voice-header-tools .voice-header-tool {
+  margin-left: 0;
+}
 /* Stream offered as a tile with a live preview (#4). */
 .stream-card {
   display: flex;
@@ -4168,37 +4343,45 @@ span.att-pending {
   height: var(--tile-h, var(--stage-tile-h));
   max-width: none;
 }
-/* 🔴 Перетаскивание плиток сетки (12.10, `useStageDrag.ts`): удержание 2 с поднимает плитку, как значок на
-   рабочем столе Android-оболочки. Двигает её код (inline `transform`), здесь — только состояния:
-   `pressing` — идёт удержание (с 0.3 с плитка сразу обводится и медленно поджимается до самого подъёма —
+/* 🔴 Перетаскивание плиток сцены (12.10, `useStageDrag.ts`): удержание 0,5 с (до 16.10 — 2 с) поднимает плитку, как значок на
+   рабочем столе Android-оболочки. Контейнеры с жестом помечены `.stage-dnd`: сетка «под окно» и с 16.10 — в режиме
+   просмотра показа сетка открытых показов, полоса карточек и полоса людей. Двигает плитку код (inline `transform`), здесь — только состояния:
+   `pressing` — идёт удержание (с 0,15 с плитка сразу обводится и медленно поджимается до самого подъёма —
    видно, что сейчас поднимется, а не зависло), `lifted` — поднята (поверх соседей, тень
    «всплыло» → «поверх всего»), `settling` — садится в гнездо. Гнездо `.stage-drag-nest` — пустая ячейка
-   под поднятой плиткой (встаёт на новое место сразу, без перехода: расступаются соседи, а не гнездо); сетке нужен `position: relative`, чтобы гнездо стояло по её координатам. */
-.stage-grid {
+   под поднятой плиткой (встаёт на новое место сразу, без перехода: расступаются соседи, а не гнездо); контейнеру нужен `position: relative`, чтобы гнездо и `offsetLeft` плиток считались от него. */
+.stage-dnd {
   position: relative;
 }
-.stage-grid > [data-drag='pressing'] {
+.stage-dnd > [data-drag='pressing'] {
   transform: scale(0.94);
   box-shadow: 0 0 0 3px var(--accent);
-  transition: transform 1.7s linear, box-shadow var(--t-fast) ease-out;
+  /* = STAGE_DRAG_HOLD_MS − STAGE_DRAG_HINT_MS (500 − 150, 16.10): поджатие заканчивается ровно к подъёму. */
+  transition: transform 350ms linear, box-shadow var(--t-fast) ease-out;
 }
-.stage-grid > [data-drag='lifted'],
-.stage-grid > [data-drag='settling'] {
+.stage-dnd > [data-drag='lifted'],
+.stage-dnd > [data-drag='settling'] {
   z-index: 2;
 }
-.stage-grid > [data-drag='lifted'] {
+.stage-dnd > [data-drag='lifted'] {
   box-shadow: var(--sh-3);
   cursor: grabbing;
   will-change: transform;
 }
-.stage-grid[data-dragging],
-.stage-grid[data-dragging] * {
+.stage-dnd[data-dragging],
+.stage-dnd[data-dragging] * {
   cursor: grabbing;
   user-select: none;
 }
+/* 🔴 Пока тащим — без якорения прокрутки (16.10): перестановка узлов (наведение) заставляла браузер «держать»
+   видимую плитку и сам прокручивал полосу назад — после автопрокрутки к нижнему ряду полоса прыгала к верхнему. */
+.stage-dnd[data-dragging] {
+  overflow-anchor: none;
+}
 /* Пока тащим, кнопки «по наведению» и подсказка «Смотреть» на поднятой плитке не вылезают. */
-.stage-grid[data-dragging] .stream-card-overlay,
-.stage-grid[data-dragging] .stage-expand {
+.stage-dnd[data-dragging] .stream-card-overlay,
+.stage-dnd[data-dragging] .stage-expand,
+.stage-dnd[data-dragging] .screen-controls {
   opacity: 0;
 }
 .stage-drag-nest {
@@ -4210,7 +4393,7 @@ span.att-pending {
   pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {
-  .stage-grid > [data-drag='pressing'] {
+  .stage-dnd > [data-drag='pressing'] {
     transform: none;
     transition: none;
   }
@@ -9645,6 +9828,19 @@ button.dms-scope.on::after {
      нечем. Здесь полоса и так занимает своё место через `flex: 1`. */
   .app.m-content .voice-stage.watching .stage-people {
     max-height: none;
+    /* 🔴 Ряды — по высоте плитки 3:4 (#221, замерено на стенде 412: три человека и больше под крупным — плитки второго ряда
+       наезжали на первый). Полоса `flex: 1` с прокруткой даёт сетке определённую высоту, и ряды `auto` ужимались до её доли. */
+    grid-auto-rows: max-content;
+  }
+  /* Крупный говорящий (#221) — во всю площадь крупного, а не плитка 3:4 сетки телефона. */
+  .app.m-content .stage-big-person > .stage-tile {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: auto;
+  }
+  /* «Участники» лежат поверх шапки справа (`.mobile-members-btn`, fixed) — переключатель вида встаёт левее. */
+  .app.m-content.has-members .voice-header-tools {
+    margin-right: 44px;
   }
   .app.m-content .stage-tile.speaking {
     box-shadow: 0 0 0 2px var(--green), 0 0 18px 0 var(--green-glow);

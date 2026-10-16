@@ -69,10 +69,14 @@ import { reportBadPicture, useBadPictureAvailable } from '../badPicture';
 import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
 import { fitStageGrid, stageAvatarSize, STAGE_SCROLLBAR_PX, STAGE_GRID_HYSTERESIS_PX, type StageGridLayout } from '../stageGridRules';
 import { setHideNoVideo, useHideNoVideo } from '../stageViewPrefs';
+import { setStageLayout, useStageLayout } from '../stageLayoutPrefs';
+import { effectiveStageLayout, isOneBigLayout, stageAutoOpenStream, type StageLayout } from '../stageLayoutRules';
+import { useStageSpeaker } from '../useStageSpeaker';
+import { StageLayoutPicker } from './StageLayoutPicker';
 import { usePhoneLayout } from '../phoneLayout';
 import { stageHasVideo } from '../stageAutoShowRules';
 import { useStageAutoShow } from '../useStageAutoShow';
-import { applyStageOrder, isDefaultStageOrder, personTileKey, streamTileKey } from '../stageOrderRules';
+import { applyStageOrder, isDefaultStageOrder, personTileKey, streamTileKey, type StageOrderMode } from '../stageOrderRules';
 import { saveStageOrder, useStageOrder } from '../stageOrderPrefs';
 import { useStageDrag } from '../useStageDrag';
 
@@ -259,7 +263,10 @@ function ScreenViewer({
   onToggleAudio,
   onVolume,
   onClose,
+  stageKey,
 }: {
+  /** Ключ для перетаскивания в сетке открытых показов (16.10); развёрнутый на весь экран не тащится. */
+  stageKey?: string;
   track: TrackReference;
   hasAudio: boolean;
   audioMuted: boolean;
@@ -395,7 +402,12 @@ function ScreenViewer({
   const silent = audioMuted || volPct === 0;
 
   return (
-    <div className={`screen-viewer${pseudo ? ' pseudo-fs' : ''}${reveal.revealClass}`} ref={ref} onClick={reveal.onClick}>
+    <div
+      className={`screen-viewer${pseudo ? ' pseudo-fs' : ''}${reveal.revealClass}`}
+      ref={ref}
+      data-stage-key={pseudo ? undefined : stageKey}
+      onClick={reveal.onClick}
+    >
       <VideoTrack trackRef={track} className="screen-video" />
       {/* Подсказки «кто кого» — иначе при открытом стриме о типах в канале не узнать вовсе. */}
       <StreamTipFeed />
@@ -829,6 +841,42 @@ function byStageKey(order: readonly string[], keys: readonly string[], nodes: re
   });
 }
 
+/** Ключи карточек показов: два показа одного владельца (браузерный и нативный спутник) — второй под своим identity. */
+function screenStageKeys(list: readonly TrackReference[]): string[] {
+  const keys: string[] = [];
+  for (const s of list) {
+    const k = streamTileKey(s.participant.identity);
+    keys.push(keys.includes(k) ? `s:${s.participant.identity}` : k);
+  }
+  return keys;
+}
+
+/**
+ * Перетаскивание в контейнере режима просмотра показа (16.10): тот же `useStageDrag`, свой контейнер и
+ * свой сохранённый порядок (канал + `mode`). `shown` — порядок показа с учётом наведения.
+ * `ordered` — раскладка, где порядок живёт (ПК, режим просмотра): на телефоне и в узком окне те же
+ * контейнеры рисуются в порядке по умолчанию. `enabled` — можно ли тянуть прямо сейчас (Alt-режим чаевых
+ * жест забирает, но порядок при этом не скачет).
+ */
+function useStageModeDrag(channelId: string | null, mode: StageOrderMode, keys: readonly string[], ordered: boolean, enabled: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  const saved = useStageOrder(channelId, mode);
+  const applied = ordered ? applyStageOrder(keys, saved) : [...keys];
+  const drag = useStageDrag({
+    enabled: ordered && enabled && !!channelId,
+    gridRef: ref,
+    order: applied,
+    onCommit: (order) => {
+      if (!channelId) return;
+      // Ничего не меняли и раньше не запоминали — записи нет (и «Сбросить» не появится зря).
+      if (!saved && isDefaultStageOrder(keys, order)) return;
+      saveStageOrder(channelId, mode, order);
+    },
+  });
+  const shown = drag.preview ? applyStageOrder(keys, drag.preview) : applied;
+  return { ref, drag, shown };
+}
+
 // Stage for the channel you're connected to. All media is SFU-forwarded (no P2P). Streams show as
 // invite cards; everyone else appears as a capped avatar/camera tile so nobody fills the space.
 function VoiceStage() {
@@ -982,7 +1030,7 @@ function VoiceStage() {
       screens.map((s) => s.participant.identity),
     );
     if (id !== null) {
-      watch(id);
+      openStream(id);
       clearPendingWatch();
       return;
     }
@@ -1041,10 +1089,101 @@ function VoiceStage() {
   const watchedScreens = watchedIds
     .map((id) => screens.find((s) => s.participant.identity === id))
     .filter((s): s is TrackReference => !!s);
-  const unwatchedScreens = screens.filter((s) => !watchedIds.includes(s.participant.identity));
   const camByIdentity = new Map(cameras.map((c) => [c.participant.identity, c]));
   const focusCam = focusCamId ? camByIdentity.get(focusCamId) : undefined;
-  const watching = watchedScreens.length > 0 || !!focusCam;
+
+  // 🔴 Вид сцены (#221, 16.10, как раскладки Google Meet): Авто / Сетка / Фокус / Сбоку / Говорящий — один выбор на
+  // всё (`stageLayoutPrefs.ts`), правила — `stageLayoutRules.ts`. На телефоне «Сетка»/«Сбоку» действуют как «Авто».
+  // ⚠️ «Телефон» — по ширине (`usePhoneLayout`, граница 760 px, как у мобильных стилей), а не только `isMobile()`:
+  // тот истинен лишь в приложении, а мобильные стили `.app.m-content .stage-tile` перебивают сетку «под окно».
+  const phoneLayout = usePhoneLayout();
+  const viewLayout = effectiveStageLayout(useStageLayout(), mobile || phoneLayout);
+  const oneBig = isOneBigLayout(viewLayout);
+  const selfId = room.localParticipant.identity;
+  const screenIds = screens.map((s) => s.participant.identity);
+  // Свой показ сам не открываем: смотреть себя — зеркальный коридор и лишняя подписка.
+  const otherScreenIds = screenIds.filter((id) => ownerOf(id) !== selfId);
+  // Показы, уже бывшие на сцене при прошлом автооткрытии или ручном выборе: закрытый автооткрытый не открывается снова.
+  // Сброс — при смене вида (вошёл в «Фокус» — снова откроется первый); пришёл в него, уже открыв что-то, — всё видено.
+  const seenRef = useRef(new Set<string>());
+  const seenLayoutRef = useRef(viewLayout);
+  const keepSeenRef = useRef(false);
+  // Открытые самим «Фокусом»/«Сбоку» (не кликом): уходя в «Говорящего», их закрываем — там крупно говорящий, а не показ.
+  const autoOpenedRef = useRef(new Set<string>());
+  if (seenLayoutRef.current !== viewLayout) {
+    seenLayoutRef.current = viewLayout;
+    seenRef.current = new Set(keepSeenRef.current || watchedIds.length > 0 || focusCam ? screenIds : []);
+    keepSeenRef.current = false;
+  }
+  // «Фокус»/«Сбоку» без выбранного: крупно первый чужой показ (как у Meet презентация). Рисуем его сразу, не дожидаясь
+  // эффекта, который запишет намерение «смотрю» в стор, — иначе кадр мигал бы сеткой.
+  const autoOpenId = stageAutoOpenStream(viewLayout, otherScreenIds, watchedIds, !!focusCam, seenRef.current);
+  const autoOpenScreen = autoOpenId ? screens.find((s) => s.participant.identity === autoOpenId) : undefined;
+  if (autoOpenScreen) watchedScreens.push(autoOpenScreen);
+  const unwatchedScreens = screens.filter((s) => !watchedIds.includes(s.participant.identity) && s !== autoOpenScreen);
+  const hasManual = watchedScreens.length > 0 || !!focusCam;
+  // Нечего показать крупно (нет показов или все закрыты) — в режимах «один крупно» крупно тот, кто говорит; себя — никогда.
+  const others = participants.filter((p) => !p.isLocal && !p.identity.endsWith('#screen')).map((p) => p.identity);
+  // Следим за говорящим и пока крупно показ: закрыл его — крупно сразу тот, кто говорит (или говорил последним), а не первый по списку.
+  const speakerId = useStageSpeaker(others, oneBig);
+  const bigPerson = speakerId && !hasManual ? participants.find((p) => p.identity === speakerId) : undefined;
+  const watching = hasManual || !!bigPerson;
+
+  /** Открыть показ: в «Сетке» — переход в «Фокус» на нём; в режимах «один крупно» он заменяет крупное. */
+  const openStream = (id: string) => {
+    for (const sid of screenIds) seenRef.current.add(sid);
+    autoOpenedRef.current.delete(id);
+    if (viewLayout === 'grid') {
+      keepSeenRef.current = true;
+      setStageLayout('focus');
+    } else if (oneBig) {
+      for (const w of watchedIds) if (w !== id) unwatch(w);
+      setFocusCamId(null);
+    }
+    watch(id);
+  };
+  /** Камера крупно (кнопка «развернуть» на плитке) — те же правила, что у показа. */
+  const openCamera = (id: string) => {
+    for (const sid of screenIds) seenRef.current.add(sid);
+    if (viewLayout === 'grid') {
+      keepSeenRef.current = true;
+      setStageLayout('focus');
+    } else if (oneBig) {
+      for (const w of watchedIds) unwatch(w);
+    }
+    setFocusCamId(id);
+  };
+
+  // Смена вида: в «Сетку» — закрыть открытое (там все плитки равные, показ — карточкой); в «один крупно» — оставить одно.
+  const prevLayoutRef = useRef(viewLayout);
+  useEffect(() => {
+    const was = prevLayoutRef.current;
+    prevLayoutRef.current = viewLayout;
+    if (was === viewLayout) return;
+    if (viewLayout === 'grid') {
+      clearWatched();
+      setFocusCamId(null);
+    } else if (viewLayout === 'speaker') {
+      // Открытое вручную остаётся крупно; открытое самим «Фокусом»/«Сбоку» — закрываем.
+      const manual = watchedIds.filter((w) => !autoOpenedRef.current.has(w));
+      for (const w of watchedIds) if (w !== manual[0]) unwatch(w);
+      if (manual.length > 0) setFocusCamId(null);
+    } else if (isOneBigLayout(viewLayout) && watchedIds.length > 0) {
+      for (const w of watchedIds.slice(1)) unwatch(w);
+      setFocusCamId(null);
+    }
+    autoOpenedRef.current.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewLayout]);
+
+  // Автооткрытие записываем в стор: звук показа и атрибут «смотрю» — как при клике по карточке.
+  useEffect(() => {
+    if (!autoOpenId) return;
+    for (const sid of otherScreenIds) seenRef.current.add(sid);
+    autoOpenedRef.current.add(autoOpenId);
+    watch(autoOpenId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenId]);
 
   // «Скрыть участников без видео» (как у Discord): видео — это камера; показ экрана у человека без
   // камеры остаётся своей карточкой, а его плитка с аватаркой прячется. Видовая настройка — локально.
@@ -1052,12 +1191,14 @@ function VoiceStage() {
   useStageAutoShow({ room, channelId, hideNoVideo, hasVideo: stageHasVideo(screens, cameras) });
   // Спутники нативного показа ("<id>#screen") плиткой не рисуются — их видео идёт карточкой показа
   // под именем владельца; аватаркой второй раз они появляться не должны.
-  const people = participants.filter(
+  const allPeople = participants.filter(
     (p) => !p.identity.endsWith('#screen') && (!hideNoVideo || camByIdentity.has(p.identity)),
   );
-  const hiddenCount = participants.filter((p) => !p.identity.endsWith('#screen')).length - people.length;
+  const hiddenCount = participants.filter((p) => !p.identity.endsWith('#screen')).length - allPeople.length;
+  // Крупный говорящий в полосе второй раз не рисуется.
+  const people = bigPerson ? allPeople.filter((p) => p.identity !== bigPerson.identity) : allPeople;
   // Срок разовой подсказки идёт, только пока на сцене есть чья-то плитка, на которой её видно (своя не типается).
-  const hasTipTargets = people.some((p) => !p.isLocal);
+  const hasTipTargets = allPeople.some((p) => !p.isLocal);
   useEffect(() => {
     if (activeTipMode !== 'hold' || !hasTipTargets || !tipHoldHintPending()) return;
     setHoldHint(true);
@@ -1075,10 +1216,8 @@ function VoiceStage() {
   // карточки показов, камеры и люди без видео — ОДНОЙ сеткой одного размера 16:9, и все влезают без
   // прокрутки (`fitStageGrid`, как у Discord / Meet). При просмотре стрима или камеры в фокусе —
   // прежняя раскладка (вьюверы сверху, полосы снизу), на телефоне — прежняя сетка в две колонки 3:4.
-  // ⚠️ «Телефон» — по ширине (`usePhoneLayout`, та же граница 760 px, что у мобильных стилей), а не
-  // `isMobile()`: тот истинен только в приложении, и браузер телефона / узкое окно получали бы сетку
-  // «под окно» внутри мобильных стилей, которые её перебивают (замерено на стенде: плитки 67×119 и 2×89).
-  const phoneLayout = usePhoneLayout();
+  // ⚠️ «Телефон» — по ширине (`usePhoneLayout` выше), не только `isMobile()` (замерено на стенде: плитки 67×119 и 2×89).
+  // «Сетка» (#221) — это та же сетка «под окно», только открытый показ её не сменяет (клик ведёт в «Фокус»).
   const fit = !watching && !mobile && !phoneLayout;
   const gridCount = unwatchedScreens.length + people.length;
   const { ref: gridRef, layout, fits } = useFitGrid(gridCount, fit);
@@ -1090,15 +1229,23 @@ function VoiceStage() {
 
   // Ключи плиток для порядка, расставленного перетаскиванием (12.10). Два показа одного владельца
   // (браузерный и нативный спутник) получили бы один ключ — второй тогда идёт под своим identity.
-  const streamKeys: string[] = [];
-  for (const s of unwatchedScreens) {
-    const k = streamTileKey(s.participant.identity);
-    streamKeys.push(streamKeys.includes(k) ? `s:${s.participant.identity}` : k);
-  }
+  const streamKeys = screenStageKeys(unwatchedScreens);
   const personKeys = people.map((p) => personTileKey(p.identity));
   const defaultKeys = [...streamKeys, ...personKeys];
   // Порядок свой у каждой ширины окна: ключ хранилища — канал + число колонок сетки.
   const gridCols = layout?.cols ?? 0;
+  // ⚠️ Объявлены ДО жеста сетки: порядок хуков стабилен, а жест сетки остаётся последним вызовом `useStageDrag`.
+  // Режим просмотра показа (16.10, решение владельца): тот же жест в трёх контейнерах — сетка открытых
+  // показов, полоса карточек и полоса людей; порядок у каждого свой (`StageOrderMode`), сетку «под окно» не трогает.
+  const watchDragOn = watching && !mobile && !phoneLayout;
+  const tipFree = activeTipMode === 'none';
+  const watchKeys = screenStageKeys(watchedScreens);
+  // «Сбоку» (#221) — колонка справа со своими ключами порядка (`side-*`); «Фокус»/«Говорящий» делят полосы и ключи режима
+  // просмотра. Экземпляр жеста у полосы один на оба вида (меняется только ключ): контейнер тот же, порядок хуков стабилен.
+  const side = viewLayout === 'side' && watching;
+  const watchDnd = useStageModeDrag(channelId, 'watch-streams', watchKeys, watchDragOn, tipFree && watchedScreens.length > 1);
+  const cardsDnd = useStageModeDrag(channelId, side ? 'side-cards' : 'watch-cards', streamKeys, watchDragOn, tipFree && unwatchedScreens.length > 1);
+  const peopleDnd = useStageModeDrag(channelId, side ? 'side-people' : 'watch-people', personKeys, watchDragOn, tipFree && people.length > 1);
   const savedOrder = useStageOrder(channelId, gridCols);
   const appliedOrder = applyStageOrder(defaultKeys, savedOrder);
   const drag = useStageDrag({
@@ -1121,7 +1268,7 @@ function VoiceStage() {
       stageKey={streamKeys[i]}
       trackRef={s}
       name={nameOf(ownerOf(s.participant.identity), s.participant.name || s.participant.identity)}
-      onWatch={() => watch(s.participant.identity)}
+      onWatch={() => openStream(s.participant.identity)}
     />
   ));
   const tiles = people.map((p, i) => (
@@ -1132,7 +1279,7 @@ function VoiceStage() {
       camera={camByIdentity.get(p.identity)}
       channelId={channelId}
       openMenu={openUserMenu}
-      onExpand={() => setFocusCamId(p.identity)}
+      onExpand={() => openCamera(p.identity)}
       tipMode={activeTipMode}
       holdHint={holdHint}
       tipBusy={tipBusyId === p.identity}
@@ -1163,7 +1310,7 @@ function VoiceStage() {
             Тип · {economy.wallet.balance} {economy.currencyName}
           </span>
         )}
-        <div className="stage-grid" ref={gridRef} style={gridStyle} onPointerDown={drag.onPointerDown}>
+        <div className="stage-grid stage-dnd" ref={gridRef} style={gridStyle} onPointerDown={drag.onPointerDown}>
           {/* Гнездо — первым, чтобы соседи, переезжая, шли поверх него. */}
           {drag.dragging && <div className="stage-drag-nest" ref={drag.nestRef} aria-hidden="true" />}
           {byStageKey(shownOrder, defaultKeys, [...streamCards, ...tiles])}
@@ -1174,26 +1321,27 @@ function VoiceStage() {
     );
   }
 
-  return (
-    <div className={`voice-stage${watching ? ' watching' : ''}`}>
-      {/* Пилюля баланса — признак Alt-режима ПК; на телефоне режима нет (удержание карточки доступно всегда), постоянная пилюля лежала поверх плиток. */}
-      {activeTipMode === 'button' && economy && (
-        <span className="voice-tip-balance" aria-live="polite">
-          Тип · {economy.wallet.balance} {economy.currencyName}
-        </span>
-      )}
+  // Крупное: камера в фокусе, открытые показы или (режимы «один крупно», #221) говорящий человек — его плитка во всю площадь.
+  const big = (
+    <>
       {focusCam && (
         <div className="stage-watch-grid count-1">
           <CameraViewer track={focusCam} onClose={() => setFocusCamId(null)} />
         </div>
       )}
       {watchedScreens.length > 0 && (
-        <div className={`stage-watch-grid count-${Math.min(watchedScreens.length, 4)}`}>
-          {watchedScreens.map((s) => {
+        <div
+          className={`stage-watch-grid${watchDragOn ? ' stage-dnd' : ''} count-${Math.min(watchedScreens.length, 4)}`}
+          ref={watchDnd.ref}
+          onPointerDown={watchDnd.drag.onPointerDown}
+        >
+          {watchDnd.drag.dragging && <div className="stage-drag-nest" ref={watchDnd.drag.nestRef} aria-hidden="true" />}
+          {byStageKey(watchDnd.shown, watchKeys, watchedScreens.map((s, i) => {
             const id = s.participant.identity;
             return (
               <ScreenViewer
                 key={s.publication?.trackSid}
+                stageKey={watchKeys[i]}
                 track={s}
                 hasAudio={audioIds.has(ownerOf(id)) || audioIds.has(id)}
                 audioMuted={mutedIds.includes(id)}
@@ -1204,14 +1352,66 @@ function VoiceStage() {
                 onClose={() => unwatch(id)}
               />
             );
-          })}
+          }))}
         </div>
       )}
-      {unwatchedScreens.length > 0 && <div className="stage-streams">{streamCards}</div>}
-      <div className="stage-people">
-        {tiles}
+      {bigPerson && (
+        <div className="stage-watch-grid count-1 stage-big-person">
+          <StageTile
+            key={bigPerson.sid || bigPerson.identity}
+            p={bigPerson}
+            camera={camByIdentity.get(bigPerson.identity)}
+            channelId={channelId}
+            openMenu={openUserMenu}
+            onExpand={() => openCamera(bigPerson.identity)}
+            tipMode={activeTipMode}
+            holdHint={holdHint}
+            tipBusy={tipBusyId === bigPerson.identity}
+            onTip={() => void tip(bigPerson.identity, nameOf(bigPerson.identity, bigPerson.name || bigPerson.identity))}
+            onTipHoldStart={(e) => startTipHold(e, bigPerson.identity, nameOf(bigPerson.identity, bigPerson.name || bigPerson.identity))}
+            onTipHoldEnd={clearTipHold}
+            avatarSize={128}
+          />
+        </div>
+      )}
+    </>
+  );
+  // Остальные: закрытые показы и люди — полосами снизу, а в «Сбоку» колонкой справа (каждая со своей прокруткой).
+  const rest = (
+    <>
+      {unwatchedScreens.length > 0 && (
+        <div className={`stage-streams${watchDragOn ? ' stage-dnd' : ''}`} ref={cardsDnd.ref} onPointerDown={cardsDnd.drag.onPointerDown}>
+          {cardsDnd.drag.dragging && <div className="stage-drag-nest" ref={cardsDnd.drag.nestRef} aria-hidden="true" />}
+          {byStageKey(cardsDnd.shown, streamKeys, streamCards)}
+        </div>
+      )}
+      <div className={`stage-people${watchDragOn ? ' stage-dnd' : ''}`} ref={peopleDnd.ref} onPointerDown={peopleDnd.drag.onPointerDown}>
+        {peopleDnd.drag.dragging && <div className="stage-drag-nest" ref={peopleDnd.drag.nestRef} aria-hidden="true" />}
+        {byStageKey(peopleDnd.shown, personKeys, tiles)}
         {emptyHint}
       </div>
+    </>
+  );
+
+  return (
+    <div className={`voice-stage${watching ? ' watching' : ''}${side ? ' side' : ''}`}>
+      {/* Пилюля баланса — признак Alt-режима ПК; на телефоне режима нет (удержание карточки доступно всегда), постоянная пилюля лежала поверх плиток. */}
+      {activeTipMode === 'button' && economy && (
+        <span className="voice-tip-balance" aria-live="polite">
+          Тип · {economy.wallet.balance} {economy.currencyName}
+        </span>
+      )}
+      {side ? (
+        <>
+          <div className="stage-main">{big}</div>
+          <div className="stage-side">{rest}</div>
+        </>
+      ) : (
+        <>
+          {big}
+          {rest}
+        </>
+      )}
       {userMenu}
     </div>
   );
@@ -1358,24 +1558,29 @@ function MobileCallBar() {
 function ConnectedVoiceHeader({ channel }: { channel: Channel }) {
   const hideNoVideo = useHideNoVideo();
   const phoneLayout = usePhoneLayout();
+  const phone = isMobile() || phoneLayout;
   return (
     <div className="voice-header">
       <ChannelGlyph c={channel} size={18} />
       <span>{channel.name}</span>
-      {/* Видовая настройка сцены (10.10, как «Show Non-Video Participants» у Discord) — в шапке
-          голосового канала справа. На телефоне шапку справа занимает «участники» поверх неё. */}
-      {!isMobile() && !phoneLayout && (
-        <button
-          type="button"
-          className={`topbar-btn voice-header-tool${hideNoVideo ? ' active' : ''}`}
-          aria-pressed={hideNoVideo}
-          title={hideNoVideo ? 'Показать участников без видео' : 'Скрыть участников без видео'}
-          aria-label="Скрыть участников без видео"
-          onClick={() => setHideNoVideo(!hideNoVideo)}
-        >
-          <Icon name="camera-off" size={18} />
-        </button>
-      )}
+      {/* Видовые настройки сцены справа в шапке: вид сцены (#221, как раскладки Google Meet) — и на телефоне (там три
+          режима; место под «участники», лежащие поверх шапки, держит `.voice-header-tools`), и «Скрыть участников без
+          видео» (10.10, как «Show Non-Video Participants» у Discord) — только на ПК. */}
+      <div className="voice-header-tools">
+        <StageLayoutPicker phone={phone} />
+        {!phone && (
+          <button
+            type="button"
+            className={`topbar-btn voice-header-tool${hideNoVideo ? ' active' : ''}`}
+            aria-pressed={hideNoVideo}
+            title={hideNoVideo ? 'Показать участников без видео' : 'Скрыть участников без видео'}
+            aria-label="Скрыть участников без видео"
+            onClick={() => setHideNoVideo(!hideNoVideo)}
+          >
+            <Icon name="camera-off" size={18} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

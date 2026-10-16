@@ -36,10 +36,12 @@ function load<T>(raw: string, deps: Record<string, unknown>, globals: Record<str
 
 async function fixture(check: (f: {
   host: HTMLDivElement; writes: boolean[]; storage: Map<string, string>; resets: string[];
+  orders(): stageOrderRules.StageOrders;
   open(type: Channel['type'], id?: string): Promise<void>; category(): Promise<void>;
   click(): Promise<void>; external(hide: boolean): Promise<void>; item(): HTMLButtonElement | undefined;
   resetItem(): HTMLButtonElement | undefined;
-}) => Promise<void>, raw = source, hide = false, savedChannels: string[] = []) {
+}) => Promise<void>, raw = source, hide = false, savedChannels: string[] = [],
+  savedOrders: stageOrderRules.StageOrders = {}) {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -48,6 +50,7 @@ async function fixture(check: (f: {
   const storage = new Map<string, string>(hide ? [['gv_stage_hide_novideo', '1']] : []);
   const writes: boolean[] = [];
   const saved = new Set(savedChannels); const resets: string[] = [];
+  let orders = savedOrders;
   const forbidden = () => { throw new Error('Локальная настройка не вызывает API, вход в канал или подтверждение'); };
   const state = { bootstrap: { permissions: '0', channels: [], categories: [] }, user: { id: 'self' }, voice: null,
     openChannel: forbidden, joinVoice: forbidden };
@@ -66,8 +69,8 @@ async function fixture(check: (f: {
       '../stageViewPrefs': { ...prefs, setHideNoVideo: (next: boolean) => { writes.push(next); prefs.setHideNoVideo(next); } },
       '../stageOrderRules': stageOrderRules,
       '../stageOrderPrefs': { useStageOrder: () => null, saveStageOrder: noop,
-        useHasStageOrder: (id: string | null) => !!id && saved.has(id),
-        resetStageOrder: (id: string) => { resets.push(id); saved.delete(id); } },
+        useHasStageOrder: (id: string | null) => !!id && (saved.has(id) || !!orders[id]),
+        resetStageOrder: (id: string) => { resets.push(id); saved.delete(id); orders = stageOrderRules.dropStageOrders(orders, id); } },
       '../useStageDrag': { useStageDrag: () => ({ preview: null, dragging: false,
         nestRef: { current: null }, onPointerDown: noop }) },
       '../store': { useStore: Object.assign((select: (s: typeof state) => unknown) => select(state),
@@ -94,7 +97,7 @@ async function fixture(check: (f: {
       .find(button => button.querySelector('.ctx-label-main')?.textContent === label);
     const resetItem = () => [...host.querySelectorAll<HTMLButtonElement>('.ctx-item')]
       .find(button => button.querySelector('.ctx-label-main')?.textContent === 'Сбросить раскладку плиток');
-    await check({ host, writes, storage, item, resetItem, resets,
+    await check({ host, writes, storage, item, resetItem, resets, orders: () => orders,
       open: async (type, id) => { await React.act(async () => { actions.openChannelMenu(event(), channel(type, id)); }); },
       category: async () => { await React.act(async () => { actions.openCategoryMenu(event(),
         { id: 'category', serverId: 'server', name: 'Категория', position: 0 }); }); },
@@ -143,6 +146,17 @@ async function resetClick(raw = source) {
   }, raw, false, ['voice-a', 'voice-b']);
 }
 it('R169 сброс передаёт id меню, закрывает его и не сбрасывает другой канал', () => resetClick());
+it('R246 запись только режимов даёт пункт сброса, который удаляет все раскладки лишь выбранного канала', () => fixture(async ({ open, resetItem, resets, orders }) => {
+  await open('voice', 'mode-only');
+  assert.ok(resetItem(), 'режимы просмотра сами по себе являются сохранённой раскладкой');
+  await React.act(async () => { resetItem()!.click(); });
+  assert.deepEqual(resets, ['mode-only']);
+  assert.deepEqual(orders(), { other: { at: 2, cols: { 3: ['p:other'] }, modes: { 'watch-people': ['p:other'] } } },
+    'сброс убирает modes и cols текущего канала, соседний канал остаётся целиком');
+}, source, false, [], {
+  'mode-only': { at: 1, cols: {}, modes: { 'watch-streams': ['s:one'] } },
+  other: { at: 2, cols: { 3: ['p:other'] }, modes: { 'watch-people': ['p:other'] } },
+}));
 it('R169 мутант безусловного пункта сброса обнаруживается на несохранённом канале', async () => {
   const anchor = "c.type === 'voice' && hasStageOrder &&";
   assert.equal(source.split(anchor).length - 1, 1); await resetVisibility();

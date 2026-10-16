@@ -144,7 +144,10 @@ async function realProgress(raw = original) {
     await f.change({ phase: 'ready' });
     assert.equal(f.timers(), 0);
     assert.equal(f.host.querySelector('.update-title')?.textContent, 'Обновление 9.9.9 установлено');
-    assert.match(f.host.querySelector('.update-actions')?.textContent ?? '', /Перезапустить/);
+    const readyButton = f.host.querySelector('.update-actions .update-btn-primary');
+    assert.equal(readyButton?.textContent?.trim(), 'Перезапустить');
+    assert.equal(readyButton?.querySelectorAll('svg').length, 1,
+      'R245 panel-ready-icon: запрет значка в предложении не убирает его у установленного обновления');
   }, raw);
 }
 it('R240 полоса не обгоняет байты, неизвестная длина ограничена 90 %, а Finished снимает потолок', () => realProgress());
@@ -177,14 +180,20 @@ async function click(element: Element | null | undefined) {
 async function availableCard(raw: string, viaSplash: boolean) {
   await scene(async f => {
     await f.change({ phase: 'available', viaSplash });
+    assert.equal(f.host.querySelector('.update-title')?.textContent,
+      viaSplash ? 'Доступна версия 9.9.9' : 'Доступно обновление 9.9.9',
+      'R245 panel-offer-title: заголовок соответствует режиму и содержит номер версии');
     const subtitle = f.host.querySelector('.update-sub')?.textContent;
-    assert.equal(subtitle, viaSplash ? 'поставится при перезапуске' : 'обновить можно, когда удобно',
-      'R244 panel-splash-sub: подпись объясняет поведение именно этой сборки');
+    assert.equal(subtitle, viaSplash ? 'приложение перезапустится на пару секунд' : 'обновить можно, когда удобно',
+      'R245 panel-splash-sub: подпись объясняет поведение именно этой сборки');
     const primary = f.host.querySelector<HTMLButtonElement>('.update-panel .update-btn-primary');
-    assert.equal(primary?.textContent?.trim(), viaSplash ? 'Перезапустить и обновить' : 'Обновить',
-      'R244 panel-splash-button: первичная кнопка называет точное действие');
-    assert.equal(primary?.querySelectorAll('svg').length, viaSplash ? 1 : 0,
-      'R244 panel-splash-button-icon: RestartIcon есть только для перезапуска');
+    assert.ok(primary, 'R245 panel-offer-button-exists: предложение содержит кнопку обновления');
+    assert.equal(primary.textContent?.trim(), 'Обновить',
+      'R245 panel-splash-button: первичная кнопка предлагает обновление, а не перезапуск');
+    assert.doesNotMatch(primary.textContent ?? '', /перезапустить/i,
+      'R245 panel-offer-no-restart-word: старое действие не приписано к кнопке предложения');
+    assert.equal(primary.querySelectorAll('svg').length, 0,
+      'R245 panel-splash-button-icon: у предложения нет значка перезапуска');
     assert.equal(f.host.querySelector('.update-icon [data-goose-pose]')?.getAttribute('data-goose-pose'), 'head',
       'R244 panel-goose-pose: карточка использует голову нового Goose');
     assert.equal(f.host.querySelector('.update-icon [data-goose-size]')?.getAttribute('data-goose-size'), '32',
@@ -192,32 +201,38 @@ async function availableCard(raw: string, viaSplash: boolean) {
   }, raw);
 }
 
-it('R244 подпись и первичная кнопка карточки различают обновление со заставкой и без неё', async () => {
+it('R245 оба режима показывают точные заголовок и подпись, кнопка предложения — «Обновить» без значка перезапуска', async () => {
   await availableCard(original, false);
   await availableCard(original, true);
 });
 
-it('R244 окно «Что нового» открывается карточкой, показывает нового Goose и верную кнопку для обоих режимов', async () => {
-  for (const viaSplash of [false, true]) {
-    await scene(async f => {
-      await f.change({ phase: 'available', viaSplash });
-      await click(f.host.querySelector('.update-title'));
-      const notes = f.host.querySelector('[role="dialog"]');
-      assert.ok(notes, 'R244 panel-notes-open: клик по карточке открывает «Что нового»');
-      assert.equal(f.host.querySelectorAll('.update-icon [data-goose-pose="head"][data-goose-size="32"]').length, 1,
-        'R244 panel-goose-card: новый Goose(head, 32) виден в карточке');
-      assert.equal(notes.querySelector('.update-notes-goose [data-goose-pose]')?.getAttribute('data-goose-pose'), 'head',
-        'R244 panel-goose-notes-pose: новый Goose виден в окне заметок');
-      assert.equal(notes.querySelector('.update-notes-goose [data-goose-size]')?.getAttribute('data-goose-size'), '32',
-        'R244 panel-goose-notes-size: окно заметок использует размер 32');
-      const primary = notes.querySelector<HTMLButtonElement>('.update-btn-primary');
-      assert.equal(primary?.textContent?.trim(), viaSplash ? 'Перезапустить и обновить' : 'Обновить',
-        'R244 panel-notes-button: кнопка заметок называет точное действие');
-      assert.equal(primary?.querySelectorAll('svg').length, viaSplash ? 1 : 0,
-        'R244 panel-notes-button-icon: RestartIcon соответствует режиму обновления');
-      assert.equal(f.actions.applyPendingUpdate, 0, 'R244 panel-notes-no-action: открытие заметок само не запускает обновление');
-    });
-  }
+async function availableNotes(raw: string, viaSplash: boolean) {
+  await scene(async f => {
+    await f.change({ phase: 'available', viaSplash });
+    await click(f.host.querySelector('.update-title'));
+    const notes = f.host.querySelector('[role="dialog"]');
+    assert.ok(notes, 'R244 panel-notes-open: клик по карточке открывает «Что нового»');
+    assert.equal(f.host.querySelectorAll('.update-icon [data-goose-pose="head"][data-goose-size="32"]').length, 1,
+      'R244 panel-goose-card: новый Goose(head, 32) виден в карточке');
+    assert.equal(notes.querySelector('.update-notes-goose [data-goose-pose]')?.getAttribute('data-goose-pose'), 'head',
+      'R244 panel-goose-notes-pose: новый Goose виден в окне заметок');
+    assert.equal(notes.querySelector('.update-notes-goose [data-goose-size]')?.getAttribute('data-goose-size'), '32',
+      'R244 panel-goose-notes-size: окно заметок использует размер 32');
+    const primary = notes.querySelector<HTMLButtonElement>('.update-btn-primary');
+    assert.ok(primary, 'R245 panel-notes-button-exists: в заметках есть кнопка обновления');
+    assert.equal(primary.textContent?.trim(), 'Обновить',
+      'R245 panel-notes-button: кнопка заметок предлагает обновление, а не перезапуск');
+    assert.doesNotMatch(primary.textContent ?? '', /перезапустить/i,
+      'R245 panel-notes-no-restart-word: в кнопке заметок нет старого действия');
+    assert.equal(primary.querySelectorAll('svg').length, 0,
+      'R245 panel-notes-button-icon: у предложения в заметках нет значка перезапуска');
+    assert.equal(f.actions.applyPendingUpdate, 0, 'R244 panel-notes-no-action: открытие заметок само не запускает обновление');
+  }, raw);
+}
+
+it('R245 окно «Что нового» открывается карточкой, показывает Goose и «Обновить» без значка в обоих режимах', async () => {
+  await availableNotes(original, false);
+  await availableNotes(original, true);
 });
 
 it('R244 кнопка карточки запускает applyPendingUpdate ровно один раз и не всплывает в открытие заметок', async () => {
@@ -245,18 +260,47 @@ it('R244 кнопка в «Что нового» запускает applyPending
   }
 });
 
-it('R244 реальные подпись, кнопка и поза Goose ловят мутанты игнорирования viaSplash и неверной позы', async () => {
+it('R245 реальные карточка и заметки отвергают старые тексты, значок перезапуска и неверного Goose', async () => {
+  // Отдельные контрфакты не дают скрыть поломку иконки более ранним падением текста.
+  const splashTitle = '? `Доступна версия ${v}`.trim()';
+  const legacyTitle = ': `Доступно обновление ${v}`.trim()';
   await availableCard(original, true);
-  const subtitle = "? viaSplash\n      ? 'поставится при перезапуске'\n      : 'обновить можно, когда удобно'";
-  await assert.rejects(() => availableCard(mutate(subtitle,
-    "? false\n      ? 'поставится при перезапуске'\n      : 'обновить можно, когда удобно'"), true),
-    exactFailure('R244 panel-splash-sub:', 'обновить можно, когда удобно', 'поставится при перезапуске'));
+  await assert.rejects(() => availableCard(mutate(splashTitle, '? `Доступно обновление ${v}`.trim()'), true),
+    exactFailure('R245 panel-offer-title:', 'Доступно обновление 9.9.9', 'Доступна версия 9.9.9'));
+  await availableCard(original, false);
+  await assert.rejects(() => availableCard(mutate(legacyTitle, ': `Доступна версия ${v}`.trim()'), false),
+    exactFailure('R245 panel-offer-title:', 'Доступна версия 9.9.9', 'Доступно обновление 9.9.9'));
 
   await availableCard(original, true);
-  const button = "<button className=\"update-btn-primary\" onClick={(e) => { e.stopPropagation(); void applyPendingUpdate(); }}>\n              {viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}";
-  await assert.rejects(() => availableCard(mutate(button,
-    "<button className=\"update-btn-primary\" onClick={(e) => { e.stopPropagation(); void applyPendingUpdate(); }}>\n              Обновить"), true),
-  exactFailure('R244 panel-splash-button:', 'Обновить', 'Перезапустить и обновить'));
+  const subtitle = "? viaSplash\n      ? 'приложение перезапустится на пару секунд'\n      : 'обновить можно, когда удобно'";
+  await assert.rejects(() => availableCard(mutate(subtitle,
+    "? false\n      ? 'приложение перезапустится на пару секунд'\n      : 'обновить можно, когда удобно'"), true),
+    exactFailure('R245 panel-splash-sub:', 'обновить можно, когда удобно', 'приложение перезапустится на пару секунд'));
+
+  await availableCard(original, true);
+  await assert.rejects(() => availableCard(mutate("'приложение перезапустится на пару секунд'", "'поставится при перезапуске'"), true),
+    exactFailure('R245 panel-splash-sub:', 'поставится при перезапуске', 'приложение перезапустится на пару секунд'));
+
+  const buttons = [
+    {
+      anchor: '<button className="update-btn-primary" onClick={(e) => { e.stopPropagation(); void applyPendingUpdate(); }}>\n              Обновить',
+      probe: availableCard,
+      prefix: 'R245 panel-splash-button',
+    },
+    {
+      anchor: '<button className="update-btn-primary" onClick={() => { setShowNotes(false); void applyPendingUpdate(); }}>\n                  Обновить',
+      probe: availableNotes,
+      prefix: 'R245 panel-notes-button',
+    },
+  ];
+  for (const { anchor, probe, prefix } of buttons) {
+    await probe(original, true);
+    await assert.rejects(() => probe(mutate(anchor, anchor.replace('Обновить', "{viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}")), true),
+      exactFailure(`${prefix}:`, 'Перезапустить и обновить', 'Обновить'));
+    await probe(original, true);
+    await assert.rejects(() => probe(mutate(anchor, anchor.replace('Обновить', '<RestartIcon /> Обновить')), true),
+      exactFailure(`${prefix}-icon:`, 1, 0));
+  }
 
   await availableCard(original, true);
   await assert.rejects(() => availableCard(mutate('pose="head"', 'pose="wave"'), true),

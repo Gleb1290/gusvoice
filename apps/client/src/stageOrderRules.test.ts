@@ -71,6 +71,44 @@ it('R169 битые JSON и структуры отвергаются, корр�
   assert.equal(rules.parseStageOrders(JSON.stringify({ channels: { good: { at: 12, cols: { 2: keys } } } })).good.cols['2'].length, 64);
   assert.deepEqual(rules.parseStageOrders(rules.serializeStageOrders({ a: { at: 1, cols: { 2: ['a'] } } })), { a: { at: 1, cols: { 2: ['a'] } } });
 });
+// Класс ошибки: неизвестный/битый режим теряет корректный порядок либо отбрасывает весь канал.
+it('R246 парсер принимает только известные режимы и сохраняет канал только с режимами', () => {
+  const parsed = rules.parseStageOrders(JSON.stringify({ channels: {
+    modesOnly: { at: 3, modes: { 'watch-streams': ['s:a'], 'watch-cards': ['c:a'], 'watch-people': ['p:a'], future: ['x'], 'watch-broken': ['x'], 'watch-empty': [], 'watch-bad': 'x' } },
+    mixed: { at: 4, cols: { 2: ['c:b'] }, modes: { 'watch-streams': ['s:b'], future: ['x'] } },
+    invalid: { at: 5, modes: { future: ['x'], 'watch-streams': [], 'watch-cards': 'x' } },
+  } }));
+  assert.deepEqual(plain(parsed), {
+    modesOnly: { at: 3, cols: {}, modes: { 'watch-streams': ['s:a'], 'watch-cards': ['c:a'], 'watch-people': ['p:a'] } },
+    mixed: { at: 4, cols: { 2: ['c:b'] }, modes: { 'watch-streams': ['s:b'] } },
+  });
+  const valid = Array.from({ length: rules.STAGE_ORDER_MAX_KEYS + 1 }, (_, i) => `s:${i}`);
+  const dirty = rules.parseStageOrders(JSON.stringify({ channels: { a: { modes: {
+    'watch-streams': ['', null, 12, 'x'.repeat(201), 'x'.repeat(200), ...valid],
+  } } } }));
+  assert.deepEqual(dirty.a.modes?.['watch-streams'], ['x'.repeat(200), ...valid.slice(0, rules.STAGE_ORDER_MAX_KEYS - 1)],
+    'режимы очищают ключи 200/201 и обрезают только после отбрасывания повреждённых');
+  for (const modes of [null, [], 'bad', 7, {}]) {
+    assert.deepEqual(rules.parseStageOrders(JSON.stringify({ channels: { a: { at: 1, cols: { 2: ['p:a'] }, modes } } })),
+      { a: { at: 1, cols: { 2: ['p:a'] } } }, 'битое/пустое modes не портит прежние колонки и не оставляет пустого поля');
+  }
+});
+// Класс ошибки: новые режимы ломают совместимость со старыми записями, где поля modes ещё нет.
+it('R246 формат колонок без modes остаётся прежним при разборе и записи', () => {
+  const old = { a: { at: 7, cols: { 2: ['p:a', 's:b'] } } };
+  assert.deepEqual(plain(rules.parseStageOrders(rules.serializeStageOrders(old))), old);
+  assert.equal(Object.hasOwn(JSON.parse(rules.serializeStageOrders(old)).channels.a, 'modes'), false);
+});
+// Класс ошибки: новые ключи боковой колонки меняют прежние watch-* или добавляются не по схеме хранилища.
+it('R248 side modes добавлены отдельно, watch modes сохраняют прежний закрытый список', () => {
+  assert.deepEqual(rules.STAGE_ORDER_MODES, ['watch-streams', 'watch-cards', 'watch-people']);
+  assert.deepEqual(rules.STAGE_SIDE_ORDER_MODES, ['side-cards', 'side-people']);
+  assert.deepEqual(rules.STAGE_STORED_MODES, ['watch-streams', 'watch-cards', 'watch-people', 'side-cards', 'side-people']);
+  const parsed = rules.parseStageOrders(JSON.stringify({ channels: {
+    sideOnly: { at: 1, modes: { 'side-cards': ['c:a'], 'side-people': ['p:a'], future: ['x'] } },
+  } }));
+  assert.deepEqual(plain(parsed), { sideOnly: { at: 1, cols: {}, modes: { 'side-cards': ['c:a'], 'side-people': ['p:a'] } } });
+});
 function eviction(r: Rules) {
   const initial = { oldest: { at: 1, cols: { 1: ['a'] } }, newest: { at: 20, cols: { 1: ['b'] } } };
   const next = r.putStageOrder(initial, 'current', 2, ['c'], 0, 2);
@@ -101,10 +139,59 @@ it('R169 текущая средняя ширина переживает уда�
   assert.equal(Object.keys(result.a.cols).length, 8); assert.equal(result.a.cols['100'], undefined);
   order.push('later'); assert.deepEqual(result.a.cols['5'], ['new']); assert.deepEqual(initial.a.cols['5'], ['old']);
 });
+// Класс ошибки: запись сетки стирает режимы или мутирует исходную запись.
+it('R246 запись колонок переносит modes и не мутирует исходную запись', () => {
+  const modeOrder = ['s:a', 's:b'];
+  const initial: rules.StageOrders = { a: { at: 1, cols: { 2: ['p:a'] }, modes: { 'watch-streams': modeOrder } } };
+  const next = rules.putStageOrder(initial, 'a', 3, ['p:b'], 9);
+  assert.deepEqual(plain(next.a), { at: 9, cols: { 2: ['p:a'], 3: ['p:b'] }, modes: { 'watch-streams': ['s:a', 's:b'] } });
+  assert.notEqual(next, initial); assert.notEqual(next.a, initial.a); assert.notEqual(next.a.cols, initial.a.cols);
+  assert.deepEqual(initial.a.modes?.['watch-streams'], ['s:a', 's:b']);
+  assert.deepEqual(next.a.cols['2'], ['p:a']); assert.deepEqual(initial.a.cols['3'], undefined);
+});
+// Класс ошибки: перестановка внутри одного контейнера портит другие режимы и сетку либо мутирует входы.
+it('R246 запись режима изолирована от колонок и других режимов, копирует и обрезает порядок на 64', () => {
+  const cols = { 2: ['p:a'] }; const streams = ['s:a']; const people = ['p:b'];
+  const initial: rules.StageOrders = { a: { at: 1, cols, modes: { 'watch-streams': streams, 'watch-people': people } } };
+  const input = Array.from({ length: 65 }, (_, i) => `c${i}`);
+  const next = rules.putStageModeOrder(initial, 'a', 'watch-cards', input, 11);
+  assert.deepEqual(plain(next.a.cols), { 2: ['p:a'] });
+  assert.deepEqual(plain(next.a.modes), { 'watch-streams': ['s:a'], 'watch-people': ['p:b'], 'watch-cards': input.slice(0, 64) });
+  assert.equal(next.a.at, 11); assert.notEqual(next, initial); assert.notEqual(next.a, initial.a);
+  assert.notEqual(next.a.cols, initial.a.cols); assert.notEqual(next.a.modes, initial.a.modes);
+  assert.equal(next.a.modes?.['watch-streams'], streams); assert.equal(next.a.modes?.['watch-people'], people);
+  input.push('after'); assert.equal(next.a.modes?.['watch-cards']?.length, 64); assert.equal(next.a.modes?.['watch-cards']?.includes('after'), false);
+  assert.deepEqual(cols, { 2: ['p:a'] }); assert.deepEqual(initial.a.modes, { 'watch-streams': ['s:a'], 'watch-people': ['p:b'] });
+  const exactly64 = Array.from({ length: 64 }, (_, i) => `k${i}`);
+  assert.equal(rules.putStageModeOrder({}, 'a', 'watch-streams', exactly64, 0).a.modes?.['watch-streams']?.length, 64);
+});
+// Класс ошибки: сохранение порядка боковой колонки затирает колонки или режимы просмотра.
+it('R248 putStageModeOrder сохраняет side-* рядом с cols и watch-* и сериализация переживает разбор', () => {
+  const initial: rules.StageOrders = { a: { at: 1, cols: { 2: ['grid'] }, modes: { 'watch-streams': ['watched'] } } };
+  const withCards = rules.putStageModeOrder(initial, 'a', 'side-cards', ['card-b', 'card-a'], 2);
+  const withPeople = rules.putStageModeOrder(withCards, 'a', 'side-people', ['person-b', 'person-a'], 3);
+  assert.deepEqual(plain(withPeople.a), {
+    at: 3,
+    cols: { 2: ['grid'] },
+    modes: { 'watch-streams': ['watched'], 'side-cards': ['card-b', 'card-a'], 'side-people': ['person-b', 'person-a'] },
+  });
+  assert.deepEqual(plain(rules.parseStageOrders(rules.serializeStageOrders(withPeople))), plain(withPeople));
+  assert.deepEqual(plain(initial.a), { at: 1, cols: { 2: ['grid'] }, modes: { 'watch-streams': ['watched'] } });
+});
 // Класс ошибки: сброс другого канала или лишнее уведомление при отсутствии записи.
 it('R169 сброс отсутствующего возвращает тот же объект, существующего удаляет только его', () => {
   const a = { a: { at: 1, cols: { 1: ['x'], 2: ['y'] } }, b: { at: 2, cols: { 1: ['z'] } } };
   assert.equal(rules.dropStageOrders(a, 'missing'), a); assert.deepEqual(rules.dropStageOrders(a, 'a'), { b: a.b }); assert.equal('a' in a, true);
+});
+// Класс ошибки: сброс оставляет один из типов раскладки, поэтому канал продолжает считаться настроенным.
+it('R246 сброс удаляет вместе колонки и все режимы, не меняя соседний канал', () => {
+  const a: rules.StageOrders = {
+    channel: { at: 1, cols: { 2: ['p:a'] }, modes: { 'watch-streams': ['s:a'], 'watch-cards': ['c:a'], 'watch-people': ['p:b'], 'side-cards': ['sc:a'], 'side-people': ['sp:a'] } },
+    other: { at: 2, cols: {}, modes: { 'watch-people': ['p:z'], 'side-people': ['sp:z'] } },
+  };
+  const dropped = rules.dropStageOrders(a, 'channel');
+  assert.deepEqual(plain(dropped), { other: { at: 2, cols: {}, modes: { 'watch-people': ['p:z'], 'side-people': ['sp:z'] } } });
+  assert.equal('channel' in a, true); assert.equal(dropped.other, a.other);
 });
 function edges(r: Rules) {
   const slots = [{ x: 10, y: 20, w: 100, h: 50 }, { x: 120, y: 20, w: 100, h: 50 }];
@@ -138,6 +225,18 @@ it('R169 мутанты сравнения только длины и одина
 it('R169 мутанты вытеснения новейшего и текущего убиваются', () => {
   mutation('.sort((a, b) => next[a].at - next[b].at)', '.sort((a, b) => next[b].at - next[a].at)', eviction);
   mutation('.filter((id) => id !== channelId)', '.filter(() => true)', eviction);
+});
+// Класс ошибки: перенос раскладки сетки теряет режимы либо запись режима меняет cols.
+it('R246 мутанты потери modes при записи колонок и записи режима в cols убиваются', () => {
+  const initial: rules.StageOrders = { a: { at: 1, cols: { 2: ['grid'] }, modes: { 'watch-streams': ['stream'] } } };
+  const writeGrid = (r: Rules) => assert.equal(r.putStageOrder(initial, 'a', 3, ['next'], 2).a.modes?.['watch-streams']?.[0], 'stream');
+  mutation('const entry: StageChannelOrders = prev?.modes ? { at: now, cols: colsMap, modes: prev.modes } : { at: now, cols: colsMap };', 'const entry: StageChannelOrders = { at: now, cols: colsMap };', writeGrid);
+  const writeMode = (r: Rules) => {
+    const next = r.putStageModeOrder(initial, 'a', 'watch-cards', ['card'], 2);
+    assert.deepEqual(plain(next.a.cols), { 2: ['grid'] });
+    assert.deepEqual(plain(next.a.modes), { 'watch-streams': ['stream'], 'watch-cards': ['card'] });
+  };
+  mutation("modes: { ...(prev?.modes ?? {}), [mode]: order.slice(0, STAGE_ORDER_MAX_KEYS) },", "cols: { ...(prev?.cols ?? {}), [mode]: order.slice(0, STAGE_ORDER_MAX_KEYS) },", writeMode);
 });
 // Класс ошибки: включение исключённой границы.
 it('R169 мутант включительной правой границы убивается', () => mutation('center.x < s.x + s.w', 'center.x <= s.x + s.w', edges));

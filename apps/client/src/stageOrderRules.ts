@@ -117,7 +117,33 @@ export function isDefaultStageOrder(defaultKeys: readonly string[], visible: rea
 }
 
 /** Сохранённые раскладки одного канала: число колонок → порядок; `at` — когда трогали (для вытеснения). */
-export type StageChannelOrders = { at: number; cols: Record<string, string[]> };
+/**
+ * Раскладки режима просмотра показа (16.10): там не одна сетка, а три контейнера — сетка открытых
+ * показов, полоса закрытых карточек и полоса людей. Их порядок от ширины окна не зависит (сетка
+ * показов раскладывается по их числу, полосы переносятся по строкам), поэтому ключ — канал + режим,
+ * без числа колонок. Отдельно от `cols`: перестановка в полосе не должна трогать раскладку сетки
+ * «под окно» и наоборот — в сетке люди и показы стоят вперемешку, в полосах порознь.
+ *
+ * #221 (16.10, виды сцены): «Фокус» и «Говорящий» рисуют те же полосы, что режим просмотра, и делят его ключи
+ * `watch-*`; «Сбоку» — колонка справа, свои ключи `STAGE_SIDE_ORDER_MODES`.
+ */
+export const STAGE_ORDER_MODES = ['watch-streams', 'watch-cards', 'watch-people'] as const;
+/**
+ * Колонка вида «Сбоку» (#221): `side-cards` (закрытые показы) и `side-people` (люди). Отдельным списком, а не в
+ * `STAGE_ORDER_MODES`: тот перечисляет контейнеры режима просмотра (по экземпляру жеста на каждый), а колонка — те же два
+ * контейнера полос с другим ключом. Хранилище знает оба списка (`STAGE_STORED_MODES`); прошлые сборки незнакомые режимы
+ * пропускают — запись только добавлением.
+ */
+export const STAGE_SIDE_ORDER_MODES = ['side-cards', 'side-people'] as const;
+export const STAGE_STORED_MODES = [...STAGE_ORDER_MODES, ...STAGE_SIDE_ORDER_MODES] as const;
+export type StageOrderMode = (typeof STAGE_STORED_MODES)[number];
+
+/** `modes` — только когда в нём что-то есть (запись без него читается и прошлыми сборками). */
+export type StageChannelOrders = {
+  at: number;
+  cols: Record<string, string[]>;
+  modes?: Partial<Record<StageOrderMode, string[]>>;
+};
 export type StageOrders = Record<string, StageChannelOrders>;
 
 /**
@@ -139,15 +165,30 @@ export function parseStageOrders(raw: string | null | undefined): StageOrders {
   for (const [channelId, entry] of Object.entries(channels as Record<string, unknown>)) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const at = Number((entry as { at?: unknown }).at);
-    const cols = (entry as { cols?: unknown }).cols;
-    if (!cols || typeof cols !== 'object' || Array.isArray(cols)) continue;
+    const rawCols = (entry as { cols?: unknown }).cols;
+    const cols = rawCols && typeof rawCols === 'object' && !Array.isArray(rawCols) ? (rawCols as Record<string, unknown>) : null;
+    const rawModes = (entry as { modes?: unknown }).modes;
+    const modesIn = rawModes && typeof rawModes === 'object' && !Array.isArray(rawModes) ? (rawModes as Record<string, unknown>) : null;
+    if (!cols && !modesIn) continue;
+    const clean = (list: unknown[]) =>
+      list.filter((k): k is string => typeof k === 'string' && k.length > 0 && k.length <= 200).slice(0, STAGE_ORDER_MAX_KEYS);
     const parsed: Record<string, string[]> = {};
-    for (const [n, list] of Object.entries(cols as Record<string, unknown>)) {
+    for (const [n, list] of Object.entries(cols ?? {})) {
       if (!/^[1-9]\d{0,2}$/.test(n) || !Array.isArray(list)) continue;
-      const keys = list.filter((k): k is string => typeof k === 'string' && k.length > 0 && k.length <= 200);
-      if (keys.length > 0) parsed[n] = keys.slice(0, STAGE_ORDER_MAX_KEYS);
+      const keys = clean(list);
+      if (keys.length > 0) parsed[n] = keys;
     }
-    if (Object.keys(parsed).length > 0) out[channelId] = { at: Number.isFinite(at) ? at : 0, cols: parsed };
+    // Режимы — только известные имена: чужое/будущее отбрасывается, как и нечисловые колонки.
+    const modes: Partial<Record<StageOrderMode, string[]>> = {};
+    for (const m of STAGE_STORED_MODES) {
+      const list = modesIn?.[m];
+      if (!Array.isArray(list)) continue;
+      const keys = clean(list);
+      if (keys.length > 0) modes[m] = keys;
+    }
+    const hasModes = Object.keys(modes).length > 0;
+    if (Object.keys(parsed).length > 0 || hasModes)
+      out[channelId] = { at: Number.isFinite(at) ? at : 0, cols: parsed, ...(hasModes ? { modes } : {}) };
   }
   return out;
 }
@@ -180,7 +221,31 @@ export function putStageOrder(
       .slice(0, colKeys.length - STAGE_ORDER_MAX_COLS)
       .forEach((n) => delete colsMap[n]);
   }
-  const next: StageOrders = { ...orders, [channelId]: { at: now, cols: colsMap } };
+  // Раскладки режима просмотра (`modes`) переезжают как есть: запись сетки их не трогает.
+  const entry: StageChannelOrders = prev?.modes ? { at: now, cols: colsMap, modes: prev.modes } : { at: now, cols: colsMap };
+  return evictStageChannels({ ...orders, [channelId]: entry }, channelId, maxChannels);
+}
+
+/** Записать порядок контейнера режима просмотра `mode` у `channelId` (новый объект; `cols` не трогает). */
+export function putStageModeOrder(
+  orders: StageOrders,
+  channelId: string,
+  mode: StageOrderMode,
+  order: readonly string[],
+  now: number,
+  maxChannels: number = STAGE_ORDER_MAX_CHANNELS,
+): StageOrders {
+  const prev = orders[channelId];
+  const entry: StageChannelOrders = {
+    at: now,
+    cols: { ...(prev?.cols ?? {}) },
+    modes: { ...(prev?.modes ?? {}), [mode]: order.slice(0, STAGE_ORDER_MAX_KEYS) },
+  };
+  return evictStageChannels({ ...orders, [channelId]: entry }, channelId, maxChannels);
+}
+
+/** Каналов больше `maxChannels` — вытесняем дольше всех не тронутые (кроме только что записанного). */
+function evictStageChannels(next: StageOrders, channelId: string, maxChannels: number): StageOrders {
   const ids = Object.keys(next);
   if (ids.length > maxChannels) {
     ids
@@ -192,7 +257,7 @@ export function putStageOrder(
   return next;
 }
 
-/** Убрать все раскладки канала (все числа колонок). Нечего убирать — тот же объект. */
+/** Убрать все раскладки канала (все числа колонок и все режимы просмотра). Нечего убирать — тот же объект. */
 export function dropStageOrders(orders: StageOrders, channelId: string): StageOrders {
   if (!(channelId in orders)) return orders;
   const next = { ...orders };
