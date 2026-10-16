@@ -5,6 +5,92 @@ import { runInNewContext } from 'node:vm';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import ts from 'typescript';
 import * as playback from './voicePlayback';
+import * as React from 'react';
+
+const playerSource = readFileSync(new URL('./voicePlayer.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+function musicPlayer(raw = playerSource) {
+  const audios: FakeAudio[] = [];
+  const unexpected: string[] = [];
+  class FakeAudio extends EventTarget {
+    src = ''; preload = ''; currentTime = 0; playbackRate = 1; duration = NaN;
+    constructor() { super(); audios.push(this); }
+    play() { this.dispatchEvent(new Event('play')); return Promise.resolve(); }
+    pause() { this.dispatchEvent(new Event('pause')); }
+    removeAttribute() { this.src = ''; } load() {}
+  }
+  const mediaSession = { metadata: null as { title: string; artist: string } | null, playbackState: 'none', setActionHandler: () => {} };
+  class Metadata {
+    title: string; artist: string;
+    constructor(value: { title: string; artist: string }) { this.title = value.title; this.artist = value.artist; }
+  }
+  const deps: Record<string, unknown> = { react: React, './voicePlayback': playback,
+    './api': { api: { convListened: async () => { unexpected.push('convListened'); } } } };
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
+    module, exports: module.exports, Audio: FakeAudio, MediaMetadata: Metadata, navigator: { mediaSession },
+    document: { querySelectorAll: () => [] }, require: (id: string) => {
+      assert.equal(Object.hasOwn(deps, id), true, `R230 явный импорт плеера ${id}`); return deps[id];
+    },
+  });
+  return { player: module.exports as typeof import('./voicePlayer'), audios, mediaSession, unexpected };
+}
+function musicDuration(raw = playerSource) {
+  const { player, audios, unexpected } = musicPlayer(raw);
+  player.toggleVoice({ key: 'unknown', url: '/music.wav', durationMs: 0, title: 'Музыка' });
+  for (const invalid of [NaN, Infinity, 0, -1]) {
+    audios[0].duration = invalid; audios[0].dispatchEvent(new Event('durationchange'));
+    assert.equal(player.getVoicePlayerState().track?.durationMs, 0, 'R230 метаданные: неверная длительность не записывается');
+  }
+  audios[0].duration = 12.3456; audios[0].dispatchEvent(new Event('durationchange'));
+  assert.equal(player.getVoicePlayerState().track?.durationMs, 12_346, 'R230 метаданные: неизвестная длительность округляется в мс');
+  audios[0].duration = 100; audios[0].dispatchEvent(new Event('durationchange'));
+  assert.equal(player.getVoicePlayerState().track?.durationMs, 12_346, 'R230 длительность: уже известное значение не переписывается');
+  player.toggleVoice({ key: 'known', url: '/voice.ogg', durationMs: 4000 });
+  audios[0].duration = 8; audios[0].dispatchEvent(new Event('durationchange'));
+  assert.equal(player.getVoicePlayerState().track?.durationMs, 4000, 'R230 голосовое: серверная длительность остаётся точной');
+  player.closeVoice(); audios[0].duration = 3; audios[0].dispatchEvent(new Event('durationchange'));
+  assert.equal(player.getVoicePlayerState().track, null, 'закрытый плеер не воскрешает дорожку метаданными');
+  assert.deepEqual(unexpected, [], 'R230 длительность не сообщает прослушано для файла или записи без источника');
+}
+function musicSession(raw = playerSource) {
+  const { player, mediaSession, unexpected } = musicPlayer(raw);
+  player.toggleVoice({ key: 'music', url: '/track.wav', durationMs: 0, title: 'Ночной гусь',
+    source: { conversationId: 'conv', messageId: 'msg', mine: false, listened: undefined, author: 'Автор' } });
+  assert.equal(mediaSession.metadata?.title, 'Ночной гусь', 'R230 медиасессия: название трека вместо голосового');
+  assert.equal(mediaSession.metadata?.artist, 'Автор');
+  player.toggleVoice({ key: 'voice', url: '/voice.ogg', durationMs: 1000 });
+  assert.equal(mediaSession.metadata?.title, 'Голосовое сообщение', 'без title сохраняется прежний тип голосового');
+  player.closeVoice(); assert.equal(mediaSession.metadata, null); assert.equal(mediaSession.playbackState, 'none');
+  // Ошибка внутри api была бы проглочена reportListened.catch; журнал проверяется снаружи приложения.
+  assert.deepEqual(unexpected, [], 'R230 музыкальная медиасессия не отправляет голосовой отчёт прослушано');
+}
+function playerChange(anchor: string, replacement: string) {
+  assert.equal(playerSource.split(anchor).length - 1, 1, 'R230 единственный якорь изменения плеера');
+  return playerSource.replace(anchor, replacement);
+}
+
+it('R230 метаданные музыки заполняют только неизвестную длительность и не переписывают длительность голосового', () => {
+  // Класс ошибки: поздние/повторные события Audio меняют уже известный размер шкалы или приносят Infinity.
+  musicDuration();
+});
+it('R230 системный плеер получает название музыки, а голосовое сохраняет прежнюю подпись', () => {
+  // Класс ошибки: единый аудиоплеер ошибочно подписывает музыкальный файл как голосовое сообщение.
+  musicSession();
+});
+it('R230 контрфакт перезаписи известной длительности обнаруживается повторным событием Audio', () => {
+  // Класс ошибки: метаданные браузера затмевают сохранённую сервером или первым событием длительность.
+  musicDuration();
+  assert.throws(() => musicDuration(playerChange('t && !(t.durationMs > 0) && Number.isFinite(a.duration)',
+    't && Number.isFinite(a.duration)')), (e: unknown) => e instanceof assert.AssertionError
+      && e.message.startsWith('R230 длительность:') && e.operator === 'strictEqual' && e.actual === 100_000 && e.expected === 12_346);
+});
+it('R230 контрфакт потери музыкального названия обнаруживается в настоящей медиасессии плеера', () => {
+  // Класс ошибки: удачный запуск файла скрывает регрессию системной шторки и медиаклавиш.
+  musicSession();
+  assert.throws(() => musicSession(playerChange("title: track.title ?? 'Голосовое сообщение'", "title: 'Голосовое сообщение'")),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R230 медиасессия:') && e.operator === 'strictEqual'
+      && e.actual === 'Голосовое сообщение' && e.expected === 'Ночной гусь');
+});
 
 it('серия непрослушанных пропускает свои и услышанные, ручное переключение возвращает обычную очередь', async () => {
   // Ловит смешение фильтрованной автосерии и ручного выбора следующей записи.

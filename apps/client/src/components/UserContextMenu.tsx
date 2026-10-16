@@ -2,14 +2,14 @@ import { type CustomStatus, has, Permission, permsFromString, type Role, type Us
 import { explainCallPrivacy, useCall } from '../callStore';
 import { serverCalls } from '../callView';
 import { ConnectionQuality, type Participant, type RemoteTrack } from 'livekit-client';
-import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useState } from 'react';
+import { type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { MAX_VOLUME, useUserAudio } from '../localUserAudio';
 import { useStore } from '../store';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
 import { GuestLine, guestHomeLabel, useGuestHome } from './GuestMark';
-import { dmBlockText } from '../dmRules';
+import { dmBlockText, dmPeerHome, peerPresenceShown, serverFedDm } from '../dmRules';
 import { clearEvidence, useEvidence } from '../reportEvidence';
 import { toast } from '../toast';
 import { AvatarZoom } from './AvatarZoom';
@@ -63,6 +63,34 @@ export function useUserMenu() {
     <UserContextMenu target={state.target} pos={state.pos} initialView={state.view} onClose={() => setState(null)} />
   ) : null;
   return { open, openAt, menu };
+}
+
+/**
+ * Телефонный профиль собеседника на весь экран (#218, как `ProfileActivity` Telegram Android) — `PhoneProfile.tsx`. Данные считает
+ * это меню (присутствие, «был(а)…», звонок, роли — те же, что у карточки), рисует подставленный экран.
+ * ⚠️ Подставляется при загрузке (`providePhoneProfile` из `PhoneProfile.tsx`, импорт в `main.tsx`), а не импортом отсюда: экран
+ * сам рисует это меню в «⋮» — обратный импорт дал бы кольцо модулей. Не подставлен (тесты, сборка без него) — карточка, как на ПК.
+ */
+export type PhoneProfileProps = {
+  target: UserMenuTarget;
+  username?: string;
+  isSelf: boolean;
+  lastSeen: UserLastSeen | null;
+  customStatus: CustomStatus | null;
+  roles: Role[];
+  joinedAt?: string;
+  pushMuted: boolean;
+  onClose: () => void;
+  onDm: () => void;
+  onCall?: () => void;
+  onEdit: () => void;
+  onMute: () => void;
+  /** Меню «⋮» шапки профиля: пункты прежнего «⋯» карточки (контакты, блокировка, громкость, модерация). */
+  renderMenu: (pos: MenuPos, close: () => void) => ReactNode;
+};
+let phoneProfile: { isPhone: () => boolean; render: (p: PhoneProfileProps) => ReactNode } | null = null;
+export function providePhoneProfile(v: { isPhone: () => boolean; render: (p: PhoneProfileProps) => ReactNode }): void {
+  phoneProfile = v;
 }
 
 type View = 'menu' | 'connection' | 'profile' | 'roles' | 'move' | 'ban' | 'nickname' | 'poke' | 'mega-poke';
@@ -337,10 +365,12 @@ function ProfileCard({
   const animatedAvatarUrl = useAnimatedAvatarUrl()(target.userId) ?? null;
   // Откуда человек — из того же общего ростера и по той же причине, что и анимация.
   const guestHome = useGuestHome()(target.userId);
+  const dmHome = useStore((s) => dmPeerHome(s.dms, target.userId));
+  const lineHome = guestHome ?? dmHome; // Э4: у человека из ЛС инстанс — из записи беседы
   const seen = lastSeen ? lastSeenLabel(lastSeen, new Date(), true) : null;
   // Запрет личек двусторонний (§5.8): гостю закрыта переписка и с местными, поэтому спрашиваем
   // правило, а не одно лишь «гость ли собеседник».
-  const dmBlocked = dmBlockText(useStore((s) => s.user?.homeInstance), guestHome);
+  const dmBlocked = dmBlockText(useStore((s) => s.user?.homeInstance), guestHome, useStore((s) => serverFedDm(s.serverFeatures)));
   // Кружок обрезает картинку, а прийти в профиль могут именно ради неё. Открываем ровно то, что
   // человек тут видит: анимацию, когда она показана, иначе обычный аватар. Выключивший анимацию
   // не должен получить её через просмотрщик — выключатель бережёт трафик, а не только глаза.
@@ -378,7 +408,7 @@ function ProfileCard({
         {seen && <div className="pcard-handle pcard-seen">{seen}</div>}
         {/* Откуда человек — сразу под @ником: в карточку приходят смотреть на человека, и «он с
             другого инстанса» здесь такая же часть ответа, как его роли. */}
-        <GuestLine home={guestHome} />
+        <GuestLine home={lineHome} />
         {customStatus && (
           <div className="pcard-custom">
             {customStatus.emoji && <span className="pcard-custom-emoji">{customStatus.emoji}</span>}
@@ -462,11 +492,14 @@ export function UserContextMenu({
   pos,
   onClose,
   initialView = 'menu',
+  fromProfile = false,
 }: {
   target: UserMenuTarget;
   pos: MenuPos;
   onClose: () => void;
   initialView?: 'menu' | 'profile';
+  /** Меню «⋮» телефонного профиля (#218): без «Профиль», «Написать в ЛС» и пушей (они — кнопки профиля), с блокировкой. */
+  fromProfile?: boolean;
 }) {
   const bootstrap = useStore((s) => s.bootstrap);
   const me = useStore((s) => s.user);
@@ -486,6 +519,8 @@ export function UserContextMenu({
   const inVoicePresence = useStore((s) => Object.values(s.presence).some((l) => l.some((v) => v.userId === target.userId)));
   // Гость ли человек — из общего ростера; по этому же полю решается, предлагать ли ему личку.
   const menuGuestHome = useGuestHome()(target.userId);
+  // Э1 (`fedm1`): человеку другого инстанса — «Написать в ЛС» через его дом (отказ скажет сервер словами).
+  const menuFedDm = useStore((s) => serverFedDm(s.serverFeatures));
   // Контакты (08.10, `contacts1`): только между своими людьми инстанса — гостю и с гостем пунктов нет (сервер ответит 400/403).
   const contactsOn = useStore((s) => serverContacts(s.serverFeatures)) && !me?.homeInstance && !menuGuestHome && target.userId !== me?.id;
   const contacts = useContactList(contactsOn);
@@ -506,20 +541,30 @@ export function UserContextMenu({
      «Никто»); карточка на сервере — только точка шлюза (невидимый не в сети, «Время захода» не влияет). Без `presence4` — Р-2
      (`lastseen2`): скрытое время прячет и точку. */
   const p4 = useStore((s) => serverPresence4(s.serverFeatures));
-  const inDm = useStore((s) => s.view === 'dm');
+  /* Карточка, открытая из шапки беседы (`target.convId`), — по правилам ЛС, как сама шапка (`DmChatView`: `dmPresent` + «в сети» после
+     действия), и тогда, когда вид уже не «ЛС» (приёмка 15.10: в шапке «в сети», в профиле того же человека «был(а) сегодня в 15:56»). */
+  const inDm = useStore((s) => s.view === 'dm' || !!target.convId);
   const dmOnlineHere = useStore((s) => p4 && inDm && s.dmOnlineUsers.includes(target.userId));
   // `presence5` (D4, решение 42): карточка из ЛС — свёрнутое или простаивающее приложение не в сети; на сервере — как раньше.
   const dmAwayHere = useStore((s) => inDm && !!s.dmAwayUsers?.includes(target.userId));
   const rawOnline = (onlineUsers.includes(target.userId) || dmOnlineHere) && !dmAwayHere;
   const hidesOnline = useStore((s) => serverHidesOnline(s.serverFeatures));
+  /* Э4 (#141, `fedm4`): в ЛС с человеком другого инстанса без признака сервера «был(а) …» и «в сети» врут (теневой пользователь) — не спрашиваем и не показываем. */
+  const menuDmHome = useStore((s) => dmPeerHome(s.dms, target.userId));
+  const peerShown = peerPresenceShown(!!menuDmHome, useStore((s) => s.serverFeatures));
+  const presenceOff = inDm && !peerShown;
   // Решение 48 (08.10): карточка из сервера — по серверным правилам («в сети» при открытом сокете), из ЛС — по правилам ЛС.
+  // Э4: гейт «был(а)» человека соседа без `fedm4` — на результате, вызов прежний (его выражение исполняет `presenceClient.test`).
   const profileSeen = useLastSeen(isSelf ? null : target.userId, inDm ? 'dm' : 'server');
+  const shownSeen = presenceOff ? null : profileSeen;
   const localOnline = useLocalOnline(isSelf ? null : target.userId);
   const online = isSelf
     ? rawOnline
-    : p4
-      ? rawOnline || (inDm && localOnline)
-      : dotShown(rawOnline, profileSeen?.exact, hidesOnline, localOnline);
+    : presenceOff
+      ? false
+      : p4
+        ? rawOnline || (inDm && localOnline)
+        : dotShown(rawOnline, shownSeen?.exact, hidesOnline, localOnline);
   const p = target.participant ?? null;
   /**
    * Аватар в шапке меню — и он же открывается по клику.
@@ -664,6 +709,25 @@ export function UserContextMenu({
     }
   };
   const pushMuted = pushMutedDmUsers.includes(target.userId);
+  const peerBlocked = useStore((s) => fromProfile && s.blockedUsers.some((u) => u.id === target.userId));
+  async function switchBlock() {
+    const user = {
+      id: target.userId,
+      username: username ?? target.name,
+      displayName: member?.user.displayName ?? target.name,
+      avatarUrl: target.avatarUrl ?? null,
+    };
+    if (!peerBlocked) {
+      const ok = await confirmAction({
+        title: `Заблокировать ${target.name}?`,
+        body: `${target.name} не узнает об этом. Новые сообщения и «печатает» из этой беседы до вас не дойдут — даже после разблокировки. Чтобы написать самим, разблокируйте.`,
+        tone: 'danger',
+        confirmLabel: 'Заблокировать',
+      });
+      if (!ok) return;
+    }
+    await useStore.getState().setBlocked(user, !peerBlocked);
+  }
   // PTT idle (mic off between key-presses) is not "muted" — read the ptt attribute like the roster does.
   const micMuted = p ? !p.isMicrophoneEnabled && p.attributes?.ptt !== '1' : (target.micMuted ?? false);
   // Server-mute is reported by presence; fall back to the mic-muted proxy where it's unknown.
@@ -699,6 +763,43 @@ export function UserContextMenu({
     );
   }
 
+  // Звонок из профиля — общий для карточки и телефонного экрана.
+  const profileCall =
+    callsOn && !isSelf
+      ? shownSeen?.canCall === false
+        ? // Запрет звонков (`presence4`, п.25): кнопка остаётся, нажатие объясняет (как Telegram), звонка нет.
+          () => explainCallPrivacy(target.name)
+        : () =>
+            run(async () => {
+              // Звонок живёт в беседе: открыть (или завести) беседу 1:1 и позвонить из неё, как «Позвонить» в профиле Telegram.
+              const id = await useStore.getState().convOpenWith(target.userId);
+              await useStore.getState().selectDm(id);
+              await useCall.getState().start(id);
+            })
+      : undefined;
+  // `presence4`: в сети — строка «в сети», а не «был(а) недавно» из ответа сервера (он считает «недавно» для скрытого времени).
+  const profileLastSeen =
+    shownSeen && online && !isSelf && !shownSeen.online ? { ...shownSeen, online: true, at: null, approx: null } : shownSeen;
+
+  if (view === 'profile' && phoneProfile?.isPhone()) {
+    return phoneProfile.render({
+      target,
+      username,
+      isSelf,
+      lastSeen: profileLastSeen,
+      customStatus,
+      roles,
+      joinedAt: member?.joinedAt,
+      pushMuted,
+      onClose,
+      onDm: () => run(() => openDmWith(target.userId)),
+      onCall: profileCall,
+      onEdit: () => run(() => setSettingsOpen(true)),
+      onMute: () => setPushMuted('dm_user', target.userId, !pushMuted).catch(toastError),
+      renderMenu: (at, close) => <UserContextMenu target={target} pos={at} onClose={close} fromProfile />,
+    });
+  }
+
   if (view === 'profile') {
     return (
       <ContextMenu pos={pos} onClose={onClose} width={320} bare>
@@ -707,27 +808,13 @@ export function UserContextMenu({
           username={username}
           isSelf={isSelf}
           status={dot}
-          // `presence4`: в сети — строка «в сети», а не «был(а) недавно» из ответа сервера (он считает «недавно» для скрытого времени).
-          lastSeen={profileSeen && online && !isSelf && !profileSeen.online ? { ...profileSeen, online: true, at: null, approx: null } : profileSeen}
+          lastSeen={profileLastSeen}
           customStatus={customStatus}
           roles={roles}
           joinedAt={member?.joinedAt}
           onBack={() => setView('menu')}
           onDm={() => run(() => openDmWith(target.userId))}
-          onCall={
-            callsOn && !isSelf
-              ? profileSeen?.canCall === false
-                ? // Запрет звонков (`presence4`, п.25): кнопка остаётся, нажатие объясняет (как Telegram), звонка нет.
-                  () => explainCallPrivacy(target.name)
-                : () =>
-                    run(async () => {
-                      // Звонок живёт в беседе: открыть (или завести) беседу 1:1 и позвонить из неё, как «Позвонить» в профиле Telegram.
-                      const id = await useStore.getState().convOpenWith(target.userId);
-                      await useStore.getState().selectDm(id);
-                      await useCall.getState().start(id);
-                    })
-              : undefined
-          }
+          onCall={profileCall}
           onEdit={() => run(() => setSettingsOpen(true))}
           onReopen={() => setView('menu')}
           onSharedMedia={onClose}
@@ -1002,7 +1089,9 @@ export function UserContextMenu({
 
       {!isSelf && (
         <>
-          {showUserAudio({ isSelf, hasParticipant: !!target.participant, voiceChannelId: target.voiceChannelId, inPresence: inVoicePresence }) && (
+          {/* На телефонном экране профиля громкость — строка самого экрана (`PhoneProfile.tsx`), в «⋮» второй копии нет. */}
+          {!(fromProfile && phoneProfile?.isPhone()) &&
+            showUserAudio({ isSelf, hasParticipant: !!target.participant, voiceChannelId: target.voiceChannelId, inPresence: inVoicePresence }) && (
             <>
             {/* Personal, client-only audio — persisted across sessions, applies in voice. */}
             <div className="ctx-vol2">
@@ -1013,7 +1102,7 @@ export function UserContextMenu({
                   title={audio.muted ? 'Включить звук' : 'Заглушить для себя'}
                   onClick={() => audio.toggleMuted()}
                 >
-                  <Icon name={audio.muted ? 'volume-off' : 'volume'} size={16} />
+                  <Icon name={audio.muted || volPct === 0 ? 'volume-off' : 'volume'} size={16} />
                 </button>
                 <span className="ctx-vol2-label">Громкость</span>
                 <button
@@ -1059,12 +1148,12 @@ export function UserContextMenu({
 
           <MenuDivider />
           {p && <MenuItem icon="activity" label="Инфо о подключении" onClick={() => setView('connection')} />}
-          <MenuItem icon="user" label="Профиль" onClick={() => setView('profile')} />
+          {!fromProfile && <MenuItem icon="user" label="Профиль" onClick={() => setView('profile')} />}
           {/* Гостю пункта нет: `POST /dm` с ним отвечает `federation.dm_unavailable` (§5.8), и пункт
               меню, который всегда кончается отказом, — это обещание, которого мы не держим.
               ⚠️ Смотрим на ОБЕ стороны: гостю закрыта личка и с местными, а раньше условие знало
               только про собеседника, и у гостя пункт оставался на месте. */}
-          {!dmBlockText(me?.homeInstance, menuGuestHome) && (
+          {!fromProfile && !dmBlockText(me?.homeInstance, menuGuestHome, menuFedDm) && (
             <MenuItem icon="mail" label="Написать в ЛС" onClick={() => run(() => openDmWith(target.userId))} />
           )}
           {/* Контакты (`contacts1`), как меню профиля Telegram: «Добавить в контакты» или «Изменить» / «Удалить контакт». */}
@@ -1093,19 +1182,31 @@ export function UserContextMenu({
             label="Упомянуть"
             onClick={() => run(() => requestMention(username ?? target.name))}
           />
-          <MenuItem
-            icon={pushMuted ? 'bell' : 'bell-off'}
-            label={pushMuted ? 'Включить пуши от него' : 'Отключить пуши от него'}
-            sub={pushMuted ? undefined : 'не будить телефон на его ЛС'}
-            active={pushMuted}
-            onClick={() => run(() => setPushMuted('dm_user', target.userId, !pushMuted))}
-          />
+          {!fromProfile && (
+            <MenuItem
+              icon={pushMuted ? 'bell' : 'bell-off'}
+              label={pushMuted ? 'Включить пуши от него' : 'Отключить пуши от него'}
+              sub={pushMuted ? undefined : 'не будить телефон на его ЛС'}
+              active={pushMuted}
+              onClick={() => run(() => setPushMuted('dm_user', target.userId, !pushMuted))}
+            />
+          )}
+          {/* «Заблокировать» — в «⋮» профиля, как у Telegram (`ProfileActivity`, пункт `block_contact`); то же окно и тот же вызов,
+              что у шапки беседы (`DmChatView.switchDmBlock` — отсюда не импортируется: беседа сама импортирует это меню). */}
+          {fromProfile && (
+            <MenuItem
+              icon="ban"
+              label={peerBlocked ? 'Разблокировать' : 'Заблокировать'}
+              danger={!peerBlocked}
+              onClick={() => run(() => switchBlock())}
+            />
+          )}
         </>
       )}
 
       {isSelf && (
         <>
-          <MenuItem icon="user" label="Профиль" onClick={() => setView('profile')} />
+          {!fromProfile && <MenuItem icon="user" label="Профиль" onClick={() => setView('profile')} />}
           {/* Свой ник — ТОЛЬКО в ветке isSelf (#19/#72). Раньше пункт лежал внутри блока `!isSelf`,
               а `canRename` требует `isSelf` — взаимоисключающе, поэтому не показывался вообще. */}
           {canRename && (

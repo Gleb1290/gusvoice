@@ -1,0 +1,11 @@
+{
+  "id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "kind": "direct",
+  "origin_instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "created_at": 1760270300000,
+  "members": [
+    { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" },
+    { "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k", "user_id": "0193f1a2-1111-7e8f-9a0b-1c2d3e4f5a6b" }
+  ],
+  "title": null
+}

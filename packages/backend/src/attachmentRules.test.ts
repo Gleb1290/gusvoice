@@ -6,9 +6,10 @@ import * as crypto from 'node:crypto';
 import ts from 'typescript';
 import * as chunks from './attachmentRules.js';
 import * as storageRules from './storageRules.js';
+import { FORWARD_BYTES_MAX } from './convRules.js';
 import {
   attLink, attPartsWellFormed, attSig, attSigValid, attachmentHeaders, deriveAttKey, isAttId,
-  isAttPath, parseAttLink, parseRange, pendingEvictions, policyGrantsPublic, redactLogUrl,
+  isAttPath, parseRange, pendingEvictions, policyGrantsPublic, redactLogUrl,
   resolveAttachmentMime, sanitizeFilename, servedContentType,
 } from './attachmentRules.js';
 
@@ -18,12 +19,13 @@ const key = deriveAttKey('тестовый секрет, не настоящий
 const sig = attSig(key, id, 'viewer', 2);
 
 describe('R131 сроки копирования и перехвата сборки', () => {
-  it('копия получает минуту плюс секунду за каждые начатые четыре МиБ, файл 512 МиБ — 188 секунд', () => {
+  it('копия получает минуту плюс секунду за каждые начатые четыре МиБ, файл 1 ГиБ — 316 секунд', () => {
     // Деление на размер восьмимегабайтного куска сокращало бы срок большой пересылки вдвое и обрывало её раньше времени.
     const check = (rules: typeof chunks) => {
       assert.equal(rules.copyTimeoutMs(0), 60000);
       assert.equal(rules.copyTimeoutMs(4 * 1024 * 1024), 61000);
       assert.equal(rules.copyTimeoutMs(512 * 1024 * 1024), 188000);
+      assert.equal(rules.copyTimeoutMs(1024 * 1024 * 1024), 316000);
     };
     check(chunks);
     const source = readFileSync(new URL('./attachmentRules.ts', import.meta.url), 'utf8');
@@ -63,7 +65,7 @@ describe('R127 чистые правила загрузки кусками', () 
     // Ловит потерянный нулевой файл и лишний кусок при точном делении.
     for (const [size, count] of [[0, 1], [1, 1], [8, 1], [9, 2], [16, 2], [17, 3]])
       assert.equal(chunks.partCount(size, 8), count);
-    assert.equal(chunks.partCount(chunks.BIGFILE_MAX_BYTES), 64);
+    assert.equal(chunks.partCount(chunks.BIGFILE_MAX_BYTES), 128);
   });
   it('последний кусок несёт остаток, неверные номера не получают размер', () => {
     // Кусок всегда partSize потерял бы последний байт или потребовал бы лишних байтов клиента.
@@ -79,10 +81,40 @@ describe('R127 чистые правила загрузки кусками', () 
     assert.deepEqual(chunks.missingParts(0, [], 8), [1]);
     assert.deepEqual(chunks.missingParts(0, [{ part: 1, size: 0 }], 8), []);
   });
-  it('файл ровно512МиБ допускается, лишний байт получает413 раньше других пределов', () => {
-    assert.equal(chunks.BIGFILE_MAX_BYTES, 512 * 1024 * 1024);
+  it('файл ровно1ГиБ допускается, лишний байт получает413 раньше других пределов', () => {
+    assert.equal(chunks.BIGFILE_MAX_BYTES, 1024 * 1024 * 1024);
     assert.equal(chunks.uploadStartBlock(chunks.BIGFILE_MAX_BYTES, 0, 0), null);
     assert.equal(chunks.uploadStartBlock(chunks.BIGFILE_MAX_BYTES + 1, chunks.DM_DAILY_UPLOAD_BYTES, 12)?.code, 413);
+  });
+  it('R142 предел 1 ГиБ и общий запас 8 ГиБ не откатываются и не расходятся с пересылкой', () => {
+    // Числа проверяются независимо от констант: согласованный откат не должен сделать тест зелёным.
+    const verify = (rules: typeof chunks) => {
+      const GiB = 1024 * 1024 * 1024;
+      assert.equal(rules.BIGFILE_MAX_BYTES, GiB);
+      assert.equal(rules.uploadStartBlock(GiB, 0, 0), null);
+      assert.equal(rules.uploadStartBlock(GiB + 1, 0, 0)?.code, 413);
+      assert.equal(rules.partCount(GiB), 128);
+      assert.equal(rules.PENDING_MAX_BYTES, 8 * GiB);
+      assert.equal(rules.PENDING_MAX_BYTES_BIGFILE, FORWARD_BYTES_MAX);
+      assert.equal(rules.PENDING_MAX_BYTES, FORWARD_BYTES_MAX);
+    };
+    verify(chunks);
+    const source = readFileSync(new URL('./attachmentRules.ts', import.meta.url), 'utf8');
+    for (const [from, to] of [
+      ['BIGFILE_MAX_BYTES = 1024 * 1024 * 1024', 'BIGFILE_MAX_BYTES = 512 * 1024 * 1024'],
+      ['PENDING_MAX_BYTES = 8 * 1024 * 1024 * 1024', 'PENDING_MAX_BYTES = 9 * 1024 * 1024 * 1024'],
+      ['PENDING_MAX_BYTES_BIGFILE = 8 * 1024 * 1024 * 1024', 'PENDING_MAX_BYTES_BIGFILE = 9 * 1024 * 1024 * 1024'],
+    ]) {
+      assert.ok(source.includes(from), `якорь ${from}`);
+      const module = { exports: {} };
+      runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+        { module, exports: module.exports, Buffer, URL, require: (name: string) => {
+          if (name === 'node:crypto') return crypto;
+          if (name === './storageRules.js') return storageRules;
+          throw new Error(`неожиданная зависимость ${name}`);
+        } });
+      assert.throws(() => verify(module.exports as typeof chunks), assert.AssertionError);
+    }
   });
   it('одиннадцать открытых допускают ещё загрузку, двенадцать уже получают429', () => {
     assert.equal(chunks.UPLOADS_OPEN_MAX, 12);
@@ -136,16 +168,6 @@ describe('закрытая ссылка на вложение', () => {
     assert.equal(attPartsWellFormed(id, 'viewer', `${sig}!`), false);
   });
 
-  it('старая отправка принимает лишь свою полную ссылку без хвоста, query и hash', () => {
-    // Ловит принятие URL с другого источника или с лишними параметрами как своего файла.
-    const base = 'https://api.example.test/base';
-    const url = attLink(base, id, 'viewer', sig);
-    assert.deepEqual(parseAttLink(url, base), { id, viewerId: 'viewer', sig });
-    for (const bad of [url.replace('api.example.test', 'evil.test'), `${url}?x=1`, `${url}#x`, `${url}/tail`, url.replace('/base/', '/other/')]) {
-      assert.equal(parseAttLink(bad, base), null, bad);
-    }
-    assert.equal(parseAttLink('not a URL', base), null);
-  });
 });
 
 describe('тип и выдача закрытого файла', () => {

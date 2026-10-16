@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import type { ConvMessage, ConvPin, ConvScheduled, ConvSummary, ConvSyncResponse } from '@gusvoice/shared';
-import { createConvActions, type ConvDeps, type ConvHost } from './convStore';
+import { createConvActions, type ConvDeps, type ConvHost, type FedViaHooks } from './convStore';
 import * as channelRules from './channelRules';
 import * as convRules from './convSyncRules';
 import * as cacheRules from './convCacheRules';
@@ -13,6 +13,76 @@ import * as outboxRules from './outboxRules';
 import * as feedRules from './feedWindowRules';
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+const viaStoreSource = readFileSync(new URL('./convStore.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+function loadViaStore(raw = viaStoreSource): Pick<typeof import('./convStore'), 'createConvActions' | 'bindFedVia'> {
+  const module = { exports: {} };
+  const deps: Record<string, unknown> = { './channelRules': channelRules, './convSyncRules': convRules,
+    './convCacheRules': cacheRules, './outgoingRules': outgoingRules, './outboxRules': outboxRules, './feedWindowRules': feedRules };
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module, exports: module.exports, AbortController, require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `граница convStore ${id}`); return deps[id]; } });
+  return module.exports as Pick<typeof import('./convStore'), 'createConvActions' | 'bindFedVia'>;
+}
+async function viaSending(options: { status?: number; network?: boolean; active?: boolean; offline?: boolean; canTry?: boolean;
+  limited?: 'file' | 'quote' | 'asFile' | 'spoiler' | 'caption'; bound?: boolean }, raw = viaStoreSource) {
+  const module = loadViaStore(raw); const trace: string[] = [];
+  let viaBody: Parameters<FedViaHooks['send']>[1] | undefined;
+  const hooks: FedViaHooks = { active: () => options.active ?? false, canTry: () => options.canTry ?? true,
+    homeFailed: () => { trace.push('failed'); }, history: async () => [],
+    send: async (id, body) => { trace.push('via'); viaBody = body; return message(body.clientId, id); },
+  };
+  module.bindFedVia(options.bound === false ? null : hooks);
+  const fails = options.network || options.status !== undefined;
+  const expectedVia = options.bound !== false && !options.limited &&
+    (!!options.active || (!!fails && !options.offline && options.canTry !== false && (options.network || [502, 503, 504].includes(options.status!))));
+  const f = fixture({ convSend: async (id, body) => {
+    trace.push('home');
+    if (fails) throw Object.assign(new Error('сбой дома'), options.status === undefined ? {} : { status: options.status });
+    return message(body.clientId, id);
+  } }, module.createConvActions, { deviceOffline: () => options.offline ?? false });
+  try {
+    f.set({ dmMessages: { c: [] } });
+    const files = options.limited === 'file' ? [{ name: 'file.txt', type: 'text/plain' }] as File[] : [];
+    f.actions.outboxEnqueue('c', { key: 'via-send', content: 'текст', files, replyToId: 'parent', silent: true, noPreview: true,
+      ...(options.limited === 'quote' ? { replyQuote: { text: 'кусок', offset: 0 } } : {}),
+      ...(options.limited === 'asFile' ? { asFile: true } : {}),
+      ...(options.limited === 'spoiler' ? { spoilers: [0] } : {}),
+      ...(options.limited === 'caption' ? { captionAbove: true } : {}),
+    });
+    await settle(); await settle();
+    assert.equal(trace.includes('via'), expectedVia, 'обход следует недоступности дома и допустимости строки');
+    assert.equal(trace.filter(x => x === 'home').length, options.active && expectedVia ? 0 : 1, 'активный обход не обращается домой');
+    assert.equal(trace.includes('failed'), expectedVia && !options.active, 'проба дома только после сетевого провала');
+    if (expectedVia) {
+      assert.equal(viaBody?.clientId, 'via-send'); assert.equal(viaBody?.content, 'текст'); assert.equal(viaBody?.replyToId, 'parent');
+      assert.equal(viaBody?.silent, true); assert.equal(viaBody?.noPreview, true);
+      assert.equal(Object.hasOwn(viaBody!, 'attachments'), false, 'в обходном теле нет скрытых файлов');
+      assert.equal(f.get().outbox.c?.length ?? 0, 0); assert.equal(f.get().dmMessages.c[0]?.id, 'via-send');
+    }
+  } finally { module.bindFedVia(null); }
+}
+it('R200 convStore после сбоя сети и 502–504 отправляет текст через bindFedVia с тем же clientId и ответом', async () => {
+  await viaSending({ network: true }); for (const status of [502, 503, 504]) await viaSending({ status });
+});
+it('R200 convStore не обходит 400 403 500, отсутствие сессии и отключённую сеть устройства', async () => {
+  for (const status of [400, 403, 500]) await viaSending({ status });
+  await viaSending({ network: true, canTry: false }); await viaSending({ network: true, offline: true });
+});
+it('R200 convStore активный обход допускает только текст, ограничения файла и цитаты остаются домашними', async () => {
+  for (const limited of ['file', 'quote', 'asFile', 'spoiler', 'caption'] as const) await viaSending({ active: true, limited });
+});
+it('R200 convStore active сразу отправляет соседу, без bindFedVia и в норме сохраняет прежнюю отправку домой', async () => {
+  await viaSending({ active: true }); await viaSending({ bound: false }); await viaSending({});
+});
+for (const [name, anchor, replacement, options, target] of [
+  ['обойти отказ дома', '!isHomeDownError(e) || deviceOffline() || !via.canTry(convId)', 'deviceOffline() || !via.canTry(convId)', { status: 403 }, 'обход следует недоступности'],
+  ['обойти дом с файлами', '!via || !viaSendable(item)', '!via', { active: true, limited: 'file' as const }, 'обход следует недоступности'],
+  ['игнорировать active', 'if (via.active(convId)) return via.send(convId, viaBody, SEND_TIMEOUT_MS);', 'if (false) return via.send(convId, viaBody, SEND_TIMEOUT_MS);', { active: true }, 'обход следует недоступности'],
+] as const) it(`R200 convStore мутант «${name}» отвергается реальной очередью`, async () => {
+  await viaSending(options); assert.equal(viaStoreSource.split(anchor).length - 1, 1, 'единственный якорь обходной отправки');
+  await assert.rejects(viaSending(options, viaStoreSource.replace(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target));
+});
 
 it('очередь отправляет без превью и как файлы в API после загрузки, обычная строка без флагов', async () => {
   // Ловит сохранённый выбор, который забыли перенести из outbox в сетевое тело.

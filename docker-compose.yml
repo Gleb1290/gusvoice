@@ -130,6 +130,9 @@ services:
       # believes can't drift apart. Default OFF on purpose: an instance must not start collecting data
       # about its users' machines just because it was updated. See .env.example.
       DIAG_ENABLED: ${DIAG_ENABLED:-false}
+      # Опасные ссылки (#218 п.5): локальный список угроз, скачивается раз в сутки; адреса из сообщений наружу не уходят.
+      LINK_THREATS_ENABLED: ${LINK_THREATS_ENABLED:-true}
+      LINK_THREATS_URLS: ${LINK_THREATS_URLS:-}
       ECONOMY_ENABLED: ${ECONOMY_ENABLED:-false}
       # Closed preview of the economy: comma-separated user IDs it is visible to while the feature is
       # under wraps. EMPTY = no restriction (normal behaviour) -- a forgotten variable must mean "as
@@ -176,6 +179,12 @@ services:
       # Поиск GIF в ЛС (Р-7): giphy | tenor + ключ; пусто => только «Мои GIF».
       GIF_PROVIDER: ${GIF_PROVIDER:-}
       GIF_API_KEY: ${GIF_API_KEY:-}
+      # Картинка карты в карточке геопозиции ЛС (`yamap1`): ключ Static API Яндекса; пусто => карточка без картинки, маршрута нет.
+      # Потолок запросов инстанса в сутки (по умолчанию 100 — бесплатный тариф Яндекса, 0 — без потолка).
+      YANDEX_MAPS_STATIC_KEY: ${YANDEX_MAPS_STATIC_KEY:-}
+      # Своя карта OpenStreetMap (`osmmap1`): путь к файлу PMTiles ВНУТРИ контейнера (каталог ./maps хоста виден как /maps); пусто => карты нет.
+      MAP_PMTILES_PATH: ${MAP_PMTILES_PATH:-}
+      YANDEX_MAPS_STATIC_DAILY_MAX: ${YANDEX_MAPS_STATIC_DAILY_MAX:-}
       # Update button in the admin panel: where the backend learns the newest release (asked only when the super-admin
       # opens the "Instance" tab, cached for 6 h). Empty => no check. The version of THIS backend is baked into the image.
       GV_RELEASES_URL: ${GV_RELEASES_URL-https://api.github.com/repos/Gleb1290/gusvoice/releases/latest}
@@ -183,6 +192,7 @@ services:
       # заводить инстансу печать и открывать наружу маршруты /api/fed/*. Пароль — пара к файлу ключа
       # в ./fed-keys (см. volumes ниже): одно без другого бесполезно, в бэкап нужны оба.
       FEDERATION_ENABLED: ${FEDERATION_ENABLED:-false}
+      FEDERATION_DM_ENABLED: ${FEDERATION_DM_ENABLED:-false}
       FEDERATION_KEY_PASSPHRASE: ${FEDERATION_KEY_PASSPHRASE:-}
       FEDERATION_DATA_DIR: /var/lib/gusvoice/federation
       # Публичный адрес ЭТОГО API — он уезжает в визитку инстанса, по нему сосед к нам и ходит.
@@ -197,6 +207,9 @@ services:
       # это пара, и копия каталога установки должна забирать обе части. В базе ключа нет, чтобы дамп
       # базы не уносил личность инстанса. Потеря пары = потеря доверия соседей, лечится перепривязкой.
       - ./fed-keys:/var/lib/gusvoice/federation
+      # Своя карта OpenStreetMap (`osmmap1`): каталог с файлом PMTiles — ТОЛЬКО НА ЧТЕНИЕ. Монтируем каталог, а не файл: нет файла —
+      # Docker не создаст на его месте папку, карта просто выключена. Каталога нет — Docker заведёт пустой.
+      - ${MAP_PMTILES_DIR:-./maps}:/maps:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

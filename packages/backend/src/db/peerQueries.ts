@@ -5,7 +5,7 @@ import { db } from './index.js';
  * Запросы «кто с кем связан» — общий сервер или личная переписка (F0 #139).
  *
  * Оба жили внутри своих модулей: `loadPeers` — в `gateway.ts` (тот тянет Redis и Fastify),
- * `shareServer` — приватной функцией в `routes/dm.ts`. Проверить сам SQL было нельзя ничем, кроме
+ * `shareServer` — приватной функцией в старых ручках ЛС (`/api/dm*`, сняты 10.10). Проверить сам SQL было нельзя ничем, кроме
  * живого Postgres, а это ровно те два запроса, от которых зависит, кто видит чужой онлайн и кому
  * можно написать. Здесь они видны, и интеграционный тест (#143) зовёт их напрямую.
  */
@@ -18,8 +18,8 @@ import { db } from './index.js';
  * продолжал видеть, кто из участников в сети, а они — его.
  * 🔴 Связь «через беседу» не считается, если один из двоих заблокировал другого (05.10, #212): беседу 1:1 может
  * завести кто угодно на инстансе (политика `anyone`), и пустая беседа показывала её создателю онлайн того, кто его
- * заблокировал (`online.snapshot`). Общий сервер блокировка не отменяет — там онлайн виден всем участникам, как и
- * раньше. Кэш соседей шлюза при блокировке и разблокировке сбрасывается (`blocks.onBlockChange` →
+ * заблокировал (`online.snapshot`). С 14.10 (F5, приёмка ЛС, как Telegram: заблокированный видит «был(а) давно») блокировка
+ * рвёт и связь через общий сервер — в обе стороны, как у беседы. Кэш соседей шлюза при блокировке и разблокировке сбрасывается (`blocks.onBlockChange` →
  * `userVisibilityHub.refreshPeers`).
  */
 export async function loadPeers(userId: string): Promise<Set<string>> {
@@ -27,6 +27,10 @@ export async function loadPeers(userId: string): Promise<Set<string>> {
     SELECT b.user_id AS id FROM server_members a
       JOIN server_members b ON b.server_id = a.server_id AND b.state = 'active'
       WHERE a.user_id = ${userId} AND a.state = 'active'
+        -- F5 (приёмка 13.10, как Telegram): блокировка в любую сторону прячет «в сети» и через общий сервер.
+        AND NOT EXISTS (SELECT 1 FROM user_blocks ub
+          WHERE (ub.blocker_id = a.user_id AND ub.blocked_id = b.user_id)
+             OR (ub.blocker_id = b.user_id AND ub.blocked_id = a.user_id))
     UNION SELECT p.user_id AS id FROM conversation_members m
       JOIN conversation_members p ON p.conversation_id = m.conversation_id AND p.user_id <> m.user_id
       WHERE m.user_id = ${userId}
@@ -53,6 +57,13 @@ export async function shareServer(userA: string, userB: string): Promise<boolean
  * запрос для «был(а) в сети» (С1, #211) — `loadPeers` поднимает всех соседей разом.
  */
 export async function arePeers(userA: string, userB: string): Promise<boolean> {
+  // F5: блокировка в любую сторону — не соседи и при общем сервере (как `loadPeers`).
+  const blocked = await db.execute(sql`
+    SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ${userA} AND ub.blocked_id = ${userB}) OR (ub.blocker_id = ${userB} AND ub.blocked_id = ${userA})
+      LIMIT 1
+  `);
+  if (blocked.rows.length > 0) return false;
   if (await shareServer(userA, userB)) return true;
   const res = await db.execute(sql`
     SELECT 1 FROM conversation_members m

@@ -12,7 +12,9 @@ import type {
 import type {
   CreateGroupRequest,
   ConvReadAt,
+  ConvReaders,
   LastSeenPrivacy,
+  MessagePrivacy,
   NotifyView,
   LastSeenExceptions,
   UserLastSeen,
@@ -41,6 +43,7 @@ import type {
   Channel,
   Category,
   ConvDeleteManyRequest,
+  ConvAlbumItemDeleteResponse,
   ConvDraftRequest,
   ConvForwardRequest,
   ConvForwardResponse,
@@ -274,6 +277,9 @@ async function parseResponse<T>(res: Response): Promise<T> {
     // обязано показать, к кому идти, а второй запрос за ними идти уже некуда — нас туда не пускают.
     const contacts = (data as { contacts?: unknown }).contacts;
     if (Array.isArray(contacts)) err.contacts = contacts as { kind: string; label: string; value: string }[];
+    // Э7 (#141, `fedm6`): 403 `group_not_invitable { userIds }` — кого из выбранных инстанс не пускает в группы (имена инстансов в тосте).
+    const userIds = (data as { userIds?: unknown }).userIds;
+    if (Array.isArray(userIds)) (err as Error & { userIds?: string[] }).userIds = userIds.filter((x): x is string => typeof x === 'string');
     throw err;
   }
   return data as T;
@@ -358,6 +364,22 @@ function xhrUpload(url: string, headers: Record<string, string>, body: FormData 
   });
 }
 
+/** Ответ `GET /conv/:id/fallback` (Э5): куда и с чем писать, пока дом недоступен. `expiresAt` — мс. */
+export interface ConvFallbackSession {
+  instanceId: string;
+  apiBase: string;
+  userId: string;
+  token: string;
+  expiresAt: number;
+}
+
+/** Строка отчёта `POST /conv/via-claims` (Э5): что отправлено в обход дома; `payloadHash` — `fedViaRules.viaPayloadHash`. */
+export interface ConvViaClaim {
+  conversationId: string;
+  clientId: string;
+  payloadHash: string;
+}
+
 interface Transport {
   req<T>(method: string, path: string, body?: unknown, opts?: ReqOptions): Promise<T>;
   /** Адрес API (для ссылок на скачивание). */
@@ -369,6 +391,8 @@ interface Transport {
   upload(path: string, body: FormData, opts?: UploadOpts): Promise<Response>;
   /** Кусок файла (`bigfile1`): `PUT` сырых байт с прогрессом и отменой (`chunkedUpload.ts`). */
   putPart(path: string, body: Blob, opts: UploadOpts): Promise<Response>;
+  /** `GET` с входом, ответ как есть (картинка карты `yamap1`: `<img>` заголовок входа не шлёт). Продление токена учтено. */
+  raw(path: string, timeoutMs?: number): Promise<Response>;
   /** Отражение статуса/игры в фоновые шлюзы — только у активного. */
   mirror(method: 'PATCH' | 'POST', path: string, body: unknown): void;
 }
@@ -419,6 +443,13 @@ const activeTransport: Transport = {
     const sent = epoch;
     const headers: Record<string, string> = { 'Content-Type': 'application/octet-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
     const res = await xhrUpload(`${config.apiUrl}/api${path}`, headers, body, opts, 'PUT');
+    if (sent !== epoch) throw switchedAway();
+    absorbRefresh(res);
+    return res;
+  },
+  async raw(path: string, timeoutMs?: number): Promise<Response> {
+    const sent = epoch;
+    const res = await fetchWithin(`${config.apiUrl}/api${path}`, { method: 'GET', headers: token ? { Authorization: `Bearer ${token}` } : {} }, timeoutMs);
     if (sent !== epoch) throw switchedAway();
     absorbRefresh(res);
     return res;
@@ -482,12 +513,41 @@ function recordTransport(localId: string): Transport {
     upload: (path, body, opts) => send(path, { method: 'POST', body }, undefined, opts),
     putPart: (path, body, opts) =>
       send(path, { method: 'PUT', body, headers: { 'Content-Type': 'application/octet-stream' } }, undefined, { ...opts, signal: opts.signal ?? new AbortController().signal }, 'PUT'),
+    raw: (path, timeoutMs) => send(path, { method: 'GET' }, timeoutMs),
     mirror: () => {},
   };
 }
 
 /**
- * Загрузка вложения ЛС (старая `/dm/:id/attachments` и беседы `/conv/:id/attachments` — один приём на сервере).
+ * Э5: запросы по долгой сессии на инстансе собеседника (`ConvFallbackSession`). Адрес и токен — из сессии на каждый вызов; поколения
+ * нет (переход между инстансами такой запрос не отменяет), продление токена и 401 не трогают вход в основной инстанс.
+ */
+function viaTransport(session: ConvFallbackSession): Transport {
+  const url = (path: string) => `${session.apiBase.replace(/\/+$/, '')}/api${path}`;
+  const auth = { Authorization: `Bearer ${session.token}` };
+  return {
+    async req<T>(method: string, path: string, body?: unknown, opts?: ReqOptions): Promise<T> {
+      const res = await fetchWithin(
+        url(path),
+        {
+          method,
+          headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...auth },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        },
+        opts?.timeoutMs,
+      );
+      return parseResponse<T>(res);
+    },
+    base: () => session.apiBase,
+    upload: () => Promise.reject(new Error('Дом недоступен — пока только текст')),
+    putPart: () => Promise.reject(new Error('Дом недоступен — пока только текст')),
+    raw: (path, timeoutMs) => fetchWithin(url(path), { method: 'GET', headers: auth }, timeoutMs),
+    mirror: () => {},
+  };
+}
+
+/**
+ * Загрузка вложения беседы (`/conv/:id/attachments`; каналы — `/channels/:id/attachments`).
  * Размер картинки (и с 06.10 видео — с длительностью) меряем параллельно загрузке (#194): лента оставит место до скачивания.
  */
 async function uploadVia(t: Transport, path: string, file: File, opts?: UploadOpts): Promise<Attachment> {
@@ -585,6 +645,8 @@ function makeApi(t: Transport) {
     hideReadTime?: boolean;
     /** «Кто может звонить» (`presence4`). */
     callPrivacy?: LastSeenPrivacy;
+    /** «Кто может мне писать» (`msgpriv1`). */
+    messagePrivacy?: MessagePrivacy;
     /** «Показывать имя / текст» и «Уведомления из групп» (G38, `push2`). */
     notifyView?: NotifyView;
     notifyGroups?: boolean;
@@ -601,11 +663,17 @@ function makeApi(t: Transport) {
   /** «Кто может звонить» (`presence4`): исключения — та же форма, что у «Времени захода». */
   callExceptions: () => req<LastSeenExceptions>('GET', '/users/me/call-exceptions'),
   setCallExceptions: (body: { always: string[]; never: string[] }) => req<LastSeenExceptions>('PUT', '/users/me/call-exceptions', body),
+  // «Кто может мне писать» (`msgpriv1`): только «Всегда разрешать».
+  messageExceptions: () => req<LastSeenExceptions>('GET', '/users/me/message-exceptions'),
+  setMessageExceptions: (always: string[]) => req<LastSeenExceptions>('PUT', '/users/me/message-exceptions', { always, never: [] }),
   setLastSeenExceptions: (body: { always: string[]; never: string[] }) =>
     req<LastSeenExceptions>('PUT', '/users/me/last-seen-exceptions', body),
   /** «Прочитано в 12:34» своего сообщения в беседе 1:1 (С1, `lastseen1`). */
   convReadAt: (convId: string, messageId: string) =>
     req<ConvReadAt>('GET', `/conv/${convId}/messages/${encodeURIComponent(messageId)}/read-at`),
+  /** «Кто прочитал» своё сообщение в группе (`readers1`) — строка «N прочитали» в меню. */
+  convReaders: (convId: string, messageId: string) =>
+    req<ConvReaders>('GET', `/conv/${convId}/messages/${encodeURIComponent(messageId)}/readers`),
   // Steam link (#40 Phase 1B): get the OpenID redirect URL (client navigates to it), or unlink.
   steamLinkUrl: () => req<{ url: string }>('POST', '/users/me/steam/link-url'),
   steamUnlink: () => req<User>('DELETE', '/users/me/steam'),
@@ -872,8 +940,6 @@ function makeApi(t: Transport) {
     req<void>('DELETE', `/channels/${channelId}/messages/${messageId}`),
   react: (channelId: string, messageId: string, emoji: string, op: 'add' | 'remove') =>
     req<void>('POST', `/channels/${channelId}/messages/${messageId}/reactions`, { emoji, op }),
-  reactDm: (dmId: string, messageId: string, emoji: string, op: 'add' | 'remove') =>
-    req<void>('POST', `/dm/${dmId}/messages/${messageId}/reactions`, { emoji, op }),
   pinMessage: (channelId: string, messageId: string) =>
     req<Message>('PUT', `/channels/${channelId}/messages/${messageId}/pin`),
   unpinMessage: (channelId: string, messageId: string) =>
@@ -1054,30 +1120,14 @@ function makeApi(t: Transport) {
   getStreamPreview: (channelId: string, userId: string) =>
     req<{ image: string }>('GET', `/channels/${channelId}/voice/preview/${userId}`),
 
-  // --- direct messages ---
-  listDms: () => req<DmChannel[]>('GET', '/dm'),
-  openDm: (userId: string) => req<DmChannel>('POST', '/dm', { userId }),
-  listDmMessages: (dmId: string, cursor?: HistoryCursor) =>
-    req<Message[]>('GET', `/dm/${dmId}/messages${historyQuery(cursor)}`),
-  sendDmMessage: (dmId: string, content: string, attachments: Attachment[] = [], replyToId?: string | null) =>
-    req<Message>('POST', `/dm/${dmId}/messages`, { content, attachments, replyToId }),
-  editDmMessage: (dmId: string, messageId: string, content: string) =>
-    req<Message>('PATCH', `/dm/${dmId}/messages/${messageId}`, { content }),
-  /**
-   * Удалить сообщение ЛС (#212): `both` — у обоих (только своё), `me` — только у себя (любое). Без `scope` сервер
-   * удаляет у обоих — так делал старый клиент.
-   */
-  deleteDmMessage: (dmId: string, messageId: string, scope?: 'me' | 'both') =>
-    req<void>('DELETE', `/dm/${dmId}/messages/${messageId}${scope ? `?for=${scope}` : ''}`),
-  uploadDmAttachment: (dmId: string, file: File, opts?: UploadOpts): Promise<Attachment> =>
-    uploadTo(`/dm/${dmId}/attachments`, file, opts),
-
   // --- беседы ЛС, этап 1 сервера (`/api/conv/*`, `docs/dm/STAGE1.md`); клиент ходит сюда в режиме бесед (этап 2) ---
   // `groups=1` (07.10, `groups1`): клиент умеет группы ЛС. Сервер без групп параметр не знает и не смотрит на него.
   // `former=1` (08.10, `groups3`): ещё и бывшие группы (только на чтение); старый сервер параметр не знает и не шлёт.
   convList: () => req<ConvListResponse>('GET', '/conv?groups=1&former=1'),
   convSync: (pts: number, limit = 500) => req<ConvSyncResponse>('GET', `/conv/sync?pts=${pts}&limit=${limit}&groups=1`),
-  convDirect: (userId: string) => req<ConvSummary | { id: string }>('POST', '/conv/direct', { userId }),
+  /** Э1 (`fedm1`): вместо id — человек связанного инстанса из поиска (`RemoteUserHit`), строки у нас у него может не быть. */
+  convDirect: (who: string | { instanceId: string; homeUserId: string }) =>
+    req<ConvSummary | { id: string }>('POST', '/conv/direct', typeof who === 'string' ? { userId: who } : who),
   /** «Избранное» (08.10, `saved1`): найти беседу с самим собой или завести; ответ — её сводка (`saved: true`). */
   convSaved: () => req<ConvSummary | { id: string }>('POST', '/conv/saved'),
   /** Одно из `before`/`after` (курсор `"<sortKey>_<id>"`) или `around` (id сообщения); без них — последние. */
@@ -1105,7 +1155,8 @@ function makeApi(t: Transport) {
   /** Знак жизни звонка; `video` (`calls2`) — у меня включена камера или показ: звонок станет «Видеозвонком». */
   callPing: (callId: string, video?: boolean) =>
     req<CallActiveResponse>('POST', `/calls/${callId}/ping`, video ? { video: true } : {}),
-  callActive: () => req<CallActiveResponse>('GET', '/calls/active'),
+  /** `fed` (Э6, `fedcall1`): отдать и входящий звонок с другого инстанса (`DmCall.host`); без него сервер его не показывает. */
+  callActive: (fed?: boolean) => req<CallActiveResponse>('GET', `/calls/active${fed ? '?fed=1' : ''}`),
   /** Сколько общих медиа каждого вида (G29, `media1`). */
   convMediaCounts: (convId: string, former?: boolean) =>
     req<SharedMediaCounts>('GET', `/conv/${convId}/media/counts${former ? '?former=1' : ''}`),
@@ -1118,10 +1169,24 @@ function makeApi(t: Transport) {
   },
   /**
    * Поиск из списка бесед (G35, `gsearch1`): по тексту во всех моих беседах; `conversationId` — чип «человек», `since` / `until` —
-   * чип «дата». `before` — курсор `next` прошлой порции.
+   * чип «дата». `before` — курсор `next` прошлой порции. `full` — вкладки поиска на телефоне (12.10): имена вложений в поиск
+   * (`names=1`) и целые сообщения в ответ (`full=1`, `ConvSearchAllHit.message`); старый сервер оба параметра пропускает.
    */
-  convSearchAll: (a: { q: string; conversationId?: string; since?: string; until?: string; kind?: SharedMediaKind; before?: string; limit?: number }) => {
+  convSearchAll: (a: {
+    q: string;
+    conversationId?: string;
+    since?: string;
+    until?: string;
+    kind?: SharedMediaKind;
+    before?: string;
+    limit?: number;
+    full?: boolean;
+  }) => {
     const p = new URLSearchParams({ q: a.q });
+    if (a.full) {
+      p.set('names', '1');
+      p.set('full', '1');
+    }
     if (a.conversationId) p.set('conversationId', a.conversationId);
     if (a.since) p.set('since', a.since);
     if (a.until) p.set('until', a.until);
@@ -1172,9 +1237,22 @@ function makeApi(t: Transport) {
       replyQuote?: { text: string; offset: number };
       /** Стикер каталога (С2, признак `stickers2`): сообщение-стикер — `content: ''` и без вложений. */
       stickerId?: string;
+      /**
+       * Геопозиция / контакт (G69, признак `geocontact1`): отдельное сообщение — `content: ''`, без вложений; запасной текст
+       * собирает сервер. Слать только при признаке.
+       */
+      media?: import('@gusvoice/shared').ConvMediaInput;
     },
     timeoutMs?: number,
   ) => t.req<ConvMessage>('POST', `/conv/${convId}/messages`, body, timeoutMs ? { timeoutMs } : undefined),
+  /**
+   * Э5 (#141, `fedm5`): долгая сессия на инстансе собеседника — «мой дом лежит, пишу через него». Только в беседе 1:1 с человеком
+   * соседа; ошибки: 409 `federation.unsupported`/код связки, 503 `federation.peer_unreachable`, 404. `userId` — наш id ТАМ.
+   */
+  convFallback: (convId: string, purpose?: 'call') =>
+    req<ConvFallbackSession>('GET', `/conv/${convId}/fallback${purpose === 'call' ? '?for=call' : ''}`),
+  /** Э5: отчёт об отправленном в обход дома (вся очередь устройства; пустой тоже), после него дом сверяет и подтверждает задним числом. */
+  convViaClaims: (items: ConvViaClaim[]) => req<unknown>('POST', '/conv/via-claims', { items }),
   // ── Контакты (08.10, #211, признак `contacts1`) — каждая запись отвечает списком целиком ──
   contacts: () => req<ContactList>('GET', '/contacts'),
   contactAdd: (userId: string, name?: string | null) =>
@@ -1243,6 +1321,19 @@ function makeApi(t: Transport) {
   /** `big` (08.10, `bigreact1`) — «большая» реакция удержанием; ключ шлётся, только когда он есть (старый сервер его отбросит). */
   convReact: (convId: string, messageId: string, emoji: string, op: 'add' | 'remove', big?: boolean) =>
     req<void>('POST', `/conv/${convId}/messages/${messageId}/reactions`, big ? { emoji, op, big: true } : { emoji, op }),
+  /** Опрос в ЛС (14.10, `convpoll1`): голос (`optionIds`) или отмена (пустой список) — ответ: сообщение моими глазами. */
+  convPollVote: (convId: string, messageId: string, optionIds: string[]) =>
+    req<ConvMessage>('POST', `/conv/${convId}/messages/${messageId}/poll/vote`, { optionIds }),
+  /** «Остановить опрос» — только автор (`convpoll1`). */
+  convPollClose: (convId: string, messageId: string) => req<ConvMessage>('POST', `/conv/${convId}/messages/${messageId}/poll/close`),
+  /** «Посмотреть голоса» неанонимного опроса (`convpoll1`): итоги должны быть открыты (свой голос или опрос остановлен). */
+  convPollVoters: (convId: string, messageId: string) =>
+    req<import('@gusvoice/shared').ConvPollVotersResponse>('GET', `/conv/${convId}/messages/${messageId}/poll/voters`),
+  /** Трансляция геопозиции в ЛС (14.10, `geolive1`): новая точка (только автор, пока идёт) — ответ: сообщение моими глазами. */
+  convGeoLiveUpdate: (convId: string, messageId: string, point: { lat: number; lon: number; accuracy?: number | null; heading?: number | null }) =>
+    req<ConvMessage>('POST', `/conv/${convId}/messages/${messageId}/live`, point),
+  /** «Остановить трансляцию» — только автор (`geolive1`). */
+  convGeoLiveStop: (convId: string, messageId: string) => req<ConvMessage>('POST', `/conv/${convId}/messages/${messageId}/live/stop`),
   /** «Прослушал голосовое» (07.10, G12, признак `voice1`): гасит точку у меня и показывает автору; повтор безвреден. */
   convListened: (convId: string, messageId: string) => req<void>('POST', `/conv/${convId}/messages/${messageId}/listened`),
   /** Одноразовое голосовое дослушано или закрыто (`voice3`, G54): сервер удаляет файл, у обоих — «прослушано». */
@@ -1282,7 +1373,8 @@ function makeApi(t: Transport) {
   convHide: (convId: string, scope: 'me' | 'both') => req<void>('POST', `/conv/${convId}/hide`, { for: scope }),
   /** Группы ЛС (07.10, `groups1`): создать — название и участники (кроме себя); ответ — сводка группы. */
   convCreateGroup: (body: CreateGroupRequest) => req<ConvSummary>('POST', '/conv/group', body),
-  convRenameGroup: (convId: string, title: string) => req<ConvSummary | { ok: true }>('PATCH', `/conv/${convId}/group`, { title }),
+  // Э7 (#141, `fedm6`): в группе чужого дома переименовать / позвать / удалить / выйти отвечают `{ ok: true, pending: true }` — сводка доедет `conv.change`.
+  convRenameGroup: (convId: string, title: string) => req<ConvSummary | { ok: true; pending?: true }>('PATCH', `/conv/${convId}/group`, { title }),
   convGroupPhoto: async (convId: string, file: File): Promise<ConvSummary> => {
     const fd = new FormData();
     fd.append('file', file);
@@ -1291,9 +1383,9 @@ function makeApi(t: Transport) {
     if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
     return data as ConvSummary;
   },
-  convAddMembers: (convId: string, userIds: string[]) => req<ConvSummary>('POST', `/conv/${convId}/members`, { userIds }),
-  convRemoveMember: (convId: string, userId: string) => req<ConvSummary>('DELETE', `/conv/${convId}/members/${userId}`),
-  convLeaveGroup: (convId: string) => req<{ id: string; left: true }>('POST', `/conv/${convId}/leave`, {}),
+  convAddMembers: (convId: string, userIds: string[]) => req<ConvSummary | { ok: true; pending: true }>('POST', `/conv/${convId}/members`, { userIds }),
+  convRemoveMember: (convId: string, userId: string) => req<ConvSummary | { ok: true; pending: true }>('DELETE', `/conv/${convId}/members/${userId}`),
+  convLeaveGroup: (convId: string) => req<{ id: string; left: true } | { ok: true; pending: true }>('POST', `/conv/${convId}/leave`, {}),
   /** Загрузка в закрытое хранилище (шаг 1в): ответ — прежний DTO вложения + `id` для отправки. */
   convUpload: (convId: string, file: File, opts?: UploadOpts) => convUploadVia(convId, file, opts),
   /**
@@ -1310,6 +1402,15 @@ function makeApi(t: Transport) {
    * `convSyncRules.serverDeletesOthersForBoth`); чужое там, где нельзя, — 403 и не удаляется ничего. `me` — любые
    * видимые. Ответ 204; в стор — `convAfterDeleteMany`.
    */
+  /**
+   * Убрать ОДИН элемент альбома (G56, признак `album1`): `both` — у всех (только своё), `me` — у себя. `removed: 'message'` —
+   * элемент был последним видимым, сообщение удалено целиком. 409 `album_item_peer_old` — дом собеседника не понимает.
+   */
+  convDeleteAlbumItem: (convId: string, messageId: string, attachmentId: string, scope: 'me' | 'both') =>
+    req<ConvAlbumItemDeleteResponse>(
+      'DELETE',
+      `/conv/${convId}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}?for=${scope}`,
+    ),
   convDeleteMany: (convId: string, ids: string[], scope: 'me' | 'both') =>
     req<void>('POST', `/conv/${convId}/messages/delete`, { ids, for: scope } satisfies ConvDeleteManyRequest),
   /**
@@ -1322,8 +1423,13 @@ function makeApi(t: Transport) {
    * Закрепить (`conv7`): `me` — только у себя, `both` — ещё у собеседника. Только видимое мне живое сообщение — иначе
    * 404; мой список полон — 409 `{error: 'pin limit', max}`. Ответ — мой список с `pts`; собеседнику — `conv.change`.
    */
-  convPin: (convId: string, messageId: string, scope: 'me' | 'both') =>
-    req<ConvPinsResponse>('PUT', `/conv/${convId}/messages/${messageId}/pin`, { for: scope } satisfies ConvPinRequest),
+  convPin: (convId: string, messageId: string, scope: 'me' | 'both', notify?: boolean) =>
+    req<ConvPinsResponse>(
+      'PUT',
+      `/conv/${convId}/messages/${messageId}/pin`,
+      // G4: «Уведомить всех участников» — только из окна закрепа группы; иначе тело как раньше.
+      (notify === undefined ? { for: scope } : { for: scope, notify }) satisfies ConvPinRequest,
+    ),
   /**
    * Открепить (`conv7`): `me` — только мой закреп, `both` — и закреп «для обоих» у собеседника. Сообщения нет в беседе —
    * 404, для меня его нет — 200 без изменений. Ответ — мой список с `pts`.
@@ -1371,6 +1477,18 @@ function makeApi(t: Transport) {
   //     must not live in the public bundle; the backend hands it out only to logged-in users). ---
   fdroidInfo: () =>
     req<{ repoUrl: string; fingerprint: string; addUrl: string; qr: string }>('GET', '/app/fdroid'),
+  /**
+   * Картинка карты для геопозиции (`yamap1`): свой сервер проксирует Static API Яндекса. Не картинка / отказ — исключение, карточка
+   * остаётся без картинки (`mapImage.ts`).
+   */
+  /** Что есть в файле карты сервера (`osmmap1`): масштабы, границы, центр. Как есть — разбирает `mapSource.loadMapInfo` (`parseMapInfo`). */
+  // Метка десятиминутки обходит кеш браузера (`/info` отдаётся с `max-age=3600`): новые границы карты — не позже 10 минут (`mapSource`).
+  mapInfo: () => req<unknown>('GET', `/maps/info?v=${Math.floor(Date.now() / 600_000)}`),
+  mapStaticImage: async (path: string): Promise<Blob> => {
+    const res = await t.raw(path, 15_000);
+    if (!res.ok || !(res.headers.get('content-type') ?? '').startsWith('image/')) throw new Error(`HTTP ${res.status}`);
+    return res.blob();
+  },
   /** Карточка ссылки (#64). Бэкенд отвечает 204, когда карточки нет — тогда получаем null. */
   linkPreview: (url: string) =>
     req<{ url: string; title: string | null; description: string | null; siteName: string | null } | null>(
@@ -1380,9 +1498,6 @@ function makeApi(t: Transport) {
 
   // --- persisted read marks (migration 0018) ---
   markChannelRead: (channelId: string) => req<{ ok: true }>('POST', `/channels/${channelId}/read`),
-  // `upTo` — id последнего сообщения на экране: «прочитано» ставится до него, а не до часов сервера (#212).
-  markDmRead: (dmId: string, upTo?: string) =>
-    req<{ ok: true }>('POST', `/dm/${dmId}/read`, upTo ? { upTo } : undefined),
 
   // Force-download URL for a chat attachment: the backend streams the MinIO object with
   // Content-Disposition: attachment (the <a download> attribute is a no-op cross-origin).
@@ -1546,7 +1661,12 @@ function makeApi(t: Transport) {
   setupComplete: () => req<{ ok: boolean }>('POST', '/setup/complete'),
   setupVoiceTest: () => req<VoiceTestToken>('POST', '/setup/voice-test'),
   adminInstance: () => req<AdminInstanceSettings>('GET', '/admin/instance'),
-  adminSetInstance: (b: { name?: string | null; registration?: RegistrationPolicy; dmPolicy?: DmPolicy }) =>
+  adminSetInstance: (b: {
+    name?: string | null;
+    registration?: RegistrationPolicy;
+    dmPolicy?: DmPolicy;
+    fedDmPolicy?: 'shared' | 'anyone';
+  }) =>
     req<{ ok: boolean }>('PUT', '/admin/instance', b),
   adminDeleteInstanceIcon: () => req<{ ok: boolean }>('DELETE', '/admin/instance/icon'),
   adminInstanceUpdate: (refresh = false) =>
@@ -1568,6 +1688,22 @@ export type Api = ReturnType<typeof makeApi>;
 export const api = makeApi(activeTransport);
 
 const recordApis = new Map<string, Api>();
+const viaApis = new Map<string, Api>();
+
+/**
+ * Клиент по долгой сессии на инстансе собеседника (Э5): `POST /conv/:id/messages` (текст и ответ), `GET` истории беседы.
+ * Ответы НЕ пишутся в стор прямо (чужие номера `pts`) — их сводит `convStore` отдельным путём (`applyViaPage`).
+ */
+export function apiVia(session: ConvFallbackSession): Api {
+  const key = `${session.apiBase}|${session.token}`;
+  let a = viaApis.get(key);
+  if (!a) {
+    if (viaApis.size > 16) viaApis.clear();
+    a = makeApi(viaTransport(session));
+    viaApis.set(key, a);
+  }
+  return a;
+}
 
 /**
  * Клиент, привязанный к записи реестра (01.10): админка дома из гостей, голос своего инстанса, пока на экране другой.

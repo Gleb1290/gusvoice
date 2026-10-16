@@ -6,12 +6,17 @@ import ts from 'typescript';
 import type { DmChannel } from '@gusvoice/shared';
 import * as rules from './dmListSearchRules';
 import * as row from './dmRowRules';
+import * as shared from '@gusvoice/shared';
+import * as media from './sharedMediaRules';
 function mutant(from: string, to: string): typeof rules {
   const source = readFileSync(new URL('./dmListSearchRules.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes(from));
+  assert.equal(source.split(from).length - 1, 1, 'уникальный якорь правил');
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, require: () => row });
+    { module, exports: module.exports, require: (id: string) => {
+      const deps: Record<string, unknown> = { './dmRowRules': row, '@gusvoice/shared': shared, './sharedMediaRules': media };
+      assert.ok(Object.hasOwn(deps, id), `неописанная зависимость правил ${id}`); return deps[id];
+    } });
   return module.exports as typeof rules;
 }
 const dm = (id: string, displayName = id, extra: Partial<DmChannel> = {}): DmChannel => ({
@@ -139,31 +144,110 @@ it('фрагмент находит ё как е, сохраняет исход�
   assert.deepEqual(rules.hitSnippet('', 'еж'), { pre: '', hit: '', post: '' });
 });
 
-it('API поиска передаёт chip `kind` вместе с пустым текстом и сохраняет остальные query-поля', () => {
+function searchApi(raw = readFileSync(new URL('./api.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n')) {
+  const requests: { url: string; method: string }[] = [];
+  const fail = () => { throw Error('неожиданная внешняя операция API'); };
+  const deps: Record<string, unknown> = {
+    './config': { config: { apiUrl: 'https://search.invalid' }, activeInstance: () => null, instances: () => [],
+      activeInstanceId: () => 'test', updateActiveInstance: fail, updateInstance: fail },
+    './bgGateways': { mirrorToBg: fail }, './imageSize': { measureMediaFile: fail },
+  };
+  const module = { exports: {} as typeof import('./api') };
+  // Исполняется весь API с настоящим транспортом; fetch — явная граница, сети и настоящего реестра нет.
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module, exports: module.exports, URLSearchParams, Response, Headers, AbortSignal, Map,
+      localStorage: { getItem: () => null },
+      fetch: async (url: string, init: RequestInit) => {
+        requests.push({ url, method: init.method ?? '' }); return new Response('{"hits":[],"next":null}', { status: 200 });
+      }, require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `неописанная зависимость API ${id}`); return deps[id]; } });
+  return { api: module.exports.api, requests };
+}
+const uniqueChange = (source: string, anchor: string, replacement: string) => {
+  assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь мутанта'); return source.replace(anchor, replacement);
+};
+it('API поиска передаёт chip `kind` вместе с пустым текстом и сохраняет остальные query-поля', async () => {
   // Чип «Медиа» сам по себе валиден: если клиент теряет kind, сервер получает пустой поиск и отвечает ошибкой.
   const source = readFileSync(new URL('./api.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const start = source.indexOf('  convSearchAll: (');
-  assert.ok(start >= 0, 'найдена реальная обёртка api.convSearchAll');
-  const end = source.indexOf('\n  },', start);
-  assert.ok(end > start, 'найдена граница метода');
-  const method = source.slice(start, end + 4);
-  const check = (body: string) => {
-    const requests: string[] = [];
-    const module = { exports: {} as Record<string, unknown> };
-    const code = ts.transpileModule(`const api = {${body}}; module.exports = api;`, {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    }).outputText;
-    runInNewContext(code, { module, exports: module.exports, URLSearchParams,
-      req: (_method: string, path: string) => { requests.push(path); return path; } });
-    const api = module.exports as { convSearchAll: (a: { q: string; kind?: string; conversationId?: string; since?: string; until?: string; before?: string; limit?: number }) => string };
-    const result = api.convSearchAll({ q: '', kind: 'media', conversationId: 'c', since: '2026-10-01', until: '2026-10-08', before: 'cursor', limit: 20 });
-    assert.equal(result, '/conv/search?q=&conversationId=c&since=2026-10-01&until=2026-10-08&kind=media&before=cursor&limit=20');
-    assert.deepEqual(requests, [result]);
+  const check = async (body: string) => {
+    const f = searchApi(body);
+    await f.api.convSearchAll({ q: '', kind: 'media', conversationId: 'c', since: '2026-10-01', until: '2026-10-08', before: 'cursor', limit: 20 });
+    assert.deepEqual(f.requests, [{ method: 'GET', url: 'https://search.invalid/api/conv/search?q=&conversationId=c&since=2026-10-01&until=2026-10-08&kind=media&before=cursor&limit=20' }], 'старые query-поля и kind сохранены');
   };
-  check(method);
-  assert.throws(() => check(method.replace("    if (a.kind) p.set('kind', a.kind);\n", '')), assert.AssertionError,
-    'мутант теряет фильтр вида: из пустого запроса серверу нечего искать');
+  await check(source);
+  await assert.rejects(check(uniqueChange(source, "    if (a.kind) p.set('kind', a.kind);\n", '')),
+    e => e instanceof assert.AssertionError && e.message.includes('старые query-поля'));
 });
+
+it('R183 вкладки поиска начинаются Чатами и содержат GIF вместо отсутствующей Музыки', () => {
+  // Класс ошибки: порядок или вид вкладки расходится с поддержанными сервером фильтрами.
+  assert.deepEqual(rules.PHONE_SEARCH_TABS, ['chats', 'media', 'link', 'file', 'gif', 'voice']);
+  assert.deepEqual(rules.PHONE_SEARCH_TABS.map(rules.phoneSearchTabLabel), ['Чаты', 'Медиа', 'Ссылки', 'Файлы', 'GIF', 'Голосовые']);
+});
+function tabsShown(api: typeof rules) {
+  for (const q of ['', '  ', '\n\t']) {
+    assert.equal(api.phoneSearchTabsShown(q, {}), false, 'закрытое пустое поле без вкладок');
+    assert.equal(api.phoneSearchTabsShown(q, {}, false), false);
+    assert.equal(api.phoneSearchTabsShown(q, {}, true), true, 'открытое пустое поле с вкладками');
+  }
+  for (const q of ['', 'а', ' отчёт ']) for (const open of [false, true]) {
+    const text = q.trim() !== '';
+    assert.equal(api.phoneSearchTabsShown(q, {}, open), open || text);
+    assert.equal(api.phoneSearchTabsShown(q, { person: { convId: 'c', name: 'Беседа' } }, open), open || text);
+    assert.equal(api.phoneSearchTabsShown(q, { date: { label: 'Сегодня', since: 's', until: 'u' } }, open), open || text);
+    for (const kind of shared.SHARED_MEDIA_KINDS) assert.equal(api.phoneSearchTabsShown(q, { kind }, open), false, 'чип вида прячет вкладки');
+  }
+}
+it('R185 фокус пустого поиска показывает вкладки, чипы человека и даты не мешают, чип вида скрывает', () => {
+  // Класс ошибки: старое правило непустого запроса или обход явного чипа вида при фокусе.
+  tabsShown(rules);
+});
+for (const [name, from, to, target] of [
+  ['без open', "return (open || q.trim() !== '') && !chips.kind;", "return q.trim() !== '' && !chips.kind;", 'открытое пустое поле'],
+  ['без запрета чипа', "return (open || q.trim() !== '') && !chips.kind;", "return open || q.trim() !== '';", 'чип вида'],
+] as const) it(`R185 мутант ${name} обнаруживается матрицей открытого поля и чипов`, () => {
+  // Проверяются обе стороны признака, не только один разрешённый ввод.
+  tabsShown(rules); assert.throws(() => tabsShown(mutant(from, to)), e => e instanceof assert.AssertionError && e.message.includes(target));
+});
+for (const [name, from, to] of [
+  ['Музыка вместо GIF', "['chats', 'media', 'link', 'file', 'gif', 'voice']", "['chats', 'media', 'link', 'file', 'music', 'voice']"],
+  ['Чаты не первые', "['chats', 'media', 'link', 'file', 'gif', 'voice']", "['media', 'chats', 'link', 'file', 'gif', 'voice']"],
+  ['неверная подпись Чатов', "return tab === 'chats' ? 'Чаты' : SHARED_MEDIA_TITLES[tab];", "return tab === 'chats' ? 'Все' : SHARED_MEDIA_TITLES[tab];"],
+] as const) it(`R183 мутант ${name} обнаруживается по точному списку и подписи`, () => {
+  // Протокольный набор и подписи не должны расходиться с вкладками UI.
+  const check = (api: typeof rules) => {
+    assert.equal(Array.from(api.PHONE_SEARCH_TABS).join('|'), 'chats|media|link|file|gif|voice', 'порядок и виды вкладок');
+    assert.equal(api.phoneSearchTabLabel('chats'), 'Чаты', 'подпись первой вкладки');
+  };
+  check(rules); assert.throws(() => check(mutant(from, to)), e => e instanceof assert.AssertionError && /вклад/.test(e.message));
+});
+async function fullSearch(raw?: string) {
+  const f = searchApi(raw); const args = { q: 'отчёт & фото', kind: 'file' as const, full: true, conversationId: 'c', since: 's', until: 'u', before: 'x', limit: 1 };
+  await f.api.convSearchAll(args);
+  assert.equal(f.requests.length, 1); const url = new URL(f.requests[0].url);
+  assert.equal(f.requests[0].method, 'GET'); assert.equal(url.pathname, '/api/conv/search');
+  assert.equal(url.searchParams.get('names'), '1', 'full включает поиск по именам');
+  assert.equal(url.searchParams.get('full'), '1', 'full просит целые сообщения');
+  for (const [key, value] of Object.entries(args)) if (key !== 'full') assert.equal(url.searchParams.get(key), String(value), `поле ${key}`);
+  assert.equal(args.q, 'отчёт & фото', 'обёртка не меняет исходный запрос');
+}
+it('R183 full поиска передаёт names и full вместе, сохраняет и экранирует все прежние поля', async () => {
+  // Класс ошибки: запрос получает плитки без сообщений либо теряет поиск по имени файла.
+  await fullSearch();
+});
+it('R183 отсутствие full и явное false оставляют прежнюю строку запроса побайтово', async () => {
+  // Парное принимается: старый вызов не получает новый режим или пустые flags.
+  for (const extra of [{}, { full: false }]) {
+    const f = searchApi(); await f.api.convSearchAll({ q: 'а б', ...extra });
+    assert.equal(f.requests[0].url, 'https://search.invalid/api/conv/search?q=%D0%B0+%D0%B1');
+  }
+});
+for (const [flag, target] of [['names', 'поиск по именам'], ['full', 'целые сообщения']] as const)
+  it(`R183 потеря ${flag} обнаруживается вызовом целого API`, async () => {
+    // Контрфакт меняет реальную обёртку, а не склеенный для теста метод.
+    await fullSearch(); const source = readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
+    await assert.rejects(fullSearch(uniqueChange(source, `p.set('${flag}', '1');`, '')),
+      e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 
 it('вкладка «Все» сливает два курсора по времени и показывает только строки не глубже общего горизонта', () => {
   // При независимых курсорах нельзя показать старую строку одного источника, пока другой ещё не догружен до неё.

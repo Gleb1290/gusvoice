@@ -92,12 +92,12 @@ async function input(value: string) {
 it('панель выбора держит порядок read/clear/block и скрывает невозможные действия', async () => {
   // Смешанный выбор с заблокированным собеседником не должен предлагать повторную блокировку.
   const { DmPickHead } = await server.ssrLoadModule('/src/components/DmRowMenu.tsx') as typeof import('./DmRowMenu');
-  await seed({ serverFeatures: ['conv11', 'conv12', 'conv13'], blockedUsers: [] });
+  await seed({ serverFeatures: ['conv1', 'conv2', 'conv11', 'conv12', 'conv13'], blockedUsers: [] });
   await mount(DmPickHead, { ids: ['c'], isMuted: () => false, onClose() {} });
   await flush(() => host.querySelector<HTMLButtonElement>('[aria-label="Ещё"]')!.click());
   const labels = () => [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].map((b) => b.textContent?.trim());
   assert.deepEqual(labels(), ['Пометить как непрочитанное', 'Очистить историю', 'Заблокировать']);
-  await state({ blockedUsers: [peer as never], serverFeatures: ['conv13'] });
+  await state({ blockedUsers: [peer as never], serverFeatures: ['conv1', 'conv2', 'conv13'] });
   assert.deepEqual(labels(), ['Пометить как непрочитанное']);
   await state({ blockedUsers: [], dms: [dm('c', 1)] });
   assert.deepEqual(labels(), ['Пометить как прочитанное', 'Заблокировать']);
@@ -140,7 +140,7 @@ it('Esc просмотрщика сначала закрывает меню, з�
   await flush(()=>video.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:20})));
   assert.ok(document.querySelector('.ctx-menu'));
   await flush(()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',cancelable:true})));
-  assert.equal(document.querySelector('.ctx-menu'),null); assert.equal(closed,0);
+  assert.equal(document.querySelector('.ctx-menu') === null, true); assert.equal(closed,0);
   const down=new KeyboardEvent('keydown',{key:' ',code:'Space',cancelable:true});
   await flush(()=>window.dispatchEvent(down)); assert.equal(down.defaultPrevented,true);
   await act(async()=>{await new Promise<void>(r=>nativeTimeout(r,230));}); assert.equal(video.playbackRate,2);
@@ -210,7 +210,7 @@ it('кнопка тоста передаётся через toast, закрыв�
   assert.equal(mod.useToasts.getState().toasts[0].action, action);
   assert.equal(mod.useToasts.getState().toasts[0].durationMs, 1234);
   await mount(ToastHost, {}); const button = host.querySelector<HTMLButtonElement>('.toast-act'); assert.ok(button);
-  await flush(() => button.click()); assert.equal(called, 1); assert.equal(host.querySelector('.toast'), null);
+  await flush(() => button.click()); assert.equal(called, 1); assert.equal(host.querySelector('.toast') === null, true);
 });
 
 it('поиск F3 идёт старее, Shift+F3 новее, Esc в поле и смена беседы закрывают поиск', async () => {
@@ -269,11 +269,11 @@ it('ReactionBar предлагает быструю только при обра
     assert.ok(button); await flush(() => button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
   };
   await mount(Bar, { reactions: ['👍', '🔥'], quick: '👍', onPick() {}, onMore() {}, onSetQuick: (e: string) => { picked.push(e); } });
-  await click('👍'); assert.equal(host.querySelector('.react-bar-setq'), null);
+  await click('👍'); assert.equal(host.querySelector('.react-bar-setq') === null, true);
   await click('🔥'); const set = host.querySelector<HTMLButtonElement>('.react-bar-setq'); assert.ok(set);
   await flush(() => set.click()); assert.deepEqual(picked, ['🔥']);
   await flush(() => root!.render(el(Bar, { reactions: ['👍', '🔥'], quick: '👍', onPick() {}, onMore() {} })));
-  await click('🔥'); assert.equal(host.querySelector('.react-bar-setq'), null);
+  await click('🔥'); assert.equal(host.querySelector('.react-bar-setq') === null, true);
 });
 it('живое событие реакции ведёт список поставивших, удаляет по id и не выдумывает список старому серверу', async () => {
   // Проверяется настоящий store.applyReaction: правила чипа не доказывают корректность WS-мутации.
@@ -304,18 +304,18 @@ it('буква и Shift-буква фокусируют поиск, Ctrl и со
   row.focus();
   const letter = new KeyboardEvent('keydown', { key: 'К', shiftKey: true, bubbles: true, cancelable: true });
   await flush(() => row.dispatchEvent(letter));
-  assert.equal(document.activeElement, find); assert.equal(letter.defaultPrevented, false);
+  assert.equal(document.activeElement === find, true); assert.equal(letter.defaultPrevented, false);
   // HappyDOM не выполняет нативный ввод браузера после keydown; проверяем передачу фокуса, затем обычный input.
   await input('К'); assert.equal(find.value, 'К');
   await input(''); row.focus();
   await flush(() => row.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', ctrlKey: true, bubbles: true, cancelable: true })));
-  assert.equal(find.value, ''); assert.equal(document.activeElement, row);
+  assert.equal(find.value, ''); assert.equal(document.activeElement === row, true);
   const list = host.querySelector<HTMLElement>('.dm-list')!;
   await flush(() => list.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })));
   assert.equal(find.value, '');
   const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
   await flush(() => row.dispatchEvent(space));
-  assert.equal(space.defaultPrevented, true); assert.equal(document.activeElement, find); assert.equal(find.value, '');
+  assert.equal(space.defaultPrevented, true); assert.equal(document.activeElement === find, true); assert.equal(find.value, '');
 });
 
 async function searchTimers(run: (fire: () => Promise<void>, pending: () => number) => Promise<void>) {
@@ -339,7 +339,7 @@ it('поиск людей ждёт 300 мс, заменяет таймер вв�
   const remote = { id: 'remote', username: 'abcde', displayName: 'Remote', avatarUrl: null };
   api.searchUsers = async q => { calls.push(q); return { users: [known, remote] }; };
   try { await searchTimers(async (fire, pending) => {
-    await seed({ serverFeatures: ['users1'], dms: [], members: [{ user: known } as never] }); await mount();
+    await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], dms: [], members: [{ user: known } as never] }); await mount();
     await flush(() => compose.openDmCompose());
     await input('@abc'); assert.equal(calls.length, 0); assert.equal(pending(), 1);
     await input('@abcd'); assert.equal(calls.length, 0); assert.equal(pending(), 1, 'прежний таймер отменён');
@@ -359,7 +359,7 @@ it('опоздавшие успех и отказ прежнего поиска 
   const requests: { resolve: (r: { users: { id: string; username: string; displayName: string; avatarUrl: null }[] }) => void; reject: (e: Error) => void }[] = [];
   api.searchUsers = () => new Promise((resolve, reject) => { requests.push({ resolve, reject }); });
   try { await searchTimers(async fire => {
-    await seed({ serverFeatures: ['users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
+    await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
     await input('@abc'); await fire();
     await input('@abcd'); await fire();
     const hit = (id: string) => ({ id, username: 'abcde', displayName: id, avatarUrl: null });
@@ -381,7 +381,7 @@ it('пустой поиск учит ввести @имя, отказ объяс
   const saved = api.searchUsers; let calls = 0;
   api.searchUsers = async () => { calls++; throw new Error('Слишком много попыток'); };
   try { await searchTimers(async fire => {
-    await seed({ serverFeatures: ['users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
+    await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
     assert.equal(document.querySelector('.sheet-empty')?.textContent, 'Введите @имя');
     await input('ab'); await fire(); assert.equal(calls, 0);
     await input('@abc'); await fire();
@@ -390,7 +390,7 @@ it('пустой поиск учит ввести @имя, отказ объяс
     await state({ user: { ...store.getState().user!, homeInstance: { instanceId: 'foreign', name: 'Home', domain: 'example.test' } } });
     await flush(() => compose.openDmCompose('@abc')); await fire(); assert.equal(calls, 1, 'гость не вызывает поиск');
     await flush(() => compose.closeDmCompose());
-    await state({ serverFeatures: [], user: { ...store.getState().user!, homeInstance: null } });
+    await state({ serverFeatures: ['conv1', 'conv2'], user: { ...store.getState().user!, homeInstance: null } });
     await flush(() => compose.openDmCompose('@abc')); await fire(); assert.equal(calls, 1, 'старый сервер не вызывается');
   }); } finally { api.searchUsers = saved; }
 });
@@ -403,7 +403,7 @@ async function searchScenario(kind: 'stale' | 'debounce' | 'duplicate' | 'guest'
       const requests: ((r: { users: { id: string; username: string; displayName: string; avatarUrl: null }[] }) => void)[] = [];
       api.searchUsers = () => new Promise(resolve => requests.push(resolve));
       await searchTimers(async fire => {
-        await seed({ serverFeatures: ['users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
+        await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
         await input('@abc'); await fire(); await input('@abcd'); await fire();
         const hit = (id: string) => ({ id, username: 'abcde', displayName: id, avatarUrl: null });
         await flush(() => requests[1]({ users: [hit('current')] }));
@@ -416,7 +416,7 @@ async function searchScenario(kind: 'stale' | 'debounce' | 'duplicate' | 'guest'
       await searchTimers(async (fire, pending) => {
         const forwarded = await new Promise<unknown>(resolve => window.setTimeout((value: unknown) => resolve(value), 0, 'timer-argument'));
         assert.equal(forwarded, 'timer-argument', 'прочие таймеры сохраняют переданные аргументы');
-        await seed({ serverFeatures: ['users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
+        await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], dms: [] }); await mount(); await flush(() => compose.openDmCompose());
         await input('@abc'); assert.equal(calls, 0, 'ввод ещё не должен отправлять запрос');
         assert.equal(pending(), 1, 'ожидается таймер debounce'); await fire();
         assert.equal(calls, 1, 'после задержки ровно один запрос');
@@ -425,14 +425,14 @@ async function searchScenario(kind: 'stale' | 'debounce' | 'duplicate' | 'guest'
       const known = { id: 'known-user', username: 'abcde', displayName: 'Known person', avatarUrl: null };
       api.searchUsers = async () => ({ users: [known] });
       await searchTimers(async fire => {
-        await seed({ serverFeatures: ['users1'], members: [{ user: known } as never], dms: [] }); await mount();
+        await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], members: [{ user: known } as never], dms: [] }); await mount();
         await flush(() => compose.openDmCompose()); await input('@abc'); await fire();
         assert.equal([...document.querySelectorAll('.sheet-row')].filter(r => r.textContent?.includes('Known person')).length, 1);
       });
     } else {
       let calls = 0; api.searchUsers = async () => { calls++; return { users: [{ id: 'guest-hit', username: 'abcde', displayName: 'Visible hit', avatarUrl: null }] }; };
       await searchTimers(async fire => {
-        await seed({ serverFeatures: ['users1'], dms: [], user: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null,
+        await seed({ serverFeatures: ['conv1', 'conv2', 'users1'], dms: [], user: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null,
           homeInstance: { instanceId: 'home', name: 'Home', domain: 'home.test' } } as never });
         await mount(); await flush(() => compose.openDmCompose('@abc')); await fire();
         assert.equal(calls, 0, 'гость не вызывает сетевой поиск');
@@ -491,7 +491,8 @@ before(async () => {
 async function seed(patch: Patch = {}) {
   store.setState({ ...initial, user: { id: 'me', username: 'goose', displayName: 'Гусь', avatarUrl: null } as never,
     view: 'dm', mobilePane: 'list', currentDmId: null, dms: [dm()], dmMessages: { c: [] }, onlineUsers: ['peer'],
-    convActive: true, conv: { ...initial.conv, pts: 100, phase: 'live', summaries: { c: summary() } },
+    convActive: true, serverFeatures: ['conv1', 'conv2'], conv: { ...initial.conv, pts: 100, phase: 'live', summaries: { c: summary() },
+      windows: { c: { basePts: 100, hasMoreBefore: false, hasMoreAfter: false } } },
     drafts: {}, outbox: {}, unreadDms: [], members: [], loadDms: async () => {}, ...patch });
 }
 afterEach(async () => {
@@ -522,32 +523,30 @@ it('открытая строка подсвечена на ПК, на теле�
   // Ловит смешение текущей беседы с выбранным экраном телефона.
   await seed({ currentDmId: 'c' }); await mount(); assert.equal(host.querySelector('.dm-row.active')?.getAttribute('aria-current'), 'true');
   act(() => root!.unmount()); root = undefined; host.remove(); phone = true; await mount();
-  assert.equal(host.querySelector('.dm-row.active'), null); assert.equal(host.querySelector('.dm-row')?.hasAttribute('aria-current'), false);
+  assert.equal(host.querySelector('.dm-row.active') === null, true); assert.equal(host.querySelector('.dm-row')?.hasAttribute('aria-current'), false);
 });
 it('неотправленное заменяет галочки, но сохраняет счётчик и превью', async () => {
   // Ловит прежнее исчезновение unread под красным !.
   await seed({ unreadDms: ['c'], dms: [dm('c', 2)], outbox: { c: [outgoing()] } }); await mount();
   assert.ok(host.querySelector('.dm-row.failed .dm-when .dm-st.failed'), 'ошибка рядом со временем');
-  assert.equal(host.querySelector('.dm-st.read,.dm-st.sent,.dm-fail'), null);
+  assert.equal(host.querySelector('.dm-st.read,.dm-st.sent,.dm-fail') === null, true);
   assert.equal(host.querySelector('.dm-badge')?.textContent, '2'); assert.equal(host.querySelector('.dm-preview')?.textContent, 'текст');
   await state({ outbox: { c: [outgoing('sending')] } });
-  assert.equal(host.querySelector('.dm-st.failed'), null);
+  assert.equal(host.querySelector('.dm-st.failed') === null, true);
   await state({ conv: { ...store.getState().conv, summaries: { c: summary({ lastMessage: { ...summary().lastMessage!, authorId: 'peer' } }) } }, outbox: { c: [outgoing()] } });
   assert.ok(host.querySelector('.dm-st.failed'), 'ошибка есть и у чужого последнего');
 });
-it('черновик прячет галочки, старый путь не читает сводку, очередь и черновик', async () => {
-  // Ловит утечку данных нового протокола в старый список.
+it('черновик прячет галочки последнего сообщения', async () => {
+  // Галочки последнего сообщения не должны выглядеть как статус ещё не отправленного черновика.
   await seed({ drafts: { c: { text: 'черновик', replyToId: null } } }); await mount();
-  assert.match(host.querySelector('.dm-preview')!.textContent!, /Черновик:.*черновик/); assert.equal(host.querySelector('.dm-st'), null);
-  await state({ convActive: false }); assert.equal(host.querySelector('.dm-preview')?.textContent, '\u00a0');
-  assert.equal(host.querySelector('.dm-draft,.dm-st'), null); assert.ok(host.querySelector('time.dm-time'), 'время старого списка осталось');
+  assert.match(host.querySelector('.dm-preview')!.textContent!, /Черновик:.*черновик/); assert.equal(host.querySelector('.dm-st') === null, true);
 });
 it('печатает только собеседник, срок пять секунд гасит признак и оставляет время', async () => {
   // Ловит третьего человека и вечный индикатор набора.
-  await seed(); await mount(); await flush(() => typing.noteTyping('c','third')); assert.equal(host.querySelector('.dm-typing'), null);
+  await seed(); await mount(); await flush(() => typing.noteTyping('c','third')); assert.equal(host.querySelector('.dm-typing') === null, true);
   await flush(() => typing.noteTyping('c','peer')); assert.ok(host.querySelector('.dm-typing .typing-dots'), 'печатает собеседник');
   assert.ok(host.querySelector('.dm-st.read'), 'галочки не исчезли'); assert.ok(host.querySelector('time'), 'время не исчезло');
-  await act(async () => { await wait(6050); }); assert.equal(host.querySelector('.dm-typing'), null);
+  await act(async () => { await wait(6050); }); assert.equal(host.querySelector('.dm-typing') === null, true);
 });
 it('поиск выделяет оба начала слова, Escape чистит, Ctrl K работает в русской раскладке', async () => {
   // Ловит поиск произвольной подстроки и зависимость горячей клавиши от раскладки.
@@ -566,7 +565,7 @@ it('поиск выделяет оба начала слова, Escape чист�
 it('Назад очищает мобильный поиск, фокус и фильтр, а без поиска не перехватывает список', async () => {
   // На телефоне шаг назад закрывает внутренний поиск, но пустой список должен остаться хозяином жеста.
   phone = true;
-  await seed({ serverFeatures: ['gsearch1'], dms: [dm()], mobilePane: 'list' });
+  await seed({ serverFeatures: ['conv1', 'conv2', 'gsearch1'], dms: [dm()], mobilePane: 'list' });
   await mount();
   const { stepBack } = await server.ssrLoadModule('/src/androidBack.ts') as typeof import('../androidBack');
   const back = async () => { let handled = false; await flush(() => { handled = stepBack(); }); return handled; };
@@ -575,21 +574,21 @@ it('Назад очищает мобильный поиск, фокус и фи�
 
   field!.focus(); await flush();
   assert.equal(await back(), true, 'одного фокуса достаточно для шага назад');
-  await flush(); assert.notEqual(document.activeElement, field, 'возврат снимает фокус, чтобы клавиатура закрылась');
+  await flush(); assert.equal(document.activeElement !== field, true, 'возврат снимает фокус, чтобы клавиатура закрылась');
 
   field!.focus(); await input('колокол');
   assert.equal(field!.value, 'колокол');
   assert.equal(await back(), true, 'непустой запрос тоже активирует обработчик');
   await flush(); assert.equal(field!.value, '', 'шаг назад очищает запрос');
-  assert.notEqual(document.activeElement, field, 'после очистки поле больше не в фокусе');
+  assert.equal(document.activeElement !== field, true, 'после очистки поле больше не в фокусе');
 
   field!.focus(); await flush();
-  const kind = host.querySelector<HTMLButtonElement>('.dms-chip[data-kind]'); assert.ok(kind, 'фокус пустого поля показывает быстрые фильтры');
+  const kind = host.querySelector<HTMLButtonElement>('.dms-kinds [data-tab="media"]'); assert.equal(!!kind, true, 'пустое поле телефона показывает вкладки поиска');
   await flush(() => kind!.click());
-  assert.ok(host.querySelector('.dms-chip.on'), 'быстрый фильтр выбран как чип');
-  assert.equal(await back(), true, 'одного чипа достаточно, даже при пустом запросе');
-  await flush(); assert.equal(host.querySelector('.dms-chip.on'), null, 'шаг назад удаляет выбранный фильтр');
-  assert.notEqual(document.activeElement, field, 'шаг назад также закрывает клавиатуру для фильтра');
+  assert.equal(kind!.getAttribute('aria-selected'), 'true', 'Медиа выбрано как вкладка');
+  assert.equal(await back(), true, 'поиск с вкладкой открыт даже при пустом запросе');
+  await flush(); assert.equal(host.querySelector('.dms-kinds') === null, true, 'шаг назад закрывает вкладки поиска');
+  assert.equal(document.activeElement !== field, true, 'шаг назад также закрывает клавиатуру для фильтра');
   assert.equal(await back(), false, 'после очистки нет скрытого обработчика поиска');
 });
 async function searchBackOverlayScenario() {
@@ -601,7 +600,7 @@ async function searchBackOverlayScenario() {
     { label: 'профиль', patch: { mobileProfileOpen: true }, after: () => assert.equal(store.getState().mobileProfileOpen, false) },
   ];
   for (const [index, item] of cases.entries()) {
-    await seed({ serverFeatures: ['gsearch1'], dms: [dm()], currentDmId: 'c', ...item.patch });
+    await seed({ serverFeatures: ['conv1', 'conv2', 'gsearch1'], dms: [dm()], currentDmId: 'c', ...item.patch });
     await mount();
     const field = host.querySelector<HTMLInputElement>('input[placeholder="Найти беседу"]'); assert.ok(field);
     await input(`эхо-${index}`);
@@ -625,19 +624,19 @@ it('пустой поиск открывает Написать с запрос�
   await seed(); await mount(); await input('тан'); assert.match(host.querySelector('.dm-nores')!.textContent!, /«тан»/);
   await flush(() => host.querySelector<HTMLButtonElement>('.dm-nores button')!.click());
   const dialog=document.querySelector('.modal-overlay > .modal.dm-compose[role="dialog"][aria-modal="true"]')!;
-  assert.ok(dialog,'ПК окно'); assert.equal(document.querySelector('.sheet'),null);
+  assert.ok(dialog,'ПК окно'); assert.equal(document.querySelector('.sheet') === null, true);
   assert.equal(dialog.getAttribute('aria-labelledby'),dialog.querySelector('h2')?.id);
   assert.equal(dialog.querySelector<HTMLInputElement>('input')?.value,'тан'); assert.ok(document.activeElement === dialog.querySelector('input'), 'фокус в поле окна');
   await flush(() => (dialog as HTMLElement).click()); assert.ok(document.querySelector('.dm-compose'),'клик внутри не закрывает');
-  await flush(() => window.dispatchEvent(new KeyboardEvent('keydown',{ key:'Escape',bubbles:true }))); assert.equal(document.querySelector('.dm-compose'),null);
+  await flush(() => window.dispatchEvent(new KeyboardEvent('keydown',{ key:'Escape',bubbles:true }))); assert.equal(document.querySelector('.dm-compose') === null, true);
 });
 it('кандидат из беседы доступен без ростера, выбор закрывает окно и вызывает openDmWith', async () => {
   // Ловит Некому написать в сессии без открытого сервера.
   const opened:string[]=[]; await seed({ openDmWith:async id=>{ opened.push(id); } }); await mount();
   await flush(() => compose.openDmCompose()); const button=document.querySelector<HTMLButtonElement>('.dm-compose .sheet-row')!;
-  assert.match(button.textContent!,/@cat/); await flush(()=>button.click()); assert.deepEqual(opened,['peer']); assert.equal(document.querySelector('.dm-compose'),null);
+  assert.match(button.textContent!,/@cat/); await flush(()=>button.click()); assert.deepEqual(opened,['peer']); assert.equal(document.querySelector('.dm-compose') === null, true);
   await state({ dms: [] }); await flush(()=>compose.openDmCompose()); assert.match(document.querySelector('.sheet-empty')!.textContent!,/Некому написать/);
-  await flush(()=>document.querySelector<HTMLElement>('.modal-overlay')!.click()); assert.equal(document.querySelector('.dm-compose'),null);
+  await flush(()=>document.querySelector<HTMLElement>('.modal-overlay')!.click()); assert.equal(document.querySelector('.dm-compose') === null, true);
 });
 it('гостю и гостя нельзя открыть: окно закрывается без API-вызова', async () => {
   // Ловит обещание заведомо запрещённой ЛС из нового окна.
@@ -652,24 +651,24 @@ it('телефон рисует лист, поиск скрывает каран
   // Ловит смешение ширины браузера с нативным isMobile и кнопкой под клавиатурой.
   phone=true; await seed(); await mount(); const field=host.querySelector<HTMLInputElement>('input.sheet-search')!;
   assert.ok(host.querySelector('.dm-fab'),'карандаш до поиска');
-  await flush(()=>field.focus()); assert.equal(host.querySelector('.dm-fab'),null);
-  await input('ко'); await flush(()=>field.blur()); assert.equal(host.querySelector('.dm-fab'),null);
+  await flush(()=>field.focus()); assert.equal(host.querySelector('.dm-fab') === null, true);
+  await input('ко'); await flush(()=>field.blur()); assert.equal(host.querySelector('.dm-fab') === null, true);
   await flush(()=>window.dispatchEvent(new KeyboardEvent('keydown',{ ctrlKey:true,code:'KeyK',key:'k' }))); assert.ok(document.activeElement !== field,'Ctrl K не слушается на телефоне');
-  await flush(()=>compose.openDmCompose()); assert.ok(document.querySelector('.sheet-scrim > .sheet'),'телефонный лист'); assert.equal(document.querySelector('.modal.dm-compose'),null);
+  await flush(()=>compose.openDmCompose()); assert.ok(document.querySelector('.sheet-scrim > .sheet'),'телефонный лист'); assert.equal(document.querySelector('.modal.dm-compose') === null, true);
 });
 it('гусь пустого списка появляется только после списка и только на телефоне', async () => {
   // Ловит вспышку пустого состояния до ответа сервера.
-  phone=true; await seed({ dms:[],conv:{ ...initial.conv,pts:null } }); await mount(); assert.equal(host.querySelector('.empty-goose'),null);
-  await state({ conv:{ ...store.getState().conv,pts:0 } }); assert.ok(host.querySelector('.empty-goose'),'пусто после списка'); assert.equal(host.querySelector('input'),null);
-  act(()=>root!.unmount()); root=undefined; host.remove(); phone=false; await mount(); assert.equal(host.querySelector('.empty-goose'),null);
+  phone=true; await seed({ dms:[],conv:{ ...initial.conv,pts:null } }); await mount(); assert.equal(host.querySelector('.empty-goose') === null, true);
+  await state({ conv:{ ...store.getState().conv,pts:0 } }); assert.ok(host.querySelector('.empty-goose'),'пусто после списка'); assert.equal(host.querySelector('input') === null, true);
+  act(()=>root!.unmount()); root=undefined; host.remove(); phone=false; await mount(); assert.equal(host.querySelector('.empty-goose') === null, true);
 });
 it('главная область ПК показывает гуся и Написать, гостю — подсказку без кнопки', async () => {
   // Ловит второй пустой список и приглашение гостя в запрещённые ЛС.
   await seed({ dms:[],conv:{ ...initial.conv,pts:0 } }); await mount(Layout,{});
   assert.ok(host.querySelector('.content .empty-goose .dm-start'),'ПК пустое состояние');
   await state({ user:{ id:'me',username:'goose',displayName:'Гусь',avatarUrl:null,homeInstance:{ instanceId:'home',name:'Дом',domain:'home.test' } } as never });
-  assert.equal(host.querySelector('.content .dm-start'),null); assert.match(host.querySelector('.content .eg-sub')!.textContent!,/Гостю/);
-  await state({ conv:{ ...store.getState().conv,pts:null } }); assert.equal(host.querySelector('.content .empty-goose'),null);
+  assert.equal(host.querySelector('.content .dm-start') === null, true); assert.match(host.querySelector('.content .eg-sub')!.textContent!,/Гостю/);
+  await state({ conv:{ ...store.getState().conv,pts:null } }); assert.equal(host.querySelector('.content .empty-goose') === null, true);
 });
 it('кнопка телефона «К беседе» закрывает вид отложенных, но не переводит на список', async () => {
   // Вид передаёт переход назад через schedView; первая кнопка не должна провалиться в обычный возврат к списку.
@@ -696,12 +695,12 @@ it('кнопка телефона «К беседе» закрывает вид 
 it('шапка переключает online/solo/typing и не дублирует печатает над полем', async () => {
   // Ловит недоступную подпись шапки и двойной индикатор набора.
   await seed(); await mount(Chat,{ dm:dm() });
-  assert.equal(host.querySelector('.dm-who-status')?.textContent,'в сети'); assert.equal(host.querySelector('.dm-title'),null);
+  assert.equal(host.querySelector('.dm-who-status')?.textContent,'в сети'); assert.equal(host.querySelector('.dm-title') === null, true);
   assert.equal(host.querySelector('.dm-who-status')?.hasAttribute('aria-hidden'),false); assert.equal(host.querySelector('.dm-who-typing')?.getAttribute('aria-hidden'),'true');
-  await state({ onlineUsers:[] }); assert.ok(host.querySelector('.dm-who.solo'),'офлайн без подписи'); assert.equal(host.querySelector('.topbar .mp-dot-wrap'),null);
+  await state({ onlineUsers:[] }); assert.ok(host.querySelector('.dm-who.solo'),'офлайн без подписи'); assert.equal(host.querySelector('.topbar .mp-dot-wrap') === null, true);
   await flush(()=>typing.noteTyping('c','peer')); assert.ok(host.querySelector('.dm-who.typing:not(.solo)'),'набор и офлайн');
   assert.equal(host.querySelector('.dm-who-status')?.getAttribute('aria-hidden'),'true'); assert.equal(host.querySelector('.dm-who-typing')?.hasAttribute('aria-hidden'),false);
-  assert.equal(host.querySelector('.typing-row'),null);
+  assert.equal(host.querySelector('.typing-row') === null, true);
   act(()=>root!.unmount()); root=undefined; host.remove();
   const ChannelChat=(await server.ssrLoadModule('/src/components/ChatView.tsx')).ChatView as ComponentType<{channel:Channel}>;
   await state({messagesByChannel:{ch:[]},members:[{user:peer} as never]});
@@ -771,11 +770,11 @@ it('список ЛС держит один Tab-stop и стрелки/перв�
   assert.deepEqual(rows.map(r => r.tabIndex), [0, -1, -1], 'Tab входит в одну строку');
   rows[0]!.focus();
   await flush(() => host.querySelector('.dm-list')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })));
-  assert.equal(document.activeElement, rows[1], 'стрелка вниз переводит фокус на следующую беседу');
+  assert.equal(document.activeElement === rows[1], true, 'стрелка вниз переводит фокус на следующую беседу');
   await flush(() => host.querySelector('.dm-list')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true })));
-  assert.equal(document.activeElement, rows[2], 'End идёт к последней строке');
+  assert.equal(document.activeElement === rows[2], true, 'End идёт к последней строке');
   await flush(() => host.querySelector('.dm-list')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })));
-  assert.equal(document.activeElement, rows[2], 'стрелка у конца не зацикливает список');
+  assert.equal(document.activeElement === rows[2], true, 'стрелка у конца не зацикливает список');
 });
 
 it('Alt-навигация по ЛС работает прямо из textarea, не зацикливается и уважает модальный слой', async () => {
@@ -860,7 +859,7 @@ it('App сообщает о сломанном invite без входа, но м
     await mount(App, {}); await act(async () => { await wait(4700); });
     assert.equal(location.pathname, '/');
     assert.match(host.textContent ?? '', /не отвечает|недоступен/i, `сбой сети показывает экран unreachable: ${host.textContent}`);
-    assert.equal(host.querySelector('.auth-notice'), null, 'unreachable не оставляет ложную форму входа');
+    assert.equal(host.querySelector('.auth-notice') === null, true, 'unreachable не оставляет ложную форму входа');
     assert.equal(noticeStore.useToasts.getState().toasts.length, beforeToasts, 'unreachable suppresses broken invite explanation');
     if (root) act(() => root!.unmount()); root = undefined; host.remove();
 
@@ -868,7 +867,7 @@ it('App сообщает о сломанном invite без входа, но м
     await seed({ user: null }); api.me = async () => { throw Object.assign(new Error('switched'), { switched: true }); };
     await mount(App, {}); await flush();
     assert.equal(location.pathname, '/');
-    assert.equal(host.querySelector('.auth-notice'), null, 'stale не оставляет notice от устаревшей ссылки');
+    assert.equal(host.querySelector('.auth-notice') === null, true, 'stale не оставляет notice от устаревшей ссылки');
     assert.equal(noticeStore.useToasts.getState().toasts.length, beforeToasts, 'stale load suppresses broken invite toast');
 
     if (root) act(() => root!.unmount()); root = undefined; host.remove();
@@ -1091,7 +1090,7 @@ it('полоса имеет единый набор, мои реакции до�
   assert.equal(buttons[0].getAttribute('aria-pressed'), 'false');
   await flush(() => { buttons[1].click(); document.querySelector<HTMLButtonElement>('.react-bar-more')!.click(); });
   assert.deepEqual(picks, ['🔥']); assert.equal(more, 1); assert.equal(closed, 0);
-  assert.equal(moreAnchor, document.querySelector('.react-bar-more'), 'полный пикер получает кнопку-якорь, а не событие с потерянным currentTarget');
+  assert.equal(moreAnchor === document.querySelector('.react-bar-more'), true, 'полный пикер получает кнопку-якорь, а не событие с потерянным currentTarget');
 });
 it('узкое старое меню остаётся листом, но якорь даже на телефоне использует стек', async () => {
   // Ловит снятие старого мобильного пути и обратную регрессию якорного меню в лист.
@@ -1108,7 +1107,7 @@ it('пересылка на ПК — окно, поиск ё=е, Esc сперв�
   await seed({ dms: [{ ...dm(), otherUser: { ...peer, displayName: 'Ёжик' } }, { ...dm('d'), otherUser: { ...peer, id: 'p2', displayName: 'Кот' } }] });
   let closed = 0; await mount(Picker, { count: 2, onSend() {}, onClose: () => closed++ });
   assert.ok(document.querySelector('.modal-overlay .fwd-modal[aria-modal="true"]'), 'окно ПК');
-  assert.ok(!document.querySelector('.sheet'), 'не лист'); assert.equal(document.activeElement, host.querySelector('input'));
+  assert.ok(!document.querySelector('.sheet'), 'не лист'); assert.equal(document.activeElement === host.querySelector('input'), true);
   await input('еж'); assert.equal(host.querySelectorAll('.dm-row').length, 1); assert.equal(host.querySelector('mark')?.textContent, 'Ёж');
   await flush(() => host.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
   assert.equal(closed, 0); assert.equal(host.querySelectorAll('.dm-row').length, 2);
@@ -1120,8 +1119,16 @@ it('пересылка на телефоне — лист, повторный в
   phone = true; await seed(); const picks: string[] = []; let closed = 0;
   await mount(Picker, { count: 1, onSend: ids => picks.push(...ids), onClose: () => closed++ });
   assert.ok(document.querySelector('.sheet-scrim .sheet'), 'лист телефона'); assert.ok(!document.querySelector('.fwd-modal'), 'не окно ПК');
-  await flush(() => document.querySelector<HTMLButtonElement>('.dm-row')!.click());
+  const cell = document.querySelector<HTMLButtonElement>('.fwd-grid .fwd-cell');
+  assert.equal(!!cell, true, 'телефон использует ячейку сетки ShareAlert');
+  assert.equal(document.querySelectorAll('.fwd-grid .dm-row').length, 0, 'старые строки в сетку не подмешаны');
+  await flush(() => cell!.click());
+  assert.equal(cell!.classList.contains('picked'), true, 'тап отмечает получателя');
+  assert.equal(cell!.getAttribute('aria-checked'), 'true');
   assert.deepEqual(picks, [], 'выбор адресата сам по себе не отправляет');
+  const send = document.querySelector<HTMLButtonElement>('.fwd-send');
+  assert.equal(send?.classList.contains('round'), true);
+  assert.equal(send?.getAttribute('aria-label'), 'Отправить (1)');
   await flush(() => { document.querySelector<HTMLButtonElement>('.fwd-send')!.click(); document.querySelector<HTMLButtonElement>('.fwd-send')!.click(); });
   assert.deepEqual(picks, ['c']); assert.equal(closed, 1);
 });

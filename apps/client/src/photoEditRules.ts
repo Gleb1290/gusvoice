@@ -1,4 +1,5 @@
 import { photoCompressible } from './attachRules';
+import type { DrawMark } from './photoDrawRules';
 
 /**
  * Правка вложений до отправки (08.10, #211, G49) — ЧИСТЫЕ правила. Источники (поведение, не код): Telegram Desktop
@@ -27,6 +28,8 @@ export interface PhotoEdit {
   flipped: boolean;
   crop: CropBox;
   aspect: CropAspect;
+  /** Нарисованное и надписи (14.10, G49): в пикселях исходника, см. `photoDrawRules.ts`; нет — ничего не рисовали. */
+  marks?: DrawMark[];
 }
 
 export const FULL_CROP: CropBox = { x: 0, y: 0, w: 1, h: 1 };

@@ -1,6 +1,95 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { attachmentWords, formatDuration, isVoiceMessage, peaksFrom, VOICE_MAX_MS, WAVEFORM_BUCKETS } from './voiceMessage.js';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+import { attachmentWords, formatDuration, isMusicFile, isVoiceMessage, musicSubtitle, musicTitle, peaksFrom, VOICE_MAX_MS, WAVEFORM_BUCKETS } from './voiceMessage.js';
+
+const musicRulesSource = readFileSync(new URL('./voiceMessage.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+function musicRules(raw: string): typeof import('./voiceMessage.js') {
+  const module = { exports: {} };
+  // Правило без зависимостей исполняется целиком, а не вырезанной копией функции.
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module, exports: module.exports });
+  return module.exports as typeof import('./voiceMessage.js');
+}
+function musicChange(anchor: string, replacement: string): string {
+  assert.equal(musicRulesSource.split(anchor).length - 1, 1, 'R230 единственный якорь музыкального правила');
+  return musicRulesSource.replace(anchor, replacement);
+}
+type MusicCheck = typeof isMusicFile;
+function noVoiceAsMusic(check: MusicCheck) {
+  assert.equal(check({ contentType: 'audio/wav', name: 'Голос.wav', waveform: [1, 30] }), false,
+    'R230 голосовое: огибающая оставляет собственный плеер');
+  assert.equal(check({ contentType: 'audio/wav', name: 'Музыка.wav', waveform: [] }), true);
+}
+function noUnsupportedMusic(check: MusicCheck) {
+  for (const contentType of ['audio/amr', 'audio/x-ms-wma', 'audio/aiff', 'audio/midi', 'audio/unknown'])
+    assert.equal(check({ contentType, name: 'Песня.mp3' }), false, 'R230 формат: расширение не отменяет известный неподдерживаемый MIME');
+  assert.equal(check({ contentType: 'audio/mpeg', name: 'Песня.mp3' }), true);
+}
+function musicByExtension(check: MusicCheck) {
+  for (const contentType of ['', 'application/octet-stream', 'binary/octet-stream', 'application/x-unknown'])
+    for (const extension of ['mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'wav', 'weba'])
+      assert.equal(check({ contentType, name: `Трек.${extension.toUpperCase()}` }), true,
+        'R230 расширение: неизвестный MIME не прячет воспроизводимый файл');
+}
+
+it('R230 все воспроизводимые MIME принимаются с параметрами, пробелами и верхним регистром', () => {
+  // Класс ошибки: допустимый MIME-синоним или параметры кодека оставляют звук обычной скрепкой.
+  for (const type of ['audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg-3', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
+    'audio/aac', 'audio/x-aac', 'audio/aacp', 'audio/ogg', 'application/ogg', 'audio/opus', 'audio/flac', 'audio/x-flac',
+    'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave', 'audio/x-pn-wav', 'audio/webm']) {
+    for (const contentType of [type, ` ${type.toUpperCase()} ; codecs=opus`])
+      assert.equal(isMusicFile({ contentType, name: 'Без расширения' }), true, contentType);
+  }
+});
+it('R230 неизвестный MIME принимает все расширения воспроизводимого звука, а не только mp3', () => {
+  // Класс ошибки: хранилище выдаёт octet-stream, и исправный музыкальный файл исчезает из плеера.
+  musicByExtension(isMusicFile);
+  assert.equal(isMusicFile({ contentType: ' APPLICATION/OCTET-STREAM ; charset=binary', name: 'Трек.WAV' }), true);
+});
+it('R230 неподдерживаемые аудиоформаты остаются файлами даже с обманчивым расширением', () => {
+  // Класс ошибки: проверка любого audio/* предлагает кнопку запуска заведомо неиграющего формата.
+  noUnsupportedMusic(isMusicFile);
+  for (const name of ['Музыка.amr', 'Музыка.wma', 'Музыка', 'Музыка.', '.mp3', '...'])
+    assert.equal(isMusicFile({ contentType: 'application/octet-stream', name }), false, name);
+});
+it('R230 голосовое с огибающей и видеокружок не становятся музыкой, пустая огибающая не мешает файлу', () => {
+  // Класс ошибки: музыкальный тип перехватывает флаги прослушано/один раз у другого вида вложения.
+  noVoiceAsMusic(isMusicFile);
+  assert.equal(isMusicFile({ contentType: 'audio/wav', name: 'Трек.wav', waveform: null }), true);
+  assert.equal(isMusicFile({ contentType: 'video/mp4', name: 'Кружок.wav', round: true }), false);
+  assert.equal(isMusicFile({ contentType: 'image/png', name: 'Обложка.mp3' }), false);
+});
+it('R230 название музыки убирает только последнее расширение и сохраняет непустое имя из точек', () => {
+  // Класс ошибки: точка в названии либо скрытое имя даёт пустой заголовок системного плеера.
+  for (const [name, expected] of [['Ночной гусь.wav', 'Ночной гусь'], ['Концерт.live.FLAC', 'Концерт.live'],
+    ['  Без расширения  ', 'Без расширения'], ['.mp3', '.mp3'], ['...', '..'], ['.', '.'], ['  .mp3', '  .mp3'], ['', '']])
+    assert.equal(musicTitle(name), expected);
+});
+it('R230 подпись до старта показывает размер либо известную длительность, но не фиктивное 0:00', () => {
+  // Класс ошибки: неизвестные метаданные выглядят как файл нулевой длины или портят подпись NaN.
+  for (const durationMs of [0, -1, NaN, Infinity])
+    assert.equal(musicSubtitle({ atMs: 0, durationMs, started: false, sizeLabel: 'размер' }), 'размер');
+  assert.equal(musicSubtitle({ atMs: 0, durationMs: 225_000, started: false, sizeLabel: 'размер' }), '3:45 · размер');
+});
+it('R230 запущенная и приостановленная музыка показывает позицию вместо размера, даже без длительности', () => {
+  // Класс ошибки: позиция теряется на паузе или неизвестная длительность делает дробь с нулевым знаменателем.
+  assert.equal(musicSubtitle({ atMs: 12_000, durationMs: 225_000, started: true, sizeLabel: 'размер' }), '0:12 / 3:45');
+  assert.equal(musicSubtitle({ atMs: 12_000, durationMs: 0, started: true, sizeLabel: 'размер' }), '0:12');
+  assert.equal(musicSubtitle({ atMs: 0, durationMs: 225_000, started: true, sizeLabel: 'размер' }), '0:00 / 3:45');
+});
+for (const [title, check, anchor, replacement, prefix, actual, expected] of [
+  ['потеря защиты голосового', noVoiceAsMusic, 'if (isVoiceMessage(a) || isRoundVideo(a)) return false;', 'if (isRoundVideo(a)) return false;', 'R230 голосовое:', true, false],
+  ['приём любого audio', noUnsupportedMusic, 'if (PLAYABLE_TYPES.has(type)) return true;', "if (type.startsWith('audio/')) return true;", 'R230 формат:', true, false],
+  ['потеря расширений', musicByExtension, 'if (UNKNOWN_TYPES.has(type)) return PLAYABLE_EXT.has(extOf(a.name));', '', 'R230 расширение:', false, true],
+] as const) it(`R230 контрфакт ${title} обнаруживается настоящим модулем правил`, () => {
+  // Класс ошибки: зелёный положительный пример не доказывает отсутствие ложной классификации.
+  check(isMusicFile); check(musicRules(musicRulesSource).isMusicFile);
+  assert.throws(() => check(musicRules(musicChange(anchor, replacement)).isMusicFile), (e: unknown) =>
+    e instanceof assert.AssertionError && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+});
 
 it('R125 предел голосового равен тридцати минутам, а не прежним пяти', () => {
   // Общий предел согласует таймер рекордера и приём вложения без потери длинной записи.

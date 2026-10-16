@@ -48,3 +48,14 @@ paths = ['''packages/shared/src/federation/fixtures/.*''']
 description = "RFC 8291 appendix A published test vector, not a real secret"
 targetRules = ["generic-api-key"]
 paths = ['''packages/backend/src/pushCrypto\.test\.ts''']
+
+# Установщик карты разбирает список сборок protomaps (`builds.json`): поле `"key":"20261014.pmtiles"` — ИМЯ ФАЙЛА сборки (дата),
+# а не ключ; эвристика `generic-api-key` цепляется за слово key. Узко: ЭТО правило, ЭТИ два файла И значение ровно ГГГГММДД.pmtiles
+# (условие AND — секрет другого вида в этих файлах по-прежнему валит гейт).
+[[allowlists]]
+description = "protomaps build names (YYYYMMDD.pmtiles) in the map installer and its test are not secrets"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''deploy/maps/maps-install\.sh''', '''packages/backend/src/mapsInstall\.test\.ts''']
+regexTarget = "secret"
+regexes = ['''^[0-9]{8}\.pmtiles$''']

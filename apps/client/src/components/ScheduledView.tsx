@@ -343,7 +343,7 @@ export function ScheduledView({ items, peerName, me, onBack, create, silentToggl
       <div className="message-body">
         {renderMessageText(
           it.content,
-          (url, key) => <MessageLink key={key} url={url} authorId={null} authorName={me.name} />,
+          (url, key) => <MessageLink key={key} url={url} />,
         )}
         {metaAt === 'body' ? meta : null}
       </div>

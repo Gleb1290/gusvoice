@@ -1,19 +1,19 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { DM_SERVER_UPDATE_TEXT, dmNeedsServerUpdate } from './dmRules';
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
 describe('стыки нового пути личных бесед', () => {
-  it('conv1 без conv2 оставляет старый путь и не объявляет caps бесед', () => {
-    // Ловит потерю живой доставки ЛС на сервере 0.8.17, где есть conv1, но нет новой рассылки.
-    for (const path of ['./App.tsx', './components/UserSettingsModal.tsx']) {
-      const s = source(path);
-      assert.match(s, /features\?\.includes\(CAP_CONV1\)\s*&&\s*!!features\?\.includes\(FEATURE_CONV2\)/, path);
-    }
+  it('conv1 без conv2 требует обновления сервера, обе возможности включают беседы без локального переключателя', () => {
+    // После удаления старых API нельзя обещать переписку с сервером без новой рассылки.
+    assert.equal(dmNeedsServerUpdate(['conv1']), true);
+    assert.equal(dmNeedsServerUpdate(['conv1', 'conv2']), false);
+    assert.equal(DM_SERVER_UPDATE_TEXT, 'ЛС на этом сервере требуют обновления сервера');
     const app = source('./App.tsx');
-    assert.match(app, /const active = [^;]+&& convClientSwitch\(\);\s*st\.setConvActive\(active\)/);
-    assert.match(source('./sockets.ts'), /convActive \? \[CAP_CONV1\] : undefined/);
+    assert.match(app, /const active = !!features\?\.includes\(CAP_CONV1\)\s*&&\s*!!features\?\.includes\(FEATURE_CONV2\);\s*st\.setConvActive\(active\)/);
+    assert.doesNotMatch(app, /convClientSwitch/);
   });
   it('черновик не пересоздаёт стор при равном значении и удаляется после очистки поля', () => {
     // Ловит дорогие перерисовки ленты на каждой букве и возврат очищенного черновика.
@@ -35,7 +35,7 @@ describe('стыки нового пути личных бесед', () => {
   it('вид ЛС берёт черновик однократно, без подписки на каждую букву', () => {
     // Ловит пересоздание всей ленты при вводе текста черновика.
     const s = source('./components/DmChatView.tsx');
-    assert.match(s, /useState\(\(\) => \(convActive \? useStore\.getState\(\)\.drafts\[dm\.id\]/);
+    assert.match(s, /useState\(\(\) => useStore\.getState\(\)\.drafts\[dm\.id\]\)/);
     assert.doesNotMatch(s, /useStore\(\(s\) => s\.drafts/);
   });
 
@@ -66,10 +66,11 @@ describe('стыки нового пути личных бесед', () => {
     assert.match(s, /sending\.clear\(\)/);
   });
 
-  it('шлюз объявляет новую возможность только клиенту с включёнными беседами', () => {
-    // Ловит двойную доставку нового и старого протокола одной вкладке.
+  it('шлюз всегда объявляет conv1, а догонка запускается только при поддержке бесед сервером', () => {
+    // Старых обработчиков больше нет: переключение режима не должно вернуть серверу старую доставку.
     const s = source('./sockets.ts');
-    assert.match(s, /convActive \? \[CAP_CONV1\] : undefined/);
+    assert.match(s, /const caps(?::[^=;]+)?\s*=\s*\[CAP_CONV1\]/);
+    assert.match(s, /t: 'identify',[\s\S]{0,180}caps: \[\.\.\.caps,/);
     assert.match(s, /if \(store\.convActive\) void store\.convOnReady\(\)/);
   });
 
@@ -78,14 +79,6 @@ describe('стыки нового пути личных бесед', () => {
     const s = source('./api.ts');
     assert.match(s, /if \(active\?\.token\) return active\.token/);
     assert.match(s, /instances\(\)\.length <= 1 \? localStorage\.getItem\('gv_token'\) : null/);
-  });
-
-  it('по умолчанию беседы включены, а локальный 0 откатывает только это устройство', () => {
-    // Ловит случайный возврат всех веб-клиентов на старые ЛС после релиза.
-    const s = source('./convStore.ts');
-    assert.match(s, /CONV_CLIENT_DEFAULT = true/);
-    assert.match(s, /if \(v === '1'\) return true;\s*if \(v === '0'\) return false/);
-    assert.match(s, /return CONV_CLIENT_DEFAULT/);
   });
 
   it('при старте метка своего ключа снимается после уборки, но до чтения и записи кеша', () => {

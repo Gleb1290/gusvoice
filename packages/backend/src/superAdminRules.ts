@@ -164,6 +164,11 @@ export interface BindingIo {
   userExists(userId: string): Promise<boolean>;
   /** id пользователя с логином РОВНО таким (регистр важен) или `null`. */
   findIdByUsername(username: string): Promise<string | null>;
+  /**
+   * Одобрить аккаунт супер-админа, если одобрение пустое: ему некому подтверждать регистрацию, а `loginGate` без
+   * `approved_at` не пускает при любой политике. Не трогает уже одобренных. Необязательна: без неё — как раньше.
+   */
+  ensureApproved?(userId: string): Promise<void>;
   /** Записать первую привязку (не перетирая чужую запись). */
   persist(userId: string): Promise<void>;
   /** `SUPERADMIN_USERNAME` из env как есть. */
@@ -192,6 +197,8 @@ export async function bindSuperAdminWith(io: BindingIo): Promise<BindingDecision
   });
 
   if (decision.persist && decision.superAdminId) await io.persist(decision.superAdminId);
+  // И свежепривязанный, и давно привязанный: «супер-админ ждёт одобрения» не бывает (#142, свежая база).
+  if (decision.superAdminId && io.ensureApproved) await io.ensureApproved(decision.superAdminId);
   if (decision.log) io.log(decision.log.level, decision.log.message);
   return decision;
 }

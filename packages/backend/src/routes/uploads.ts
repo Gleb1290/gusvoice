@@ -6,6 +6,7 @@ import { privateAttachmentsReady, attachmentStore } from '../attachments.js';
 import { attachmentUploadBlock, rateHit, retryMessage } from '../authGuard.js';
 import { abortUpload, completeUpload, partTarget, startUpload, uploadPart, uploadStatus, type UploadFail } from '../bigUploads.js';
 import { loadAccess } from '../conversations.js';
+import { fedFilesRefused } from './conv.js';
 import { attachmentBlocked } from '../storage.js';
 import { uploadGate, type GateTicket } from '../uploadGate.js';
 import { uploadedAttachmentDto } from './att.js';
@@ -97,7 +98,10 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
         type: z.string().max(200).optional(),
       })
       .parse(req.body);
-    if (!(await loadAccess(conversationId, me))) return reply.code(404).send({ error: 'not found' });
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    // Э3 часть 1 (#141): в беседу с человеком соседа без `dm2` файлы не уходят (`conv.fedFilesRefused`), как у одиночной загрузки.
+    if (await fedFilesRefused(reply, access.peerId)) return;
     if (!(await ready(reply))) return;
     const name = sanitizeFilename(body.name || 'file');
     const declared = body.type || 'application/octet-stream';

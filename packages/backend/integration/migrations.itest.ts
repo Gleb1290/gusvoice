@@ -3,8 +3,13 @@ import { after, before, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { createTestDb, type TestDb } from './harness.js';
+
+// Ограничиваем весь сценарий, включая его finally; отдельный Promise.race над SQL
+// оставил бы запрос живым и мог бы закрыть PGlite прямо во время его выполнения.
+const SCENARIO_TIMEOUT_MS = 120_000;
 
 test('R131 0134 повторяется и сохраняет метки, старые вставки получают NULL в новых колонках',async()=>{
   // Старый писатель не знает активности; повтор миграции не должен снять живой забор сборки.
@@ -182,9 +187,9 @@ let t: TestDb;
 
 before(async () => {
   t = await createTestDb();
-});
+}, { timeout: SCENARIO_TIMEOUT_MS });
 
-after(async () => t.close());
+after(async () => { if (t) await t.close(); }, { timeout: SCENARIO_TIMEOUT_MS });
 
 test('чистая база применяет каждый SQL-файл ровно один раз', async () => {
   // Ловит забытый файл, неверный порядок и расхождение таблицы учёта с реально применёнными миграциями.
@@ -252,22 +257,132 @@ test('0075 с ключами пуша применяется после всей
   assert.equal(crypto, before + 1);
 });
 
-test('0077 добавляет непустой по умолчанию массив скрывших без новой ссылки на users', async () => {
+test('0077 добавляет непустой по умолчанию массив скрывших без новой ссылки на users', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
   // Ловит миграцию, которая ломает старые строки ЛС или неожиданно меняет политику удаления аккаунта.
   const before = t.appliedMigrations.indexOf('0076_user_blocks.sql');
   const hidden = t.appliedMigrations.indexOf('0077_dm_hidden_for.sql');
   assert.equal(hidden, before + 1);
-  const column = await t.raw.query<{ is_nullable: string; column_default: string }>(`
+  const { raw } = await beforeDmDrop();
+  try {
+  const column = await raw.query<{ is_nullable: string; column_default: string }>(`
     SELECT is_nullable, column_default FROM information_schema.columns
     WHERE table_name = 'dm_messages' AND column_name = 'hidden_for'
   `);
   assert.equal(column.rows[0]?.is_nullable, 'NO');
   assert.match(column.rows[0]?.column_default ?? '', /\{\}/);
-  const fks = await t.raw.query(`
+  const fks = await raw.query(`
     SELECT 1 FROM information_schema.key_column_usage
     WHERE table_name = 'dm_messages' AND column_name = 'hidden_for'
   `);
   assert.equal(fks.rows.length, 0);
+  } finally { await raw.close(); }
+});
+
+async function beforeDmDrop(): Promise<{ raw: PGlite; migration: string }> {
+  const raw = new PGlite();
+  try {
+    // Таймер node:test не прерывает синхронный WASM; ожидание SQL ограничивает сам Postgres.
+    await raw.exec("SET statement_timeout = '30s'; SET lock_timeout = '5s'");
+    const { migrationsDir, migrationOrder, migrationPlan } = await import('../src/db/index.js');
+    for (const file of migrationOrder(await readdir(migrationsDir))) {
+      if (file === '0135_drop_dm_tables.sql') break;
+      const plan = migrationPlan(await readFile(join(migrationsDir, file), 'utf8'));
+      if (plan.transaction) await raw.exec(plan.sql);
+      else for (const step of plan.steps) {
+        try { await raw.exec(step.sql); } catch (error) { if (!step.optional) throw error; }
+      }
+    }
+    return { raw, migration: await readFile(join(migrationsDir, '0135_drop_dm_tables.sql'), 'utf8') };
+  } catch (error) { await raw.close(); throw error; }
+}
+
+async function checkDmDrop(change: (sql: string) => string = sql => sql): Promise<void> {
+  const { raw, migration } = await beforeDmDrop();
+  try {
+    // Все четыре старые таблицы непусты; настоящие FK делают порядок DROP наблюдаемым.
+    await raw.exec(`
+      INSERT INTO users(id,username,display_name,password_hash) VALUES ('drop-a','DropA','A','hash'),('drop-b','DropB','B','hash');
+      INSERT INTO dm_channels(id,user_a,user_b) VALUES ('old-drop','drop-a','drop-b');
+      INSERT INTO dm_messages(id,dm_channel_id,author_id,content) VALUES ('old-message','old-drop','drop-a','old text');
+      INSERT INTO dm_reads(dm_channel_id,user_id) VALUES ('old-drop','drop-b');
+      INSERT INTO dm_message_reactions(message_id,user_id,emoji) VALUES ('old-message','drop-b','👍');
+      INSERT INTO conversations(id,kind,direct_key) VALUES ('live-drop','direct','drop-a:drop-b');
+      INSERT INTO conversation_members(conversation_id,user_id,last_read_key) VALUES ('live-drop','drop-a',0),('live-drop','drop-b',1);
+      INSERT INTO conversation_messages(id,conversation_id,author_id,sort_key,content) VALUES ('live-message','live-drop','drop-a',1,'live text');
+      INSERT INTO conversation_message_reactions(message_id,user_id,emoji) VALUES ('live-message','drop-b','🪿');
+      INSERT INTO dm_folders(id,user_id,title,pinned_ids) VALUES ('kept-folder','drop-a','Не удалить',ARRAY['live-drop']);
+      INSERT INTO dm_reports(id,reporter_id,reported_id,conversation_id,reason,evidence)
+        VALUES ('kept-report','drop-a','drop-b','live-drop','spam','[{"messageId":"live-message","text":"live text","at":1}]');
+    `);
+    const oldTables = ['dm_channels','dm_messages','dm_reads','dm_message_reactions'];
+    for (const table of oldTables) assert.equal((await raw.query(`SELECT * FROM ${table}`)).rows.length, 1);
+    const keptTables = (await raw.query<{tablename:string}>(`SELECT tablename FROM pg_tables
+      WHERE schemaname='public' AND (tablename='conversations' OR left(tablename,13)='conversation_'
+        OR tablename IN ('dm_folders','dm_reports')) ORDER BY tablename`)).rows.map(row => row.tablename);
+    const snapshots = async () => {
+      const rows = [];
+      // PGlite выполняет query через очередь, а close не ждёт её опустошения.
+      // Promise.all при мутанте DROP dm_folders может отклониться раньше остальных
+      // запросов: finally не должен закрывать базу с ещё не завершённой очередью.
+      for (const table of keptTables) {
+        rows.push((await raw.query(`SELECT * FROM ${table} ORDER BY 1,2`)).rows);
+      }
+      return rows;
+    };
+    const before = await snapshots();
+    const sql = change(migration);
+    await raw.exec(sql);
+    for (const table of oldTables) {
+      assert.deepEqual((await raw.query(`SELECT to_regclass('${table}')::text AS name`)).rows, [{name:null}]);
+    }
+    assert.deepEqual(await snapshots(), before, 'беседы, папки и жалобы сохраняются побайтово');
+    await raw.exec(sql);
+    assert.deepEqual(await snapshots(), before, 'повтор DROP безопасен для живых данных');
+  } finally {
+    // После ошибочного SQL не оставляем транзакцию перед завершением Postgres.
+    try { await raw.exec('ROLLBACK'); } finally { await raw.close(); }
+  }
+}
+
+test('R140 0135 удаляет только четыре старые таблицы с данными, повтор безопасен для бесед, папок и жалоб', { timeout: SCENARIO_TIMEOUT_MS }, () => checkDmDrop());
+
+test('R140 контрфакт 0135 без IF EXISTS ломает повтор', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
+  await assert.rejects(() => checkDmDrop(sql => {
+    const mutant = sql.replace(/DROP TABLE IF EXISTS/g, 'DROP TABLE');
+    assert.notEqual(mutant, sql);
+    return mutant;
+  }), /does not exist/);
+});
+
+test('R140 контрфакт 0135 с обратным порядком DROP нарушает внешние ключи', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
+  await assert.rejects(() => checkDmDrop(sql => {
+    const statements = sql.match(/^DROP TABLE[^;]+;/gm)!;
+    assert.equal(statements.length, 4);
+    const mutant = statements.reverse().join('\n');
+    assert.notEqual(mutant, sql);
+    return mutant;
+  }), /depend|foreign key/i);
+});
+
+test('R140 контрфакт 0135 с DROP dm_folders теряет живую папку', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
+  await assert.rejects(() => checkDmDrop(sql => sql + '\nDROP TABLE IF EXISTS dm_folders;'), /dm_folders.*does not exist/);
+});
+
+test('R140 исходники и схема не возвращают четыре снятые таблицы — возвращённое объявление поймано', async () => {
+  const check = (source: string, file: string) => assert.doesNotMatch(source,
+    /\b(?:dm_messages|dm_channels|dm_reads|dm_message_reactions)\b/, `${file}: снятая таблица вернулась`);
+  const walk = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, {withFileTypes:true})) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) await walk(file);
+      else if (/\.ts$/.test(entry.name) && !/\.(?:test|itest)\.ts$/.test(entry.name)) check(await readFile(file,'utf8'),file);
+    }
+  };
+  await walk(fileURLToPath(new URL('../src/', import.meta.url)));
+  const schema = await readFile(new URL('../src/db/schema.ts',import.meta.url),'utf8');
+  for (const table of ['dm_messages','dm_channels','dm_reads','dm_message_reactions']) {
+    assert.throws(() => check(schema + `\nexport const returned = pgTable('${table}', {});`, 'schema.ts'), assert.AssertionError);
+  }
 });
 
 test('0062 одобряет всех пользователей, существовавших до миграции', async () => {

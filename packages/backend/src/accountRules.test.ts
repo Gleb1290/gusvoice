@@ -21,7 +21,6 @@ const CLEARED_USER_FK_TABLES = [
   'channel_reads',
   'coin_balances',
   'diag_reports',
-  'dm_reads',
   'dm_folders',
   'email_verifications',
   'federation_guest_grants',
@@ -79,10 +78,6 @@ const RETAINED_USER_FKS = [
   'conversation_message_reactions.user_id',
   'conversation_messages.author_id',
   'conversations.created_by',
-  'dm_channels.user_a',
-  'dm_channels.user_b',
-  'dm_message_reactions.user_id',
-  'dm_messages.author_id',
   // Журнал запретов на инстанс (F3, §5.11) переживает уход модератора: решение принимал ИНСТАНС,
   // и «кем поставлен» — подпись в журнале, а не связь с живым аккаунтом.
   'instance_bans.created_by',
@@ -163,8 +158,8 @@ describe('удаление аккаунта обезличивает, а не с
     const rowAnonymized = Object.keys(fields);
     // `homeInstanceId`/`homeUserId` сохраняются намеренно (F3, §5.6.2): значок инстанса остаётся у
     // обезличенного гостя, и по этой же паре действует запрет на инстанс.
-    // callPrivacy — не идентификатор и сам по себе не раскрывается: удалённая учётка не может инициировать звонок.
-    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId', 'callPrivacy'];
+    // Политики звонков и сообщений — не идентификаторы: удалённая учётка не может инициировать ни то ни другое.
+    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId', 'callPrivacy', 'messagePrivacy'];
     const invalidatedAfterTransaction = ['tokenGeneration'];
     assert.deepEqual(schemaColumns, [...rowAnonymized, ...retained, ...invalidatedAfterTransaction].sort());
   });

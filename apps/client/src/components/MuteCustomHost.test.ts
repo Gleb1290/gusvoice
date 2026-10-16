@@ -59,10 +59,10 @@ async function scene(a:Case={},source=raw){
   };
   try{
     await React.act(async()=>root.render(React.createElement(host.MuteCustomHost)));
-    assert.equal(mount.querySelector('input'),null,'без события окно закрыто');
+    assert.equal(mount.querySelector('input') === null, true, 'без события окно закрыто');
     if(a.invalid){
       for(const detail of [undefined,null,'',0,{},['peer']])await React.act(async()=>window.dispatchEvent(new CustomEvent(list.MUTE_CUSTOM_EVENT,{detail})));
-      assert.equal(mount.querySelector('input'),null,'нестроковый и пустой id не открывают окно');assert.deepEqual(calls,[]);return;
+      assert.equal(mount.querySelector('input') === null, true, 'нестроковый и пустой id не открывают окно');assert.deepEqual(calls,[]);return;
     }
     await React.act(async()=>window.dispatchEvent(new CustomEvent(list.MUTE_CUSTOM_EVENT,{detail:'peer'})));
     assert.deepEqual(['Дни','Часы','Минуты'].map(label=>field(label).value),['00','08','00'],'начальный срок 8 часов');
@@ -82,7 +82,7 @@ async function scene(a:Case={},source=raw){
         else if(a.mode==='close')mount.querySelector<HTMLButtonElement>('.icon-close')!.click();
         else [...mount.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='Отмена')!.click();
       });
-      assert.deepEqual(calls,[],'отмена не выключает уведомления');assert.equal(closed,1);assert.equal(mount.querySelector('input'),null);return;
+      assert.deepEqual(calls,[],'отмена не выключает уведомления');assert.equal(closed,1);assert.equal(mount.querySelector('input') === null, true);return;
     }
     if(a.mode==='compose'||a.mode==='buttonEnter'){
       await React.act(async()=>{
@@ -95,7 +95,7 @@ async function scene(a:Case={},source=raw){
       else{const button=go();button.click();if(a.mode==='double')button.click();}
     });
     assert.deepEqual(json(calls),[['dm_user','peer',true,a.mode==='custom'?190800:28800]],'в API уходят точные секунды ровно один раз');
-    assert.equal(closed,1,'окно закрывается ровно раз');assert.equal(mount.querySelector('input'),null,'finally закрывает окно');
+    assert.equal(closed,1,'окно закрывается ровно раз');assert.equal(mount.querySelector('input') === null, true, 'finally закрывает окно');
     assert.equal(errors.length,a.error?1:0,'отказ сообщён через toastError');
     if(a.error)assert.match(String(errors[0]),/отказ мьюта/);
   }finally{await React.act(async()=>root.unmount());mount.remove();}

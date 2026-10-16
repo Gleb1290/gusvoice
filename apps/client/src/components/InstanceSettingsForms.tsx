@@ -85,6 +85,42 @@ const DM_POLICY_CARDS: { value: DmPolicy; title: string; text: string }[] = [
   },
 ];
 
+/**
+ * Э1 ЛС между инстансами (#141, Ф6, решение владельца 12.10): кто из людей СВЯЗАННЫХ инстансов может первым написать нашим.
+ * Решает наш инстанс как дом получателя; нет настройки — «только общий сервер». Карточки — те же, что у `DmPolicyPicker`.
+ */
+const FED_DM_POLICY_CARDS: { value: 'shared' | 'anyone'; title: string; text: string }[] = [
+  {
+    value: 'shared',
+    title: 'Только с общего сервера',
+    text: 'Человек другого инстанса может написать первым, только если у вас есть общий сервер. Отвечать и писать самим можно всегда.',
+  },
+  {
+    value: 'anyone',
+    title: 'Все со связанных инстансов',
+    text:
+      'Написать первым может любой человек связанного инстанса. Защита: не больше 10 новых переписок в час от одного человека, ' +
+      'плашка «незнакомец» с кнопками «Заблокировать» и «Пожаловаться», блокировка работает.',
+  },
+];
+
+export function FedDmPolicyPicker({ value, onChange }: { value: 'shared' | 'anyone'; onChange: (p: 'shared' | 'anyone') => void }) {
+  return (
+    <div className="reg-policy" role="radiogroup" aria-label="Кто может начать переписку с людьми других инстансов">
+      {FED_DM_POLICY_CARDS.map((c) => (
+        <label key={c.value} className={`reg-card${value === c.value ? ' selected' : ''}`}>
+          <input type="radio" name="fed-dm-policy" value={c.value} checked={value === c.value} onChange={() => onChange(c.value)} />
+          <span className="reg-card-dot" aria-hidden="true" />
+          <span className="reg-card-body">
+            <span className="reg-card-title">{c.title}</span>
+            <span className="reg-card-text">{c.text}</span>
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 export function DmPolicyPicker({ value, onChange }: { value: DmPolicy; onChange: (p: DmPolicy) => void }) {
   return (
     <div className="reg-policy" role="radiogroup" aria-label="Кто может начать личную переписку">
@@ -212,7 +248,12 @@ export function InstanceSettingsPanel() {
     );
   }
 
-  async function save(patch: { name?: string | null; registration?: RegistrationPolicy; dmPolicy?: DmPolicy }) {
+  async function save(patch: {
+    name?: string | null;
+    registration?: RegistrationPolicy;
+    dmPolicy?: DmPolicy;
+    fedDmPolicy?: 'shared' | 'anyone';
+  }) {
     setBusy(true);
     try {
       await adminApi().adminSetInstance(patch);
@@ -261,6 +302,16 @@ export function InstanceSettingsPanel() {
             <span>Кто может начать личную переписку</span>
           </div>
           <DmPolicyPicker value={s.dmPolicy} onChange={(dmPolicy) => void save({ dmPolicy })} />
+        </>
+      )}
+      {/* Э1 ЛС между инстансами (#141, Ф6): поле приходит, только пока у инстанса включён `FEDERATION_DM_ENABLED`. */}
+      {s.fedDmPolicy !== undefined && (
+        <>
+          <hr className="smtp-sep" />
+          <div className="field">
+            <span>Кто может начать переписку с людьми других инстансов</span>
+          </div>
+          <FedDmPolicyPicker value={s.fedDmPolicy} onChange={(fedDmPolicy) => void save({ fedDmPolicy })} />
         </>
       )}
     </div>

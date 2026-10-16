@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isMobile, isTauri } from './hotkeys';
 
 /**
  * Раскладка телефона — та же граница, что у мобильных стилей (`@media (max-width: 760px)` в `styles.css`). Разметка,
@@ -24,4 +25,20 @@ export function usePhoneLayout(): boolean {
     return () => mq.removeEventListener('change', on);
   }, []);
   return phone;
+}
+
+/**
+ * Телефонный вид настроек и подписей: приложение на телефоне (`isMobile()`) ИЛИ телефонная раскладка в браузере. Браузер
+ * без Tauri — потому что окно настольного приложения, ужатое до 760 px, остаётся компьютером (клавиши, мышь, трей есть),
+ * а вот вкладка телефона — нет: там нет ни наведения, ни горячих клавиш, ни «окна не в фокусе» (раньше на ней жили подписи
+ * для ПК, потому что `isMobile()` в браузере всегда ложь).
+ */
+export function isPhoneUiNow(): boolean {
+  return isMobile() || (!isTauri() && phoneNow());
+}
+
+/** То же, что `isPhoneUiNow`, но перерисовывает при смене ширины окна. */
+export function usePhoneUi(): boolean {
+  const phone = usePhoneLayout();
+  return isMobile() || (!isTauri() && phone);
 }

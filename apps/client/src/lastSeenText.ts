@@ -16,6 +16,30 @@ export function serverLastSeen(features: readonly string[] | null | undefined): 
   return !!features?.includes(FEATURE_LASTSEEN1);
 }
 
+/** Окно «кто прочитал» — 7 суток от отправки (tdesktop `WhoReadExists`, `chat_read_mark_expire_period`); старше — строки нет. */
+export const READERS_EXPIRE_MS = 7 * 86_400_000;
+
+/**
+ * Показывать ли строку «кто прочитал» в меню сообщения группы: своё, уже с ✓✓ (кто-то прочитал — Telegram Web A
+ * `!isMessageUnread`, tdesktop `unseen → false`) и не старше 7 суток. Нет времени отправки — нет строки.
+ */
+export function readersLineShown(input: { mine: boolean; read: boolean; createdAt: string | undefined; now: number }): boolean {
+  const { mine, read, createdAt, now } = input;
+  if (!mine || !read || !createdAt) return false;
+  const t = Date.parse(createdAt);
+  return Number.isFinite(t) && now - t < READERS_EXPIRE_MS;
+}
+
+/**
+ * Текст строки «кто прочитал» (Telegram Web A `MessageContextMenu` — один прочитавший: его имя; несколько —
+ * `ConversationContextMenuSeen`; никого — `ConversationContextMenuNoViews`; tdesktop `lng_context_seen_text`).
+ */
+export function readersLabel(names: readonly string[]): string {
+  if (names.length === 0) return 'Никто не прочитал';
+  if (names.length === 1) return names[0];
+  return `${names.length} прочитали`;
+}
+
 function plural(n: number, one: string, few: string, many: string): string {
   const m10 = n % 10;
   const m100 = n % 100;
@@ -25,11 +49,11 @@ function plural(n: number, one: string, few: string, many: string): string {
 }
 
 const pad = (n: number) => String(n).padStart(2, '0');
-const hhmm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+export const hhmm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const ddmmyy = (d: Date) => `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${pad(d.getFullYear() % 100)}`;
 const MONTHS_SHORT = ['янв.', 'февр.', 'мар.', 'апр.', 'мая', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
 
-function dayDiff(a: Date, b: Date): number {
+export function dayDiff(a: Date, b: Date): number {
   const da = new Date(a.getFullYear(), a.getMonth(), a.getDate()).getTime();
   const db = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime();
   return Math.round((db - da) / 86_400_000);
@@ -62,6 +86,18 @@ export function lastSeenLabel(v: Pick<UserLastSeen, 'online' | 'at' | 'approx'>,
   if (days <= 0) return `был(а) сегодня в ${hhmm(at)}`;
   if (days === 1) return `был(а) вчера в ${hhmm(at)}`;
   return full ? `был(а) ${ddmmyy(at)} в ${hhmm(at)}` : `был(а) ${ddmmyy(at)}`;
+}
+
+/**
+ * Подпись контакта в списке «Новое сообщение» (Telegram `ContactsActivity` → `UserCell`: под именем «в сети» / «был(а) …»,
+ * `LocaleController.formatUserStatus`). `online` — присутствие (точка), `seen` — ответ пачки `POST /users/last-seen`; ответа нет — `null`
+ * (вызывающий оставляет прежнюю подпись). Снимок «ещё в сети, а присутствия уже нет» — как в шапке беседы: «только что» / «недавно».
+ */
+export function contactStatusText(online: boolean, seen: UserLastSeen | undefined, now: Date): string | null {
+  if (online) return 'в сети';
+  if (!seen) return null;
+  if (seen.online) return seen.exact ? 'был(а) только что' : 'был(а) недавно';
+  return lastSeenLabel(seen, now);
 }
 
 /**

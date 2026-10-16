@@ -22,7 +22,7 @@ async function home(server = h.server, frequent = true, hold = false) {
     const person = document.querySelector<HTMLElement>('.dms-person'); assert.ok(person);
     if (!frequent) {
       await act(async () => { person.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })); person.click(); });
-      assert.equal(document.querySelector('.ctx-menu'), null, 'без freq1 удаления из частых нет');
+      assert.equal(document.querySelector('.ctx-menu') === null, true, 'без freq1 удаления из частых нет');
       assert.deepEqual(opened, ['friend']); return;
     }
     if (hold) {
@@ -47,7 +47,7 @@ async function home(server = h.server, frequent = true, hold = false) {
     assert.ok(remove, 'меню предлагает убрать из частых');
     await act(async () => remove.click());
     assert.deepEqual(hidden, ['friend'], 'удаляется именно выбранная беседа');
-    assert.equal(document.querySelector('.ctx-menu'), null);
+    assert.equal(document.querySelector('.ctx-menu') === null, true);
   } finally { h.unmount(); }
 }
 it('R119 Частые перед Недавними; ПКМ убирает выбранную беседу', async () => home());

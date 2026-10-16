@@ -87,7 +87,11 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
     const [meta, policy] = await Promise.all([instanceMeta(), registrationPolicy()]);
     // ⚠️ Признак федерации — «поднялась ли она», а не «просили ли её в `.env`»: при испорченном
     // ключе (`key-error`) маршрутов тоже нет, и обещать клиенту работающую федерацию нельзя.
-    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, federation: federation.status() === 'ready' };
+    const fed = federation.status() === 'ready';
+    // Название для соседей (визитка) — подпись «через «…»» у получателя (`client/selfInstanceName.ts`); то же видно в
+    // публичной визитке `GET /fed/v1/instance`, так что нового наружу не уходит.
+    const fedName = fed ? (await readInstanceMeta()).name : null;
+    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, federation: fed, fedName };
   });
 
   /**

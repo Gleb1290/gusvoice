@@ -70,7 +70,7 @@ export function subscribeUpload(key: string, fn: () => void): () => void {
 const signals = new Map<string, AbortSignal>();
 
 /**
- * Сигнал отмены строки «в пути» без очереди ЛС (каналы, старый путь ЛС): лента кладёт его перед `onSend`, зовущий
+ * Сигнал отмены строки «в пути» без очереди ЛС (каналы): лента кладёт его перед `onSend`, зовущий
  * (`ChatView`, `DmChatView`) берёт по `sendKey` и отдаёт загрузке. `null` — строка ушла.
  */
 export function setUploadSignal(key: string, signal: AbortSignal | null): void {

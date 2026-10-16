@@ -31,6 +31,8 @@ export function useLastSeen(userId: string | null | undefined, scope: 'dm' | 'se
       : false,
   );
   // Моя настройка «Время захода» меняет и то, что я вижу у других (взаимность) — спросить заново.
+  /* Э7 ч.3 (D): возврат во вкладку и возвращение шлюза (`lastSeenRefresh.ts`) — «был(а)» мог устареть (видели «13 минут» при трёх). */
+  const epoch = useStore((s) => s.lastSeenEpoch);
   const myPrivacy = useStore((s) => `${s.user?.lastSeenPrivacy ?? ''}|${s.user?.status === 'invisible' ? 'inv' : ''}`);
   /* `got` — когда пришёл ответ: O5 (S20+, 08.10) — по нему видно, что ответ получен ДО выхода человека из сети. */
   const [view, setView] = useState<{ v: UserLastSeen; got: number } | null>(null);
@@ -70,7 +72,7 @@ export function useLastSeen(userId: string | null | undefined, scope: 'dm' | 'se
       alive = false;
       clearTimeout(t);
     };
-  }, [on, userId, online, myPrivacy]);
+  }, [on, userId, online, myPrivacy, epoch]);
 
   const shown = view && goneAt != null && view.got < goneAt ? leftJustNow(view.v, goneAt) : view?.v;
   useEffect(() => {

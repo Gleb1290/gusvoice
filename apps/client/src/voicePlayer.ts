@@ -53,6 +53,11 @@ export interface VoiceTrack {
   durationMs: number;
   source?: VoiceSource;
   place?: VoicePlace;
+  /**
+   * Аудиофайл, а не голосовое (15.10, `MusicFileCard`): название трека — подпись полосы плеера и системного плеера. Нет — голосовое.
+   * В автопереход файл не попадает: серия строится по `.voice-msg[data-voice]` ленты, у карточки файла его нет.
+   */
+  title?: string;
 }
 
 export interface VoicePlayerState {
@@ -168,7 +173,7 @@ function updateSession(track: VoiceTrack | null): void {
   }
   try {
     ms.metadata = new MediaMetadata({
-      title: 'Голосовое сообщение',
+      title: track.title ?? 'Голосовое сообщение',
       artist: track.source?.author ?? '',
     });
   } catch {
@@ -194,6 +199,11 @@ function el(): HTMLAudioElement {
     if (state.track) set({ at: a.currentTime * 1000 });
   });
   a.addEventListener('ended', onEnded);
+  // У аудиофайла длительности во вложении нет (её знает только голосовое) — берём из метаданных, чтобы полоса плеера шла.
+  a.addEventListener('durationchange', () => {
+    const t = state.track;
+    if (t && !(t.durationMs > 0) && Number.isFinite(a.duration) && a.duration > 0) set({ track: { ...t, durationMs: Math.round(a.duration * 1000) } });
+  });
   // Скорость одна на все голосовые: смена в пузыре или в полосе подхватывается играющим сразу.
   subscribeVoiceSpeed((s) => {
     a.playbackRate = s;

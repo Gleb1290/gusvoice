@@ -15,6 +15,7 @@ import {
   type FedSigningKey,
 } from '@gusvoice/shared';
 import { safePeerRequest, type PeerRequest, type SafeResponse } from '../safeFetch.js';
+import { peerScheme } from './devPeers.js';
 import { fingerprintFrom, instanceIdFrom } from './instanceIdentity.js';
 import { signRequest } from './httpSignature.js';
 import { keyIsCurrent, verifySigningKey } from './signingKeys.js';
@@ -177,7 +178,8 @@ export async function proveDomain(
   } catch {
     return { ok: false, problem: 'bad-document', detail: 'api_base не разбирается' };
   }
-  const url = `https://${domain}/config.json`;
+  // Режим стенда (Ф13): у хоста из `FEDERATION_DEV_PEERS` — `http`, остальным по-прежнему только `https`.
+  const url = `${peerScheme(domain)}://${domain}/config.json`;
   const refuse = (why: string): PeerResult<true> => ({ ok: false, problem: 'domain-unproven', detail: `${url}: ${why}` });
   let res: SafeResponse;
   try {
@@ -294,7 +296,9 @@ export async function getSignedFromPeer(input: {
   /** Ответ — файл (аватар соседа): байты приезжают отдельно, `body` остаётся пустым. */
   binary?: boolean;
   maxBytes?: number;
-}): Promise<PeerResult<{ status: number; body: string; bytes?: Buffer; contentType: string }>> {
+  /** Э3: файл вложения ЛС (`safePeerRequest.attachment`) — свой потолок и срок. */
+  attachment?: boolean;
+}): Promise<PeerResult<{ status: number; body: string; bytes?: Buffer; contentType: string; retryAfter?: number }>> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(input.query ?? {})) {
     if (value === null || value === undefined || value === '') continue;
@@ -318,8 +322,19 @@ export async function getSignedFromPeer(input: {
       allowHosts: input.allowHosts,
       binary: input.binary,
       maxBytes: input.maxBytes,
+      ...(input.attachment ? { attachment: true } : {}),
     });
-    return { ok: true, value: { status: res.status, body: res.body, bytes: res.bytes, contentType: res.contentType } };
+    return {
+      ok: true,
+      value: {
+        status: res.status,
+        body: res.body,
+        bytes: res.bytes,
+        contentType: res.contentType,
+        // Исправления ревью ЛС 12.10, п. 1: 429 соседа — забор журнала ждёт `retry-after`.
+        ...(res.retryAfter !== undefined ? { retryAfter: res.retryAfter } : {}),
+      },
+    };
   } catch (err) {
     return { ok: false, problem: 'unreachable', detail: err instanceof Error ? err.message : String(err) };
   }

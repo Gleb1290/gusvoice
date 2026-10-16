@@ -12,11 +12,17 @@ import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
 import { BottomSheet } from './BottomSheet';
 import { Icon } from './Icon';
 import { StatusDot } from './StatusDot';
+import { UserContextMenu } from './UserContextMenu';
 
 /**
- * Mobile-only Профиль tab (design-step8 D3). A full-screen pane above the bottom nav: profile card
- * (banner + avatar + name + @handle), a quick presence-status row (→ status sheet), a Настройки entry
- * that opens the settings modal, and a red Выйти. Rendered by MainLayout when `mobileProfileOpen`.
+ * Mobile-only Профиль tab (design-step8 D3; с 15.10 плоский вид как «Настройки» в Telegram Android, #218). A full-screen pane
+ * above the bottom nav: шапка (аватар + имя + @handle), then flat 50 px rows — a quick presence-status row (→ status sheet),
+ * Настройки (opens the settings modal), Админ-панель (super-admin only) and a red Выйти. Rendered by MainLayout when
+ * `mobileProfileOpen`.
+ * Нажатие на шапку — свой профиль на весь экран (приёмка 0.9.0), как у Telegram Android 12: свой профиль там — тот же
+ * `ProfileActivity`, что у собеседника, с `my_profile` (`TA/ui/MainTabsActivity.java`, `POSITION_PROFILE` в фабрике вкладок).
+ * Экран тот же, что у собеседника (`PhoneProfile` через `UserContextMenu` `initialView="profile"`), в варианте `isSelf`
+ * (кнопка «Изменить» ведёт в настройки). `UserContextMenu` упоминается только при открытом профиле.
  */
 export function MobileProfile() {
   const user = useStore((s) => s.user);
@@ -27,6 +33,7 @@ export function MobileProfile() {
   const logout = useStore((s) => s.logout);
   const [statusSheet, setStatusSheet] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [selfProfile, setSelfProfile] = useState(false);
 
   if (!user) return null;
 
@@ -54,65 +61,88 @@ export function MobileProfile() {
   return (
     <div className="mobile-profile">
       <div className="prof-scroll">
-        {/* Profile card: honey banner + overlapping avatar + name/handle. */}
-        <div className="prof-card">
-          <div className="prof-banner" />
-          <div className="prof-card-body">
-            <span className="prof-card-ava">
-              <Avatar
-                url={user.avatarUrl}
-                animatedUrl={animatedOn ? user.animatedAvatarUrl : undefined}
-                name={user.displayName}
-                size={72}
-              />
-            </span>
+        {/* Шапка как у экрана «Настройки» Telegram Android: аватар, имя и строка под ним, без баннера и карточки. */}
+        <div
+          className="prof-head"
+          role="button"
+          tabIndex={0}
+          aria-label="Мой профиль"
+          onClick={() => setSelfProfile(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setSelfProfile(true);
+            }
+          }}
+        >
+          <span className="prof-card-ava">
+            <Avatar
+              url={user.avatarUrl}
+              animatedUrl={animatedOn ? user.animatedAvatarUrl : undefined}
+              name={user.displayName}
+              size={64}
+            />
+          </span>
+          <div className="prof-head-text">
             <div className="prof-name-row">
               <span className="prof-name">{user.displayName}</span>
-              <StatusDot status={user.status} size={11} />
             </div>
             <div className="prof-handle">@{user.username}</div>
           </div>
         </div>
 
-        {/* Quick presence status. */}
-        <button type="button" className="prof-row" onClick={() => setStatusSheet(true)}>
-          <StatusDot status={user.status} size={12} />
-          <span className="prof-row-label">{statusLine}</span>
-          <Icon name="chevron-right" size={18} />
-        </button>
-
-        {/* Open the full settings modal. */}
-        <button type="button" className="prof-row" onClick={() => setSettingsOpen(true)}>
-          <Icon name="settings" size={20} />
-          <span className="prof-row-label">Настройки</span>
-          <Icon name="chevron-right" size={18} />
-        </button>
-
-        {/* Admin panel — super-admin only. The desktop rail's admin icon is hidden on mobile, so this is
-            the ONLY way a phone operator reaches user-approval / SMTP setup (e.g. verify a registration
-            manually when the instance has no e-mail configured). */}
-        {admin && (
-          <button type="button" className="prof-row" onClick={() => void openOwnAdmin(admin.homeId).catch(toastError)}>
-            <Icon name="lock" size={20} />
-            <span className="prof-row-label">Админ-панель</span>
-            <Icon name="chevron-right" size={18} />
+        {/* Дальше — плоские группы строк по 50 px: значок слева, подпись 16, разделитель с отступом под текст
+            (Telegram `TextCell`); группы разделяет полоса фона, как у `ShadowSectionCell`. */}
+        <div className="prof-group">
+          {/* Быстрый статус присутствия. */}
+          <button type="button" className="prof-row" onClick={() => setStatusSheet(true)}>
+            <StatusDot status={user.status} size={12} />
+            <span className="prof-row-label">{statusLine}</span>
           </button>
-        )}
+        </div>
 
-        {/* Sign out (mirrors the settings-modal session action). */}
-        <button
-          type="button"
-          className="prof-row danger"
-          onClick={async () => {
-            setMobileProfileOpen(false);
-            await logout();
-            location.reload();
-          }}
-        >
-          <Icon name="logout" size={20} />
-          <span className="prof-row-label">Выйти</span>
-        </button>
+        <div className="prof-group">
+          {/* Полные настройки — отдельными экранами (список разделов → раздел). */}
+          <button type="button" className="prof-row" onClick={() => setSettingsOpen(true)}>
+            <Icon name="settings" size={22} />
+            <span className="prof-row-label">Настройки</span>
+          </button>
+
+          {/* Админ-панель — только супер-админу. Рейл-иконка админки на телефоне скрыта, так что это ЕДИНСТВЕННЫЙ вход:
+              без него оператор с телефона не дойдёт до одобрения регистраций и настройки почты. */}
+          {admin && (
+            <button type="button" className="prof-row" onClick={() => void openOwnAdmin(admin.homeId).catch(toastError)}>
+              <Icon name="lock" size={22} />
+              <span className="prof-row-label">Админ-панель</span>
+            </button>
+          )}
+        </div>
+
+        <div className="prof-group">
+          {/* Выход (то же, что действие «Сессия» в настройках). */}
+          <button
+            type="button"
+            className="prof-row danger"
+            onClick={async () => {
+              setMobileProfileOpen(false);
+              await logout();
+              location.reload();
+            }}
+          >
+            <Icon name="logout" size={22} />
+            <span className="prof-row-label">Выйти</span>
+          </button>
+        </div>
       </div>
+
+      {selfProfile && (
+        <UserContextMenu
+          target={{ userId: user.id, name: user.displayName, avatarUrl: user.avatarUrl, username: user.username }}
+          pos={{ x: 0, y: 0 }}
+          initialView="profile"
+          onClose={() => setSelfProfile(false)}
+        />
+      )}
 
       {statusSheet && (
         <BottomSheet title="Статус" onClose={() => setStatusSheet(false)}>

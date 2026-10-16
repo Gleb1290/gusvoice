@@ -11,9 +11,9 @@ const h = setupHarness(import.meta.url);
 it('плавающий день не появляется на программный scroll, появляется на wheel и гаснет', async () => {
   await h.mount({ messages: [h.msg('top')] }); const list = h.host.querySelector<HTMLElement>('.messages')!;
   Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => h.host.querySelector('[data-mid="top"]') });
-  await act(async () => { list.dispatchEvent(new Event('scroll')); await h.delay(40); }); assert.equal(h.host.querySelector('.bub-float.on'), null);
+  await act(async () => { list.dispatchEvent(new Event('scroll')); await h.delay(40); }); assert.equal(h.host.querySelector('.bub-float.on') === null, true);
   await act(async () => { list.dispatchEvent(new Event('wheel')); list.dispatchEvent(new Event('scroll')); await h.delay(40); });
-  assert.ok(h.host.querySelector('.bub-float.on')); await act(async () => { await h.delay(1550); }); assert.equal(h.host.querySelector('.bub-float.on'), null);
+  assert.ok(h.host.querySelector('.bub-float.on')); await act(async () => { await h.delay(1550); }); assert.equal(h.host.querySelector('.bub-float.on') === null, true);
 });
 h.mutantTest('стрелка вверх редактирует последнее своё обычное сообщение, пропуская стикер и пересылку', async () => {
   // Нельзя подать `hasOwnEditable` уже вычисленным: регрессия была именно в выборе последней строки перед этим флагом.
@@ -32,7 +32,7 @@ h.mutantTest('стрелка вверх редактирует последне�
     await act(async () => { field!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); await h.flush(); });
     assert.ok(h.host.querySelector('.edit-strip'), 'последний обычный свой месседж открыт в composer');
     assert.equal(field.value, eligible.content, 'пересланная строка и стикер не становятся целью правки');
-    assert.equal(h.host.querySelector('.edit-box'), null, 'inline правки больше нет');
+    assert.equal(h.host.querySelector('.edit-box') === null, true, 'inline правки больше нет');
   };
   await h.rejectMutant((source) => source.replace(
     'm.author.id === meId && !m.forwardedFrom && !m.sticker',
@@ -46,7 +46,7 @@ it('клавиши поля, повтор и пробел кнопки не зо
   const input = document.createElement('textarea'); const button = document.createElement('button'); list.append(input, button);
   for (const [target, key, repeat] of [[input, 'PageDown', false], [button, ' ', false], [list, 'PageDown', true]] as const) {
     await act(async () => { target.dispatchEvent(new KeyboardEvent('keydown', { key, repeat, bubbles: true })); list.dispatchEvent(new Event('scroll')); await h.delay(40); });
-    assert.equal(h.host.querySelector('.bub-float.on'), null);
+    assert.equal(h.host.querySelector('.bub-float.on') === null, true);
   }
   await act(async () => { list.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', bubbles: true })); list.dispatchEvent(new Event('scroll')); await h.delay(40); });
   assert.ok(h.host.querySelector('.bub-float.on'));
@@ -91,7 +91,7 @@ it('инерция продлевает человеческую прокрут�
   for (let i = 0; i < 5; i++) await act(async () => { await h.delay(190); list.dispatchEvent(new Event('scroll')); await h.delay(30); });
   assert.ok(h.host.querySelector('.bub-float.on'));
   await act(async () => { await h.delay(350); list.dispatchEvent(new Event('scroll')); await h.delay(40); });
-  await act(async () => { await h.delay(1200); }); assert.equal(h.host.querySelector('.bub-float.on'), null);
+  await act(async () => { await h.delay(1200); }); assert.equal(h.host.querySelector('.bub-float.on') === null, true);
 });
 it('меньше движения не отменяет исчезновение даты через полторы секунды', async () => {
   // Ловит прежний условный таймер, оставлявший пилюлю навсегда при reduced-motion.
@@ -102,57 +102,70 @@ it('меньше движения не отменяет исчезновение
     await h.mount({ messages: [h.msg('top')] }); const list = h.host.querySelector<HTMLElement>('.messages')!;
     Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => h.host.querySelector('[data-mid="top"]') });
     await act(async () => { list.dispatchEvent(new Event('touchmove', { bubbles: true })); list.dispatchEvent(new Event('scroll')); await h.delay(40); });
-    assert.ok(h.host.querySelector('.bub-float.on')); await act(async () => { await h.delay(1550); }); assert.equal(h.host.querySelector('.bub-float.on'), null);
+    assert.ok(h.host.querySelector('.bub-float.on')); await act(async () => { await h.delay(1550); }); assert.equal(h.host.querySelector('.bub-float.on') === null, true);
   } finally { window.matchMedia = match; }
 });
-it('на телефоне ошибка открывает лист с фокусом, Escape возвращает кнопку', async () => {
-  // Ловит десктопное меню вместо доступного мобильного диалога.
-  h.mobile(); await h.mount({ outbox: h.queue() }); const button = h.host.querySelector<HTMLButtonElement>('.bub-fail-btn')!;
-  assert.equal(button.getAttribute('aria-haspopup'), 'dialog');
-  await act(async () => { button.click(); }); await h.flush();
-  const sheet = document.querySelector('.sheet[role="dialog"]'); assert.ok(sheet); assert.match(sheet.textContent!, /Ваше сообщение/);
-  assert.equal(document.querySelector('.ctx-menu'), null); assert.ok(document.activeElement === sheet.querySelector('.sheet-row'));
-  await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); }); await h.flush();
-  assert.equal(document.querySelector('.sheet'), null); assert.ok(document.activeElement === button);
+it('на телефоне ошибка открывает меню у пузыря с фокусом, Escape возвращает кнопку', async () => {
+  // Телефон получает доступное меню у пузыря; прежний лист больше не открывается.
+  h.mobile(); const restore = h.pointerLayout(true, 390);
+  try {
+    await h.mount({ outbox: h.queue() }); const button = h.host.querySelector<HTMLButtonElement>('.bub-fail-btn')!;
+    assert.equal(button.getAttribute('aria-haspopup'), 'menu');
+    await act(async () => { button.click(); }); await h.flush();
+    const menu = document.querySelector('.ctx-menu[role="menu"]'); assert.ok(menu); assert.match(menu.textContent!, /Не отправлено: сеть/);
+    assert.ok(document.querySelector('.ctx-stack.anchored'));
+    assert.equal(document.querySelector('.sheet') === null, true); assert.ok(document.activeElement === menu.querySelector('button'));
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); }); await h.flush();
+    assert.equal(document.querySelector('.ctx-menu') === null, true); assert.ok(document.activeElement === button);
+  } finally { restore(); }
 });
 for (const outgoing of [false, true]) {
-  it(`долгое касание ${outgoing ? 'ошибки' : 'сообщения'} не нажимает открытый лист при отпускании`, async () => {
-    // Ловит синтетический click по строке листа, открывшегося под тем же пальцем.
-    h.mobile(); const copies: string[] = [];
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copies.push(text); } } });
-    await h.mount(outgoing ? { outbox: h.queue() } : { messages: [h.msg('top')], onReact: () => {} });
-    const body = h.host.querySelector('.message-body')!;
-    await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); });
-    const sheet = document.querySelector('.sheet[role="dialog"]')!; assert.ok(sheet);
-    const copy = [...sheet.querySelectorAll<HTMLButtonElement>('.sheet-row')].find((b) => b.textContent?.includes('Скопировать текст'))!; assert.ok(copy);
-    let end!: Event; await act(async () => { end = h.touch(body, 'touchend'); }); assert.equal(end.defaultPrevented, true);
-    const first = new MouseEvent('click', { bubbles: true, cancelable: true });
-    await act(async () => { copy.dispatchEvent(first); }); assert.equal(first.defaultPrevented, true); assert.equal(copies.length, 0); assert.ok(document.querySelector('.sheet'));
-    await act(async () => { await h.delay(450); }); await act(async () => { copy.click(); });
-    assert.deepEqual(copies, [outgoing ? 'failed' : 'top']);
-    if (!outgoing) {
-      // Разметка реакций проверяется до закрытия листа отдельным повторным открытием.
+  it(`долгое касание ${outgoing ? 'ошибки' : 'сообщения'} не нажимает открытое меню при отпускании`, async () => {
+    // Клик того же жеста не должен ни выполнить команду, ни закрыть карточку.
+    h.mobile(); const restore = h.pointerLayout(true, 390); const copies: string[] = [];
+    try {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copies.push(text); } } });
+      await h.mount(outgoing ? { outbox: h.queue() } : { messages: [h.msg('top')], onReact: () => {} });
+      const body = h.host.querySelector('.message-body')!;
       await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); });
-      const more = document.querySelector('.sheet-react.more')!; assert.ok(more);
-      assert.equal(more.getAttribute('aria-label'), 'Все реакции'); assert.equal(more.getAttribute('title'), null);
-      assert.ok(more.querySelector('svg[width="22"] path[d="M6 9 L12 15 L18 9"]'));
-      assert.deepEqual([...document.querySelectorAll('.sheet-react:not(.more)')].map((b) => b.textContent), ['👍', '🔥', '😂', '❤️', '🦆']);
-      await act(async () => { h.touch(body, 'touchcancel'); });
-    }
+      const menu = document.querySelector('.ctx-menu[role="menu"]')!; assert.ok(menu);
+      assert.ok(document.querySelector('.ctx-stack.anchored')); assert.equal(document.querySelector('.sheet') === null, true);
+      const copy = [...menu.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Скопировать текст'))!; assert.ok(copy);
+      let end!: Event; await act(async () => { end = h.touch(body, 'touchend'); }); assert.equal(end.defaultPrevented, true);
+      const first = new MouseEvent('click', { bubbles: true, cancelable: true });
+      await act(async () => { copy.dispatchEvent(first); }); assert.equal(first.defaultPrevented, true); assert.equal(copies.length, 0); assert.ok(document.querySelector('.ctx-menu'));
+      await act(async () => { await h.delay(450); }); await act(async () => { copy.click(); });
+      assert.deepEqual(copies, [outgoing ? 'failed' : 'top']);
+      if (!outgoing) {
+        // Разметка реакций проверяется отдельным повторным открытием карточки.
+        await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); });
+        // Полоса при наведении тоже смонтирована в DOM: проверяем реакции только открытого меню.
+        const more = document.querySelector('.ctx-stack .react-bar-more')!; assert.ok(more);
+        assert.equal(more.getAttribute('aria-label'), 'Все реакции'); assert.equal(more.getAttribute('title'), 'Все реакции');
+        assert.ok(more.querySelector('svg[width="20"]'), 'все реакции имеют пиктограмму нового меню');
+        assert.deepEqual([...document.querySelectorAll('.ctx-stack .react-bar button:not(.react-bar-more)')].map((b) => b.textContent), ['👍', '🔥', '😂', '❤️', '🦆']);
+        await act(async () => { h.touch(body, 'touchcancel'); });
+      }
+    } finally { restore(); }
   });
 }
-it('короткий тап, движение пальца и отпускание другой цели не поглощают клик', async () => {
+it('короткий тап и движение не взводят защиту, чужое отпускание не подавлено и следующий клик проходит', async () => {
   // Парное принятие обычного жеста: защита long-press не должна блокировать следующие действия.
-  h.mobile(); await h.mount({ messages: [h.msg('top')] }); const body = h.host.querySelector('.message-body')!;
-  await act(async () => { h.touch(body, 'touchstart'); await h.delay(100); });
-  let ended!: Event; await act(async () => { ended = h.touch(body, 'touchend'); }); assert.equal(ended.defaultPrevented, false); assert.equal(document.querySelector('.sheet'), null);
-  await act(async () => { h.touch(body, 'touchstart'); h.touch(body, 'touchmove', 11); await h.delay(560); });
-  assert.equal(document.querySelector('.sheet'), null); await act(async () => { ended = h.touch(body, 'touchend'); }); assert.equal(ended.defaultPrevented, false);
-  await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); }); assert.ok(document.querySelector('.sheet'));
-  const other = document.querySelector('.sheet-row')!; await act(async () => { ended = h.touch(other, 'touchend'); }); assert.equal(ended.defaultPrevented, false);
-  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
-  let clicked = false; other.addEventListener('click', () => { clicked = true; });
-  await act(async () => { other.dispatchEvent(click); }); assert.equal(click.defaultPrevented, false); assert.equal(clicked, true);
+  h.mobile(); const restore = h.pointerLayout(true, 390);
+  try {
+    await h.mount({ messages: [h.msg('top')] }); const body = h.host.querySelector('.message-body')!;
+    await act(async () => { h.touch(body, 'touchstart'); await h.delay(100); });
+    let ended!: Event; await act(async () => { ended = h.touch(body, 'touchend'); }); assert.equal(ended.defaultPrevented, false); assert.equal(document.querySelector('.ctx-menu') === null, true);
+    await act(async () => { h.touch(body, 'touchstart'); h.touch(body, 'touchmove', 11); await h.delay(560); });
+    assert.equal(document.querySelector('.ctx-menu') === null, true); await act(async () => { ended = h.touch(body, 'touchend'); }); assert.equal(ended.defaultPrevented, false);
+    await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); }); assert.ok(document.querySelector('.ctx-menu'));
+    const other = document.querySelector('.ctx-menu button')!; await act(async () => { ended = h.touch(other, 'touchend'); }); assert.equal(ended.defaultPrevented, false);
+    // Новый guard ставится уже при открытии меню. Следующий самостоятельный клик разрешён после его короткого окна.
+    await act(async () => { await h.delay(450); });
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    let clicked = false; other.addEventListener('click', () => { clicked = true; });
+    await act(async () => { other.dispatchEvent(click); }); assert.equal(click.defaultPrevented, false); assert.equal(clicked, true);
+  } finally { restore(); }
 });
 it('широкая группа показывает мой аватар только у последней исходящей строки', async () => {
   // Ловит пустую колонку/повтор аватара и проверяет, что на телефоне его профильный тап не открывает меню сообщения.
@@ -162,7 +175,7 @@ it('широкая группа показывает мой аватар тол�
   try {
     await h.mount({ messages: [h.msg('saved', 'me', 180000)], outbox: h.queue() });
     assert.ok(h.host.querySelector('.messages.bub-left'));
-    const rows = h.host.querySelectorAll('.message.bub'); assert.equal(rows[0]!.querySelector('.bub-ava .msg-ava'), null);
+    const rows = h.host.querySelectorAll('.message.bub'); assert.equal(rows[0]!.querySelector('.bub-ava .msg-ava') === null, true);
     assert.ok(rows[1]!.querySelector('.bub-ava .msg-ava')); assert.ok(rows[1]!.nextElementSibling?.classList.contains('bub-fail'));
     const avatar = rows[1]!.querySelector<HTMLElement>('.msg-ava')!;
     await act(async () => { avatar.click(); await h.flush(); }); assert.ok(!document.querySelector('.ctx-stack'), 'аватар открывает профиль, не меню сообщения');
@@ -204,7 +217,6 @@ it('старая отправка получает время постановк
 });
 it('DmChatView применяет тихое прочтение через настоящий стор, не перемонтирует ленту и не гасит unread', async () => {
   // Ловит разрыв цепочки сводка → подписка DmChatView → галочки MessagePane.
-  localStorage.setItem('gv_dm_bubbles', '1'); localStorage.setItem('gv_feed_window', '0');
   const { DmChatView } = await h.server.ssrLoadModule('/src/components/DmChatView.tsx') as typeof import('./DmChatView');
   const { useStore } = await h.server.ssrLoadModule('/src/store.ts') as typeof import('../store');
   h.resetStore = () => useStore.getState().convReset();
@@ -213,7 +225,8 @@ it('DmChatView применяет тихое прочтение через на�
   const summary = { ...dm, kind: 'direct' as const, lastMessage: null, lastReadKey: 0, unread: 3, peerReadKey: 20 };
   const messages = [h.msg('m10', 'me', 0, 10), h.msg('m15', 'peer', 0, 15), h.msg('m20', 'me', 0, 20), h.msg('m30', 'me', 0, 30)];
   useStore.setState({ convActive: true, user: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null } as never,
-    conv: { ...useStore.getState().conv, phase: 'live', pts: 100, summaries: { c: summary }, summaryPts: { c: 100 } },
+    conv: { ...useStore.getState().conv, phase: 'live', pts: 100, summaries: { c: summary }, summaryPts: { c: 100 },
+      windows: { c: { basePts: 100, hasMoreBefore: false, hasMoreAfter: false } } },
     dmMessages: { c: messages }, unreadDms: ['c'], dms: [dm], currentDmId: 'c', view: 'dm', drafts: {}, draftRev: {}, outbox: {} });
   h.host = document.createElement('div'); document.body.append(h.host); h.root = createRoot(h.host);
   await act(async () => { h.root!.render(createElement(DmChatView, { dm })); }); await h.flush();
@@ -226,13 +239,6 @@ it('DmChatView применяет тихое прочтение через на�
   h.rendered.length = 0;
   await act(async () => { useStore.getState().convOnChange({ pts: 101, conversation: { ...summary, peerReadKey: 30 } }, false); });
   assert.deepEqual(h.rendered, []);
-  await act(async () => { h.root!.unmount(); }); h.root = createRoot(h.host);
-  useStore.setState({ convActive: false, dmMessages: { c: messages.map(({ sortKey: _key, ...m }) => m) } });
-  await act(async () => { h.root!.render(createElement(DmChatView, { dm })); }); assert.equal(h.host.querySelector('.bub-st.read'), null);
-  await act(async () => { h.root!.unmount(); }); h.root = createRoot(h.host);
-  localStorage.setItem('gv_dm_bubbles', '0'); useStore.setState({ convActive: true, dmMessages: { c: messages } });
-  await act(async () => { h.root!.render(createElement(DmChatView, { dm })); }); assert.equal(h.host.querySelector('.bub-st'), null);
-  localStorage.setItem('gv_dm_bubbles', '0'); localStorage.removeItem('gv_feed_window');
 });
 h.mutantTest('мутант без read-статуса не проходит настоящий DOM-сценарий галочек', async () => {
   // Ловит возврат всегда одинарной галочки у своих сообщений.
@@ -284,13 +290,15 @@ h.mutantTest('мутант условного таймера оставляет 
   } finally { window.matchMedia = match; }
 });
 h.mutantTest('мутант без защиты отпускания пальца проваливает long-press сценарий', async () => {
-  // Ловит синтетический click из касания, открывшего мобильный лист.
-  h.mobile();
+  // Ловит синтетический click из касания, открывшего меню у пузыря.
   await h.rejectMutant((s) => s.replace("if (e.type === 'touchend' && e.target === from)", 'if (false)'), async (component) => {
-    await h.mount({ messages: [h.msg('top')] }, component); const body = h.host.querySelector('.message-body')!;
-    await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); }); assert.ok(document.querySelector('.sheet'), 'long-press открывает лист');
-    let ended!: Event; await act(async () => { ended = h.touch(body, 'touchend'); }); assert.equal(ended.defaultPrevented, true);
-  });
+    h.mobile(); const restore = h.pointerLayout(true, 390);
+    try {
+      await h.mount({ messages: [h.msg('top')] }, component); const body = h.host.querySelector('.message-body')!;
+      await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); }); assert.ok(document.querySelector('.ctx-menu'), 'long-press открывает меню');
+      let ended!: Event; await act(async () => { ended = h.touch(body, 'touchend'); }); assert.equal(ended.defaultPrevented, true, 'отпускание открывшего меню пальца подавлено');
+    } finally { restore(); }
+  }, 'отпускание открывшего меню пальца подавлено');
 });
 h.mutantTest('мутант без группировки сохранённого с очередью оставляет лишний хвост', async () => {
   // Ловит разрыв одной серии своих сообщений на границе сохранённого и исходящих.
@@ -340,16 +348,18 @@ it('ответ не рвёт серию пузырей ЛС, но рвёт ка�
 });
 it('защита клика после long-press сама истекает, даже если первого клика не было', async () => {
   // Ловит вечный capture-слушатель, который съедает следующий нормальный клик спустя секунды.
-  h.mobile(); const copies: string[] = [];
-  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copies.push(text); } } });
-  await h.mount({ outbox: h.queue() }); const body = h.host.querySelector('.message-body')!;
-  await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); });
-  await act(async () => { h.touch(body, 'touchend'); }); await act(async () => { await h.delay(450); });
-  const copy = [...document.querySelectorAll<HTMLButtonElement>('.sheet-row')].find((b) => b.textContent?.includes('Скопировать текст'))!;
-  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
-  await act(async () => { copy.dispatchEvent(click); }); assert.equal(click.defaultPrevented, false); assert.deepEqual(copies, ['failed']);
+  h.mobile(); const restore = h.pointerLayout(true, 390); const copies: string[] = [];
+  try {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copies.push(text); } } });
+    await h.mount({ outbox: h.queue() }); const body = h.host.querySelector('.message-body')!;
+    await act(async () => { h.touch(body, 'touchstart'); await h.delay(560); });
+    await act(async () => { h.touch(body, 'touchend'); }); await act(async () => { await h.delay(450); });
+    const copy = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find((b) => b.textContent?.includes('Скопировать текст'))!; assert.ok(copy);
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    await act(async () => { copy.dispatchEvent(click); }); assert.equal(click.defaultPrevented, false); assert.deepEqual(copies, ['failed']);
+  } finally { restore(); }
 });
-it('долгое касание выбирает в личной пачке, но остаётся меню без batch и в канале', async () => {
+it('долгое касание открывает меню в личной пачке, без batch и в канале; Выбрать включает пачку', async () => {
   // Один жест не должен включать пачки в каналах, даже если вызывающий случайно передал batch.
   const restore = h.pointerLayout(true, 390);
   const batch = { forward: async () => {}, deleteMany: async () => {}, peerName: () => 'Собеседник', open: () => {} };
@@ -360,7 +370,11 @@ it('долгое касание выбирает в личной пачке, н�
     await act(async () => { h.touch(dmBody, 'touchstart'); await h.delay(560); });
     await act(async () => { h.touch(dmBody, 'touchend'); await h.flush(); });
     await act(async () => { dmBody.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); await h.flush(); });
-    assert.ok(h.host.querySelector('.sel-head'), 'долгое касание в DM входит в выделение');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'долгое касание в DM сначала оставляет меню');
+    const choose = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find((b) => b.textContent?.trim() === 'Выбрать');
+    assert.ok(choose, 'пункт Выбрать доступен в меню DM');
+    await act(async () => { choose.click(); await h.flush(); });
+    assert.ok(h.host.querySelector('.sel-head'), 'Выбрать входит в выделение');
     h.unmount();
     await h.mount({ messages: [h.msg('long-legacy')] });
     const legacyBody = h.host.querySelector('.message-body')!;

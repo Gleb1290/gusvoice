@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api';
 import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
 import { toastError } from '../toast';
-import { noticeFromRefusal } from '../accessClosed';
 import { takeInviteLink, usePendingInviteLink } from '../deepLinkInvite';
-import { subscribeToServer } from '../sockets';
 import { useStore } from '../store';
 import { unreadOutsideArchive } from '../dmArchiveRules';
-import { confirmAction } from '../confirm';
 import { activeInstanceId, instances } from '../config';
 import { adminTarget } from '../configRules';
 import { openOwnAdmin } from '../instanceSwitch';
@@ -20,12 +16,10 @@ import { railEdges, railScrollClass, RAIL_SCROLLBAR_LINGER_MS, type RailEdges } 
 import { hasUnseen } from '../settingsSeen';
 import { SECTIONS } from '../settingsNav';
 import { CreateServerModal, JoinServerModal } from './ServerActionModals';
-import { ContextMenu, MenuItem, type MenuPos } from './ContextMenu';
+import { GuestGroupMenu, selectServer, ServerMenu, type GuestGroupMenuState, type ServerMenuState } from './ServerMenu';
 
 export function ServerRail() {
   const servers = useStore((s) => s.servers);
-  const currentServerId = useStore((s) => s.currentServerId);
-  const openServer = useStore((s) => s.openServer);
   const loadServers = useStore((s) => s.loadServers);
   const user = useStore((s) => s.user);
   const animatedOn = useAnimatedAvatarsEnabled();
@@ -95,12 +89,11 @@ export function ServerRail() {
     setLinkToCheck(takeInviteLink());
     setShowJoin(true);
   }, [pendingLink]);
-  const pushMutedServers = useStore((s) => s.pushMutedServers);
-  const setPushMuted = useStore((s) => s.setPushMuted);
   // Своё меню по ПКМ (#75). Настройки сервера отсюда НЕ предлагаем: права мы знаем только для
   // ОТКРЫТОГО сервера (они в bootstrap), а показать пункт, который у половины серверов приведёт
   // в отказ, хуже, чем не показать его вовсе.
-  const [menu, setMenu] = useState<{ pos: MenuPos; id: string; name: string; ownerId: string } | null>(null);
+  const [menu, setMenu] = useState<ServerMenuState | null>(null);
+  const [groupMenu, setGroupMenu] = useState<GuestGroupMenuState | null>(null);
 
   const canCreate = !!(user?.superAdmin || user?.canCreateServers);
   // Во время перехода `user` ещё учётка прежнего инстанса (01.10) — права берём из снимка активной записи.
@@ -108,53 +101,11 @@ export function ServerRail() {
   const liveSuper = switching ? !!instances().find((i) => i.id === activeInstanceId())?.superAdmin : !!user?.superAdmin;
   const admin = adminTarget(instances(), activeInstanceId(), liveSuper);
 
-  async function select(id: string) {
-    /**
-     * Закрытый держателем сервер не открываем ВООБЩЕ (§5.3.1): жать по нему человек будет — он
-     * остался в рейле, потому что членство сохранено. Показываем то же окно, что и в момент
-     * закрытия, вместо похода за отказом.
-     */
-    const closed = useStore.getState().closedServers[id];
-    if (closed) {
-      useStore.getState().noteAccessClosed(closed);
-      return;
-    }
-    try {
-      await openServer(id);
-      subscribeToServer(id);
-    } catch (err) {
-      // Закрыли, пока нас не было: узнаём об этом только сейчас, отказом с причиной и контактами.
-      const notice = noticeFromRefusal(err, { id, name: servers.find((x) => x.id === id)?.name ?? 'сервер' });
-      if (notice) useStore.getState().noteAccessClosed(notice);
-      else toastError(err);
-    }
-  }
+  const select = selectServer;
 
   async function afterJoinOrCreate(serverId: string) {
     await loadServers();
     await select(serverId);
-  }
-
-  /** Покинуть сервер (#92). Владельцу пункт не показываем — сервер остался бы без хозяина. */
-  async function leave(serverId: string, name: string) {
-    const ok = await confirmAction({
-      title: `Покинуть сервер «${name}»?`,
-      body: 'Ваши сообщения останутся, но вернуться можно будет только по новому приглашению.',
-      confirmLabel: 'Покинуть',
-    });
-    if (!ok) return;
-    try {
-      await api.leaveServer(serverId);
-      await loadServers();
-      // Уходим со страницы сервера, только если открыт ИМЕННО он: иначе выход из фонового
-      // сервера через ПКМ выкидывал бы из того, что человек сейчас читает.
-      if (useStore.getState().currentServerId === serverId) {
-        useStore.setState({ currentServerId: null, bootstrap: null, currentChannelId: null });
-        setView('dm');
-      }
-    } catch (err) {
-      toastError(err);
-    }
   }
 
   return (
@@ -178,6 +129,7 @@ export function ServerRail() {
       <RailGroups
         onOpenLive={(id) => void select(id)}
         onMenu={(e, s) => setMenu({ pos: { x: e.clientX, y: e.clientY }, id: s.id, name: s.name, ownerId: s.ownerId })}
+        onGroupMenu={(e, group) => setGroupMenu({ pos: { x: e.clientX, y: e.clientY }, group })}
       />
       {canCreate && (
         <button className="rail-icon add" title="Создать сервер" onClick={() => setShowCreate(true)}>
@@ -191,41 +143,8 @@ export function ServerRail() {
       <div className="rail-spacer" />
       {/* Переключателя инстансов здесь больше нет (23.09): переход — группами рейла, добавить/убрать —
           «Настройки › Федерация › Мои инстансы» (`InstancesPanel`). */}
-      {menu && (
-        <ContextMenu pos={menu.pos} onClose={() => setMenu(null)} width={232}>
-          {menu.id !== currentServerId && (
-            <MenuItem
-              icon="chevron-down"
-              label="Открыть"
-              onClick={() => {
-                setMenu(null);
-                void select(menu.id);
-              }}
-            />
-          )}
-          <MenuItem
-            icon={pushMutedServers.includes(menu.id) ? 'bell' : 'bell-off'}
-            label={pushMutedServers.includes(menu.id) ? 'Включить пуши сервера' : 'Отключить пуши сервера'}
-            onClick={() => {
-              const muted = pushMutedServers.includes(menu.id);
-              setMenu(null);
-              setPushMuted('server', menu.id, !muted).catch(toastError);
-            }}
-          />
-          {menu.ownerId !== user?.id && (
-            <MenuItem
-              icon="close"
-              label="Покинуть сервер"
-              danger
-              onClick={() => {
-                const { id, name } = menu;
-                setMenu(null);
-                void leave(id, name);
-              }}
-            />
-          )}
-        </ContextMenu>
-      )}
+      {menu && <ServerMenu menu={menu} onClose={() => setMenu(null)} />}
+      {groupMenu && <GuestGroupMenu menu={groupMenu} onClose={() => setGroupMenu(null)} />}
       {/* 🔴 Кружок «загляни»: в настройках есть то, чего человек ещё не видел (новая настройка из
           обновления). Отметка про ПРОСМОТР, а не про значение, — поэтому отдельная от точки
           «изменено» внутри окна. Гаснет, когда человек до этих групп доберётся. */}

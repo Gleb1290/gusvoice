@@ -1,0 +1,30 @@
+{
+  "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k",
+  "conversation_id": "0199d2b0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "next": null,
+  "items": [
+    {
+      "kind": "react",
+      "entity_id": "0199d2b1-3c4d-7e5f-8a6b-7c8d9e0f1a2b",
+      "entity": {
+        "message_id": "0199d2b1-3c4d-7e5f-8a6b-7c8d9e0f1a2b",
+        "reactions": [{ "user": { "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" }, "emoji": "👍" }]
+      }
+    },
+    {
+      "kind": "pin",
+      "entity_id": "0199d2b1-3c4d-7e5f-8a6b-7c8d9e0f1a2b",
+      "entity": {
+        "message_id": "0199d2b1-3c4d-7e5f-8a6b-7c8d9e0f1a2b",
+        "pinned": true,
+        "by": { "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" }
+      }
+    },
+    {
+      "kind": "read",
+      "entity_id": null,
+      "entity": { "reads": [] }
+    }
+  ],
+  "marks_complete": true
+}

@@ -29,6 +29,8 @@
 #   --no-db-backup      don't copy the database before recreating containers
 #   --install-updater   (root) enable the "Update" button in the admin panel: installs a
 #                       small systemd watcher that runs this script when the panel asks
+#   --map               ask about the own map for location sharing even if you said no before (needs a terminal)
+#   --no-map            don't touch the map at all this time
 #   -y, --yes           don't ask anything, just do it
 #   -h, --help          show this help
 # =============================================================================
@@ -77,7 +79,7 @@ if [ "${GV_UPDATE_LIB_ONLY:-}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
 
 set -euo pipefail
 
-REFRESH_FILES=1; PRUNE=0; ASSUME_YES=0; DB_BACKUP=1; FROM_PANEL=0; INSTALL_UPDATER=0
+REFRESH_FILES=1; PRUNE=0; ASSUME_YES=0; DB_BACKUP=1; FROM_PANEL=0; INSTALL_UPDATER=0; MAP_FORCE=0; NO_MAP=0
 for arg in "$@"; do
   case "$arg" in
     --images-only) REFRESH_FILES=0 ;;
@@ -85,6 +87,8 @@ for arg in "$@"; do
     --no-db-backup) DB_BACKUP=0 ;;
     --install-updater) INSTALL_UPDATER=1 ;;
     --from-panel)  FROM_PANEL=1; ASSUME_YES=1 ;;   # run by the systemd watcher, not by hand
+    --map)         MAP_FORCE=1 ;;
+    --no-map)      NO_MAP=1 ;;
     -y|--yes)      ASSUME_YES=1 ;;
     -h|--help)     sed -n '3,/^# =====/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'Unknown option: %s (try --help)\n' "$arg" >&2; exit 2 ;;
@@ -273,6 +277,7 @@ if [ "$REFRESH_FILES" = "1" ]; then
   # Template dirs (safe to overwrite in place — nothing is executing from them). Your .env drives them.
   [ -d "$new/config" ] && cp -Rf "$new/config/." config/ 2>/dev/null || true
   [ -d "$new/docs" ]   && { mkdir -p docs; cp -Rf "$new/docs/." docs/ 2>/dev/null || true; }
+  [ -d "$new/deploy" ] && { mkdir -p deploy; cp -Rf "$new/deploy/." deploy/ 2>/dev/null || true; }   # own-map installer + country outlines
   chmod +x install.sh update.sh uninstall.sh 2>/dev/null || true
   rm -rf "$tmp"; TMP_DIR=''
   ok "stack files refreshed (.env left untouched)"
@@ -383,6 +388,21 @@ if [ "$FROM_PANEL" = "1" ]; then
   [ "$healthy" = "1" ] || die "the backend didn't become healthy within 5 minutes. See: docker compose logs backend"
   NEW_VERSION="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$backend_id" 2>/dev/null | sed -n 's/^GV_VERSION=//p' | head -n 1 || true)"
   ok "backend is up${NEW_VERSION:+ ($NEW_VERSION)}"
+fi
+
+# --- 3.9) Own map for location sharing (optional, never fails the update) --------
+# Questions and downloads ONLY for a person at a terminal: not with -y, not from the panel button. Otherwise one hint line in the log.
+if [ "$NO_MAP" = "0" ] && [ -f deploy/maps/maps-install.sh ]; then
+  # shellcheck source=deploy/maps/maps-install.sh
+  . deploy/maps/maps-install.sh
+  map_interactive=0
+  if [ "$ASSUME_YES" = "0" ] && [ "$FROM_PANEL" = "0" ] && maps_can_ask; then map_interactive=1; fi
+  maps_update_entry "$map_interactive" "$MAP_FORCE" || true
+  if [ "$MAPS_PLAN_READY" = "1" ]; then
+    maps_apply || true
+    if [ "$MAPS_ENV_CHANGED" = "1" ]; then docker compose "${PROFILES[@]}" up -d backend </dev/null || true
+    elif [ "$MAPS_REPLACED" = "1" ]; then docker compose "${PROFILES[@]}" restart backend </dev/null || true; fi
+  fi
 fi
 
 # --- 4) Optional cleanup -----------------------------------------------------

@@ -1,4 +1,4 @@
-import { eq, or, sql } from 'drizzle-orm';
+import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import { hashPassword, setSuperAdminId } from './auth.js';
 import { db } from './db/index.js';
 import { instanceSettings, users } from './db/schema.js';
@@ -43,6 +43,8 @@ export async function seedSuperAdmin(): Promise<void> {
     displayName: username.trim(),
     passwordHash: await hashPassword(password),
     verified: true,
+    // Без этого аккаунт ждал бы одобрения (колонка пустая по умолчанию, `loginGate`) — у супер-админа некому одобрять.
+    approvedAt: new Date(),
   });
   console.log(
     `[seed] super-admin "${username.trim()}" created (pre-verified). Log in with it, then you can remove SUPERADMIN_PASSWORD from .env.`,
@@ -75,6 +77,14 @@ export async function bindSuperAdmin(): Promise<void> {
     findIdByUsername: async (username) => {
       const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
       return row?.id ?? null;
+    },
+    ensureApproved: async (userId) => {
+      // Только пустое `approved_at` (на проде оно давно стоит — строка не меняется вовсе). Время правки каталога
+      // сдвигается: впервые «одобренный» аккаунт попадает в дельту соседей (F2).
+      await db
+        .update(users)
+        .set({ approvedAt: new Date(), directoryUpdatedAt: new Date() })
+        .where(and(eq(users.id, userId), isNull(users.approvedAt)));
     },
     persist: async (userId) => {
       await db

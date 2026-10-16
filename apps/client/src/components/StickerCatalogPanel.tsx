@@ -71,7 +71,14 @@ export function StickerCatalogPanel() {
 
   const row = (p: StickerCatalogPack, actions: React.ReactNode) => (
     <div className="pack-row" key={p.id}>
-      <button type="button" className="pack-preview" title="Открыть набор" onClick={() => openSet({ packId: p.id })}>
+      <button
+        type="button"
+        className="pack-preview"
+        title="Открыть набор"
+        // B7 (приёмка 13.10): панель живёт только в поле беседы — окно набора отсюда шлёт стикер тапом в эту беседу и закрывается
+        // (Telegram Android `StickersAlert` с делегатом `onStickerSelected`); без открытой беседы (`sender` пуст) — только смотреть.
+        onClick={() => openSet({ packId: p.id, send: useDmStickers.getState().sender ?? undefined })}
+      >
         {p.stickers.slice(0, 5).map((s) => (
           <StickerView key={s.id} url={s.url} format={s.format} emoji={s.emoji} size={32} animate={false} />
         ))}

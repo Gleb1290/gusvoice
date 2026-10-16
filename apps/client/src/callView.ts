@@ -2,7 +2,8 @@
  * Звонки 1:1 в ЛС (08.10, #211, С5, `calls1`) — чистые правила клиента: что показать ЭТОМУ устройству по событию звонка
  * и как подписать фазу. Стор — `callStore.ts`, разметка и медиа — `components/CallLayer.tsx`.
  */
-import { FEATURE_CALLS1, FEATURE_CALLS2, callDurationText, type DmCall } from '@gusvoice/shared';
+import { FEATURE_CALLS1, FEATURE_CALLS2, FEATURE_FEDCALL1, callDurationText, type DmCall } from '@gusvoice/shared';
+import type { IconName } from './components/Icon';
 
 /**
  * Вид звонка на этом устройстве: `incoming` — мне звонят (на всех моих устройствах, пока никто не ответил), `outgoing` —
@@ -30,17 +31,40 @@ export function serverCalls(features: readonly string[] | null | undefined): boo
   return !!features?.includes(FEATURE_CALLS1);
 }
 
+/** Подсказка у неактивной трубки беседы с человеком соседа, чей инстанс не принимает звонки (Э6, `ConvSummary.fedNoCalls`). */
+export const FED_NO_CALLS_TEXT = 'Инстанс собеседника пока не принимает звонки';
+
+/** Сервер умеет звонки между инстансами (`fedcall1`): шлёт `call.host`, отдаёт чужой звонок в `/calls/active?fed=1`. */
+export function serverFedCalls(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_FEDCALL1);
+}
+
+/**
+ * Трубка беседы с человеком другого инстанса (`peerHome` не пуст) неактивна: у нашего сервера нет `fedcall1` или инстанс
+ * собеседника не принимает звонки (`fedNoCalls` сводки). Местная беседа — никогда.
+ */
+export function fedCallsLocked(
+  peerHome: object | string | null | undefined,
+  features: readonly string[] | null | undefined,
+  summary: { fedNoCalls?: true } | null | undefined,
+): boolean {
+  return !!peerHome && (!serverFedCalls(features) || summary?.fedNoCalls === true);
+}
+
 /** «0:07», «12:45», «1:02:03» — счётчик идущего разговора (tdesktop `Ui::FormatDurationText`). */
 /**
  * Объяснение запрета звонков (`presence4`, решение владельца 08.10 п.25): собеседник выбрал «Кто может звонить» так, что мне нельзя.
  * Telegram Desktop (`calls_instance.cpp`) на нажатие трубки показывает окно-справку `lng_call_error_not_available` с кнопкой «ОК»,
- * Android — `CallNotAvailable`; у нас то же окно (`alertDialog`). Пол собеседника неизвестен, поэтому «ограничил(а)».
+ * Android — `CallNotAvailable`; у нас то же окно (`alertDialog`).
+ * Приёмка 15.10 (I3): текст — короткий, как Android `CallNotAvailable` («Sorry, %1$s doesn't accept calls.»,
+ * `VoIPFragment.java` на `ERROR_PRIVACY`), без рода и без длинного совета tdesktop; значок — «запрет» (`ban`), а не «сигнал».
  */
-export function callPrivacyNotice(name: string): { title: string; body: string } {
+export function callPrivacyNotice(name: string): { title: string; body: string; icon: IconName } {
   const who = name.trim() || 'Собеседник';
   return {
     title: 'Позвонить нельзя',
-    body: `${who} ограничил(а) звонки в настройках приватности. Можно попросить изменить настройку или позвонить вам самому.`,
+    body: `${who} не принимает звонки.`,
+    icon: 'ban',
   };
 }
 

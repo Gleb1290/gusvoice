@@ -64,7 +64,7 @@ function measure(top: number, bottom: number, left: number, right: number, zoom 
   } });
   patch(globalThis, 'getComputedStyle', { value: (element: Element) => {
     if (element === document.documentElement) return { zoom: String(zoom) };
-    assert.equal(element, probe, 'измеряется созданная проба');
+    assert.ok(element === probe, 'измеряется созданная проба');
     assert.ok(document.body.contains(element), 'измерение только после подключения к DOM');
     checkProbe(written.get(element) ?? '');
     measurements++;

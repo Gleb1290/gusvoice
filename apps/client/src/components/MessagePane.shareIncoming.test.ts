@@ -47,7 +47,7 @@ for (const phone of [false, true]) {
         await h.mount({ feedId: 'c', outbox, onSend: async () => { sent++; } }, component); await input(draft);
         await act(async () => { useStore.getState().setSharedIn({ convId: 'c', files: [new File(['data'], 'incoming.txt', { type: 'text/plain' })], text: 'подпись' }); await h.flush(); });
         if (phone) {
-          assert.equal(document.querySelector('.sfb'), null, 'на телефоне отдельного окна нет');
+          assert.equal(document.querySelector('.sfb') === null, true, 'на телефоне отдельного окна нет');
           assert.match(h.host.querySelector('.pending-atts')?.textContent ?? '', /incoming\.txt/, 'файл виден в полосе composer');
           assert.equal(field().value, 'черновик\nподпись');
         } else {
@@ -57,7 +57,7 @@ for (const phone of [false, true]) {
           assert.equal(document.querySelector<HTMLTextAreaElement>('.sfb-caption')?.value,
             draft ? 'черновик подпись' : 'подпись', 'подпись окна сохраняет черновик перед входящим текстом');
           assert.equal(field().value, draft, 'подпись окна не дублируется в черновике');
-          assert.equal(h.host.querySelector('.pending-atts'), null);
+          assert.equal(h.host.querySelector('.pending-atts') === null, true);
         }
         assert.equal(useStore.getState().sharedIn, null);
         assert.equal(enqueued, 0, 'входящий файл сам не попадает в очередь');
@@ -91,7 +91,7 @@ for (const mode of ['readOnly', 'edit'] as const) {
     assert.equal(useToasts.getState().toasts.length, count + 1);
     assert.equal(useToasts.getState().toasts.at(-1)!.title, mode === 'edit' ? 'Сначала закончите правку сообщения' : 'В эту беседу писать нельзя');
     assert.equal(useStore.getState().sharedIn, null);
-    assert.equal(document.querySelector('.sfb'), null); assert.equal(h.host.querySelector('.pending-atts'), null);
+    assert.equal(document.querySelector('.sfb') === null, true); assert.equal(h.host.querySelector('.pending-atts') === null, true);
     if (mode === 'edit') assert.equal(field().value, 'edit-share', 'пришедшее не подмешано в правку');
   });
 }

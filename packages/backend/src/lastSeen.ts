@@ -1,12 +1,13 @@
-import type { ConvReadAt, LastSeenExceptions, UserLastSeen } from '@gusvoice/shared';
+import type { ConvReadAt, ConvReaders, LastSeenExceptions, UserLastSeen } from '@gusvoice/shared';
 import { and, eq, inArray, or } from 'drizzle-orm';
 import { peerReadKeys, type ConvAccess } from './conversations.js';
 import { isBlockedBy } from './blocks.js';
 import { db } from './db/index.js';
 import { arePeers, loadPeers } from './db/peerQueries.js';
-import { conversationMessages, lastSeenExceptions, users } from './db/schema.js';
+import { conversationMembers, conversationMessages, lastSeenExceptions, userBlocks, users } from './db/schema.js';
 import { isUserDmPresent } from './gateway.js';
 import {
+  groupReaders,
   LAST_SEEN_EXCEPTIONS_MAX,
   lastSeenView,
   normalizeLastSeenPrivacy,
@@ -20,7 +21,28 @@ import {
  * «Был(а) в сети» и «Прочитано в …» (С1, #211) — база + шлюз вокруг чистых `lastSeenRules.ts`.
  */
 
-type SideRow = ReadTimeSide & { lastSeenAt: Date | null; deleted: boolean };
+type SideRow = ReadTimeSide & { lastSeenAt: Date | null; deleted: boolean; remote?: boolean };
+
+/**
+ * ЛС между инстансами, Э4 (#141, `dm3`): время захода человека соседа (теневая строка `subjectId`) глазами нашего `viewerId` —
+ * итог правил ЕГО дома, присланный этим домом (`federation/dmEphemeral.ts`): `shares` — точное время видно (`lastSeenAt`), иначе
+ * только примерное (`lastSeenAt` — представитель категории, наружу не уходит). `null` — дом ничего не присылал: строка как есть.
+ * Задаёт `index.ts` (крючок, без импорта: модуль проверки исполняют с закрытым перечнем зависимостей).
+ */
+export type RemoteLastSeen = (subjectId: string, viewerId: string) => { shares: boolean; lastSeenAt: Date | null } | null;
+let remoteLastSeen: RemoteLastSeen | null = null;
+export function configureRemoteLastSeen(fn: RemoteLastSeen | null): void {
+  remoteLastSeen = fn;
+}
+
+/** Сторона человека соседа: правило и исключения его дома уже применены там — здесь «всем» либо «никому». */
+function withRemote(subject: SideRow, viewerId: string): SideRow {
+  const r = remoteLastSeen?.(subject.id, viewerId);
+  // Исправления ревью 12.10, п. 8: от дома ничего — правила его дома нам неизвестны, местная теневая строка (гостевые заходы)
+  // их не заменяет: «никому» и без времени.
+  if (!r) return subject.remote ? { ...subject, lastSeenAt: null, privacy: 'nobody', exceptions: undefined } : subject;
+  return { ...subject, lastSeenAt: r.lastSeenAt, privacy: r.shares ? 'everyone' : 'nobody', exceptions: undefined };
+}
 
 /**
  * Исключения, которые меняют картину между зрителем и людьми `ids` (G07, `lastseen3`): МОИ списки про них и ИХ записи про меня
@@ -56,6 +78,7 @@ async function loadSides(ids: string[], viewerForExceptions?: string): Promise<M
       hideReadTime: users.hideReadTime,
       presence: users.presenceStatus,
       deletedAt: users.deletedAt,
+      home: users.homeInstanceId,
     })
     .from(users)
     .where(inArray(users.id, ids));
@@ -71,6 +94,7 @@ async function loadSides(ids: string[], viewerForExceptions?: string): Promise<M
         hideReadTime: r.hideReadTime,
         invisible: r.presence === 'invisible',
         deleted: !!r.deletedAt,
+        remote: !!r.home,
       },
     ]),
   );
@@ -79,11 +103,15 @@ async function loadSides(ids: string[], viewerForExceptions?: string): Promise<M
 /** «В сети» / «был(а) …» человека глазами `viewerId`. Нет такого (или удалён) — `null`. */
 export async function lastSeenFor(viewerId: string, subjectId: string): Promise<UserLastSeen | null> {
   const sides = await loadSides([viewerId, subjectId], viewerId);
-  const subject = sides.get(subjectId);
+  const stored = sides.get(subjectId);
   const viewer = sides.get(viewerId);
-  if (!subject || !viewer || subject.deleted) return null;
+  if (!stored || !viewer || stored.deleted) return null;
+  const subject = withRemote(stored, viewerId);
   const isPeer = viewerId === subjectId ? true : await arePeers(viewerId, subjectId);
-  return lastSeenView({ subject, viewer, isPeer, connected: isUserDmPresent(subjectId), now: Date.now() });
+  // F5 (приёмка 13.10): заблокировавший меня — «был(а) давно», как у Telegram. Человек соседа, заблокировавший меня у себя
+  // дома, сюда не попадает (его блок наш инстанс не знает) — «давно» даёт пустой вид из его дома (`dmEphemeral.fedBlockChanged`).
+  const blockedViewer = viewerId !== subjectId && (await isBlockedBy(subjectId, viewerId));
+  return lastSeenView({ subject, viewer, isPeer, connected: isUserDmPresent(subjectId), now: Date.now(), blockedViewer });
 }
 
 /** Сколько людей за один запрос `POST /users/last-seen` (строки беседы + участники групп на экране). */
@@ -103,9 +131,11 @@ export async function lastSeenForMany(viewerId: string, subjectIds: readonly str
   const now = Date.now();
   const out: UserLastSeen[] = [];
   for (const id of ids) {
-    const subject = sides.get(id);
-    if (!subject || subject.deleted) continue;
-    out.push(lastSeenView({ subject, viewer, isPeer: id === viewerId || peers.has(id), connected: isUserDmPresent(id), now }));
+    const stored = sides.get(id);
+    if (!stored || stored.deleted) continue;
+    const blockedViewer = id !== viewerId && (await isBlockedBy(id, viewerId)); // F5: заблокировавший меня — «давно»
+    const subject = withRemote(stored, viewerId);
+    out.push(lastSeenView({ subject, viewer, isPeer: id === viewerId || peers.has(id), connected: isUserDmPresent(id), now, blockedViewer }));
   }
   return out;
 }
@@ -147,6 +177,77 @@ export async function readAtFor(me: string, access: ConvAccess, messageId: strin
   const hidden =
     !mine || !theirs || (await isBlockedBy(peerId, me)) ? true : readTimeHidden(mine, theirs, await arePeers(me, peerId));
   return readAtView({ read, readAt: msg.readAt, createdAt: msg.createdAt, hidden, now: Date.now() });
+}
+
+/**
+ * «Кто прочитал» СВОЁ сообщение в группе (15.10, `readers1`, `GET /conv/:id/messages/:mid/readers`). Не группа («Избранное»,
+ * 1:1 — у него `read-at`), чужое или удалённое сообщение, нет такого — `null` (404). Правила — `lastSeenRules.groupReaders`;
+ * здесь только чтение: «прочитано до» действующих участников, стороны времени захода, блокировки в обе стороны, «собеседники».
+ * Люди соседа в группе — по их `last_read_key` у нас (строки `read` хоста, `dmgroupmarks1`); нет отметок — их и нет в списке.
+ */
+export async function readersFor(me: string, access: ConvAccess, messageId: string): Promise<ConvReaders | null> {
+  if (access.kind !== 'group' || access.saved || access.peerId) return null;
+  const [msg] = await db
+    .select({
+      authorId: conversationMessages.authorId,
+      sortKey: conversationMessages.sortKey,
+      createdAt: conversationMessages.createdAt,
+      deletedAt: conversationMessages.deletedAt,
+    })
+    .from(conversationMessages)
+    .where(and(eq(conversationMessages.id, messageId), eq(conversationMessages.conversationId, access.conversationId)))
+    .limit(1);
+  if (!msg || msg.authorId !== me || msg.deletedAt) return null;
+  const others = access.memberIds.filter((id) => id !== me);
+  if (others.length === 0) {
+    // В группе, кроме автора, никого: срок «кто прочитал» решает то же правило (`groupReaders`), что и при участниках —
+    // старое сообщение отвечает `expired`, а не пустым списком (находка Codex R239).
+    const solo = (await loadSides([me], me)).get(me);
+    if (!solo) return null;
+    const view = groupReaders({ me: solo, sortKey: msg.sortKey, createdAt: msg.createdAt, now: Date.now(), members: [] });
+    return view.expired ? { items: [], expired: true } : { items: [] };
+  }
+  const [keys, sides, blockRows, peers] = await Promise.all([
+    db
+      .select({ id: conversationMembers.userId, key: conversationMembers.lastReadKey })
+      .from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, access.conversationId), inArray(conversationMembers.userId, others))),
+    loadSides([me, ...others], me),
+    db
+      .select({ blocker: userBlocks.blockerId, blocked: userBlocks.blockedId })
+      .from(userBlocks)
+      .where(
+        or(
+          and(eq(userBlocks.blockerId, me), inArray(userBlocks.blockedId, others)),
+          and(inArray(userBlocks.blockerId, others), eq(userBlocks.blockedId, me)),
+        ),
+      ),
+    loadPeers(me),
+  ]);
+  const mine = sides.get(me);
+  if (!mine) return null;
+  const keyOf = new Map(keys.map((k) => [k.id, Number(k.key)]));
+  const blocked = new Set(blockRows.map((b) => (b.blocker === me ? b.blocked : b.blocker)));
+  const members = others.flatMap((id) => {
+    const side = sides.get(id);
+    return side
+      ? [{ ...side, lastReadKey: keyOf.get(id) ?? 0, blocked: blocked.has(id), isPeer: peers.has(id) }]
+      : [];
+  });
+  const view = groupReaders({ me: mine, sortKey: msg.sortKey, createdAt: msg.createdAt, now: Date.now(), members });
+  if (view.expired) return { items: [], expired: true };
+  if (view.ids.length === 0) return { items: [] };
+  const rows = await db
+    .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl })
+    .from(users)
+    .where(inArray(users.id, view.ids));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return {
+    items: view.ids.flatMap((id) => {
+      const r = byId.get(id);
+      return r ? [{ userId: r.id, username: r.username, displayName: r.displayName, avatarUrl: r.avatarUrl }] : [];
+    }),
+  };
 }
 
 type ExceptionKind = 'always' | 'never';

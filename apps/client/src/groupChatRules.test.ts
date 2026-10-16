@@ -4,7 +4,7 @@ import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
-import type { ConvSummary } from '@gusvoice/shared';
+import type { ConvSummary, User } from '@gusvoice/shared';
 import * as convSyncRules from './convSyncRules';
 import * as rules from './groupChatRules';
 import * as pluralRules from './plural';
@@ -76,4 +76,134 @@ it('цвет автора стабилен, лежит в семи токена�
   check(load('return h % PEER_COLOR_COUNT;', 'return h % PEER_COLOR_COUNT;'));
   assert.throws(() => check(load('return h % PEER_COLOR_COUNT;', 'return id.length % PEER_COLOR_COUNT;')), assert.AssertionError,
     'мутант заменяет стабильный FNV-1a цвет длиной имени');
+});
+
+it('группы соседей требуют fedm6, а свои доступны всегда', () => {
+  // Без проверки флага чужой участник выглядит выбираемым, а при ошибочной проверке теряется и свой.
+  const check = (api: typeof rules) => {
+    assert.equal(api.serverFedGroups(['dm2once', 'fedm6']), true, 'fedm6 включает смешанные группы');
+    assert.equal(api.serverFedGroups(['dm2once']), false, 'одной поддержки лички недостаточно');
+    assert.equal(api.serverFedGroups([]), false, 'пустой список не включает смешанные группы');
+    assert.equal(api.serverFedGroups(null), false, 'неизвестные признаки не включают смешанные группы');
+    assert.equal(api.serverFedGroups(undefined), false, 'отсутствие списка фич безопасно');
+    assert.equal(api.groupPickable({ homeInstance: null }, false), true, 'свой участник доступен без fedm6');
+    assert.equal(api.groupPickable({}, false), true, 'участник без homeInstance считается своим');
+    assert.equal(api.groupPickable({ homeInstance: { instanceId: 'home-peer', name: null, domain: 'peer.test' } }, false), false,
+      'сосед недоступен без fedm6');
+    assert.equal(api.groupPickable({ homeInstance: { instanceId: 'home-peer', name: null, domain: 'peer.test' } }, true), true,
+      'сосед доступен с fedm6');
+  };
+  const source = readFileSync(new URL('./groupChatRules.ts', import.meta.url), 'utf8');
+  const load = (from: string, to: string): typeof rules => {
+    assert.ok(source.includes(from), 'точка мутации доступности найдена');
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports, require: (id: string) => {
+        if (id === '@gusvoice/shared') return shared;
+        if (id === './convSyncRules') return convSyncRules;
+        if (id === './plural') return pluralRules;
+        throw new Error(`неожиданный импорт ${id}`);
+      } });
+    return module.exports as typeof rules;
+  };
+  check(rules);
+  assert.throws(() => check(load('return !u.homeInstance || fedGroups;', 'return !u.homeInstance && fedGroups;')),
+    (error) => error instanceof assert.AssertionError && error.message.startsWith('свой участник доступен без fedm6')
+      && error.actual === false && error.expected === true,
+    'мутант && fedGroups ошибочно скрывает своих');
+});
+
+it('подписи дома группы используют имя, домен и источник-хост по приоритету', () => {
+  // Участник хоста — главный источник имени; 1:1 только запасной источник, а пробельное имя не должно затмить домен.
+  const home = (instanceId: string, name?: string, domain?: string): NonNullable<User['homeInstance']> => ({
+    instanceId, name: name ?? null, domain: domain ?? '',
+  });
+  const check = (api: typeof rules) => {
+    assert.equal(api.groupHomeLabel(home('n1', '  Дом соседа  ', 'neighbor.test')), 'Дом соседа');
+    assert.equal(api.groupHomeLabel(home('n1', '   ', 'neighbor.test')), 'neighbor.test');
+    assert.equal(api.groupHomeLabel(home('n1')), null);
+    assert.equal(api.groupHomeLabel(null), null);
+    assert.equal(api.groupHomeLabel(undefined), null);
+    const memberHome = home('host', 'Участник хоста');
+    const dmHome = home('host', 'Собеседник 1:1');
+    assert.equal(api.groupHostHome('host', [{ homeInstance: memberHome }], [{ otherUser: { homeInstance: dmHome } }])?.name, 'Участник хоста',
+      'дом участника имеет приоритет над собеседником 1:1');
+    assert.equal(api.groupHostHome('host', [], [{ otherUser: { homeInstance: dmHome } }])?.name, 'Собеседник 1:1');
+    assert.equal(api.groupHostHome('missing', [{ homeInstance: memberHome }]), null);
+    assert.equal(api.groupHostHome(null, [{ homeInstance: memberHome }]), null);
+    assert.equal(api.groupOpPending({ pending: true }), true, 'только подтверждённый ответ означает ожидание');
+    for (const value of [{ pending: false }, { pending: 'true' }, {}, null, 'pending'])
+      assert.equal(api.groupOpPending(value), false, 'похожие или отсутствующие флаги не означают ожидание');
+    assert.equal(api.fedGroupPendingText('Дом'), 'Запрос отправлен инстансу «Дом»');
+    assert.equal(api.fedGroupPendingText(null), 'Запрос отправлен инстансу, где живёт группа');
+    assert.equal(api.fedGroupPhotoHint('Дом'), 'Фото меняется на инстансе «Дом»');
+    assert.equal(api.fedGroupPhotoHint(null), 'Фото меняется на инстансе, где живёт группа');
+    assert.equal(api.fedGroupDownText('Дом'), 'Инстанс «Дом», где живёт группа, недоступен — сообщения доедут, когда он вернётся; состав сейчас не меняется');
+    assert.equal(api.fedGroupDownText(null), 'Инстанс, где живёт группа, недоступен — сообщения доедут, когда он вернётся; состав сейчас не меняется');
+  };
+  const source = readFileSync(new URL('./groupChatRules.ts', import.meta.url), 'utf8');
+  const load = (from: string, to: string): typeof rules => {
+    assert.ok(source.includes(from), 'точка мутации приоритета дома найдена');
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports, require: (id: string) => {
+        if (id === '@gusvoice/shared') return shared;
+        if (id === './convSyncRules') return convSyncRules;
+        if (id === './plural') return pluralRules;
+        throw new Error(`неожиданный импорт ${id}`);
+      } });
+    return module.exports as typeof rules;
+  };
+  check(rules);
+  const memberLoop = '  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;\n  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;';
+  const dmFirst = '  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;\n  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;';
+  assert.throws(() => check(load(memberLoop, dmFirst)),
+    (error) => error instanceof assert.AssertionError && error.message.startsWith('дом участника имеет приоритет над собеседником 1:1')
+      && error.actual === 'Собеседник 1:1' && error.expected === 'Участник хоста',
+    'мутант меняет приоритет источников дома группы');
+});
+
+it('отказ приглашения называет только выбранные инстансы, убирает повторы и даёт безопасный fallback', () => {
+  // Фильтр по userIds важен при смешанном выборе: общий текст всех чужих инстансов обещает неверную причину.
+  const picked = [
+    { id: 'own', homeInstance: null },
+    { id: 'peer-a', homeInstance: { instanceId: 'a', name: 'Дом А', domain: 'a.test' } },
+    { id: 'peer-a-copy', homeInstance: { instanceId: 'a2', name: 'Дом А', domain: 'a2.test' } },
+    { id: 'peer-b', homeInstance: { instanceId: 'b', name: null, domain: 'b.test' } },
+    { id: 'peer-unknown', homeInstance: { instanceId: 'c', name: null, domain: '' } },
+  ];
+  const check = (api: typeof rules) => {
+    assert.equal(api.groupNotInvitableText(['peer-a', 'peer-a-copy', 'own', 'peer-a'], picked),
+      'Нельзя позвать: инстанс «Дом А» не поддерживает группы', 'один дом дедуплицируется по подписи');
+    assert.equal(api.groupNotInvitableText(['peer-a', 'peer-b'], picked),
+      'Нельзя позвать: инстансы «Дом А», «b.test» не поддерживают группы', 'два выбранных дома перечисляются один раз');
+    assert.equal(api.groupNotInvitableText([], picked),
+      'Нельзя позвать: инстансы «Дом А», «b.test» не поддерживают группы', 'пустой отказанный список означает все выбранные дома');
+    assert.equal(api.groupNotInvitableText(undefined, picked),
+      'Нельзя позвать: инстансы «Дом А», «b.test» не поддерживают группы', 'отсутствующий список означает все выбранные дома');
+    assert.equal(api.groupNotInvitableText(['peer-unknown', 'own'], picked),
+      'Нельзя позвать: инстанс этого человека не поддерживает группы', 'без имени и только свой участник не раскрывают чужой дом');
+    assert.equal(api.groupNotInvitableText(['not-picked'], picked),
+      'Нельзя позвать: инстанс этого человека не поддерживает группы', 'невыбранный id не подмешивает чужие дома');
+    assert.equal(api.groupNotInvitableText(undefined, []),
+      'Нельзя позвать: инстанс этого человека не поддерживает группы', 'без выбора остаётся человеческий запасной текст');
+  };
+  const source = readFileSync(new URL('./groupChatRules.ts', import.meta.url), 'utf8');
+  const load = (from: string, to: string): typeof rules => {
+    assert.ok(source.includes(from), 'точка мутации фильтра отказанных id найдена');
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports, require: (id: string) => {
+        if (id === '@gusvoice/shared') return shared;
+        if (id === './convSyncRules') return convSyncRules;
+        if (id === './plural') return pluralRules;
+        throw new Error(`неожиданный импорт ${id}`);
+      } });
+    return module.exports as typeof rules;
+  };
+  check(rules);
+  assert.throws(() => check(load('(!ids || ids.has(p.id))', 'true')),
+    (error) => error instanceof assert.AssertionError && error.message.startsWith('один дом дедуплицируется по подписи')
+      && error.expected === 'Нельзя позвать: инстанс «Дом А» не поддерживает группы',
+    'мутант без фильтра userIds подмешивает неотказанные дома');
 });

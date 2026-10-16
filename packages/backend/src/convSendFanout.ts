@@ -6,29 +6,27 @@ import { contactNamesFor } from './contacts.js';
 import { pushNameFor } from './contactRules.js';
 import { conversations, userBlocks, users } from './db/schema.js';
 import { groupMuteTarget, groupPushTitle } from './groupRules.js';
-import { publishLegacySend } from './dmLegacyEvents.js';
 import { contentPreview, pushAlwaysUsers, pushThrottleSource, sendPushToUsers, stickerPushText, withSilent, type PushPayload } from './push.js';
 
 /**
  * Что происходит ПОСЛЕ фиксации нового сообщения беседы — одно место для обычной отправки (`POST /conv/:id/messages`) и
  * отложенной (С4: планировщик и «Отправить сейчас», `scheduled.ts`), чтобы правила у них не разошлись:
- * 1. старые события `dm.channel`/`dm.create` — соединениям без `conv1` (десктоп/APK 0.8.x); их сбой ответ не портит;
- * 2. `conv.change` (`deliver`) — соединениям с `conv1`, обоим, `created`; у отложенного следом — список автору;
- * 3. пуш получателю, если план доставки его уведомляет (заблокировавшему автора — нет): один на получателя от
+ * 1. `conv.change` (`deliver`) — соединениям с `conv1`, обоим, `created`; у отложенного следом — список автору;
+ * 2. пуш получателю, если план доставки его уведомляет (заблокировавшему автора — нет): один на получателя от
  *    отправителя за окно, заглушка «ЛС этого человека» чтится, «без звука» (С3) — `silent: true` и своё окно.
- * Старая рассылка — ДО `deliver` (как в `/api/dm*`): упади `deliver`, повтор запроса событий уже не шлёт, а старый клиент
- * журнала не догоняет. Пуш — в фоне: хранилище подписок не вправе задерживать ответ.
+ * Пуш — в фоне: хранилище подписок не вправе задерживать ответ. Старые события `dm.*` клиентам 0.8.x сняты (вывод
+ * старых ЛС, шаг 5).
  */
 export interface SentMessage {
   /** Автор. */
   me: string;
   peerId: string | null;
   /**
-   * Группа (07.10, `groups1`): действующие участники. Старых событий `dm.*` у группы нет (старый клиент групп не знает),
-   * пуш — каждому, кроме автора и заблокировавших его: «Имя в «Название»» и текст (`groupRules.groupPushTitle`).
+   * Группа (07.10, `groups1`): действующие участники. Пуш — каждому, кроме автора и заблокировавших его:
+   * «Имя в «Название»» и текст (`groupRules.groupPushTitle`).
    */
   groupMemberIds?: readonly string[];
-  /** «Избранное» (08.10, `saved1`): беседа с самим собой — старых событий `dm.*` нет (старый клиент её не знает), пуша нет. */
+  /** «Избранное» (08.10, `saved1`): беседа с самим собой — пуша нет. */
   saved?: boolean;
   conversationId: string;
   row: { id: string; createdAt: Date; sortKey?: number };
@@ -49,10 +47,14 @@ export interface SentMessage {
 export async function fanOutSend(s: SentMessage): Promise<void> {
   if (s.groupMemberIds) return fanOutGroup(s, s.groupMemberIds);
   if (s.saved) return deliver(s.delivery);
-  await publishLegacySend(s.me, s.peerId, s.conversationId, s.row, s.notifyRecipient).catch(() => {});
   await deliver(s.delivery);
   if (!s.notifyRecipient || !s.peerId) return;
   const peerId = s.peerId;
+  // ЛС между инстансами (Э2, `docs/dm/FEDERATION.md` §3.8): собеседник с другого инстанса — пуш шлёт ЕГО дом по своей копии;
+  // через нас (`guest.notify`) ничего не идёт: такое событие ещё и встало бы в очереди связки перед звонком в дверь
+  // `conv.changed` и задержало бы доставку на проход очереди.
+  const [peerRow] = await db.select({ home: users.homeInstanceId }).from(users).where(eq(users.id, peerId)).limit(1);
+  if (peerRow?.home) return;
   const [author] = await db
     .select({ displayName: users.displayName, avatarUrl: users.avatarUrl })
     .from(users)
@@ -123,8 +125,11 @@ function pushGroup(
     const blockers = await blockedMe(me, memberIds);
     const groupsOff = await groupPushOff(memberIds, conversationId);
     const names = await contactNamesFor(me, memberIds.filter((id) => id !== me));
+    const elsewhere = await homedElsewhere(memberIds);
     for (const id of memberIds) {
       if (id === me || blockers.has(id) || groupsOff.has(id)) continue;
+      // Э7 (#141): участник с другого инстанса — пуш шлёт ЕГО дом по своей копии (как 1:1 выше, `fanOutSend`).
+      if (elsewhere.has(id)) continue;
       const mode = await pushBurst(id, pushThrottleSource(conversationId, silent));
       if (mode === 'drop') continue;
       const name = pushNameFor(names, id, who.author);
@@ -188,6 +193,19 @@ async function groupPushOff(ids: readonly string[], conversationId: string): Pro
     groupMuteTarget(conversationId),
   );
   return new Set(rows.map((r) => r.id).filter((id) => !always.has(id)));
+}
+
+/**
+ * Кто из `ids` — человек другого инстанса (теневая строка, `users.home_instance_id`; Э7 #141, приёмка 13.10). Пуш группы ему
+ * не шлём: его дом будит телефон сам по своей копии (`federation/convAccept.applyMessage` → `fanOutSend`, `groupMemberIds`
+ * — только свои), а наш пуш ушёл бы его дому событием `guest.notify` и встал бы в очереди связки ПЕРЕД звонком в дверь
+ * (`eventStream.sendEventTo`: раньше стоящее в очереди — звонок тоже в очередь, до прохода `outbox.runOutboxPass`), так
+ * что дом участника забирал новую группу и её сообщения с опозданием — как у 1:1 до правила в `fanOutSend`.
+ */
+export async function homedElsewhere(ids: readonly string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = await db.select({ id: users.id, home: users.homeInstanceId }).from(users).where(inArray(users.id, [...ids]));
+  return new Set(rows.filter((r) => r.home !== null).map((r) => r.id));
 }
 
 /** Кто из `ids` заблокировал `me` — им пуш из группы не шлём. */

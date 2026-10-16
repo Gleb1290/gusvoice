@@ -50,6 +50,79 @@ function fixture() {
   };
 }
 
+async function remoteTypingScenario(relay = relayTyping) {
+  const f = fixture();
+  const remote: unknown[][] = [];
+  f.deps.remoteTyping = (...args) => { remote.push(args); };
+  f.deps.connsOf = () => [];
+  for (const action of [undefined, 'typing', 'unknown', 'voice_upload', 'round']) {
+    await relay(f.deps, f.conn, { dmId: 'dm', action });
+  }
+  assert.deepEqual(remote, [
+    ['dm', 'alice', 'bob', 'typing'], ['dm', 'alice', 'bob', 'typing'], ['dm', 'alice', 'bob', 'typing'],
+    ['dm', 'alice', 'bob', 'voice_upload'], ['dm', 'alice', 'bob', 'round'],
+  ], 'удалённый набор получает нормализованное действие');
+  assert.equal(f.sent.length, 0);
+  remote.length = 0;
+  f.deps.connsOf = () => [{ socket: 'bob-pc' }];
+  await relay(f.deps, f.conn, { dmId: 'dm', action: 'voice' });
+  assert.equal(remote.length, 0, 'живой местный сокет исключает удалённую пересылку');
+  assert.equal(f.sent.length, 1);
+}
+
+it('R197 удалённый набор уходит только без сокетов и сохраняет обычное typing без поля action', async () => {
+  await remoteTypingScenario();
+});
+
+it('R197 удалённая пересылка до проверки сокетов поймана на парной местной доставке', async () => {
+  const original = readFileSync(new URL('./gatewayTyping.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const from = "if (conns.length === 0 || deps.isRemote?.(route.peerId)) {\n      deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');";
+  assert.equal(original.split(from).length, 2, 'уникальный якорь remoteTyping');
+  const mutated = original.replace(from, "deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');\n    if (conns.length === 0) {");
+  const load = (source: string) => {
+    const module = { exports: {} as typeof import('./gatewayTyping.js') };
+    const deps: Record<string, unknown> = {
+      '@gusvoice/shared': { parseTypingAction, typingActionField, typingActionFor },
+      './blockRules.js': { reachesPeer }, './gatewayRules.js': { typingRoute },
+    };
+    runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
+      module, exports: module.exports, require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `явный импорт ${id}`); return deps[id]; },
+    });
+    return module.exports.relayTyping;
+  };
+  await remoteTypingScenario(load(original));
+  await assert.rejects(remoteTypingScenario(load(mutated)), e => e instanceof assert.AssertionError && e.message.includes('живой местный сокет исключает'));
+});
+
+async function guestTypingScenario(relay = relayTyping) {
+  const f = fixture(); const remote: unknown[][] = [];
+  f.deps.remoteTyping = (...args) => { remote.push(args); };
+  f.deps.isRemote = id => id === 'bob';
+  await relay(f.deps, f.conn, { dmId: 'dm', action: 'round' });
+  assert.equal(f.sent.length, 0, 'гостевые сокеты тени не заменяют дом при наборе в ЛС');
+  assert.deepEqual(remote, [['dm', 'alice', 'bob', 'round']]);
+  f.deps.isRemote = () => false; remote.length = 0;
+  await relay(f.deps, f.conn, { dmId: 'dm', action: 'voice' });
+  assert.equal(f.sent.length, 2); assert.deepEqual(remote, []);
+}
+it('R201 набор тени с гостевыми сокетами всё равно уходит дому, местный собеседник получает обычную доставку', async () => {
+  await guestTypingScenario();
+});
+it('R201 мутант без isRemote ловится утечкой набора в гостевые сокеты', async () => {
+  const original = readFileSync(new URL('./gatewayTyping.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const from = 'if (conns.length === 0 || deps.isRemote?.(route.peerId))'; assert.equal(original.split(from).length, 2);
+  const load = (code: string) => {
+    const module = { exports: {} as typeof import('./gatewayTyping.js') };
+    const deps: Record<string, unknown> = { '@gusvoice/shared': { parseTypingAction, typingActionField, typingActionFor }, './blockRules.js': { reachesPeer }, './gatewayRules.js': { typingRoute } };
+    runInNewContext(ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
+      module, exports: module.exports, require(id: string) { assert.ok(Object.hasOwn(deps, id)); return deps[id]; },
+    });
+    return module.exports.relayTyping;
+  };
+  await guestTypingScenario(load(original));
+  await assert.rejects(guestTypingScenario(load(original.replace(from, 'if (conns.length === 0)'))), e => e instanceof assert.AssertionError && e.message.includes('гостевые сокеты тени'));
+});
+
 it('кружок в ЛС и группе выбирает action отдельно для каждого устройства, канал не понижает вид', async () => {
   const source = readFileSync(new URL('./gatewayTyping.ts', import.meta.url), 'utf8');
   const load = (code: string) => {

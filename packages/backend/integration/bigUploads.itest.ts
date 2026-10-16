@@ -61,6 +61,17 @@ beforeEach(async()=>{
 });
 after(async()=>{await app.close();setStore(null);redis.disconnect();await t.close();});
 
+test('R140 ровно 1 ГиБ начинает 128 частей, лишний байт получает 413 без новой сессии',async()=>{
+  // Проверяем объявленный размер, не выделяя гигабайт памяти и не подменяя настоящий лимит константой из приложения.
+  const GiB=1024*1024*1024;
+  const accepted=await start(GiB);assert.equal(accepted.statusCode,201,accepted.body);
+  assert.equal(accepted.json().parts,128);assert.equal(accepted.json().partSize,8*1024*1024);
+  const denied=await start(GiB+1);assert.equal(denied.statusCode,413,denied.body);
+  assert.equal(sessions.size,1);
+  const rows=await t.raw.query<{size:number}>('SELECT size FROM attachment_uploads');
+  assert.equal(rows.rows.length,1);assert.equal(Number(rows.rows[0].size),GiB);
+});
+
 test('R127 старт, две части, сборка и отправка дают получателю тот же файл, повтор сборки идемпотентен',async()=>{
   // Ловит разрыв между временной загрузкой, pending-вложением и настоящей доставкой.
   const bytes=Buffer.concat([Buffer.alloc(BIGFILE_PART_BYTES,1),Buffer.from('end')]);
@@ -148,10 +159,69 @@ test('R127 одиночный файл ровно 25 МиБ принимаетс
 async function sourceModule<T>(relative:string,from?:string,to?:string,overrides:Record<string,unknown>={}):Promise<T>{
   const url=new URL(relative,import.meta.url);let source=readFileSync(url,'utf8').replace(/\r\n/g,'\n');
   if(from){assert.ok(source.includes(from),`якорь ${from}`);source=source.replace(from,to!);}
-  const parsed=ts.createSourceFile(url.pathname,source,ts.ScriptTarget.Latest,true);const imports:Record<string,unknown>={};
-  for(const decl of parsed.statements){if(!ts.isImportDeclaration(decl)||!ts.isStringLiteral(decl.moduleSpecifier)||decl.importClause?.isTypeOnly)continue;const spec=decl.moduleSpecifier.text;imports[spec]=overrides[spec]??await import(spec.startsWith('.')?new URL(spec,url).href:spec);}
-  const module={exports:{}};runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports,Buffer,URL,Date,Map,Set,Promise,console,fetch:globalThis.fetch,require:(spec:string)=>{assert.ok(spec in imports);return imports[spec];}});return module.exports as T;
+  const parsed=ts.createSourceFile(url.pathname,source,ts.ScriptTarget.Latest,true);
+  const specs=new Set<string>();const imports=new Map<string,unknown>();
+  // CommonJS-транспиляция превращает await import() в отложенный require().
+  // Собираем и эти зависимости до исполнения, не открывая произвольный require
+  // или повторную загрузку БД/Redis вне настоящего ESM-кеша harness.
+  const collect=(node:ts.Node):void=>{
+    if(ts.isImportDeclaration(node)&&!node.importClause?.isTypeOnly){
+      assert.ok(ts.isStringLiteral(node.moduleSpecifier),`литеральный импорт в ${relative}`);
+      specs.add(node.moduleSpecifier.text);
+    }else if(ts.isExportDeclaration(node)&&!node.isTypeOnly&&node.moduleSpecifier){
+      assert.ok(ts.isStringLiteral(node.moduleSpecifier),`литеральный реэкспорт в ${relative}`);
+      specs.add(node.moduleSpecifier.text);
+    }else if(ts.isCallExpression(node)&&node.expression.kind===ts.SyntaxKind.ImportKeyword){
+      const spec=node.arguments[0];
+      assert.ok(spec&&(ts.isStringLiteral(spec)||ts.isNoSubstitutionTemplateLiteral(spec)),`динамический импорт должен быть литералом в ${relative}`);
+      specs.add(spec.text);
+    }
+    ts.forEachChild(node,collect);
+  };
+  collect(parsed);assert.ok(specs.size<=128,`слишком много прямых зависимостей в ${relative}`);
+  for(const spec of specs)imports.set(spec,Object.hasOwn(overrides,spec)?overrides[spec]:await import(spec.startsWith('.')?new URL(spec,url).href:spec));
+  const module={exports:{}};runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports,Buffer,URL,Date,Map,Set,Promise,console,fetch:globalThis.fetch,require:(spec:string)=>{assert.ok(imports.has(spec),`незарегистрированный импорт ${spec} в ${relative}`);return imports.get(spec);}});return module.exports as T;
 }
+
+test('R142 восемь pending-файлов по 1 ГиБ не вытесняют свой альбом и отправляются вместе',async()=>{
+  // Метаданные моделируют уже собранные файлы: восемь гигабайт памяти тесту не нужны.
+  const attachments=await import('../src/attachments.js');
+  const ids=Array.from({length:8},(_,i)=>`93000000-0000-4000-8000-${String(100+i).padStart(12,'0')}`);
+  for(const id of ids)await attachments.insertPendingRow({id,storageKey:`dm/${id}`,ownerId:'a',conversationId:'dm',name:'album.bin',contentType:'application/octet-stream',size:1024*1024*1024},{daily:true});
+  assert.deepEqual((await t.raw.query<{id:string}>("SELECT id FROM attachments WHERE state='pending' ORDER BY id")).rows.map(row=>row.id),ids);
+  const sent=await app.inject({method:'POST',url:'/conv/dm/messages',headers:headers(),payload:{clientId:'93000000-0000-4000-8000-000000000110',content:'',attachments:ids.map(id=>({id}))}});
+  assert.equal(sent.statusCode,201,sent.body);
+  assert.equal(sent.json().attachments.length,8);
+  assert.equal((await t.raw.query("SELECT id FROM attachments WHERE state='attached'")).rows.length,8);
+});
+
+test('R142 пересылка на разрешённом пределе даёт 201, мутант 9 ГиБ при квоте 8 получает 429',async()=>{
+  // Настоящие route, SQL и проверка квоты; изменяется только константа целого convRules-модуля в памяти.
+  type Rules=typeof import('../src/convRules.js');
+  type Conversations=typeof import('../src/conversations.js');
+  type Routes=typeof import('../src/routes/conv.js');
+  for(const mutated of [false,true]){
+    const rules=mutated?await sourceModule<Rules>('../src/convRules.ts','FORWARD_BYTES_MAX = 8 * 1024 * 1024 * 1024','FORWARD_BYTES_MAX = 9 * 1024 * 1024 * 1024'):await import('../src/convRules.js');
+    if(!mutated)assert.ok(rules.FORWARD_BYTES_MAX<=DM_DAILY_UPLOAD_BYTES);
+    else assert.ok(rules.FORWARD_BYTES_MAX>DM_DAILY_UPLOAD_BYTES);
+    await t.raw.exec("DELETE FROM conversation_messages; DELETE FROM attachments");
+    const id='93000000-0000-4000-8000-000000000120';
+    const files=[{id,name:'boundary.bin',contentType:'application/octet-stream',size:rules.FORWARD_BYTES_MAX}];
+    await t.raw.query("INSERT INTO conversation_messages(id,conversation_id,author_id,sort_key,content,attachments) VALUES ('forward-boundary','other','c',1,'',$1::jsonb)",[JSON.stringify(files)]);
+    await t.raw.query("INSERT INTO attachments(id,conversation_id,owner_id,message_id,storage_key,name,content_type,size,state) VALUES ($1,'other','c','forward-boundary','dm/boundary','boundary.bin','application/octet-stream',$2,'attached')",[id,rules.FORWARD_BYTES_MAX]);
+    objects.set('dm/boundary',Buffer.from('metadata-only'));
+    const conversations=await sourceModule<Conversations>('../src/conversations.ts',undefined,undefined,{'./convRules.js':rules});
+    const routes=await sourceModule<Routes>('../src/routes/conv.ts',undefined,undefined,{'../conversations.js':conversations});
+    const target=Fastify();errorHandler(target);
+    try{
+      await target.register(routes.convRoutes);await target.ready();
+      const response=await target.inject({method:'POST',url:'/conv/dm/forward',headers:headers('b'),payload:{clientId:'93000000-0000-4000-8000-000000000121',fromConversationId:'other',messageIds:['forward-boundary']}});
+      assert.equal(response.statusCode,mutated?429:201,response.body);
+      if(mutated){assert.throws(()=>assert.equal(response.statusCode,201),assert.AssertionError);assert.equal((await t.raw.query("SELECT id FROM attachments WHERE owner_id='b'")).rows.length,0);}
+      else assert.equal(response.json().messages[0].attachments[0].size,8*1024*1024*1024);
+    }finally{await target.close();}
+  }
+});
 test('R127 контрфакты размера, отсутствующих частей и повторной сборки ловятся на настоящих строках',async()=>{
   // Ловит независимую потерю трёх гарантий целостности.
   type Big=typeof import('../src/bigUploads.js');

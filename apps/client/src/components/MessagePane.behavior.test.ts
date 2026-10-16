@@ -82,11 +82,11 @@ it('галочки прочтения есть только у своих пуз
   const messages = [h.msg('m10', 'me', 0, 10), h.msg('m15', 'peer', 0, 15), h.msg('m20', 'me', 0, 20), h.msg('m30', 'me', 0, 30)];
   await h.mount({ messages, peerReadKey: 20 });
   for (const id of ['m10', 'm20']) assert.ok(h.host.querySelector(`[data-mid="${id}"] .bub-st.read`));
-  assert.ok(h.host.querySelector('[data-mid="m30"] .bub-st.sent')); assert.equal(h.host.querySelector('[data-mid="m15"] .bub-st'), null);
+  assert.ok(h.host.querySelector('[data-mid="m30"] .bub-st.sent')); assert.equal(h.host.querySelector('[data-mid="m15"] .bub-st') === null, true);
   await h.rerender({ messages, peerReadKey: 30 }); assert.ok(h.host.querySelector('[data-mid="m30"] .bub-st.read'));
-  await h.rerender({ messages, peerReadKey: null }); assert.equal(h.host.querySelector('.bub-st.read'), null);
+  await h.rerender({ messages, peerReadKey: null }); assert.equal(h.host.querySelector('.bub-st.read') === null, true);
   const list = h.host.querySelector('.messages');
-  await h.rerender({ messages, bubbles: false, peerReadKey: 30 }); assert.equal(h.host.querySelector('.bub-st'), null);
+  await h.rerender({ messages, bubbles: false, peerReadKey: 30 }); assert.equal(h.host.querySelector('.bub-st') === null, true);
   assert.ok(h.host.querySelector('.messages') === list, 'обёртка не перемонтирует ленту при переключении пузырей');
 });
 it('свои сохранённые и исходящие склеиваются в одну группу с единственным хвостом', async () => {
@@ -121,22 +121,15 @@ it('кнопка неотправленного открывает меню, п�
   const menu = document.querySelector<HTMLElement>('.ctx-menu[role="menu"]')!; assert.ok(menu); assert.equal(btn.getAttribute('aria-expanded'), 'true');
   assert.ok(document.activeElement === menu.querySelector('button'), 'фокус на первом пункте меню'); assert.match(menu.textContent!, /Скопировать текст/);
   const del = [...menu.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Удалить'))!;
-  await act(async () => { del.click(); await h.delay(); }); assert.deepEqual(discarded, ['k']); assert.equal(document.querySelector('.ctx-menu'), null);
+  await act(async () => { del.click(); await h.delay(); }); assert.deepEqual(discarded, ['k']); assert.equal(document.querySelector('.ctx-menu') === null, true);
 });
-it('новое меню включается только переключателем и выключенное сохраняет старую ветку', async () => {
-  // Проверка предотвращает регрессию, когда `bubbles: true` ошибочно включали без пользовательского переключателя.
+it('меню сообщения всегда показывает действия, прочтение и реакции с якорем пикера', async () => {
+  // Переключателя больше нет; содержимое карточки и якорь всех реакций остаются контрактом.
   const message = h.msg('menu', 'me');
-  await h.mount({ messages: [message], onReact: () => {} });
-  const row = h.host.querySelector<HTMLElement>('[data-mid="menu"]')!;
-  await act(async () => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 140, clientY: 160 })); await h.flush(); });
-  assert.ok(document.querySelector('.ctx-menu'), 'старое контекстное меню осталось при выключенном переключателе');
-  assert.ok(!document.querySelector('.ctx-stack'), 'выключенный переключатель не рисует новую карточку');
-  await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }); await h.flush();
-  await act(async () => { h.root!.unmount(); }); h.root = null; h.host.remove();
-  h.round12(); await h.mount({ messages: [message], peerReadKey: 10, onReact: () => {} });
+  await h.mount({ messages: [message], peerReadKey: 10, onReact: () => {} });
   const enabledRow = h.host.querySelector<HTMLElement>('[data-mid="menu"]')!;
   await act(async () => { enabledRow.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 140, clientY: 160 })); await h.flush(); });
-  const stack = document.querySelector('.ctx-stack'); assert.ok(stack, 'переключатель включает новую карточку меню');
+  const stack = document.querySelector('.ctx-stack'); assert.ok(stack, 'карточка меню доступна без переключателя');
   assert.deepEqual([...stack.querySelectorAll('.ctx-menu button')].map((b) => b.textContent?.trim()).filter(Boolean).slice(0, 3), ['Ответить', 'Изменить', 'Скопировать текст']);
   assert.ok(stack.querySelector('.react-bar'), 'меню показывает быстрые реакции'); assert.ok(stack.querySelector('.ctx-foot'), 'меню показывает подвал');
   assert.equal(stack.querySelector('.ctx-foot span:last-child')!.textContent, sentAtLabel(message.createdAt), 'DOM использует календарное время из sentAtLabel');
@@ -227,7 +220,7 @@ it('R, E и Del действуют только вне полей ввода', a
   await open();
   await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', key: 'у', bubbles: true })); }); await h.flush();
   assert.ok(!document.querySelector('.ctx-stack'), 'E закрывает меню'); assert.equal(h.host.querySelector<HTMLTextAreaElement>('.composer textarea')?.value, 'keys');
-  assert.ok(h.host.querySelector('.edit-strip')); assert.equal(h.host.querySelector('.edit-box'), null);
+  assert.ok(h.host.querySelector('.edit-strip')); assert.equal(h.host.querySelector('.edit-box') === null, true);
   await act(async () => { h.host.querySelector('.composer textarea')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }); await h.flush();
   await open();
   let del!: KeyboardEvent;
@@ -440,8 +433,8 @@ it('выделение разрешает Изменить/Ответить то
   assert.ok(!h.host.querySelector('[aria-label="Изменить"]'), 'несколько сообщений нельзя редактировать пачкой');
   assert.ok(!h.host.querySelector('.sel-bar')?.textContent?.includes('Ответить'), 'ответ доступен только для одного сообщения');
 });
-h.mutantTest('свой стикер нельзя редактировать через меню и телефонный лист', async () => {
-  // Стикер — отправленное медиа без редактируемого текста: ни мышиное меню, ни лист пальца не обещают правку.
+h.mutantTest('свой стикер нельзя редактировать через меню ПК и меню у пузыря телефона', async () => {
+  // Стикер — отправленное медиа без редактируемого текста: обе живые точки входа не обещают правку.
   await h.rejectMutant((source) => source.replaceAll(' && !m.sticker', ''), async (component) => {
     const sticker = { ...h.msg('own-sticker'), content: '', sticker: { id: 'sticker-1', emoji: '🦆', url: '/duck.webp', format: 'webp' } } as Message;
     const hasEdit = () => [...document.querySelectorAll('button')].some((button) => button.textContent?.includes('Изменить') || button.getAttribute('aria-label') === 'Изменить');
@@ -453,13 +446,16 @@ h.mutantTest('свой стикер нельзя редактировать че
     assert.ok(!hasEdit(), 'меню ПК не предлагает правку стикера');
     h.unmount();
 
-    const restore = h.pointerLayout(true, 390); h.mobile(); localStorage.setItem('gv_dm_bubbles', '0');
+    const restore = h.pointerLayout(true, 390); h.mobile();
     try {
       await h.mount({ bubbles: true, messages: [sticker] }, component);
       const stickerSurface = h.host.querySelector<HTMLElement>('[data-mid="own-sticker"] .message-sticker'); assert.ok(stickerSurface);
       await act(async () => { h.touch(stickerSurface!, 'touchstart'); await h.delay(560); });
-      const sheet = document.querySelector('.sheet[role="dialog"]'); assert.ok(sheet, 'удержание открывает телефонный лист действий');
-      assert.ok(![...sheet.querySelectorAll('button')].some((button) => button.textContent?.includes('Изменить')), 'телефонный лист не предлагает правку стикера');
+      const menu = document.querySelector('.ctx-menu[role="menu"]'); assert.ok(menu, 'удержание открывает меню у пузыря');
+      assert.ok(document.querySelector('.ctx-stack.anchored'), 'меню привязано к пузырю');
+      assert.equal(document.querySelector('.sheet') === null, true, 'старого листа действий нет');
+      assert.ok(![...menu.querySelectorAll('button')].some((button) => button.textContent?.includes('Изменить')), 'телефонное меню не предлагает правку стикера');
+      await act(async () => { h.touch(stickerSurface!, 'touchcancel'); });
       h.unmount();
 
       await h.mount({ bubbles: true, messages: [sticker] }, component);

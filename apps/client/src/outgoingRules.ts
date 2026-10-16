@@ -16,7 +16,7 @@
  * не должно — неотправленное тогда честно пропадает вместе с набранным текстом, как было всегда.
  */
 
-import { fedErrorText, isFedErrorCode } from './fedErrorText';
+import { fedErrorText, isFedErrorCode, messageErrorText } from './fedErrorText';
 import { humanLengthError } from './longTextRules';
 
 export type OutgoingStatus = 'sending' | 'failed';
@@ -58,7 +58,7 @@ export function sendErrorText(e: unknown): string | null {
   if ((e as { switched?: boolean } | null)?.switched === true) return null;
   const raw = e instanceof Error ? e.message : String(e);
   // Сырая строка проверки длины (zod) от сервера постарше — словами (07.10).
-  return (isFedErrorCode(raw) && fedErrorText(raw)) || humanLengthError(raw) || raw || 'не удалось отправить';
+  return (isFedErrorCode(raw) && fedErrorText(raw)) || messageErrorText(raw) || humanLengthError(raw) || raw || 'не удалось отправить';
 }
 
 /** Подпись вложений в строке «в пути»: «photo.png», «photo.png и ещё 2». */

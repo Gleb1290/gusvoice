@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Attachment, ConvMessage, ConvMute, ConvPin, ConvScheduled, DmChannel, Message, Sticker } from '@gusvoice/shared';
+import type { Attachment, ConvMediaInput, ConvMessage, ConvMute, ConvPin, ConvScheduled, DmChannel, Message, Sticker } from '@gusvoice/shared';
 import type { GifPick } from './GifPicker';
 import { serverDmStickers } from '../dmStickerRules';
 import { useDmStickers } from '../dmStickers';
@@ -10,7 +10,6 @@ import { api } from '../api';
 import { fireEffect } from '../effectsBus';
 import { SEARCH_PAGE } from '../chatSearchRules';
 import type { ChatSearchSource } from './ChatSearch';
-import { setUploadDone, setUploadProgress, uploadAborted, uploadSignal } from '../uploadProgress';
 import { confirmAction } from '../confirm';
 import { serverStranger, strangerBarShown } from '../strangerBarRules';
 import { contactLabel, isContact, serverContacts } from '../contactRules';
@@ -24,7 +23,7 @@ import { toast, toastError, useToasts } from '../toast';
 import { typingActionLabel, useTyping, useTypingAction } from '../typing';
 import { Avatar } from './Avatar';
 import { explainCallPrivacy, useCall } from '../callStore';
-import { serverCalls } from '../callView';
+import { FED_NO_CALLS_TEXT, fedCallsLocked, serverCalls } from '../callView';
 import { StrangerBar, StrangerReportModal } from './StrangerBar';
 import { removeContactAsk } from './ContactEditModal';
 import { ContextMenu, MenuDivider, MenuItem } from './ContextMenu';
@@ -47,14 +46,26 @@ import { ScheduledView } from './ScheduledView';
 import { StatusDot } from './StatusDot';
 import { useLastSeen } from '../useLastSeen';
 import { dmDot, dmPresent, useLocalOnline } from '../dmOnline';
-import { lastSeenLabel, serverLastSeen } from '../lastSeenText';
+import { serverLastSeen } from '../lastSeenText';
+import { lastSeenForms, useStatusFit } from '../statusFit';
 import { SavedAvatar, SavedEmpty } from './SavedAvatar';
-import { chatReadKeyOf, groupMembersLabel, groupTypingLabel, typingNames } from '../groupChatRules';
+import { chatReadKeyOf, fedGroupDownText, groupHomeLabel, groupHostHome, groupMembersLabel, groupTypingLabel, typingNames } from '../groupChatRules';
 import { leaveGroup, openGroupInfo } from './GroupDialogs';
 import { newClientId } from '../clientId';
-import { feedWindowSwitch, toOutboxRef } from '../convStore';
+import { toOutboxRef } from '../convStore';
 import {
+  FED_VIA_TEXT_ONLY,
+  fedViaBarText,
+  fedFilesHint,
+  serverFedFiles,
   convCursor,
+  fedLinkBroken,
+  fedLinkBrokenText,
+  messagePrivacyPlateText,
+  fedLinkStale,
+  fedLinkStaleText,
+  fedPeerDown,
+  fedPeerDownText,
   peerReadKeyOf,
   SAVED_NAME,
   scheduledCountOf,
@@ -65,6 +76,7 @@ import {
   serverChatClear,
   serverArchive,
   serverRounds,
+  serverAlbumItemsOn,
   serverVoiceOnce,
   serverChatSearch,
   serverReactionsUnread,
@@ -78,14 +90,18 @@ import {
   serverForwardOptions,
   serverUnreadMark,
   serverGifs,
+  serverGeoContact,
+  serverConvPoll,
+  serverGeoLive,
   serverPush4,
+  peerPresenceShown,
+  serverFedPresence,
+  serverReaders,
 } from '../convSyncRules';
 import { notifyAlwaysAction } from '../notifyExceptionsRules';
 import { DM_MUTE_PRESETS, MUTE_CUSTOM_EVENT, dmMuteOf, dmPinLimitText, muteActive, mutePeriodLabel, muteLeftLabel, muteSoundOff } from '../dmListRules';
 import { loadMuteRecent, saveMuteRecent } from '../muteRecent';
-import { dmBubblesSwitch } from '../dmBubbles';
 import { usePhoneLayout } from '../phoneLayout';
-import { hasMoreOlder, olderCursor } from '../historyPage';
 
 const EMPTY: Message[] = [];
 
@@ -127,19 +143,24 @@ export async function switchDmBlock(peer: DmChannel['otherUser'], blocked: boole
  * на …», «Выключить на время…» (второй вид — 1 час, 8 часов, 1 день, 2 дня, 7 дней и «Свой срок…» — выбор даты и времени, 09.10 `mute2`; прежние сроки от 15 минут до 3 месяцев
  * в подменю доживают, если запомнены), «Выключить уведомления» (навсегда, красным);
  * заглушена — «Включить уведомления» с остатком срока серым справа (Н16). Для шапки беседы и меню строки; `onDone` закрывает меню.
+ * `onBack` (телефон, #218) — подменю «Уведомления» внутри «⋮» беседы, как Telegram Android `ChatNotificationsPopupWrapper`
+ * (`TA/ui/Components/ChatNotificationsPopupWrapper.java:76-135`): первым «Назад», дальше тот же состав без тонкой черты перед
+ * «Выключить уведомления» (у Telegram пункты подменю идут подряд).
  */
 export function DmMuteMenuItems({
   peerId,
   mute,
   now,
   onDone,
+  onBack,
 }: {
   peerId: string;
   mute: ConvMute | null;
   now: number;
   onDone: () => void;
+  onBack?: () => void;
 }) {
-  const soundMenu = useStore((s) => s.convActive && serverUnreadMark(s.serverFeatures));
+  const soundMenu = useStore((s) => serverUnreadMark(s.serverFeatures));
   const [view, setView] = useState<'main' | 'time'>('main');
   const set = (muted: boolean, seconds?: number, soundOnly?: boolean) => {
     onDone();
@@ -151,7 +172,7 @@ export function DmMuteMenuItems({
   if (view === 'time') {
     return (
       <>
-        <MenuItem icon="chevron-left" label="Выключить на время" onClick={() => setView('main')} />
+        <MenuItem icon="chevron-left" label="Выключить на время" back onClick={() => setView('main')} />
         <MenuDivider />
         {DM_MUTE_PRESETS.map((p) => (
           <MenuItem
@@ -178,6 +199,7 @@ export function DmMuteMenuItems({
   const soundOff = muteSoundOff(mute, now);
   return (
     <>
+      {onBack && <MenuItem icon="chevron-left" label="Назад" back onClick={onBack} />}
       {soundMenu && (
         <MenuItem
           icon={soundOff ? 'bell' : 'volume-off'}
@@ -189,7 +211,7 @@ export function DmMuteMenuItems({
         <MenuItem key={s} icon="clock" label={`Выключить на ${mutePeriodLabel(s)}`} onClick={() => set(true, s)} />
       ))}
       <MenuItem icon="clock" label="Выключить на время…" submenu onClick={() => setView('time')} />
-      <MenuDivider />
+      {!onBack && <MenuDivider />}
       <MenuItem icon="bell-off" label="Выключить уведомления" danger onClick={() => set(true)} />
     </>
   );
@@ -228,9 +250,6 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
           : null,
     [peer.id, peerName, peer.avatarUrl, meId, meName, meAvatar],
   );
-  const appendDmMessage = useStore((s) => s.appendDmMessage);
-  const updateDmMessage = useStore((s) => s.updateDmMessage);
-  const removeDmMessage = useStore((s) => s.removeDmMessage);
   // Заглушка (07.10, G03): из сводки (`conv11`) или из списка заглушек; срок вышел — часы перерисуют шапку сами.
   const mutedUsers = useStore((s) => s.pushMutedDmUsers);
   const muteUntil = useStore((s) => s.pushMuteUntil);
@@ -239,7 +258,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   const pushMuted = muteActive(mute, muteNow);
   const setPushMuted = useStore((s) => s.setPushMuted);
   // Закреп беседы и сроки заглушки — только у сервера с `conv11` и в режиме бесед; иначе колокольчик — прежний тумблер.
-  const prefsOn = useStore((s) => s.convActive && serverChatPrefs(s.serverFeatures));
+  const prefsOn = useStore((s) => serverChatPrefs(s.serverFeatures));
   /* «Личные» / группы выключены (решение владельца 38, `push4`): пункт меню — «Включить уведомления» этой беседы (исключение)
      или «Выключить уведомления» (снять его), как Telegram; иначе — заглушки, как было. */
   const alwaysAct = useStore((s) =>
@@ -250,20 +269,22 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       always: s.pushAlwaysTargets,
     }),
   );
-  const archiveOn = useStore((s) => s.convActive && serverArchive(s.serverFeatures));
+  const archiveOn = useStore((s) => serverArchive(s.serverFeatures));
   // «Прослушать один раз» (`voice3`, G54) — только личка 1:1 с человеком: не группа и не «Избранное» (tdesktop `TTLButton`).
-  const voiceOnceOn = useStore((s) => s.convActive && serverVoiceOnce(s.serverFeatures)) && !dm.group && !dm.saved;
+  const voiceOnceOn = useStore((s) => serverVoiceOnce(s.serverFeatures)) && !dm.group && !dm.saved;
   /** Кружки (`circles1`, G68) — только режим бесед и сервер с признаком; без него у кнопки записи нет режима камеры. */
-  const roundOn = useStore((s) => s.convActive && serverRounds(s.serverFeatures));
-  const clearOn = useStore((s) => s.convActive && serverChatClear(s.serverFeatures));
+  const roundOn = useStore((s) => serverRounds(s.serverFeatures));
+  const clearOn = useStore((s) => serverChatClear(s.serverFeatures));
   // Поиск в беседе и «Перейти к дате» (G05, G25): сервер с `search1` и окно ленты (переход «вокруг» найденного).
-  const searchFlag = useStore((s) => s.convActive && serverChatSearch(s.serverFeatures));
+  const searchFlag = useStore((s) => serverChatSearch(s.serverFeatures));
   // Кнопки «@» / «♥» над «вниз» (G24, `reactunread1`): числа — из сводки беседы, действия — из стора и `api`.
-  const reactFlag = useStore((s) => s.convActive && serverReactionsUnread(s.serverFeatures));
+  const reactFlag = useStore((s) => serverReactionsUnread(s.serverFeatures));
   // «Большая» реакция удержанием (G43, `bigreact1`): только беседам нового сервера.
-  const bigFlag = useStore((s) => s.convActive && serverBigReactions(s.serverFeatures));
+  const bigFlag = useStore((s) => serverBigReactions(s.serverFeatures));
   const unreadReactions = useStore((s) => s.conv.summaries[dm.id]?.unreadReactions ?? 0);
   const unreadMentions = useStore((s) => s.conv.summaries[dm.id]?.unreadMentions ?? 0);
+  // Опрос в 1:1 с человеком соседа (`dmpoll1`): сервер разрешает, когда все дома беседы объявили признак, и отдаёт `fedPoll` в сводке.
+  const fedPollOk = useStore((s) => s.conv.summaries[dm.id]?.fedPoll === true);
   const [searchOpen, setSearchOpen] = useState(false);
   const [bellAt, setBellAt] = useState<DOMRect | null>(null);
   const pinned = !!dm.pinnedAt;
@@ -271,62 +292,55 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   const refreshDmHistory = useStore((s) => s.refreshDmHistory);
   const failed = useStore((s) => s.historyFailed.includes(dm.id));
   const blocked = useStore((s) => s.blockedUsers.some((u) => u.id === dm.otherUser.id));
-  // Режим бесед (ЛС этап 2): те же действия через `/api/conv/*` с id отправки; события — `conv.change`.
-  const convActive = useStore((s) => s.convActive);
+  /* Беседа есть только в режиме бесед (ЛС этап 2; старого пути `/api/dm*` у клиента нет с 09.10): действия — через
+     `/api/conv/*` с id отправки, события — `conv.change`, лента — пузыри (Р13) с окном (шаг 2г). */
   // Исходящие беседы (шаг 2в): в сторе по беседе — переживают смену беседы, голос и перезапуск, повторяются сами.
   const outboxItems = useStore((s) => s.outbox[dm.id] ?? NO_OUTBOX);
   // Черновик (шаг 2д): читается ОДИН раз при создании ленты — подписка на него перерисовывала бы беседу на каждую букву.
-  const [initialDraft] = useState(() => (convActive ? useStore.getState().drafts[dm.id] : undefined));
+  const [initialDraft] = useState(() => useStore.getState().drafts[dm.id]);
   /* Черновик с другого моего устройства (Р7): подписка на СЧЁТЧИК пришедших, не на сам черновик — он меняется только
      пришедшим, а не каждой буквой здесь. */
-  const draftRev = useStore((s) => (convActive ? (s.draftRev[dm.id] ?? 0) : 0));
+  const draftRev = useStore((s) => s.draftRev[dm.id] ?? 0);
   const draftRemote = useMemo(() => {
     if (!draftRev) return undefined;
     const d = useStore.getState().drafts[dm.id];
     return { text: d?.text ?? '', replyToId: d?.replyToId ?? null, rev: draftRev };
   }, [draftRev, dm.id]);
-  // Окно ленты (шаг 2г): только в режиме бесед и с переключателем устройства — до приёмки владельцем.
-  const [feedWin] = useState(() => convActive && feedWindowSwitch());
-  // ЛС как в Telegram (Р13): пузыри — до приёмки владельцем за переключателем устройства (`dmBubbles.ts`).
-  const [bubbles] = useState(dmBubblesSwitch);
-  /* ✓✓ «прочитано собеседником» (Р6): ключ из сводки беседы — только в режиме бесед и с пузырями (у старой ленты
-     отметок нет). Подписка на ЧИСЛО: перерисовка — только когда собеседник прочитал дальше, а не на каждую сводку. */
+  /* ✓✓ «прочитано собеседником» (Р6): ключ из сводки беседы. Подписка на ЧИСЛО: перерисовка — только когда собеседник
+     прочитал дальше, а не на каждую сводку. */
   // «Избранное» (`saved1`): сообщения сразу «прочитаны» (✓✓, как у Telegram, где читать их некому, кроме меня).
   const saved = !!dm.saved;
   const peerReadKey = useStore((s) =>
-    !convActive || !bubbles
-      ? null
-      : saved
-        ? Number.MAX_SAFE_INTEGER
-        : s.conv.summaries[dm.id]?.group
-          ? chatReadKeyOf(s.conv.summaries[dm.id])
-          : peerReadKeyOf(s.conv.summaries[dm.id]),
+    saved
+      ? Number.MAX_SAFE_INTEGER
+      : s.conv.summaries[dm.id]?.group
+        ? chatReadKeyOf(s.conv.summaries[dm.id])
+        : peerReadKeyOf(s.conv.summaries[dm.id]),
   );
-  const win = useStore((s) => (feedWin ? s.conv.windows[dm.id] : undefined));
-  const unreadBelow = useStore((s) => (feedWin ? (s.conv.summaries[dm.id]?.unread ?? 0) : 0));
+  const win = useStore((s) => s.conv.windows[dm.id]);
+  const unreadBelow = useStore((s) => s.conv.summaries[dm.id]?.unread ?? 0);
   /* Раунд 12, порция 5: пересылка, выделение и удаление пачкой — только в режиме бесед и у сервера с `conv5` (ручки —
-     `/api/conv/*`); чужое «у обоих» — с `conv6` (С1). Старый сервер или старый путь ЛС — ни пунктов, ни выделения, ни
-     галочки у чужого. Видно это только за переключателем пузырей — его проверяет лента (`MessagePane.round12`). */
-  const batchOn = useStore((s) => s.convActive && serverBatchActions(s.serverFeatures));
+     `/api/conv/*`); чужое «у обоих» — с `conv6` (С1). Старый сервер — ни пунктов, ни выделения, ни галочки у чужого. */
+  const batchOn = useStore((s) => serverBatchActions(s.serverFeatures));
   // «Без звука» (С3, `conv8`): и у меню «Отправить», и у «Переслать в…» (галочка в окне).
-  const silentOn = useStore((s) => bubbles && s.convActive && serverSilentSend(s.serverFeatures));
+  const silentOn = useStore((s) => serverSilentSend(s.serverFeatures));
   /** «Скрыть имя отправителя / подписи» у пересылки (G71, `fwd2`). */
-  const forwardOptsOn = useStore((s) => s.convActive && serverForwardOptions(s.serverFeatures));
+  const forwardOptsOn = useStore((s) => serverForwardOptions(s.serverFeatures));
   /** «Отправить позже» в окне «Переслать в…» (G71): тот же признак, что у отложенных (`schedOn` ниже). */
-  const schedForward = useStore((s) => bubbles && s.convActive && serverScheduled(s.serverFeatures));
+  const schedForward = useStore((s) => serverScheduled(s.serverFeatures));
   /** Флаги отправки (G19 + G48, `linkprev1`): «без превью» и «как файл». */
-  const sendFlagsOn = useStore((s) => s.convActive && serverSendFlags(s.serverFeatures));
+  const sendFlagsOn = useStore((s) => serverSendFlags(s.serverFeatures));
   /** «Высокое качество», спойлер и подпись над медиа в окне отправки файлов (G48, `media2`). */
-  const mediaFlagsOn = useStore((s) => s.convActive && serverMediaFlags(s.serverFeatures));
+  const mediaFlagsOn = useStore((s) => serverMediaFlags(s.serverFeatures));
   /** Цитата фрагмента и «Ответить в другом чате» (G55, `quote1`). */
-  const quoteOn = useStore((s) => s.convActive && serverQuote(s.serverFeatures));
+  const quoteOn = useStore((s) => serverQuote(s.serverFeatures));
   // Стикеры в ЛС (С2, `stickers2`): мои наборы, недавние, каталог инстанса во вкладке панели; окно набора из ленты шлёт сюда.
-  const stickersOn = useStore((s) => s.convActive && serverDmStickers(s.serverFeatures));
+  const stickersOn = useStore((s) => serverDmStickers(s.serverFeatures));
   const myStickers = useDmStickers((s) => s.mine);
   const recentStickers = useDmStickers((s) => s.recent);
   // GIF (`gifs1`, Р-7): «Мой GIF» или найденный — сервер копирует файл вложением этой беседы, дальше обычная отправка
   // с подсказкой `gif: true` (видео без звука по кругу). «Сохранить GIF» — из меню сообщения.
-  const gifsOn = useStore((s) => s.convActive && serverGifs(s.serverFeatures));
+  const gifsOn = useStore((s) => serverGifs(s.serverFeatures));
   const sendGif = async (pick: GifPick) => {
     const a =
       pick.kind === 'saved'
@@ -346,6 +360,23 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       .gifSave({ attachmentId, width: a.width ?? null, height: a.height ?? null, durationMs: a.durationMs ?? null })
       .then(() => toast('success', 'GIF сохранён'))
       .catch(toastError);
+  };
+  // Геопозиция и контакт (14.10, G69, `geocontact1`): отдельное сообщение без текста; запасной текст собирает сервер.
+  const geoContactOn = useStore((s) => serverGeoContact(s.serverFeatures));
+  // Опрос (14.10, `convpoll1`): провода опроса соседям нет — в 1:1 с человеком другого инстанса и в группе чужого хоста пункта
+  // нет (группа своего хоста с людьми соседа — сервер ответит 403 `conv_poll_federated` с понятной фразой).
+  const convPollFeature = useStore((s) => serverConvPoll(s.serverFeatures));
+  // Трансляция геопозиции (14.10, `geolive1`): как опрос — провода соседям нет, в беседе с людьми других инстансов пункта нет.
+  const geoLiveFeature = useStore((s) => serverGeoLive(s.serverFeatures));
+  const sendMedia = async (media: ConvMediaInput) => {
+    const msg = await api.convSend(dm.id, { clientId: newClientId(), content: '', attachments: [], media });
+    useStore.getState().convAfterSend(dm.id, msg);
+    // Трансляция пошла: точки обновляет менеджер (служба Android или страница), пока не выйдет срок или не нажмут «Остановить».
+    if (media.kind === 'geolive' && msg.media && (msg.media as { kind?: string }).kind === 'geolive') {
+      const live = msg.media as import('@gusvoice/shared').ConvGeoLiveMedia;
+      // Закрытые перечни импортов в тестах: менеджер подгружается на месте (`import()`), как `pollActions` на сервере.
+      void import('../geoLiveSharing').then((m) => m.beginGeoLive(dm.id, msg.id, live), toastError);
+    }
   };
   const sendStickerRef = useRef<(stickerId: string) => Promise<void>>(async () => {});
   sendStickerRef.current = async (stickerId: string) => {
@@ -369,9 +400,44 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       if (useDmStickers.getState().sender === sender) useDmStickers.getState().setSender(null);
     };
   }, [stickersOn, dm.id]);
-  const othersForBoth = useStore((s) => s.convActive && serverDeletesOthersForBoth(s.serverFeatures));
+  const othersForBoth = useStore((s) => serverDeletesOthersForBoth(s.serverFeatures));
   /* Бывшая группа (`groups3`): пересылка ИЗ неё и удаление пачкой — «нет такой» у сервера (`loadAccess` исходной беседы), потому пачки нет. */
   const former = useStore((s) => s.conv.summaries[dm.id]?.former ?? null);
+  const peerHome = dm.group || dm.saved ? null : (dm.otherUser.homeInstance ?? null);
+  const peerHomeLabel = peerHome ? peerHome.name?.trim() || peerHome.domain || 'другой инстанс' : null;
+  /* Э2 часть Б (#141, Ф7): связка с инстансом собеседника разорвана или приостановлена — беседа архив ТОЛЬКО ДЛЯ ЧТЕНИЯ (`fedLink: 'broken'`
+     в сводке): вместо поля ввода плашка, ни ответа, ни правки, ни реакций, ни звонка; сервер на запись отвечает 403 `federation.dm_link_broken`. */
+  const linkBroken = useStore((s) => !!peerHome && fedLinkBroken(s.conv.summaries[dm.id]));
+  /* Исправления ревью 12.10, п. 7 (`fedStale` в сводке): инстанс собеседника не забирает наши сообщения дольше 10 минут — плашка над
+     полем «Сообщения ждут, пока «X» их заберёт»; писать можно. */
+  const linkStale = useStore((s) => !!peerHome && fedLinkStale(s.conv.summaries[dm.id]));
+  /* Хвост Э7 (14.10, `fedPeerDown` в сводке): дом собеседника не отвечает дольше 10 минут — плашка «Инстанс «X» недоступен — сообщения
+     доедут, когда он вернётся» (как у группы, `fed-group-down`); писать можно. Одна плашка: она важнее «ждут, пока заберёт». */
+  const peerDown = useStore((s) => !!peerHome && fedPeerDown(s.conv.summaries[dm.id]));
+  /* Э7 (#141, `fedm6`): дом группы чужого инстанса недоступен (`fedGroupHost.down`) — плашка над полем в стиле `fed-stale`; писать можно,
+     доставка остальным — когда он вернётся; состав и название не меняются (кнопки окна группы неактивны). */
+  const groupDownText = useStore((s) => {
+    const host = dm.group ? s.conv.summaries[dm.id]?.fedGroupHost : undefined;
+    return host?.down ? fedGroupDownText(groupHomeLabel(groupHostHome(host.instanceId, dm.group?.members ?? [], s.dms))) : null;
+  });
+  /* Э3 (#141, `fedm3`): вложения с человеком соседа закрыты, только если сервер не объявил `fedm3` ИЛИ его инстанс вложений не принимает
+     (`fedNoFiles` в сводке); иначе беседа как обычная ЛС. `null` — открыты. */
+  const fedFiles = useStore((s) => serverFedFiles(s.serverFeatures));
+  const fedNoFiles = useStore((s) => !!s.conv.summaries[dm.id]?.fedNoFiles);
+  /* Э5 (#141, `fedm5`): дом недоступен, текст уходит через инстанс собеседника по долгой сессии (`fedVia.ts` ведёт `fedVia` в сторе):
+     плашка над полем, вложения/голос/GIF/стикеры/правка/удаление/реакции закрыты с подсказкой «Дом недоступен — пока только текст». */
+  /* Э7 часть 3 (#141): в группе чужого дома «через» идёт к её хосту (`fedGroupHost`) — тот же режим, плашка называет хост. */
+  const groupHostId = useStore((s) => (dm.group ? (s.conv.summaries[dm.id]?.fedGroupHost?.instanceId ?? null) : null));
+  const groupHostName = useStore((s) => (groupHostId ? groupHomeLabel(groupHostHome(groupHostId, dm.group?.members ?? [], s.dms)) : null));
+  const viaPeerLabel = peerHomeLabel ?? (groupHostId ? (groupHostName ?? 'другой инстанс') : null);
+  const viaOn = useStore((s) => (!!peerHome || !!groupHostId) && s.fedVia?.down === true && !!s.fedVia.ready?.includes(dm.id));
+  /* Э7 ч.3 (D): у получателя подпись «через «…»» — название СВОЕГО инстанса (`GET /instance`, `selfInstanceName.ts`), а не локальное имя значка (адрес). */
+  const selfInstanceName = useStore((s) => s.selfInstanceName ?? '');
+  const viaSelfLocal = useStore((s) => s.fedVia?.self ?? '');
+  const viaSelf = selfInstanceName || viaSelfLocal;
+  const filesHint = viaOn ? FED_VIA_TEXT_ONLY : fedFilesHint(!!peerHome, fedFiles, fedNoFiles ? { fedNoFiles: true } : null);
+  // G56: действия над одним элементом альбома — у сервера с `album1`.
+  const albumOn = useStore((s) => serverAlbumItemsOn(s.serverFeatures));
   const batch = useMemo<MessageBatch | undefined>(
     () =>
       batchOn && !former
@@ -427,6 +493,32 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
               await api.convDeleteMany(dm.id, messageIds, scope);
               useStore.getState().convAfterDeleteMany(dm.id, messageIds);
             },
+            /* G56 (`album1`): один элемент альбома. Переслать — новое сообщение с ним одним (тот же id отправки на повтор, что у
+               `forward`); удалить — элемент уходит событием `conv.change` (оно приходит и мне), последний — сообщение целиком. */
+            ...(albumOn
+              ? {
+                  forwardItem: async (messageId: string, attachmentId: string, to: string, silent?: boolean, opts?: { hideSender?: boolean }) => {
+                    const key = `${dm.id}>${to}:${messageId}/${attachmentId}`;
+                    const clientId = forwardKeys.get(key) ?? newClientId();
+                    forwardKeys.set(key, clientId);
+                    const res = await api.convForward(to, {
+                      clientId,
+                      fromConversationId: dm.id,
+                      messageIds: [messageId],
+                      attachmentId,
+                      ...(silent && silentOn ? { silent: true } : {}),
+                      ...(forwardOptsOn && opts?.hideSender ? { hideSender: true } : {}),
+                    });
+                    forwardKeys.delete(key);
+                    useStore.getState().convAfterForward(to, res.messages);
+                  },
+                  deleteItem: async (messageId: string, attachmentId: string, scope: 'me' | 'both') => {
+                    // Отказ 409 `album_item_peer_old` переводит в слова `MessagePane.delItem` (`ALBUM_ITEM_PEER_OLD_TEXT`).
+                    const res = await api.convDeleteAlbumItem(dm.id, messageId, attachmentId, scope);
+                    if (res.removed === 'message') useStore.getState().convAfterDelete(dm.id, messageId);
+                  },
+                }
+              : {}),
             peerName: (id) => {
               const u = useStore.getState().dms.find((d) => d.id === id)?.otherUser;
               return u ? peerNameNow(u.id, u.displayName) : '';
@@ -434,13 +526,13 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             open: (id) => void useStore.getState().selectDm(id),
           }
         : undefined,
-    [batchOn, former, silentOn, schedForward, forwardOptsOn, dm.id],
+    [batchOn, former, silentOn, schedForward, forwardOptsOn, albumOn, dm.id],
   );
   /* Раунд 12, порция 7 — закреп в ЛС (С2, `conv7`): только за переключателем пузырей, в режиме бесед и у сервера с
      признаком; иначе ни запроса, ни пунктов, ни полосы. Список — в сторе (`conv.pins`): загрузка при открытии беседы,
      дальше его ведут `conv.change` с полем `pins` и догонка. Сброшен (смена токена, обрезанный журнал) — просим заново. */
   // Бывшая группа (`groups3`): закрепы — только участникам, запроса нет (сервер ответил бы «нет такой»).
-  const pinsOn = useStore((s) => bubbles && s.convActive && serverDmPins(s.serverFeatures) && !s.conv.summaries[dm.id]?.former);
+  const pinsOn = useStore((s) => serverDmPins(s.serverFeatures) && !s.conv.summaries[dm.id]?.former && !fedLinkBroken(s.conv.summaries[dm.id]));
   const pinsEntry = useStore((s) => (pinsOn ? s.conv.pins?.[dm.id] : undefined));
   // Удалённое мной — из полосы сразу, не дожидаясь события со списком (оно идёт следом за событием о сообщении).
   const gone = useStore((s) => (pinsOn ? s.conv.gone : NO_GONE));
@@ -469,8 +561,8 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       pinsOn
         ? {
             list: pinList,
-            pin: async (messageId, scope) => {
-              useStore.getState().convSetPins(dm.id, await api.convPin(dm.id, messageId, scope));
+            pin: async (messageId, scope, notify) => {
+              useStore.getState().convSetPins(dm.id, await api.convPin(dm.id, messageId, scope, notify));
             },
             unpin: async (messageId, scope) => {
               useStore.getState().convSetPins(dm.id, await api.convUnpin(dm.id, messageId, scope));
@@ -482,12 +574,13 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   /* Чёрный список (#212, «как в Telegram»): собеседник не узнает, его новые сообщения сюда не дойдут. */
   const switchBlock = () => switchDmBlock(dm.otherUser, blocked);
   /* Плашка незнакомца (08.10, `stranger1`, С7): сервер говорит, кто незнакомец; я гашу её сразу при блокировке и ответе. */
-  const strangerOn = useStore((s) => s.convActive && serverStranger(s.serverFeatures));
+  const strangerOn = useStore((s) => serverStranger(s.serverFeatures));
   const isStranger = useStore((s) => s.conv.summaries[dm.id]?.stranger === true);
   const [reportOpen, setReportOpen] = useState(false);
-  /* Контакты (08.10, `contacts1`): у беседы 1:1 с живым человеком; гостю соседнего инстанса — нет (сервер ответит 403). */
+  /* Контакты (08.10, `contacts1`): у беседы 1:1 с живым человеком; гостю соседнего инстанса — нет (сервер ответит 403), и человеку другого
+     инстанса — тоже (`contacts.guest`, Э2 часть Б): на плашке незнакомца остаются «Пожаловаться» и «Заблокировать». */
   const contactsOn =
-    useStore((s) => s.convActive && serverContacts(s.serverFeatures)) && !user?.homeInstance && !dm.group && !dm.saved;
+    useStore((s) => serverContacts(s.serverFeatures)) && !user?.homeInstance && !dm.group && !dm.saved && !peerHome;
   const contacts = useContactList(contactsOn);
   const peerContact = contacts?.find((c) => c.id === peer.id) ?? null;
   const peerPerson = { id: peer.id, username: peer.username, displayName: peer.displayName, avatarUrl: peer.avatarUrl };
@@ -533,32 +626,46 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   // Шапка (раунд 11): «в сети» — тот же признак, что точка в списке.
   // `presence4`: в ЛС «Невидимый» тоже в сети (`dmOnlineUsers`), «Никто» не прячет «в сети» — только время у вышедшего.
   // `presence5` (D4, решение 42): свёрнутое или простаивающее приложение собеседника — в ЛС не в сети (`dmPresent`).
-  const rawOnline = useStore((s) => dmPresent(s, dm.otherUser.id));
   const features = useStore((s) => s.serverFeatures);
+  /* Э4 (#141, `fedm4`): статус человека другого инстанса (`peerHome`) показываем, только если сервер объявил `fedm4` — до него теневой
+     пользователь «никогда не в сети», а `last-seen` врёт «был(а) давно». Выключено — как у собеседника без данных: ни запроса, ни точки, ни «в сети». */
+  const presenceOn = peerPresenceShown(!!peerHome, features);
+  // Э4: гейт присутствия человека соседа — на результате, сам вызов прежний (его выражение исполняет `presenceClient.test`).
+  const rawOnline = useStore((s) => dmPresent(s, dm.otherUser.id));
+  const gatedOnline = presenceOn && rawOnline;
   /* Связи с сервером нет (замечание владельца 05.10, как у Telegram): вместо статуса собеседника — «Соединение…» или
      «Ожидание сети…» (`connState.ts`); «в сети», точка у аватара и «печатает» в это время устарели и не показываются. */
   const conn = connLabel(useConnState());
   /* «Был(а) в сети» (С1, `lastseen1`): «был(а) 5 минут назад / сегодня в 14:30 / недавно» вместо пустой строки, как у
      Telegram; без признака сервера — `null`, шапка как раньше. «В сети» — по-прежнему точка шлюза. */
-  const lastSeen = useLastSeen(group || saved ? null : dm.otherUser.id);
+  const lastSeen = useLastSeen(group || saved || !presenceOn ? null : dm.otherUser.id);
   /* Р-2 (`lastseen2`, сервер без `presence4`): время захода собеседника мне скрыто — ни «в сети», ни точки, а «был(а) недавно».
      С `presence4` (решение владельца 08.10) «в сети» — по присутствию всегда, скрытое время даёт «был(а) недавно» только вышедшему. */
-  const localOnline = useLocalOnline(group || saved ? null : dm.otherUser.id);
-  const online = dmDot(rawOnline, lastSeen?.exact, features, localOnline);
+  const localOnline = useLocalOnline(group || saved || !presenceOn ? null : dm.otherUser.id);
+  const online = dmDot(gatedOnline, lastSeen?.exact, features, localOnline);
   /* O5 (приёмка S20+, 09.10): снимок «был(а)» ещё `online:true` (приходит позже присутствия — `online.away` / `online.update`), а «в сети»
      уже нет — раньше строка была пустой ~1,5 с. Теперь сразу «был(а) только что» (время мне видно) или «был(а) недавно» (скрыто
      приватностью — точное не раскрываем). Пусто — только пока снимка нет вовсе или человек в сети. */
-  const seenText = !lastSeen || online ? '' : lastSeen.online ? (lastSeen.exact ? 'был(а) только что' : 'был(а) недавно') : lastSeenLabel(lastSeen, new Date());
+  const seenForms = !lastSeen || online ? [] : lastSeen.online ? [lastSeen.exact ? 'был(а) только что' : 'был(а) недавно'] : lastSeenForms(lastSeen, new Date());
+  const seenText = seenForms[0] ?? '';
   const lastSeenOn = useStore((s) => serverLastSeen(s.serverFeatures));
+  // «N прочитали» в меню своего сообщения группы (15.10, `readers1`); `read-at` — только 1:1 (группе он отвечает 404).
+  const readersOn = useStore((s) => serverReaders(s.serverFeatures));
   const peerOnline = online && !conn;
   const peerTyping = typing && !conn;
   const phone = usePhoneLayout();
+  /* Тесная шапка телефона (#218): «был(а) сегодня в 03:53» не влезает на 360 — показываем самую полную форму, что влезла (`lastSeenForms`, замер — `useStatusFit`). */
+  const statusRef = useRef<HTMLSpanElement>(null);
+  const shortForms = phone && seenForms.length > 1;
+  useStatusFit(statusRef, shortForms ? seenForms.join('|') : '');
 
   /* Шапка кликабельна (G06, Telegram 03·2.2.1 / 2.2.3): аватар и имя открывают карточку собеседника — на ПК та же карточка,
      что по клику на аватар в ленте (`useUserMenu`, вид «profile»), на телефоне она же листом снизу. Меню «⋯» — те же
      действия, что раньше были отдельными кнопками (уведомления, заблокировать) + «Показать профиль». */
   const { openAt: openUserCardAt, menu: userCard } = useUserMenu();
-  const [moreAt, setMoreAt] = useState<{ x: number; y: number } | null>(null);
+  const [moreAt, setMoreAt] = useState<{ x: number; y: number; rect?: DOMRect } | null>(null);
+  // Телефон (#218): «⋮» беседы показывает подменю «Уведомления» на месте своих пунктов (Telegram Android `openSwipeBack`).
+  const [muteSub, setMuteSub] = useState(false);
   /* Ctrl+\ — меню беседы с клавиатуры (G65; Telegram `Command::ShowChatMenu` → `_topBar->showPeerMenu()`). Клавишу ловит
      `DesktopKeysHost` (только десктоп) и шлёт событие; меню раскрывается под кнопкой «⋯», как по клику. */
   const moreBtnRef = useRef<HTMLButtonElement>(null);
@@ -586,7 +693,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
      в режиме бесед и у сервера с признаком; иначе ни пунктов, ни входа. Список отложенных — в сторе (`conv.scheduled`):
      загрузка при открытии вида, дальше его ведут `conv.change` с полем `scheduled` и догонка; число для входа — оттуда же
      или из сводки (`scheduledCount`). */
-  const schedOn = useStore((s) => bubbles && s.convActive && serverScheduled(s.serverFeatures));
+  const schedOn = useStore((s) => serverScheduled(s.serverFeatures));
   // Отложенные С ВЛОЖЕНИЯМИ (06.10, `conv10`): без признака «позже» и «когда в сети» с файлами — серые.
   const schedMedia = useStore((s) => schedOn && serverScheduledAttachments(s.serverFeatures));
   const schedEntry = useStore((s) => (schedOn ? s.conv.scheduled?.[dm.id] : undefined));
@@ -702,7 +809,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
      `channelVisit.ts`. */
   const { newSince, readKey, visitKey, started } = useChannelVisit(dm.id, 'dm');
   /* Беседа дочитана (здесь или на другом устройстве) — убрать её уведомления ОС (G09, как у Telegram). */
-  const unreadNow = useStore((s) => (convActive ? (s.conv.summaries[dm.id]?.unread ?? 0) : -1));
+  const unreadNow = useStore((s) => s.conv.summaries[dm.id]?.unread ?? 0);
   useEffect(() => {
     if (unreadNow === 0) clearOsNotifications(dm.id);
   }, [unreadNow, dm.id]);
@@ -711,35 +818,39 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
      сообщения» не ползёт, пока читаешь; место — только когда непрочитанного нет (последнее сообщение сводки против
      снятого ключа). */
   const visitStart = useMemo(() => {
-    if (!feedWin) return null;
     const s = useStore.getState();
     const last = s.conv.summaries[dm.id]?.lastMessage;
     const unread = readKey !== null && !!last && last.sortKey > readKey && last.authorId !== s.user?.id;
     return { readKey, place: unread ? null : (s.places[dm.id] ?? null) };
-  }, [visitKey, readKey, feedWin, dm.id]);
-  const feedWindow: FeedWindowProps | undefined = visitStart
-    ? {
-        hasOlder: win?.hasMoreBefore ?? true,
-        hasNewer: !!win?.hasMoreAfter,
-        loadNewer: () => useStore.getState().convLoadNewer(dm.id),
-        jumpLatest: () => useStore.getState().convJumpLatest(dm.id),
-        jumpTo: (id) => useStore.getState().convJumpTo(dm.id, id),
-        unreadBelow,
-        place: visitStart.place,
-        onPlace: (p) => useStore.getState().convSetPlace(dm.id, p),
-        readKey: visitStart.readKey,
-        stale: !!win?.stale,
-      }
-    : undefined;
+  }, [visitKey, readKey, dm.id]);
+  const feedWindow: FeedWindowProps = {
+    hasOlder: win?.hasMoreBefore ?? true,
+    hasNewer: !!win?.hasMoreAfter,
+    loadNewer: () => useStore.getState().convLoadNewer(dm.id),
+    jumpLatest: () => useStore.getState().convJumpLatest(dm.id),
+    jumpTo: (id) => useStore.getState().convJumpTo(dm.id, id),
+    unreadBelow,
+    place: visitStart.place,
+    onPlace: (p) => useStore.getState().convSetPlace(dm.id, p),
+    readKey: visitStart.readKey,
+    stale: !!win?.stale,
+  };
   // Бывшая группа: поиск по её ленте сервер не отдаёт (`/conv/:id/search` — «нет такой»).
-  const searchOn = searchFlag && !!feedWindow && !former;
+  const searchOn = searchFlag && !former;
   // Звонок 1:1 (С5, `calls1`): трубка в шапке, как tdesktop `TopBarWidget` / tweb `ChatTopbar` — между поиском и «⋯». Только
   // беседа 1:1 (не группа, не «Избранное»), заблокированному не звоним (сервер всё равно ответит 403).
   // «Кто может звонить» (`presence4`, решение владельца 08.10 п.25): собеседник запретил мне звонить (`canCall === false` из
   // `GET /users/:id/last-seen`) — трубка ОСТАЁТСЯ, по нажатию окно «ограничил(а) звонки» (как Telegram), звонка нет.
   const callsOn =
-    useStore((s) => s.convActive && serverCalls(s.serverFeatures)) && !group && !saved && !former && !blocked;
+    useStore((s) => serverCalls(s.serverFeatures)) && !group && !saved && !former && !blocked;
   const callsDenied = lastSeen?.canCall === false;
+  // «Кто может мне писать» (`msgpriv1`, 13.10): собеседник пускает только контакты (и тех, кому писал сам), я не прохожу —
+  // вместо поля ввода плашка, как tdesktop `lng_restricted_send_non_premium` в `history_view_compose_controls.cpp`.
+  const messagesDenied = !group && !saved && !former && !blocked && lastSeen?.canMessage === false;
+  // Э6 (`fedcall1`): человек другого инстанса — трубка неактивна с подсказкой, пока наш сервер без `fedcall1` или его инстанс не принимает звонки.
+  const callsFedLocked = useStore((s) => fedCallsLocked(peerHome, s.serverFeatures, s.conv.summaries[dm.id]));
+  // Подсказка — только когда отказал инстанс собеседника (`fedNoCalls`); подпись трубки без него прежняя (`R192`: кнопка ищется по «Позвонить»).
+  const callsFedNoHint = useStore((s) => !!peerHome && s.conv.summaries[dm.id]?.fedNoCalls === true);
   const inCall = useCall((s) => !!s.call);
   const chatSearch: ChatSearchSource | undefined = searchOn
     ? {
@@ -750,32 +861,26 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       }
     : undefined;
 
-  /* Медиатека беседы для просмотра (G11): порции истории за краем окна ленты. Беседы — `convHistory` в обе стороны (удалённое
-     у меня — мимо), старый путь ЛС — только старше. */
+  /* Медиатека беседы для просмотра (G11): порции истории за краем окна ленты — `convHistory` в обе стороны (удалённое
+     у меня — мимо). */
   const loadMediaPage = async (dir: -1 | 1, edge: Message): Promise<{ messages: Message[]; more: boolean }> => {
-    if (convActive) {
-      const sortKey = (edge as Partial<ConvMessage>).sortKey;
-      if (typeof sortKey !== 'number') return { messages: [], more: false };
-      const cur = convCursor({ sortKey, id: edge.id });
-      const res = await api.convHistory(dm.id, dir < 0 ? { before: cur, limit: 100 } : { after: cur, limit: 100 });
-      const gone = useStore.getState().conv.gone;
-      const list = res.messages.filter((m): m is ConvMessage => !('gone' in m) && !gone[m.id]);
-      return { messages: list, more: dir < 0 ? res.hasMoreBefore : res.hasMoreAfter };
-    }
-    const cursor = dir < 0 ? olderCursor([edge]) : null;
-    if (!cursor) return { messages: [], more: false };
-    const page = await api.listDmMessages(dm.id, cursor);
-    return { messages: page, more: hasMoreOlder(page) };
+    const sortKey = (edge as Partial<ConvMessage>).sortKey;
+    if (typeof sortKey !== 'number') return { messages: [], more: false };
+    const cur = convCursor({ sortKey, id: edge.id });
+    const res = await api.convHistory(dm.id, dir < 0 ? { before: cur, limit: 100 } : { after: cur, limit: 100 });
+    const gone = useStore.getState().conv.gone;
+    const list = res.messages.filter((m): m is ConvMessage => !('gone' in m) && !gone[m.id]);
+    return { messages: list, more: dir < 0 ? res.hasMoreBefore : res.hasMoreAfter };
   };
 
   return (
     <MessagePane
       nameOf={nameOf}
       quoteNames
-      // Файл до 512 МБ кусками (`bigfile1`) — только путём бесед (`api.convUpload`); старый путь ЛС — прежние 25 МБ.
+      // Файл до 512 МБ кусками (`bigfile1`) — путём бесед (`api.convUpload`).
       // Предел считает сама лента (`attachRules.dmAttachMaxBytes`): харнесс шапки грузит этот файл с перечнем импортов.
-      bigFiles={convActive}
-      onRedial={callsOn && !callsDenied && !inCall ? () => void useCall.getState().start(dm.id) : undefined}
+      bigFiles
+      onRedial={callsOn && !linkBroken && !callsDenied && !callsFedLocked && !inCall ? () => void useCall.getState().start(dm.id) : undefined}
       newSince={newSince}
       scrollKey={visitKey}
       feedId={dm.id}
@@ -785,7 +890,8 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
            связи с сервером — «Подключение…» / «Ожидание сети», 05.10);
            «печатает» ложится в ту же клетку поверх, ширина подписи не меняется. ПК — одной строкой, подпись как тема
            канала (`.topbar-topic`); телефон — имя над подписью, без подписи (`.solo`) имя по центру. На телефоне аватар
-           крупнее: шапка там 56 px с кнопками 48, и маленький терялся между ними (#212). */
+           как у Telegram Android — 42 (`ChatAvatarContainer.java:265`, радиус 21) и БЕЗ точки «в сети»: присутствие там
+           только словами в строке состояния (#218). ПК (tdesktop) — 28 с точкой, как было. */
         <div
           className="topbar-title dm-open-profile"
           role="button"
@@ -801,30 +907,44 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
           }}
         >
           <span className="dm-ava">
-            {saved ? <SavedAvatar size={phone ? 36 : 28} /> : <Avatar url={dm.otherUser.avatarUrl} name={peerName} size={phone ? 36 : 28} />}
-            {peerOnline && (
+            {saved ? <SavedAvatar size={phone ? 42 : 28} /> : <Avatar url={dm.otherUser.avatarUrl} name={peerName} size={phone ? 42 : 28} />}
+            {peerOnline && !phone && (
               <span className="mp-dot-wrap">
                 <StatusDot status="online" size={phone ? 12 : 10} ringColor="var(--bg)" />
               </span>
             )}
           </span>
           <span className={`dm-who${peerTyping ? ' typing' : ''}${saved || (!group && !peerOnline && !peerTyping && !conn && !seenText) ? ' solo' : ''}`}>
-            <strong>{peerName}</strong>
+            <strong>
+              {peerName}
+              {/* Э1 (`fedm1`): собеседник с другого инстанса — значок как `GuestMark` списка участников (импорт сюда нельзя, см. выше). */}
+              {peerHomeLabel && (
+                <span className="guest-mark" title={`С инстанса «${peerHomeLabel}»`} aria-label={`с инстанса «${peerHomeLabel}»`}>
+                  <Icon name="globe" size={12} />
+                </span>
+              )}
+            </strong>
             <span className="topbar-topic dm-who-sub">
               {/* Скрытая из двух подписей прозрачна, но в дереве — скринридеру её не читать. */}
-              <span className="dm-who-status" aria-hidden={peerTyping || undefined}>
+              <span ref={statusRef} className="dm-who-status" aria-hidden={peerTyping || undefined}>
                 {conn ??
                   (saved
                     ? ''
                     : former
                     ? former.removed
-                      ? 'вас удалили из группы'
+                      ? 'вас исключили из группы'
                       : 'вы покинули группу'
                     : group
                       ? groupMembersLabel(group.members.length)
                       : online
                         ? 'в сети'
-                        : seenText)}
+                        : shortForms
+                          ? seenForms.map((f, i) => (
+                              <span key={f} data-form hidden={i > 0}>
+                                {f}
+                              </span>
+                            ))
+                          : seenText)}
               </span>
               <span className="dm-who-typing" aria-hidden={!peerTyping || undefined}>
                 <span className="typing-dots">
@@ -856,13 +976,13 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
               <Icon name="search" size={18} />
             </button>
           )}
-          {callsOn && (
+          {callsOn && !linkBroken && (
             <button
               type="button"
               className="topbar-btn"
-              title="Позвонить"
+              title={callsFedNoHint ? FED_NO_CALLS_TEXT : 'Позвонить'}
               aria-label="Позвонить"
-              disabled={inCall}
+              disabled={inCall || callsFedLocked}
               onClick={() => (callsDenied ? explainCallPrivacy(peerName) : void useCall.getState().start(dm.id))}
             >
               <Icon name="phone" size={18} />
@@ -876,147 +996,144 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             aria-haspopup="menu"
             onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
-              setMoreAt({ x: r.right, y: r.bottom + 4 });
+              // `rect` — якорь выпадающего меню на телефоне (`drop`); ПК — меню по точке под кнопкой, как было.
+              setMoreAt({ x: r.right, y: r.bottom + 4, rect: r });
+              setMuteSub(false);
             }}
           >
             <Icon name="more" size={18} />
           </button>
-          {moreAt && (
-            <ContextMenu pos={{ x: Math.max(0, moreAt.x - 264), y: moreAt.y }} width={264} fit onClose={() => setMoreAt(null)}>
-              {/* Телефон (решение 49, 08.10), как Telegram Android: в шапке только звонок и ⋮, «Поиск» — первым пунктом меню. */}
-              {phone && searchOn && (
+          {moreAt &&
+            (() => {
+              const close = () => setMoreAt(null);
+              const searchItem = searchOn && (
                 <MenuItem
                   icon="search"
                   label="Поиск"
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     setSearchOpen(true);
                   }}
                 />
-              )}
-              {group && !former && (
+              );
+              const groupInfoItem = group && !former && (
                 <MenuItem
                   icon="users"
                   label="Информация о группе"
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     openGroupInfo(dm.id);
                   }}
                 />
-              )}
-              {/* Группа (`groups2`): тот же «Выключить уведомления ▸», цель заглушки — `group:<id>` (= `otherUser.id`). */}
-              {!saved && !former && alwaysAct && (
+              );
+              /* Группа (`groups2`): тот же «Выключить уведомления ▸», цель заглушки — `group:<id>` (= `otherUser.id`). */
+              const muteItem = saved || former ? null : alwaysAct ? (
                 <MenuItem
                   icon={alwaysAct === 'enable' ? 'bell' : 'bell-off'}
                   label={alwaysAct === 'enable' ? 'Включить уведомления' : 'Выключить уведомления'}
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     useStore.getState().setPushAlways(dm.otherUser.id, alwaysAct === 'enable').catch(toastError);
                   }}
                 />
-              )}
-              {!saved && !former && !alwaysAct && <MenuItem
+              ) : phone && moreAt.rect && prefsOn && !pushMuted ? (
+                /* Телефон (#218): «Уведомления ▸» (подпись как у TG — решение владельца 12.10) открывает подменю в том же меню, как Telegram Android (`muteItem` —
+                   `lazilyAddSwipeBackItem(…, chatNotificationsPopupWrapper.windowLayout)` → `openSwipeBack`, `TA/ui/ChatActivity.java:4373-4387`);
+                   заглушена — «Включить уведомления» сразу, без подменю (ветка ниже). */
+                <MenuItem icon="bell-off" label="Уведомления" submenu onClick={() => setMuteSub(true)} />
+              ) : <MenuItem
                 icon={pushMuted ? 'bell' : 'bell-off'}
                 label={pushMuted ? 'Включить уведомления' : prefsOn ? 'Выключить уведомления…' : 'Отключить уведомления'}
                 // Заглушена на время — остаток срока серым справа (решение 41, 08.10: в этом меню его не было вовсе).
                 shortcut={(pushMuted && prefsOn && muteLeftLabel(mute, muteNow)) || undefined}
                 note
                 onClick={() => {
-                  setMoreAt(null);
+                  close();
                   // Сервер умеет срок (conv11) и сейчас звук есть — выбор срока; иначе — прежний переключатель.
                   if (prefsOn && !pushMuted) setBellAt(new DOMRect(moreAt.x - 1, moreAt.y - 4, 1, 1));
                   else setPushMuted('dm_user', dm.otherUser.id, !pushMuted).catch(toastError);
                 }}
-              />}
-              {archiveOn && !former && (
+              />;
+              const archiveItem = archiveOn && !former && (
                 <MenuItem
                   icon={dm.archived ? 'unarchive' : 'archive'}
                   label={archiveMenuLabel(dm.archived === true)}
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     archiveDms([dm.id], dm.archived !== true);
                   }}
                 />
-              )}
-              {/* Телефон: закрепление беседы переехало из шапки в меню (тот же экшен, что у кнопки-пина на ПК). */}
-              {phone && prefsOn && !former && (
+              );
+              /* Телефон: закрепление беседы переехало из шапки в меню (тот же экшен, что у кнопки-пина на ПК). */
+              const pinItem = phone && prefsOn && !former && (
                 <MenuItem
                   icon={pinned ? 'pin-off' : 'pin'}
                   label={pinned ? 'Открепить' : 'Закрепить'}
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     toggleDmPinned(dm.id, !pinned);
                   }}
                 />
-              )}
-              {!group && !saved && <MenuItem
-                icon="user"
-                label="Показать профиль"
-                onClick={() => {
-                  setMoreAt(null);
-                  openUserCardAt({ x: moreAt.x - 320, y: moreAt.y }, peerTarget, 'profile');
-                }}
-              />}
-              {searchOn && !phone && (
+              );
+              const profileItem = !group && !saved && (
                 <MenuItem
-                  icon="search"
-                  label="Поиск"
+                  icon="user"
+                  label="Показать профиль"
                   onClick={() => {
-                    setMoreAt(null);
-                    setSearchOpen(true);
+                    close();
+                    openUserCardAt({ x: moreAt.x - 320, y: moreAt.y }, peerTarget, 'profile');
                   }}
                 />
-              )}
-              {/* Контакты (`contacts1`), как меню профиля Telegram: «Добавить в контакты» или «Изменить контакт» / «Удалить контакт». */}
-              {contactsOn && !former && !peerContact && (
+              );
+              /* Контакты (`contacts1`), как меню профиля Telegram: «Добавить в контакты» или «Изменить контакт» / «Удалить контакт». */
+              const addContactItem = contactsOn && !former && !peerContact && (
                 <MenuItem
                   icon="user-plus"
                   label="Добавить в контакты"
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     useContacts.getState().openEdit(peerPerson, 'add');
                   }}
                 />
-              )}
-              {contactsOn && !former && peerContact && (
-                <MenuItem
-                  icon="edit"
-                  label="Изменить контакт"
-                  onClick={() => {
-                    setMoreAt(null);
-                    useContacts.getState().openEdit(peerPerson, 'edit');
-                  }}
-                />
-              )}
-              {contactsOn && !former && peerContact && (
-                <MenuItem
-                  icon="trash"
-                  label="Удалить контакт"
-                  onClick={() => {
-                    setMoreAt(null);
-                    void removeContactAsk(peerPerson, contactLabel(peerContact));
-                  }}
-                />
-              )}
-              {/* С «Добавить в контакты» на плашке телефона «Пожаловаться» живёт здесь (как «Report» в меню Telegram Android). */}
-              {strangerBar && contactsOn && (
+              );
+              const editContactItems = contactsOn && !former && peerContact && (
+                <>
+                  <MenuItem
+                    icon="edit"
+                    label="Изменить контакт"
+                    onClick={() => {
+                      close();
+                      useContacts.getState().openEdit(peerPerson, 'edit');
+                    }}
+                  />
+                  <MenuItem
+                    icon="trash"
+                    label="Удалить контакт"
+                    onClick={() => {
+                      close();
+                      void removeContactAsk(peerPerson, contactLabel(peerContact));
+                    }}
+                  />
+                </>
+              );
+              /* С «Добавить в контакты» на плашке телефона «Пожаловаться» живёт здесь (как «Report» в меню Telegram Android). */
+              const reportItem = strangerBar && contactsOn && (
                 <MenuItem
                   icon="flag"
                   label="Пожаловаться"
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     setReportOpen(true);
                   }}
                 />
-              )}
-              {!saved && !former && <MenuDivider />}
-              {saved || former ? null : group ? (
+              );
+              const blockItem = saved || former ? null : group ? (
                 <MenuItem
                   icon="logout"
                   label="Покинуть группу"
                   danger
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     void leaveGroup(dm.id, group.title);
                   }}
                 />
@@ -1026,48 +1143,102 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
                   label={blocked ? 'Разблокировать' : 'Заблокировать'}
                   danger={!blocked}
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     void switchBlock();
                   }}
                 />
-              )}
-              {/* Как у Telegram (03·2.3.1 / 2.3.2): «Очистить историю» и «Удалить чат» — в конце меню; окна те же, что у меню строки. */}
-              {/* Бывшая группа (Telegram Android `ChatActivity`: при `isNotInChat` нет «Покинуть», остаётся удалить): одно «Удалить группу». */}
-              {former && (
+              );
+              /* Бывшая группа (Telegram Android `ChatActivity`: при `isNotInChat` нет «Покинуть», остаётся удалить): одно «Удалить группу». */
+              const formerItem = former && (
                 <MenuItem
                   icon="trash"
                   label="Удалить группу"
                   danger
                   onClick={() => {
-                    setMoreAt(null);
+                    close();
                     void deleteFormerGroup(dm);
                   }}
                 />
-              )}
-              {clearOn && !former && (
+              );
+              const clearItems = clearOn && !former && (
                 <>
-                  <MenuDivider />
                   <MenuItem
                     icon="close"
                     label="Очистить историю"
                     onClick={() => {
-                      setMoreAt(null);
+                      close();
                       void clearHistory(dm, nameOf);
                     }}
                   />
                   <MenuItem
                     icon="trash"
                     label="Удалить чат"
-                    danger
+                    // В «⋮» телефона — обычным цветом, как у Telegram Android (окно подтверждения всё равно спросит); ПК — как было.
+                    danger={!phone}
                     onClick={() => {
-                      setMoreAt(null);
+                      close();
                       void deleteChat(dm, nameOf);
                     }}
                   />
                 </>
-              )}
-            </ContextMenu>
-          )}
+              );
+              /* Телефон (10.10, #218): выпадающее меню у правого верхнего угла, как «⋮» Telegram Android (`ChatActivity`
+                 `headerItem`, порядок `lazilyAddSubItem`): уведомления (`muteItem`) · разрыв (`lazilyAddColoredGap`) · Поиск ·
+                 Добавить в контакты · Очистить историю · Удалить чат. Звонок у нас — кнопкой в шапке, перевода, таймера, обоев и
+                 ярлыка нет. Наше, чего в этом меню у Telegram нет (в списке бесед, профиле, плашке), — после «Поиска» и «Добавить
+                 в контакты», ПЕРЕД «Очистить историю / Удалить чат»: разрушающие остаются последними, как у Telegram (решение
+                 владельца 10.10). ПК — прежнее меню по точке и прежний порядок. */
+              if (phone && moreAt.rect && muteSub && !pushMuted) {
+                // Тот же якорь и вид, что у основного меню ниже: подменю встаёт на его место.
+                return (
+                  <ContextMenu anchor={moreAt.rect} drop align="end" width={196} fit onClose={close}>
+                    <DmMuteMenuItems peerId={dm.otherUser.id} mute={mute} now={muteNow} onDone={close} onBack={() => setMuteSub(false)} />
+                  </ContextMenu>
+                );
+              }
+              if (phone && moreAt.rect) {
+                return (
+                  <ContextMenu anchor={moreAt.rect} align="end" drop width={196} fit onClose={close}>
+                    {muteItem}
+                    {muteItem && <MenuDivider />}
+                    {searchItem}
+                    {addContactItem}
+                    {groupInfoItem}
+                    {archiveItem}
+                    {pinItem}
+                    {profileItem}
+                    {editContactItems}
+                    {reportItem}
+                    {blockItem}
+                    {formerItem}
+                    {clearItems}
+                  </ContextMenu>
+                );
+              }
+              return (
+                <ContextMenu pos={{ x: Math.max(0, moreAt.x - 264), y: moreAt.y }} width={264} fit onClose={close}>
+                  {groupInfoItem}
+                  {muteItem}
+                  {archiveItem}
+                  {pinItem}
+                  {profileItem}
+                  {searchItem}
+                  {addContactItem}
+                  {editContactItems}
+                  {reportItem}
+                  {!saved && !former && <MenuDivider />}
+                  {blockItem}
+                  {/* Как у Telegram (03·2.3.1 / 2.3.2): «Очистить историю» и «Удалить чат» — в конце меню; окна те же, что у меню строки. */}
+                  {formerItem}
+                  {clearItems && (
+                    <>
+                      <MenuDivider />
+                      {clearItems}
+                    </>
+                  )}
+                </ContextMenu>
+              );
+            })()}
           {bellAt && (
             <ContextMenu anchor={bellAt} align="end" onClose={() => setBellAt(null)} width={phone ? 288 : 256} fit>
               <DmMuteMenuItems peerId={dm.otherUser.id} mute={mute} now={muteNow} onDone={() => setBellAt(null)} />
@@ -1081,6 +1252,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
           <>
             <StrangerBar
               peerName={peerName}
+              peerHome={peerHomeLabel}
               onAdd={contactsOn ? () => useContacts.getState().openEdit(peerPerson, 'add') : undefined}
               onBlock={() => void switchBlock()}
               onReport={() => setReportOpen(true)}
@@ -1090,6 +1262,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
               <StrangerReportModal
                 convId={dm.id}
                 peer={{ id: peer.id, displayName: peer.displayName }}
+                holder={peerHomeLabel}
                 blocked={blocked}
                 onBlock={blockQuiet}
                 onClose={() => setReportOpen(false)}
@@ -1098,13 +1271,36 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
           </>
         ) : undefined
       }
+      composerNotice={
+        peerDown && !linkBroken ? (
+          <div className="composer-blocked fed-archive fed-stale fed-peer-down" role="status">
+            <Icon name="clock" size={16} />
+            <span className="muted">{fedPeerDownText(peerHomeLabel)}</span>
+          </div>
+        ) : linkStale && !linkBroken ? (
+          <div className="composer-blocked fed-archive fed-stale" role="status">
+            <Icon name="clock" size={16} />
+            <span className="muted">{fedLinkStaleText(peerHomeLabel)}</span>
+          </div>
+        ) : groupDownText && !former ? (
+          <div className="composer-blocked fed-archive fed-stale fed-group-down" role="status">
+            <Icon name="clock" size={16} />
+            <span className="muted">{groupDownText}</span>
+          </div>
+        ) : undefined
+      }
       composerReplacement={
         former ? (
           <div className="composer-blocked">
-            <span className="muted">{former.removed ? 'Вас удалили из группы.' : 'Вы покинули группу.'}</span>
+            <span className="muted">{former.removed ? 'Вас исключили из группы.' : 'Вы покинули группу.'}</span>
             <button type="button" className="link" onClick={() => void deleteFormerGroup(dm)}>
               Удалить группу
             </button>
+          </div>
+        ) : linkBroken ? (
+          <div className="composer-blocked fed-archive" role="status">
+            <Icon name="lock" size={16} />
+            <span className="muted">{fedLinkBrokenText(peerHomeLabel)}</span>
           </div>
         ) : blocked ? (
           <div className="composer-blocked">
@@ -1112,6 +1308,11 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             <button type="button" className="link" onClick={() => void switchBlock()}>
               Разблокировать
             </button>
+          </div>
+        ) : messagesDenied ? (
+          <div className="composer-blocked" role="status">
+            <Icon name="lock" size={16} />
+            <span className="muted">{messagePrivacyPlateText(peerName)}</span>
           </div>
         ) : undefined
       }
@@ -1140,56 +1341,46 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             }
           : undefined
       }
-      // «Прочитано» по видимому (G09): лента сообщает увиденное — с начала визита и только в режиме бесед.
-      onSeen={convActive && started && (!feedWin || feedWindow) ? (key) => useStore.getState().convSeen(dm.id, key) : undefined}
-      bubbles={bubbles}
+      // «Прочитано» по видимому (G09): лента сообщает увиденное — с начала визита.
+      onSeen={started ? (key) => useStore.getState().convSeen(dm.id, key) : undefined}
+      bubbles
       peerReadKey={peerReadKey}
-      readAtConvId={bubbles && convActive && lastSeenOn && !saved ? dm.id : null}
-      onTyping={saved ? undefined : (action) => sendTyping({ dmId: dm.id, recipientId: dm.otherUser.id }, action)}
+      readAtConvId={lastSeenOn && !saved && !group ? dm.id : null}
+      readersConvId={readersOn && group && !saved ? dm.id : null}
+      onTyping={saved || (peerHome && !serverFedPresence(features)) ? undefined : (action) => sendTyping({ dmId: dm.id, recipientId: dm.otherUser.id }, action)}
       meId={user?.id}
       draft={initialDraft}
       draftRemote={draftRemote}
-      onDraftChange={convActive ? (text, replyToId) => useStore.getState().setDraft(dm.id, text, replyToId) : undefined}
+      onDraftChange={(text, replyToId) => useStore.getState().setDraft(dm.id, text, replyToId)}
       sendFlags={sendFlagsOn}
       mediaFlags={mediaFlagsOn}
       quoteOn={quoteOn}
-      outbox={
-        convActive
-          ? {
-              items: outboxItems,
-              enqueue: (item) => useStore.getState().outboxEnqueue(dm.id, item),
-              retry: (key) => useStore.getState().outboxRetry(dm.id, key),
-              discard: (key) => useStore.getState().outboxDiscard(dm.id, key),
-            }
-          : undefined
-      }
-      onSend={async (content, files, replyToId, sendKey) => {
-        const signal = uploadSignal(sendKey);
-        // Старый путь ЛС (без бесед): прогресс и отмена — как у каналов (07.10).
-        const attachments = await Promise.all(
-          files.map((f, i) =>
-            api
-              .uploadDmAttachment(dm.id, f, {
-                signal,
-                onProgress: (loaded, total) => setUploadProgress(sendKey, i, loaded, total),
-              })
-              .then((a) => {
-                setUploadDone(sendKey, i);
-                return a;
-              }),
-          ),
-        );
-        if (signal?.aborted) throw uploadAborted();
-        const msg = await api.sendDmMessage(dm.id, content, attachments, replyToId);
-        if (signal?.aborted) {
-          await api.deleteDmMessage(dm.id, msg.id, 'both').catch(() => appendDmMessage(dm.id, msg));
-          throw uploadAborted();
-        }
-        appendDmMessage(dm.id, msg);
+      outbox={{
+        items: outboxItems,
+        enqueue: (item) => useStore.getState().outboxEnqueue(dm.id, item),
+        retry: (key) => useStore.getState().outboxRetry(dm.id, key),
+        discard: (key) => useStore.getState().outboxDiscard(dm.id, key),
       }}
+      // ЛС шлёт очередь бесед (`outbox` выше); `onSend` ленты (путь без очереди — каналы) сюда не доходит.
+      onSend={() => Promise.reject(new Error('ЛС отправляются очередью бесед'))}
       stickerPacks={stickersOn ? (myStickers ?? []) : undefined}
-      onSendSticker={stickersOn ? (stickerId) => sendStickerRef.current(stickerId) : undefined}
-      onSendGif={gifsOn ? sendGif : undefined}
+      onSendSticker={stickersOn ? (stickerId) => (viaOn ? Promise.reject(new Error(FED_VIA_TEXT_ONLY)) : sendStickerRef.current(stickerId)) : undefined}
+      // Файлы людям других инстансов: закрыты без `fedm3` или при `fedNoFiles` (Э3) — скрепка неактивна с подсказкой, голосовое, кружок и GIF скрыты.
+      filesBlocked={filesHint ?? undefined}
+      viaNames={peerHome || groupHostId ? { self: viaSelf, peer: viaPeerLabel ?? '' } : undefined}
+      composerNote={
+        viaOn ? (
+          <div className="fed-via-bar" role="status">
+            <Icon name="globe" size={14} />
+            <span>{fedViaBarText(viaSelf, viaPeerLabel ?? '')}</span>
+          </div>
+        ) : undefined
+      }
+      onSendGif={gifsOn && !filesHint ? sendGif : undefined}
+      // «Через» (Э5) — только текст; у бывшей группы и архива поля ввода нет вовсе.
+      onSendMedia={geoContactOn && !viaOn ? sendMedia : undefined}
+      convPoll={convPollFeature && (!peerHome || fedPollOk) && !groupHostId && !viaOn}
+      geoLive={geoLiveFeature && !peerHome && !groupHostId && !viaOn}
       // Бывшая группа (`groups3`): сервер вышедшему сохранить не даст (404, нет участия) — пункта в меню нет (ревью 08.10).
       onSaveGif={gifsOn && !former ? saveGif : undefined}
       stickerRecent={stickersOn ? recentStickers : undefined}
@@ -1197,75 +1388,60 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       onStickerUsed={stickersOn ? (st) => useDmStickers.getState().used(st) : undefined}
       onEscapeClose={() => {
         /* Последний Esc — закрыть беседу (07.10, G15; Telegram Desktop `HistoryWidget::escape` → `_cancelRequests` →
-           `showBackFromStack`): на ПК справа «Выбери диалог», в одну колонку (узкое окно) — назад к списку. Фокус — в поиск
-           бесед: у Telegram после закрытия набор уходит в поиск, а ↓ из поиска ведёт к строкам (G14). */
+           `showBackFromStack`): на ПК справа «Выбери диалог», в одну колонку (узкое окно) — назад к списку. Фокус в поиск
+           бесед НЕ уводим (просьба владельца 10.10: Esc только закрывает беседу; раньше тут был `.dm-find input`.focus()). */
         const s = useStore.getState();
         if (phone) return s.setMobilePane('list');
         useStore.setState({ currentDmId: null });
-        requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.dm-find input')?.focus());
       }}
       voiceOnce={voiceOnceOn}
-      roundOk={roundOn}
-      onSendVoice={async (take, opts) => {
+      roundOk={roundOn && !filesHint}
+      onSendVoice={filesHint ? undefined : async (take, opts) => {
         // ЛС голосовые умеют: это не серверная настройка, в отличие от стикеров и ников (#20).
-        if (convActive) {
-          const att = await api.convUpload(dm.id, take.file);
-          // Кружок (`circles1`, G68): квадратное видео с пометкой `round`; огибающей у него нет.
-          const ref = take.round
-            ? {
-                ...toOutboxRef({ ...att, width: take.round.side, height: take.round.side, durationMs: take.durationMs }),
-                waveform: null,
-                round: true as const,
-              }
-            : toOutboxRef({ ...att, waveform: take.waveform, durationMs: take.durationMs });
-          const msg = await api.convSend(dm.id, {
-            clientId: newClientId(),
-            content: '',
-            // «Один раз» (`voice3`) — пометка у ссылки на вложение; сервер оставит её только в личке 1:1.
-            attachments: [voiceOnceOn && opts?.once ? { ...ref, once: true } : ref],
-          });
-          useStore.getState().convAfterSend(dm.id, msg);
-          return;
-        }
-        const att = await api.uploadDmAttachment(dm.id, take.file);
-        const msg = await api.sendDmMessage(dm.id, '', [
-          { ...att, waveform: take.waveform, durationMs: take.durationMs },
-        ]);
-        appendDmMessage(dm.id, msg);
+        const att = await api.convUpload(dm.id, take.file);
+        // Кружок (`circles1`, G68): квадратное видео с пометкой `round`; огибающей у него нет.
+        const ref = take.round
+          ? {
+              ...toOutboxRef({ ...att, width: take.round.side, height: take.round.side, durationMs: take.durationMs }),
+              waveform: null,
+              round: true as const,
+            }
+          : toOutboxRef({ ...att, waveform: take.waveform, durationMs: take.durationMs });
+        const msg = await api.convSend(dm.id, {
+          clientId: newClientId(),
+          content: '',
+          // «Один раз» (`voice3`) — пометка у ссылки на вложение; сервер оставит её только в личке 1:1.
+          attachments: [voiceOnceOn && opts?.once ? { ...ref, once: true } : ref],
+        });
+        useStore.getState().convAfterSend(dm.id, msg);
       }}
       onEdit={async (m, content) => {
-        if (convActive) {
-          useStore.getState().convAfterEdit(dm.id, await api.convEdit(dm.id, m.id, content));
-          return;
-        }
-        const updated = await api.editDmMessage(dm.id, m.id, content);
-        updateDmMessage(dm.id, updated);
+        if (viaOn) throw new Error(FED_VIA_TEXT_ONLY);
+        useStore.getState().convAfterEdit(dm.id, await api.convEdit(dm.id, m.id, content));
       }}
       deletePeerName={peerName}
       batch={batch}
       deleteOthersForBoth={othersForBoth}
       pins={pins}
-      readOnly={!!former}
+      readOnly={!!former || linkBroken}
       sendMenu={sendMenu}
       onDelete={async (m, scope) => {
-        if (convActive) {
-          await api.convDelete(dm.id, m.id, scope ?? 'me');
-          useStore.getState().convAfterDelete(dm.id, m.id);
-          return;
-        }
-        await api.deleteDmMessage(dm.id, m.id, scope);
-        // Строку ленты убираем сразу; время беседы и число поправит событие `dm.delete` следом.
-        removeDmMessage(dm.id, m.id);
+        if (viaOn) throw new Error(FED_VIA_TEXT_ONLY);
+        await api.convDelete(dm.id, m.id, scope ?? 'me');
+        useStore.getState().convAfterDelete(dm.id, m.id);
       }}
       reactorOf={reactorOf}
-      onReact={former ? undefined : (messageId, emoji, op) => {
+      onReact={former || linkBroken ? undefined : (messageId, emoji, op) => {
+        // Э5: дом недоступен — реакции закрыты с подсказкой (сервер соседа ответил бы 403 `federation.dm_via_limited`).
+        if (viaOn) return void toastError(new Error(FED_VIA_TEXT_ONLY));
         // Persist; the gateway echoes the change back to both participants → store update.
-        (convActive ? api.convReact(dm.id, messageId, emoji, op) : api.reactDm(dm.id, messageId, emoji, op)).catch(toastError);
+        api.convReact(dm.id, messageId, emoji, op).catch(toastError);
       }}
       onReactBig={
-        former || !bigFlag
+        former || linkBroken || !bigFlag
           ? undefined
           : (messageId, emoji) => {
+              if (viaOn) return void toastError(new Error(FED_VIA_TEXT_ONLY));
               // Как Telegram: у отправителя анимация сразу, реакция ставится (повтор своей — снова «большая»), собеседнику — `reaction.big`.
               fireEffect({ kind: 'bigReaction', conversationId: dm.id, messageId, emoji });
               api.convReact(dm.id, messageId, emoji, 'add', true).catch(toastError);

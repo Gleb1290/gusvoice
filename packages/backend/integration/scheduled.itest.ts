@@ -558,7 +558,11 @@ test('планировщик ждёт заданного времени, зат�
   const authorJournal = (await t.raw.query<{ pts: number; kind: string }>(`SELECT pts,kind FROM user_changes WHERE user_id='a' ORDER BY pts`)).rows;
   assert.deepEqual(authorJournal.map((r) => r.kind), ['sched', 'msg', 'sched']);
   assert.deepEqual(changes.map((m) => m.pts), authorJournal.slice(1).map((r) => Number(r.pts)));
-  assert.ok(eventsFor('b').some((m) => m.t === 'dm.create'), 'старому клиенту тоже доставляется отправка планировщика');
+  assert.equal(eventsFor('b').some((m) => String(m.t).startsWith('dm.') || m.t === 'read.dm'), false,
+    'планировщик больше не публикует события старого пути ЛС');
+  const oldClientEvents = published.filter((p) => p.channel === 'gw:user:b').map((p) => JSON.parse(p.message))
+    .filter((envelope) => !envelope.cap);
+  assert.deepEqual(oldClientEvents, [], 'соединение без conv1 не получает отправку планировщика');
   assert.equal((await runScheduledTick({ now: () => new Date(Date.now() + 10_000) })).sent, 0);
   assert.equal((await messageRows()).length, 1);
   assert.equal((await t.raw.query<{ n: number }>(`SELECT count(*)::int n FROM user_changes WHERE kind='sched' AND user_id='a'`)).rows[0].n, 2);

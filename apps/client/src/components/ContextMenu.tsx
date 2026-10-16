@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { BIG_MOVE_SLOP_PX, bigHoldOutcome, bigHoldProgress } from '../bigReaction';
 import { useImageViewerOpen } from '../imageViewer';
 import {
+  clampAxis,
   placeByHalf,
   placeByPoint,
   placeStackByPoint,
@@ -47,6 +48,21 @@ type ContextMenuCommonProps = {
   align?: MenuAlign;
   /** Приглушить экран двумя половинами подложки, кроме полосы `[top, bottom]` (раунд 12, телефон: строка сообщения). */
   spotlight?: MenuSpotlight;
+  /**
+   * Выпадающее меню кнопки шапки (10.10, телефон; Telegram Android `ActionBarMenuItem.updateOrShowPopup` +
+   * `ActionBarPopupWindow.startAnimation`): только с `anchor` (прямоугольник кнопки). Карточка встаёт верхом на верх кнопки,
+   * правым краем к её правому краю (кнопку накрывает, как у Telegram), раскрывается сверху вниз от правого верхнего угла
+   * (`.ctx-stack.drop`), пункты проявляются по мере раскрытия — задержку каждому ставит сам блок (`dropStagger`).
+   */
+  drop?: boolean;
+  /**
+   * Уровни внутри меню на телефоне (#218, решение владельца 12.10): системная «Назад» (`stepBack` шлёт Esc, слой `.ctx-menu` забирает
+   * его первым) ведёт на уровень выше, а не закрывает меню целиком — как подменю `ActionBarPopupWindow` у Telegram Android
+   * (`ChatNotificationsPopupWrapper`: «Назад» возвращает основной список). Порядок: пункт с `back` (`MenuItem back`) или `.ctx-back`
+   * в открытом уровне — нажимается; иначе `onBack` (меню, где уровень — состояние зовущего); иначе меню закрывается. На ПК Esc
+   * закрывает меню целиком, как и прежде.
+   */
+  onBack?: () => void;
 };
 
 /** Ровно одно из двух: `pos` (точка клика) или `anchor` (прямоугольник якоря, раунд 12). */
@@ -133,6 +149,8 @@ export function ContextMenu({
   reactions,
   align = 'start',
   spotlight,
+  drop = false,
+  onBack,
 }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -184,7 +202,14 @@ export function ContextMenu({
     /* Карточка не выше доступной области за вычетом полосы реакций над ней (разведка наплывов 09.10, ландшафт 740×360:
        «Изменить»/«Удалить» уходили за низ) — дальше прокрутка внутри карточки. Ставим ДО замера блока: его высота от неё. */
     card.style.maxHeight = `${stackCardMaxHeight(vp, card.offsetTop)}px`;
-    if (anchor) {
+    if (anchor && drop) {
+      const a = toLayoutRect(anchor);
+      const vp2 = viewportAboveSafeBottom();
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      setPlace({ left: clampAxis(a.right - w, w, vp2.vw, 8, vp2.left ?? 0), top: clampAxis(a.top, h, vp2.vh, 8, vp2.top ?? 0) });
+      dropStagger(card);
+    } else if (anchor) {
       // `viewportAboveSafeBottom` = `viewportSafe` (и верхняя вставка) — имя прежнее, его держит проверка R114.
       setPlace(placeByHalf(toLayoutRect(anchor), el.offsetWidth, el.offsetHeight, align, 8, 8, viewportAboveSafeBottom()));
     } else if (pos) {
@@ -198,7 +223,7 @@ export function ContextMenu({
         }, 8, vp),
       );
     }
-  }, [pos?.x, pos?.y, anchor?.left, anchor?.top, anchor?.right, anchor?.bottom, align, sheet, stacked, relayout]);
+  }, [pos?.x, pos?.y, anchor?.left, anchor?.top, anchor?.right, anchor?.bottom, align, sheet, stacked, relayout, drop]);
 
   // Меню у якоря переживает смену размера окна (на телефоне это клавиатура: спряталась от того же тапа) — ставим заново.
   const anchored = !sheet && !!anchor;
@@ -258,9 +283,22 @@ export function ContextMenu({
       if (!outside(t) || t.closest('input, textarea, select, [contenteditable]')) return false;
       return !(e.key === ' ' && t.closest('button, a, [role="button"]'));
     };
+    /* Шаг на уровень выше (только телефон) — `true`, если сделан и меню закрывать не нужно. */
+    const stepOut = () => {
+      if (!window.matchMedia('(max-width: 620px)').matches) return false;
+      const up = ref.current?.querySelector<HTMLElement>('[data-menu-back], .ctx-back');
+      if (up) {
+        up.click();
+        return true;
+      }
+      if (!onBack) return false;
+      onBack();
+      return true;
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-      else if (tapClose && scrollKey(e)) onClose();
+      if (e.key === 'Escape') {
+        if (!stepOut()) onClose();
+      } else if (tapClose && scrollKey(e)) onClose();
     };
     // У якоря и с подложкой: клик мимо закрывает меню и дальше не идёт — ни в ленту под подложкой, ни в строку.
     /* Кроме щелчка, вложенного в щелчок по пункту (тот ещё не доставлен до конца — `eventPhase`): `.click()` из обработчика
@@ -325,7 +363,7 @@ export function ContextMenu({
       window.removeEventListener('resize', onClose);
       window.removeEventListener('blur', onClose);
     };
-  }, [onClose, isMobile, viewerOpen, stacked, tapClose, anchored]);
+  }, [onClose, onBack, isMobile, viewerOpen, stacked, tapClose, anchored]);
 
   // Phone: a bottom-sheet sliding up over a scrim (taps outside close it).
   if (sheet) {
@@ -375,7 +413,7 @@ export function ContextMenu({
       )}
       <div
         ref={ref}
-        className={`ctx-stack${anchor ? ' anchored' : ''}${align === 'end' ? ' end' : ''}`}
+        className={`ctx-stack${anchor ? ' anchored' : ''}${align === 'end' ? ' end' : ''}${anchor && drop ? ' drop' : ''}`}
         style={{ left: place?.left ?? 0, top: place?.top ?? 0, visibility: place ? 'visible' : 'hidden' }}
         onContextMenu={noNativeMenu}
       >
@@ -392,6 +430,22 @@ export function ContextMenu({
     </>,
     document.body,
   );
+}
+
+/**
+ * Раскрытие выпадающего меню (`drop`), как Telegram Android `ActionBarPopupWindow.startAnimation`: подложка раскрывается
+ * за `150 + 16 × N` мс (N — видимых пунктов), пункт проявляется (`alpha 0→1`, `translationY −6→0` за 180 мс,
+ * `ActionBarPopupWindowLayout.startChildAnimation`), когда край раскрытия дошёл до его середины
+ * (`ActionBarPopupWindowLayout.setBackScaleY`). Длительность и задержки — CSS-переменными: `--drop-ms` у карточки,
+ * `--drop-at` у пункта.
+ */
+function dropStagger(card: HTMLElement) {
+  const items = Array.from(card.children).filter((c): c is HTMLElement => c instanceof HTMLElement);
+  const shown = items.filter((c) => c.classList.contains('ctx-item')).length;
+  const ms = 150 + 16 * shown;
+  const h = card.offsetHeight || 1;
+  card.style.setProperty('--drop-ms', `${ms}ms`);
+  for (const c of items) c.style.setProperty('--drop-at', `${Math.round((ms * Math.min(h, c.offsetTop + c.offsetHeight / 2)) / h)}ms`);
 }
 
 /**
@@ -599,6 +653,7 @@ export function MenuItem({
   active,
   shortcut,
   note,
+  back,
 }: {
   icon?: IconName;
   label: ReactNode;
@@ -616,11 +671,14 @@ export function MenuItem({
    * Подсказки клавиш (R, Del) на телефоне скрыты правилом `.ctx-menu.sheet .ctx-shortcut` — клавиатуры там нет.
    */
   note?: boolean;
+  /** Пункт «назад на уровень выше» — его нажимает системная «Назад» на телефоне (`ContextMenu`, `onBack`). */
+  back?: boolean;
 }) {
   return (
     <button
       type="button"
       role="menuitem"
+      data-menu-back={back ? '' : undefined}
       className={`ctx-item ${danger ? 'danger' : ''} ${active ? 'active' : ''}`}
       disabled={disabled}
       onClick={onClick}

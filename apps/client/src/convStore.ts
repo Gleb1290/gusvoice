@@ -36,6 +36,9 @@ import {
   remoteDraftDecision,
   seedUnread,
   summariesToDms,
+  applyViaPage,
+  isHomeDownError,
+  viaSendable,
   draftTextForServer,
   trimWindow,
   updateDrafts,
@@ -107,7 +110,7 @@ export interface ConvDeps {
   isMobile: () => boolean;
   /** Метка визита беседы — черта «Новые сообщения» (`channelPrefs.markChannelSeen`). */
   markChannelSeen: (convId: string, at: number) => void;
-  /** Окно ленты включено (шаг 2г, `feedWindowSwitch`): «прочитано» — только до загруженного. Нет — окна нет. */
+  /** Окно ленты (шаг 2г; в клиенте всегда `true`): «прочитано» — только до загруженного. Нет — окна нет (тесты). */
   windowed?: () => boolean;
   /** Сервер хранит черновики (Р7, признак `conv3`). Нет — черновик живёт только на устройстве, как раньше. */
   draftsOnServer?: () => boolean;
@@ -151,6 +154,31 @@ export function bindUploadProgress(sink: UploadProgressSink | null): void {
   boundProgress = sink;
 }
 
+/**
+ * Э5 (#141, `fedm5`): «мой дом лежит — пишу через инстанс собеседника». Привязка из `main.tsx` (`fedVia.ts`) — не импортом, как
+ * `bindUploadProgress`: стор грузят харнессы тестов с перечнем разрешённых модулей. Не привязано — отправка и история прежние.
+ */
+export interface FedViaHooks {
+  /** Дом недоступен и у беседы есть действующая долгая сессия: текст идёт в обход. */
+  active: (convId: string) => boolean;
+  /** Долгая сессия беседы есть (дом мог лечь, а мы ещё не знаем) — провалившуюся отправку можно повторить в обход. */
+  canTry: (convId: string) => boolean;
+  /** Запрос к дому не дошёл — проверить дом (проба) и показать плашку. */
+  homeFailed: () => void;
+  /** Текст в обход дома по долгой сессии (+ запись в очередь отчёта). */
+  send: (
+    convId: string,
+    body: { clientId: string; content: string; replyToId: string | null; silent?: true; noPreview?: true },
+    timeoutMs: number,
+  ) => Promise<ConvMessage>;
+  /** Последняя порция истории беседы у инстанса собеседника (пока дом недоступен). */
+  history: (convId: string) => Promise<ConvMessage[]>;
+}
+let boundVia: FedViaHooks | null = null;
+export function bindFedVia(h: FedViaHooks | null): void {
+  boundVia = h;
+}
+
 /** Отмену загрузки сделал сам человек (XHR `abort`, `uploadProgress.uploadAborted`): строку не помечать «не отправлено». */
 function aborted(e: unknown): boolean {
   return (e as { aborted?: boolean } | null)?.aborted === true || (e as { name?: string } | null)?.name === 'AbortError';
@@ -191,58 +219,6 @@ function screenIdOf(s: ConvHost, mobile: boolean): string | null {
 
 function listOf(s: ConvHost, convId: string): ConvMessage[] | undefined {
   return s.dmMessages[convId] as ConvMessage[] | undefined;
-}
-
-/**
- * Переключатель устройства (`docs/dm/STAGE2.md`, «Переключение»). Принято на проде 30.09 — новый путь включён всем, где
- * сервер умеет беседы; `gv_conv_client = '0'` возвращает старый на одном устройстве (откат без выпуска).
- */
-export const CONV_CLIENT_DEFAULT = true;
-const SWITCH_KEY = 'gv_conv_client';
-
-export function convClientSwitch(): boolean {
-  try {
-    const v = localStorage.getItem(SWITCH_KEY);
-    if (v === '1') return true;
-    if (v === '0') return false;
-  } catch {
-    /* нет хранилища — умолчание сборки */
-  }
-  return CONV_CLIENT_DEFAULT;
-}
-
-export function setConvClientSwitch(on: boolean): void {
-  try {
-    localStorage.setItem(SWITCH_KEY, on ? '1' : '0');
-  } catch {
-    /* нет хранилища — переключить нельзя */
-  }
-}
-
-/**
- * Окно ленты беседы (шаг 2г): открытие у непрочитанного, переходы к цитатам, память места. Принято владельцем 02.10 —
- * у всех; `gv_feed_window = '0'` возвращает прежнюю ленту на одном устройстве (откат без выпуска).
- */
-export const FEED_WINDOW_DEFAULT = true;
-const FEED_WINDOW_KEY = 'gv_feed_window';
-
-export function feedWindowSwitch(): boolean {
-  try {
-    const v = localStorage.getItem(FEED_WINDOW_KEY);
-    if (v === '1') return true;
-    if (v === '0') return false;
-  } catch {
-    /* нет хранилища — умолчание сборки */
-  }
-  return FEED_WINDOW_DEFAULT;
-}
-
-export function setFeedWindowSwitch(on: boolean): void {
-  try {
-    localStorage.setItem(FEED_WINDOW_KEY, on ? '1' : '0');
-  } catch {
-    /* нет хранилища — переключить нельзя */
-  }
 }
 
 /** Вложение из ответа загрузки → ссылка на него в отправке (id + подсказки клиента). */
@@ -661,9 +637,7 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       }
       // Отменили между файлами или сразу после последнего — сообщения нет и не будет.
       if (ctrl?.signal.aborted || !hasItem(convId, item.key)) throw Object.assign(new Error('отменено'), { aborted: true });
-      const msg = await api.convSend(
-        convId,
-        {
+      const sendBody: Parameters<Api['convSend']>[1] = {
           clientId: item.key,
           content: item.content,
           // «Как файлы» (G48) — подсказка `asFile` у каждого вложения; сервер оставит её только у картинок и видео.
@@ -679,9 +653,8 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
           ...(item.captionAbove === true ? { captionAbove: true } : {}),
           // Цитата фрагмента (G55, `quote1`) — так же только у таких.
           ...(item.replyQuote && item.replyToId ? { replyQuote: item.replyQuote } : {}),
-        },
-        SEND_TIMEOUT_MS,
-      );
+      };
+      const msg = await sendBoth(convId, item, sendBody);
       if (myGen !== gen) return;
       setItems(convId, (list) => list.filter((x) => x.key !== item.key));
       progress.clear(item.key);
@@ -711,6 +684,31 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       if (myGen === gen) sending.delete(convId);
     }
     if (myGen === gen) void pump(convId);
+  }
+
+  /**
+   * Отправка строки: дом, а если он недоступен и строка — только текст, то через инстанс собеседника (Э5, `fedm5`, привязка
+   * `bindFedVia`). Путь в обход открыт, пока дом лежит (`via.active`), либо открывается самим провалом отправки (`isHomeDownError`:
+   * запрос не дошёл, молчание, 502–504) при уже сохранённой долгой сессии беседы. Отказ дома другим кодом — дом жив, обхода нет.
+   */
+  async function sendBoth(convId: string, item: OutboxItem, body: Parameters<Api['convSend']>[1]) {
+    const via = boundVia;
+    if (!via || !viaSendable(item)) return api.convSend(convId, body, SEND_TIMEOUT_MS);
+    const viaBody = {
+      clientId: body.clientId,
+      content: body.content,
+      replyToId: body.replyToId ?? null,
+      ...(body.silent ? { silent: true as const } : {}),
+      ...(body.noPreview ? { noPreview: true as const } : {}),
+    };
+    if (via.active(convId)) return via.send(convId, viaBody, SEND_TIMEOUT_MS);
+    try {
+      return await api.convSend(convId, body, SEND_TIMEOUT_MS);
+    } catch (e) {
+      if (!isHomeDownError(e) || deviceOffline() || !via.canTry(convId)) throw e;
+      via.homeFailed();
+      return via.send(convId, viaBody, SEND_TIMEOUT_MS);
+    }
   }
 
   /** Неудача попытки отправки — по правилам очереди (`outboxRules.afterFailure`). */
@@ -1042,6 +1040,27 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       if (!hadList) await load;
     },
 
+    /**
+     * Э5: дом недоступен — свежая порция истории беседы у инстанса собеседника (`FedViaHooks.history`) сводится с окном
+     * (`applyViaPage`: номера `pts` чужие — в окно не пишутся, добавляются лишь неизвестные сообщения). Тихо: нет привязки, обход
+     * закрыт, окна нет или запрос не дошёл — ничего не меняется. Вернулся ли дом, решает проба (`fedVia.ts`).
+     */
+    convViaRefresh: async (convId: string): Promise<void> => {
+      const via = boundVia;
+      if (!via || !via.active(convId)) return;
+      const myGen = gen;
+      let msgs: ConvMessage[];
+      try {
+        msgs = await via.history(convId);
+      } catch {
+        return;
+      }
+      if (myGen !== gen) return;
+      const s = get();
+      const r = applyViaPage(s.conv, listOf(s, convId), convId, msgs);
+      if (r.list && r.state !== s.conv) commit(r.state, { [convId]: r.list });
+    },
+
     /** Порция старше первой в ленте (длинное окно режется снизу). `true` — выше есть ещё. */
     convLoadOlder: async (convId: string): Promise<boolean> => {
       const list = listOf(get(), convId);
@@ -1124,7 +1143,7 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       }),
 
     /** Открыть или создать беседу с человеком; вернуть её id. */
-    convOpenWith: async (userId: string): Promise<string> => {
+    convOpenWith: async (userId: string | { instanceId: string; homeUserId: string }): Promise<string> => {
       const res = await sameGen(api.convDirect(userId));
       const conv = get().conv;
       // Номера у ответа нет: сводку берём, только если беседы в списке ещё нет (дальше её ведут события).

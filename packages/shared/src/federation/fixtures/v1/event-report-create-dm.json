@@ -1,0 +1,22 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W7G",
+      "seq": 82,
+      "kind": "report.create",
+      "created_at": 1760270600000,
+      "payload": {
+        "report_id": "0199d2a2-5c6d-7e8f-9a0b-1c2d3e4f5a81",
+        "reported_user_id": "0193f1a2-1111-7e8f-9a0b-1c2d3e4f5a6b",
+        "action": "dm_report",
+        "server_name": null,
+        "reason": "spam: пишет рекламу в личку",
+        "evidence": [
+          { "text": "купите курс", "at": 1760270500000, "channel": "dm" }
+        ],
+        "created_at": 1760270600000
+      }
+    }
+  ]
+}

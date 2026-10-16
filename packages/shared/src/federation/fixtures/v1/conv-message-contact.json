@@ -1,0 +1,29 @@
+{
+  "id": "0199e2b1-8c4d-7d4e-8f5a-6b7c8d9e0f3c",
+  "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "author": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" },
+  "client_id": "c-0199e2b1-8c4d",
+  "payload_hash": "c1d2e3f4a5b60718",
+  "created_at": 1760443260000,
+  "origin_sort_key": 1760443260000123,
+  "content": "👤 Контакт: Утка @duck",
+  "reply_to_id": null,
+  "forwarded_from": null,
+  "silent": false,
+  "no_preview": true,
+  "caption_above": false,
+  "reply_quote": null,
+  "sticker": null,
+  "service": null,
+  "attachments": [],
+  "edit_version": 0,
+  "edited_at": null,
+  "deleted": false,
+  "media": {
+    "kind": "contact",
+    "person": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-0000-7e8f-9a0b-1c2d3e4f5a6b" },
+    "username": "duck",
+    "name": "Утка",
+    "avatar_url": "https://media.example.org/gusvoice/avatars/duck.webp"
+  }
+}

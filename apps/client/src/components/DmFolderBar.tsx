@@ -638,3 +638,116 @@ export function FolderRemoveItem({ dm, muted, onDone }: { dm: DmChannel; muted: 
     />
   );
 }
+
+/** Беседа выбора глазами правила папки. */
+const pickChat = (dm: DmChannel, muted: boolean) => ({ id: dm.id, group: !!dm.group, muted, unread: (dm.unread ?? 0) > 0 || dm.markedUnread === true });
+
+/** По одной беседе, по очереди: каждый ответ сервера — весь список папок, параллельные затёрли бы друг друга. */
+function toggleChatsInFolder(folderId: string, chats: readonly ReturnType<typeof pickChat>[], add: boolean): Promise<void> {
+  return chats.reduce<Promise<void>>((p, c) => p.then(() => useDmFolders.getState().toggleChat(folderId, c, add)), Promise.resolve());
+}
+
+/**
+ * Что режим выбора бесед на телефоне умеет с папками (Telegram Android `DialogsActivity.updateCounters`,
+ * `TA/ui/DialogsActivity.java:9927-9947`): «В папку» — на главной вкладке и в архиве, если есть свои папки
+ * (`getCanAddDialogFilters` не пуст); «Убрать из папки» — открыта своя папка и хоть одну выбранную из неё можно убрать.
+ */
+export function useFolderPickCaps(): { add: boolean; removeFrom: DmFolder | null } {
+  const on = useFoldersOn();
+  const folders = useDmFolders((s) => s.folders);
+  const activeId = useDmFolders((s) => s.activeId);
+  if (!on || !foldersShown(folders)) return { add: false, removeFrom: null };
+  const active = activeFolderOf(folders, activeId);
+  const home = !active || !!active.system;
+  return { add: home && folders.some((f) => !f.system), removeFrom: home ? null : active };
+}
+
+/**
+ * Второй уровень «В папку» режима выбора (Telegram Android `FiltersListBottomSheet`, вызов — `add_to_folder`
+ * `TA/ui/DialogsActivity.java:3913`): свои папки; галочка — ВСЕ выбранные уже там, тогда нажатие убирает их (если папка не
+ * опустеет — `dmFolderCanRemove`), иначе добавляет недостающих (не больше `DM_FOLDER_CHATS_MAX` явно включённых).
+ */
+export function DmFolderPickItems({ picked, isMuted, onDone }: { picked: readonly DmChannel[]; isMuted: (dm: DmChannel) => boolean; onDone: () => void }) {
+  const folders = useDmFolders((s) => s.folders) ?? [];
+  const chats = picked.map((d) => pickChat(d, isMuted(d)));
+  const n = chats.length;
+  return (
+    <>
+      {folders
+        .filter((f) => !f.system)
+        .map((f) => {
+          const missing = chats.filter((c) => !dmFolderContains(f, c));
+          const all = missing.length === 0;
+          const can = all ? chats.every((c) => dmFolderCanRemove(f, c)) : f.include.length + missing.length <= DM_FOLDER_CHATS_MAX;
+          const title = dmFolderTitle(f);
+          return (
+            <MenuItem
+              key={f.id}
+              icon={all ? 'check' : undefined}
+              label={title}
+              disabled={!can}
+              onClick={() => {
+                onDone();
+                toggleChatsInFolder(f.id, all ? chats : missing, !all)
+                  .then(() => toast('success', all ? `Убрано из папки «${title}»: ${n}` : `Добавлено в папку «${title}»: ${missing.length}`))
+                  .catch(toastError);
+              }}
+            />
+          );
+        })}
+    </>
+  );
+}
+
+/**
+ * Пункты папок в «⋯» режима выбора: «В папку ▸» (`onFolders` — открыть второй уровень, `DmFolderPickItems`) и «Убрать из
+ * папки «…»» — по `useFolderPickCaps`. Отдельным компонентом: панель выбора зовёт его, только если папки включены.
+ */
+export function DmFolderPickEntries({
+  picked,
+  isMuted,
+  onDone,
+  onFolders,
+}: {
+  picked: readonly DmChannel[];
+  isMuted: (dm: DmChannel) => boolean;
+  onDone: () => void;
+  onFolders: () => void;
+}) {
+  const caps = useFolderPickCaps();
+  return (
+    <>
+      {caps.add && <MenuItem icon="folder" label="В папку" submenu onClick={onFolders} />}
+      {caps.removeFrom && <FolderRemovePickItem folder={caps.removeFrom} picked={picked} isMuted={isMuted} onDone={onDone} />}
+    </>
+  );
+}
+
+/** «Убрать из папки «…»» режима выбора: убирает из открытой своей папки тех выбранных, кого можно (`dmFolderCanRemove`). */
+function FolderRemovePickItem({
+  folder,
+  picked,
+  isMuted,
+  onDone,
+}: {
+  folder: DmFolder;
+  picked: readonly DmChannel[];
+  isMuted: (dm: DmChannel) => boolean;
+  onDone: () => void;
+}) {
+  const chats = picked.map((d) => pickChat(d, isMuted(d))).filter((c) => dmFolderCanRemove(folder, c));
+  if (chats.length === 0) return null;
+  const title = dmFolderTitle(folder);
+  return (
+    <MenuItem
+      icon="minus"
+      label={`Убрать из папки «${title}»`}
+      onClick={() => {
+        onDone();
+        toggleChatsInFolder(folder.id, chats, false)
+          .then(() => toast('success', `Убрано из папки «${title}»: ${chats.length}`))
+          .catch(toastError);
+      }}
+    />
+  );
+}

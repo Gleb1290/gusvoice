@@ -28,6 +28,8 @@
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "20.14.5",
+    "@turf/buffer": "7.4.0",
+    "@turf/simplify": "7.4.0",
     "happy-dom": "20.14.5"
   }
 }

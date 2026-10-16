@@ -80,3 +80,79 @@ export function attachmentWords(f: { kind: 'voice' | 'file'; video?: boolean; ro
   const chars = [...flat];
   return chars.length === 0 ? 'Файл' : chars.length <= 200 ? flat : `${chars.slice(0, 199).join('')}…`;
 }
+
+// ─── Аудиофайл (не голосовое) ───────────────────────────────────────────────────────────
+/**
+ * Аудиофайл в ленте — музыкальной карточкой, а не карточкой файла (15.10, приёмка 0.9.0: wav был «скрепкой с размером»;
+ * карточка — `MusicFileCard` в `apps/client/src/components/VoiceMessage.tsx`).
+ * Как Telegram: документ со звуком (`MessageObject.isMusic`) — ячейка с круглой кнопкой ▶, названием и длительностью
+ * (Android `ChatMessageCell` `documentAttachType == DOCUMENT_ATTACH_TYPE_MUSIC`, Web K `audio.tsx`), голосовое — отдельно.
+ *
+ * Только форматы, которые ИГРАЕТ сам WebView / Chromium (Android System WebView, WebView2, Chrome): mp3, m4a/aac, ogg/oga
+ * (Vorbis, Opus), opus, flac, wav, webm-звук. AMR, WMA, AIFF, MIDI WebView не играет — они остаются файлом.
+ */
+
+/** MIME, которые проигрываются (без параметров, в нижнем регистре). */
+const PLAYABLE_TYPES = new Set([
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/mpeg3',
+  'audio/x-mpeg-3',
+  'audio/mp4',
+  'audio/m4a',
+  'audio/x-m4a',
+  'audio/aac',
+  'audio/x-aac',
+  'audio/aacp',
+  'audio/ogg',
+  'application/ogg',
+  'audio/opus',
+  'audio/flac',
+  'audio/x-flac',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/wave',
+  'audio/vnd.wave',
+  'audio/x-pn-wav',
+  'audio/webm',
+]);
+
+/** Расширения тех же форматов — когда отправитель не знал типа (`application/octet-stream`, пусто). */
+const PLAYABLE_EXT = new Set(['mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'wav', 'weba']);
+
+/** Типы «не знаю, что это»: по ним решает расширение. */
+const UNKNOWN_TYPES = new Set(['', 'application/octet-stream', 'binary/octet-stream', 'application/x-unknown']);
+
+function extOf(name: string): string {
+  const i = name.lastIndexOf('.');
+  return i > 0 ? name.slice(i + 1).toLowerCase() : '';
+}
+
+/**
+ * Показать вложение музыкальной карточкой? Голосовое (огибающая) и кружок — нет, у них свои плееры; «Отправить как файл»
+ * у звука не бывает (флаг только у фото и видео), поэтому не смотрим.
+ */
+export function isMusicFile(a: { contentType: string; name: string; waveform?: number[] | null; round?: true }): boolean {
+  if (isVoiceMessage(a) || isRoundVideo(a)) return false;
+  const type = (a.contentType || '').split(';')[0].trim().toLowerCase();
+  if (PLAYABLE_TYPES.has(type)) return true;
+  if (UNKNOWN_TYPES.has(type)) return PLAYABLE_EXT.has(extOf(a.name));
+  return false;
+}
+
+/** Название трека: имя файла без расширения (у Telegram — тег title, нет его — имя файла). Пустое — имя целиком. */
+export function musicTitle(name: string): string {
+  const i = name.lastIndexOf('.');
+  const base = i > 0 ? name.slice(0, i) : name;
+  return base.trim() || name;
+}
+
+/**
+ * Подпись под названием: играет или стоит на паузе посреди — «0:12 / 3:45» (Telegram Android: `durationText` у музыки),
+ * иначе «3:45 · 63 KB»; длительность ещё не узнали — только размер.
+ */
+export function musicSubtitle(p: { atMs: number; durationMs: number; started: boolean; sizeLabel: string }): string {
+  const known = Number.isFinite(p.durationMs) && p.durationMs > 0;
+  if (p.started) return known ? `${formatDuration(p.atMs)} / ${formatDuration(p.durationMs)}` : formatDuration(p.atMs);
+  return known ? `${formatDuration(p.durationMs)} · ${p.sizeLabel}` : p.sizeLabel;
+}

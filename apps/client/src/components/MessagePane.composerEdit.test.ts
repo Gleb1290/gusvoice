@@ -40,7 +40,7 @@ h.mutantTest('R109 мышиное Изменить открывает основ
       const field = await openComposerEdit(component, confirm, undefined, true);
       assert.ok(h.host.querySelector('.edit-strip'), 'мышиная правка открыта в основной полосе');
       assert.match(h.host.querySelector('.edit-strip')?.textContent ?? '', /Редактирование/);
-      assert.equal(h.host.querySelector('.edit-box'), null);
+      assert.equal(h.host.querySelector('.edit-box') === null, true);
       assert.equal(field.value, 'composer-edit');
       assert.ok(document.activeElement === field, 'после входа в правку фокус находится в composer');
       assert.equal(field.selectionStart, field.value.length); assert.equal(field.selectionEnd, field.value.length);
@@ -67,16 +67,16 @@ for (const exit of ['крестик', 'Escape'] as const) {
       // Сначала promise ответа и commit закрытия окна, затем кадр. Не держим act открытым
       // таймером flush: HappyDOM RAF(setImmediate) иначе обгоняет React commit и теряет фокус.
       await act(async () => { resume.click(); });
-      assert.equal(document.querySelector('.confirm-overlay'), null, 'окно закрыто до кадра возврата фокуса');
+      assert.equal(document.querySelector('.confirm-overlay') === null, true, 'окно закрыто до кадра возврата фокуса');
       assert.ok(h.host.querySelector('.edit-strip')); assert.equal(field.value, 'новая версия');
       await h.runUiFrame(); assert.ok(document.activeElement === field, 'после продолжения правки фокус возвращён в composer');
       await close();
       const discard = [...document.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('Отбросить'))!;
       assert.ok(discard, 'изменения можно отбросить'); await act(async () => { discard.click(); await h.flush(); });
-      assert.equal(h.host.querySelector('.edit-strip'), null); assert.equal(field.value, 'черновик до правки');
+      assert.equal(h.host.querySelector('.edit-strip') === null, true); assert.equal(field.value, 'черновик до правки');
       await messageChoice('composer-edit', 'Изменить'); await close();
-      assert.equal(document.querySelector('.confirm-overlay'), null, 'нет изменений — нет вопроса');
-      assert.equal(h.host.querySelector('.edit-strip'), null); assert.equal(field.value, 'черновик до правки');
+      assert.equal(document.querySelector('.confirm-overlay') === null, true, 'нет изменений — нет вопроса');
+      assert.equal(h.host.querySelector('.edit-strip') === null, true); assert.equal(field.value, 'черновик до правки');
     }, 'выход из изменённой правки спрашивает');
   });
 }
@@ -124,7 +124,7 @@ for (const exit of ['крестик', 'Escape'] as const) {
       const resume = [...document.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('Продолжить'))!;
       assert.ok(document.activeElement === resume, 'фокус действительно ушёл в окно подтверждения');
       await act(async () => { resume.click(); });
-      assert.equal(document.querySelector('.confirm-overlay'), null, 'commit снял окно до возвратного кадра');
+      assert.equal(document.querySelector('.confirm-overlay') === null, true, 'commit снял окно до возвратного кадра');
       assert.ok(h.host.querySelector('.edit-strip')); assert.equal(field.value, 'изменение перед отказом');
       assert.ok(document.activeElement !== field, 'до кадра ловушка сама не вернула focus в composer');
       await h.runUiFrame();
@@ -139,7 +139,7 @@ it('R109 сохранить вызывает onEdit только для ново
   await composerValue('мой черновик'); await messageChoice('save-edit', 'Изменить');
   await composerValue('исправлено');
   await act(async () => { h.host.querySelector<HTMLButtonElement>('.composer button[title="Сохранить"]')!.click(); await h.flush(); });
-  assert.deepEqual(edits, ['save-edit:исправлено']); assert.equal(h.host.querySelector('.edit-strip'), null);
+  assert.deepEqual(edits, ['save-edit:исправлено']); assert.equal(h.host.querySelector('.edit-strip') === null, true);
   assert.equal(h.host.querySelector<HTMLTextAreaElement>('.composer textarea')!.value, 'мой черновик');
   await messageChoice('save-edit', 'Изменить');
   await act(async () => { h.host.querySelector<HTMLButtonElement>('.composer button[title="Сохранить"]')!.click(); await h.flush(); });
@@ -155,7 +155,7 @@ h.mutantTest('R109 ответ во время правки откладывае�
     await act(async () => { h.host.querySelector<HTMLButtonElement>('.edit-strip .rs-close')!.click(); await h.flush(); });
     const discard = [...document.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('Отбросить'))!;
     await act(async () => { discard.click(); await h.flush(); });
-    assert.equal(field.value, 'черновик до правки'); assert.equal(h.host.querySelector('.edit-strip'), null);
+    assert.equal(field.value, 'черновик до правки'); assert.equal(h.host.querySelector('.edit-strip') === null, true);
     assert.match(h.host.querySelector('.reply-strip')?.textContent ?? '', /composer-reply/);
   }, 'ответ сохраняет активную правку');
 });
@@ -171,7 +171,7 @@ h.mutantTest('R109 вложения скрыты в правке, новые о�
       await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })); await h.flush(); });
     };
     await add('before-edit.txt'); assert.match(h.host.querySelector('.pending-atts')?.textContent ?? '', /before-edit.txt/);
-    await messageChoice('composer-edit', 'Изменить'); assert.equal(h.host.querySelector('.pending-atts'), null);
+    await messageChoice('composer-edit', 'Изменить'); assert.equal(h.host.querySelector('.pending-atts') === null, true);
     const { useToasts } = await runtime.ssrLoadModule('/src/toast.ts') as typeof import('../toast');
     const oldToasts = useToasts.getState().toasts;
     try {
@@ -224,11 +224,11 @@ h.mutantTest(`R110 Android Назад: ${regression} пойман, повтор 
     try {
       await composerValue('изменено после открытия'); await back();
       assert.ok(document.querySelector('.confirm-overlay'), 'Android Назад спрашивает об изменённой правке');
-      await back(); assert.equal(document.querySelector('.confirm-overlay'), null, 'повтор закрывает только окно');
+      await back(); assert.equal(document.querySelector('.confirm-overlay') === null, true, 'повтор закрывает только окно');
       assert.ok(h.host.querySelector('.edit-strip')); assert.equal(field.value, 'изменено после открытия');
       await composerValue('composer-edit'); await back();
-      assert.equal(h.host.querySelector('.edit-strip'), null); assert.equal(field.value, 'черновик до правки');
-      assert.equal(document.querySelector('.confirm-overlay'), null, 'нет изменения — нет вопроса');
+      assert.equal(h.host.querySelector('.edit-strip') === null, true); assert.equal(field.value, 'черновик до правки');
+      assert.equal(document.querySelector('.confirm-overlay') === null, true, 'нет изменения — нет вопроса');
       await messageChoice('composer-reply', 'Ответить'); await back();
       assert.ok(!h.host.querySelector('.reply-strip'), 'ответ снимается молча'); assert.ok(!document.querySelector('.confirm-overlay'), 'ответ не спрашивает подтверждения');
       assert.equal(useStore.getState().mobilePane, 'content', 'назад не уводит в список');
@@ -242,23 +242,24 @@ h.mutantTest('R109 edit-last в пустом поле действительно
     h.round12(); h.desktop(); await h.mount({ messages: [h.msg('arrow-own')] }, component);
     const field = await composerValue('непустой черновик');
     const up = async () => { await act(async () => { field.setSelectionRange(0, 0); field.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); await h.flush(); }); };
-    await up(); assert.equal(h.host.querySelector('.edit-strip'), null, 'непустой черновик не становится правкой'); assert.equal(field.value, 'непустой черновик');
+    await up(); assert.equal(h.host.querySelector('.edit-strip') === null, true, 'непустой черновик не становится правкой'); assert.equal(field.value, 'непустой черновик');
     await composerValue(''); await up(); assert.ok(h.host.querySelector('.edit-strip'), 'edit-last открывает правку своего сообщения'); assert.equal(field.value, 'arrow-own');
   }, 'edit-last открывает правку своего сообщения');
 });
 
-h.mutantTest('R110 удержание самого текста выделяет сообщение, а не слово', async () => {
+h.mutantTest('R110 удержание самого текста открывает меню сообщения, а не выбор слова', async () => {
   await h.rejectMutant((s) => s.replace('      open();\n    };\n    // Прежний таймер', '      if (selectMessageText(messages.find((m) => m.id === id)!)) return;\n      open();\n    };\n    // Прежний таймер'), async (component) => {
   h.mobile(); h.round12(); const restore = h.pointerLayout(true, 390);
   try {
     await h.mount({ messages: [h.msg('long-text')], batch: { forward: async () => {}, deleteMany: async () => {}, peerName: () => 'Друг', open: () => {} } }, component);
     const body = h.host.querySelector<HTMLElement>('.message-body')!;
     await act(async () => { h.touch(body, 'touchstart', 25, 25); await h.delay(510); await h.flush(); });
-    assert.ok(h.host.querySelector('.sel-head'), 'удержание текста выбирает сообщение');
-    assert.equal(document.querySelector('.tsel-bar'), null, 'панель слова не открыта');
+    assert.ok(document.querySelector('.ctx-menu'), 'удержание текста открывает меню сообщения');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'само удержание не выбирает сообщение');
+    assert.equal(document.querySelector('.tsel-bar') === null, true, 'панель слова не открыта');
     await act(async () => { h.touch(body, 'touchend', 25, 25); body.click(); await h.flush(); });
   } finally { h.unmount(); restore(); h.desktop(); }
-  }, 'удержание текста выбирает сообщение');
+  }, 'удержание текста открывает меню сообщения');
 });
 
 h.mutantTest('R110 Выделить текст есть только на телефоне после копирования и только у текста', async () => {
@@ -287,7 +288,7 @@ h.mutantTest('R110 Выделить текст есть только на тел
 
 h.textSelMutantTest('R110 allTextSel выбирает всё тело с краевыми пробелами, пустое тело не выбирает', () => {
   const body = document.createElement('div'); body.innerHTML = '  первое <b>второе🙂</b>  <span class="bub-meta">12:34</span><span class="spoiler">секрет</span>';
-  const sel = h.allTextSel(body); assert.ok(sel); assert.equal(sel.body, body); assert.equal(sel.start, 0); assert.equal(sel.end, '  первое второе🙂  '.length, 'весь текст выбран включая краевые пробелы');
-  for (const text of ['', ' \n\t ']) { body.textContent = text; assert.equal(h.allTextSel(body), null); }
-  body.innerHTML = '<span class="ts">12:34</span><span class="spoiler">секрет</span>'; assert.equal(h.allTextSel(body), null);
+  const sel = h.allTextSel(body); assert.ok(sel); assert.equal(sel.body === body, true); assert.equal(sel.start, 0); assert.equal(sel.end, '  первое второе🙂  '.length, 'весь текст выбран включая краевые пробелы');
+  for (const text of ['', ' \n\t ']) { body.textContent = text; assert.equal(h.allTextSel(body) === null, true); }
+  body.innerHTML = '<span class="ts">12:34</span><span class="spoiler">секрет</span>'; assert.equal(h.allTextSel(body) === null, true);
 }, 'весь текст выбран включая краевые пробелы');

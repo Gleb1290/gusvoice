@@ -311,7 +311,7 @@ async function copyStored(fromKey: string, toKey: string, mime: string): Promise
  * (`convRules.FORWARD_ATTACHMENTS_MAX` / `FORWARD_BYTES_MAX` = пределам незавершённых).
  * Копии считаются в суточный объём владельца (ревью `bigfile1`, M2: иначе 512 МБ × 10 в минуту в «Избранное» обходили
  * предел): сумма проверяется под замком `att-pending:<владелец>` вместе со вставкой — сверх `DailyQuotaError` (429).
- * Срок одной копии — от размера (`attachmentRules.copyTimeoutMs`): файл в 512 МБ хранилище копирует дольше минуты.
+ * Срок одной копии — от размера (`attachmentRules.copyTimeoutMs`): файл в 1 ГиБ хранилище копирует дольше минуты.
  * Возвращает «id исходного вложения → новая строка». Сбой — новые строки «удалены», их файлы уберёт `purgeDeleted`.
  */
 export async function copyForForward(input: {

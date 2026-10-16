@@ -10,6 +10,7 @@ import { MobileProfile } from './MobileProfile';
 import { ChatView } from './ChatView';
 import { DmChatView } from './DmChatView';
 import { DmSidebar } from './DmSidebar';
+import { PhoneServerList } from './PhoneServerList';
 import { EconomyWelcome } from './EconomyWelcome';
 import { FeatherLayer } from './FeatherLayer';
 import { BigReactionLayer } from './BigReactionLayer';
@@ -21,7 +22,7 @@ import { ContactEditHost } from './ContactEditModal';
 import { DesktopKeysHost } from './DesktopKeys';
 import { closeCheatSheet, toggleCheatSheet, useCheatSheetOpen } from '../cheatSheet';
 import { openDmCompose } from '../dmCompose';
-import { dmEmptyHint } from '../dmRules';
+import { DM_SERVER_UPDATE_TEXT, dmEmptyHint, dmNeedsServerUpdate } from '../dmRules';
 import { exitSelection, useSelectionOpen } from '../dmSelection';
 import { exitChatSearch } from './ChatSearch';
 import { backFromSchedView, useSchedViewOpen } from '../schedView';
@@ -65,9 +66,13 @@ export function MainLayout() {
   const view = useStore((s) => s.view);
   const dms = useStore((s) => s.dms);
   // Список бесед ещё не пришёл (беседы без кеша) — пустым его не называем, гусь не мелькает до ответа сервера.
-  const dmListKnown = useStore((s) => !s.convActive || s.conv.pts !== null);
+  const dmListKnown = useStore((s) => s.convActive && s.conv.pts !== null);
+  // Сервер без бесед (`conv1`+`conv2`) — ЛС там нет: вместо гуся «Бесед пока нет» заглушка про обновление (09.10).
+  const dmOff = useStore((s) => dmNeedsServerUpdate(s.serverFeatures));
   const currentDmId = useStore((s) => s.currentDmId);
   const mobilePane = useStore((s) => s.mobilePane);
+  const serverListOpen = useStore((s) => s.serverListOpen);
+  const currentServerId = useStore((s) => s.currentServerId);
   const setMobilePane = useStore((s) => s.setMobilePane);
   const settingsOpen = useStore((s) => s.settingsOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
@@ -178,14 +183,29 @@ export function MainLayout() {
   /* Отделы ОДНОГО инстанса пересоздаются на каждом переходе (`instanceEpoch`, 01.10): главный экран больше не
      снимается целиком, и окна прежнего инстанса (настройки сервера, приглашение) иначе пережили бы его. Рейл и
      голос (`VoiceConnection`) не пересоздаются — первый общий для всех инстансов, второй принадлежит своему. */
-  const sidebar = isDm ? <DmSidebar key={`dm${instanceEpoch}`} /> : <ChannelSidebar key={`ch${instanceEpoch}`} />;
+  /* Телефон, вкладка «Серверы» (#218): СПИСОК серверов — пока сервер не выбран или человек вернулся «Назад» из его каналов
+     (`serverListOpen`); иначе каналы открытого сервера. Раньше вместо списка была лента квадратов сверху и пустое «Выбери сервер». */
+  const serverListShown = phone && !isDm && (serverListOpen || !currentServerId);
+  const sidebar = isDm ? (
+    <DmSidebar key={`dm${instanceEpoch}`} />
+  ) : serverListShown ? (
+    <PhoneServerList key={`sl${instanceEpoch}`} />
+  ) : (
+    <ChannelSidebar key={`ch${instanceEpoch}`} />
+  );
   const showMembers = !isDm && !!bootstrap;
 
   const content = isDm ? (
     <div className="content" key={`dmc${instanceEpoch}`}>
       {/* Телефон: полоса звонка — одна над всем экраном (`CallBar top` ниже), не в ленте. */}
       {!phone && <CallBar />}
-      {dm ? (
+      {dmOff ? (
+        <div className="empty-goose">
+          <Goose pose="look" size={150} />
+          <div className="eg-title">Личные сообщения недоступны</div>
+          <div className="eg-sub">{DM_SERVER_UPDATE_TEXT}. Каналы и голос работают как обычно.</div>
+        </div>
+      ) : dm ? (
         <DmChatView key={dm.id} dm={dm} />
       ) : dmListKnown && dms.length === 0 ? (
         /* Бесед нет (раунд 11, HANDOFF §4): на ПК гусь — в главной области, там есть место; список слева пуст и без
@@ -238,6 +258,11 @@ export function MainLayout() {
   // Телефон: лента серверов сверху — только на вкладке «Серверы» (решение 04.10, макет раунда 11 `ListPhone`). На
   // «Сообщениях» и в «Профиле» её нет, место отдаётся списку бесед и профилю (CSS `.app.m-norail`; ПК не трогает).
   if (isDm || profileShown) appClass.push('m-norail');
+  // Телефон: список бесед прокручивается под стеклянной капсулой вкладок, как у Telegram Android (#218, CSS `.app.m-dmlist`).
+  if (isDm && mobilePane === 'list') appClass.push('m-dmlist');
+  // С #218 ленты серверов сверху нет и на «Серверах» — вместо неё список серверов строками (`PhoneServerList`) и «Назад» в каналах:
+  // рейл растворяется тем же правилом, что при `m-norail` (CSS `.app.m-list.m-srvlist > .rail`).
+  if (!isDm && !profileShown) appClass.push('m-srvlist');
   // Ворота показа: гусь не лезет поверх настроек, админки, шпаргалки и тыка — и только в голосе,
   // потому что предложение выдаётся ровно сидящим в канале.
   const goosePresentationAllowed =

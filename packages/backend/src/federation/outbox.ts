@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray, lte } from 'drizzle-orm';
+import { asc, eq, inArray } from 'drizzle-orm';
 import { FED_EVENTS, serializeFedEvent, type FedEvent } from '@gusvoice/shared';
 import { db } from '../db/index.js';
 import { federationLinks, federationOutbox } from '../db/schema.js';
@@ -104,7 +104,7 @@ export async function runOutboxPass(
     const pending = await db
       .select()
       .from(federationOutbox)
-      .where(and(eq(federationOutbox.instanceId, link.instanceId), lte(federationOutbox.nextAttemptAt, new Date(now))))
+      .where(eq(federationOutbox.instanceId, link.instanceId))
       .orderBy(asc(federationOutbox.seq));
 
     let host: string;
@@ -117,10 +117,17 @@ export async function runOutboxPass(
     // Протухшее выбрасываем ДО сборки пачки: иначе одно застрявшее событие тащило бы за собой
     // всю пачку и та упиралась бы в него на каждом проходе.
     const alive = [];
+    /**
+     * 🔴 Отправляем только НЕПРЕРЫВНОЕ начало очереди, чей срок повтора наступил (Э0, `docs/dm/FEDERATION.md` §2.2). Раньше
+     * выборка брала «всё, чей срок наступил»: пачка 1–50 не дошла и получила паузу, а 51-е и дальше паузы не имели — следующий
+     * проход отправлял их первыми, сосед сдвигал последний номер, и 1–50 потом выбрасывались им как повторы.
+     */
+    let waiting = false;
     for (const row of pending) {
       const drop = dropReason({ attempts: row.attempts, createdAt: row.createdAt.getTime() }, now);
       if (!drop) {
-        alive.push(row);
+        if (row.nextAttemptAt.getTime() > now) waiting = true;
+        if (!waiting) alive.push(row);
         continue;
       }
       await db.delete(federationOutbox).where(eq(federationOutbox.id, row.id));

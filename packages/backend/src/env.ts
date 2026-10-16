@@ -1,4 +1,8 @@
 import { firstPlaceholderSecret, parsePreviewList } from '@gusvoice/shared';
+import { isIP } from 'node:net';
+import { linkThreatsEnabled } from './linkThreatsRules.js';
+import { devPeersProblem, parseDevPeers } from './federation/devPeers.js';
+import { isBlockedAddress } from './safeFetch.js';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -73,6 +77,15 @@ export const env = {
    * он не собирал впустую.
    */
   diagEnabled: (process.env.DIAG_ENABLED ?? 'false') === 'true',
+  // Опасные ссылки (#218 п.5, признак `linkthreats1`): сверка ссылок в сообщениях с ЛОКАЛЬНЫМ списком угроз, который
+  // сервер сам скачивает раз в сутки. Адреса из сообщений наружу не уходят. Выключено => списка нет, поля нет, признака нет.
+  linkThreats: {
+    enabled: linkThreatsEnabled(process.env.LINK_THREATS_ENABLED),
+    /** Адреса списков через запятую; пусто => Phishing.Database (MIT). */
+    urls: (process.env.LINK_THREATS_URLS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+    /** Локальные файлы вместо скачивания (стенд, коробка без интернета): пути через запятую. */
+    files: (process.env.LINK_THREATS_FILE ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+  },
   // Экономика ГусКоинов (#117). Выключено => маршруты `/servers/:id/economy/*` НЕ регистрируются, и
   // вкладку «Монеты» не видит никто, включая владельца сервера.
   // 🔴 Это не косметика: тумблер «включить экономику» боевой, и без флага любой владелец чужого
@@ -176,6 +189,13 @@ export const env = {
   // (только «Мои GIF»). Запросы идут через бэкенд (`routes/gifs.ts`), ключ клиенту не отдаётся.
   gifProvider: (process.env.GIF_PROVIDER ?? '').trim().toLowerCase(),
   gifApiKey: process.env.GIF_API_KEY ?? '',
+  // Картинка карты в карточке геопозиции ЛС (`yamap1`): ключ Static API Яндекса. Пусто => маршрута `/api/maps/static` НЕТ, признак не
+  // объявляется, клиент рисует карточку без картинки. Суточный потолок запросов инстанса: пусто — 100 (бесплатный тариф Яндекса — 100 запросов в сутки), `0` — без потолка.
+  // Своя карта OpenStreetMap (`osmmap1`): путь к файлу PMTiles (сборка protomaps) на сервере. Пусто => маршрутов `/api/maps/{info,tiles,glyphs}` НЕТ,
+  // признак не объявляется. Файл только читается (в compose — том `:ro`).
+  mapPmtilesPath: (process.env.MAP_PMTILES_PATH ?? '').trim(),
+  yandexMapsStaticKey: (process.env.YANDEX_MAPS_STATIC_KEY ?? '').trim(),
+  yandexMapsStaticDailyMax: /^\d{1,7}$/.test((process.env.YANDEX_MAPS_STATIC_DAILY_MAX ?? '').trim()) ? Number(process.env.YANDEX_MAPS_STATIC_DAILY_MAX!.trim()) : 100,
   /**
    * Федерация инстансов (#139). 🔴 Умолчание — ВЫКЛЮЧЕНО: пока держатель сам не включил, инстанс
    * не заводит себе печать, ничего не отдаёт соседям и вообще не регистрирует маршруты `/api/fed/*`.
@@ -191,5 +211,27 @@ export const env = {
     keyPassphrase: process.env.FEDERATION_KEY_PASSPHRASE ?? '',
     dataDir: process.env.FEDERATION_DATA_DIR ?? '/var/lib/gusvoice/federation',
     apiBase: (process.env.FEDERATION_API_BASE ?? process.env.VITE_API_URL ?? '').replace(/\/+$/, ''),
+    /**
+     * ЛС между инстансами (#141, `docs/dm/FEDERATION.md`). 🔴 Умолчание — ВЫКЛЮЧЕНО, и без федерации не включается: пока
+     * держатель сам не включил, маршрут журнала `/fed/v1/conv/changes` не регистрируется и журнал на связку не пишется.
+     */
+    dmEnabled:
+      (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true' &&
+      (process.env.FEDERATION_DM_ENABLED ?? '').toLowerCase() === 'true',
+    /** Режим стенда для локальных соседей (Ф13, `federation/devPeers.ts`): хосты, которым можно `http` и loopback. */
+    devPeers: parseDevPeers(process.env.FEDERATION_DEV_PEERS),
   },
 };
+
+/**
+ * 🔴 Режим стенда — отказ старта при опасном сочетании (Ф13): на проде, с публичным адресом API или с не местным хостом в
+ * списке. Громко и сразу, как плейсхолдер секрета выше: молча проигнорированная переменная выглядела бы как работающий стенд.
+ */
+const devPeerProblem = devPeersProblem({
+  hosts: env.federation.devPeers,
+  nodeEnv: process.env.NODE_ENV,
+  publicApiUrl: env.publicApiUrl,
+  isLocalIp: isBlockedAddress,
+  isIp: (v) => isIP(v) !== 0,
+});
+if (devPeerProblem) throw new Error(devPeerProblem);

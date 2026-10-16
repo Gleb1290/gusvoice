@@ -64,8 +64,8 @@ export function checkInstanceName(raw: string): NameProblem | null {
  * иконка, и она читается на каждый запрос соседа, а здесь — ещё и версия, для правки держателем.
  * Сводить их в один модуль значило бы завести цикл импортов (визитка ← события ← визитка).
  */
-export async function readInstanceMeta(): Promise<InstanceMeta> {
-  const [row] = await db
+export async function readInstanceMeta(q: Pick<typeof db, 'select'> = db): Promise<InstanceMeta> {
+  const [row] = await q
     .select({ value: instanceSettings.value })
     .from(instanceSettings)
     .where(eq(instanceSettings.key, FEDERATION_META_KEY))

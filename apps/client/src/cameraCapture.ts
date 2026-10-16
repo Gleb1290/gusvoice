@@ -29,10 +29,10 @@ export async function cameraAllowedQuietly(): Promise<boolean> {
   }
 }
 
-/** Поток камеры: 1280×720 — и для ячейки, и для экрана (смена разрешения перезапускала бы камеру), и для видео в 25 МБ. */
+/** Поток камеры: 1280×720 — и для ячейки, и для экрана (смена разрешения перезапускала бы камеру), и для видео в 25 МБ; на миг снимка — 1920×1440 (`takeSnapshot`). */
 export async function openCamera(facing: Facing): Promise<MediaStream> {
   return navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    video: { facingMode: { ideal: facing }, width: { ideal: STREAM_W }, height: { ideal: STREAM_H } },
     audio: false,
   });
 }
@@ -70,8 +70,12 @@ export async function setTorch(track: MediaStreamTrack, on: boolean): Promise<bo
   }
 }
 
+interface PhotoRange {
+  max?: number;
+}
 interface ImageCaptureLike {
-  takePhoto(): Promise<Blob>;
+  takePhoto(settings?: { imageWidth?: number; imageHeight?: number }): Promise<Blob>;
+  getPhotoCapabilities?(): Promise<{ imageWidth?: PhotoRange; imageHeight?: PhotoRange }>;
 }
 type ImageCaptureCtor = new (track: MediaStreamTrack) => ImageCaptureLike;
 
@@ -102,21 +106,86 @@ function frameOf(video: HTMLVideoElement): Promise<Blob> {
   return new Promise<Blob>((resolve, reject) => c.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob'))), 'image/jpeg', 0.92));
 }
 
+/** Сколько ждём снимок сенсора: кадр в полном разрешении (12–50 Мп) Camera2 отдаёт дольше кадра превью. */
+const PHOTO_TIMEOUT_MS = 6000;
+
 /**
- * Снимок: сначала `ImageCapture.takePhoto()` (полное разрешение сенсора, есть в Chromium и WebView), не вышло за 4 с —
- * кадр потока. Затем то же сжатие, что у фото из галереи (2560 px, JPEG 0.85, без метаданных).
+ * Поток на время снимка — 4:3 1920×1440, как предел снимка камеры Telegram Android (`photoMaxWidth/Height`,
+ * `CameraView.java:760-783`). 🔴 WebView снимает `takePhoto()` по размеру ПОТОКА, а не сенсора: на эмуляторе (Android 16,
+ * WebView 145) при потоке 1280×720 снимок — 1280×720 даже с явным `imageWidth/Height`, при потоке 1920×1440 — 3840×2160
+ * (#218 п.6, «снимок плохой»). Поэтому перед снимком поток поднимаем (`applyConstraints`, ~10 мс), после — возвращаем
+ * `STREAM_W×STREAM_H`: превью ячейки и видео остаются лёгкими.
+ */
+const SNAP_W = 1920;
+const SNAP_H = 1440;
+const STREAM_W = 1280;
+const STREAM_H = 720;
+
+/**
+ * Самый крупный кадр, который отдаёт сенсор (`getPhotoCapabilities`: `imageWidth.max` × `imageHeight.max`). Без явного размера
+ * Chromium снимает кадр «поближе к» размеру ПОТОКА — 1280×720 — и снимок выходил не лучше кадра превью (#218 п.6). Telegram
+ * Android снимает своей Camera2 до 1920×1440 (`CameraView.java:760-783`) и тоже без сжатия превью; дальше у нас то же сжатие,
+ * что у галереи (длинная сторона 2560). Не узнали — `null`, снимаем как раньше.
+ */
+async function largestPhoto(ic: ImageCaptureLike): Promise<{ imageWidth: number; imageHeight: number } | null> {
+  try {
+    const caps = await withTimeout(ic.getPhotoCapabilities?.() ?? Promise.reject(new Error('no caps')), 1500);
+    const w = caps.imageWidth?.max ?? 0;
+    const h = caps.imageHeight?.max ?? 0;
+    return w > 0 && h > 0 ? { imageWidth: w, imageHeight: h } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Снимок: сначала `ImageCapture.takePhoto()` в ПОЛНОМ разрешении сенсора (`largestPhoto`; есть в Chromium и WebView), не
+ * вышло за 6 с — кадр потока. Затем то же сжатие, что у фото из галереи (2560 px, JPEG 0.85, без метаданных). Каким путём
+ * и какого размера вышел кадр — в консоль (`[camera] snapshot`): на устройстве иначе не узнать, сработал ли сенсор.
  */
 export async function takeSnapshot(video: HTMLVideoElement, track: MediaStreamTrack | null): Promise<File> {
   let blob: Blob | null = null;
+  let how = 'frame';
   const IC = (window as unknown as { ImageCapture?: ImageCaptureCtor }).ImageCapture;
+  const live = !!track && track.readyState === 'live';
+  let raised = false;
+  if (track && live && typeof track.applyConstraints === 'function') {
+    try {
+      await withTimeout(track.applyConstraints({ width: { ideal: SNAP_W }, height: { ideal: SNAP_H } }), 1500);
+      raised = true;
+    } catch {
+      raised = false;
+    }
+  }
   if (IC && track && track.readyState === 'live') {
     try {
-      blob = await withTimeout(new IC(track).takePhoto(), 4000);
+      const ic = new IC(track);
+      const size = await largestPhoto(ic);
+      try {
+        blob = await withTimeout(size ? ic.takePhoto(size) : ic.takePhoto(), PHOTO_TIMEOUT_MS);
+        how = size ? `sensor ${size.imageWidth}x${size.imageHeight}` : 'sensor default';
+      } catch (e) {
+        // Размер не принят (бывает у фронтальной) — ещё раз без него, как до #218; не уложился по времени — сразу кадр потока.
+        if (!size || (e instanceof Error && e.message === 'timeout')) throw e;
+        blob = await withTimeout(ic.takePhoto(), PHOTO_TIMEOUT_MS);
+        how = 'sensor default';
+      }
     } catch {
       blob = null;
     }
   }
-  if (!blob || blob.size === 0) blob = await frameOf(video);
+  try {
+    if (!blob || blob.size === 0) {
+      blob = await frameOf(video);
+      how = `frame ${video.videoWidth}x${video.videoHeight}`;
+    }
+  } finally {
+    // Поток — обратно в лёгкий: превью и видео (25 МБ) остаются на STREAM_W×STREAM_H.
+    if (raised && track && track.readyState === 'live') {
+      void track.applyConstraints({ width: { ideal: STREAM_W }, height: { ideal: STREAM_H } }).catch(() => undefined);
+    }
+  }
+  console.info('[camera] snapshot', how, blob.size);
   const raw = new File([blob], captureName('photo', new Date(), 'jpg'), { type: 'image/jpeg' });
   return compressPhoto(raw);
 }
@@ -153,13 +222,13 @@ export function recorderType(): RecorderPick | null {
 /**
  * Запись видео, пока держат кнопку: видео — трек камеры, звук — свой трек микрофона (берётся на время записи, без звука —
  * если микрофона нет или его не дали). Порции раз в секунду: у предела сервера (`VIDEO_SOFT_LIMIT`) запись останавливается
- * сама (`onFull`). `opts.mic: false` — у приложения нет разрешения на микрофон (натив знает, `nativeMediaInfo().mic`):
+ * сама (`onFull`). `opts.softLimit` — свой предел записи (`attachRules.videoSoftLimit`: в ЛС по `bigfile1` до 1 ГиБ). `opts.mic: false` — у приложения нет разрешения на микрофон (натив знает, `nativeMediaInfo().mic`):
  * пишем без звука и окна не просим — оно «скрывает» страницу, и поток камеры гаснет посреди записи («Видео не записалось»).
  */
 export async function startRecording(
   video: MediaStreamTrack,
   onFull: () => void,
-  opts: { mic?: boolean } = {},
+  opts: { mic?: boolean; softLimit?: number } = {},
 ): Promise<Recording | null> {
   const pick = recorderType();
   if (!pick) return null;
@@ -183,7 +252,7 @@ export async function startRecording(
     if (!e.data || e.data.size === 0) return;
     chunks.push(e.data);
     size += e.data.size;
-    if (!full && recordingFull(size)) {
+    if (!full && recordingFull(size, opts.softLimit)) {
       full = true;
       onFull();
     }

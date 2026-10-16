@@ -118,15 +118,7 @@ export function ComposerLinkPreview({ text, dismissed, onDismiss }: { text: stri
   );
 }
 
-export function LinkPreviewCard({
-  url,
-  authorId,
-  authorName,
-}: {
-  url: string;
-  authorId: string | null;
-  authorName: string;
-}) {
+export function LinkPreviewCard({ url }: { url: string }) {
   const [data, setData] = useState<Preview | null | undefined>(() => cache.get(url));
   const [ask, setAsk] = useState(false);
 
@@ -168,7 +160,7 @@ export function LinkPreviewCard({
   }
 
   function go() {
-    if (shouldWarnAboutLink(url, authorId)) setAsk(true);
+    if (shouldWarnAboutLink(url)) setAsk(true);
     else openLink(url);
   }
 
@@ -180,7 +172,7 @@ export function LinkPreviewCard({
         {data.description && <span className="lp-desc">{data.description}</span>}
       </button>
       {ask && (
-        <LinkConfirmModal url={url} authorId={authorId} authorName={authorName} onClose={() => setAsk(false)} />
+        <LinkConfirmModal url={url} onClose={() => setAsk(false)} />
       )}
     </>
   );

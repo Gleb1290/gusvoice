@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { videoSoftLimit } from './attachRules';
 import { ATTACH_MAX, ATTACH_MAX_BYTES, VIDEO_SOFT_LIMIT, attachMode, attachRoom, fitAttachments, droppedAttachText, toggleSelected, selectedNumber, overLimit, formatDuration, pickRecorderType, RECORDER_TYPES, selectionTitle, recentFilesOf, fitWithin, compressedName, permNotice, thumbPx, skippedText, recordingFull, photoCompressible, baseMime, captureName, fileBadge, fileSizeText, serverScheduledAttachments } from './attachRules';
 
 it('нативная галерея важнее устройства, камера листа нужна только телефону вне оболочки ПК', () => {
@@ -163,6 +164,56 @@ it('запись останавливается ровно на мягком п�
   // Остановка только после лимита делает готовый контейнер слишком большим для сервера.
   assert.equal(recordingFull(VIDEO_SOFT_LIMIT-1),false); assert.equal(recordingFull(VIDEO_SOFT_LIMIT),true); assert.equal(recordingFull(VIDEO_SOFT_LIMIT+1),true);
   assert.equal(captureName('photo',new Date(2026,9,6,1,2,3),'jpg'),'photo-2026-10-06-01-02-03.jpg');
+});
+
+it('явный мягкий предел записи заменяет прежние 24 МиБ и срабатывает ровно на границе', () => {
+  // ЛС допускают длинное видео, каналы сохраняют старый предел; нельзя игнорировать второй аргумент.
+  const mib = 1024 * 1024;
+  assert.equal(VIDEO_SOFT_LIMIT, 24 * mib);
+  for (const limit of [mib, 1023 * mib]) {
+    assert.equal(recordingFull(limit - 1, limit), false);
+    assert.equal(recordingFull(limit, limit), true);
+    assert.equal(recordingFull(limit + 1, limit), true);
+  }
+  assert.equal(recordingFull(VIDEO_SOFT_LIMIT, 1023 * mib), false, 'старый порог не режет запись для ЛС');
+  assert.equal(recordingFull(VIDEO_SOFT_LIMIT - 1), false);
+  assert.equal(recordingFull(VIDEO_SOFT_LIMIT), true);
+  assert.equal(recordingFull(VIDEO_SOFT_LIMIT, undefined), true);
+});
+
+it('мягкий предел оставляет ровно 1 МиБ контейнеру и никогда не опускается ниже 1 МиБ', () => {
+  const mib = 1024 * 1024;
+  assert.equal(videoSoftLimit(), 24 * mib, 'без параметра остаётся прежний запас для канала');
+  assert.equal(videoSoftLimit(25 * mib), 24 * mib);
+  assert.equal(videoSoftLimit(1024 * mib), 1023 * mib, '1 ГиБ сервера не равен порогу записи');
+  for (const max of [0, mib - 1, mib, 2 * mib - 1, 2 * mib]) {
+    assert.equal(videoSoftLimit(max), mib, `нижний предел для ${max} байт`);
+  }
+  assert.equal(videoSoftLimit(2 * mib + 1), mib + 1, 'выше нижней границы вычитается ровно 1 МиБ');
+});
+
+it('контракт мягкого предела убивает игнорирование второго аргумента и потерю запаса контейнера', () => {
+  const source = readFileSync(new URL('./attachRules.ts', import.meta.url), 'utf8');
+  const mib = 1024 * 1024;
+  const loadRules = (text: string) => {
+    const mod = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(text, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText, { module: mod, exports: mod.exports, require: (id: string) => {
+      if (id === '@gusvoice/shared') return { FEATURE_CONV10: 'conv10', FEATURE_BIGFILE1: 'bigfile1' };
+      assert.equal(id, './convSyncRules');
+      return { serverScheduledAttachments };
+    } });
+    return mod.exports as typeof import('./attachRules');
+  };
+  for (const [before, after, check] of [
+    ['return bytes >= softLimit;', 'return bytes >= VIDEO_SOFT_LIMIT;', (rules: typeof import('./attachRules')) => assert.equal(rules.recordingFull(24 * mib, 1023 * mib), false)],
+    ['max - 1024 * 1024', 'max', (rules: typeof import('./attachRules')) => assert.equal(rules.videoSoftLimit(1024 * mib), 1023 * mib)],
+  ] as const) {
+    assert.equal(source.split(before).length - 1, 1, 'мутация имеет единственную точку приложения');
+    check(loadRules(source));
+    assert.throws(() => check(loadRules(source.replace(before, after))), assert.AssertionError);
+  }
 });
 
 it('подпись файла различает расширение и границы единиц размера', () => {

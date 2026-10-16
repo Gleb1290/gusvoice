@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { nameFromRoster } from './memberNameRules';
+import { nameFromRoster, voiceNameSource } from './memberNameRules';
 import { useStore } from './store';
 
 /**
@@ -43,4 +43,22 @@ export function useNameResolver(): NameResolver {
 export function resolveMemberName(userId: string, fallback: string): string {
   const roster = new Map(useStore.getState().members.map((m) => [m.user.id, m.nickname]));
   return nameFromRoster(roster, userId, fallback);
+}
+
+/**
+ * Имя участника голоса для плитки/строки/просмотра: как `useNameResolver`, но свой локальный участник без `identity`/`name`
+ * (до подключения, после обрыва) зовётся моим именем (B11) — правило `voiceNameSource`.
+ */
+export function useVoiceName(): (p: { identity: string; name?: string | null; isLocal?: boolean }) => string {
+  const nameOf = useNameResolver();
+  const me = useStore((s) => s.user);
+  const meId = me?.id;
+  const meName = me?.displayName;
+  return useMemo(() => {
+    const mine = meId && meName !== undefined ? { id: meId, displayName: meName } : null;
+    return (p) => {
+      const src = voiceNameSource(p, mine);
+      return nameOf(src.id, src.fallback);
+    };
+  }, [nameOf, meId, meName]);
 }

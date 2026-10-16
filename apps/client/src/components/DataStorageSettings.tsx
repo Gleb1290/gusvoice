@@ -17,6 +17,7 @@ import { sameValue } from '../settingsChanged';
 import { clearDeviceCache, measureStorage, type StorageUsage } from '../storageUsage';
 import { toast } from '../toast';
 import { DownloadsList } from './DownloadsList';
+import { RaiseToEarSetting } from './RaiseToEarSetting';
 import { Toggle } from './Toggle';
 
 /**
@@ -124,6 +125,7 @@ function AutoDownloadPanel() {
       <div className="muted" style={{ fontSize: 12 }}>
         Играет в ленте само, без звука и по кругу. Выключено — кадр с ▶, играет по нажатию.
       </div>
+      <RaiseToEarSetting />
       {changed ? (
         <button type="button" className="settings-action" onClick={resetAutoDownload}>
           Сбросить настройки автозагрузки

@@ -360,6 +360,48 @@ export function isKeyboardOpen(fullHeight: number, height: number, editableFocus
   return editableFocused && fullHeight - height >= KEYBOARD_MIN_SHRINK;
 }
 
+/**
+ * Панель эмодзи / стикеров / GIF на телефоне встаёт НА МЕСТО клавиатуры и берёт её высоту (tg3, #218) — как у Telegram
+ * Android: `ChatActivityEnterView.java:3565-3566` (`kbd_height` / `kbd_height_land3`, по умолчанию `dp(200)`), запоминание —
+ * `:13191-13195` (только высота больше `dp(50)`, портрет и ландшафт — отдельно).
+ */
+export const KEYBOARD_PANEL_DEFAULT = 200;
+export const KEYBOARD_PANEL_MIN_SAVE = 50;
+const KBD_KEY = 'gv_kbd_height';
+const KBD_KEY_LAND = 'gv_kbd_height_land';
+/** Высота панели под полем ввода по запомненной высоте клавиатуры (чистая функция): нет замера или он не больше 50 — 200. */
+export function keyboardPanelHeight(stored: number | null | undefined): number {
+  return typeof stored === 'number' && Number.isFinite(stored) && stored > KEYBOARD_PANEL_MIN_SAVE ? Math.round(stored) : KEYBOARD_PANEL_DEFAULT;
+}
+function isLandscape(): boolean {
+  return window.innerWidth > window.innerHeight;
+}
+/** Запомненная высота клавиатуры для текущей ориентации (или 200). */
+export function rememberedKeyboardHeight(): number {
+  try {
+    const raw = localStorage.getItem(isLandscape() ? KBD_KEY_LAND : KBD_KEY);
+    return keyboardPanelHeight(raw === null ? null : Number(raw));
+  } catch {
+    return KEYBOARD_PANEL_DEFAULT;
+  }
+}
+/* Высоту пишем, когда клавиатура УСТОЯЛАСЬ (300 мс без изменений): по ходу выезда и ухода вьюпорт проходит промежуточные
+   высоты, и последняя из них — ещё «открытая» на уходе — иначе запомнилась бы вместо настоящей. */
+let kbSaveTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleKeyboardSave(height: number): void {
+  // Без таймеров (чужая песочница) — не запоминаем: высота останется прежней или по умолчанию.
+  if (typeof setTimeout !== 'function') return;
+  clearTimeout(kbSaveTimer);
+  kbSaveTimer = setTimeout(() => {
+    if (height <= KEYBOARD_PANEL_MIN_SAVE) return;
+    try {
+      localStorage.setItem(isLandscape() ? KBD_KEY_LAND : KBD_KEY, String(Math.round(height)));
+    } catch {
+      /* хранилище недоступно — останется высота по умолчанию */
+    }
+  }, 300);
+}
+
 let kbFullHeight = 0;
 let kbWidth = 0;
 function editableFocused(): boolean {
@@ -379,8 +421,20 @@ export function refreshKeyboardFlag(): void {
   if (vv.scale <= 1) kbFullHeight = Math.max(kbFullHeight, vv.height, window.innerHeight);
   const open = vv.scale <= 1 && isKeyboardOpen(kbFullHeight, vv.height, editableFocused());
   const root = document.documentElement;
-  if (open) root.setAttribute('data-kb', '');
-  else root.removeAttribute('data-kb');
+  /* `data-kbspace` — клавиатура ЗАНИМАЕТ место, где бы ни был фокус (tg3, #218): по кнопке смайлика фокус уходит из поля
+     раньше, чем уезжает клавиатура, и панель эмодзи под полем (`.expr-under`) прячется до её ухода — иначе лента на миг
+     сжималась бы на высоту панели. Только на сенсорном экране: низкое окно браузера на ПК — не клавиатура. */
+  const space = vv.scale <= 1 && kbFullHeight - vv.height >= KEYBOARD_MIN_SHRINK && window.matchMedia?.('(pointer: coarse)').matches === true;
+  if (space) root.setAttribute('data-kbspace', '');
+  else root.removeAttribute('data-kbspace');
+  if (open) {
+    root.setAttribute('data-kb', '');
+    scheduleKeyboardSave(kbFullHeight - vv.height);
+  } else {
+    if (kbSaveTimer !== undefined) clearTimeout(kbSaveTimer);
+    kbSaveTimer = undefined;
+    root.removeAttribute('data-kb');
+  }
 }
 export function installViewportVars(): void {
   refreshViewportVars();

@@ -1,12 +1,12 @@
 import type { Attachment } from '@gusvoice/shared';
-import { VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
+import { FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
 import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { Readable } from 'node:stream';
 import { z } from 'zod';
 import {
   attachmentHeaders,
   attPartsWellFormed,
-  parseAttLink,
   parseRange,
   resolveAttachmentMime,
   sanitizeFilename,
@@ -20,11 +20,9 @@ import {
   privateAttachmentsReady,
 } from '../attachments.js';
 import { attachmentUploadBlock, clientIp, rateHit, retryMessage } from '../authGuard.js';
-import type { AttachmentRef } from '../conversations.js';
 import { attachmentAccess } from '../convRules.js';
 import { db } from '../db/index.js';
 import { attachments, conversationMembers, conversationMessages, users } from '../db/schema.js';
-import { env } from '../env.js';
 import { attachmentBlocked } from '../storage.js';
 
 /**
@@ -115,24 +113,18 @@ export async function uploadedAttachmentDto(
 }
 
 /**
- * Вложения старой отправки (`/api/dm/:id/messages`): 0.8.x возвращает ссылку из ответа загрузки, а не id. Годится
- * только НАША ссылка на файл, выданная ЭТОМУ человеку (подпись с его поколением токенов); публичные адреса бакета в
- * новых ЛС больше не принимаются — иначе можно сослаться на чужой публичный файл. `null` — хоть одна не годится.
- * Моё ли оно, незавершённое ли и из этой ли беседы — решает `conversations.sendMessage` под замком.
+ * Э3 часть 2 (#141): отдача файла `remote` (копии у нас нет) — крючок, а не импорт: модуль федерации тянет шлюз и Redis, а
+ * этот маршрут живёт и без федерации. Подключается в `index.ts` при `FEDERATION_DM_ENABLED` (`federation/convAtt.ts`
+ * `serveRemoteAttachment`); без крючка `remote` — прежний 503 `federation.att_pending`.
  */
-export async function refsFromLegacyUrls(
-  list: { url: string; width?: number | null; height?: number | null; waveform?: number[] | null; durationMs?: number | null }[],
-  me: string,
-): Promise<AttachmentRef[] | null> {
-  if (list.length === 0) return [];
-  const gen = await tokenGenOf(me);
-  const out: AttachmentRef[] = [];
-  for (const a of list) {
-    const p = parseAttLink(a.url, env.publicApiUrl);
-    if (!p || p.viewerId !== me || !attachmentSigValid(p.id, me, gen, p.sig)) return null;
-    out.push({ id: p.id, width: a.width, height: a.height, waveform: a.waveform, durationMs: a.durationMs });
-  }
-  return out;
+export type RemoteAttServe =
+  | { kind: 'stream'; body: Readable }
+  | { kind: 'unavailable'; instance: string | null }
+  | { kind: 'gone' };
+type RemoteServe = (att: typeof attachments.$inferSelect, range: { start: number; end: number } | null) => Promise<RemoteAttServe>;
+let remoteServe: RemoteServe | null = null;
+export function configureRemoteAttachments(fn: RemoteServe | null): void {
+  remoteServe = fn;
 }
 
 export async function attRoutes(app: FastifyInstance): Promise<void> {
@@ -191,6 +183,13 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
       message: message ?? null,
     });
     if (!allowed) return deny();
+    // Э3 часть 1 (#141): файл из копии сообщения соседа ещё не скопирован к нам — 503 `federation.att_pending`
+    // (в сообщении `fedState: 'copying'`); копия доедет — сообщение придёт обновлённым, ссылка та же.
+    // Э3 часть 2: с крючком (`configureRemoteAttachments`, при `FEDERATION_DM_ENABLED`) такой файл отдаётся потоком с дома
+    // автора — ниже; без него — по-прежнему 503.
+    if (att.state === 'remote' && !remoteServe) {
+      return reply.code(503).headers({ 'Retry-After': '5', 'Cache-Control': 'no-store' }).send({ error: FED_ERRORS.attPending });
+    }
 
     const headers = attachmentHeaders(att.contentType, att.name, att.id);
     // Условный запрос: доступ уже проверен, файл по id не меняется — 304 без тела.
@@ -198,11 +197,24 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
     if (inm && inm.split(',').some((t) => t.trim() === headers.ETag)) {
       return reply.code(304).headers({ ETag: headers.ETag, 'Cache-Control': headers['Cache-Control'] }).send();
     }
-    const st = await attachmentStore.stat(att.storageKey);
+    const st = att.state === 'remote' ? { size: att.size } : await attachmentStore.stat(att.storageKey);
     if (!st) return deny();
     const range = parseRange(req.headers.range, st.size);
     if (range === 'unsatisfiable') {
       return reply.code(416).headers({ 'Content-Range': `bytes */${st.size}`, 'Cache-Control': 'no-store' }).send();
+    }
+    // Э3 часть 2 (#141): копии у нас нет — поток с дома автора (тот же диапазон); автор недоступен — 503 `att_unavailable`.
+    let remoteBody: Readable | null = null;
+    if (att.state === 'remote' && remoteServe && req.method !== 'HEAD') {
+      const r = await remoteServe(att, range);
+      if (r.kind === 'gone') return deny();
+      if (r.kind === 'unavailable') {
+        return reply
+          .code(503)
+          .headers({ 'Retry-After': '30', 'Cache-Control': 'no-store' })
+          .send({ error: FED_ERRORS.attUnavailable, ...(r.instance ? { instance: r.instance } : {}) });
+      }
+      remoteBody = r.body;
     }
     reply.headers(headers);
     if (range) {
@@ -215,7 +227,7 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
     }
     // HEAD — только заголовки (ревью 30.09): маленький запрос не должен стоить чтения файла целиком.
     if (req.method === 'HEAD') return reply.send();
-    return reply.send(await attachmentStore.get(att.storageKey, range ?? undefined));
+    return reply.send(remoteBody ?? (await attachmentStore.get(att.storageKey, range ?? undefined)));
   };
   app.get(path, { exposeHeadRoute: false }, serve);
   app.head(path, serve);

@@ -123,7 +123,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!perms) return reply.code(404).send({ error: 'not found' });
     if (!has(perms.permissions, Permission.VIEW_CHANNEL)) return reply.code(403).send({ error: 'forbidden' });
 
-    // Курсор (время, id) — та же дыра на границе миллисекунды, что и в ЛС (разбор — `routes/dm.ts`).
+    // Курсор (время, id) — та же дыра на границе миллисекунды, что и в ЛС (разбор был в снятом `routes/dm.ts`).
     const cursor = query.beforeId
       ? (
           await db
@@ -419,7 +419,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
     if (!msg || msg.channelId !== channelId) return reply.code(404).send({ error: 'not found' });
     if (msg.authorId !== req.user!.sub) return reply.code(403).send({ error: 'forbidden' });
-    // Пробелы проходили `.min(1)` до обрезки и давали пустую реплику (#212) — разбор в `routes/dm.ts`.
+    // Пробелы проходили `.min(1)` до обрезки и давали пустую реплику (#212) — разбор был в снятом `routes/dm.ts`.
     if (!content && msg.attachments.length === 0) return reply.code(400).send({ error: 'empty message' });
 
     const perms = await getChannelPermissions(channelId, req.user!.sub);
@@ -473,7 +473,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (!perms || !has(perms.permissions, Permission.VIEW_CHANNEL)) return reply.code(403).send({ error: 'forbidden' });
 
     // Рассылаем только настоящее изменение: повтор запроса иначе удваивал реакцию у всех на экране (#212,
-    // разбор — `routes/dm.ts`).
+    // разбор был в снятом `routes/dm.ts`).
     const changed =
       op === 'add'
         ? await db

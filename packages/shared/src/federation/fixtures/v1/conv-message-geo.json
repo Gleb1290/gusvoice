@@ -1,0 +1,23 @@
+{
+  "id": "0199e2b1-7b3c-7d4e-8f5a-6b7c8d9e0f2b",
+  "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "author": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" },
+  "client_id": "c-0199e2b1-7b3c",
+  "payload_hash": "b1c2d3e4f5a60718",
+  "created_at": 1760443200000,
+  "origin_sort_key": 1760443200000123,
+  "content": "📍 Геопозиция: 55.755800, 37.617300 https://www.openstreetmap.org/?mlat=55.7558&mlon=37.6173#map=16/55.7558/37.6173",
+  "reply_to_id": null,
+  "forwarded_from": null,
+  "silent": false,
+  "no_preview": true,
+  "caption_above": false,
+  "reply_quote": null,
+  "sticker": null,
+  "service": null,
+  "attachments": [],
+  "edit_version": 0,
+  "edited_at": null,
+  "deleted": false,
+  "media": { "kind": "geo", "lat": 55.7558, "lon": 37.6173, "accuracy": 12.5 }
+}

@@ -27,6 +27,7 @@ import { getDownloadDir } from './downloads';
 import { getHotkeys, HOTKEY_DEFAULTS } from './hotkeys';
 import { COIN_NOTIFY_DEFAULT, coinNotifyLevel, OS_NOTIFY_DEFAULT, osNotifyLevel } from './notifications';
 import { getOverlaySettings, OVERLAY_DEFAULTS } from './overlaySettings';
+import { getNotifyPopupPrefs, NOTIFY_POPUP_DEFAULTS, type NotifyPopupPrefs } from './notifyPopupPrefs';
 import type { SettingsSnapshot } from './settingsChanged';
 import { getSoundSettings, SOUND_DEFAULTS } from './sounds';
 import { getStreamSettings, STREAM_DEFAULTS } from './streamSettings';
@@ -35,6 +36,11 @@ import { getToastSettings, TOAST_DEFAULTS } from './toastSettings';
 import { getSidebarWidth, getUiScale, SIDEBAR_DEFAULT, UI_SCALE_DEFAULT } from './uiPrefs';
 
 /** Как настроено сейчас. */
+/** Отпечаток настроек своих всплывающих окон (G38) для точки «изменено» — один пункт группы `set-g-notify-popup`. */
+function popupPrint(p: NotifyPopupPrefs): [boolean, string, number, string] {
+  return [p.native, p.corner, p.count, p.monitor];
+}
+
 export function readSettings(): SettingsSnapshot {
   return {
     audio: getAudioSettings(),
@@ -57,6 +63,7 @@ export function readSettings(): SettingsSnapshot {
     doubleClick: getDoubleClickAction(),
     quickReaction: getQuickReaction(),
     osNotify: osNotifyLevel(),
+    notifyPopup: popupPrint(getNotifyPopupPrefs()),
     coinNotify: coinNotifyLevel(),
     closeBehavior: getCloseBehavior(),
     downloadDir: getDownloadDir(),
@@ -87,6 +94,7 @@ export function factorySettings(): SettingsSnapshot {
     doubleClick: DOUBLE_CLICK_DEFAULT,
     quickReaction: QUICK_REACTION_DEFAULT,
     osNotify: OS_NOTIFY_DEFAULT,
+    notifyPopup: popupPrint(NOTIFY_POPUP_DEFAULTS),
     coinNotify: COIN_NOTIFY_DEFAULT,
     closeBehavior: CLOSE_BEHAVIOR_DEFAULT,
     downloadDir: null,

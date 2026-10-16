@@ -14,20 +14,31 @@
  * `streamSettings`).
  */
 import { CALL_PING_MS } from '@gusvoice/shared';
-import { Room, RoomEvent, Track, type LocalVideoTrack, type RemoteTrack } from 'livekit-client';
+import { Room, RoomEvent, Track, createLocalAudioTrack, type LocalAudioTrack, type LocalVideoTrack, type RemoteTrack } from 'livekit-client';
 import { useEffect, useRef, useState } from 'react';
 import { pushBackHandler } from '../androidBack';
-import { api } from '../api';
 import { getAudioSettings } from '../audioSettings';
 import { cameraCaptureOptions, cameraPublishOptions } from '../cameraSettings';
 import { CALL_DEVICE, useCall } from '../callStore';
 import { callStatusText, callViewFor, previewCorner, serverCallVideo, type CallView, type PreviewCorner } from '../callView';
 import { isMobile } from '../hotkeys';
+import {
+  callAudioSupported,
+  onCallAudioChanged,
+  readCallAudio,
+  selectCallRoute,
+  speakerPress,
+  startCallAudio,
+  stopCallAudio,
+  type CallAudioState,
+  type CallRoute,
+} from '../nativeCallAudio';
 import { usePhoneLayout } from '../phoneLayout';
 import { useStore } from '../store';
 import { captureOptions, getStreamSettings, publishOptions, webScreenSettings } from '../streamSettings';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
+import { BottomSheet, SheetRow } from './BottomSheet';
 import { Icon } from './Icon';
 
 function useCallView(): CallView {
@@ -51,12 +62,16 @@ function useElapsed(answeredAt: string | undefined): number {
 
 let ringCtx: AudioContext | null = null;
 function ringPattern(kind: 'incoming' | 'outgoing'): () => void {
+  // Телефон: свой контекст на каждый звонок, закрывается вместе с рингтоном. Он рождается ДО микрофона, а значит с
+  // `USAGE_MEDIA`, и на Android открывает общий MMAP-поток громкого динамика (AAudio): звук звонка, открытый, пока этот
+  // поток жив, подсаживается в него же и уходит в громкий (`useCallMedia`). ПК — общий контекст, как раньше.
+  const own = isMobile();
+  let ac: AudioContext;
   try {
-    ringCtx ??= new AudioContext();
+    ac = own ? new AudioContext() : (ringCtx ??= new AudioContext());
   } catch {
     return () => {};
   }
-  const ac = ringCtx;
   void ac.resume().catch(() => {});
   const beep = () => {
     const t0 = ac.currentTime;
@@ -81,7 +96,10 @@ function ringPattern(kind: 'incoming' | 'outgoing'): () => void {
   };
   beep();
   const t = setInterval(beep, kind === 'incoming' ? 2000 : 4000);
-  return () => clearInterval(t);
+  return () => {
+    clearInterval(t);
+    if (own) void ac.close().catch(() => {});
+  };
 }
 
 // ─── Медиа звонка ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -100,6 +118,70 @@ function facingSupported(phone: boolean): boolean {
   }
 }
 
+/**
+ * Вывод звука разговора на Android (кнопка «Динамик»; Telegram `VoIPFragment` / `VoIPService`): пока звонок идёт (вызов или
+ * разговор), нативная сторона держит звук (`CallAudio.kt`), по окончании возвращает прежнее. Вне приложения Android и в старом APK
+ * без моста — `null` (кнопки нет). Включили камеру, пока звук у уха, — на громкий (Telegram `switchToSpeaker`).
+ */
+function useCallAudio(live: boolean): CallAudioState | null {
+  const camera = useCall((s) => s.camera);
+  const [state, setState] = useState<CallAudioState | null>(null);
+  useEffect(() => {
+    if (!live || !callAudioSupported()) {
+      setState(null);
+      return;
+    }
+    startCallAudio(useCall.getState().camera);
+    setState(readCallAudio());
+    const off = onCallAudioChanged(() => setState(readCallAudio()));
+    return () => {
+      off();
+      stopCallAudio();
+    };
+  }, [live]);
+  useEffect(() => {
+    if (live && camera && readCallAudio()?.route === 'earpiece') selectCallRoute('speaker');
+  }, [live, camera]);
+  return live ? state : null;
+}
+
+const ROUTE_ICON: Record<CallRoute, RoundIcon> = { speaker: 'volume', earpiece: 'phone', wired: 'headphones', bluetooth: 'bluetooth' };
+const ROUTE_LABEL: Record<CallRoute, string> = { speaker: 'Динамик', earpiece: 'Телефон', wired: 'Наушники', bluetooth: 'Bluetooth' };
+
+/** Лист выбора вывода (Telegram `toggleSpeakerphoneOrShowRouteSheet`: «Динамик / Телефон / Bluetooth»). */
+function CallRouteSheet({ audio, onClose }: { audio: CallAudioState; onClose: () => void }) {
+  return (
+    <BottomSheet title="Вывод звука" onClose={onClose}>
+      {audio.devices.map((d) => (
+        <SheetRow
+          key={d.kind}
+          icon={ROUTE_ICON[d.kind]}
+          label={d.kind === 'bluetooth' && d.name ? d.name : ROUTE_LABEL[d.kind]}
+          meta={d.kind === audio.route ? <Icon name="check" size={20} /> : undefined}
+          onClick={() => {
+            selectCallRoute(d.kind);
+            onClose();
+          }}
+        />
+      ))}
+    </BottomSheet>
+  );
+}
+
+/**
+ * Android: контекст, через который играет звук собеседника (`useCallMedia`): `'playback'` — поток AudioTrack, не MMAP, с
+ * назначением, взятым в момент создания (после микрофона — VOICE_COMMUNICATION). Нет WebAudio — `undefined`, SDK заведёт свой.
+ */
+function callPlaybackContext(): AudioContext | undefined {
+  try {
+    const ac = new AudioContext({ latencyHint: 'playback' });
+    void ac.resume().catch(() => {});
+    return ac;
+  } catch {
+    return undefined;
+  }
+}
+
 function useCallMedia(): void {
   const join = useCall((s) => s.join);
   const muted = useCall((s) => s.muted);
@@ -112,20 +194,62 @@ function useCallMedia(): void {
   useEffect(() => {
     if (!join) return;
     const a = getAudioSettings();
+    // Приложение Android: эхоподавление ВКЛЮЧЕНО, усиление и шумодав — нет. Режим связи (`MODE_IN_COMMUNICATION`) Chromium
+    // ставит ТОЛЬКО когда у входного потока есть платформенный эхоподавитель (`audio_manager_android.cc`, эффект ECHO_CANCELLER),
+    // и только тогда выходные потоки рождаются с `USAGE_VOICE_COMMUNICATION`; без него звук звонка — `USAGE_MEDIA`, такой поток
+    // всегда в громком динамике, и «Динамик» / «у уха» (`CallAudio.kt`) его не касаются. Усиление и шумодав остаются выключенными:
+    // с ними микрофон на Samsung уходил во «всплеск и тишину» (`VoiceConnection.tsx`, `audioCaptureDefaults`; `MainActivity.kt`).
+    const mobile = isMobile();
+    const capture = {
+      autoGainControl: mobile ? false : a.autoGainControl,
+      echoCancellation: mobile ? true : a.echoCancellation,
+      noiseSuppression: mobile ? false : a.noiseFilter !== 'off',
+      ...(a.inputDeviceId ? { deviceId: a.inputDeviceId } : {}),
+    };
+    // Android: звук собеседника играет НАШ WebAudio-контекст `latencyHint: 'playback'`, созданный после микрофона (`webAudioMix`;
+    // `<audio>` SDK остаётся немым — без него удалённый звук в WebAudio не течёт). Почему так (замер S20, Chromium 154):
+    //  • назначение (`usage`) выходного потока Chromium берёт в момент создания: до микрофона — MEDIA, после — VOICE_COMMUNICATION;
+    //  • поток с малой задержкой (обычный `<audio>` звонка, контекст по умолчанию) AAudio подсаживает в уже открытый общий
+    //    MMAP-поток (его открыл рингтон / контекст SDK до микрофона) — и просьба VOICE_COMMUNICATION теряется: громкий динамик;
+    //  • `'playback'` в MMAP не ходит никогда (AudioTrack с VOICE_COMMUNICATION — слушается «Динамик» / «у уха»), а простаивающий
+    //    поток Chromium переиспользует только в пределах своего класса задержки — рингтон (`ringPattern`) другого класса.
+    // Свой контекст подставляется в настройку до `connect`, иначе SDK при подключении заведёт свой (до микрофона).
+    const mix: { audioContext?: AudioContext } = {};
     const r = new Room({
+      ...(mobile ? { webAudioMix: mix as { audioContext: AudioContext } } : {}),
       disconnectOnPageLeave: false,
       adaptiveStream: false,
-      publishDefaults: { dtx: true, red: true },
-      audioCaptureDefaults: {
-        autoGainControl: isMobile() ? false : a.autoGainControl,
-        echoCancellation: isMobile() ? false : a.echoCancellation,
-        noiseSuppression: isMobile() ? false : a.noiseFilter !== 'off',
-        ...(a.inputDeviceId ? { deviceId: a.inputDeviceId } : {}),
-      },
+      // `stopMicTrackOnMute: false` (так и по умолчанию, держим явно): выключенный микрофон — дорожка остаётся открытой
+      // (только `enabled = false`), иначе закрытый вход снял бы режим связи и звук ушёл бы в громкий.
+      publishDefaults: { dtx: true, red: true, stopMicTrackOnMute: false },
+      audioCaptureDefaults: capture,
     });
     const els = new Set<HTMLMediaElement>();
     // Звонок кончился, пока комната подключалась (отклонили, отменили): обрыв подключения — наш, не ошибка.
     let gone = false;
+    // Android: микрофон открываем СРАЗУ, подключаемся — только после него (и после контекста звука выше), так что ни один
+    // выходной поток звонка не рождается раньше режима связи. Звонок, начатый с выключенным микрофоном, держит дорожку
+    // открытой и публикует её заглушённой. ПК и веб — как раньше (подключение сразу, микрофон после него).
+    let mic: LocalAudioTrack | null = null;
+    const micOpen: Promise<void> = mobile
+      ? createLocalAudioTrack(capture).then(
+          (t) => {
+            if (gone) t.stop();
+            else mic = t;
+          },
+          (e: unknown) => {
+            if (gone) return;
+            console.error('[call] microphone open failed:', e);
+            toastError(e, 'Звонок: не удалось подключить звук');
+          },
+        )
+      : Promise.resolve();
+    const attachAudio = (track: RemoteTrack) => {
+      const el = track.attach();
+      el.dataset.gvCall = '1';
+      document.body.appendChild(el);
+      els.add(el);
+    };
     const here = () => useCall.getState().setConnected(r.remoteParticipants.size > 0);
     // Видео собеседника: показ экрана важнее камеры (tdesktop показывает то, что пришло, — у нас одно окно).
     const pickRemote = () => {
@@ -148,10 +272,7 @@ function useCallMedia(): void {
     };
     r.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
       if (track.kind !== 'audio') return pickRemote();
-      const el = track.attach();
-      el.dataset.gvCall = '1';
-      document.body.appendChild(el);
-      els.add(el);
+      attachAudio(track);
     });
     r.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
       if (track.kind !== 'audio') return void pickRemoteSoon();
@@ -171,24 +292,50 @@ function useCallMedia(): void {
     });
     r.on(RoomEvent.ParticipantConnected, here);
     r.on(RoomEvent.ParticipantDisconnected, () => (here(), pickRemoteSoon()));
-    r.connect(join.url, join.token)
-      .then(() => {
+    void (async () => {
+      try {
+        // Android: микрофон (режим связи) → контекст звука собеседника → подключение. Микрофон не открылся — всё равно
+        // подключаемся: слышать собеседника важнее.
+        if (mobile) {
+          await micOpen;
+          if (gone) return;
+          mix.audioContext = callPlaybackContext();
+        }
+        await r.connect(join.url, join.token);
         here();
         pickRemote();
-        setReady(true);
-        return r.localParticipant.setMicrophoneEnabled(!useCall.getState().muted);
-      })
-      .catch((e) => {
+        if (!mobile) {
+          setReady(true);
+          await r.localParticipant.setMicrophoneEnabled(!useCall.getState().muted);
+          return;
+        }
+        // Android: публикуем уже открытую дорожку (микрофон выключен — заглушённой). «Готово» — после публикации: иначе
+        // слежение за `muted` ниже успело бы открыть вторую дорожку. Не открылась — то же слежение попробует ещё раз.
+        try {
+          const t = mic as LocalAudioTrack | null;
+          if (t && !gone) {
+            if (useCall.getState().muted) await t.mute();
+            await r.localParticipant.publishTrack(t);
+          }
+        } finally {
+          if (!gone) setReady(true);
+        }
+      } catch (e) {
         if (gone) return;
         console.error('[call] connect failed:', e);
         toastError(e, 'Звонок: не удалось подключить звук');
-      });
+      }
+    })();
     setRoom(r);
     return () => {
       gone = true;
       setRoom(null);
       setReady(false);
       void r.disconnect();
+      // Свой контекст звука собеседника SDK не закрывает (`webAudioMix` с контекстом снаружи).
+      void mix.audioContext?.close().catch(() => {});
+      // Неопубликованную дорожку `disconnect` не закрывает (микрофон открыли, а подключиться не успели).
+      (mic as LocalAudioTrack | null)?.stop();
       for (const el of els) el.remove();
       useCall.getState().setConnected(false);
       useCall.getState().setVideoTracks({ localVideo: null, remoteVideo: null, remoteScreen: false });
@@ -222,7 +369,7 @@ function useCallMedia(): void {
       .then(() => {
         pickLocal();
         const id = useCall.getState().call?.id;
-        if (id) void api.callPing(id, true).catch(() => {});
+        if (id) void useCall.getState().ping(id, true).catch(() => {});
       })
       .catch((e) => {
         useCall.getState().setCamera(false);
@@ -244,7 +391,7 @@ function useCallMedia(): void {
       .setScreenShareEnabled(true, captureOptions(s), publishOptions(s))
       .then(() => {
         const id = useCall.getState().call?.id;
-        if (id) void api.callPing(id, true).catch(() => {});
+        if (id) void useCall.getState().ping(id, true).catch(() => {});
       })
       .catch((e: unknown) => {
         useCall.getState().setScreen(false);
@@ -262,7 +409,7 @@ function useCallPing(view: CallView, callId: string | undefined): void {
     if (!on || !callId) return;
     const t = setInterval(() => {
       const { camera, screen } = useCall.getState();
-      api.callPing(callId, camera || screen).catch((e: { status?: number }) => {
+      useCall.getState().ping(callId, camera || screen).catch((e: { status?: number }) => {
         const cur = useCall.getState().call;
         if (e?.status === 404 && cur?.id === callId) useCall.getState().apply({ ...cur, phase: 'ended', reason: 'disconnect' });
       });
@@ -273,7 +420,7 @@ function useCallPing(view: CallView, callId: string | undefined): void {
 
 // ─── Разметка ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-type RoundIcon = 'phone' | 'mic' | 'mic-off' | 'camera' | 'camera-off' | 'screen-share' | 'camera-flip';
+type RoundIcon = 'phone' | 'mic' | 'mic-off' | 'camera' | 'camera-off' | 'screen-share' | 'camera-flip' | 'volume' | 'headphones' | 'bluetooth';
 
 function RoundBtn(p: { kind: 'accept' | 'decline' | 'plain'; icon: RoundIcon; label: string; on?: boolean; onClick: () => void }) {
   return (
@@ -370,6 +517,8 @@ export function CallLayer() {
   const elapsed = useElapsed(view === 'active' ? call?.answeredAt : undefined);
   useCallMedia();
   useCallPing(view, call?.id);
+  const audio = useCallAudio(!ended && (view === 'outgoing' || view === 'active'));
+  const [routeSheet, setRouteSheet] = useState(false);
 
   // Звонит у собеседника — рингтон; звоню я — гудки вызова. Молчим, как только что-то изменилось.
   useEffect(() => {
@@ -400,7 +549,8 @@ export function CallLayer() {
   const selfInBody = !!self && view === 'outgoing';
   const big = !!remote || (!!self && view === 'active');
   const ringing = !ended && (view === 'incoming' || view === 'outgoing');
-  const acts = 2 + (videoOn ? 1 : 0) + (videoOn && screenShareSupported(phone) ? 1 : 0) + (videoOn && camera && facingSupported(phone) ? 1 : 0);
+  const press = audio ? speakerPress(audio) : null;
+  const acts = 2 + (press ? 1 : 0) + (videoOn ? 1 : 0) + (videoOn && screenShareSupported(phone) ? 1 : 0) + (videoOn && camera && facingSupported(phone) ? 1 : 0);
 
   return (
     <div className={`call-scrim${phone ? ' phone' : ''}`}>
@@ -418,7 +568,7 @@ export function CallLayer() {
         )}
         {!remote && (
           <div className={`call-ava${ringing ? ' ringing' : ''}`}>
-            <Avatar url={peer.avatarUrl} name={peer.name} size={phone ? 128 : 96} />
+            <Avatar url={peer.avatarUrl} name={peer.name} size={phone ? 135 : 96} />
           </div>
         )}
         <div className="call-name">{peer.name}</div>
@@ -449,6 +599,15 @@ export function CallLayer() {
                 {videoOn && screenShareSupported(phone) && (
                   <RoundBtn kind="plain" icon="screen-share" label="Экран" on={screen} onClick={() => s.setScreen(!screen)} />
                 )}
+                {audio && press && (
+                  <RoundBtn
+                    kind="plain"
+                    icon={audio.route === 'bluetooth' || audio.route === 'wired' ? ROUTE_ICON[audio.route] : 'volume'}
+                    label="Динамик"
+                    on={audio.route === 'speaker'}
+                    onClick={() => ('sheet' in press ? setRouteSheet(true) : selectCallRoute(press.to))}
+                  />
+                )}
                 <RoundBtn kind="plain" icon={muted ? 'mic-off' : 'mic'} label={muted ? 'Включить микрофон' : 'Микрофон'} on={muted} onClick={() => s.setMuted(!muted)} />
                 <RoundBtn kind="decline" icon="phone" label={view === 'outgoing' ? 'Отменить' : 'Завершить'} onClick={() => void s.hangup()} />
               </>
@@ -456,6 +615,7 @@ export function CallLayer() {
           </div>
         )}
       </div>
+      {routeSheet && audio && press && 'sheet' in press && <CallRouteSheet audio={audio} onClose={() => setRouteSheet(false)} />}
     </div>
   );
 }

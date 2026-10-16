@@ -74,11 +74,64 @@ export function isUserOnline(userId: string): boolean {
  * Отсюда «был(а)» (`lastSeen.ts`) и «Когда будет в сети» (`scheduled.ts`).
  */
 export function isUserDmPresent(userId: string): boolean {
+  // Э4 (#141): человек другого инстанса — по отметкам его дома (`setRemoteDmPresence`), сокетов у теневой строки здесь нет.
+  if (remoteDmPresent.has(userId)) return true;
+  // Исправления ревью 12.10, п. 8: его гостевые сокеты (гость на нашем сервере) «в сети» для ЛС не делают — только его дом.
+  if (fedHooks?.isRemote?.(userId)) return false;
   return (presentCount.get(userId) ?? 0) > 0;
 }
 
 /** Сколько у человека соединений «здесь» (`sessionVisibility`: видимые, скрытые уходят через `HIDDEN_OFFLINE_MS`). */
 const presentCount = new Map<string, number>();
+
+/**
+ * ЛС между инстансами, Э4 (#141, `dm3`): теневые строки людей соседа, которых их дом объявил «в сети» (`POST /fed/v1/ephemeral`
+ * `presence`). Пишет только `setRemoteDmPresence`; устаревание — у вызывающего (`federation/dmEphemeral.ts`).
+ */
+const remoteDmPresent = new Set<string>();
+
+/**
+ * Крючки Э4 (#141) — задаёт `index.ts` при `FEDERATION_DM_ENABLED` (`federation/dmEphemeral.ts`); здесь без импорта: модуль
+ * шлюза проверки исполняют с закрытым перечнем зависимостей. Нет крючков — как до Э4.
+ * - `typing` — «печатает» нашего человека собеседнику без соединений здесь (у человека соседа их нет никогда);
+ * - `presence` — наш человек стал «в сети» / «не в сети» для ЛС (`isUserDmPresent` сменилось).
+ */
+export interface GatewayFedHooks {
+  typing(dmId: string, senderId: string, peerId: string, action: string): void;
+  presence(userId: string, online: boolean): void;
+  /** Исправления ревью 12.10, п. 8: человек другого инстанса (теневая строка) — синхронно (`dmEphemeral.isKnownShadow`). */
+  isRemote?(userId: string): boolean;
+  /** Э7 часть 3 (#141): наш человек печатает в группе — участникам других инстансов (через хост, `dmGroupTyping.ts`). */
+  groupTyping?(dmId: string, senderId: string, action: string): void;
+}
+let fedHooks: GatewayFedHooks | null = null;
+export function configureGatewayFed(hooks: GatewayFedHooks | null): void {
+  fedHooks = hooks;
+}
+
+/** Э4: сообщить крючку, если «в сети для ЛС» сменилось (`was` — значение до правки счётчика). */
+function noteDmPresence(userId: string, was: boolean): void {
+  const now = isUserDmPresent(userId);
+  if (now !== was) fedHooks?.presence(userId, now);
+}
+
+/**
+ * Э4 (#141): человек соседа (теневая строка `userId`) в сети / вышел — по отметке его дома. Для наших людей он становится
+ * таким же «в сети», как местный: серверный онлайн (`hub`, `online.update` тем, кому можно о нём знать — собеседникам без
+ * блокировки), «в сети для ЛС» (`isUserDmPresent` → «был(а)», `/users/:id/last-seen`). Счётчик `hub` — ровно одна единица за
+ * отметку: гостевые сокеты того же человека (F3) считаются отдельно и не сбиваются.
+ */
+export function setRemoteDmPresence(userId: string, online: boolean): void {
+  if (remoteDmPresent.has(userId) === online) return;
+  if (online) {
+    remoteDmPresent.add(userId);
+    if (hub.goOnline(userId)) hub.deliverAboutUser(userId, { t: 'online.update', userId, online: true });
+  } else {
+    remoteDmPresent.delete(userId);
+    if (hub.goOffline(userId)) hub.deliverAboutUser(userId, { t: 'online.update', userId, online: false });
+  }
+  syncDmAway(userId);
+}
 
 /**
  * «Не в сети для ЛС» при открытом сокете (`presence5`): пересчитать и, если поменялось, разослать `online.away` и отметить
@@ -103,15 +156,19 @@ const visibility = createSessionVisibility<Conn>({
   cancel: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
   show: (conn) => {
     if (!conn.userId) return;
+    const wasPresent = isUserDmPresent(conn.userId);
     presentCount.set(conn.userId, (presentCount.get(conn.userId) ?? 0) + 1);
     syncDmAway(conn.userId);
+    noteDmPresence(conn.userId, wasPresent);
   },
   hide: (conn) => {
     if (!conn.userId) return;
+    const wasPresent = isUserDmPresent(conn.userId);
     const n = (presentCount.get(conn.userId) ?? 1) - 1;
     if (n <= 0) presentCount.delete(conn.userId);
     else presentCount.set(conn.userId, n);
     syncDmAway(conn.userId);
+    noteDmPresence(conn.userId, wasPresent);
   },
 });
 
@@ -273,7 +330,21 @@ const typingDeps: TypingDeps<WsLike> = {
   send,
   getChannelAudience,
   publishToChannel: (serverId, channelId, msg, audience) => publishToChannel(serverId, channelId, msg, audience),
+  // Э4 (#141): собеседник — человек соседа — «печатает» уходит его дому (`configureGatewayFed`).
+  remoteTyping: (dmId, senderId, peerId, action) => fedHooks?.typing(dmId, senderId, peerId, action),
+  // Исправления ревью 12.10, п. 8: собеседник — человек соседа — «печатает» только его дому, не в гостевой сокет.
+  isRemote: (userId) => fedHooks?.isRemote?.(userId) ?? false,
+  // Э7 часть 3 (#141): в группе есть участники других инстансов — «печатает» уходит и им (хосту / от хоста).
+  remoteGroupTyping: (dmId, senderId, action) => fedHooks?.groupTyping?.(dmId, senderId, action),
 };
+
+/**
+ * Э4 (#141): «печатает» человека соседа (теневая строка `shadowId`) в беседе `dmId` — нашим людям тем же путём, что местное
+ * (`relayTyping`: участник беседы, блокировка, показ беседы, предел `typing:<id>`, `round` → `voice` старым соединениям).
+ */
+export function relayFedTyping(shadowId: string, dmId: string, action: string | undefined): Promise<void> {
+  return relayTyping(typingDeps, { userId: shadowId, servers: new Set<string>() }, { dmId, action });
+}
 
 /**
  * Снять подписку на сервер у тех локальных соединений, чей владелец больше не участник (#91).

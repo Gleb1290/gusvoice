@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import { bigReactionTargets, convPinOrderPlan, convPinOrderStamps, resolveReplyQuote, searchPattern } from './convRules.js';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
@@ -123,8 +125,95 @@ import {
   pinRowAction, pinAudience, unpinTargets, PINS_MAX,
   convListOrder,
   stickerOf, stickerAwarePreview,
+  albumItemDecision, attachmentsForViewer, hiddenAttachmentKey, removedByEdit,
 } from './convRules.js';
-import { PENDING_MAX_COUNT, PENDING_MAX_BYTES } from './attachmentRules.js';
+import { PENDING_MAX_COUNT, PENDING_MAX_BYTES, PENDING_MAX_BYTES_BIGFILE, DM_DAILY_UPLOAD_BYTES } from './attachmentRules.js';
+
+// G56: контрфакты исполняют весь модуль, чтобы сохранить вызовы между настоящими правилами.
+type AlbumRules = Pick<typeof import('./convRules.js'), 'albumItemDecision' | 'attachmentsForViewer' | 'removedByEdit'>;
+function albumRulesModule(from?: string, to?: string): AlbumRules {
+  const raw = readFileSync(new URL('./convRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  if (from !== undefined) assert.equal(raw.split(from).length - 1, 1, 'единственный якорь контрфакта G56');
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(from === undefined ? raw : raw.replace(from, to!), { compilerOptions: {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+  } }).outputText, { module, exports: module.exports, Date, Set, Map, Buffer,
+    require: (id: string) => { assert.equal(id, 'node:crypto'); return { createHash }; } });
+  return module.exports as AlbumRules;
+}
+const albumList = ['one', 'two', 'three'].map(id => ({ id }));
+const albumInput = (p: Partial<Parameters<typeof albumItemDecision>[0]> = {}) => ({
+  list: albumList, hidden: [], viewerId: 'a', authorId: 'a', attachmentId: 'one', scope: 'both' as const, ...p,
+});
+function albumAssertion(actual: unknown, expected: unknown, label: string) {
+  assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected, label);
+}
+function albumFailure(actual: unknown, wrong: unknown, expected: unknown, label: string) {
+  assert.throws(() => albumAssertion(actual, expected, label), e => e instanceof assert.AssertionError
+    && e.message.startsWith(label) && e.operator === 'deepStrictEqual' && JSON.stringify(e.actual) === JSON.stringify(wrong)
+    && JSON.stringify(e.expected) === JSON.stringify(expected));
+}
+
+describe('G56 правила одного элемента альбома', () => {
+  it('свой элемент у обоих убирается, чужой запрещён, у меня чужой можно спрятать', () => {
+    // Право на чужое сообщение целиком в 1:1 не даёт права редактировать его альбом.
+    assert.equal(albumItemDecision(albumInput()), 'remove');
+    assert.equal(albumItemDecision(albumInput({ authorId: 'b' })), 'forbidden');
+    assert.equal(albumItemDecision(albumInput({ authorId: 'b', scope: 'me' })), 'hide');
+  });
+  it('последний общий или последний видимый мне удаляет сообщение, два ещё оставляют элемент', () => {
+    assert.equal(albumItemDecision(albumInput({ list: albumList.slice(0, 1) })), 'whole');
+    assert.equal(albumItemDecision(albumInput({ list: albumList.slice(0, 2) })), 'remove');
+    assert.equal(albumItemDecision(albumInput({ scope: 'me', hidden: ['a:two', 'a:three'] })), 'whole');
+    assert.equal(albumItemDecision(albumInput({ scope: 'me', hidden: ['a:three'] })), 'hide');
+    assert.equal(albumItemDecision(albumInput({ hidden: ['a:two', 'a:three'] })), 'remove', 'у обоих считается исходный список');
+  });
+  it('отсутствующий или уже спрятанный мной id повторяется без изменений, чужая пометка не мешает', () => {
+    assert.equal(albumItemDecision(albumInput({ attachmentId: 'missing' })), 'repeat');
+    assert.equal(albumItemDecision(albumInput({ hidden: ['a:one'] })), 'repeat');
+    assert.equal(albumItemDecision(albumInput({ hidden: ['b:one'] })), 'remove');
+    assert.equal(albumItemDecision(albumInput({ list: [{}, { id: null }], attachmentId: 'missing' })), 'repeat');
+  });
+  it('список смотрящего учитывает точный префикс, оставляет старые элементы без id и не меняет исходник', () => {
+    const list = [...albumList, {}, { id: null }], hidden = ['a:one', 'ab:two', 'b:three'];
+    assert.equal(hiddenAttachmentKey('a', 'one'), 'a:one');
+    albumAssertion(attachmentsForViewer(list, hidden, 'a'), [{ id: 'two' }, { id: 'three' }, {}, { id: null }], 'только свои пометки');
+    albumAssertion(attachmentsForViewer(list, hidden, 'b'), [{ id: 'one' }, { id: 'two' }, {}, { id: null }], 'собеседник видит свой список');
+    assert.equal(list.length, 5); assert.equal(hidden.length, 3);
+    for (const marks of [[], null, undefined, ['ab:one']]) assert.equal(attachmentsForViewer(list, marks, 'a'), list);
+    albumAssertion(attachmentsForViewer(albumList, albumList.map(a => `a:${a.id}`), 'a'), [], 'всё спрятанное не видно');
+  });
+  it('приём сужения находит убранное, пустой провод и полная замена ничего не стирают', () => {
+    albumAssertion(removedByEdit(albumList, [{ id: 'one' }, { id: 'three' }]), [{ id: 'two' }], 'убрано только отсутствующее');
+    albumAssertion(removedByEdit(albumList, []), [], 'пустой провод сохраняет файлы');
+    albumAssertion(removedByEdit(albumList, [{ id: 'new' }]), [], 'все убрано — не сужение');
+    albumAssertion(removedByEdit([...albumList, {}], albumList), [], 'старый элемент без id не стирается');
+    albumAssertion(removedByEdit([], [{ id: 'new' }]), [], 'пустой исходник');
+  });
+  it('контрфакт строгой границы одного элемента ловится последним видимым', () => {
+    const p = albumInput({ scope: 'me', hidden: ['a:two', 'a:three'] });
+    albumAssertion(albumRulesModule().albumItemDecision(p), 'whole', 'последний видимый удаляет сообщение');
+    const mutant = albumRulesModule("visible.length <= 1 ? 'whole' : 'hide'", "visible.length < 1 ? 'whole' : 'hide'");
+    albumFailure(mutant.albumItemDecision(p), 'hide', 'whole', 'последний видимый удаляет сообщение');
+    const q = albumInput({ list: albumList.slice(0, 1) });
+    albumAssertion(albumRulesModule().albumItemDecision(q), 'whole', 'последний общий удаляет сообщение');
+    const both = albumRulesModule("p.list.length <= 1 ? 'whole' : 'remove'", "p.list.length < 1 ? 'whole' : 'remove'");
+    albumFailure(both.albumItemDecision(q), 'remove', 'whole', 'последний общий удаляет сообщение');
+  });
+  it('контрфакт потери проверки автора ловится разрешением чужой правки', () => {
+    const p = albumInput({ authorId: 'b' });
+    albumAssertion(albumRulesModule().albumItemDecision(p), 'forbidden', 'чужой альбом не редактируется');
+    const mutant = albumRulesModule("if (p.scope === 'both' && p.authorId !== p.viewerId) return 'forbidden';", '');
+    albumFailure(mutant.albumItemDecision(p), 'remove', 'forbidden', 'чужой альбом не редактируется');
+  });
+  it('контрфакт пустого провода ловится сохранением именованных файлов рядом со старым без id', () => {
+    // Один безымянный старый элемент делает gone.length < row.length: без guard удалятся все три закрытых файла.
+    const list = [...albumList, {}];
+    albumAssertion(albumRulesModule().removedByEdit(list, []), [], 'пустой провод не удаляет закрытые файлы');
+    const mutant = albumRulesModule('if (wire.length === 0) return [];', '');
+    albumFailure(mutant.removedByEdit(list, []), albumList, [], 'пустой провод не удаляет закрытые файлы');
+  });
+});
 
 it('стикер распознаётся только с URL, превью использует emoji, прежний отпечаток без stickerId не меняется', () => {
   // Введение стикеров не должно ломать replay старого сообщения или принимать мусорный JSON за стикер.
@@ -278,7 +367,9 @@ describe('чистые правила пересылки и удаления п�
   it('пределы временных копий равны пределам незавершённых загрузок', () => {
     // Ловит расхождение продублированных констант и отказ на разрешённой пачке.
     assert.equal(FORWARD_ATTACHMENTS_MAX, PENDING_MAX_COUNT); assert.equal(FORWARD_BYTES_MAX, PENDING_MAX_BYTES);
-    assert.equal(FORWARD_BYTES_MAX, 6 * 1024 * 1024 * 1024, 'R127 альбом из десяти крупных вложений укладывается в общий предел');
+    assert.equal(FORWARD_BYTES_MAX, PENDING_MAX_BYTES_BIGFILE);
+    assert.equal(FORWARD_BYTES_MAX, 8 * 1024 * 1024 * 1024, 'R142 восемь файлов по 1 ГиБ укладываются в общий предел');
+    assert.ok(FORWARD_BYTES_MAX <= DM_DAILY_UPLOAD_BYTES, 'разрешённая пересылка должна помещаться в пустую суточную квоту');
   });
 });
 

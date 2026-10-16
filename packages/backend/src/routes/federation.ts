@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   FED_ERRORS,
+  FED_CONV_GROUPS_PATH,
   FED_FEATURES,
   serializeDirectoryPage,
   serializeGuestSession,
@@ -12,6 +13,11 @@ import {
   type FederationReportRow,
   type FederationSyncRow,
   type GuestPlacesView,
+  FED_CONV_LIMITS,
+  serializeConvChangesPage,
+  serializeConvExportPage,
+  serializeConvGroupsList,
+  fedId,
 } from '@gusvoice/shared';
 import { bumpTokenGeneration, requireAuth, requireSuperAdmin } from '../auth.js';
 import { db } from '../db/index.js';
@@ -40,6 +46,8 @@ import { quotaOf, resetQuota, setQuota } from '../federation/guestQuota.js';
 import { acceptIdentity } from '../federation/guestHost.js';
 import { previewForPeer, previewInvite } from '../federation/invitePreview.js';
 import { REVOCATION_PAGE_MAX, revocationsSince } from '../federation/guestRevocation.js';
+import { changesForPeer, exportForPeer, groupsForPeer } from '../federation/convChanges.js';
+import { acceptConvOpen } from '../federation/convOpen.js';
 import { guestMembershipsOf, membershipsForPeer } from '../federation/guestMembership.js';
 import {
   banInstanceUser,
@@ -124,6 +132,25 @@ async function syncRowsFor(instanceId: string): Promise<FederationSyncRow[]> {
     });
   }
   return rows;
+}
+
+/**
+ * Э5 часть 1 (#141): отдача «через»-сообщений дому автора (`GET /fed/v1/conv/via`) — `federation/convVia.pendingFor`, подключает
+ * `index.ts` при `FEDERATION_DM_ENABLED`. Крючком, а не импортом: этот модуль собирают проверки с явным перечнем зависимостей.
+ */
+let fedViaPending: ((instanceId: string, selfInstanceId: string) => Promise<Record<string, unknown>>) | null = null;
+/**
+ * Исправления ревью ЛС 12.10, п. 7 и п. 10: сосед забирает у нас (`/fed/v1/conv/changes` — `since` его курсора, то есть
+ * подтверждённое; полный проход и «через» — `null`). Крючок пишет подтверждённое и время забора (плашка «Сообщения ждут»)
+ * и перечитывает визитку соседа, если в нашей строке связки нет `dm1`. Подключает `index.ts`; не подключено — ничего.
+ */
+let fedConvPeerSeen: ((link: StoredLink, since: number | null) => void) | null = null;
+export function configureFedConvPeerSeen(fn: typeof fedConvPeerSeen): void {
+  fedConvPeerSeen = fn;
+}
+
+export function configureFedViaRoutes(pending: typeof fedViaPending): void {
+  fedViaPending = pending;
 }
 
 export async function federationRoutes(app: FastifyInstance): Promise<void> {
@@ -268,6 +295,78 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
       revocations: rows.map((r) => ({ user_id: r.userId, kind: r.kind, gen: r.gen, created_at: r.createdAt })),
     };
   });
+
+  /**
+   * Журнал изменений бесед для соседа (Э0 ЛС между инстансами, `docs/dm/FEDERATION.md` §3.3): `?since=<seq>&limit=`.
+   *
+   * 🔴 Регистрируется ТОЛЬКО при `FEDERATION_DM_ENABLED`: выключено — маршрута нет (честный 404, как у всей федерации).
+   * Подписанный GET связанного соседа; отдаются только строки, адресованные СПРАШИВАЮЩЕМУ, и только по беседам, где у него
+   * сейчас есть участник (`changesForPeer`). Негодный `since` — отказ, а не «с начала» (тот же урок, что у курсора отзывов).
+   */
+  if (env.federation.dmEnabled) {
+    app.get('/fed/v1/conv/changes', async (req, reply) => {
+      const q = req.query as Record<string, string | undefined>;
+      const link = await admitPeer(req, reply, q.instance_id, 'convPull');
+      if (!link) return;
+      const since = typeof q.since === 'string' && /^\d{1,15}$/.test(q.since) ? Number(q.since) : null;
+      if (since === null) return reply.code(400).send({ error: 'bad-since' });
+      fedConvPeerSeen?.(link, since);
+      const limitRaw = typeof q.limit === 'string' && /^\d{1,4}$/.test(q.limit) ? Number(q.limit) : FED_CONV_LIMITS.page;
+      const self = federation.identity()?.instanceId;
+      if (!self) return reply.code(503).send({ error: 'no-identity' });
+      return serializeConvChangesPage(await changesForPeer(link.instanceId, since, limitRaw, self));
+    });
+
+    /**
+     * Э5 часть 1 (#141, `docs/dm/FEDERATION.md` §4 п. 1 (б)): «через»-сообщения людей СПРАШИВАЮЩЕГО, ждущие решения его дома
+     * (`federation/convVia.pendingFor`, подключает `index.ts` крючком `configureFedViaRoutes`). Не подключено — 404.
+     */
+    app.get('/fed/v1/conv/via', async (req, reply) => {
+      const q = req.query as Record<string, string | undefined>;
+      const link = await admitPeer(req, reply, q.instance_id, 'directory');
+      if (!link) return;
+      const self = federation.identity()?.instanceId;
+      if (!self) return reply.code(503).send({ error: 'no-identity' });
+      if (!fedViaPending) return reply.code(404).send({ error: 'not-found' });
+      return fedViaPending(link.instanceId, self);
+    });
+
+    /**
+     * Полный проход по одной общей беседе (Э2 часть Б, §3.3, Ф12): журнал обрезан (`reset`) или связку завели заново.
+     * `?after=<message.id>` — курсор прошлой страницы. 1:1, где у спрашивающего есть участник (`exportForPeer`), или группа (Э7 часть 3, `exportGroupForPeer`);
+     * чужая или незнакомая беседа — 404, как будто её нет.
+     */
+    app.get('/fed/v1/conv/:id/export', async (req, reply) => {
+      const q = req.query as Record<string, string | undefined>;
+      const link = await admitPeer(req, reply, q.instance_id, 'convPull');
+      if (!link) return;
+      fedConvPeerSeen?.(link, null);
+      const id = fedId((req.params as { id?: unknown }).id);
+      const after = q.after === undefined || q.after === '' ? null : fedId(q.after);
+      if (!id || (q.after && !after)) return reply.code(400).send({ error: 'bad-request' });
+      const self = federation.identity()?.instanceId;
+      if (!self) return reply.code(503).send({ error: 'no-identity' });
+      const page = await exportForPeer(link.instanceId, id, after, self);
+      if (!page) return reply.code(404).send({ error: 'not found' });
+      return serializeConvExportPage(page);
+    });
+
+    /**
+     * Э7 часть 3: группы, чей хост — мы, где у спрашивающего есть люди (действующие или бывшие) — для его полного прохода
+     * (`groupsForPeer`); сами группы — `GET /fed/v1/conv/:id/export`. Сосед без `dmgroup1` — 404, как до части 3.
+     */
+    app.get(FED_CONV_GROUPS_PATH, async (req, reply) => {
+      const q = req.query as Record<string, string | undefined>;
+      const link = await admitPeer(req, reply, q.instance_id, 'convPull');
+      if (!link) return;
+      const self = federation.identity()?.instanceId;
+      if (!self) return reply.code(503).send({ error: 'no-identity' });
+      const groups = await groupsForPeer(link.instanceId);
+      if (!groups) return reply.code(404).send({ error: 'not found' });
+      return serializeConvGroupsList({ instanceId: self, groups });
+    });
+
+  }
 
   /**
    * Карточка нашей ссылки для связанного соседа (F3, §4.2.1).
@@ -446,6 +545,22 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
         receiveEvents: (instanceId, events) => receiveEvents(instanceId, events),
       }),
     );
+
+    if (env.federation.dmEnabled) {
+      /**
+       * Э1: сосед просит открыть беседу его человека с нашим (`docs/dm/FEDERATION.md` §1.2, провод `shared/federation/convOpen.ts`).
+       * 🔴 В скоупе `proto`: подпись POST проверяется по сырому телу (`rawBody`), снаружи его нет — 401.
+       * Связка обязана быть рабочей (`requireActive`). Решает наша настройка `fedDmPolicy` (Ф6) — `federation/convOpen.ts`.
+       * ⚠️ Повтор подписи не отсекаем: запрос идемпотентен (второй раз — `exists`), а предел новых переписок считает и так.
+       */
+      proto.post('/fed/v1/conv/open', async (req, reply) => {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const link = await admitPeer(req, reply, body.instance_id, 'events', { requireActive: true });
+        if (!link) return;
+        const res = await acceptConvOpen(link, body);
+        return reply.code(res.status).send(res.body);
+      });
+    }
 
     /**
      * Контакты держателя (§5.1.1).
@@ -1069,6 +1184,11 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
       }
       const res = await linkService.applyAdminAction(instanceId, action);
       if (!res.ok) return reply.code(409).send({ error: res.problem, detail: res.detail });
+      // Разорванная/приостановленная связка не «лежит»: тревога о ней снимается сразу, а не через круг проверки
+      // (до 5 мин) — 15.10 держатель разорвал связку с удалённым соседом, а красный баннер «не отвечает» остался.
+      await runFederationAlerts().catch(() => {
+        /* круг проверки не должен ронять действие со связкой */
+      });
       return res.value;
     });
   });

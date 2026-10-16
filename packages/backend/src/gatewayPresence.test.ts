@@ -64,7 +64,7 @@ function setup(change?: Change) {
     setTimeout: (fn: () => void, ms: number) => { const id = { unref() {} }; timers.set(id, { fn, at: now + ms }); return id; },
     clearTimeout: (id: object) => { timers.delete(id); },
   };
-  const gateway = execute<{ registerGateway: (app: unknown) => void; isUserOnline: (id: string) => boolean; isUserDmPresent: (id: string) => boolean; isUserActive: (id: string) => boolean }>(source('gateway.ts', change), deps, globals);
+  const gateway = execute<Pick<typeof import('./gateway.js'), 'isUserOnline' | 'isUserDmPresent' | 'isUserActive' | 'configureGatewayFed' | 'setRemoteDmPresence'> & { registerGateway(app: unknown): void }>(source('gateway.ts', change), deps, globals);
   let connect!: (socket: Socket, request: unknown) => void;
   gateway.registerGateway({ get: (_path: string, _options: unknown, handler: typeof connect) => { connect = handler; } });
   const open = async (id: string, hidden = false) => { const socket = new Socket(); connect(socket, {}); await socket.frame({ t: 'identify', token: id, caps: ['presence5'], hidden }); await settle(); return socket; };
@@ -122,4 +122,93 @@ it('планировщик получает пробу присутствия Л
   };
   check(call); const mutant = call.replace('isUserDmPresent', 'isUserOnline'); assert.notEqual(mutant, call);
   assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('планировщик не считает')); socket.close();
+});
+
+async function remotePresenceScenario(change?: Change) {
+  const gate = setup(change); const peer = await gate.open('peer'); peer.messages.length = 0;
+  gate.setRemoteDmPresence('subject', true); await settle();
+  assert.equal(gate.isUserDmPresent('subject'), true, 'отметка дома даёт присутствие ЛС без сокета');
+  assert.equal(gate.isUserOnline('subject'), true);
+  assert.deepEqual(peer.messages, [{ t: 'online.update', userId: 'subject', online: true }]);
+  gate.setRemoteDmPresence('subject', true); await settle();
+  assert.equal(peer.messages.length, 1, 'повтор отметки дома не шлёт второй online.update');
+  gate.setRemoteDmPresence('subject', false); await settle();
+  assert.equal(gate.isUserDmPresent('subject'), false);
+  assert.equal(gate.isUserOnline('subject'), false, 'повтор online не увеличивает счётчик хаба');
+  assert.deepEqual(peer.messages, [
+    { t: 'online.update', userId: 'subject', online: true }, { t: 'online.update', userId: 'subject', online: false },
+  ], 'после одного offline счётчик дома снят');
+  gate.setRemoteDmPresence('subject', false); await settle(); assert.equal(peer.messages.length, 2); peer.close();
+}
+
+it('R197 дом соседа включает и выключает присутствие, повтор обеих отметок не шумит', async () => {
+  await remotePresenceScenario();
+});
+
+it('R197 отметка дома и гостевой сокет считаются независимо в обоих порядках выхода', async () => {
+  for (const first of ['socket', 'home'] as const) {
+    const gate = setup(); const peer = await gate.open('peer'); const socket = await gate.open('subject');
+    peer.messages.length = 0; gate.setRemoteDmPresence('subject', true); await settle();
+    assert.deepEqual(peer.messages, [], 'дополнительная отметка не дублирует уже объявленный online');
+    if (first === 'socket') socket.close(); else gate.setRemoteDmPresence('subject', false);
+    await settle();
+    assert.equal(gate.isUserOnline('subject'), true, 'первый выход оставляет второго владельца счётчика');
+    assert.equal(gate.isUserDmPresent('subject'), true);
+    assert.deepEqual(peer.messages, []);
+    if (first === 'socket') gate.setRemoteDmPresence('subject', false); else socket.close();
+    await settle();
+    assert.equal(gate.isUserOnline('subject'), false); assert.equal(gate.isUserDmPresent('subject'), false);
+    assert.deepEqual(peer.messages, [{ t: 'online.update', userId: 'subject', online: false }]); peer.close();
+  }
+});
+
+async function hookPresenceScenario(change?: Change) {
+  const gate = setup(change); const calls: unknown[][] = [];
+  gate.configureGatewayFed({ typing() {}, presence: (...args) => { calls.push(args); } });
+  const one = await gate.open('subject'); const two = await gate.open('subject');
+  assert.deepEqual(calls, [['subject', true]], 'крючок не повторяет online при втором устройстве');
+  await one.frame({ t: 'visible', on: false }); await gate.tick(2000);
+  assert.deepEqual(calls, [['subject', true]], 'скрытие одного устройства не меняет присутствие');
+  await two.frame({ t: 'visible', on: false }); await gate.tick(2000);
+  assert.deepEqual(calls, [['subject', true], ['subject', false]]);
+  await two.frame({ t: 'visible', on: false }); await gate.tick(2000);
+  assert.equal(calls.length, 2);
+  await one.frame({ t: 'visible', on: true });
+  assert.deepEqual(calls, [['subject', true], ['subject', false], ['subject', true]]);
+  gate.configureGatewayFed(null); one.close(); two.close(); await settle(); assert.equal(calls.length, 3);
+}
+
+it('R197 крючок присутствия получает только переходы, а не каждый сокет и visible кадр', async () => {
+  await hookPresenceScenario();
+});
+
+for (const [name, change, check, failure] of [
+  ['удалённый набор отсутствует в isUserDmPresent', { file: 'gateway.ts', from: 'if (remoteDmPresent.has(userId)) return true;', to: 'if (false) return true;' }, remotePresenceScenario, 'отметка дома даёт присутствие'],
+  ['повторная отметка увеличивает счётчик', { file: 'gateway.ts', from: 'if (remoteDmPresent.has(userId) === online) return;', to: 'if (!online && !remoteDmPresent.has(userId)) return;' }, remotePresenceScenario, 'повтор online не увеличивает'],
+  ['крючок зовётся без перехода', { file: 'gateway.ts', from: 'if (now !== was) fedHooks?.presence(userId, now);', to: 'fedHooks?.presence(userId, now);' }, hookPresenceScenario, 'крючок не повторяет online'],
+] as [string, Change, (change?: Change) => Promise<void>, string][]) {
+  it(`R197 мутант «${name}» останавливается адресной проверкой присутствия`, async () => {
+    await check();
+    await assert.rejects(check(change), e => e instanceof assert.AssertionError && e.message.includes(failure));
+  });
+}
+
+async function remoteGuestScenario(change?: Change) {
+  const gate = setup(change); const hooks: unknown[][] = [];
+  gate.configureGatewayFed({ typing() {}, presence: (...args) => { hooks.push(args); }, isRemote: id => id === 'subject' });
+  const socket = await gate.open('subject');
+  assert.equal(gate.isUserOnline('subject'), true);
+  assert.equal(gate.isUserDmPresent('subject'), false, 'гостевой сокет не объявляет тень присутствующей в ЛС');
+  assert.deepEqual(hooks, [], 'гостевой identify не создаёт исходящий presence для тени');
+  gate.setRemoteDmPresence('subject', true); await settle();
+  assert.equal(gate.isUserDmPresent('subject'), true);
+  gate.setRemoteDmPresence('subject', false); await settle();
+  assert.equal(gate.isUserDmPresent('subject'), false); assert.equal(gate.isUserOnline('subject'), true);
+  socket.close(); await settle(); assert.equal(gate.isUserOnline('subject'), false);
+}
+it('R201 гостевой сокет сохраняет серверный онлайн, но presence ЛС тени задаётся только домом', async () => { await remoteGuestScenario(); });
+it('R201 мутант гостевого присутствия пойман живым identify без отметки дома', async () => {
+  await remoteGuestScenario();
+  await assert.rejects(remoteGuestScenario({ file: 'gateway.ts', from: 'if (fedHooks?.isRemote?.(userId)) return false;', to: '// guest socket counted' }),
+    e => e instanceof assert.AssertionError && e.message.includes('гостевой сокет не объявляет'));
 });

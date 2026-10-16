@@ -60,6 +60,18 @@ export function durationOf(seconds: number): number {
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : 0;
 }
 
+/**
+ * Сколько осталось у играющего в ленте видео, мс, целыми секундами вниз — как у Telegram: Web K пишет
+ * `toHHMMSS(video.duration − video.currentTime)` (`tweb/src/components/wrappers/video.ts:555-566`), Android —
+ * `duration − currentProgressMs / 1000` (`ChatMessageCell.java:5644-5658`). Длительности нет (поток, метаданные не пришли) — `null`:
+ * подпись остаётся полной длительностью.
+ */
+export function videoTimeLeftMs(duration: number, currentTime: number): number | null {
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  const t = Number.isFinite(currentTime) && currentTime > 0 ? currentTime : 0;
+  return Math.max(0, Math.floor(duration - t)) * 1000;
+}
+
 /** Нет размера во вложении (старое, или отправитель не померил) — место 16:9, пока не придут метаданные. */
 const FALLBACK_W = 1280;
 const FALLBACK_H = 720;
@@ -94,6 +106,8 @@ export function VideoAttachment({
 }) {
   const [meta, setMeta] = useState<{ w: number; h: number; ms: number } | null>(null);
   const [failed, setFailed] = useState(false);
+  // Остаток играющего без звука видео (#218): `null` — ещё не играло, в подписи полная длительность.
+  const [left, setLeft] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const gifFlag = a.gif === true;
   const playing = autoplay ?? gifFlag;
@@ -102,6 +116,17 @@ export function VideoAttachment({
     if (!v || !playing || failed) return;
     return playWhileVisible(v);
   }, [playing, failed, a.url]);
+  /* Обратный отсчёт в подписи, пока видео играет само (не GIF): `timeupdate` идёт ~4 раза в секунду, а состояние меняется
+     только со сменой целой секунды — перерисовка раз в 1 с, как `throttle(…, 1e3)` у Web K. На паузе (ушло за край) подпись
+     стоит на последнем значении, на повторе (`loop`) снова начинается с полной длительности. */
+  useEffect(() => {
+    const v = videoRef.current;
+    setLeft(null);
+    if (!v || !playing || gifFlag || failed) return;
+    const tick = () => setLeft(videoTimeLeftMs(v.duration, v.currentTime));
+    v.addEventListener('timeupdate', tick);
+    return () => v.removeEventListener('timeupdate', tick);
+  }, [playing, gifFlag, failed, a.url]);
   if (failed && !fill) return <FileCard a={a} href={href} sizeLabel={sizeLabel} />;
   // Метаданные файла важнее подсказки отправителя: подсказка задаёт место сразу, файл его поправит, если она соврала.
   const w = meta?.w || a.width || FALLBACK_W;
@@ -154,9 +179,12 @@ export function VideoAttachment({
             <Icon name="play" size={20} />
           </span>
         ) : null}
+        {/* Играет само — остаток и значок «без звука» справа от времени (Web K `video.ts:126-146` `nosound_filled`, Android
+            `chat_msgNoSoundDrawable` `ChatMessageCell.java:25069-25082`); не играет — полная длительность и ▶. */}
         {!gif && ms > 0 ? (
-          <span className="att-dur" aria-hidden="true">
-            {formatDuration(ms)}
+          <span className={`att-dur${play ? ' muted' : ''}`} aria-hidden="true">
+            {formatDuration(play && left !== null ? left : ms)}
+            {play ? <Icon name="volume-off" size={12} /> : null}
           </span>
         ) : null}
       </button>

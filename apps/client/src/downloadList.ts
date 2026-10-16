@@ -25,6 +25,8 @@ export interface DownloadEntry {
   at: number;
   /** Скачанное — объектная ссылка (`URL.createObjectURL`), пока запись в списке. */
   href?: string;
+  /** Где файл лёг на диск — путь от оболочки десктопа (`gv-download-done`); у браузера и Android его нет. «Показать в папке». */
+  path?: string;
 }
 
 /** Сколько записей держим: старые законченные уходят (и их объектные ссылки освобождаются). */
@@ -76,7 +78,7 @@ export function addDownload(d: { key: string; url: string; name: string; type: s
 }
 
 /** Поправить запись (ход, итог). Нет такой — ничего. */
-export function patchDownload(id: number, patch: Partial<Pick<DownloadEntry, 'loaded' | 'total' | 'state' | 'href'>>): void {
+export function patchDownload(id: number, patch: Partial<Pick<DownloadEntry, 'loaded' | 'total' | 'state' | 'href' | 'path'>>): void {
   if (!list.some((e) => e.id === id)) return;
   set(list.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 }
@@ -115,4 +117,52 @@ export function opensInBrowser(type: string): boolean {
     t === 'application/pdf' ||
     t === 'text/plain'
   );
+}
+
+/** Сколько путей «ссылка → файл на диске» держим (хватает на сеанс; старые уходят первыми). */
+const SAVED_BY_URL_MAX = 200;
+const savedByUrl = new Map<string, string>();
+
+/** Имя файла из пути Windows или POSIX. */
+function baseNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Имя на диске = имя записи, с поправкой на «имя (1).ext», которое оболочка даёт при совпадении (`lib.rs unique_in`). */
+function sameSavedName(entryName: string, onDisk: string): boolean {
+  return onDisk === entryName || onDisk.replace(/ \(\d+\)(?=(\.[^.]*)?$)/, '') === entryName;
+}
+
+/**
+ * Оболочка десктопа сказала, куда легло скачанное (`gv-download-done`: ссылка, откуда качали, и путь файла). Запоминаем путь по
+ * ссылке (фото и файлы, которые качает сам WebView2 по адресу выдачи) и пишем в запись списка: сперва та, чья объектная
+ * ссылка равна `url`; ссылку WebView2 не отдал или она `blob:` без записи — самая свежая готовая запись без пути с тем же
+ * именем. Для «Показать в папке» (tdesktop `File::ShowInFolder`, `core/file_utilities.cpp`).
+ */
+export function noteSavedFile(f: { url?: string; path: string }): void {
+  if (!f.path) return;
+  const url = f.url || '';
+  if (url) {
+    savedByUrl.delete(url);
+    savedByUrl.set(url, f.path);
+    while (savedByUrl.size > SAVED_BY_URL_MAX) {
+      const first = savedByUrl.keys().next().value;
+      if (first === undefined) break;
+      savedByUrl.delete(first);
+    }
+  }
+  let hit = url ? list.find((e) => e.href === url) : undefined;
+  if (!hit && (!url || url.startsWith('blob:'))) {
+    const onDisk = baseNameOf(f.path);
+    hit = list.find((e) => e.state === 'done' && !e.path && sameSavedName(e.name, onDisk));
+  }
+  if (hit) patchDownload(hit.id, { path: f.path });
+}
+
+/**
+ * Путь скачанного файла на диске (для «Показать в папке»): запись списка по ключу вложения, иначе по ссылке «Скачать» —
+ * фото качает WebView2 сам, записи в списке у них нет. Нет — файл в этом сеансе не сохраняли (пункта нет).
+ */
+export function savedPathOf(key: string, url?: string): string | undefined {
+  return list.find((e) => e.key === key && e.state === 'done' && e.path)?.path ?? (url ? savedByUrl.get(url) : undefined);
 }

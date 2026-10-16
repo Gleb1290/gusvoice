@@ -509,7 +509,7 @@ export interface AttachmentAccessInput {
   viewerId: string;
   /** Аккаунт смотрящего удалён — ссылка больше не работает, даже если была выдана. */
   viewerDeleted: boolean;
-  att: { ownerId: string; conversationId: string; state: 'pending' | 'attached' | 'deleted' | 'scheduled'; messageId: string | null };
+  att: { ownerId: string; conversationId: string; state: 'pending' | 'attached' | 'deleted' | 'scheduled' | 'remote'; messageId: string | null };
   /** Участие СМОТРЯЩЕГО в беседе вложения; `null` — не участник. */
   member: { leftAt: Date | string | null } | null;
   /** Сообщение, к которому прикреплено вложение (для `attached`). */
@@ -522,6 +522,8 @@ export interface AttachmentAccessInput {
  * - незавершённая загрузка (`pending`) — только загрузившему, пока он участник;
  * - файл, ждущий в отложенном сообщении (`scheduled`, 06.10, `conv10`), — тоже только автору (вид «Отложенные»): собеседник
  *   не узнаёт ни о файле, ни о самом отложенном, пока оно не ушло;
+ * - файл из копии сообщения соседа (`remote`, Э3) — как прикреплённое: доступ решает сообщение; что файла у нас ещё нет,
+ *   выдача (`routes/att.ts`) скажет отдельно — 503 `federation.att_pending`;
  * - прикреплённое — участнику без `left_at`, если сообщение из ЭТОЙ беседы и видно ему (`messageView`): надгробие,
  *   спрятанное им «у себя» и чужое придержанное — нет.
  */
@@ -542,11 +544,11 @@ export const MESSAGE_BATCH_MAX = 100;
 /**
  * Предел вложений одной пересылки: файлы копируются (`attachments.copyForForward`), и сколько копий держит одна операция,
  * столько же, сколько у человека может висеть незавершённых загрузок (`attachmentRules.PENDING_MAX_COUNT` /
- * `PENDING_MAX_BYTES`, 40 файлов / 6 ГиБ с 09.10, было 600 МиБ): копии живут в `pending` секунды до привязки. Числа здесь, а не импортом:
+ * `PENDING_MAX_BYTES`, 40 файлов / 8 ГиБ (= суточный) с 10.10, 6 ГиБ с 09.10, было 600 МиБ): копии живут в `pending` секунды до привязки. Числа здесь, а не импортом:
  * этот модуль — чистый и тянет только `node:crypto`. Суточный объём пересылки — `DM_DAILY_UPLOAD_BYTES` (задача bigfix).
  */
 export const FORWARD_ATTACHMENTS_MAX = 40;
-export const FORWARD_BYTES_MAX = 6 * 1024 * 1024 * 1024;
+export const FORWARD_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 
 /**
  * id отправки i-го сообщения пачки пересылки — из id отправки пачки (`clientId` запроса). Уникальность `(автор,
@@ -817,4 +819,77 @@ export function replyQuoteSnapshot(content: string): ReplyQuoteMark {
   const last = text.charCodeAt(text.length - 1);
   if (content.length > REPLY_QUOTE_LIMIT && last >= 0xd800 && last <= 0xdbff) text = text.slice(0, -1);
   return { text, offset: 0, auto: true };
+}
+
+// ─── G56: один элемент альбома (13.10, признак `album1`) ─────────────────────────────────────────────────────────────
+/**
+ * Одно фото или видео альбома (G56, признак `album1`; 13.10). У Telegram каждый элемент альбома — отдельное сообщение с общим
+ * `grouped_id` (Android `MessageObject.GroupedMessages`, tdesktop `Data::Group`), поэтому «Удалить» и «Переслать» в меню
+ * элемента (tdesktop `HistoryView::FillContextMenu`, `PointState::GroupPart`) и в просмотрщике (Android `PhotoViewer`,
+ * tdesktop `OverlayWidget`) касаются ОДНОГО элемента. У нас альбом — одно сообщение со списком вложений, поэтому:
+ * «у обоих» — правка списка (элемент уходит из `attachments`, файл — в уборку), «у меня» — пометка
+ * `conversation_messages.hidden_attachments` (`<смотрящий>:<id вложения>`), остальные видят альбом целиком. Последний
+ * видимый элемент — удаление сообщения целиком (как удаление последнего сообщения группы у Telegram).
+ * Чистые правила — без базы, для тестов.
+ */
+
+/** Запись «спрятано у меня» в `hidden_attachments`. */
+export function hiddenAttachmentKey(userId: string, attachmentId: string): string {
+  return `${userId}:${attachmentId}`;
+}
+
+/** Вложения глазами смотрящего: без тех, что он спрятал у себя. Пустая пометка — тот же список (без копии). */
+export function attachmentsForViewer<T extends { id?: string | null }>(
+  list: readonly T[],
+  hidden: readonly string[] | null | undefined,
+  viewerId: string,
+): T[] {
+  if (!hidden || hidden.length === 0) return list as T[];
+  const mine = new Set(hidden.filter((k) => k.startsWith(`${viewerId}:`)));
+  if (mine.size === 0) return list as T[];
+  return list.filter((a) => !a.id || !mine.has(hiddenAttachmentKey(viewerId, a.id)));
+}
+
+export type AlbumItemAction =
+  /** Элемента уже нет (убран раньше или спрятан мной) — успех без изменений: ответ на первый запрос мог потеряться. */
+  | 'repeat'
+  /** «У обоих» чужого элемента — только своё (решение 13.10: правка чужого сообщения у собеседника). */
+  | 'forbidden'
+  /** Видимый элемент последний — удалить сообщение целиком тем же путём, что «Удалить сообщение» (`deleteMessage`). */
+  | 'whole'
+  /** «У меня»: пометить элемент спрятанным у меня. */
+  | 'hide'
+  /** «У обоих»: убрать элемент из списка вложений. */
+  | 'remove';
+
+/**
+ * Что делать с элементом `attachmentId` сообщения. Видимость самого сообщения проверяет вызывающий
+ * (`convRules.messageView === 'full'`). Элементы без `id` (старый публичный бакет, до шага 1в) по одному не убираются —
+ * их нечем назвать, запрос с таким не совпадёт (`repeat`).
+ */
+export function albumItemDecision(p: {
+  list: readonly { id?: string | null }[];
+  hidden: readonly string[] | null | undefined;
+  viewerId: string;
+  authorId: string;
+  attachmentId: string;
+  scope: 'me' | 'both';
+}): AlbumItemAction {
+  const visible = attachmentsForViewer(p.list, p.hidden, p.viewerId);
+  if (!visible.some((a) => a.id === p.attachmentId)) return 'repeat';
+  if (p.scope === 'both' && p.authorId !== p.viewerId) return 'forbidden';
+  if (p.scope === 'me') return visible.length <= 1 ? 'whole' : 'hide';
+  return p.list.length <= 1 ? 'whole' : 'remove';
+}
+
+/**
+ * Приём правки копии сообщения от соседа (`federation/convAccept.ts`): какие вложения копии убраны на доме автора. Только
+ * сужение: провод без вложений (правка текста старым домом, «файлы позже») ничего не убирает — сообщение целиком уходит
+ * надгробием (`deleted`), а не правкой; копии без `id` не трогаются. Пусто — убирать нечего.
+ */
+export function removedByEdit<T extends { id?: string | null }>(row: readonly T[], wire: readonly { id: string }[]): T[] {
+  if (wire.length === 0) return [];
+  const keep = new Set(wire.map((a) => a.id));
+  const gone = row.filter((a) => !!a.id && !keep.has(a.id));
+  return gone.length < row.length ? gone : [];
 }

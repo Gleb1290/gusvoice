@@ -15,7 +15,9 @@
  */
 import {
   attachmentWords,
+  convMediaPreview,
   isVoiceMessage,
+  parseConvMedia,
   stripFormatting,
   type Message,
   type ConvLastMessage,
@@ -408,9 +410,12 @@ function quoteWords(f: Partial<Pick<ConvLastMessage, 'attachmentKind' | 'attachm
  */
 export function replyQuoteLook(
   reply: ReplyQuoteSource,
-  original: Pick<Message, 'attachments' | 'sticker'> | undefined,
+  original: (Pick<Message, 'attachments' | 'sticker'> & { media?: unknown }) | undefined,
 ): ReplyQuoteLook {
   if (reply.deleted) return { kind: 'deleted', text: 'Сообщение удалено' };
+  // Геопозиция / контакт (G69, `geocontact1`): «Геопозиция» / «Контакт: Имя», а не запасная фраза со ссылкой.
+  const media = original?.media ? parseConvMedia(original.media) : null;
+  if (media) return { kind: 'text', text: convMediaPreview(media) };
   // Цитата — одной строкой без маркеров формата (G51), скрытый текст закрыт, как в превью списка.
   const caption = stripFormatting(reply.content).trim();
   if (!original) return quoteFromPreview(reply, caption);
@@ -423,7 +428,7 @@ export function replyQuoteLook(
       return { kind: 'voice', text: quoteWords({ attachmentKind: 'voice' }) };
     }
     if (a.contentType.startsWith('image/')) {
-      return { kind: 'photo', text: caption || 'Фото', thumb: a.url || undefined, ...(a.spoiler && !a.asFile ? { spoiler: true as const } : {}) };
+      return { kind: 'photo', text: caption || 'Фото', thumb: a.fedState === 'copying' ? undefined : a.url || undefined, ...(a.spoiler && !a.asFile ? { spoiler: true as const } : {}) };
     }
     if (a.contentType.startsWith('video/')) {
       return { kind: 'file', text: quoteWords({ attachmentKind: 'file', attachmentVideo: true, ...(a.round === true ? { attachmentRound: true as const } : {}) }) };
@@ -477,7 +482,7 @@ export function replyQuoteVideo(
 /**
  * ✓✓ у своего сохранённого сообщения (Р6, решение владельца 03.10: всегда, без настройки, только 1:1): собеседник
  * прочитал до него — `sortKey <= peerReadKey` (ключ — `convSyncRules.peerReadKeyOf`). Ключа нет (`null`: сервер до
- * `conv4`, сводка из кеша до его обновления, сравнивать не с кем) или у сообщения нет `sortKey` (старый путь ЛС) — нет,
+ * `conv4`, сводка из кеша до его обновления, сравнивать не с кем) или у сообщения нет `sortKey` — нет,
  * остаётся ✓ «отправлено».
  */
 export function readByPeer(sortKey: number | undefined, peerReadKey: number | null | undefined): boolean {

@@ -41,10 +41,10 @@ async function scene(server: ViteDevServer, mode: 'choose' | 'close' | 'big' | '
     await h.mount({}, ShareIncoming); await h.flush();
     if (mode === 'absent') {
       assert.equal(w().__gvShare, undefined, 'без моста hook не установлен');
-      assert.equal(document.querySelector('.fwd-modal'), null); assert.equal(calls.length, 0); return;
+      assert.equal(document.querySelector('.fwd-modal') === null, true); assert.equal(calls.length, 0); return;
     }
     if (mode === 'big') {
-      assert.equal(document.querySelector('.fwd-modal'), null, 'негодные файлы не открывают окно');
+      assert.equal(document.querySelector('.fwd-modal') === null, true, 'негодные файлы не открывают окно');
       assert.equal(useToasts.getState().toasts.length, initialToasts.toasts.length + 1);
       assert.match(useToasts.getState().toasts.at(-1)!.title, /25|больш|размер/i);
       assert.deepEqual(calls, ['shared', 'sharedDrop']); return;
@@ -59,7 +59,7 @@ async function scene(server: ViteDevServer, mode: 'choose' | 'close' | 'big' | '
     assert.ok(row, 'текущая беседа доступна для входящего share');
     await act(async () => { row.click(); await h.flush(); });
     assert.deepEqual(calls, ['shared', 'sharedOpen'], 'закрытие после выбора не удаляет ещё читаемые копии');
-    assert.equal(document.querySelector('.fwd-modal'), null);
+    assert.equal(document.querySelector('.fwd-modal') === null, true);
     assert.ok(finishOpen); await act(async () => { finishOpen!(); await h.flush(); });
     assert.deepEqual(calls, ['shared', 'sharedOpen', 'select:current', 'sharedDrop']);
     const incoming = useStore.getState().sharedIn; assert.ok(incoming);
@@ -107,7 +107,7 @@ async function legacyScene(server: ViteDevServer, mode: 'choose' | 'close' | 'fi
     assert.equal(useToasts.getState().toasts.length, initialToasts.toasts.length + 1, 'filesOff сообщает ровно один тост');
     assert.equal(useToasts.getState().toasts.at(-1)!.title, 'Чтобы делиться файлами, обновите Android System WebView');
     if (mode === 'files') {
-      assert.equal(document.querySelector('.fwd-modal'), null, 'без текста и файлов нечего выбирать');
+      assert.equal(document.querySelector('.fwd-modal') === null, true, 'без текста и файлов нечего выбирать');
       assert.deepEqual(calls, ['text', 'drop:legacy'], 'без media мост удаляет legacy заказ'); return;
     }
     assert.ok(document.querySelector('.fwd-modal'), 'текст остаётся доступным при filesOff');

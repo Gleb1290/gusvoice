@@ -51,6 +51,8 @@ export async function callRoutes(app: FastifyInstance): Promise<void> {
     if (!answering && !(await callAllowedFor(me, peerId))) return reply.code(403).send({ error: CALL_PRIVACY_ERROR });
     const res = await startCall(me, peerId, conversationId, device);
     if (res.kind === 'busy') return reply.code(409).send({ error: CALL_BUSY_ERROR });
+    // Э6: собеседник с другого инстанса — отказ его дома (занят, «кто может звонить», нет `dmcall1`, недоступен) как есть.
+    if (res.kind === 'refused') return reply.code(res.status).send({ error: res.error });
     return reply.code(res.answered ? 200 : 201).send(await callJoin(res.call, me));
   });
 
@@ -80,6 +82,10 @@ export async function callRoutes(app: FastifyInstance): Promise<void> {
     return { call: callById(id) } satisfies CallActiveResponse;
   });
 
-  /** Мой текущий звонок — для устройства, которое подключилось посреди звонка (и после перезагрузки страницы). */
-  app.get('/calls/active', async (req) => ({ call: callOf(req.user!.sub) }) satisfies CallActiveResponse);
+  /**
+   * Мой текущий звонок — для устройства, которое подключилось посреди звонка (и после перезагрузки страницы). `?fed=1` (Э6,
+   * клиент с `fedcall1`) — и входящий с другого инстанса (`DmCall.host`); старый клиент его не спрашивает и не получает.
+   */
+  app.get('/calls/active', async (req) =>
+    ({ call: callOf(req.user!.sub, (req.query as { fed?: unknown } | undefined)?.fed === '1') }) satisfies CallActiveResponse);
 }

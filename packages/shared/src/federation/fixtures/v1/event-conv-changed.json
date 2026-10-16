@@ -1,0 +1,12 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W5E",
+      "seq": 72,
+      "kind": "conv.changed",
+      "created_at": 1760270400000,
+      "payload": { "seq": 24 }
+    }
+  ]
+}

@@ -8,7 +8,6 @@ import {
   conversationMessages,
   conversationScheduled,
   diagReports,
-  dmReads,
   emailVerifications,
   federationGuestGrants,
   federationMemberships,
@@ -38,9 +37,9 @@ import {
  * ⚠️ Отдельным модулем, без `db`, env, Redis и шлюза — чтобы этот самый код можно было прогнать на
  * настоящем Postgres в проверке, не поднимая бэкенд. Сеть и события — в `accountDelete.ts`.
  *
- * Что НЕ трогается и почему: `messages`, `message_reactions`, `dm_channels`, `dm_messages`,
- * `dm_message_reactions`, `audit_log`, `coin_ledger`, `season_results`, `poll_votes`, `bans` — это
- * переписка и история, ради которой строка и остаётся (`accountRules.ts`). Из `conversation_messages` меняется
+ * Что НЕ трогается и почему: `messages`, `message_reactions`, `audit_log`, `coin_ledger`, `season_results`,
+ * `poll_votes`, `bans` — это переписка и история, ради которой строка и остаётся (`accountRules.ts`).
+ * Из `conversation_messages` меняется
  * только имя в снимках «Переслано от» (ниже), сами сообщения остаются. Отложенные (`conversation_scheduled`, С4) —
  * ещё не переписка, а неотправленное личное: удаляются, и их файлы (`attachments` в состоянии `scheduled`, `conv10`) —
  * тоже; файлы отправленных сообщений остаются, как сами сообщения.
@@ -95,10 +94,9 @@ export async function anonymizeAccountRows(tx: PgDatabase<any, any, any>, userId
   await tx.delete(emailVerifications).where(eq(emailVerifications.userId, userId));
   await tx.delete(passwordResets).where(eq(passwordResets.userId, userId));
   await tx.delete(channelReads).where(eq(channelReads.userId, userId));
-  await tx.delete(dmReads).where(eq(dmReads.userId, userId));
   await tx.delete(diagReports).where(eq(diagReports.userId, userId));
   // Журнал догонки ЛС (этап 1): состояние синхронизации устройств человека. Строки `user_changes` уходят каскадом.
-  // Беседы, участие в них и сообщения остаются — это переписка собеседника, как `dm_*`.
+  // Беседы, участие в них и сообщения остаются — это переписка собеседника.
   await tx.delete(userSync).where(eq(userSync.userId, userId));
   // Чёрный список (#212) — в обе стороны: свой список — личные данные, а блокировка удалённого аккаунта
   // ничего не защищает (писать ему уже нельзя, `dmRules.canWriteDm`).

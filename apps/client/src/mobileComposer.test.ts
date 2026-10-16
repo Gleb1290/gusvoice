@@ -12,17 +12,15 @@ describe('кнопки мобильного композера', () => {
     assert.deepEqual([...new Set(classes)].sort(), ['attach', 'emoji', 'plus', 'poll', 'sched', 'textfile', 'voice']);
   });
 
-  it('кнопка плюса скрыта по умолчанию и явно включается первой только в мобильной раскладке', () => {
+  it('скрепка скрыта по умолчанию и включается третьей только в мобильной раскладке', () => {
     // Ловит лишний плюс на десктопе и прыжок мобильной кнопки в неверное место строки.
     assert.match(css, /\.att-btn\.plus\s*\{\s*display:\s*none;/s);
-    assert.match(css, /\.app\.m-content \.composer \.att-btn\.plus\s*\{[^}]*display:\s*inline-flex;[^}]*order:\s*1;/s);
+    assert.match(css, /\.app\.m-content \.composer \.att-btn\.plus\s*\{[^}]*display:\s*inline-flex;[^}]*order:\s*3;/s);
   });
 
-  it('файл, голосовое и опрос спрятаны в шторку, а эмодзи остаётся третьим', () => {
+  it('файл, голосовое и опрос спрятаны в шторку, а эмодзи идёт первым', () => {
     // Ловит возврат переполненной строки на 411 px и исчезновение двери в кастомные эмодзи.
     assert.match(css, /\.att-btn\.attach,\s*\.app\.m-content \.composer \.att-btn\.voice,\s*\.app\.m-content \.composer \.att-btn\.poll\s*\{\s*display:\s*none;/s);
-    assert.match(css, /\.app\.m-content \.composer \.att-btn\.emoji\s*\{\s*order:\s*3;/s);
-    assert.match(css, /\.app\.m-content \.composer \.att-btn\.sched\s*\{\s*order:\s*2;/s);
-    assert.match(css, /\.app\.m-content \.composer \.att-btn\.textfile\s*\{\s*order:\s*2;/s);
+    assert.match(css, /\.app\.m-content \.composer \.att-btn\.emoji\s*\{\s*order:\s*1;/s);
   });
 });

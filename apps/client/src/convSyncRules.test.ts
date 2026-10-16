@@ -6,6 +6,123 @@ import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
 import * as dmList from './dmListRules';
 import * as prefs from './convSyncRules';
+import * as dmRules from './dmRules';
+import { FED_DM_LINK_BROKEN, fedErrorText } from './fedErrorText.js';
+
+function presenceCapability(api: typeof prefs) {
+  for (const features of [null, undefined, [], ['fedm3'], ['dm3'], ['FEDM4'], ['fedm4'], ['conv2', 'fedm4']] as const) {
+    const enabled = !!features?.includes('fedm4' as never);
+    assert.equal(api.serverFedPresence(features), enabled, 'только точный fedm4 объявляет presence соседа');
+    for (const peerHome of [false, true]) {
+      const expected = !peerHome || enabled;
+      assert.equal(api.peerPresenceShown(peerHome, features), expected, 'местный статус не зависит от fedm4, сосед зависит');
+      assert.equal(dmRules.peerPresenceShown(peerHome, features), expected, 'обе копии правила присутствия совпадают');
+    }
+  }
+}
+it('R197 обе копии peerPresenceShown согласованы: местный всегда виден, сосед только с fedm4', () => presenceCapability(prefs));
+for (const [name, anchor, replacement, target] of [
+  ['убран местный обход', 'return !peerHome || serverFedPresence(features);', 'return serverFedPresence(features);', 'местный статус не зависит'],
+  ['сосед без fedm4', 'return !peerHome || serverFedPresence(features);', 'return true;', 'местный статус не зависит'],
+  ['fedm4 не проверяется', 'return !!features?.includes(FEATURE_FEDM4);', 'return !!features;', 'только точный fedm4'],
+] as const) it(`R197 мутант «${name}» ловится таблицей обеих копий presence`, () => {
+  presenceCapability(prefs); presenceCapability(mutantSync(anchor, anchor));
+  assert.throws(() => presenceCapability(mutantSync(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target));
+});
+
+function homeDownContract(api: typeof prefs) {
+  for (const e of [new TypeError('сеть'), new Error('timeout'), { timeout: true }, { status: 502 }, { status: 503 }, { status: 504 }])
+    assert.equal(api.isHomeDownError(e), true, 'недоступный дом допускает обход');
+  for (const status of [400, 403, 404, 409, 429, 500]) assert.equal(api.isHomeDownError({ status }), false, 'явный отказ живого дома не обходится');
+  for (const e of [null, undefined, 'network', { switched: true }, { aborted: true }, { name: 'AbortError' }, { status: 503, switched: true }, { status: 502, aborted: true }])
+    assert.equal(api.isHomeDownError(e), false);
+}
+it('R200 сеть, таймаут и 502–504 означают дом недоступен, остальные отказы и отмены не разрешают обход', () => homeDownContract(prefs));
+it('R200 мутант 500 как недоступный дом отвергается явным отказом', () => {
+  homeDownContract(prefs);
+  const anchor = 'return x.status === 502 || x.status === 503 || x.status === 504;';
+  homeDownContract(mutantSync(anchor, anchor));
+  assert.throws(() => homeDownContract(mutantSync(anchor, 'return x.status >= 500;')),
+    e => e instanceof assert.AssertionError && e.message.includes('явный отказ живого дома'));
+});
+function viaItemContract(api: typeof prefs) {
+  const plain = { content: '  текст  ', fileNames: [] };
+  assert.equal(api.viaSendable(plain), true, 'чистый текст годится для обхода');
+  assert.equal(api.viaSendable({ ...plain, replyQuote: { text: 'кусок', offset: 0 } }), false, 'цитата фрагмента не уходит через соседа');
+  for (const extra of [{ fileNames: ['x'] }, { asFile: true }, { spoilers: [0] }, { captionAbove: true }]) assert.equal(api.viaSendable({ ...plain, ...extra }), false);
+  for (const content of ['', ' \n\t ']) assert.equal(api.viaSendable({ ...plain, content }), false);
+  assert.equal(api.viaSendable({ ...plain, asFile: false, spoilers: undefined, captionAbove: false, replyQuote: null }), true);
+}
+it('R200 обход допускает непустой текст, но не файл, asFile, спойлер, верхнюю подпись и цитату фрагмента', () => viaItemContract(prefs));
+it('R200 мутант обхода с replyQuote ловится допустимым текстом и запрещённым фрагментом', () => {
+  viaItemContract(prefs); const anchor = ' && !it.replyQuote;';
+  viaItemContract(mutantSync(anchor, anchor));
+  assert.throws(() => viaItemContract(mutantSync(anchor, ';')),
+    e => e instanceof assert.AssertionError && e.message.includes('цитата фрагмента не уходит'));
+});
+it('R200 fallback нужен только человеку соседа с fedm5 и неразорванной связкой, плашка имеет честные имена', () => {
+  for (const features of [null, undefined, [], ['fedm4'], ['FEDM5'], ['fedm5']] as const)
+    for (const remote of [false, true]) for (const summary of [null, undefined, {}, { fedLink: 'ok' }, { fedLink: 'broken' }])
+      assert.equal(prefs.fedViaWanted(remote, features, summary), remote && !!features?.includes('fedm5' as never) && summary?.fedLink !== 'broken');
+  assert.equal(prefs.fedViaBarText('Дом', 'Сосед'), 'Инстанс «Дом» недоступен — пишем через «Сосед»');
+  assert.equal(prefs.fedViaBarText('', ''), 'Инстанс «Мой» недоступен — пишем через «инстанс собеседника»');
+});
+function viaPageContract(api: typeof prefs) {
+  const known = msg('known', 2, 'домашнее'); const fresh = msg('fresh', 1, 'сосед'); const gone = msg('gone', 3);
+  const state = { ...prefs.emptyConvState(), pts: 99, msgPts: { known: 7 }, gone: { gone: true as const },
+    windows: { c: { basePts: 88, hasMoreBefore: true, hasMoreAfter: false, stale: false } } };
+  const out = api.applyViaPage(state, [known], 'c', [{ ...known, content: 'чужая подмена' }, gone, fresh, fresh]);
+  assert.equal(out.list?.map(m => m.id).join(','), 'fresh,known', 'только неизвестные сообщения добавляются и сортируются');
+  assert.equal(out.list?.find(m => m.id === 'known'), known, 'домашняя версия первична');
+  assert.equal(out.state.gone.gone, true); assert.equal(out.state.msgPts.fresh, 0, 'чужой pts не попадает в домашний курсор');
+  assert.equal(out.state.msgPts.known, 7); assert.equal(out.state.pts, 99); assert.equal(out.state.windows, state.windows);
+  assert.equal(state.msgPts.known, 7); assert.equal(Object.hasOwn(state.msgPts, 'fresh'), false, 'исходное состояние не мутирует');
+}
+it('R200 applyViaPage добавляет только неизвестные, не воскрешает gone и ставит msgPts=0 без чужого курсора', () => viaPageContract(prefs));
+it('R200 applyViaPage без окна, списка или у старой страницы не достраивает ленту через дыру', () => {
+  const list = [msg('known', 1)]; const fresh = [msg('fresh', 2)];
+  const windowCases: prefs.ConvState['windows'][] = [{}, { c: { basePts: 2, hasMoreBefore: true, hasMoreAfter: true, stale: false } }];
+  for (const windows of windowCases) {
+    const state = { ...prefs.emptyConvState(), windows };
+    const out = prefs.applyViaPage(state, list, 'c', fresh);
+    assert.equal(out.state, state); assert.equal(out.list?.map(m => m.id).join(','), 'known');
+  }
+  const state = { ...prefs.emptyConvState(), windows: { c: { basePts: 2, hasMoreBefore: false, hasMoreAfter: false, stale: false } } };
+  const out = prefs.applyViaPage(state, undefined, 'c', fresh); assert.equal(out.state, state); assert.equal(out.list, undefined);
+});
+it('R200 мутант чужого msgPts обнаруживается неизвестным сообщением при домашнем pts=99', () => {
+  viaPageContract(prefs); const anchor = 'msgPts[m.id] = msgPts[m.id] ?? 0;';
+  viaPageContract(mutantSync(anchor, anchor));
+  assert.throws(() => viaPageContract(mutantSync(anchor, 'msgPts[m.id] = state.pts;')),
+    e => e instanceof assert.AssertionError && e.message.includes('чужой pts не попадает'));
+});
+it('R201 только boolean fedStale включает плашку, текст называет дом или инстанс собеседника', () => {
+  for (const summary of [null, undefined, {}, { fedStale: false }, { fedStale: 1 }, { fedStale: 'true' }, { fedLink: 'broken' }]) assert.equal(prefs.fedLinkStale(summary), false);
+  assert.equal(prefs.fedLinkStale({ fedStale: true }), true);
+  assert.equal(prefs.fedLinkStaleText('Сосед'), 'Сообщения ждут, пока «Сосед» их заберёт');
+  for (const name of [null, undefined, '']) assert.equal(prefs.fedLinkStaleText(name), 'Сообщения ждут, пока инстанс собеседника их заберёт');
+});
+
+it('R194 fedm3 строго включает файлы, локальная беседа открыта, старый сосед и fedNoFiles дают разные подсказки', () => {
+  // Класс ошибки: локальные файлы закрыты или несовместимый сосед получает доступ к ним.
+  assert.equal(prefs.serverFedFiles(['fedm3']), true);
+  for (const features of [null, undefined, [], ['fedm2'], ['FEDM3']]) assert.equal(prefs.serverFedFiles(features), false);
+  for (const enabled of [false, true]) for (const summary of [null, undefined, {}, { fedNoFiles: false }, { fedNoFiles: true }]) {
+    assert.equal(prefs.fedFilesHint(false, enabled, summary), null);
+    assert.equal(prefs.fedFilesHint(true, enabled, summary), !enabled ? prefs.FED_FILES_LATER_HINT : summary?.fedNoFiles ? prefs.FED_FILES_PEER_HINT : null);
+  }
+});
+it('R194 контрфакт игнорирования fedNoFiles ловится подсказкой уже умеющего файлы сервера', () => {
+  // Класс ошибки: совместимость своего сервера ошибочно приравнена к совместимости соседа.
+  const check = (api: typeof prefs) => assert.equal(api.fedFilesHint(true, true, { fedNoFiles: true }), prefs.FED_FILES_PEER_HINT, 'сосед без файлов закрыт');
+  check(prefs);
+  // Тот же whole-module адаптер сначала исполняет исходный код: ошибка его импортов не считается отказом мутанта.
+  const anchor = 'return summary?.fedNoFiles ? FED_FILES_PEER_HINT : null;';
+  check(mutantSync(anchor, anchor));
+  assert.throws(() => check(mutantSync(anchor, 'return null;')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('сосед без файлов закрыт'));
+});
 
 describe('R115 локальный порядок закрепов', () => {
   it('перестановка обновляет закрепы, но не закрепляет снятые или неизвестные беседы', () => {
@@ -49,7 +166,7 @@ describe('R115 локальный порядок закрепов', () => {
 
 function mutantSync(from: string, to: string): typeof prefs {
   const source = readFileSync(new URL('./convSyncRules.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes(from), 'мутируется существующее правило');
+  assert.equal(source.split(from).length - 1, 1, 'единственный якорь существующего правила');
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { module, exports: module.exports, require: (id: string) => { if (id === '@gusvoice/shared') return shared; assert.equal(id, './dmListRules'); return dmList; } });
@@ -717,5 +834,16 @@ describe('догонка бесед', () => {
     state.summaries = { one: summary('one') };
     assert.equal(patchPeer(state, 'peer', 'Peer', null), state);
     assert.equal(patchPeer(state, 'missing', 'Nobody', null), state);
+  });
+
+  it('разорванная связка распознаётся только по fedLink=broken, а архивная плашка совпадает с отказом записи', () => {
+    // Класс ошибки: неверный truthy-check переводит обычные и старые сводки в режим только чтения.
+    for (const value of [undefined, null, {}, { fedLink: 'ok' }, { fedLink: null }])
+      assert.equal(prefs.fedLinkBroken(value), false);
+    assert.equal(prefs.fedLinkBroken({ fedLink: 'broken' }), true);
+    assert.equal(prefs.fedLinkBroken({ fedLink: 'broken', other: true }), true);
+    assert.equal(prefs.fedLinkBrokenText('Утка'), fedErrorText(FED_DM_LINK_BROKEN, 'Утка'));
+    assert.equal(prefs.fedLinkBrokenText(null), fedErrorText(FED_DM_LINK_BROKEN));
+    assert.equal(prefs.fedLinkBrokenText(undefined), fedErrorText(FED_DM_LINK_BROKEN));
   });
 });

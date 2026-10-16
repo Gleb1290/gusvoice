@@ -117,7 +117,7 @@ it('Esc сначала закрывает мобильный лист выбор
 
   const first = await pressEscape();
   assert.equal(first.defaultPrevented, false, 'Select закрывает лист без гашения Esc у верхнего settings dialog');
-  assert.equal(document.body.querySelector('.sheet.dd-sheet'), null, 'первый Esc снял лист');
+  assert.equal(document.body.querySelector('.sheet.dd-sheet') === null, true, 'первый Esc снял лист');
   assert.equal(closed, 0, 'первый Esc не закрыл родительские настройки');
   assert.equal(activeWindowKeys.size, baseline, 'закрытие листа сняло его window listener');
 
@@ -141,7 +141,7 @@ it('настольный Select не вешает мобильный window list
 
   const inside = await pressEscape(pop);
   assert.equal(inside.defaultPrevented, true, 'React handler списка обработал Escape на desktop');
-  assert.equal(document.body.querySelector('.dd-pop'), null, 'список закрылся');
+  assert.equal(document.body.querySelector('.dd-pop') === null, true, 'список закрылся');
   assert.equal(closed, 0, 'обработанный Select Escape не закрыл окно');
   await pressEscape();
   assert.equal(closed, 1, 'после закрытия списка следующий Esc закрывает окно');
@@ -179,7 +179,7 @@ it('лист устройства поверх полного UserSettingsModal 
     await flush(() => trigger!.click());
     assert.ok(document.querySelector('.sheet.dd-sheet'), 'на телефоне устройство выбирается в листе над полным окном');
     await pressEscape();
-    assert.equal(document.querySelector('.sheet.dd-sheet'), null, 'первый Escape закрывает лист');
+    assert.equal(document.querySelector('.sheet.dd-sheet') === null, true, 'первый Escape закрывает лист');
     assert.equal(closed, 0, 'полное окно настроек не закрыто тем же событием');
     assert.ok(document.querySelector('.settings-modal'), 'настройки остались в DOM');
     await pressEscape();

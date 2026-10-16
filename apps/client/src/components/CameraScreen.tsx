@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { HOLD_TO_RECORD_MS, formatDuration, megabytes, ATTACH_MAX_BYTES } from '../attachRules';
+import { HOLD_TO_RECORD_MS, formatDuration, megabytes, ATTACH_MAX_BYTES, videoSoftLimit } from '../attachRules';
 import { setTorch, startRecording, takeSnapshot, torchSupported, type Facing, type Recording } from '../cameraCapture';
 import { Icon } from './Icon';
 
@@ -15,16 +15,66 @@ export interface CameraShot {
  * Живая картинка камеры первой ячейкой сетки листа (как у Telegram: высокая, на две строки, значок камеры в углу). Без
  * потока — тёмная ячейка со значком: нажатие откроет камеру, а разрешение спросит уже она.
  */
-export function CameraCell({ stream, facing, onOpen }: { stream: MediaStream | null; facing: Facing; onOpen: () => void }) {
+export function CameraCell({
+  stream,
+  facing,
+  onOpen,
+  onHold,
+  short = false,
+}: {
+  stream: MediaStream | null;
+  facing: Facing;
+  onOpen: () => void;
+  /**
+   * Удержание дольше `HOLD_TO_RECORD_MS` (10.10, #218: системная камера Android — тап = фото, удержание = видео, жест затвора
+   * Telegram). Нет — удержание ничего не значит, как раньше.
+   */
+  onHold?: () => void;
+  /** Одна строка вместо двух (`MediaSheet.camShort`: сетка не длиннее ряда — как `hasCameraSpaceRow` Telegram). */
+  short?: boolean;
+}) {
   const ref = useRef<HTMLVideoElement>(null);
+  const holdTimer = useRef(0);
+  /** Удержание уже сработало — следующий `click` того же нажатия не открывает ещё и снимок. */
+  const held = useRef(false);
   useEffect(() => {
     const v = ref.current;
     if (!v) return;
     if (v.srcObject !== stream) v.srcObject = stream;
     if (stream) void v.play().catch(() => undefined);
   }, [stream]);
+  useEffect(() => () => window.clearTimeout(holdTimer.current), []);
+  const release = () => window.clearTimeout(holdTimer.current);
+  const hold = onHold
+    ? {
+        onPointerDown: () => {
+          held.current = false;
+          window.clearTimeout(holdTimer.current);
+          holdTimer.current = window.setTimeout(() => {
+            held.current = true;
+            onHold();
+          }, HOLD_TO_RECORD_MS);
+        },
+        onPointerUp: release,
+        onPointerCancel: release,
+        onPointerLeave: release,
+        onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
+      }
+    : {};
   return (
-    <button type="button" className="gal-cam" onClick={onOpen} aria-label="Камера">
+    <button
+      type="button"
+      className={short ? 'gal-cam short' : 'gal-cam'}
+      onClick={() => {
+        if (held.current) {
+          held.current = false;
+          return;
+        }
+        onOpen();
+      }}
+      aria-label="Камера"
+      {...hold}
+    >
       {stream ? <video ref={ref} className={facing === 'user' ? 'mirror' : undefined} autoPlay muted playsInline /> : null}
       <span className="gal-cam-ico">
         <Icon name="camera" size={22} />
@@ -52,6 +102,7 @@ export function CameraScreen({
   onSend,
   onNote,
   mic = true,
+  maxBytes = ATTACH_MAX_BYTES,
 }: {
   stream: MediaStream | null;
   error: string | null;
@@ -59,6 +110,8 @@ export function CameraScreen({
   canFlip: boolean;
   /** Звук для видео: `false` — у приложения нет разрешения на микрофон, пишем без звука (`startRecording`). */
   mic?: boolean;
+  /** Предел файла, байт: запись останавливается у него (в ЛС при `bigfile1` — до 1 ГиБ). Нет — 25 МБ. */
+  maxBytes?: number;
   shot: CameraShot | null;
   onShot: (file: File) => void;
   onRetake: () => void;
@@ -136,10 +189,10 @@ export function CameraScreen({
     const r = await startRecording(
       track,
       () => {
-        onNote(`Видео дошло до ${megabytes(ATTACH_MAX_BYTES)} МБ — запись остановлена`);
+        onNote(`Видео дошло до ${megabytes(maxBytes)} МБ — запись остановлена`);
         void finishRecording();
       },
-      { mic },
+      { mic, softLimit: videoSoftLimit(maxBytes) },
     );
     starting.current = false;
     if (!r) {

@@ -72,6 +72,7 @@ export type IconName =
   | 'maximize'
   | 'globe'
   | 'camera-flip'
+  | 'bluetooth'
   | 'checks'
   | 'clock'
   | 'alert-circle'
@@ -89,10 +90,16 @@ export type IconName =
   | 'unarchive'
   | 'rotate'
   | 'flip'
+  | 'brush'
+  | 'eraser'
+  | 'text-size'
+  | 'undo'
   | 'repeat'
   | 'pip'
   | 'phone'
-  | 'arrow-up-right';
+  | 'arrow-up-right'
+  | 'map-pin'
+  | 'locate';
 
 const PATHS: Record<IconName, string[]> = {
   // Трубка (08.10, звонки в ЛС, `calls1`): «Позвонить», «Ответить»; повёрнутая на 135° (`.call-round.decline`) — «Завершить».
@@ -102,6 +109,10 @@ const PATHS: Record<IconName, string[]> = {
   // Стрелка направления звонка в записи ленты (08.10, `calls2`, tdesktop `historyCallArrow`): ↗ исходящий; входящий ↙ —
   // та же, повёрнутая на 180° (`.svc-call-arrow.in`). Tabler `arrow-up-right`.
   'arrow-up-right': ['M17 7 L7 17', 'M8 7 H17 V16'],
+  // Метка места (14.10, G69): «Геопозиция» в листе вложений и карточка геопозиции в ленте ЛС. Tabler `map-pin`.
+  'map-pin': ['M9 11 a3 3 0 1 0 6 0 a3 3 0 0 0 -6 0', 'M17.657 16.657 L13.414 20.9 a2 2 0 0 1 -2.827 0 L6.343 16.657 a8 8 0 1 1 11.314 0 Z'],
+  // «К моему месту» на карте выбора геопозиции (15.10, `geopick2`; Telegram Android `ChatAttachAlertLocationLayout.locationButton`): прицел.
+  locate: ['M12 5 a7 7 0 1 0 0 14 a7 7 0 1 0 0 -14 Z', 'M12 9 a3 3 0 1 0 0 6 a3 3 0 1 0 0 -6 Z', 'M12 2 V5 M12 19 V22 M2 12 H5 M19 12 H22'],
   mic: ['M12 3 a3 3 0 0 1 3 3 v5 a3 3 0 0 1 -6 0 V6 a3 3 0 0 1 3 -3 Z', 'M5 11 a7 7 0 0 0 14 0', 'M12 18 V21 M9 21 H15'],
   'mic-off': ['M12 3 a3 3 0 0 1 3 3 v5 a3 3 0 0 1 -6 0 V6 a3 3 0 0 1 3 -3 Z', 'M5 11 a7 7 0 0 0 14 0', 'M4 4 L20 20'],
   headphones: ['M4 14 v-2 a8 8 0 0 1 16 0 v2', 'M3 14 h4 v6 h-4 z', 'M17 14 h4 v6 h-4 z'],
@@ -123,6 +134,8 @@ const PATHS: Record<IconName, string[]> = {
     'M14.4 12.8 a2.6 2.6 0 0 1 -4.2 2',
     'M10.1 17.3 L10.1 14.8 L12.6 14.8',
   ],
+  // Bluetooth-гарнитура в выборе вывода звука звонка (13.10, кнопка «Динамик», Tabler `bluetooth`).
+  bluetooth: ['M7 8 L17 16 L12 20 V4 L17 8 L7 16'],
   leave: ['M14 4 H6 a2 2 0 0 0 -2 2 v12 a2 2 0 0 0 2 2 h8', 'M13 12 H21 M18 9 L21 12 L18 15'],
   hash: ['M10 4 L8 20 M16 4 L14 20 M5 9 H19 M4 15 H18'],
   volume: ['M5 9 H8 L12 5 V19 L8 15 H5 Z', 'M16 9 a4 4 0 0 1 0 6', 'M18.5 7 a7 7 0 0 1 0 10'],
@@ -300,6 +313,11 @@ const PATHS: Record<IconName, string[]> = {
   rotate: ['M19.95 11a8 8 0 1 0 -.5 4', 'M19.95 20v-5h-5'],
   /** «Отразить» в редакторе фото до отправки (G49): ось и два треугольника (Tabler `flip-vertical` — отражение по горизонтали). */
   flip: ['M12 3l0 18', 'M16 7l0 10l5 0l-5 -10', 'M8 7l0 10l-5 0l5 -10'],
+  /** Инструменты редактора фото (14.10, G49): «Рисовать» (Tabler `brush`), «Ластик» (`eraser`), «Текст» (буква Т), «Отменить» (`arrow-back-up`). */
+  brush: ['M3 21v-4a4 4 0 1 1 4 4h-4', 'M21 3a16 16 0 0 0 -12.8 10.2', 'M21 3a16 16 0 0 1 -10.2 12.8', 'M10.6 9a9 9 0 0 1 4.4 4.4'],
+  eraser: ['M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3', 'M18 13.3l-6.3 -6.3'],
+  'text-size': ['M5 7V5h14v2', 'M12 5v14', 'M9 19h6'],
+  undo: ['M9 14l-4 -4l4 -4', 'M5 10h11a4 4 0 1 1 0 8h-1'],
   /** «Зациклить» у видео в просмотрщике (G33): две встречные стрелки (Tabler `repeat`). */
   repeat: ['M4 12v-3a3 3 0 0 1 3 -3h13', 'M17 3l3 3l-3 3', 'M20 12v3a3 3 0 0 1 -3 3h-13', 'M7 21l-3 -3l3 -3'],
   /** «Картинка в картинке» у видео (Р-3): экран и окошко в углу (Tabler `picture-in-picture`). */

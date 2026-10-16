@@ -1,6 +1,85 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads, type UnreadState } from './channelRules.js';
+import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads, seedServerCounts, type UnreadState } from './channelRules.js';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+
+const countSource = readFileSync(new URL('./channelRules.ts', import.meta.url), 'utf8');
+function countsModule(anchor: string, replacement: string): typeof import('./channelRules') {
+  assert.equal(countSource.split(anchor).length - 1, 1, 'единственный якорь');
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(countSource.replace(anchor, replacement), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { module, exports: module.exports });
+  return module.exports as typeof import('./channelRules');
+}
+
+describe('R180 засев счётчиков серверов', () => {
+  function maximum(fn = seedServerCounts) {
+    const live = { unreadServers: { a: 5, b: 2 }, mentionServers: { a: 2, b: 5 } };
+    const result = fn([{ id: 'a', unread: 3, mentions: 7 }, { id: 'b', unread: 7, mentions: 3 }], live, null);
+    assert.equal(result.unreadServers.a, 5, 'max непрочитанных');
+    assert.equal(result.unreadServers.b, 7, 'рост непрочитанных');
+    assert.equal(result.mentionServers.a, 7, 'рост обращений');
+    assert.equal(result.mentionServers.b, 5, 'max обращений');
+    assert.deepEqual(live, { unreadServers: { a: 5, b: 2 }, mentionServers: { a: 2, b: 5 } });
+  }
+  function open(fn = seedServerCounts) {
+    const live = { unreadServers: {}, mentionServers: {} };
+    assert.equal(fn([{ id: 'open', unread: 9, mentions: 8 }], live, 'open') === live, true, 'открытый пропускается');
+    assert.equal(fn([{ id: 'open', unread: 9, mentions: 8 }], live, null).unreadServers.open, 9);
+  }
+  function zero(fn = seedServerCounts) {
+    const live = { unreadServers: {}, mentionServers: {} };
+    assert.equal(fn([{ id: 'zero', unread: 0, mentions: 0 }], live, null) === live, true, 'нули не записываются');
+  }
+  it('живой и серверный максимум выбираются независимо в обеих картах без мутации входа', () => {
+    // Поздний HTTP-ответ не должен уменьшать счётчик уже полученного события.
+    maximum();
+  });
+  it('открытый сервер пропускается, тот же сервер вне открытого экрана получает счётчики', () => {
+    // Иначе прочитанный сервер снова становится непрочитанным на холодном старте.
+    open();
+  });
+  it('отсутствующие, нечисловые и неположительные счётчики не создают записей', () => {
+    // Некорректный ответ не должен засорять карты нулём или бесконечным бейджем.
+    for (const value of [undefined, NaN, 0, -1, Infinity, -Infinity, 0.99]) {
+      const live = { unreadServers: { keep: 4 }, mentionServers: { keep: 2 } };
+      assert.equal(seedServerCounts([{ id: 'bad', unread: value, mentions: value }], live, null) === live, true);
+      assert.equal('bad' in live.unreadServers, false); assert.equal('bad' in live.mentionServers, false);
+    }
+    zero();
+  });
+  it('дроби округляются вниз, а единица сохраняется в обеих картах', () => {
+    // Граница floor не должна создавать дробный бейдж или терять минимальное положительное число.
+    const result = seedServerCounts([{ id: 'a', unread: 1, mentions: 1.99 }, { id: 'b', unread: 7.9, mentions: 2 }],
+      { unreadServers: {}, mentionServers: {} }, null);
+    assert.deepEqual(result, { unreadServers: { a: 1, b: 7 }, mentionServers: { a: 1, b: 2 } });
+  });
+  it('без роста сохраняется объект целиком, при росте копируется только изменённая карта', () => {
+    // Лишние копии вызывают рендеры, а изменение общей карты портит предыдущий снимок стора.
+    const live = { unreadServers: { a: 5 }, mentionServers: { a: 3 } };
+    assert.equal(seedServerCounts([], live, null) === live, true);
+    assert.equal(seedServerCounts([{ id: 'a', unread: 5, mentions: 2 }], live, null) === live, true);
+    const u = seedServerCounts([{ id: 'a', unread: 6 }], live, null);
+    assert.equal(u === live, false); assert.equal(u.unreadServers === live.unreadServers, false);
+    assert.equal(u.mentionServers === live.mentionServers, true);
+    const m = seedServerCounts([{ id: 'a', mentions: 4 }], live, null);
+    assert.equal(m.unreadServers === live.unreadServers, true); assert.equal(m.mentionServers === live.mentionServers, false);
+    assert.deepEqual(live, { unreadServers: { a: 5 }, mentionServers: { a: 3 } });
+  });
+  for (const [name, anchor, replacement, scenario, message] of [
+    ['перезапись вместо максимума', 'if (u > (unreadServers[s.id] ?? 0))', 'if (u > 0)', maximum, 'max непрочитанных'],
+    ['бейдж открытого сервера', 'if (s.id === currentServerId) continue;', 'if (false) continue;', open, 'открытый пропускается'],
+    ['запись нулей', 'if (u > (unreadServers[s.id] ?? 0))', 'if (u >= (unreadServers[s.id] ?? 0))', zero, 'нули не записываются'],
+  ] as const) it(`мутант «${name}» нарушает поведение засева`, () => {
+    // Целый модуль и original-first отделяют ошибку контракта от ошибки VM-харнесса.
+    scenario();
+    assert.throws(() => scenario(countsModule(anchor, replacement).seedServerCounts),
+      e => e instanceof assert.AssertionError && e.message.includes(message));
+  });
+});
 
 const emptyState = (): UnreadState => ({
   unreadCounts: {},

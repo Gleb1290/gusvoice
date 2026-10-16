@@ -2,6 +2,8 @@ import { eq, sql } from 'drizzle-orm';
 import { isAttPath } from './attachmentRules.js';
 import { db } from './db/index.js';
 import { linkPreviews } from './db/schema.js';
+import { isThreatHostNow } from './linkThreats.js';
+import { linkHost } from './linkThreatsRules.js';
 import { isRedundantDescription, parseHead } from './ogParse.js';
 import { BlockedTargetError, safeFetchPage } from './safeFetch.js';
 
@@ -63,6 +65,9 @@ function cacheKey(raw: string): string | null {
 export async function getLinkPreview(raw: string): Promise<LinkPreview | null> {
   const key = cacheKey(raw);
   if (!key) return null;
+  // Опасную ссылку (список угроз, #218 п.5) сервер сам не открывает: карточка не нужна, а поход на фишинговый адрес — лишний.
+  const host = linkHost(key);
+  if (host && isThreatHostNow(host)) return null;
 
   const [cached] = await db.select().from(linkPreviews).where(eq(linkPreviews.url, key)).limit(1);
   if (cached) {

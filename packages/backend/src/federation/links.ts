@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq, isNull, lt } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { federationLinkCodes, federationLinks } from '../db/schema.js';
+import { federationLinkCodes, federationLinks, federationMemberships, federationVouchedInstances } from '../db/schema.js';
 import { hashLinkSecret } from './linkCode.js';
 import { createLinkService, type StoredCode, type StoredLink } from './linkService.js';
 import type { LinkState } from './linkRules.js';
@@ -33,7 +33,22 @@ import { readInstanceMeta } from './instanceMeta.js';
  * ⚠️ Best-effort: шлём мимо ответа и глушим ошибку. Redis лежит — связка всё равно заведена, и
  * ронять из-за этого рукопожатие нельзя; человек увидит новое состояние, открыв вкладку заново.
  */
+const linkListeners = new Set<() => void>();
+
+/** Подписка на перемену связок (Э2 часть Б: беседы с людьми соседа — `convLink.refreshFedLinks`). Best-effort. */
+export function onLinksChanged(fn: () => void): () => void {
+  linkListeners.add(fn);
+  return () => linkListeners.delete(fn);
+}
+
 function notifyLinksChanged(): void {
+  for (const fn of linkListeners) {
+    try {
+      fn();
+    } catch {
+      // слушатель не вправе уронить смену связки
+    }
+  }
   // Источники CORS — сразу, а не через минуту кеша (#197 п. 8): гость только что подтверждённой связки
   // иначе ловил «ошибку сети» до следующего перечитывания. `force` — не присоединяться к чтению, начатому
   // до перемены (#198 п. 9; обновление по сроку присоединяется, #199 п. 9).
@@ -43,6 +58,27 @@ function notifyLinksChanged(): void {
   void publishToUser(admin, { t: 'federation.links' }).catch((err) => {
     console.warn(`[fed] событие о связках не разослано: ${err instanceof Error ? err.message : err}`);
   });
+}
+
+/**
+ * Наших людей, что гостят у этого соседа (индекс членств), — разбудить: связка с ним сменила состояние (15.10).
+ *
+ * 🔴 Зачем: держатель разорвал связку с удалённым навсегда соседом, а у людей в рейле так и висела его группа — выйти
+ * оттуда нельзя, хост мёртв. Клиент по событию перечитывает «Где я гость» (`linkState` у каждого места) и убирает группы
+ * разорванных связок сам; выключенный клиент узнает то же из ответа при запуске. Событие без нагрузки: список связок
+ * инстанса людям не раскрывается, каждый узнаёт только про свои гостевые места.
+ * ⚠️ Best-effort, как и событие держателю: Redis лежит — смена связки всё равно состоялась.
+ */
+async function announceGuestLinks(instanceId: string): Promise<void> {
+  try {
+    const rows = await db
+      .selectDistinct({ userId: federationMemberships.userId })
+      .from(federationMemberships)
+      .where(eq(federationMemberships.instanceId, instanceId));
+    for (const r of rows) await publishToUser(r.userId, { t: 'federation.guest_links' });
+  } catch (err) {
+    console.warn(`[fed] событие гостям о связке не разослано: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 function rowToLink(row: typeof federationLinks.$inferSelect): StoredLink {
@@ -72,6 +108,29 @@ export async function getLink(instanceId: string): Promise<StoredLink | null> {
  * Метрики отвечают на три вопроса, которые держатель задаёт первыми, когда что-то не работает:
  * сколько событий не доставлено, когда сосед отвечал в последний раз и не разъехались ли часы.
  */
+/** Э7 часть 3 (D, миграция 0143): имена чужих (без связки) инстансов со слов дома группы — для подписи значка (`instanceLabels`). */
+export async function listVouchedInstances(): Promise<{ instanceId: string; name: string | null; domain: string }[]> {
+  return db
+    .select({ instanceId: federationVouchedInstances.instanceId, name: federationVouchedInstances.name, domain: federationVouchedInstances.domain })
+    .from(federationVouchedInstances);
+}
+
+const vouchedListeners = new Set<() => Promise<void> | void>();
+
+/** Подпись значка (`instanceLabels`) перечитывается, когда дом группы назвал нам новый инстанс. */
+export function onVouchedChanged(fn: () => Promise<void> | void): () => void {
+  vouchedListeners.add(fn);
+  return () => vouchedListeners.delete(fn);
+}
+
+export async function saveVouchedInstance(v: { instanceId: string; name: string | null; domain: string; vouchedBy: string }): Promise<void> {
+  await db
+    .insert(federationVouchedInstances)
+    .values(v)
+    .onConflictDoUpdate({ target: federationVouchedInstances.instanceId, set: { name: v.name, domain: v.domain, vouchedBy: v.vouchedBy, updatedAt: new Date() } });
+  for (const fn of vouchedListeners) await fn();
+}
+
 export async function listLinks(): Promise<
   (StoredLink & {
     localName: string | null;
@@ -248,6 +307,7 @@ export const linkService = createLinkService({
     // рабочая, а её гостей заморозил `revokeOwnKey` — возвращаем то, что сейчас разрешено (F-20).
     if (link.confirmed && link.state === 'active') await thawGuestsOf(link.instanceId);
     notifyLinksChanged();
+    void announceGuestLinks(link.instanceId);
   },
   async setConfirmPending(instanceId, pending) {
     await db.update(federationLinks).set({ confirmPending: pending }).where(eq(federationLinks.instanceId, instanceId));
@@ -269,6 +329,7 @@ export const linkService = createLinkService({
       await freezeGuestsOf(instanceId);
     }
     notifyLinksChanged();
+    void announceGuestLinks(instanceId);
   },
   newId: () => randomUUID(),
   // Перенос связки на новую личность соседа живёт в `revocation.ts`: там же и запись об отозванном

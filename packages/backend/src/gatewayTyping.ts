@@ -37,6 +37,18 @@ export interface TypingDeps<S> {
   /** `caps` — возможности соединения (`identify.caps`): по `typing2` решается, получит ли оно `round` или прежнее `voice`. */
   connsOf(userId: string): Iterable<{ socket: S; caps?: ReadonlySet<string> }>;
   send(socket: S, msg: TypingMessage): void;
+  /**
+   * ЛС между инстансами, Э4 (#141): у собеседника нет соединений здесь — если он человек другого инстанса, «печатает» уходит
+   * его дому (решает и проверяет блокировку вызываемый). Нет зависимости — некому (как до Э4).
+   */
+  remoteTyping?(dmId: string, senderId: string, peerId: string, action: string): void;
+  /** Исправления ревью 12.10, п. 8: собеседник — человек другого инстанса: «печатает» всегда его дому (`remoteTyping`). */
+  isRemote?(userId: string): boolean;
+  /**
+   * Э7 часть 3 (#141, `dmgroup2`): наш человек печатает в группе — участникам других инстансов (через хост). Вызываемый сам
+   * решает, есть ли они; от имени человека другого инстанса (теневая строка) не вызывается. Нет зависимости — некому.
+   */
+  remoteGroupTyping?(dmId: string, senderId: string, action: string): void;
   getChannelAudience(channelId: string): Promise<{ serverId: string; userIds: string[] } | null>;
   publishToChannel(serverId: string, channelId: string, msg: TypingMessage, audience: string[]): Promise<unknown>;
 }
@@ -64,6 +76,7 @@ export async function relayTyping<S>(
       if (!reachesPeer(await deps.isBlockedBy(p, uid))) continue;
       for (const c of conns) deps.send(c.socket, { t: 'typing', dmId: msg.dmId, userId: uid, ...extraFor(c.caps) });
     }
+    if (!deps.isRemote?.(uid)) deps.remoteGroupTyping?.(msg.dmId, uid, extra.action ?? 'typing');
     return;
   }
   const route = typingRoute(msg, conn, () => peerId);
@@ -73,7 +86,10 @@ export async function relayTyping<S>(
     // в сети дольше 30 с (`api_send_progress.cpp: kSendTypingsToOfflineFor`) — у нас отсрочка не нужна: без соединения кадр
     // не доставить, а два запроса в базу (блок, показ беседы) экономим (07.10, G83).
     const conns = [...deps.connsOf(route.peerId)];
-    if (conns.length === 0) return;
+    if (conns.length === 0 || deps.isRemote?.(route.peerId)) {
+      deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');
+      return;
+    }
     // Заблокированному «печатает» не доходит до того, кто его заблокировал (#212, `blockRules`).
     if (!reachesPeer(await deps.isBlockedBy(route.peerId, uid))) return;
     // Беседа собеседнику ещё не показана (её завёл я, до него не дошло ни одного сообщения) — «печатает» ему не шлём:

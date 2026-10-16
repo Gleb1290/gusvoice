@@ -411,18 +411,21 @@ export function DmSearchChips({
   chips,
   onChips,
   onText,
+  phone,
 }: {
   q: string;
   dms: readonly DmChannel[];
   chips: SearchChips;
   onChips: (c: SearchChips) => void;
   onText: (t: string) => void;
+  /** Телефон: чипов типа нет — их роль играют вкладки поиска (`DmSearchKinds.tsx`). */
+  phone?: boolean;
 }) {
   const nameOf = usePeerName();
   const people = useMemo(() => (chips.person ? [] : personSuggestions(dms, q, 3, nameOf)), [dms, q, chips.person, nameOf]);
   const date = useMemo(() => (chips.date ? null : parseDateQuery(q)), [q, chips.date]);
   // Чипы типа (Telegram Android `FiltersView`): пока поле пусто — все пять, выбран один — только он (с крестиком).
-  const kinds = chips.kind ? [] : q.trim() === '' ? KIND_CHIPS : [];
+  const kinds = chips.kind || phone ? [] : q.trim() === '' ? KIND_CHIPS : [];
   if (!chips.person && !chips.date && !chips.kind && people.length === 0 && !date && kinds.length === 0) return null;
   return (
     <div className="dms-chips" role="group" aria-label="Фильтры поиска">

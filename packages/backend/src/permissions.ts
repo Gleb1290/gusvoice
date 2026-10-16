@@ -73,9 +73,35 @@ export async function getMemberContext(serverId: string, userId: string): Promis
   if (member.state !== 'active') return null;
 
   const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
-  const isOwner = server?.ownerId === userId;
-
   const serverRoles = await db.select().from(roles).where(eq(roles.serverId, serverId));
+  const mr = await db
+    .select({ roleId: memberRoles.roleId })
+    .from(memberRoles)
+    .where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
+  return memberContextFrom({
+    userId,
+    ownerId: server?.ownerId ?? null,
+    isGuest: member.homeInstanceId !== null,
+    serverRoles,
+    assignedRoleIds: mr.map((r) => r.roleId),
+  });
+}
+
+/**
+ * Контекст участника из уже загруженных строк (12.10, #218): ОДНО правило для `getMemberContext` (один сервер) и
+ * `getChannelPermissionsForServers` (весь список серверов за постоянное число запросов). Членство уже проверено
+ * вызывающим: активное, не супер-админ.
+ */
+export function memberContextFrom(p: {
+  userId: string;
+  ownerId: string | null;
+  isGuest: boolean;
+  serverRoles: readonly (RoleRow & { isGuests: boolean })[];
+  assignedRoleIds: Iterable<string>;
+}): MemberContext {
+  const { userId, isGuest, serverRoles } = p;
+  const isOwner = p.ownerId === userId;
+
   const everyone = serverRoles.find((r) => r.isEveryone) ?? null;
   /**
    * Базовые права гостя даёт системная роль «Гости» (#139, F3, §5.9) — она ЗАМЕНЯЕТ `@everyone`.
@@ -87,15 +113,10 @@ export async function getMemberContext(serverId: string, userId: string): Promis
    * это «для всех участников канала», и гость участник не меньше прочих. Переопределения на саму
    * роль «Гости» работают поверх — через `roleIds` ниже.
    */
-  const isGuest = member.homeInstanceId !== null;
   const guestsRole = serverRoles.find((r) => r.isGuests) ?? null;
   const baseRole = isGuest && guestsRole ? guestsRole : everyone;
 
-  const mr = await db
-    .select({ roleId: memberRoles.roleId })
-    .from(memberRoles)
-    .where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
-  const assigned = new Set(mr.map((r) => r.roleId));
+  const assigned = new Set(p.assignedRoleIds);
 
   const effectiveRoles: RoleRow[] = serverRoles
     .filter((r) => r.id === baseRole?.id || assigned.has(r.id))
@@ -215,6 +236,103 @@ export async function getServerChannelPermissions(serverId: string, userId: stri
     const catRows = c.categoryId ? byCat.get(c.categoryId) ?? [] : [];
     const chanRows = byChan.get(c.id) ?? [];
     out.set(c.id, resolveLayered(ctx, userId, catRows, chanRows));
+  }
+  return out;
+}
+
+/** Канал в разборе прав по всему списку серверов (`getChannelPermissionsForServers`). */
+export interface ServerChannelRow {
+  id: string;
+  serverId: string;
+  categoryId: string | null;
+  name: string;
+  type: string;
+}
+
+/**
+ * Права человека на КАЖДЫЙ канал КАЖДОГО из серверов списка — за постоянное число запросов, а не по запросу на сервер
+ * (12.10, #218: счётчики и последнее сообщение в `GET /servers`, сводка `GET /unread`). Правило то же, что у
+ * `getMemberContext` + `getServerChannelPermissions`: супер-админ — виртуальный владелец любого сервера; членства нет
+ * или оно закрыто держателем (`state <> 'active'`) — сервера в ответе нет; владелец и ADMINISTRATOR — все права;
+ * остальным — переопределения категории, поверх них канала (`resolveLayered`).
+ */
+export async function getChannelPermissionsForServers(
+  userId: string,
+  serverIds: readonly string[],
+): Promise<Map<string, { ctx: MemberContext; channels: ServerChannelRow[]; perms: Map<string, bigint> }>> {
+  const out = new Map<string, { ctx: MemberContext; channels: ServerChannelRow[]; perms: Map<string, bigint> }>();
+  const ids = [...new Set(serverIds)];
+  if (!ids.length) return out;
+  const chanCols = { id: channels.id, serverId: channels.serverId, categoryId: channels.categoryId, name: channels.name, type: channels.type };
+
+  const ctxs = new Map<string, MemberContext>();
+  if (isSuperAdmin(asUserId(userId))) {
+    for (const sid of ids) {
+      ctxs.set(sid, { isOwner: true, roleIds: [], roles: [], everyoneRoleId: null, serverPermissions: ALL_PERMISSIONS });
+    }
+  } else {
+    const [members, srvRows, roleRows, mrRows] = await Promise.all([
+      db
+        .select({ serverId: serverMembers.serverId, state: serverMembers.state, homeInstanceId: users.homeInstanceId })
+        .from(serverMembers)
+        .innerJoin(users, eq(serverMembers.userId, users.id))
+        .where(and(eq(serverMembers.userId, userId), inArray(serverMembers.serverId, ids))),
+      db.select({ id: servers.id, ownerId: servers.ownerId }).from(servers).where(inArray(servers.id, ids)),
+      db.select().from(roles).where(inArray(roles.serverId, ids)),
+      db
+        .select({ serverId: memberRoles.serverId, roleId: memberRoles.roleId })
+        .from(memberRoles)
+        .where(and(eq(memberRoles.userId, userId), inArray(memberRoles.serverId, ids))),
+    ]);
+    const ownerOf = new Map(srvRows.map((r) => [r.id, r.ownerId]));
+    for (const m of members) {
+      if (m.state !== 'active') continue;
+      ctxs.set(
+        m.serverId,
+        memberContextFrom({
+          userId,
+          ownerId: ownerOf.get(m.serverId) ?? null,
+          isGuest: m.homeInstanceId !== null,
+          serverRoles: roleRows.filter((r) => r.serverId === m.serverId),
+          assignedRoleIds: mrRows.filter((r) => r.serverId === m.serverId).map((r) => r.roleId),
+        }),
+      );
+    }
+  }
+  if (!ctxs.size) return out;
+
+  const chans: ServerChannelRow[] = await db.select(chanCols).from(channels).where(inArray(channels.serverId, [...ctxs.keys()]));
+  // Переопределения нужны только тем, у кого нет «всех прав» на сервере.
+  const layered = chans.filter((c) => {
+    const ctx = ctxs.get(c.serverId)!;
+    return !(ctx.isOwner || isAdmin(ctx.serverPermissions));
+  });
+  const chanIds = layered.map((c) => c.id);
+  const catIds = [...new Set(layered.map((c) => c.categoryId).filter((x): x is string => !!x))];
+  const [chanOws, catOws] = await Promise.all([
+    chanIds.length
+      ? db.select().from(channelOverwrites).where(inArray(channelOverwrites.channelId, chanIds))
+      : Promise.resolve([] as (typeof channelOverwrites.$inferSelect)[]),
+    catIds.length
+      ? db.select().from(categoryOverwrites).where(inArray(categoryOverwrites.categoryId, catIds))
+      : Promise.resolve([] as (typeof categoryOverwrites.$inferSelect)[]),
+  ]);
+  const byChan = new Map<string, OverwriteRow[]>();
+  for (const o of chanOws) byChan.set(o.channelId, [...(byChan.get(o.channelId) ?? []), o]);
+  const byCat = new Map<string, OverwriteRow[]>();
+  for (const o of catOws) byCat.set(o.categoryId, [...(byCat.get(o.categoryId) ?? []), o]);
+
+  for (const [sid, ctx] of ctxs) out.set(sid, { ctx, channels: [], perms: new Map() });
+  for (const c of chans) {
+    const entry = out.get(c.serverId)!;
+    const ctx = entry.ctx;
+    entry.channels.push(c);
+    entry.perms.set(
+      c.id,
+      ctx.isOwner || isAdmin(ctx.serverPermissions)
+        ? ALL_PERMISSIONS
+        : resolveLayered(ctx, userId, c.categoryId ? byCat.get(c.categoryId) ?? [] : [], byChan.get(c.id) ?? []),
+    );
   }
   return out;
 }

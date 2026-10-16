@@ -73,6 +73,20 @@ export function sharedItems(messages: readonly ConvMessage[], kind: SharedMediaK
   return out;
 }
 
+/**
+ * Э3 (#141, `fedm3`): отказ «файл ещё загружается» для вложения с `fedState: 'copying'` (копия с инстанса автора едет) — без запроса:
+ * тот же код и метка, что у настоящего 503 `federation.att_pending` (`fileActions.fedRefusal`), слова — в `toastError` → `fedErrorText`.
+ * Инстанс автора по вложению не узнать — фраза «с инстанса собеседника».
+ */
+export function copyingRefusal(): Error {
+  return Object.assign(new Error('federation.att_pending'), { fedFile: true, fedWho: null });
+}
+
+/** Просмотрщик общих медиа: нескачанные (`copying`) в ряд не входят — файла для показа ещё нет; от старых к новым. */
+export function viewerMedia<T extends { att?: Attachment }>(newestFirst: readonly T[]): T[] {
+  return viewerOrder(newestFirst.filter((x) => x.att?.fedState !== 'copying'));
+}
+
 /** Порция к уже загруженному: без повторов по id сообщения (сообщение могло прийти дважды на границе порций). */
 export function mergeSharedPage(prev: readonly ConvMessage[], page: readonly ConvMessage[]): ConvMessage[] {
   const seen = new Set(prev.map((m) => m.id));

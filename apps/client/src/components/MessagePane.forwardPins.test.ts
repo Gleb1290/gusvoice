@@ -130,7 +130,7 @@ it('полоса пересылки снимается, хранит source/оп
   assert.equal(useStore.getState().fwdDrafts['target-conversation'], undefined, '× отменяет черновик, не трогая другие беседы');
   await act(async () => { useStore.getState().setFwdDraft('target-conversation', draft); await h.flush(); });
   assert.ok(h.host.querySelector('.fwd-strip'), 'после отмены новый черновик действительно отрисован');
-  assert.equal(document.querySelector('[aria-modal="true"], .modal-overlay, .sheet, .ctx-menu, .confirm-overlay, .dd-pop, .lightbox, .emoji-backdrop, .sb-pop, .status-pop'), null, 'Esc не перекрыт посторонним слоем');
+  assert.equal(document.querySelector('[aria-modal="true"], .modal-overlay, .sheet, .ctx-menu, .confirm-overlay, .dd-pop, .lightbox, .emoji-backdrop, .sb-pop, .status-pop') === null, true, 'Esc не перекрыт посторонним слоем');
   const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
   let reachedWindow = false; const observeEsc = () => { reachedWindow = true; }; window.addEventListener('keydown', observeEsc);
   await act(async () => { h.host.querySelector('.chat')!.dispatchEvent(esc); await h.flush(); });
@@ -299,7 +299,7 @@ it('закреп из меню спрашивает область, откреп
   const unpinProps = { ...pins, list: [h.pin('pin-3', 'me', true), h.pin('pin-4', 'me', true), h.pin('pin-5', 'me', false)] };
   await h.mountWithConfirm({ messages: ['pin-3', 'pin-4', 'pin-5'].map((id) => h.msg(id)), pins: unpinProps, deletePeerName: 'Peer' });
   await menuAction('pin-3', 'Открепить');
-  assert.equal(document.querySelector('#confirm-title'), null, 'из меню открепление теперь отменяется плашкой');
+  assert.equal(document.querySelector('#confirm-title') === null, true, 'из меню открепление теперь отменяется плашкой');
   assert.ok(h.host.textContent?.includes('Сообщение откреплено'));
   assert.equal(calls.filter(c => c.startsWith('unpin:')).length, 0);
   const undo = [...h.host.querySelectorAll<HTMLButtonElement>('.fwd-done button')].find(b => b.textContent?.trim() === 'Отменить'); assert.ok(undo);

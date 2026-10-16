@@ -23,11 +23,16 @@ use tauri::{
 /// всплывать поверх игры, как это уже было.
 pub const ROSTER: &str = "overlay";
 pub const TOAST: &str = "toast";
+/// Третье окно — свои всплывающие уведомления на ПК (G38, ND-07, `notify_popup.rs`). В отличие от первых двух мышь
+/// ловит всегда (крестик, клик, ответ), но фокус не забирает: показ — `SWP_NOACTIVATE` (`notify_popup::place`).
+pub const NOTIFY: &str = "notify";
 
 /// Слот сторожа под метку: у каждого окна свой HWND.
 fn slot_of(label: &str) -> usize {
     if label == TOAST {
         1
+    } else if label == NOTIFY {
+        2
     } else {
         0
     }
@@ -38,6 +43,9 @@ fn slot_of(label: &str) -> usize {
 fn spec(label: &str) -> (String, f64, f64) {
     if label == TOAST {
         ("index.html?window=toast".into(), 420.0, 120.0)
+    } else if label == NOTIFY {
+        // Ширина карточки Telegram Desktop (`notifyWidth: 320px`, `window/window.style`), высота — одна карточка.
+        ("index.html?window=notify".into(), 320.0, 80.0)
     } else {
         ("index.html?window=overlay".into(), 240.0, 140.0)
     }
@@ -97,7 +105,10 @@ pub fn ensure(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
         .focused(false)
         .build()?;
     // Click-through by default: the mouse passes through to the game underneath.
-    let _ = win.set_ignore_cursor_events(true);
+    // Окно уведомлений (G38) — исключение: оно по размеру стопки карточек и мышь нужна ему всегда.
+    if label != NOTIFY {
+        let _ = win.set_ignore_cursor_events(true);
+    }
     Ok(win)
 }
 
@@ -123,10 +134,18 @@ pub fn show(app: &AppHandle, label: &str) -> tauri::Result<()> {
 /// обращается к Tauri из своего потока: в этом модуле работа с окном из синхронного контекста уже
 /// приводила к дедлоку событийного цикла (см. шапку `ensure`).
 #[cfg(target_os = "windows")]
-static HWNDS: [std::sync::atomic::AtomicIsize; 2] = [
+static HWNDS: [std::sync::atomic::AtomicIsize; 3] = [
+    std::sync::atomic::AtomicIsize::new(0),
     std::sync::atomic::AtomicIsize::new(0),
     std::sync::atomic::AtomicIsize::new(0),
 ];
+
+/// Поставить окно под сторожа topmost без `show`: окно уведомлений (G38) показывает себя само, без активации
+/// (`notify_popup::place`), — `show` Tauri со второго раза зовёт `SW_SHOW` и увёл бы фокус из игры.
+#[cfg(target_os = "windows")]
+pub fn guard_hwnd(label: &str, raw: isize) {
+    HWNDS[slot_of(label)].store(raw, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Мы «просели», если ВЫШЕ нас в Z-порядке есть видимое окно без `WS_EX_TOPMOST`. По правилам Windows
 /// такого быть не может — topmost-окна всегда выше обычных, — значит нас оттуда выбросили.
@@ -192,7 +211,7 @@ pub fn start_topmost_guard() {
     use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
     std::thread::spawn(|| loop {
         std::thread::sleep(std::time::Duration::from_millis(1200));
-        // Оба окна одним проходом: их всего два, и просесть может любое.
+        // Все окна одним проходом: их всего три, и просесть может любое.
         for slot in HWNDS.iter() {
             let raw = slot.load(Ordering::Relaxed);
             if raw == 0 {

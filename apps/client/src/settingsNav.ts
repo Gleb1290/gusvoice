@@ -18,7 +18,7 @@
 
 import type { IconName } from './components/Icon';
 
-export type SectionKey = 'sound' | 'notif' | 'look' | 'data' | 'folders' | 'account' | 'federation' | 'apps';
+export type SectionKey = 'sound' | 'notif' | 'look' | 'data' | 'folders' | 'account' | 'privacy' | 'federation' | 'apps';
 
 export interface SettingsGroup {
   /** id узла в разметке, к которому прокручиваем. */
@@ -50,6 +50,11 @@ export interface SettingsGroup {
   adminOnly?: boolean;
   /** Только там, где сервер умеет папки бесед ЛС (`folders1`, G40) и включены новые ЛС. */
   foldersOnly?: boolean;
+  /**
+   * Везде, КРОМЕ самого Android-приложения (приёмка 0.9.0): инструкция «как поставить GusVoice на Android» внутри
+   * установленного приложения не к месту.
+   */
+  notAndroidApp?: boolean;
 }
 
 export interface SettingsSection {
@@ -75,7 +80,7 @@ export const SECTIONS: SettingsSection[] = [
       { id: 'set-g-audio-proc', label: 'Обработка звука' },
       { id: 'set-g-ptt', label: 'Режим передачи' },
       { id: 'set-g-hotkeys', label: 'Горячие клавиши', notMobile: true },
-      { id: 'set-g-stream', label: 'Качество трансляции' },
+      { id: 'set-g-stream', label: 'Качество трансляции', notMobile: true },
       { id: 'set-g-stream-cursor', label: 'Курсор в трансляции', desktopOnly: true },
       { id: 'set-g-native-audio', label: 'Тест захвата звука', desktopOnly: true },
     ],
@@ -87,6 +92,7 @@ export const SECTIONS: SettingsSection[] = [
     icon: 'bell',
     groups: [
       { id: 'set-g-osn', label: 'Системные уведомления' },
+      { id: 'set-g-notify-popup', label: 'Всплывающие окна', desktopOnly: true },
       { id: 'set-g-notify-view', label: 'Имя и текст в уведомлениях' },
       { id: 'set-g-notify-dm', label: 'Личные сообщения' },
       { id: 'set-g-notify-groups', label: 'Уведомления из групп' },
@@ -150,8 +156,23 @@ export const SECTIONS: SettingsSection[] = [
       { id: 'set-g-password', label: 'Смена пароля' },
       { id: 'set-g-sessions', label: 'Сессии' },
       { id: 'set-g-2fa', label: 'Двухфакторная аутентификация' },
+    ],
+  },
+  /**
+   * «Конфиденциальность» — отдельный раздел сразу после аккаунта (приёмка 0.9.0), как «Конфиденциальность» у Telegram Android
+   * (`TA/ui/SettingsActivity.java` — пункт `SettingsPrivacySecurity` третьим в списке, после аккаунта и чатов). Раньше эти
+   * группы жили в конце «Аккаунта и безопасности», и «Кто может мне писать» там не находили.
+   */
+  {
+    key: 'privacy',
+    label: 'Конфиденциальность',
+    sub: 'Кто может писать, звонить и видеть время захода',
+    icon: 'shield',
+    groups: [
+      { id: 'set-g-messages', label: 'Кто может мне писать' },
       { id: 'set-g-lastseen', label: 'Время захода' },
       { id: 'set-g-calls', label: 'Звонки' },
+      // «Заблокированные» — как у Telegram, в «Конфиденциальности» (R230 D.2; раньше жили в конце «Аккаунта»).
       { id: 'set-g-blocked', label: 'Заблокированные' },
     ],
   },
@@ -179,13 +200,21 @@ export const SECTIONS: SettingsSection[] = [
       { id: 'set-g-close', label: 'При нажатии на крестик', desktopOnly: true },
       { id: 'set-g-downloads', label: 'Загрузки', desktopOnly: true },
       { id: 'set-g-updates', label: 'Обновления', desktopOnly: true },
-      { id: 'set-g-windows', label: 'Приложение для Windows' },
-      { id: 'set-g-android', label: 'GusVoice на Android' },
+      { id: 'set-g-windows', label: 'Приложение для Windows', notMobile: true },
+      { id: 'set-g-android', label: 'GusVoice на Android', notAndroidApp: true },
       { id: 'set-g-push', label: 'Пуш-уведомления' },
-      { id: 'set-g-conv-test', label: 'Новые ЛС', adminOnly: true },
     ],
   },
 ];
+
+/**
+ * Подзаголовок раздела. На телефоне у «Приложений» нет слова «Десктоп»: приложения для компьютера там не настраиваются
+ * (разделы `desktopOnly` скрыты), и подпись обещала бы то, чего на экране нет (#218).
+ */
+export function sectionSub(section: Pick<SettingsSection, 'key' | 'sub'>, phoneUi: boolean): string | undefined {
+  if (phoneUi && section.key === 'apps') return 'Android и обновления';
+  return section.sub;
+}
 
 export function sectionOf(key: SectionKey): SettingsSection {
   const s = SECTIONS.find((x) => x.key === key);
@@ -219,6 +248,7 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
   { id: 'set-g-notify-exceptions', title: 'Исключения', section: 'notif', group: 'Исключения', keywords: 'исключения беседы отключённые заглушённые без звука выключенные включить сбросить' },
   { id: 'set-g-notify-repeat', title: 'Повторять уведомления', section: 'notif', group: 'Повтор', keywords: 'повтор напоминание непрочитанное каждые минут час никогда телефон' },
   { id: 'set-g-notify-groups', title: 'Уведомления из групп', section: 'notif', group: 'Группы', keywords: 'группы групповые беседы пуш телефон выключить' },
+  { id: 'set-g-notify-popup', title: 'Всплывающие окна уведомлений', section: 'notif', group: 'Всплывающие окна', keywords: 'windows уведомления системные тост окно угол экран положение количество монитор ответить поверх игры' },
   { id: 'set-g-osn', title: 'Системные уведомления', section: 'notif', group: 'Системные', keywords: 'windows тост уведомление всплывающее' },
   { id: 'set-g-sounds', title: 'Звуки уведомлений', section: 'notif', group: 'Звуки', keywords: 'звук сигнал вход выход бип' },
   { id: 'set-g-devices', title: 'Микрофон, наушники, камера', section: 'sound', group: 'Устройства', keywords: 'устройство микрофон наушники динамики камера' },
@@ -251,11 +281,13 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
   { id: 'set-g-sessions', title: 'Сессии и выход везде', section: 'account', group: 'Сессии', keywords: 'сессия выйти устройства вход' },
   { id: 'set-g-2fa', title: 'Двухфакторная аутентификация', section: 'account', group: '2FA', keywords: '2fa двухфакторная код totp резервные' },
   { id: 'set-g-folders', title: 'Папки бесед', section: 'folders', group: 'Мои папки', keywords: 'папка папки вкладки беседы личные сообщения лс непрочитанные' },
-  { id: 'set-g-lastseen', title: 'Время захода', section: 'account', group: 'Приватность', keywords: 'был в сети была последний заход онлайн приватность конфиденциальность видимость время прочтения прочитано скрыть никто все собеседники' },
-  { id: 'set-g-calls', title: 'Кто может звонить', section: 'account', group: 'Приватность', keywords: 'звонки звонок позвонить кто может мне звонить приватность конфиденциальность никто все собеседники' },
-  { id: 'set-g-calls-exceptions', title: 'Исключения звонков', section: 'account', group: 'Приватность', keywords: 'всегда разрешать никогда не разрешать исключения звонки звонить' },
-  { id: 'set-g-lastseen-exceptions', title: 'Исключения времени захода', section: 'account', group: 'Приватность', keywords: 'всегда показывать никогда не показывать исключения время захода был в сети скрыть от человека' },
-  { id: 'set-g-blocked', title: 'Заблокированные', section: 'account', group: 'Чёрный список', keywords: 'заблокировать блокировка чёрный черный список игнор личные сообщения лс разблокировать' },
+  { id: 'set-g-lastseen', title: 'Время захода', section: 'privacy', group: 'Время захода', keywords: 'был в сети была последний заход онлайн приватность конфиденциальность видимость время прочтения прочитано скрыть никто все собеседники' },
+  { id: 'set-g-calls', title: 'Кто может звонить', section: 'privacy', group: 'Звонки', keywords: 'звонки звонок позвонить кто может мне звонить приватность конфиденциальность никто все собеседники' },
+  { id: 'set-g-calls-exceptions', title: 'Исключения звонков', section: 'privacy', group: 'Звонки', keywords: 'всегда разрешать никогда не разрешать исключения звонки звонить' },
+  { id: 'set-g-messages', title: 'Кто может мне писать', section: 'privacy', group: 'Сообщения', keywords: 'сообщения писать кто может мне писать приватность конфиденциальность все мои контакты незнакомцы' },
+  { id: 'set-g-messages-exceptions', title: 'Исключения сообщений', section: 'privacy', group: 'Сообщения', keywords: 'всегда разрешать исключения сообщения писать' },
+  { id: 'set-g-lastseen-exceptions', title: 'Исключения времени захода', section: 'privacy', group: 'Время захода', keywords: 'всегда показывать никогда не показывать исключения время захода был в сети скрыть от человека' },
+  { id: 'set-g-blocked', title: 'Заблокированные', section: 'privacy', group: 'Чёрный список', keywords: 'заблокировать блокировка чёрный черный список игнор личные сообщения лс разблокировать конфиденциальность приватность' },
   { id: 'set-g-instances', title: 'Мои инстансы', section: 'federation', group: 'Мои инстансы', keywords: 'инстанс сервер аккаунт добавить переключить удалить другой' },
   { id: 'set-g-guest', title: 'Где я гость', section: 'federation', group: 'Гость', keywords: 'гость федерация инстанс чужой' },
   { id: 'set-g-close', title: 'При нажатии на крестик', section: 'apps', group: 'Десктоп', keywords: 'закрыть трей свернуть крестик' },
@@ -319,4 +351,30 @@ export function visibleSections(opts: {
       ),
     }))
     .filter((s) => s.groups.length > 0);
+}
+
+/**
+ * Внутри самого Android-приложения (`isAndroid()`) — без групп `notAndroidApp`; раздел, оставшийся без групп, пропадает.
+ * Отдельно от `visibleSections`, поверх его результата: поиск (`searchSettings`) берёт тот же список и в скрытую группу не ведёт.
+ */
+export function withoutInAppGroups(sections: SettingsSection[], androidApp: boolean): SettingsSection[] {
+  if (!androidApp) return sections;
+  return sections
+    .map((s) => ({ ...s, groups: s.groups.filter((g) => !g.notAndroidApp) }))
+    .filter((s) => s.groups.length > 0);
+}
+
+/** Где запущен клиент — для строки версии внизу списка настроек. */
+export type AppPlatform = 'android' | 'desktop' | 'web';
+
+/**
+ * Строка версии внизу списка разделов настроек (приёмка 0.9.0: «версии приложения нигде не видно»). Как подпись под списком
+ * настроек Telegram Android — «Telegram для Android v12.x (…)» (`TA/ui/SettingsActivity.java` `getVersionName`, `versionView`:
+ * 14 dp, серый, по центру). Версия — `tauri.conf.json` установленного приложения (`appVersion`), у веба номера нет:
+ * собранный веб-клиент своей версии не знает, и выдумывать её нельзя.
+ */
+export function appVersionLabel(platform: AppPlatform, version: string | null): string {
+  const name = platform === 'android' ? 'GusVoice для Android' : platform === 'desktop' ? 'GusVoice для ПК' : 'GusVoice для веба';
+  const v = version?.trim().replace(/^v/, '');
+  return v ? `${name} ${v}` : name;
 }

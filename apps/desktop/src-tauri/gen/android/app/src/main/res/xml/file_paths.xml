@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Что наш FileProvider (${applicationId}.fileprovider) вообще может отдать — только то, что MediaBridge выдаёт наружу:
-  копия для буфера обмена (cache/gv-media/clip), «Открыть» (cache/gv-media/open), «Поделиться» (cache/gv-media/share).
+  копия для буфера обмена (cache/gv-media/clip), «Открыть» (cache/gv-media/open), «Поделиться» (cache/gv-media/share),
+  снимок системной камеры (cache/gv-media/cam).
   Не весь кеш и не внешняя память: ссылка вида content://<пакет>.fileprovider/… на остальное не строится и не открывается
   (было `cache-path path="."` + `external-path path="."` из шаблона — `inbox`, `put`, кеш WebView были бы в зоне доступа).
 -->
@@ -9,4 +10,6 @@
   <cache-path name="gv_clip" path="gv-media/clip/" />
   <cache-path name="gv_open" path="gv-media/open/" />
   <cache-path name="gv_share" path="gv-media/share/" />
+  <!-- Системная камера листа вложений (10.10): сюда камера пишет снимок / видео по EXTRA_OUTPUT (MediaBridge.capture). -->
+  <cache-path name="gv_cam" path="gv-media/cam/" />
 </paths>

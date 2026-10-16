@@ -20,6 +20,9 @@ interface UpdateStore {
   notes: string | null; // release notes (Update.body)
   downloaded: number; // bytes received so far
   total: number; // total bytes (0 = unknown / not started)
+  startedAt: number; // Date.now() начала скачивания — полоса доезжает плавно (`UpdatePanel`, 15.10)
+  dlDone: boolean; // скачивание закончилось (полоса может ещё доезжать до 100 %)
+  viaSplash: boolean; // 16.10: сборка с заставкой — «Обновить» = перезапуск, качает и ставит заставка (`applyPendingUpdate`)
   error: string | null;
   set: (patch: Partial<Omit<UpdateStore, 'set'>>) => void;
 }
@@ -30,6 +33,9 @@ export const useUpdate = create<UpdateStore>((set) => ({
   notes: null,
   downloaded: 0,
   total: 0,
+  startedAt: 0,
+  dlDone: false,
+  viaSplash: false,
   error: null,
   set: (patch) => set(patch),
 }));

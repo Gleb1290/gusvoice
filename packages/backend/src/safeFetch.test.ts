@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { after, describe, it } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import {
   assertPeerTarget,
   BlockedTargetError,
@@ -8,10 +12,56 @@ import {
   isBlockedAddress,
   PEER_MAX_BYTES,
   PEER_MAX_FILE_BYTES,
+  PEER_MAX_ATT_BYTES,
+  ATT_DEADLINE_MS,
+  FILE_DEADLINE_MS,
   resolveRedirect,
   safeFetchPage,
   safePeerRequest,
 } from './safeFetch.js';
+
+function loadSafeFetchWithTransport(
+  nextBodyLength: () => number,
+  calls: Record<string, unknown>[],
+  deadlines: number[],
+  sourceOverride?: string,
+): typeof import('./safeFetch.js') {
+  const fakeRequest = (options: Record<string, unknown>) => {
+    calls.push(options);
+    const request = new EventEmitter() as EventEmitter & { end: (body?: unknown) => void; destroy: (_error?: Error) => void };
+    request.destroy = () => {};
+    request.end = () => {
+      const response = new EventEmitter() as EventEmitter & { statusCode: number; headers: Record<string, string>; destroy: () => void };
+      response.statusCode = 200;
+      response.headers = { 'content-type': 'application/octet-stream' };
+      response.destroy = () => {};
+      request.emit('response', response);
+      response.emit('data', { length: nextBodyLength() });
+      response.emit('end');
+    };
+    return request;
+  };
+  const source = sourceOverride ?? readFileSync(new URL('./safeFetch.ts', import.meta.url), 'utf8');
+  const module = { exports: {} as Record<string, unknown> };
+  runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, {
+    module,
+    exports: module.exports,
+    URL,
+    Buffer: { from: (value: string) => Buffer.from(value), concat: () => Buffer.alloc(0) },
+    setTimeout: (_fn: () => void, ms: number) => { deadlines.push(ms); return deadlines.length; },
+    clearTimeout: () => {},
+    require: (name: string) => {
+      if (name === 'node:dns') return { lookup: () => {} };
+      if (name === 'node:http' || name === 'node:https') return { request: fakeRequest };
+      if (name === 'node:net') return { isIP: () => 0 };
+      if (name === './federation/devPeers.js') return { isDevPeerHost: () => false };
+      throw new Error(`неожиданный импорт safeFetch: ${name}`);
+    },
+  });
+  return module.exports as typeof import('./safeFetch.js');
+}
 
 /**
  * Тесты фильтра SSRF. Гоняются `pnpm --filter @gusvoice/backend test`.
@@ -438,5 +488,59 @@ describe('запросы к соседнему инстансу (F0, #139)', () 
         /больше предела/,
       );
     });
+  });
+});
+
+describe('пределы больших бинарных файлов соседа', () => {
+  it('25 МиБ и пять минут включаются только для attachment вместе с binary, старый предел остаётся парным', async () => {
+    // Класс ошибки: общий лимит аватаров либо короткий таймаут незаметно обрывает большие вложения ЛС.
+    const calls: Record<string, unknown>[] = [];
+    const deadlines: number[] = [];
+    let bodyLength = 0;
+    const source = readFileSync(new URL('./safeFetch.ts', import.meta.url), 'utf8');
+    const original = loadSafeFetchWithTransport(() => bodyLength, calls, deadlines, source);
+    const lookup = (() => {}) as unknown as NonNullable<Parameters<typeof original.safePeerRequest>[1]>;
+    const request = (api: typeof original, options: { binary?: boolean; attachment?: boolean }) => api.safePeerRequest({
+      method: 'GET', url: 'http://peer.example/file', allowHosts: new Set(['peer.example']),
+      ...options, maxBytes: PEER_MAX_ATT_BYTES + 1, deadlineMs: ATT_DEADLINE_MS + 1000,
+    }, lookup);
+
+    assert.equal(PEER_MAX_ATT_BYTES, 25 * 1024 * 1024);
+    assert.equal(ATT_DEADLINE_MS, 5 * 60_000);
+    assert.equal(PEER_MAX_FILE_BYTES, 6 * 1024 * 1024);
+    assert.equal(FILE_DEADLINE_MS, 60_000);
+    bodyLength = PEER_MAX_ATT_BYTES;
+    await request(original, { binary: true, attachment: true });
+    assert.equal(deadlines.at(-1), ATT_DEADLINE_MS, 'пятиминутный предел считывается с перехваченного таймера');
+    assert.equal((calls.at(-1)?.headers as Record<string, string>).accept, '*/*');
+    bodyLength = PEER_MAX_ATT_BYTES + 1;
+    await assert.rejects(() => request(original, { binary: true, attachment: true }), /ответ соседа больше предела/);
+
+    bodyLength = PEER_MAX_FILE_BYTES;
+    await request(original, { binary: true });
+    assert.equal(deadlines.at(-1), FILE_DEADLINE_MS);
+    assert.equal((calls.at(-1)?.headers as Record<string, string>).accept, 'image/*');
+    bodyLength = PEER_MAX_FILE_BYTES + 1;
+    await assert.rejects(() => request(original, { binary: true }), /ответ соседа больше предела/);
+
+    bodyLength = PEER_MAX_FILE_BYTES + 1;
+    await assert.rejects(() => request(original, { attachment: true }), /ответ соседа больше предела/);
+    assert.equal(deadlines.at(-1), FILE_DEADLINE_MS, 'attachment без binary не получает срок вложения');
+
+    const anchor = 'const att = req.binary === true && req.attachment === true;';
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь парного флага attachment/binary должен быть уникальным');
+    const mutant = loadSafeFetchWithTransport(
+      () => bodyLength, [], [], source.replace(anchor, 'const att = req.attachment === true;'),
+    );
+    const nonBinaryMustReject = async (api: typeof original) => {
+      let rejected = false;
+      try { await request(api, { attachment: true }); } catch { rejected = true; }
+      assert.equal(rejected, true, 'attachment без binary должен сохранить шестимегабайтный предел');
+    };
+    await assert.rejects(
+      () => nonBinaryMustReject(mutant),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.includes('attachment без binary должен сохранить шестимегабайтный предел'),
+      'мутант, который разрешает 25 МиБ только по attachment, обязан проиграть цели по старому пределу',
+    );
   });
 });

@@ -61,7 +61,7 @@ it('щипок по одной загруженной фотографии со�
     const click = new MouseEvent('click', { bubbles: true, cancelable: true }); img.dispatchEvent(click);
     assert.equal(click.defaultPrevented, true, 'click того же жеста не открывает просмотр под пальцем');
     layer.dispatchEvent(new Event('transitionend'));
-    assert.equal(document.querySelector('.gv-pinch-layer'), null, 'конец анимации очищает временную копию');
+    assert.ok(document.querySelector('.gv-pinch-layer') === null, 'конец анимации очищает временную копию');
   } finally { detach(); list.remove(); }
 });
 
@@ -73,7 +73,7 @@ it('пальцы на разных фотографиях не создают о
     try {
       list.dispatchEvent(event('touchstart', [touch(1, 20, 30, first), touch(2, 120, 30, second)]));
       list.dispatchEvent(event('touchmove', [touch(1, 20, 30, first), touch(2, 220, 30, second)]));
-      assert.equal(document.querySelector('.gv-pinch-layer'), null, 'две отдельные картинки не образуют щипок');
+      assert.ok(document.querySelector('.gv-pinch-layer') === null, 'две отдельные картинки не образуют щипок');
       assert.equal(started, 0, 'чужой жест остаётся доступен родительскому поведению строки');
     } finally { detach(); list.remove(); }
   };

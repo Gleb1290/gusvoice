@@ -7,6 +7,7 @@ import {
   GALLERY_PAGE,
   fileBadge,
   fileSizeText,
+  filterFilesByName,
   formatDuration,
   megabytes,
   ATTACH_MAX_BYTES,
@@ -16,6 +17,10 @@ import {
   selectedNumber,
   selectionTitle,
   skippedText,
+  SWEEP_HOLD_MS,
+  SWEEP_SLOP_PX,
+  sweepOrder,
+  sweepScrollSpeed,
   thumbPx,
   toggleSelected,
   type GalleryPerm,
@@ -24,19 +29,26 @@ import {
 import { cameraAllowedQuietly, cameraCount, cameraSupported, openCamera, stopStream, type Facing } from '../cameraCapture';
 import {
   cancelNativeFiles,
+  captureErrorCode,
+  captureNative,
+  cameraPermissionNative,
+  galleryAlbums,
   galleryFiles,
   galleryPage,
   galleryPermission,
   galleryThumb,
   nativeMediaInfo,
   pickDocumentsNative,
+  type GalleryAlbum,
   type GalleryItem,
 } from '../nativeMedia';
 import { useStore } from '../store';
 import { toast } from '../toast';
+import { confirmAction } from '../confirm';
 import { BottomSheet } from './BottomSheet';
 import { CameraCell, CameraScreen, type CameraShot } from './CameraScreen';
 import { MenuItem } from './ContextMenu';
+import { MediaPickViewer, type PickEntry } from './MediaPickViewer';
 import { Icon, type IconName } from './Icon';
 import { SchedPick } from './SchedPick';
 
@@ -209,6 +221,36 @@ export function MediaSheet({
   const [shot, setShot] = useState<CameraShot | null>(null);
   /** Есть ли у приложения микрофон для звука видео (`nativeMediaInfo().mic`); в браузере — как всегда, спросит сам браузер. */
   const [micAllowed, setMicAllowed] = useState(true);
+  /**
+   * Камера листа — системная (10.10, #218, решение владельца): сборка Android отвечает на `capture` (`NativeMediaInfo.capture`).
+   * Тап по ячейке — фото, удержание — видео; готовый файл — в тот же предпросмотр «Переснять / Отправить», что у своей камеры.
+   * Своя камера (`CameraScreen` на getUserMedia) остаётся браузеру телефона и старым сборкам.
+   */
+  const [sysCapture, setSysCapture] = useState(false);
+  /** Системная камера открыта (ждём её ответа): поток ячейки отпущен, второй вызов не идёт. */
+  const [sysCamBusy, setSysCamBusy] = useState(false);
+  /** Просмотр выбора (тап по фото сетки — как Telegram `PhotoViewer.openPhotoForSelect`): с какого элемента открыт. */
+  const [view, setView] = useState<number | null>(null);
+  /** Снимок системной камеры — в том же просмотре с подписью (как Telegram), не в предпросмотре «Переснять / Отправить». */
+  const [camShot, setCamShot] = useState<{ file: File; url: string; video: boolean } | null>(null);
+  /**
+   * Альбомы (как Telegram Android: выпадающий список в шапке, `ChatAttachAlertPhotoLayout.updateAlbumsDropDown`). `null` —
+   * сборка их не отдаёт (или браузер): выбора нет. `album` `null` — вся галерея («Галерея» в шапке, камера в сетке).
+   */
+  const [albums, setAlbums] = useState<GalleryAlbum[] | null>(null);
+  const [album, setAlbum] = useState<GalleryAlbum | null>(null);
+  const [albumsOpen, setAlbumsOpen] = useState(false);
+  const albumRef = useRef<GalleryAlbum | null>(null);
+  albumRef.current = album;
+  /** Все виденные элементы (любого альбома): выбор переживает смену альбома, как `selectedPhotos` Telegram. */
+  const seen = useRef(new Map<string, GalleryItem>());
+  /**
+   * Фото, которые просмотр уже получил сжатыми (2560 px, JPEG 85 — ровно то, что уходит), по id: отправка берёт их, не сжимая
+   * второй раз (#218 порция 4). Ещё не пришло — обычный путь через мост.
+   */
+  const ready = useRef(new Map<string, File>());
+  /** Поколение порций: смена альбома или сброс — ответы прежних запросов выбрасываются. */
+  const genRef = useRef(0);
 
   const camSupported = useMemo(cameraSupported, []);
   const thumbs = useMemo(() => new ThumbLoader(), []);
@@ -222,8 +264,20 @@ export function MediaSheet({
   camOpenRef.current = camOpen;
   const noteTimer = useRef(0);
 
-  const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
-  const chosen = useMemo(() => order.map((id) => byId.get(id)).filter((i): i is GalleryItem => !!i), [order, byId]);
+  // Выбор — по всем виденным элементам, не только по альбому на экране.
+  const chosen = useMemo(
+    () => order.map((id) => seen.current.get(id)).filter((i): i is GalleryItem => !!i),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [order, items],
+  );
+  /** Что листает просмотр — один массив на набор элементов (раньше пересобирался на каждый символ подписи, и миниатюра тянулась заново). */
+  const pickEntries = useMemo(
+    (): PickEntry[] =>
+      camShot
+        ? [{ kind: 'file', file: camShot.file, url: camShot.url, video: camShot.video }]
+        : items.map((item): PickEntry => ({ kind: 'gallery', item })),
+    [camShot, items],
+  );
 
   const showNote = useCallback((text: string) => {
     setNote(text);
@@ -249,6 +303,7 @@ export function MediaSheet({
 
   // Снимок в предпросмотре держит ссылку `blob:` — снимаем, когда он сменился или лист закрылся.
   useEffect(() => () => (shot ? URL.revokeObjectURL(shot.url) : undefined), [shot]);
+  useEffect(() => () => (camShot ? URL.revokeObjectURL(camShot.url) : undefined), [camShot]);
 
   // ——— Доступ и первая порция ———————————————————————————————————————————————————————————————————————————————
   useEffect(() => {
@@ -265,6 +320,7 @@ export function MediaSheet({
         if (!on) return;
         setCamAllowed(info.camera);
         setMicAllowed(info.mic);
+        setSysCapture(info.capture);
         // Окно системы — само только при первом открытии галереи; дальше — плашка с кнопкой.
         const p = info.perm === 'ask' && !info.asked ? await galleryPermission('ask') : info.perm;
         if (on) setPerm(p);
@@ -293,28 +349,16 @@ export function MediaSheet({
     };
   }, [native, camOpen]);
 
-  // Вернулись в приложение (из настроек, из окна «выбрать ещё фото») — доступ мог измениться.
-  useEffect(() => {
-    if (!native || !visible || perm === null) return;
-    let on = true;
-    void galleryPermission('check')
-      .then((p) => on && setPerm((prev) => (prev === p ? prev : p)))
-      .catch(() => undefined);
-    return () => {
-      on = false;
-    };
-    // `perm` в зависимостях не нужен: проверяем на возврате, а не после каждой смены.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [native, visible]);
-
   const loadMore = useCallback(async (reset: boolean) => {
-    if (loadingRef.current) return;
+    if (loadingRef.current && !reset) return;
+    const gen = reset ? ++genRef.current : genRef.current;
     loadingRef.current = true;
     setLoading(true);
     try {
       const list = itemsRef.current;
-      const page = await galleryPage(reset ? null : (list[list.length - 1] ?? null), GALLERY_PAGE);
-      if (!alive.current) return;
+      const page = await galleryPage(reset ? null : (list[list.length - 1] ?? null), GALLERY_PAGE, albumRef.current);
+      if (!alive.current || gen !== genRef.current) return;
+      for (const i of page.items) seen.current.set(i.id, i);
       setItems((prev) => {
         if (reset) return page.items;
         const have = new Set(prev.map((i) => i.id));
@@ -323,19 +367,73 @@ export function MediaSheet({
       setEnd(page.end);
       setFailed(false);
     } catch {
-      if (alive.current) setFailed(true);
+      if (alive.current && gen === genRef.current) setFailed(true);
     } finally {
-      loadingRef.current = false;
-      if (alive.current) setLoading(false);
+      if (gen === genRef.current) {
+        loadingRef.current = false;
+        if (alive.current) setLoading(false);
+      }
     }
   }, []);
 
+  /** Выбрать альбом из списка шапки: сетка с начала, выбор остаётся (Telegram `onItemClick(id >= 10)`, строки 3414-3424). */
+  const chooseAlbum = useCallback(
+    (a: GalleryAlbum | null) => {
+      setAlbumsOpen(false);
+      const next = a && !a.id && !a.only ? null : a;
+      if ((next?.id ?? '') === (albumRef.current?.id ?? '') && (next?.only ?? null) === (albumRef.current?.only ?? null)) return;
+      albumRef.current = next;
+      setAlbum(next);
+      setItems([]);
+      setEnd(false);
+      scrollRef.current?.scrollTo({ top: 0 });
+      void loadMore(true);
+    },
+    [loadMore],
+  );
+
+  // Вернулись в приложение (из настроек) — доступ мог измениться.
+  const permRef = useRef(perm);
+  permRef.current = perm;
+  useEffect(() => {
+    if (!native || !visible || permRef.current === null) return;
+    let on = true;
+    void galleryPermission('check')
+      .then((p) => {
+        if (!on) return;
+        setPerm((prev) => (prev === p ? prev : p));
+      })
+      .catch(() => undefined);
+    return () => {
+      on = false;
+    };
+  }, [native, visible]);
+
+  // `partial` мост с 10.10 не шлёт (`nativeMedia.asPerm` читает его как `granted`); пришёл бы — это тоже «можно читать».
   const permOk = perm === 'granted' || perm === 'partial';
   useEffect(() => {
     if (!native || !permOk) return;
     setEnd(false);
     void loadMore(true);
   }, [native, permOk, perm, loadMore]);
+
+  // Альбомы — как `loadGalleryPhotosAlbums` Telegram: при доступе и при возврате в приложение (галерея могла измениться).
+  useEffect(() => {
+    if (!native || !permOk || !visible) return;
+    let on = true;
+    // Через `then`: любой сбой списка альбомов (и синхронный) — просто «альбомов нет», лист не падает.
+    void Promise.resolve()
+      .then(galleryAlbums)
+      .then(
+        (list) => {
+          if (on && alive.current) setAlbums(list && list.length > 1 ? list : null);
+        },
+        () => undefined,
+      );
+    return () => {
+      on = false;
+    };
+  }, [native, permOk, perm, visible]);
 
   // Подгрузка у низа сетки.
   useEffect(() => {
@@ -353,7 +451,8 @@ export function MediaSheet({
   }, [native, permOk, end, tab, loadMore, items.length]);
 
   // ——— Камера: живая ячейка и свой экран ————————————————————————————————————————————————————————————————————————
-  const camWanted = camSupported && visible && !originals && (camOpen || (camAllowed && tab === 'gallery'));
+  const camWanted =
+    camSupported && visible && !originals && !sysCamBusy && ((camOpen && !sysCapture) || (camAllowed && tab === 'gallery'));
   /**
    * Последняя попытка включить камеру кончилась отказом — сама она не повторяется, только по нажатию на ячейку. 🔴 Окно
    * разрешения системы — отдельная активность поверх: страница становится «скрыта» (`visible` ложно, эффект снимается и его
@@ -398,7 +497,91 @@ export function MediaSheet({
     };
   }, [camWanted, facing]);
 
+  /**
+   * Системная камера (`sysCapture`): `video` — удержание ячейки. Поток ячейки отпускаем ДО запуска — камера устройства одна.
+   * Снято — предпросмотр «Переснять / Отправить» (`CameraScreen` с `shot`); закрыли камеру без снимка — ничего.
+   */
+  async function systemCamera(video: boolean) {
+    if (busy || sysCamBusy) return;
+    stopStream(stream);
+    setStream(null);
+    setSysCamBusy(true);
+    try {
+      const res = await captureNative({ video, maxBytes });
+      if (!alive.current) return;
+      const file = res.files[0];
+      if (!file) {
+        const text = skippedText(res.skipped, maxBytes);
+        if (text) showNote(text);
+        return;
+      }
+      setCamShot({ file, url: URL.createObjectURL(file), video: video || file.type.startsWith('video/') });
+    } catch (e) {
+      if (!alive.current) return;
+      const code = captureErrorCode(e);
+      if (code === 'busy') return;
+      if (code === 'camera-denied') void askSettings('camera');
+      else showNote('Не удалось открыть камеру');
+    } finally {
+      if (alive.current) setSysCamBusy(false);
+    }
+  }
+
   // ——— Выбор ———————————————————————————————————————————————————————————————————————————————————————————————————
+  /**
+   * Отказ в доступе — окно Telegram (tg-src BasePermissionsActivity.java, строки 58-61 и 100-120: `PermissionStorageWithHint` /
+   * `PermissionNoCameraWithHint`, кнопки `PermissionOpenSettings` и «Не сейчас»; русские тексты TG в исходниках нет — перевод наш).
+   */
+  /** Нажатие на ячейку камеры: системная камера (`sysCapture`) или своя на getUserMedia. */
+  function openCamCell() {
+    if (sysCapture) {
+      void systemCamera(false);
+      return;
+    }
+    // Нажатие — новая попытка: прежний отказ (`camDenied`) её не держит.
+    camDenied.current = false;
+    setCamError(null);
+    setCamOpen(true);
+  }
+
+  /**
+   * «Разрешить доступ к камере» (Telegram: `requestPermissions(CAMERA)`, строки 920-927): окно системы; дали — на месте строки
+   * живая ячейка камеры; отказ — окно «Настройки / Не сейчас» (`askSettings`). Сборка без `camPerm` — открываем камеру, она
+   * спросит разрешение сама.
+   */
+  async function askCamera() {
+    let r: 'granted' | 'denied' | null;
+    try {
+      r = await cameraPermissionNative();
+    } catch {
+      r = null;
+    }
+    if (!alive.current) return;
+    if (r === null) return openCamCell();
+    if (r === 'granted') {
+      camDenied.current = false;
+      setCamAllowed(true);
+      return;
+    }
+    void askSettings('camera');
+  }
+
+  async function askSettings(what: 'gallery' | 'camera') {
+    const ok = await confirmAction({
+      title: what === 'camera' ? 'Нет доступа к камере' : 'Нет доступа к фото и видео',
+      body:
+        what === 'camera'
+          ? 'GusVoice нужен доступ к камере, чтобы вы могли снимать фото и видео. Откройте настройки → «Разрешения» и включите «Камера».'
+          : 'GusVoice нужен доступ к фото и видео, чтобы вы могли их отправлять. Откройте настройки → «Разрешения» и включите «Фото и видео».',
+      confirmLabel: 'Настройки',
+      cancelLabel: 'Не сейчас',
+      // Без значка окно рисует `signal` (по умолчанию) — к доступу он не относится.
+      icon: what === 'camera' ? 'camera' : 'photo',
+    });
+    if (!ok || !alive.current) return;
+    void galleryPermission('settings').catch(() => alive.current && showNote('Не удалось открыть настройки'));
+  }
+
   const toggle = (item: GalleryItem) => {
     if (busy) return;
     if (overLimit(item, !originals, maxBytes) && !order.includes(item.id)) {
@@ -412,6 +595,22 @@ export function MediaSheet({
     }
     setOrder(next.order);
   };
+
+  // Выбор мазком (G50, как Telegram Android): держим палец на миниатюре и ведём по сетке — выбираются подряд, назад — снимаются.
+  useGallerySweep({
+    scroll: scrollRef,
+    enabled: native && tab === 'gallery',
+    ids: () => items.map((i) => i.id),
+    order: () => order,
+    room: () => room,
+    blocked: (id) => {
+      const it = items.find((x) => x.id === id);
+      return !!it && overLimit(it, !originals, maxBytes);
+    },
+    locked: () => !!busy,
+    setOrder,
+    onFull: () => showNote(room > 0 ? `Не больше ${room} за раз` : 'В сообщении уже 10 вложений'),
+  });
 
   const photos = chosen.filter((i) => i.kind === 'image').length;
   const videos = chosen.length - photos;
@@ -427,17 +626,31 @@ export function MediaSheet({
     return true;
   }
 
-  async function sendSelected(how: MediaSendHow) {
-    if (!chosen.length || busy) return;
+  async function sendSelected(how: MediaSendHow, list: GalleryItem[] = chosen) {
+    if (!list.length || busy) return;
     if (captionTooLong()) return;
-    setBusy({ done: 0, total: chosen.length });
+    setBusy({ done: 0, total: list.length });
     try {
-      const res = await galleryFiles(chosen, {
-        compress: !originals,
-        maxBytes,
-        onProgress: (done, total) => alive.current && setBusy({ done, total }),
-      });
+      // Сжатое просмотром — как есть, остальное — мостом; порядок файлов — порядок выбора.
+      const pre = originals ? [] : list.map((i) => ready.current.get(i.id) ?? null);
+      const rest = list.filter((_, k) => !pre[k]);
+      const got = rest.length
+        ? await galleryFiles(rest, {
+            compress: !originals,
+            maxBytes,
+            onProgress: (done, total) => alive.current && setBusy({ done: done + list.length - rest.length, total: list.length }),
+          })
+        : { files: [], skipped: [], cancelled: false, dropped: 0, indexes: [] };
       if (!alive.current) return;
+      const byRest = new Map<number, File>();
+      got.files.forEach((f, k) => byRest.set(got.indexes?.[k] ?? k, f));
+      let r = 0;
+      const files: File[] = [];
+      list.forEach((_, k) => {
+        const f = pre[k] ?? byRest.get(r++);
+        if (f) files.push(f);
+      });
+      const res = { ...got, files };
       const text = skippedText(res.skipped, maxBytes);
       if (!res.files.length) {
         showNote(text ?? 'Не удалось прочитать файлы');
@@ -492,7 +705,13 @@ export function MediaSheet({
   }
 
   const dmMessages = useStore((s) => s.dmMessages);
-  const recent = useMemo(() => recentFilesOf<Attachment>(dmMessages, 20), [dmMessages]);
+  // Поиск во вкладке «Файл» (G50, `ChatAttachAlertDocumentLayout`): без запроса — 20 недавних, с запросом — по всем, что в памяти (до 200).
+  const [fileQuery, setFileQuery] = useState('');
+  const recentAll = useMemo(() => recentFilesOf<Attachment>(dmMessages, 200), [dmMessages]);
+  const recent = useMemo(
+    () => (fileQuery.trim() ? filterFilesByName(recentAll, fileQuery) : recentAll.slice(0, 20)),
+    [recentAll, fileQuery],
+  );
   const [recentBusy, setRecentBusy] = useState<string | null>(null);
 
   async function attachRecent(r: RecentFile<Attachment>) {
@@ -518,7 +737,15 @@ export function MediaSheet({
   const closeTop = () => {
     if (schedOpen) return; // окно «позже» закрывается своим листом
     if (holdOpen) return setHoldOpen(false);
-    if (shot) return setShot(null);
+    if (albumsOpen) return setAlbumsOpen(false);
+    if (camShot) return setCamShot(null);
+    if (view !== null) return setView(null);
+    if (shot) {
+      setShot(null);
+      // Предпросмотр системной камеры — без своего экрана под ним: закрылся снимок — закрылась и камера.
+      if (sysCapture) setCamOpen(false);
+      return;
+    }
     if (camOpen) return setCamOpen(false);
     if (originals) {
       setOriginals(false);
@@ -564,8 +791,56 @@ export function MediaSheet({
     void sendSelected('now');
   };
 
-  const notice = native && perm ? permNotice(perm) : null;
-  const title = order.length ? `${selectionTitle(photos, videos)}${originals ? ' · без сжатия' : ''}` : originals ? 'Галерея · без сжатия' : undefined;
+  // `partial` — тот же «можно читать» (как `permOk`): своей плашки частичного доступа у листа нет (как TG Android, 10.10).
+  const notice = native && perm && perm !== 'partial' ? permNotice(perm) : null;
+  /** Своя галерея прочитана и пуста (не загрузка, не ошибка): подпись под сеткой. */
+  const noneShown = native && permOk && !loading && items.length === 0 && !failed;
+  /**
+   * Камера — одна ячейка, пока сетка не набирает больше одного ряда: Telegram Android ставит ей вторую строку
+   * (`hasCameraSpaceRow`) только при «камера + фото» больше колонок (`ChatAttachAlertPhotoLayout.java:4596-4598`). На две
+   * строки при пустой сетке её чёрный прямоугольник со значком в углу владелец принял за видео с чёрной миниатюрой (#218 п.6).
+   * Рядом плитка системного выбора (браузер, нет доступа, ошибка) или заглушки загрузки — остаётся на две, как было.
+   */
+  /**
+   * Камера — две строки (ширина одной ячейки, высота `itemSize·2 + GAP`) с пустой ячейкой под ней, как Telegram Android
+   * `hasCameraSpaceRow` (tg-src ChatAttachAlertPhotoLayout.java, строки 4580-4598; высота — `CameraViewItemDecoration`,
+   * строки 4766-4769, и `finalHeight` 3124): камера есть (вся галерея, `selectedAlbumEntry == galleryAlbumEntry`), доступ к
+   * камере дан (`!noCameraPermissions`) и «камера + элементы» длиннее ряда (`count > itemsPerRow`). Иначе — одна ячейка. У нас
+   * это `grid-row: span 2` у `button.gal-cam` и `.short` — одна строка; рядом с плиткой системного выбора — две, как было.
+   */
+  const camShort =
+    native && permOk && !failed && !(loading && items.length === 0) && items.length + 1 <= 3;
+  const showCam = (camSupported || sysCapture) && !originals && !album;
+  /**
+   * Нет доступа к камере (приложение) — на её месте строка с кнопкой «Разрешить доступ к камере» во всю ширину, как Telegram
+   * `VIEW_TYPE_CAMERA_PERMISSION_BUTTON` (tg-src ChatAttachAlertPhotoLayout.java, строки 4538-4551: строка 44+10+10−8 dp,
+   * кнопка-пилюля 44 dp со значком камеры по центру, отступ снизу 12; во всю ширину — `getSpanSize`, строки 895-898).
+   * Только у сборки с системной камерой (`sysCapture`, она же знает `camPerm`): у старой ячейка своей камеры остаётся — её
+   * нажатие и есть запрос разрешения getUserMedia.
+   */
+  const camPermRow = showCam && native && sysCapture && permOk && !camAllowed;
+  const galleryName = album ? albumLabel(album) : 'Галерея';
+  /**
+   * Шапка — название альбома со стрелкой (Telegram `dropDown`: «Галерея» для всей галереи, иначе имя папки, строки 755-769 и
+   * 3414-3420); выбранное — подписью под ним. Без альбомов (браузер, сборка старше) — «N фото», как раньше.
+   */
+  const albumTitle = albums && tab === 'gallery' ? (
+    <button
+      type="button"
+      className="gal-album-btn"
+      aria-haspopup="menu"
+      aria-expanded={albumsOpen}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={() => setAlbumsOpen((o) => !o)}
+    >
+      <span>{originals ? `${galleryName} · без сжатия` : galleryName}</span>
+      <Icon name="chevron-down" size={18} />
+    </button>
+  ) : undefined;
+  const picked = order.length ? `${selectionTitle(photos, videos)}${originals ? ' · без сжатия' : ''}` : undefined;
+  // С альбомами выбор — строкой под ними: сменить альбом можно и с выбранным (выбор переживает смену, как у Telegram).
+  const title = albumTitle ?? picked ?? (originals ? 'Галерея · без сжатия' : undefined);
+  const subtitle = albumTitle ? picked : undefined;
   const tall = order.length > 0 || scrolled || originals || tab === 'file';
 
   const sendButton = (
@@ -593,8 +868,25 @@ export function MediaSheet({
   );
 
   return (
-    <BottomSheet title={title} onClose={closeTop}>
+    <BottomSheet title={title} subtitle={subtitle} onClose={closeTop}>
       <div className={`gal${tall ? ' tall' : ''}${native ? '' : ' sys'}`}>
+        {albumsOpen && albums && (
+          <>
+            <div className="gal-albums-scrim" onClick={() => setAlbumsOpen(false)} />
+            <div className="gal-albums" role="menu" aria-label="Альбомы">
+              {albums.map((a) => (
+                <AlbumRow
+                  key={`${a.id}:${a.only ?? ''}`}
+                  album={a}
+                  label={albumLabel(a)}
+                  active={album ? album.id === a.id && album.only === a.only : !a.id && !a.only}
+                  thumbs={thumbs}
+                  onPick={chooseAlbum}
+                />
+              ))}
+            </div>
+          </>
+        )}
         {tab === 'gallery' ? (
           <div
             className="gal-scroll"
@@ -609,42 +901,45 @@ export function MediaSheet({
                 <button
                   type="button"
                   onClick={() => {
-                    const was = perm;
-                    void galleryPermission(notice.action)
+                    // Своей плашки частичного доступа больше нет (10.10, #218): как у Telegram Android, «Выбрать фото» в окне
+                    // Android 14+ даёт временный доступ к выбранному — `granted`, сетка загрузится сама.
+                    if (notice.action === 'settings') {
+                      void askSettings('gallery');
+                      return;
+                    }
+                    void galleryPermission('ask')
                       .then((p) => {
                         if (!alive.current) return;
                         setPerm(p);
-                        // «Выбрать ещё» при частичном доступе: состояние то же («partial»), эффект загрузки не сработает, а
-                        // в окне системы человек мог добавить фото — перечитываем сами (стенд 06.10: сетка не менялась до
-                        // следующего открытия листа). Из «ask» в «partial»/«granted» загрузит сам эффект.
-                        if (was === 'partial' && p === 'partial') {
-                          setEnd(false);
-                          void loadMore(true);
-                        }
+                        // Отказ в окне системы — окно Telegram «Открыть настройки / Не сейчас» (после любого отказа, как у TG).
+                        if (p !== 'granted') void askSettings('gallery');
                       })
                       .catch(() => alive.current && showNote('Не удалось спросить доступ'));
                   }}
                 >
                   {notice.button}
                 </button>
-                {perm !== 'partial' && (
-                  <button type="button" className="link" onClick={() => onSystemPick(originals ? 'originals' : 'photos')}>
-                    Выбрать через систему
-                  </button>
-                )}
+                <button type="button" className="link" onClick={() => onSystemPick(originals ? 'originals' : 'photos')}>
+                  Выбрать через систему
+                </button>
+              </div>
+            )}
+            {camPermRow && (
+              <div className="gal-cam-perm">
+                <button type="button" onClick={() => void askCamera()}>
+                  <Icon name="camera" size={20} />
+                  Разрешить доступ к камере
+                </button>
               </div>
             )}
             <div className="gal-grid">
-              {camSupported && !originals && (
+              {showCam && !camPermRow && (
                 <CameraCell
+                  short={camShort}
                   stream={camOpen ? null : stream}
                   facing={facing}
-                  onOpen={() => {
-                    // Нажатие — новая попытка: прежний отказ (`camDenied`) её не держит.
-                    camDenied.current = false;
-                    setCamError(null);
-                    setCamOpen(true);
-                  }}
+                  onHold={sysCapture ? () => void systemCamera(true) : undefined}
+                  onOpen={openCamCell}
                 />
               )}
               {native &&
@@ -657,6 +952,7 @@ export function MediaSheet({
                     thumbs={thumbs}
                     root={scrollRef}
                     onToggle={toggle}
+                    onOpen={(it) => setView(Math.max(0, items.findIndex((x) => x.id === it.id)))}
                   />
                 ))}
               {/* Своей галереи нет (браузер) или к ней нет доступа — рядом с камерой плитка системного выбора. */}
@@ -668,7 +964,9 @@ export function MediaSheet({
               )}
               {native && permOk && loading && items.length === 0 && Array.from({ length: 8 }, (_, i) => <span key={i} className="gal-cell sk" />)}
             </div>
-            {native && permOk && !loading && items.length === 0 && !failed && <div className="gal-empty">Здесь пока нет фото и видео</div>}
+            {noneShown && (
+              <div className="gal-empty">Здесь пока нет фото и видео</div>
+            )}
             {native && failed && (
               <div className="gal-empty">
                 Галерею прочитать не удалось.{' '}
@@ -681,6 +979,19 @@ export function MediaSheet({
           </div>
         ) : (
           <div className="gal-scroll gal-files">
+            {recentAll.length > 0 && (
+              <input
+                type="search"
+                className="sheet-search gal-file-search"
+                value={fileQuery}
+                placeholder="Поиск файлов"
+                aria-label="Поиск файлов по названию"
+                enterKeyHint="search"
+                autoComplete="off"
+                onChange={(e) => setFileQuery(e.target.value)}
+              />
+            )}
+            {!fileQuery.trim() && (
             <div className="gal-card">
               <button type="button" className="gal-row" onClick={() => void pickDocuments()}>
                 <span className="gal-row-ico green">
@@ -701,9 +1012,11 @@ export function MediaSheet({
                 </span>
               </button>
             </div>
+            )}
+            {fileQuery.trim() && recent.length === 0 && <div className="gal-empty">Ничего не найдено</div>}
             {recent.length > 0 && (
               <div className="gal-card">
-                <div className="gal-card-head">Недавние файлы</div>
+                <div className="gal-card-head">{fileQuery.trim() ? 'Найденные файлы' : 'Недавние файлы'}</div>
                 {recent.map((r) => {
                   const key = r.att.id || r.att.url;
                   const badge = fileBadge(r.att.name);
@@ -801,6 +1114,33 @@ export function MediaSheet({
         )}
       </div>
 
+      {(view !== null || camShot) && (
+        <MediaPickViewer
+          entries={pickEntries}
+          start={camShot ? 0 : (view ?? 0)}
+          numberOf={(item) => selectedNumber(order, item.id)}
+          caption={caption}
+          counter={capCounter}
+          busy={!!busy}
+          onCaption={setCaption}
+          onToggle={toggle}
+          onSend={(entry) => {
+            if (entry.kind === 'file') {
+              if (captionTooLong()) return;
+              onSend([entry.file], caption.trim(), 'now');
+              onClose();
+              return;
+            }
+            // Ничего не выбрано — уходит открытое (как «Отправить» в просмотре Telegram).
+            void sendSelected('now', chosen.length ? chosen : [entry.item]);
+          }}
+          onClose={() => (camShot ? setCamShot(null) : setView(null))}
+          maxBytes={maxBytes}
+          onReady={(item, file) => {
+            if (!originals) ready.current.set(item.id, file);
+          }}
+        />
+      )}
       {camOpen && (
         <CameraScreen
           stream={stream}
@@ -808,9 +1148,17 @@ export function MediaSheet({
           facing={facing}
           canFlip={canFlip}
           mic={micAllowed}
+          maxBytes={maxBytes}
           shot={shot}
           onShot={(file) => setShot({ file, url: URL.createObjectURL(file), kind: file.type.startsWith('video/') ? 'video' : 'photo' })}
-          onRetake={() => setShot(null)}
+          onRetake={() => {
+            setShot(null);
+            if (!sysCapture) return;
+            // «Переснять» системной камерой — та же камера тем же жестом, что дал снимок.
+            const video = shot?.kind === 'video';
+            setCamOpen(false);
+            void systemCamera(video);
+          }}
           onFlip={() => setFacing((f) => (f === 'user' ? 'environment' : 'user'))}
           onClose={() => {
             setShot(null);
@@ -919,6 +1267,7 @@ function GalleryCell({
   thumbs,
   root,
   onToggle,
+  onOpen,
 }: {
   item: GalleryItem;
   n: number;
@@ -926,6 +1275,8 @@ function GalleryCell({
   thumbs: ThumbLoader;
   root: React.RefObject<HTMLDivElement>;
   onToggle: (item: GalleryItem) => void;
+  /** Тап мимо кружка — просмотр (Telegram: ячейка открывает `PhotoViewer`, выбор — кружок в углу). Нет — тап выбирает, как раньше. */
+  onOpen?: (item: GalleryItem) => void;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [url, setUrl] = useState<string | undefined>(() => thumbs.get(item.id));
@@ -961,10 +1312,14 @@ function GalleryCell({
     <button
       type="button"
       ref={ref}
+      data-gid={item.id}
       className={`gal-cell${n ? ' on' : ''}${big ? ' big' : ''}`}
       aria-pressed={n > 0}
       aria-label={`${item.kind === 'video' ? 'Видео' : 'Фото'}${item.kind === 'video' ? `, ${formatDuration(item.durationMs)}` : ''}${n ? `, выбрано ${n}` : ''}`}
-      onClick={() => onToggle(item)}
+      onClick={(e) => {
+        if (onOpen && !(e.target as Element).closest?.('.gal-check')) onOpen(item);
+        else onToggle(item);
+      }}
     >
       {url ? <img src={url} alt="" draggable={false} /> : null}
       {item.kind === 'video' && (
@@ -989,4 +1344,219 @@ function HoldThumb({ item, thumbs }: { item: GalleryItem; thumbs: ThumbLoader })
       {item.kind === 'video' && <span className="gal-dur">{formatDuration(item.durationMs)}</span>}
     </span>
   );
+}
+
+/** Имя альбома в списке и в шапке: у «всей галереи» имени от натива нет (Telegram `AllMedia` / `AllVideos`). */
+function albumLabel(a: GalleryAlbum): string {
+  return a.id ? a.name || 'Без названия' : a.only ? 'Все видео' : 'Все медиа';
+}
+
+/**
+ * Строка списка альбомов — как Telegram Android `AlbumButton` (tg-src Stories/recorder/AlbumButton.java, строки 40-140):
+ * высота 48dp, поля 16, обложка 30×30 со скруглением 4, отступ 12, имя 16sp и следом число 13sp.
+ */
+function AlbumRow({
+  album,
+  label,
+  active,
+  thumbs,
+  onPick,
+}: {
+  album: GalleryAlbum;
+  label: string;
+  active: boolean;
+  thumbs: ThumbLoader;
+  onPick: (a: GalleryAlbum) => void;
+}) {
+  const cover = album.cover;
+  const [url, setUrl] = useState<string | null>(() => (cover ? (thumbs.get(cover.id) ?? null) : null));
+  useEffect(() => {
+    if (!cover || url) return;
+    let on = true;
+    const stop = thumbs.want(cover, 96, (u) => on && setUrl(u));
+    return () => {
+      on = false;
+      stop();
+    };
+  }, [cover, url, thumbs]);
+  return (
+    <button type="button" role="menuitemradio" aria-checked={active} className={`gal-album${active ? ' on' : ''}`} onClick={() => onPick(album)}>
+      <span className="gal-album-cover">{url ? <img src={url} alt="" draggable={false} /> : <Icon name="photo" size={18} />}</span>
+      <span className="gal-album-name">{label}</span>
+      <span className="gal-album-count">{album.count}</span>
+    </button>
+  );
+}
+
+/**
+ * Выбор мазком по сетке галереи листа вложений (G50, 14.10). Правила — конец `attachRules.ts`; поведение — Telegram Android
+ * (`ChatAttachAlertPhotoLayout` + `RecyclerViewItemRangeSelector`): держим палец на миниатюре — она выбирается (или
+ * снимается, если была выбрана), ведём по соседним — выбираются подряд, ведём назад — возвращаются; у края список сам едет.
+ * Ячейки узнаём по `data-gid` (id элемента галереи). Мышь не трогаем: на ПК выбор — кружок, как был.
+ */
+interface GallerySweepArgs {
+  /** Прокручиваемый список; пока его нет в документе (другая вкладка) — жест не слушается. */
+  scroll: React.RefObject<HTMLElement>;
+  enabled: boolean;
+  /** id ячеек сетки сверху вниз и текущий выбор — читаются в момент жеста, не при отрисовке. */
+  ids: () => readonly string[];
+  order: () => readonly string[];
+  room: () => number;
+  blocked: (id: string) => boolean;
+  /** Идёт отправка и тому подобное — мазок не начинать. */
+  locked: () => boolean;
+  setOrder: (order: string[]) => void;
+  onFull: () => void;
+}
+
+function useGallerySweep(args: GallerySweepArgs): void {
+  const a = useRef(args);
+  a.current = args;
+  const { enabled } = args;
+
+  useEffect(() => {
+    const el = args.scroll.current;
+    if (!enabled || !el) return;
+    // Состояние жеста живёт в замыкании: оно одно на элемент и не нужно отрисовке.
+    let pending: { pid: number; x: number; y: number; gid: string } | null = null;
+    let timer = 0;
+    let active: { pid: number; base: string[]; ids: string[]; anchor: number; cur: number; select: boolean; x: number; y: number; fullShown: boolean } | null = null;
+    let raf = 0;
+    let lastFrame = 0;
+    let suppressUntil = 0;
+
+    const cellAt = (x: number, y: number): string | null => {
+      const hit = document.elementFromPoint(x, y)?.closest?.('[data-gid]');
+      return hit && el.contains(hit) ? (hit as HTMLElement).dataset.gid || null : null;
+    };
+
+    const apply = (gid: string) => {
+      const s = active;
+      if (!s) return;
+      const idx = s.ids.indexOf(gid);
+      if (idx < 0 || idx === s.cur) return;
+      s.cur = idx;
+      const r = sweepOrder(s.base, s.ids, s.anchor, s.cur, s.select, a.current.room(), a.current.blocked);
+      if (r.full && !s.fullShown) {
+        s.fullShown = true;
+        a.current.onFull();
+      }
+      a.current.setOrder(r.order);
+    };
+
+    const stopScroll = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    };
+    // Автопрокрутка у верхнего и нижнего края; пока едет, ячейка под пальцем меняется — выбор идёт следом.
+    const tick = (t: number) => {
+      raf = 0;
+      const s = active;
+      if (!s) return;
+      const rect = el.getBoundingClientRect();
+      const v = sweepScrollSpeed(s.y - rect.top, rect.height);
+      if (v !== 0) {
+        const dt = lastFrame ? Math.min(48, t - lastFrame) : 16;
+        el.scrollTop += v * dt;
+        const gid = cellAt(s.x, s.y);
+        if (gid) apply(gid);
+        lastFrame = t;
+        raf = requestAnimationFrame(tick);
+      } else {
+        lastFrame = 0;
+      }
+    };
+    const kick = () => {
+      if (!raf && active) raf = requestAnimationFrame(tick);
+    };
+
+    const start = () => {
+      timer = 0;
+      const p = pending;
+      pending = null;
+      if (!p || a.current.locked()) return;
+      const ids = [...a.current.ids()];
+      const anchor = ids.indexOf(p.gid);
+      if (anchor < 0) return;
+      const base = [...a.current.order()];
+      const select = !base.includes(p.gid);
+      // Нельзя выбрать (больше предела сервера) или мест нет — мазок не начинается, как `isIndexSelectable` у Telegram.
+      if (select && (a.current.blocked(p.gid) || base.length >= a.current.room())) {
+        if (base.length >= a.current.room()) a.current.onFull();
+        return;
+      }
+      active = { pid: p.pid, base, ids, anchor, cur: -1, select, x: p.x, y: p.y, fullShown: false };
+      navigator.vibrate?.(8);
+      apply(p.gid);
+      kick();
+    };
+
+    const finish = () => {
+      window.clearTimeout(timer);
+      timer = 0;
+      pending = null;
+      stopScroll();
+      if (active) suppressUntil = Date.now() + 400; // отпускание после мазка не должно «открыть» ячейку
+      active = null;
+    };
+
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' || !e.isPrimary || active) return;
+      const gid = (e.target as Element | null)?.closest?.('[data-gid]')?.getAttribute('data-gid');
+      if (!gid) return;
+      window.clearTimeout(timer);
+      pending = { pid: e.pointerId, x: e.clientX, y: e.clientY, gid };
+      timer = window.setTimeout(start, SWEEP_HOLD_MS);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (active && e.pointerId === active.pid) {
+        active.x = e.clientX;
+        active.y = e.clientY;
+        const gid = cellAt(e.clientX, e.clientY);
+        if (gid) apply(gid);
+        kick();
+        return;
+      }
+      if (pending && e.pointerId === pending.pid && Math.hypot(e.clientX - pending.x, e.clientY - pending.y) > SWEEP_SLOP_PX) {
+        window.clearTimeout(timer);
+        timer = 0;
+        pending = null; // палец поехал раньше срока — это прокрутка
+      }
+    };
+    const onEnd = (e: PointerEvent) => {
+      if ((active && e.pointerId === active.pid) || (pending && e.pointerId === pending.pid)) finish();
+    };
+    // Пока идёт мазок, страница не должна ехать за пальцем: отменяем движение касания (слушатель не пассивный).
+    const onTouchMove = (e: TouchEvent) => {
+      if (active && e.cancelable) e.preventDefault();
+    };
+    const onClickCapture = (e: MouseEvent) => {
+      if (Date.now() < suppressUntil) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    };
+    const onMenu = (e: Event) => {
+      if (active || pending) e.preventDefault();
+    };
+
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onEnd);
+    el.addEventListener('pointercancel', onEnd);
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('click', onClickCapture, true);
+    el.addEventListener('contextmenu', onMenu);
+    return () => {
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onEnd);
+      el.removeEventListener('pointercancel', onEnd);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('click', onClickCapture, true);
+      el.removeEventListener('contextmenu', onMenu);
+      window.clearTimeout(timer);
+      stopScroll();
+    };
+  }, [enabled]); // eslint-disable-line react-hooks/exhaustive-deps -- всё остальное читается из `a.current` в момент жеста
 }

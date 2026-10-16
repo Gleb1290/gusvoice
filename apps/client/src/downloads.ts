@@ -17,6 +17,8 @@
  * Self-gates to desktop: on web every function here is a no-op and the browser keeps doing its thing.
  */
 import { onDownloadEvents, pickFolder, setNativeDownloadDir, type DownloadAsk } from './desktopWindow';
+import { noteSavedFile } from './downloadList';
+import { showInFolder } from './pcDownloads';
 import { toast } from './toast';
 
 const DIR_KEY = 'gv_download_dir';
@@ -94,7 +96,12 @@ export function initDownloads(): void {
   onDownloadEvents({
     // Only the terminal states are toasted: attachments are usually small, so a "started" toast would
     // fire and be replaced a blink later. The started event still exists for a future progress UI.
-    done: (d) => toast('success', 'Файл скачан', d.dir ? `${d.name} → ${d.dir}` : d.name),
+    // «Показать в папке» (G59, tdesktop `_saveMsg` → `File::ShowInFolder`): оболочка сообщила путь — запоминаем (для пунктов меню и
+    // «Загрузок») и даём ссылку в тосте.
+    done: (d) => {
+      if (d.path) noteSavedFile({ url: d.url, path: d.path });
+      toast('success', 'Файл скачан', d.dir ? `${d.name} → ${d.dir}` : d.name, d.path ? { action: { label: 'Показать в папке', onClick: () => showInFolder(d.path) } } : undefined);
+    },
     failed: (d) => toast('error', 'Не удалось скачать файл', `${d.name} — загрузка прервана`),
     needDir: (a) => void handleNeedDir(a),
   });

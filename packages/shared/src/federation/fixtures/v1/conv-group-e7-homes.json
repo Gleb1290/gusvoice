@@ -1,0 +1,54 @@
+{
+  "id": "0199d2b0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "kind": "group",
+  "origin_instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "created_at": 1760280300000,
+  "members": [
+    {
+      "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b"
+    },
+    {
+      "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k",
+      "user_id": "0193f1a2-1111-7e8f-9a0b-1c2d3e4f5a6b"
+    },
+    {
+      "instance_id": "r4t6y8u0i2o4p6a8s0d2f4g6h8j0k2l4",
+      "user_id": "0193f1a2-2222-7e8f-9a0b-1c2d3e4f5a6b"
+    }
+  ],
+  "title": "Три инстанса",
+  "group_version": 3,
+  "avatar_url": null,
+  "owner": {
+    "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+    "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b"
+  },
+  "profiles": [
+    {
+      "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+      "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+      "username": "gus",
+      "display_name": "Гусь",
+      "avatar_hash": null
+    },
+    {
+      "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k",
+      "user_id": "0193f1a2-1111-7e8f-9a0b-1c2d3e4f5a6b",
+      "username": "utka",
+      "display_name": "Утка",
+      "avatar_hash": null,
+      "home_name": "Утиный пруд",
+      "home_domain": "pond.example.org"
+    },
+    {
+      "instance_id": "r4t6y8u0i2o4p6a8s0d2f4g6h8j0k2l4",
+      "user_id": "0193f1a2-2222-7e8f-9a0b-1c2d3e4f5a6b",
+      "username": "lebed",
+      "display_name": "Лебедь",
+      "avatar_hash": null,
+      "home_name": null,
+      "home_domain": "swans.example.org:8443"
+    }
+  ]
+}

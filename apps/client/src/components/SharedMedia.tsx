@@ -7,8 +7,9 @@
  * (`Lightbox`) с листанием по всем медиа беседы; у каждого элемента — «Показать в чате» (`requestFeedJump`, подсветка
  * — механизм перехода ленты). Порции по 50 при прокрутке. Правила — `sharedMediaRules.ts`, вид вложения — `shared/sharedMedia.ts`.
  * ПК — окно поверх, телефон — лист снизу на всю высоту (как остальные окна ЛС, `GroupDialogs.Shell`).
+ * Телефонный профиль собеседника (`PhoneProfile.tsx`, #218) — вкладки прямо в профиле: `SharedMediaPanel`.
  */
-import { isRoundVideo, type ConvMessage, type SharedMediaCounts, type SharedMediaKind } from '@gusvoice/shared';
+import { isRoundVideo, type Attachment, type ConvMessage, type SharedMediaCounts, type SharedMediaKind } from '@gusvoice/shared';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { api } from '../api';
 import { serverSharedMedia } from '../convSyncRules';
@@ -18,6 +19,7 @@ import { openAttachmentFile, sizeText } from '../fileActions';
 import { viewerDate } from '../mediaViewerRules';
 import { usePhoneLayout } from '../phoneLayout';
 import {
+  copyingRefusal,
   fileBadge,
   groupByMonth,
   linkDomain,
@@ -27,7 +29,7 @@ import {
   sharedItems,
   sharedMediaCountLabel,
   visibleSharedTabs,
-  viewerOrder,
+  viewerMedia,
   type SharedItem,
 } from '../sharedMediaRules';
 import { usePeerName } from '../peerName';
@@ -175,19 +177,66 @@ function Shell({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/** Перейти к сообщению в ленте беседы: окно закрывается, беседа открывается на сообщении с подсветкой. */
-function showInChat(convId: string, messageId: string): void {
+/**
+ * Перейти к сообщению в ленте беседы: окно закрывается, беседа открывается на сообщении с подсветкой. `onLeave` — экран,
+ * в который медиа встроены (телефонный профиль, `PhoneProfile.tsx`), закрывается тоже.
+ */
+export function showInChat(convId: string, messageId: string, onLeave?: () => void): void {
   closeSharedMedia();
+  onLeave?.();
   requestFeedJump(convId, messageId);
   void useStore.getState().selectDm(convId);
 }
 
 function SharedMediaView({ convId, initial, former }: { convId: string; initial: SharedMediaKind; former: boolean }) {
   const counts = useSharedCounts(convId, former);
+  return (
+    <Shell title="Общие медиа">
+      <SharedMediaBody convId={convId} initial={initial} former={former} counts={counts} />
+    </Shell>
+  );
+}
+
+/**
+ * Общие медиа прямо в профиле (телефон, #218) — как `SharedMediaLayout` под шапкой `ProfileActivity` Telegram Android: вкладки
+ * только непустых видов, первая открыта, сетка от края до края. Листает не свой список, а экран профиля (`scroller`):
+ * вкладки прилипают под его шапкой (CSS `.tgp .smedia-embed`). Пусто во всех видах — блока нет, как у Telegram.
+ */
+export function SharedMediaPanel({ convId, scroller, onLeave }: { convId: string; scroller: HTMLElement | null; onLeave?: () => void }) {
+  const counts = useSharedCounts(convId, false);
+  const kinds = visibleSharedTabs(counts, null);
+  if (kinds.length === 0) return null;
+  return (
+    <div className="smedia smedia-embed">
+      <SharedMediaBody convId={convId} initial={kinds[0]!} former={false} counts={counts} scroller={scroller} onLeave={onLeave} />
+    </div>
+  );
+}
+
+function SharedMediaBody({
+  convId,
+  initial,
+  former,
+  counts,
+  scroller = null,
+  onLeave,
+}: {
+  convId: string;
+  initial: SharedMediaKind;
+  former: boolean;
+  counts: SharedMediaCounts | null;
+  /** Встроено в чужой экран: прокрутку и подгрузку ведёт он (`SharedMediaPanel`); нет — свой список. */
+  scroller?: HTMLElement | null;
+  onLeave?: () => void;
+}) {
+  const embedded = scroller !== null;
   const [tab, setTab] = useState<SharedMediaKind>(initial);
   const [tabs, setTabs] = useState<Partial<Record<SharedMediaKind, TabState>>>({});
   const [viewer, setViewer] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // Место вкладок в общем списке экрана (встроенный вид): к нему возвращает смена вкладки.
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
   const busy = useRef(new Set<SharedMediaKind>());
   const kinds = visibleSharedTabs(counts, tab);
   const cur = tabs[tab] ?? EMPTY_TAB;
@@ -222,20 +271,35 @@ function SharedMediaView({ convId, initial, former }: { convId: string; initial:
 
   // Подгрузка при прокрутке и, пока список ниже окна, — сразу следующая порция.
   const onScroll = () => {
-    const el = listRef.current;
+    const el = scroller ?? listRef.current;
     if (!el || cur.loading || cur.done) return;
     if (el.scrollHeight - el.scrollTop - el.clientHeight < SHARED_MEDIA_PRELOAD_PX) void load(tab);
   };
   useEffect(() => {
-    const el = listRef.current;
+    if (!scroller) return;
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    return () => scroller.removeEventListener('scroll', onScroll);
+  });
+  useEffect(() => {
+    const el = scroller ?? listRef.current;
     if (el && !cur.loading && !cur.done && cur.messages.length > 0 && el.scrollHeight <= el.clientHeight + SHARED_MEDIA_PRELOAD_PX)
       void load(tab);
-  }, [cur, tab, load]);
+  }, [cur, tab, load, scroller]);
+  /** Новая вкладка — с её начала: свой список наверх; встроенный — экран к месту вкладок, если ушёл ниже. */
+  const toTop = () => {
+    if (!scroller) {
+      listRef.current?.scrollTo({ top: 0 });
+      return;
+    }
+    const a = anchorRef.current;
+    const stick = tabsRef.current ? parseFloat(getComputedStyle(tabsRef.current).top) || 0 : 0;
+    if (a && scroller.scrollTop > a.offsetTop - stick) scroller.scrollTo({ top: a.offsetTop - stick });
+  };
 
   const items = useMemo(() => sharedItems(cur.messages, tab), [cur.messages, tab]);
 
-  // Просмотрщик: все загруженные медиа беседы, от старых к новым.
-  const mediaItems = useMemo(() => viewerOrder(sharedItems((tabs.media ?? EMPTY_TAB).messages, 'media')), [tabs.media]);
+  // Просмотрщик: все загруженные медиа беседы, от старых к новым; нескачанные с соседнего инстанса (Э3, `copying`) в ряд не входят.
+  const mediaItems = useMemo(() => viewerMedia(sharedItems((tabs.media ?? EMPTY_TAB).messages, 'media')), [tabs.media]);
   const nameOf = usePeerName(); // подпись контакта вместо имени (`peerName.ts`)
   const images: LightboxImage[] = useMemo(
     () =>
@@ -267,13 +331,13 @@ function SharedMediaView({ convId, initial, former }: { convId: string; initial:
   const viewerActions = (_img: LightboxImage, i: number): LightboxAction[] => {
     const x = mediaItems[i];
     if (!x) return [];
-    return [{ id: 'goto', icon: 'eye', label: 'Показать в чате', run: () => showInChat(convId, x.msg.id) }];
+    return [{ id: 'goto', icon: 'eye', label: 'Показать в чате', run: () => showInChat(convId, x.msg.id, onLeave) }];
   };
 
-  const title = 'Общие медиа';
   return (
-    <Shell title={title}>
-      <div className="smedia-tabs" role="tablist" aria-label="Вид">
+    <>
+      {embedded && <div ref={anchorRef} aria-hidden="true" />}
+      <div className="smedia-tabs" role="tablist" aria-label="Вид" ref={tabsRef}>
         {kinds.map((k) => (
           <button
             key={k}
@@ -283,7 +347,7 @@ function SharedMediaView({ convId, initial, former }: { convId: string; initial:
             className={k === tab ? 'smedia-tab on' : 'smedia-tab'}
             onClick={() => {
               setTab(k);
-              listRef.current?.scrollTo({ top: 0 });
+              toTop();
             }}
           >
             {SHARED_MEDIA_TITLES[k]}
@@ -291,14 +355,14 @@ function SharedMediaView({ convId, initial, former }: { convId: string; initial:
           </button>
         ))}
       </div>
-      <div className="smedia-list" ref={listRef} onScroll={onScroll} role="tabpanel" aria-label={SHARED_MEDIA_TITLES[tab]}>
+      <div className="smedia-list" ref={listRef} onScroll={embedded ? undefined : onScroll} role="tabpanel" aria-label={SHARED_MEDIA_TITLES[tab]}>
         {(tab === 'media' || tab === 'gif') &&
           groupByMonth(items).map((g) => (
             <section key={g.key} className="smedia-month">
               <div className="smedia-month-head">{g.label}</div>
               <div className="smedia-grid">
                 {g.items.map((it) => (
-                  <MediaTile key={it.key} it={it} gif={tab === 'gif'} onOpen={() => (tab === 'gif' ? showInChat(convId, it.msg.id) : openViewer(it))} />
+                  <MediaTile key={it.key} it={it} gif={tab === 'gif'} onOpen={() => (tab === 'gif' ? showInChat(convId, it.msg.id, onLeave) : openViewer(it))} />
                 ))}
               </div>
             </section>
@@ -309,11 +373,11 @@ function SharedMediaView({ convId, initial, former }: { convId: string; initial:
               <div className="smedia-month-head">{g.label}</div>
               {g.items.map((it) =>
                 tab === 'file' ? (
-                  <FileRow key={it.key} it={it} convId={convId} />
+                  <FileRow key={it.key} it={it} convId={convId} onLeave={onLeave} />
                 ) : tab === 'link' ? (
-                  <LinkRow key={it.key} it={it} convId={convId} />
+                  <LinkRow key={it.key} it={it} convId={convId} onLeave={onLeave} />
                 ) : (
-                  <VoiceRow key={it.key} it={it} convId={convId} />
+                  <VoiceRow key={it.key} it={it} convId={convId} onLeave={onLeave} />
                 ),
               )}
             </section>
@@ -333,15 +397,31 @@ function SharedMediaView({ convId, initial, former }: { convId: string; initial:
           actions={viewerActions}
         />
       )}
-    </Shell>
+    </>
   );
 }
 
-function MediaTile({ it, gif, onOpen }: { it: SharedItem; gif: boolean; onOpen: () => void }) {
+export function MediaTile({ it, gif, onOpen }: { it: SharedItem; gif: boolean; onOpen: () => void }) {
   const a = it.att!;
   const video = a.contentType.startsWith('video/');
   // Спойлер (G48, `media2`): плитка общих медиа размыта, пока смотрящий не снял его в ленте.
   const hidden = useSpoilerHidden(a);
+  // Э3 (#141, `fedm3`): копия файла с инстанса автора ещё едет — к файлу не обращаемся (503), та же заглушка, что в ленте
+  // (`AttachmentView.CopyingAttachment`): затенённая плитка с крутилкой; нажатие — «Файл ещё загружается…», а не просмотр.
+  if (a.fedState === 'copying') {
+    return (
+      <button
+        type="button"
+        className="smedia-tile att-copying"
+        onClick={() => toastError(copyingRefusal())}
+        aria-busy="true"
+        aria-label={`${gif ? 'GIF' : video ? 'Видео' : 'Фото'}: загружается`}
+        title={a.name}
+      >
+        <span className="confirm-spin att-spin big" aria-hidden="true" />
+      </button>
+    );
+  }
   return (
     <button type="button" className={`smedia-tile${hidden ? ' spoiled' : ''}`} onClick={onOpen} aria-label={gif ? 'GIF — показать в чате' : video ? 'Видео' : 'Фото'}>
       {video ? (
@@ -360,16 +440,22 @@ function MediaTile({ it, gif, onOpen }: { it: SharedItem; gif: boolean; onOpen: 
 }
 
 /** «Показать в чате» — кнопка справа у строки (Telegram: пункт меню элемента; у нас — видимая кнопка, без меню). */
-function GotoBtn({ convId, id }: { convId: string; id: string }) {
+function GotoBtn({ convId, id, onLeave }: { convId: string; id: string; onLeave?: () => void }) {
   return (
-    <button type="button" className="icon-close smedia-goto" title="Показать в чате" aria-label="Показать в чате" onClick={() => showInChat(convId, id)}>
+    <button type="button" className="icon-close smedia-goto" title="Показать в чате" aria-label="Показать в чате" onClick={() => showInChat(convId, id, onLeave)}>
       <Icon name="eye" size={16} />
     </button>
   );
 }
 
-function FileRow({ it, convId }: { it: SharedItem; convId: string }) {
+/**
+ * Строки файлов / ссылок / голосовых. `source` — откуда сообщение (вкладки поиска на телефоне, 12.10): у Telegram в общем поиске
+ * строка файла — «размер · откуда» (`SharedDocumentCell` `VIEW_TYPE_GLOBAL_SEARCH` → `FilteredSearchView.createFromInfoString`).
+ */
+export function FileRow({ it, convId, onLeave, source }: { it: SharedItem; convId: string; onLeave?: () => void; source?: string }) {
   const a = it.att!;
+  // Э3 (#141): копия ещё едет — в подписи «загружается» (как у карточки в ленте); нажатие скажет об этом тостом (`fileActions.run`).
+  const copying = a.fedState === 'copying';
   return (
     <div className="smedia-item">
       <button type="button" className="smedia-item-main" onClick={() => openAttachmentFile(a)} title={a.name}>
@@ -379,16 +465,18 @@ function FileRow({ it, convId }: { it: SharedItem; convId: string }) {
         <span className="smedia-item-text">
           <span className="smedia-item-title">{a.name}</span>
           <span className="smedia-item-sub">
-            {sizeText(a.size)} · {viewerDate(it.msg.createdAt)}
+            {sizeText(a.size)} · {copying ? 'загружается · ' : ''}
+            {source ? `${source} · ` : ''}
+            {viewerDate(it.msg.createdAt)}
           </span>
         </span>
       </button>
-      <GotoBtn convId={convId} id={it.msg.id} />
+      <GotoBtn convId={convId} id={it.msg.id} onLeave={onLeave} />
     </div>
   );
 }
 
-function LinkRow({ it, convId }: { it: SharedItem; convId: string }) {
+export function LinkRow({ it, convId, onLeave, source }: { it: SharedItem; convId: string; onLeave?: () => void; source?: string }) {
   const url = it.url!;
   const domain = linkDomain(url);
   // Строка — сообщение (как у Telegram: счётчик ссылок — по сообщениям): заголовок — домен первой, ниже все ссылки.
@@ -405,14 +493,49 @@ function LinkRow({ it, convId }: { it: SharedItem; convId: string }) {
               {u}
             </a>
           ))}
+          {source && (
+            <span className="smedia-item-sub">
+              {source} · {viewerDate(it.msg.createdAt)}
+            </span>
+          )}
         </span>
       </div>
-      <GotoBtn convId={convId} id={it.msg.id} />
+      <GotoBtn convId={convId} id={it.msg.id} onLeave={onLeave} />
     </div>
   );
 }
 
-function VoiceRow({ it, convId }: { it: SharedItem; convId: string }) {
+/**
+ * Э3 (#141): голосовое или кружок, чья копия с инстанса автора ещё едет, — те же заглушки, что в ленте (`AttachmentView.CopyingAttachment`):
+ * без плеера и без запроса к файлу (он ответил бы 503).
+ */
+function CopyingVoice({ a }: { a: Attachment }) {
+  if (isRoundVideo(a)) {
+    return (
+      <div className="round-msg" aria-busy="true" aria-label="Видеосообщение загружается">
+        <div className="round-msg-btn att-copying">
+          <span className="confirm-spin att-spin big" aria-hidden="true" />
+        </div>
+      </div>
+    );
+  }
+  const bars = a.waveform?.length ? a.waveform : Array.from({ length: 40 }, () => 20);
+  return (
+    <div className="voice-msg voice-copying" aria-busy="true" aria-label="Голосовое сообщение загружается">
+      <span className="voice-play" aria-disabled="true">
+        <span className="confirm-spin att-spin" aria-hidden="true" />
+      </span>
+      <div className="voice-wave" role="presentation">
+        {bars.map((v, i) => (
+          <span key={i} className="voice-bar" style={{ height: `${Math.max(8, v)}%` }} />
+        ))}
+      </div>
+      <span className="voice-copying-note">загружается</span>
+    </div>
+  );
+}
+
+export function VoiceRow({ it, convId, onLeave, source }: { it: SharedItem; convId: string; onLeave?: () => void; source?: string }) {
   const m = it.msg;
   const me = useStore((s) => s.user?.id);
   const author = usePeerName()(m.author.id, m.author.displayName); // подпись контакта (`peerName.ts`)
@@ -429,13 +552,13 @@ function VoiceRow({ it, convId }: { it: SharedItem; convId: string }) {
       <div className="smedia-item-text">
         <span className="smedia-voice-head">
           <span className="smedia-item-title">{author}</span>
-          <span className="smedia-item-sub">{viewerDate(m.createdAt)}</span>
+          <span className="smedia-item-sub">{source && source !== author ? `${source} · ${viewerDate(m.createdAt)}` : viewerDate(m.createdAt)}</span>
         </span>
         {/* Кружок (`circles1`) с 0125 живёт во вкладке «Голосовые», как Telegram `RoundVoice`: тот же круг, что в ленте, меньше
             (`.smedia-voice .round-msg`), без беззвучного автоповтора — играет по нажатию. */}
-        {isRoundVideo(it.att!) ? <RoundVideo a={it.att!} meta={meta} autoplay={false} /> : <VoiceMessage a={it.att!} meta={meta} />}
+        {it.att!.fedState === 'copying' ? <CopyingVoice a={it.att!} /> : isRoundVideo(it.att!) ? <RoundVideo a={it.att!} meta={meta} autoplay={false} /> : <VoiceMessage a={it.att!} meta={meta} />}
       </div>
-      <GotoBtn convId={convId} id={m.id} />
+      <GotoBtn convId={convId} id={m.id} onLeave={onLeave} />
     </div>
   );
 }

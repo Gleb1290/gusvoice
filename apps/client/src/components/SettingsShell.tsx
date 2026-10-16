@@ -6,6 +6,7 @@ import type {
   ReactNode,
   Ref,
 } from 'react';
+import { usePhoneLayout } from '../phoneLayout';
 import { Icon, type IconName } from './Icon';
 
 /**
@@ -111,9 +112,17 @@ export interface SettingsRailProps {
 }
 
 export function SettingsRail({ title, named, glyph, search, label, onClose, onListKeyDown, children }: SettingsRailProps) {
+  /* Телефон (#218): список разделов — отдельный экран, и закрывает его не «✕» справа, а стрелка «←» слева от названия, как в
+     настройках Telegram (`ActionBar` с `BACK`, `TA/ui/SettingsActivity`). Та же кнопка, тот же `onClose`; на ПК — по-прежнему «✕». */
+  const phone = usePhoneLayout();
   return (
     <div className="set-rail">
-      <div className={search ? 'set-rail-head' : 'set-rail-title'}>
+      <div className={`${search ? 'set-rail-head' : 'set-rail-title'}${phone ? ' back-left' : ''}`}>
+        {phone && (
+          <button type="button" className="icon-close icon-back" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+            <Icon name="chevron-left" size={24} />
+          </button>
+        )}
         {glyph ? (
           <span className="ch-settings-title" title={title}>
             {glyph}
@@ -126,9 +135,11 @@ export function SettingsRail({ title, named, glyph, search, label, onClose, onLi
         ) : (
           <span>{title}</span>
         )}
-        <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
-          <Icon name="close" size={18} />
-        </button>
+        {!phone && (
+          <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
+            <Icon name="close" size={18} />
+          </button>
+        )}
       </div>
       {search}
       <div className="set-rail-list" role="tablist" aria-label={label} aria-orientation="vertical" onKeyDown={onListKeyDown}>

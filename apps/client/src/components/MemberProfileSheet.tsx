@@ -3,7 +3,7 @@ import { MAX_VOLUME, useUserAudio } from '../localUserAudio';
 import { customStatusVisible, effectiveDot } from '../status';
 import { useStore } from '../store';
 import { toastError } from '../toast';
-import { dmBlockText } from '../dmRules';
+import { dmBlockText, serverFedDm } from '../dmRules';
 import { Avatar } from './Avatar';
 import { AvatarZoom } from './AvatarZoom';
 import { BottomSheet } from './BottomSheet';
@@ -53,7 +53,7 @@ export function MemberProfileSheet({ member, onClose }: { member: ServerMemberIn
 
   // Одно правило на все места, где предлагается написать (§5.8): запрет двусторонний, и гостю
   // нужен СВОЙ текст — он про него самого, а не про собеседника.
-  const dmBlocked = dmBlockText(me?.homeInstance, member.user.homeInstance);
+  const dmBlocked = dmBlockText(me?.homeInstance, member.user.homeInstance, useStore((s) => serverFedDm(s.serverFeatures)));
 
   const dm = () => {
     onClose();
@@ -126,7 +126,7 @@ export function MemberProfileSheet({ member, onClose }: { member: ServerMemberIn
                 title={audio.muted ? 'Включить звук' : 'Заглушить для себя'}
                 onClick={() => audio.toggleMuted()}
               >
-                <Icon name={audio.muted ? 'volume-off' : 'volume'} size={18} />
+                <Icon name={audio.muted || volPct === 0 ? 'volume-off' : 'volume'} size={18} />
               </button>
               <span className="mps-vol-label">ГРОМКОСТЬ</span>
               <button type="button" className={`mps-vol-pct ${audio.muted ? 'muted' : volPct > 100 ? 'boost' : ''}`} onClick={() => audio.reset()}>

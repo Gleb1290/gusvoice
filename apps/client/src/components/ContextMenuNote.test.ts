@@ -48,7 +48,7 @@ it('остаток мьюта в трёх настоящих пунктах по
           assert.equal(host.querySelector('.ctx-shortcut.ctx-note')?.textContent, '3 ч', `${caller}: остаток мьюта виден как справка`);
         }
         await React.act(async () => root.render(React.createElement(MenuItem, { label: 'Ответить', shortcut: 'R' })));
-        assert.equal(host.querySelector('.ctx-shortcut')?.textContent, 'R'); assert.equal(host.querySelector('.ctx-note'), null);
+        assert.equal(host.querySelector('.ctx-shortcut')?.textContent, 'R'); assert.equal(host.querySelector('.ctx-note') === null, true);
       } finally { await React.act(async () => root.unmount()); host.remove(); }
     };
     await check(chat);

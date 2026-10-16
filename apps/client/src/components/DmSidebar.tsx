@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,22 +10,29 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import type { ConvMute, ConvSummary, DmChannel, UserSearchHit } from '@gusvoice/shared';
+import type { ConvMute, ConvSummary, DmChannel, RemoteUserHit, UserSearchHit } from '@gusvoice/shared';
 import { api } from '../api';
 import { isMobile, isTauri } from '../hotkeys';
 import { useStore } from '../store';
 import { useVisibleOnline } from '../dmOnline';
+import { useContactSeen } from '../useContactSeen';
 import { toast, toastError } from '../toast';
 import { useDialogChrome } from '../dialogChrome';
 import {
   dmBlockText,
   dmComposeCandidates,
   dmComposeHint,
+  DM_SERVER_UPDATE_TEXT,
   dmEmptyHint,
+  dmNeedsServerUpdate,
   dmSearchHits,
+  dmRemoteQuery,
+  remoteHandle,
+  serverFedDm,
   serverSearchesUsers,
   USER_SEARCH_DELAY_MS,
   userSearchQuery,
+  type DmCandidate,
   type DmSearchState,
 } from '../dmRules';
 import { isFeedOnScreen } from '../channelRules';
@@ -59,13 +67,29 @@ import { useDmFolderUi } from './DmFolderBar';
 import { folderOwnPinRows, folderPinnedRows } from '../dmFolderView';
 import { useDmFolders } from '../dmFolders';
 import { rowMarks } from '../cornerButtonsRules';
-import { hasChips, scopeView, type SearchChips, type SearchScope } from '../dmListSearchRules';
+import {
+  hasChips,
+  phoneSearchTabsShown,
+  scopeView,
+  searchButtonShown,
+  searchFieldAlpha,
+  type PhoneSearchTab,
+  type SearchChips,
+  type SearchScope,
+} from '../dmListSearchRules';
 import { DmSearchScopes, openServerHit, ServerMessageHits } from './DmServerSearch';
-import { AllMessageHits } from './DmAllSearch';
+// Вкладки поиска на телефоне (`DmSearchKinds.tsx`) — через `DmAllSearch`: одна граница «результаты поиска» у списка.
+import { AllMessageHits, DmKindHits, DmSearchTabs } from './DmAllSearch';
 import { DmMessageHits, DmSearchChips, DmSearchHome, openSearchHit, useFrequent, useFrequentHidden, useRecentSearches } from './DmListSearch';
 import { DmArchiveHead, DmArchiveRow, useArchiveCollapsed } from './DmArchive';
 import { DRAG_MSG_MIME, hasMsgDrag, parseMsgDrag, requestForwardDrop, type MsgDragPayload } from '../dragOut';
 import { DM_ROW_AVA, useListLines } from '../dmListView';
+/** Аватар строки на телефоне, px: Telegram Android `DialogCell` в обычной раскладке — 52 (`DialogCell.java:2467`; 56 — «три строки»).
+ * Своя константа, а не из `dmListView`: тесты подменяют тот модуль целиком. Та же цифра — в `DmArchive.tsx`. */
+const DM_ROW_AVA_PHONE = 52;
+/** Точка «в сети» на аватаре строки, телефон, px: Telegram `DialogCell.java:5077` — круг радиусом 5 dp в обводке 2 dp (радиус 7), центр на 6 dp левее
+ * правого и 8 dp выше нижнего края аватара (`:5068-5073`); положение — `.app.m-list .dm-row .mp-dot-wrap` в `styles.css`. */
+const DM_ONLINE_DOT_PHONE = 10;
 import { setNarrowAllowed, useSidebarNarrow } from '../uiPrefs';
 import { CHOOSE_BY_DRAG_MS, dragMoved, hasFilesDrag, requestFilesDrop } from '../filesDrop';
 import { useDmListSwipe, useSwipeCaps, useSwipeSetting } from './DmListSwipe';
@@ -83,7 +107,7 @@ import { useVoiceDraftKeys } from '../voiceDrafts';
 
 interface DmRowProps {
   dm: DmChannel;
-  /** Сводка беседы (режим бесед): превью, ✓ / ✓✓. На старом пути `/api/dm` её нет — строка без превью и отметок. */
+  /** Сводка беседы (режим бесед): превью, ✓ / ✓✓. Нет её (ещё не пришла) — строка без превью и отметок. */
   summary: ConvSummary | undefined;
   meId: string | undefined;
   online: boolean;
@@ -247,9 +271,9 @@ export const DmRow = memo(function DmRow({
   const last = summary?.lastMessage ?? null;
   // Черновик прячется за новым непрочитанным сообщением и поднимает беседу своим временем (G34, Telegram Android `DialogCell`).
   const draftShown = !!draft && rowShowsDraft({ draftAt, lastAt: dm.lastMessageAt, unread: unread || unreadN > 0 });
-  const preview = dmRowPreview({ typing, draft: draftShown ? draft : null, last });
+  const preview = dmRowPreview({ typing, draft: draftShown ? draft : null, last, meId });
   // Служебная запись группы (`groups1`) — без отметок ✓ / ✓✓, как у Telegram.
-  const status = last?.service || dm.saved ? null : dmRowStatus({ last, meId, peerReadKey: summary?.group ? chatReadKeyOf(summary) : peerReadKeyOf(summary), preview });
+  const status = last?.service || last?.call || dm.saved ? null : dmRowStatus({ last, meId, peerReadKey: summary?.group ? chatReadKeyOf(summary) : peerReadKeyOf(summary), preview });
   const when = dmRowTime(
     preview.kind === 'draft'
       ? rowActivityAt({ lastMessageAt: dm.lastMessageAt, createdAt: dm.createdAt, draftAt })
@@ -263,6 +287,8 @@ export const DmRow = memo(function DmRow({
   const thumb =
     preview.kind === 'attachment' && last?.attachmentKind === 'photo' && typeof last.thumb === 'string' ? last.thumb : null;
   const thumbSpoiler = last?.thumbSpoiler === true;
+  // Э3 (#141): миниатюра — ссылка сервера; вложение с соседнего инстанса может ещё копироваться (503) — тогда значок вида, как без миниатюры.
+  const [badThumb, setBadThumb] = useState<string | null>(null);
   const label0 = dmRowLabel({
     name,
     online,
@@ -422,12 +448,12 @@ export const DmRow = memo(function DmRow({
       onTouchCancel={holdable ? holdStop : undefined}
     >
       <span className="dm-ava">
-        {dm.saved ? <SavedAvatar size={phone ? 48 : DM_ROW_AVA} /> : <Avatar name={name} url={dm.otherUser.avatarUrl} size={phone ? 48 : DM_ROW_AVA} />}
+        {dm.saved ? <SavedAvatar size={phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA} /> : <Avatar name={name} url={dm.otherUser.avatarUrl} size={phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA} />}
         {online && (
           /* Обводка точки — цветом фона строки: `currentColor`, а `color` обёртки стили называют рядом с фоном в каждом
              состоянии строки (блок «Раунд 11» в `styles.css`; своей переменной под фон нет с 05.10). */
           <span className="mp-dot-wrap">
-            <StatusDot status="online" size={phone ? 14 : 12} ringColor="currentColor" />
+            <StatusDot status="online" size={phone ? DM_ONLINE_DOT_PHONE : 12} ringColor="currentColor" />
           </span>
         )}
         {/* Выбор (G01): галочка в углу аватара — Telegram Android `DialogCell.checkBox` (CheckBox2 справа внизу аватара). */}
@@ -510,9 +536,9 @@ export const DmRow = memo(function DmRow({
               <Icon name="forward" size={14} title="Переслано" />
             </span>
           )}
-          {thumb ? (
+          {thumb && thumb !== badThumb ? (
             /* Мини-превью фото (G34): Telegram Android `DialogCell.thumbImage` — 18 dp, скругление 2 dp, перед текстом. */
-            <img className={thumbSpoiler ? 'dm-thumb spoiled-thumb' : 'dm-thumb'} src={thumb} alt="" loading="lazy" decoding="async" draggable={false} />
+            <img className={thumbSpoiler ? 'dm-thumb spoiled-thumb' : 'dm-thumb'} src={thumb} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setBadThumb(thumb)} />
           ) : (
             <span className="dm-att">
               <Icon name={preview.icon} size={14} />
@@ -559,15 +585,26 @@ export const DmRow = memo(function DmRow({
  * (`BottomSheet`) сделан для телефона: на ПК он растягивался на всю ширину окна (1280 px). Esc, возврат фокуса на кнопку,
  * с которой открыли, — `useDialogChrome`; щелчок мимо окна закрывает.
  */
-function ComposeDialog({ inputRef, children }: { inputRef: RefObject<HTMLInputElement>; children: ReactNode }) {
-  const dialogRef = useDialogChrome<HTMLDivElement>(closeDmCompose);
+function ComposeDialog({
+  inputRef,
+  children,
+  title = 'Написать',
+  onClose = closeDmCompose,
+}: {
+  inputRef: RefObject<HTMLInputElement>;
+  children: ReactNode;
+  /** Выбор контакта для карточки (G69, `ContactPickSheet`): свой заголовок и своё закрытие. */
+  title?: string;
+  onClose?: () => void;
+}) {
+  const dialogRef = useDialogChrome<HTMLDivElement>(onClose);
   // `useDialogChrome` ставит фокус на само окно (точка входа для читалок), а человеку сразу печатать — курсор в поле.
   // Эффект стоит ПОСЛЕ хука и потому выполняется после него: последнее слово за полем.
   useEffect(() => {
     inputRef.current?.focus();
   }, [inputRef]);
   return (
-    <div className="modal-overlay" onClick={closeDmCompose}>
+    <div className="modal-overlay" onClick={onClose}>
       <div
         className="modal dm-compose"
         ref={dialogRef}
@@ -577,7 +614,7 @@ function ComposeDialog({ inputRef, children }: { inputRef: RefObject<HTMLInputEl
         aria-labelledby="dm-compose-title"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 id="dm-compose-title">Написать</h2>
+        <h2 id="dm-compose-title">{title}</h2>
         {children}
       </div>
     </div>
@@ -592,13 +629,16 @@ function ComposeDialog({ inputRef, children }: { inputRef: RefObject<HTMLInputEl
  * `USER_SEARCH_DELAY_MS`, опоздавший ответ отбрасывается по номеру запроса) — найденные блоком «На этом инстансе» под
  * своими; пустое окно учит «Введите @имя» (`dmComposeHint`).
  */
-function NewDmSheet({ initialQuery }: { initialQuery: string }) {
+function NewDmSheet({ initialQuery, pick }: { initialQuery: string; pick?: ContactPick }) {
   const phone = usePhoneLayout();
+  // Выбор контакта для карточки (G69): тот же список, но нажатие — выбор человека, а не беседа с ним.
+  const close = pick ? pick.onClose : closeDmCompose;
   const members = useStore((s) => s.members);
   const dms = useStore((s) => s.dms);
   // Гость ли я сам — от этого зависит каждый клик «написать» (§5.8).
   const me = useStore((s) => s.user);
   const openDmWith = useStore((s) => s.openDmWith);
+  const openDmRemote = useStore((s) => s.openDmRemote);
   // Гостю искать незачем: личка с ним закрыта, и сервер ему не ответит (`requireLocalUser`).
   const searchOn = useStore((s) => serverSearchesUsers(s.serverFeatures)) && !me?.homeInstance;
   const groupsOn = useStore((s) => s.convActive && serverGroups(s.serverFeatures)) && !me?.homeInstance;
@@ -607,6 +647,8 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
   const openSaved = useStore((s) => s.openSaved);
   const [query, setQuery] = useState(initialQuery);
   const [hits, setHits] = useState<UserSearchHit[]>([]);
+  // Э1 (`fedm1`): люди связанных инстансов из кеша каталога (`UserSearchResponse.remote`).
+  const [remote, setRemote] = useState<RemoteUserHit[]>([]);
   const [search, setSearch] = useState<DmSearchState | null>(null);
   // Номер запроса поиска (как у `JoinServerModal`): ответ на прошлый ввод, догнавший нас после следующего, показал бы не
   // тех людей — человек в этот момент уже набрал другое имя.
@@ -631,12 +673,27 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
     () => sortContacts((contacts ?? []).filter((c) => contactMatches(c, query)), onlineSet),
     [contacts, query, onlineSet],
   );
+  // Телефон (#218, `ContactsActivity`): под именем «в сети» / «был(а) …», а не @ник; клавиатура сама не открывается.
+  const seenText = useContactSeen(candidateIds, onlineSet, phone);
+  const subOf = (id: string, username: string) => {
+    const t = seenText.get(id);
+    return t ? (
+      <span className={`dm-sub seen${onlineSet.has(id) ? ' on' : ''}`}>{t}</span>
+    ) : (
+      <span className="dm-sub"> @{username}</span>
+    );
+  };
+  const fedDm = useStore((s) => serverFedDm(s.serverFeatures));
+  // Э1 (`fedm1`): `@имя@домен` — человек связанного инстанса; уходит на сервер как есть (`userSearchQuery` его не пропустит).
+  const remoteQuery = searchOn ? dmRemoteQuery(query, fedDm) : null;
   const searchQuery = searchOn ? userSearchQuery(query) : null;
 
   useEffect(() => {
-    if (!searchQuery) {
+    const ask = remoteQuery ?? searchQuery;
+    if (!ask) {
       round.current += 1;
       setHits([]);
+      setRemote([]);
       setSearch(null);
       return;
     }
@@ -644,44 +701,46 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
     setSearch({ state: 'loading' });
     const t = window.setTimeout(() => {
       api
-        .searchUsers(searchQuery)
+        .searchUsers(ask)
         .then((r) => {
           if (round.current !== mine) return;
           setHits(r.users);
+          setRemote(r.remote ?? []);
           setSearch({ state: 'done' });
         })
         .catch((e: Error) => {
           if (round.current !== mine) return;
           setHits([]);
+          setRemote([]);
           setSearch({ state: 'error', error: e.message });
         });
     }, USER_SEARCH_DELAY_MS);
     return () => window.clearTimeout(t);
-  }, [searchQuery]);
+  }, [searchQuery, remoteQuery]);
 
   const found = useMemo(
     () => dmSearchHits({ hits, candidates, meId: me?.id, query: searchQuery }).filter((u) => !contactIds.has(u.id)),
     [hits, candidates, me?.id, searchQuery, contactIds],
   );
-  const hint = dmComposeHint({ searchOn, shown: contactRows.length + candidates.length + found.length, query, search });
+  const hint = dmComposeHint({ searchOn, shown: contactRows.length + candidates.length + found.length + remote.length, query, search });
 
   const picker = (
     <>
       <input
         ref={inputRef}
         className="sheet-search"
-        autoFocus
+        autoFocus={!phone}
         value={query}
         placeholder="Кому написать?"
         onChange={(e) => setQuery(e.target.value)}
       />
       {/* Группы ЛС (07.10, `groups1`): первая строка «Написать» — «Новая группа», как Telegram «New Group». */}
-      {groupsOn && !query && (
+      {groupsOn && !query && !pick && (
         <button
           type="button"
           className="sheet-row group-new"
           onClick={() => {
-            closeDmCompose();
+            close();
             openNewGroup();
           }}
         >
@@ -691,12 +750,12 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
           <span className="sr-label">Новая группа</span>
         </button>
       )}
-      {savedOn && !query && (
+      {savedOn && !query && !pick && (
         <button
           type="button"
           className="sheet-row group-new"
           onClick={() => {
-            closeDmCompose();
+            close();
             void openSaved();
           }}
         >
@@ -707,7 +766,7 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
         </button>
       )}
       {hint && <div className="sheet-empty">{hint}</div>}
-      {(contactRows.length > 0 || candidates.length > 0 || found.length > 0) && (
+      {(contactRows.length > 0 || candidates.length > 0 || found.length > 0 || remote.length > 0) && (
         <div className="dm-compose-list">
           {contactRows.length > 0 && <div className="mp-head">Контакты</div>}
           {contactRows.map((c) => (
@@ -716,7 +775,8 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
               key={c.id}
               className="sheet-row"
               onClick={() => {
-                closeDmCompose();
+                close();
+                if (pick) return pick.onPick(c.id, { name: contactLabel(c), username: c.username ?? '', avatarUrl: c.avatarUrl ?? null });
                 openDmWith(c.id).catch((e: Error) => toastError(e));
               }}
             >
@@ -726,7 +786,7 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
               </span>
               <span className="sr-label">
                 {contactLabel(c)}
-                <span className="dm-sub"> @{c.username}</span>
+                {subOf(c.id, c.username)}
               </span>
             </button>
           ))}
@@ -737,7 +797,8 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
               key={u.id}
               className="sheet-row"
               onClick={() => {
-                closeDmCompose();
+                close();
+                if (pick) return pick.onPick(u.id, { name: nameOf(u.id, u.displayName), username: u.username ?? '', avatarUrl: u.avatarUrl ?? null });
                 // Гость и гостю — нельзя (§5.8): отвечаем словами, не сходив за отказом на сервер.
                 const blocked = dmBlockText(me?.homeInstance, u.homeInstance);
                 if (blocked) {
@@ -754,7 +815,7 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
               </span>
               <span className="sr-label">
                 {nameOf(u.id, u.displayName)}
-                <span className="dm-sub"> @{u.username}</span>
+                {subOf(u.id, u.username)}
               </span>
             </button>
           ))}
@@ -767,7 +828,8 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
               key={u.id}
               className="sheet-row"
               onClick={() => {
-                closeDmCompose();
+                close();
+                if (pick) return pick.onPick(u.id, { name: nameOf(u.id, u.displayName), username: u.username ?? '', avatarUrl: u.avatarUrl ?? null });
                 // Политика инстанса `shared` не пускает к незнакомому (403), а новых переписок за час больше 10 (429) — сервер
                 // объясняет это сам, его текст и показываем.
                 openDmWith(u.id).catch((e: Error) => toastError(e));
@@ -782,24 +844,205 @@ function NewDmSheet({ initialQuery }: { initialQuery: string }) {
               </span>
             </button>
           ))}
+          {remote.length > 0 && <div className="mp-head">Другие инстансы</div>}
+          {remote.map((u) => (
+            // Э1 (`fedm1`): человек связанного инстанса. Решает его дом (Ф6): отказ сервер вернёт кодом, тост скажет словами.
+            <button
+              type="button"
+              key={`${u.instanceId}:${u.homeUserId}`}
+              className="sheet-row"
+              onClick={() => {
+                // Выбор контакта (G69): у человека из каталога соседа ещё нет нашей строки — поделиться можно после беседы с ним.
+                if (pick) {
+                  toast('info', 'Сначала напишите этому человеку — потом им можно поделиться');
+                  return;
+                }
+                close();
+                openDmRemote({ instanceId: u.instanceId, homeUserId: u.homeUserId }).catch((e: Error) => toastError(e));
+              }}
+            >
+              <span className="dm-ava">
+                <Avatar url={u.avatarUrl} name={u.displayName} size={38} />
+              </span>
+              <span className="sr-label">
+                {u.displayName}
+                <span className="dm-sub"> {remoteHandle(u)}</span>
+              </span>
+            </button>
+          ))}
         </div>
       )}
     </>
   );
 
   return phone ? (
-    <BottomSheet title="Написать" onClose={closeDmCompose}>
+    <BottomSheet title={pick?.title ?? 'Написать'} onClose={close}>
       {picker}
     </BottomSheet>
   ) : (
-    <ComposeDialog inputRef={inputRef}>{picker}</ComposeDialog>
+    <ComposeDialog inputRef={inputRef} {...(pick ? { title: pick.title, onClose: close } : {})}>
+      {picker}
+    </ComposeDialog>
   );
+}
+
+/** Выбор человека вместо «написать ему» (G69): заголовок окна, выбор, закрытие. */
+/** Кого выбрали — для окна подтверждения «Отправить контакт» (имя, @ник, аватар из той же строки списка). */
+export interface ContactWho {
+  name: string;
+  username: string;
+  avatarUrl: string | null;
+}
+
+interface ContactPick {
+  title: string;
+  onPick: (userId: string, who: ContactWho) => void;
+  onClose: () => void;
+}
+
+/**
+ * «Контакт» из листа вложений ЛС (14.10, G69, `geocontact1`): тот же список, что «Написать» (контакты, собеседники, люди
+ * открытого сервера и поиск по @имени) — как Telegram Android `ChatAttachAlertContactsLayout` берёт список контактов. Нажатие
+ * строки — выбор человека (`onPick` с его id), «Новая группа» и «Избранное» не показываются; люди других инстансов из каталога
+ * (без беседы) — пока нельзя: у них ещё нет нашей строки.
+ */
+export function ContactPickSheet({ onPick, onClose }: { onPick: (userId: string, who: ContactWho) => void; onClose: () => void }) {
+  return <NewDmSheet initialQuery="" pick={{ title: 'Отправить контакт', onPick, onClose }} />;
 }
 
 /**
  * Левая колонка личных сообщений (раунд 11, HANDOFF §2–§4): шапка, поиск по беседам, строки, пустой список, «Написать».
  * Пустой список на ПК — в главной области (`MainLayout`): там есть место, а список без бесед пуст и без поиска.
  */
+/**
+ * Люди в поиске по списку бесед на телефоне (#218) — вместо служебных строк «По запросу … бесед нет» + «Написать новому
+ * человеку» над результатами. Как у Telegram Android (`DialogsSearchAdapter`): после найденных бесед — люди, с кем беседы
+ * ещё нет (у TG — контакты из локального поиска; у нас — ростер открытого сервера и собеседники, `dmComposeCandidates`), затем
+ * блок «Глобальный поиск» (`R.string.GlobalSearch`) — люди инстанса по @логину с сервера (`GET /users/search`, признак `users1`;
+ * у TG — `searchAdapterHelper.getGlobalSearch()`, поиск по username). Строка — как у результатов по сообщениям (`.dm-row`),
+ * под именем @логин (`ProfileSearchCell`). Тап — беседа с человеком (`openDmWith`); ничего не нашлось — блока нет.
+ */
+function DmGlobalPeople({ q, dms, onOpened }: { q: string; dms: readonly DmChannel[]; onOpened: () => void }) {
+  // Ростера может не быть (сервер не открывали) — тогда только собеседники.
+  const members = useStore((s) => s.members) ?? [];
+  const me = useStore((s) => s.user);
+  const openDmWith = useStore((s) => s.openDmWith);
+  const openDmRemote = useStore((s) => s.openDmRemote);
+  // Гостю искать незачем: личка с ним закрыта, и сервер ему не ответит (`requireLocalUser`) — как в «Написать».
+  const searchOn = useStore((s) => serverSearchesUsers(s.serverFeatures)) && !me?.homeInstance;
+  const nameOf = usePeerName();
+  const [hits, setHits] = useState<UserSearchHit[]>([]);
+  const [remote, setRemote] = useState<RemoteUserHit[]>([]);
+  // Номер запроса: ответ на прошлый ввод, догнавший следующий, показал бы не тех людей.
+  const round = useRef(0);
+
+  // С кем беседа один на один уже есть — те видны строками бесед выше, второй раз их не показываем.
+  const peers = useMemo(() => new Set(dms.filter((d) => !d.group).map((d) => d.otherUser.id)), [dms]);
+  const local = useMemo(
+    () => (q.trim() ? dmComposeCandidates({ members, dms, meId: me?.id, query: q, nameOf }).filter((u) => !peers.has(u.id)) : []),
+    [members, dms, me?.id, q, nameOf, peers],
+  );
+  const fedDm = useStore((s) => serverFedDm(s.serverFeatures));
+  // Э1 (`fedm1`): `@имя@домен` — человек связанного инстанса; уходит на сервер как есть (`userSearchQuery` его не пропустит).
+  const remoteQuery = searchOn ? dmRemoteQuery(q, fedDm) : null;
+  const searchQuery = searchOn ? userSearchQuery(q) : null;
+  useEffect(() => {
+    const mine = ++round.current;
+    const ask = remoteQuery ?? searchQuery;
+    if (!ask) {
+      setHits([]);
+      setRemote([]);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      api
+        .searchUsers(ask)
+        .then((r) => {
+          if (round.current === mine) {
+            setHits(r.users);
+            setRemote(r.remote ?? []);
+          }
+        })
+        .catch(() => {
+          // Поиск людей — добавка к поиску бесед: сбой не повод для окна, просто блока нет.
+          if (round.current === mine) {
+            setHits([]);
+            setRemote([]);
+          }
+        });
+    }, USER_SEARCH_DELAY_MS);
+    return () => window.clearTimeout(t);
+  }, [searchQuery, remoteQuery]);
+  const taken = useMemo(() => [...local, ...[...peers].map((id) => ({ id }))], [local, peers]);
+  const found = useMemo(() => dmSearchHits({ hits, candidates: taken, meId: me?.id, query: searchQuery }), [hits, taken, me?.id, searchQuery]);
+
+  if (local.length === 0 && found.length === 0 && remote.length === 0) return null;
+  // Э1 (`fedm1`): человек связанного инстанса — `@имя@домен` под именем, тап открывает переписку через его дом.
+  const remoteRow = (u: RemoteUserHit) => (
+    <button
+      type="button"
+      key={`${u.instanceId}:${u.homeUserId}`}
+      className="dm-row dm-msg-hit dm-people-hit"
+      onClick={() => {
+        onOpened();
+        openDmRemote({ instanceId: u.instanceId, homeUserId: u.homeUserId }).catch((e: Error) => toastError(e));
+      }}
+    >
+      <span className="dm-ava">
+        <Avatar name={u.displayName} url={u.avatarUrl} size={40} />
+      </span>
+      <span className="dm-name">
+        <span className="dm-name-text">{u.displayName}</span>
+      </span>
+      <span className="dm-when" />
+      <span className="dm-preview">{remoteHandle(u)}</span>
+    </button>
+  );
+  const open = (u: DmCandidate | UserSearchHit) => {
+    // Гость и гостю — нельзя (§5.8): отвечаем словами, не сходив за отказом на сервер.
+    const blocked = 'homeInstance' in u ? dmBlockText(me?.homeInstance, u.homeInstance) : null;
+    if (blocked) {
+      toast('info', blocked);
+      return;
+    }
+    onOpened();
+    openDmWith(u.id).catch((e: Error) => toastError(e));
+  };
+  const row = (u: DmCandidate | UserSearchHit) => {
+    const name = nameOf(u.id, u.displayName);
+    return (
+      <button type="button" key={u.id} className="dm-row dm-msg-hit dm-people-hit" onClick={() => open(u)}>
+        <span className="dm-ava">
+          <Avatar name={name} url={u.avatarUrl} size={40} />
+        </span>
+        <span className="dm-name">
+          <span className="dm-name-text">{name}</span>
+        </span>
+        <span className="dm-when" />
+        <span className="dm-preview">@{u.username}</span>
+      </button>
+    );
+  };
+  return (
+    <>
+      {local.length > 0 && (
+        <section className="dms-hits" aria-label="Люди" data-testid="dm-local-people">
+          {local.map(row)}
+        </section>
+      )}
+      {found.length > 0 && (
+        <section className="dms-hits" aria-label="Глобальный поиск" data-testid="dm-global-people">
+          <div className="dms-head">
+            <span>Глобальный поиск</span>
+          </div>
+          {found.map(row)}
+          {remote.map(remoteRow)}
+        </section>
+      )}
+    </>
+  );
+}
+
 export function DmSidebar() {
   const dms = useStore((s) => s.dms);
   const nameOf = usePeerName(); // подпись контакта в поиске по списку (`peerName.ts`)
@@ -813,15 +1056,16 @@ export function DmSidebar() {
   const meId = useStore((s) => s.user?.id);
   // Гость ли я сам — от этого зависит подпись пустого списка (§5.8).
   const guestHome = useStore((s) => s.user?.homeInstance ?? null);
-  // Режим бесед: сводки (превью, ✓ / ✓✓), черновики (Р7) и своя очередь отправки. На старом пути их нет.
-  const convActive = useStore((s) => s.convActive);
+  // Сводки (превью, ✓ / ✓✓), черновики (Р7) и своя очередь отправки — строки есть только в режиме бесед.
   const summaries = useStore((s) => s.conv.summaries);
   const drafts = useStore((s) => s.drafts);
   /** Черновики голосовых (G54, `voiceDrafts.ts`): «Черновик: Голосовое сообщение», если текстового черновика нет. */
   const voiceDrafts = useVoiceDraftKeys();
   const outbox = useStore((s) => s.outbox);
   // Список ещё не пришёл (беседы без кеша) — пустым его не называем: иначе гусь мелькнул бы до ответа сервера.
-  const listKnown = useStore((s) => !s.convActive || s.conv.pts !== null);
+  const listKnown = useStore((s) => s.convActive && s.conv.pts !== null);
+  // Сервер без бесед (`conv1`+`conv2`) — ЛС там нет: на телефоне в списке заглушка про обновление сервера (09.10).
+  const dmOff = useStore((s) => dmNeedsServerUpdate(s.serverFeatures));
   // Заглушки бесед (07.10, G03): из сводки (`conv11`) или из списка заглушек собеседников; срок вышел — перерисовать.
   const mutedUsers = useStore((s) => s.pushMutedDmUsers);
   const muteUntil = useStore((s) => s.pushMuteUntil);
@@ -870,9 +1114,17 @@ export function DmSidebar() {
   // Вкладки областей поиска «Все / Личные / Серверы» (G35, `srvsearch1`): состояние — здесь, правила — `scopeView`.
   const srvSearch = useStore((s) => s.convActive && serverGlobalSearch(s.serverFeatures) && serverServersSearch(s.serverFeatures));
   const [scope, setScope] = useState<SearchScope>('all');
+  // Телефон (12.10, #218): при открытом поиске (и с пустым полем) — вкладки «Чаты / Медиа / Ссылки / Файлы / GIF / Голосовые» (Telegram Android
+  // `SearchViewPager`, `DmSearchKinds.tsx`); новый поиск — снова с «Чатов».
+  const [kindTab, setKindTab] = useState<PhoneSearchTab>('chats');
   useEffect(() => {
     if (!query) setScope('all');
   }, [query]);
+  // Вкладка переживает ввод и стирание запроса (как у Telegram); с «Чатов» начинается только новый поиск — поле закрыто и пусто.
+  const searchIdle = !findFocused && !query && !hasChips(chips);
+  useEffect(() => {
+    if (searchIdle) setKindTab('chats');
+  }, [searchIdle]);
   const recent = useRecentSearches();
   // «Частые» (G35, `freq1`): порядок — сервера, отсев (архив, заблокированные, «Избранное», убранные) — клиента.
   const freqOn = useStore((s) => s.convActive && serverGlobalSearch(s.serverFeatures) && serverFrequent(s.serverFeatures));
@@ -925,6 +1177,35 @@ export function DmSidebar() {
   }, [selecting]);
   // «Назад» Android при открытом поиске: сбросить запрос и чипы, снять фокус (эмулятор B1; у Telegram — закрывает поиск, а не приложение).
   const searchOpen = phone && dms.length > 0 && (findFocused || !!query || hasChips(chips));
+  /* Пока идёт поиск, капсулы вкладок нет (#218, Telegram Android `checkUi_mainTabsVisible`: `!searching`,
+     `TA/ui/DialogsActivity.java:14023`): капсула — в `MainLayout`, поэтому знак — классом на корне (CSS `:root.gv-listsearch`). */
+  useEffect(() => {
+    if (!searchOpen) return;
+    const root = document.documentElement;
+    root.classList.add('gv-listsearch');
+    return () => root.classList.remove('gv-listsearch');
+  }, [searchOpen]);
+  /* Архив на телефоне — отдельный экран, как у Telegram Android (`DialogsActivity` с `folderId = 1` открывается поверх
+     `MainTabsActivity`): ни капсулы вкладок, ни «Написать» (`isVisible = !(… || folderId != 0 || …)`, `TA/ui/DialogsActivity.java:8846`).
+     Капсула — в `MainLayout`, знак — классом на корне (CSS `:root.gv-listarchive`), как при поиске. */
+  const archiveScreen = phone && inArchive;
+  useEffect(() => {
+    if (!archiveScreen) return;
+    const root = document.documentElement;
+    root.classList.add('gv-listarchive');
+    return () => root.classList.remove('gv-listarchive');
+  }, [archiveScreen]);
+  /* Поле поиска уезжает с лентой и гаснет (#218, `searchFieldAlpha`): прозрачность пишем прямо в стиль на прокрутке (без
+     перерисовки списка), а «поле погасло → значок в шапке» — состоянием, оно меняется редко. */
+  const findZoneRef = useRef<HTMLDivElement>(null);
+  const [findGone, setFindGone] = useState(false);
+  const syncFindFade = () => {
+    if (!phone) return;
+    const st = { scrollTop: listRef.current?.scrollTop ?? 0, searching: searchOpen, selecting };
+    findZoneRef.current?.style.setProperty('--find-a', String(searchFieldAlpha(st)));
+    setFindGone(searchButtonShown(st));
+  };
+  useLayoutEffect(syncFindFade);
   useEffect(() => {
     if (!searchOpen) return;
     return pushBackHandler(() => {
@@ -1094,7 +1375,6 @@ export function DmSidebar() {
      Время черновика — из сводки сервера (`draft.at`); закреплённые остаются наверху (`byRecent`). */
   const pool = q ? dms : inArchive ? archDms : mainDms;
   const ordered = useMemo(() => {
-    if (!convActive) return pool;
     const at = (d: DmChannel) => {
       // Черновик голосового (G54, `voiceDrafts.ts`) поднимает беседу так же, как текстовый.
       const draftAt = drafts[d.id]?.text ? summaries[d.id]?.draft?.at : (voiceDrafts.get(d.id) ?? null);
@@ -1102,7 +1382,7 @@ export function DmSidebar() {
     };
     const keyed = pool.map((d) => [d, at(d)] as const);
     return keyed.some(([d, k]) => d !== k) ? [...keyed].sort((a, b) => byRecent(a[1], b[1])).map(([d]) => d) : pool;
-  }, [pool, drafts, summaries, convActive, voiceDrafts]);
+  }, [pool, drafts, summaries, voiceDrafts]);
   const shown = useMemo(
     () =>
       q
@@ -1122,8 +1402,11 @@ export function DmSidebar() {
       ? currentDmId
       : (shown[0]?.id ?? null);
   // Пустое поле в фокусе — «Частые» («Люди»), «Недавние» вместо списка; чип — только сообщения (G35).
-  const searchHome = gsearch && findFocused && !q && !hasChips(chips);
   const chipsOn = gsearch && hasChips(chips);
+  // Телефон (#218): вкладки видны сразу при открытии поиска, и при пустом поле тоже; на вкладке вида — свежие вложения вместо «Частых».
+  const phoneTabs = phone && gsearch && phoneSearchTabsShown(q, chips, findFocused || chipsOn);
+  const kindHits = phoneTabs && kindTab !== 'chats' ? kindTab : null;
+  const searchHome = gsearch && findFocused && !q && !hasChips(chips) && !kindHits;
   const freqItems = useFrequent(freqOn, searchHome);
   const frequent = useMemo(
     () =>
@@ -1132,8 +1415,9 @@ export function DmSidebar() {
         : undefined,
     [freqItems, freqHidden.hidden, freqHidden.hide, blockedUsers],
   );
-  const sv = scopeView(scope, q, chips, !!srvSearch);
-  const listRows = searchHome || chipsOn || !sv.dm ? [] : shown;
+  // Телефон: «Все / Личные / Серверы» нет — в «Чатах» личные и серверные сообщения одним списком (как вкладка «Все»).
+  const sv = scopeView(phone ? 'all' : scope, q, chips, !!srvSearch);
+  const listRows = searchHome || chipsOn || !sv.dm || kindHits ? [] : shown;
   /* Перетаскивание закреплённых (08.10, G02/G42, сервер `pinorder1`, `DmPinDrag.tsx`): в основном списке («Все» /
      системная папка) и в архиве, без поиска — общий порядок; в своей папке — её свой порядок (09.10, `pinorder2`, как
      `pinned_peers` фильтра у Telegram); без `pinorder2` в своей папке перетаскивания нет. */
@@ -1202,6 +1486,8 @@ export function DmSidebar() {
   /* Клавиши по списку (07.10, G14, Telegram 03·1.7.3): ↑/↓ — соседняя строка, PgUp/PgDn — на экран, Home/End — первая и
      последняя; Enter — открыть (обычная кнопка). Фокус ходит по строкам, Tab с них уходит из списка (roving tabindex). */
   const onListKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Поле поиска на телефоне лежит в самой ленте (#218): его клавиши — его (Esc, стрелки по тексту), не навигация по строкам.
+    if (e.target instanceof Element && e.target.closest('.dm-find-zone')) return;
     /* Печатный знак на строке списка уходит в «Найти беседу» (G36, HK-28; Telegram Desktop `Dialogs::Widget::keyPressEvent` →
        `redirectKeyToSearch`: знак без Ctrl/Alt/⌘, Shift можно — `RedirectTextToSearch`, код ≥ 32). Фокус переходит в
        keydown — браузер набирает знак уже в поле. Пробел у Telegram только открывает поиск, пустым — не набирает. */
@@ -1239,6 +1525,74 @@ export function DmSidebar() {
     row.scrollIntoView({ block: 'nearest' });
   };
 
+  /* Поле «Найти беседу» + чипы + вкладки областей поиска (G35). На ПК — над лентой, на телефоне — первой строкой ленты. */
+  const findZone = (
+    <>
+        {dms.length > 0 && (
+          <div className={query ? 'dm-find has-q' : 'dm-find'}>
+            {phone ? (
+              <input
+                ref={findRef}
+                className="sheet-search"
+                placeholder="Найти беседу"
+                aria-label="Найти беседу"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onFocus={() => setFindFocused(true)}
+                onBlur={onFindBlur}
+                onKeyDown={clearOnEscape}
+              />
+            ) : (
+              <SettingsSearch
+                inputRef={findRef}
+                placeholder="Найти беседу"
+                aria-label="Найти беседу"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onFocus={() => setFindFocused(true)}
+                onBlur={onFindBlur}
+                onKeyDown={clearOnEscape}
+              />
+            )}
+            {/* Крестик «очистить» (Telegram Desktop `FlatInput` + кнопка «×» в поиске, Android `SearchField.clearSearchImageView`):
+                на телефоне Esc нет, стирать запрос побуквенно — долго. Фокус из поля не уводим (mousedown гасим). */}
+            {query && (
+              <button
+                type="button"
+                className="dm-find-clear"
+                aria-label="Очистить поиск"
+                title="Очистить"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setQuery('');
+                  setChips({});
+                  findRef.current?.focus();
+                }}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            )}
+          </div>
+        )}
+        {/* Чипы поиска (G35): мышь по ним не уводит фокус из поля — иначе панель закрылась бы раньше щелчка. */}
+        {searchChips && dms.length > 0 && (
+          <div onMouseDown={(e) => e.preventDefault()}>
+            <DmSearchChips q={q} dms={dms} chips={chips} onChips={setChips} onText={setQuery} phone={phone} />
+          </div>
+        )}
+        {phoneTabs ? (
+          <DmSearchTabs
+            tab={kindTab}
+            onTab={(t) => {
+              setKindTab(t);
+              listRef.current?.scrollTo({ top: 0 });
+            }}
+          />
+        ) : (
+          !phone && sv.tabs && !searchHome && <DmSearchScopes scope={scope} onScope={setScope} />
+        )}
+    </>
+  );
   return (
     <div className={`channels${folderUi.strip ? ' dm-folders-on' : ''}${narrowCol ? ' dm-narrow' : ''}${listLines === 'three' ? ' dm-three' : ''}`}>
       {inArchive && !selecting ? (
@@ -1260,7 +1614,21 @@ export function DmSidebar() {
         }}
       >
         <strong>{headTitle}</strong>
-        {!phone && (
+        {/* Телефон (#218): поле поиска уехало с лентой — в шапке значок поиска, как у Telegram Android (`searchItem` при
+            `animatorSearchButtonVisible`); тап — поле встаёт сверху и получает фокус. */}
+        {phone && findGone && dms.length > 0 && (
+          <button
+            type="button"
+            className="head-icon dm-find-btn"
+            title="Найти беседу"
+            aria-label="Найти беседу"
+            onClick={() => findRef.current?.focus({ preventScroll: true })}
+          >
+            <Icon name="search" size={22} />
+          </button>
+        )}
+        {/* Сервер без бесед (`dmOff`, 09.10): писать некуда — кнопки «Написать» нет, в списке заглушка. */}
+        {!phone && !dmOff && (
           <button type="button" className="head-icon" title="Написать" aria-label="Написать" onClick={() => openDmCompose()}>
             <Icon name="edit" size={18} />
           </button>
@@ -1268,69 +1636,36 @@ export function DmSidebar() {
       </div>
       )}
       {!selecting && !(inArchive && phone) && folderUi.bar}
-      {dms.length > 0 && (
-        <div className={query ? 'dm-find has-q' : 'dm-find'}>
-          {phone ? (
-            <input
-              ref={findRef}
-              className="sheet-search"
-              placeholder="Найти беседу"
-              aria-label="Найти беседу"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => setFindFocused(true)}
-              onBlur={onFindBlur}
-              onKeyDown={clearOnEscape}
-            />
-          ) : (
-            <SettingsSearch
-              inputRef={findRef}
-              placeholder="Найти беседу"
-              aria-label="Найти беседу"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => setFindFocused(true)}
-              onBlur={onFindBlur}
-              onKeyDown={clearOnEscape}
-            />
-          )}
-          {/* Крестик «очистить» (Telegram Desktop `FlatInput` + кнопка «×» в поиске, Android `SearchField.clearSearchImageView`):
-              на телефоне Esc нет, стирать запрос побуквенно — долго. Фокус из поля не уводим (mousedown гасим). */}
-          {query && (
-            <button
-              type="button"
-              className="dm-find-clear"
-              aria-label="Очистить поиск"
-              title="Очистить"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                setQuery('');
-                setChips({});
-                findRef.current?.focus();
-              }}
-            >
-              <Icon name="close" size={14} />
-            </button>
-          )}
-        </div>
-      )}
-      {/* Чипы поиска (G35): мышь по ним не уводит фокус из поля — иначе панель закрылась бы раньше щелчка. */}
-      {searchChips && dms.length > 0 && (
-        <div onMouseDown={(e) => e.preventDefault()}>
-          <DmSearchChips q={q} dms={dms} chips={chips} onChips={setChips} onText={setQuery} />
-        </div>
-      )}
-      {sv.tabs && !searchHome && <DmSearchScopes scope={scope} onScope={setScope} />}
+      {/* Телефон (#218): поле, чипы и вкладки областей — первой строкой ленты (`findZone` ниже), чтобы уезжать вместе с ней. */}
+      {!phone && findZone}
       <div
         className={phone ? 'channel-list dm-list dm-list-touch' : 'channel-list dm-list'}
         ref={listRef}
         onKeyDown={onListKey}
-        onScroll={() => archivePulled && (listRef.current?.scrollTop ?? 0) > 56 && setArchivePulled(false)}
+        onScroll={() => {
+          syncFindFade();
+          if (archivePulled && (listRef.current?.scrollTop ?? 0) > 56) setArchivePulled(false);
+        }}
         {...gestures.bind}
       >
         {gestures.overlay}
+        {/* Телефон (#218, Telegram Android `fragmentSearchField`, поля 7, `TA/ui/DialogsActivity.java:5338`): поле едет с лентой и
+            гаснет по прокрутке (`--find-a`, `syncFindFade`); пока идёт поиск — прилипает сверху (`.on`); в режиме выбора — скрыто,
+            но место держит (`.pick`), чтобы строки под пальцем не прыгали. */}
+        {phone && dms.length > 0 && (
+          <div ref={findZoneRef} className={`dm-find-zone${searchOpen ? ' on' : ''}${selecting ? ' pick' : ''}`}>
+            {findZone}
+          </div>
+        )}
         {/* Бесед нет — на телефоне гусь в списке (кнопка «Написать» уже есть внизу), на ПК — в главной области. */}
-        {phone && listKnown && dms.length === 0 && (
+        {phone && dmOff && (
+          <div className="empty-goose">
+            <Goose pose="look" size={132} />
+            <div className="eg-title">Личные сообщения недоступны</div>
+            <div className="eg-sub">{DM_SERVER_UPDATE_TEXT}. Каналы и голос работают как обычно.</div>
+          </div>
+        )}
+        {phone && !dmOff && listKnown && dms.length === 0 && (
           <div className="empty-goose">
             <Goose pose="wave" size={132} />
             <div className="eg-title">Бесед пока нет</div>
@@ -1339,7 +1674,7 @@ export function DmSidebar() {
             </div>
           </div>
         )}
-        {archiveRowShown && !q && !searchHome && (
+        {archiveRowShown && !q && !searchHome && !kindHits && (
           <DmArchiveRow
             list={archDms}
             unreadDms={unreadDms}
@@ -1373,21 +1708,21 @@ export function DmSidebar() {
             <DmRow
               key={d.id}
               dm={d}
-              summary={convActive ? summaries[d.id] : undefined}
+              summary={summaries[d.id]}
               meId={meId}
               online={onlineSet.has(d.otherUser.id)}
               active={!phone && d.id === currentDmId}
               unread={unread}
               unreadN={unreadN}
-              draft={convActive ? drafts[d.id]?.text || (voiceDrafts.has(d.id) && d.id !== currentDmId ? 'Голосовое сообщение' : undefined) : undefined}
-              draftAt={convActive ? (drafts[d.id]?.text ? summaries[d.id]?.draft?.at : voiceDrafts.get(d.id)) : null}
-              draftReply={convActive && !!drafts[d.id]?.replyToId}
+              draft={drafts[d.id]?.text || (voiceDrafts.has(d.id) && d.id !== currentDmId ? 'Голосовое сообщение' : undefined)}
+              draftAt={drafts[d.id]?.text ? summaries[d.id]?.draft?.at : voiceDrafts.get(d.id)}
+              draftReply={!!drafts[d.id]?.replyToId}
               onPick={phone ? togglePick : undefined}
               onDropMsgs={phone ? undefined : dropMsgs}
               onDropFiles={phone ? undefined : dropFiles}
               selecting={selecting}
               picked={selecting && picks.includes(d.id)}
-              failed={convActive && !!outbox[d.id]?.some((x) => x.status === 'failed')}
+              failed={!!outbox[d.id]?.some((x) => x.status === 'failed')}
               muted={muteActive(mutes.get(d.id), muteNow)}
               grayBadge={d.archived === true}
               pinned={!!d.pinnedAt}
@@ -1400,8 +1735,25 @@ export function DmSidebar() {
             />
           );
         })}
-        {!q && dms.length > 0 && shown.length === 0 && folderUi.on && folderUi.empty}
-        {q && !chipsOn && sv.dm && dms.length > 0 && shown.length === 0 && (
+        {!q && !kindHits && dms.length > 0 && shown.length === 0 && folderUi.on && folderUi.empty}
+        {/* Телефон (#218): без служебных строк над результатами — люди без беседы и «Глобальный поиск» по @логину, как у
+            Telegram Android (`DialogsSearchAdapter`); ПК — прежняя строка «бесед нет» со ссылкой «Написать новому человеку». */}
+        {kindHits && (
+          <DmKindHits
+            q={q}
+            chips={chips}
+            kind={kindHits}
+            dms={dms}
+            meId={meId}
+            onLeave={(h) => {
+              if (q.trim().length >= 2) recent.push({ kind: 'query', text: q });
+              recent.push({ kind: 'person', convId: h.conversationId });
+              blurFind();
+            }}
+          />
+        )}
+        {phone && q && !chipsOn && sv.dm && !kindHits && dms.length > 0 && <DmGlobalPeople q={q} dms={dms} onOpened={blurFind} />}
+        {!phone && q && !chipsOn && sv.dm && dms.length > 0 && shown.length === 0 && (
           <div className="dm-empty dm-nores">
             <span>По запросу «{q}» бесед нет</span>
             <button type="button" className="link" onClick={() => openDmCompose(q)}>
@@ -1410,7 +1762,7 @@ export function DmSidebar() {
           </div>
         )}
         {/* Вкладка «Все» (08.10): личные и серверные сообщения одним списком по времени (`AllMessageHits`). */}
-        {gsearch && !searchHome && sv.tabs && sv.dm && sv.servers && (
+        {gsearch && !searchHome && !kindHits && sv.tabs && sv.dm && sv.servers && (
           <AllMessageHits
             q={q}
             dms={dms}
@@ -1428,7 +1780,7 @@ export function DmSidebar() {
             }}
           />
         )}
-        {gsearch && !searchHome && sv.dm && !(sv.tabs && sv.servers) && (
+        {gsearch && !searchHome && !kindHits && sv.dm && !(sv.tabs && sv.servers) && (
           <DmMessageHits
             q={q}
             chips={chips}
@@ -1442,7 +1794,7 @@ export function DmSidebar() {
             }}
           />
         )}
-        {gsearch && !searchHome && sv.servers && !sv.dm && (
+        {gsearch && !searchHome && !kindHits && sv.servers && !sv.dm && (
           <ServerMessageHits
             q={q}
             full={sv.serversFull}
@@ -1457,8 +1809,8 @@ export function DmSidebar() {
       </div>
 
       {/* Телефон: плавающая «Написать» (design-step8 D1). Пока открыт поиск (фокус в поле или есть запрос), её нет —
-          клавиатура подняла бы её на результаты. Поля нет (бесед нет) — поиска нет, даже если фокус не успел уйти. В режиме выбора (G01) её тоже нет — как у Telegram Android в режиме действий. */}
-      {phone && !selecting && !(dms.length > 0 && (findFocused || query)) && (
+          клавиатура подняла бы её на результаты. Поля нет (бесед нет) — поиска нет, даже если фокус не успел уйти. В режиме выбора (G01) её тоже нет — как у Telegram Android в режиме действий. В архиве — тоже (`folderId != 0`, `TA/ui/DialogsActivity.java:8846`). */}
+      {phone && !dmOff && !selecting && !inArchive && !(dms.length > 0 && (findFocused || query)) && (
         <button type="button" className="dm-fab" aria-label="Написать" title="Написать" onClick={() => openDmCompose()}>
           <Icon name="edit" size={24} />
         </button>
@@ -1472,5 +1824,118 @@ export function DmSidebar() {
       {voice && <VoicePanel />}
       <SelfVoiceBar />
     </div>
+  );
+}
+
+/**
+ * Аватар 56 ячейки: «Избранное» — закладка, остальные — фото или буква. Живёт рядом с `DmRow` (окно «Переслать» берёт
+ * из `DmSidebar` и строку, и ячейку; проверки окна подменяют этот модуль целиком).
+ */
+export function ForwardAva({ saved = false, name, url }: { saved?: boolean; name: string; url?: string | null }) {
+  return saved ? <SavedAvatar size={56} /> : <Avatar name={name} url={url} size={56} />;
+}
+
+/**
+ * Ячейка сетки «Переслать в…» на телефоне (12.10, #218): аватар 56 с подписью в две строки под ним, четыре в ряд — как
+ * `ShareDialogCell` Telegram Android (`ShareAlert`: аватар 56 dp с отступом сверху 7, имя 12 sp в две строки с отступом 66 и по
+ * 6 по бокам, ячейка 103 dp, значок выбора 24 dp справа внизу аватара, у выбранного аватар сжат до 0.857 и обведён кольцом
+ * 2 dp). Размеры лежат в `styles.css` (`.fwd-cell`). Нажатие зовёт `onOpen`; при `holdable` удержание пальцем (`DM_ROW_HOLD_MS`) или
+ * правый щелчок — `onPick` (режим «поделиться»: нажатие — одна беседа, удержание — несколько), и сработавшее удержание
+ * глотает щелчок отпускания (те же правила, что у `DmRow` и `ShareChannelRow`).
+ */
+export function ForwardCell({
+  id,
+  label,
+  avatar,
+  online = false,
+  picked,
+  selecting,
+  holdable = false,
+  onOpen,
+  onPick,
+}: {
+  id: string;
+  label: string;
+  avatar: ReactNode;
+  online?: boolean;
+  picked: boolean;
+  /** Режим выбора: ячейка — флажок (`role="checkbox"`). */
+  selecting: boolean;
+  holdable?: boolean;
+  onOpen: (id: string) => void;
+  onPick: (id: string) => void;
+}) {
+  const hold = useRef<{ timer: number | null; x: number; y: number; fired: boolean } | null>(null);
+  const holdStop = () => {
+    const h = hold.current;
+    if (h?.timer != null) window.clearTimeout(h.timer);
+    if (h) h.timer = null;
+  };
+  const holdFire = () => {
+    const h = hold.current;
+    holdStop();
+    if (h) h.fired = true;
+    navigator.vibrate?.(8);
+    onPick(id);
+  };
+  return (
+    <button
+      type="button"
+      className={`fwd-cell${picked ? ' picked' : ''}`}
+      role={selecting ? 'checkbox' : undefined}
+      aria-checked={selecting ? picked : undefined}
+      onClick={() => {
+        if (hold.current?.fired) {
+          hold.current = null;
+          return;
+        }
+        onOpen(id);
+      }}
+      onContextMenu={(e) => {
+        if (!holdable) return;
+        e.preventDefault();
+        if (hold.current?.fired) return;
+        if (hold.current) return holdFire();
+        onPick(id);
+      }}
+      onTouchStart={(e) => {
+        holdStop();
+        hold.current = null;
+        if (!holdable || e.touches.length !== 1) return;
+        const t = e.touches[0];
+        const h = { timer: null as number | null, x: t.clientX, y: t.clientY, fired: false };
+        hold.current = h;
+        h.timer = window.setTimeout(holdFire, DM_ROW_HOLD_MS);
+      }}
+      onTouchMove={(e) => {
+        const h = hold.current;
+        const t = e.touches[0];
+        if (!h || !t) return;
+        if (Math.abs(t.clientX - h.x) > DM_ROW_HOLD_SLOP || Math.abs(t.clientY - h.y) > DM_ROW_HOLD_SLOP) {
+          holdStop();
+          hold.current = null;
+        }
+      }}
+      onTouchEnd={(e) => {
+        holdStop();
+        if (hold.current?.fired && e.cancelable) e.preventDefault();
+      }}
+      onTouchCancel={holdStop}
+    >
+      <span className="fwd-cell-ava">
+        <span className="fwd-cell-pic">{avatar}</span>
+        {online && !picked && (
+          <span className="fwd-cell-dot">
+            <StatusDot status="online" size={12} ringColor="currentColor" />
+          </span>
+        )}
+        {picked && (
+          <span className="fwd-cell-check">
+            <Icon name="check" size={14} stroke={3} />
+          </span>
+        )}
+      </span>
+      <span className="fwd-cell-name">{label}</span>
+    </button>
   );
 }

@@ -1,0 +1,11 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "kind": "presence",
+  "user": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W1A" },
+  "online": true,
+  "at": 1760356800000,
+  "views": [
+    { "user": { "instance_id": "q3nwz6hkd2m7c5vbxe4a6tyl2prs4fgj", "user_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W2B" }, "last_seen": 1760356800000, "no_messages": true },
+    { "user": { "instance_id": "q3nwz6hkd2m7c5vbxe4a6tyl2prs4fgj", "user_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W3C" }, "last_seen": null, "approx": "recently" }
+  ]
+}

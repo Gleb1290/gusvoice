@@ -182,6 +182,12 @@ export function ShareIncoming() {
       const res = await takeFiles(s, max);
       const st = useStore.getState();
       st.setSharedIn({ convId, files: res.files, text: s.text });
+      // H11 (приёмка 13.10): выбранная беседа открывается ПОВЕРХ того, где был человек (Telegram Android `LaunchActivity.handleIntent`
+      // → `DialogsActivity` → `presentFragment(ChatActivity)`): «Профиль», настройки и админка, открытые на телефоне, закрываются —
+      // иначе беседа выбиралась под ними, и на экране оставался профиль. Только открытое (флаги — как у «Назад», `androidBack.ts`).
+      if (st.adminOpen) st.setAdminOpen(false);
+      if (st.settingsOpen) st.setSettingsOpen(false);
+      if (st.mobileProfileOpen) st.setMobileProfileOpen(false);
       if (ch) {
         // Канал сервера: открыть сервер (если не он) и канал — лента канала заберёт `sharedIn`, как лента беседы.
         if (st.currentServerId !== ch.serverId) await st.openServer(ch.serverId, ch.id);

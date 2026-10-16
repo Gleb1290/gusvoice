@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import ts from 'typescript';
 
 const root = '../../desktop/src-tauri/gen/android/app/src/main/';
 const kotlin = (name: string) => readFileSync(new URL(`${root}java/tech/gusik/gusvoice/${name}.kt`, import.meta.url), 'utf8');
@@ -8,6 +9,64 @@ const share = kotlin('ShareIntent');
 const media = kotlin('MediaBridge');
 const activity = kotlin('MainActivity');
 const manifest = readFileSync(new URL(`${root}AndroidManifest.xml`, import.meta.url), 'utf8');
+
+// AST-стражи проверяют проводку лимита, а не исполняют вырезанный фрагмент компонента.
+function nodes(source: string, predicate: (node: ts.Node) => boolean): { tree: ts.SourceFile; found: ts.Node[] } {
+  const tree = ts.createSourceFile('component.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const found: ts.Node[] = [];
+  const visit = (node: ts.Node) => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
+  visit(tree);
+  return { tree, found };
+}
+
+describe('R140 лимит крупного видео проходит от листа до камеры и Android', () => {
+  it('мост принимает 1032 МиБ с запасом для контейнера вместо обрезания файла 1 ГиБ', () => {
+    // Меньший предел промежуточного моста ломает файл ещё до серверной загрузки.
+    rejects(media, 'const val PUT_MAX = 1032L', 'const val PUT_MAX = 512L', (source) => {
+      assert.match(code(source), /const val PUT_MAX\s*=\s*1032L\s*\*\s*1024\s*\*\s*1024/);
+      assert.match(code(source), /p\.bytes\s*>\s*PUT_MAX/);
+    });
+  });
+
+  it('камера по умолчанию сохраняет предел канала, но вычисляет предел записи из maxBytes', () => {
+    // Без проводки пропса ЛС разрешает большой файл, а камера всё равно останавливается на 25 МБ.
+    const source = readFileSync(new URL('./components/CameraScreen.tsx', import.meta.url), 'utf8');
+    const check = (raw: string) => {
+      const bindings = nodes(raw, (node) => ts.isBindingElement(node) && node.name.getText() === 'maxBytes');
+      assert.equal(bindings.found.length, 1);
+      assert.equal((bindings.found[0] as ts.BindingElement).initializer?.getText(bindings.tree), 'ATTACH_MAX_BYTES');
+      const calls = nodes(raw, (node) => ts.isCallExpression(node) && node.expression.getText() === 'startRecording');
+      assert.equal(calls.found.length, 1);
+      const opts = (calls.found[0] as ts.CallExpression).arguments[2];
+      assert.ok(opts && ts.isObjectLiteralExpression(opts));
+      const props = opts.properties.filter((p) => ts.isPropertyAssignment(p) && p.name.getText(calls.tree) === 'softLimit');
+      assert.equal(props.length, 1);
+      assert.equal((props[0] as ts.PropertyAssignment).initializer.getText(calls.tree), 'videoSoftLimit(maxBytes)');
+    };
+    rejects(source, 'softLimit: videoSoftLimit(maxBytes)', 'softLimit: videoSoftLimit()', check);
+    rejects(source, 'maxBytes = ATTACH_MAX_BYTES', 'maxBytes = 1024', check);
+  });
+
+  it('лист передаёт камере собственный maxBytes, а не предел по умолчанию', () => {
+    // Проверяем именно JSX CameraScreen: соседний maxBytes в отправке не доказывает проводку камеры.
+    const source = readFileSync(new URL('./components/MediaSheet.tsx', import.meta.url), 'utf8');
+    const check = (raw: string) => {
+      const result = nodes(raw, (node) => (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText() === 'CameraScreen');
+      assert.equal(result.found.length, 1);
+      const element = result.found[0] as ts.JsxSelfClosingElement;
+      const props = element.attributes.properties.filter((p) => ts.isJsxAttribute(p) && p.name.getText(result.tree) === 'maxBytes');
+      assert.equal(props.length, 1);
+      const value = (props[0] as ts.JsxAttribute).initializer;
+      assert.ok(value && ts.isJsxExpression(value));
+      assert.equal(value.expression?.getText(result.tree), 'maxBytes');
+    };
+    // Ограничиваем мутацию единственным тегом камеры: maxBytes есть также у списка и выбора файлов.
+    const { tree, found } = nodes(source, (node) => ts.isJsxSelfClosingElement(node) && node.tagName.getText() === 'CameraScreen');
+    assert.equal(found.length, 1);
+    const tag = found[0]!.getText(tree);
+    rejects(source, tag, tag.replace('maxBytes={maxBytes}', 'maxBytes={25 * 1024 * 1024}'), check);
+  });
+});
 
 // Статические стражи, не исполнение Kotlin: комментарий не может заменить проверку.
 // Сохраняем строки (в том числе content://), чтобы // внутри них не стало комментарием.
@@ -82,13 +141,13 @@ describe('R118 Android: безопасный вход системного «П�
     });
   });
 
-  it('R127 известный размер больше SHARE_MAX 512 МиБ отвергается до чтения дескриптора, ровно предел не запрещён', () => {
+  it('R140 известный размер больше SHARE_MAX 1 ГиБ отвергается до чтения дескриптора, ровно предел не запрещён', () => {
     rejects(media, 'if (size > SHARE_MAX) return SharedFile(name, mime, size, null, "too-big")', '', (source) => {
       const copy = body(source, 'copyShared');
       const guard = /if\s*\(size\s*>\s*SHARE_MAX\)\s*return SharedFile\(name,\s*mime,\s*size,\s*null,\s*"too-big"\)/.exec(copy);
       assert.ok(guard);
       assert.ok(copy.indexOf('afd.createInputStream()') > guard.index, 'лимит проверен до чтения');
-      assert.match(code(source), /const val SHARE_MAX\s*=\s*512L\s*\*\s*1024\s*\*\s*1024/);
+      assert.match(code(source), /const val SHARE_MAX\s*=\s*1024L\s*\*\s*1024\s*\*\s*1024/);
     });
   });
 
@@ -100,13 +159,13 @@ describe('R118 Android: безопасный вход системного «П�
   });
 
   it('R127 уже скопированное большое вложение передаётся клиенту с SHARE_MAX, не со старым пределом 25 МиБ', () => {
-    // Копирование 512 МиБ бесполезно, если второй этап sharedOpen молча обрезает поток на DEFAULT_MAX.
+    // Копирование 1 ГиБ бесполезно, если второй этап sharedOpen молча обрезает поток на DEFAULT_MAX.
     const check = (source: string) => {
       assert.match(body(source, 'sharedOpen'), /streamOne\(proxy, id, i, Uri\.fromFile\(file\), f\.name, f\.mime, SHARE_MAX\)/);
-      assert.match(code(source), /const val SHARE_MAX\s*=\s*512L\s*\*\s*1024\s*\*\s*1024/);
+      assert.match(code(source), /const val SHARE_MAX\s*=\s*1024L\s*\*\s*1024\s*\*\s*1024/);
     };
     rejectsIn(media, 'sharedOpen', 'f.mime, SHARE_MAX)', 'f.mime, DEFAULT_MAX)', check);
-    rejects(media, 'const val SHARE_MAX = 512L', 'const val SHARE_MAX = 25L', check);
+    rejects(media, 'const val SHARE_MAX = 1024L', 'const val SHARE_MAX = 512L', check);
   });
 
   it('пересоздание активности не предлагает старое вложение снова, новый intent обрабатывается', () => {
@@ -226,9 +285,9 @@ describe('R119 Android: второй рубеж и отмена входящих
     for (const [target, replacement] of [['shareCopy.execute {', 'io.execute {'], ['shareJob?.kill()', ''], ['shareGen.get() != job.gen', 'false']]) rejectsIn(media, 'onShareIntent', target!, replacement!, check);
   });
 
-  it('R127 180 секунд общие на все файлы, signal прерывает provider и kill закрывает открытые FD', () => {
+  it('R140 360 секунд общие на все файлы, signal прерывает provider и kill закрывает открытые FD', () => {
     const check = (source: string) => {
-      assert.match(code(source), /const val SHARE_COPY_MS = 180_000L/);
+      assert.match(code(source), /const val SHARE_COPY_MS = 360_000L/);
       const b = body(source, 'onShareIntent');
       assert.match(b, /main\.postDelayed\(\{ if \(!job\.dead\) job\.kill\(\) \}, SHARE_COPY_MS\)/);
       assert.match(b, /val deadline = SystemClock\.elapsedRealtime\(\) \+ SHARE_COPY_MS\s*val files = parsed\.uris\.mapIndexed/);
@@ -241,7 +300,7 @@ describe('R119 Android: второй рубеж и отмена входящих
       assert.match(c, /job\.open\.add\(afd\)/);
       assert.match(c, /finally\s*\{\s*afd\?\.let\s*\{\s*job\.open\.remove\(it\)[\s\S]*it\.close\(\)/);
     };
-    for (const [target, replacement] of [['180_000L', '60_000L'], ['signal.cancel()', ''], ['job.dead || SystemClock.elapsedRealtime() > deadline', 'job.dead'], ['docMeta(uri, job.signal)', 'docMeta(uri)'], ['openAssetFileDescriptor(uri, "r", job.signal)', 'openAssetFileDescriptor(uri, "r")'], ['job.open.add(afd)', ''], ['job.open.remove(it)', '']]) rejects(media, target!, replacement!, check);
+    for (const [target, replacement] of [['360_000L', '180_000L'], ['signal.cancel()', ''], ['job.dead || SystemClock.elapsedRealtime() > deadline', 'job.dead'], ['docMeta(uri, job.signal)', 'docMeta(uri)'], ['openAssetFileDescriptor(uri, "r", job.signal)', 'openAssetFileDescriptor(uri, "r")'], ['job.open.add(afd)', ''], ['job.open.remove(it)', '']]) rejects(media, target!, replacement!, check);
     rejectsIn(media, 'kill', 'it.close()', '', check);
     rejectsIn(media, 'docMeta', 'null, null, null, signal)', 'null, null, null)', check);
   });
@@ -269,16 +328,17 @@ describe('R119 Android: второй рубеж и отмена входящих
     rejects(media, 'setOfNotNull(shared?.token, shareJob?.token)', 'setOfNotNull(shared?.token)', check);
   });
 
-  it('FileProvider публикует только clip/open/share, не inbox, весь кеш или external', () => {
+  it('FileProvider публикует только clip/open/share/cam, не inbox, весь кеш или external', () => {
     const paths = readFileSync(new URL(`${root}res/xml/file_paths.xml`, import.meta.url), 'utf8');
     const check = (source: string) => {
       const xml = source.replace(/<!--[\s\S]*?-->/g, '');
       const entries = [...xml.matchAll(/<([\w-]+)\b([^>]*)\/>/g)];
-      assert.equal(entries.length, 3);
+      assert.equal(entries.length, 4);
       assert.deepEqual(entries.map(m => [m[1], /\bpath="([^"]+)"/.exec(m[2]!)?.[1]]),
-        [['cache-path', 'gv-media/clip/'], ['cache-path', 'gv-media/open/'], ['cache-path', 'gv-media/share/']]);
+        [['cache-path', 'gv-media/clip/'], ['cache-path', 'gv-media/open/'], ['cache-path', 'gv-media/share/'], ['cache-path', 'gv-media/cam/']]);
     };
-    for (const name of ['clip', 'open', 'share']) rejects(paths, `path="gv-media/${name}/"`, 'path="."', check);
+    for (const name of ['clip', 'open', 'share', 'cam']) rejects(paths, `path="gv-media/${name}/"`, 'path="."', check);
+    rejects(paths, 'path="gv-media/cam/"', 'path="gv-media/inbox/"', check);
     rejects(paths, '</paths>', '<external-path name="outside" path="." /></paths>', check);
   });
 });

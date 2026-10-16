@@ -2499,6 +2499,9 @@ button.reply-quote:focus-visible {
   color: var(--accent);
   font-weight: 600;
 }
+.rs-label .rs-warn {
+  color: var(--danger);
+}
 .rs-text {
   flex: 1;
   min-width: 0;
@@ -3274,6 +3277,33 @@ body:has(.sticker-pop) > .ctx-sheet-backdrop {
   border-radius: var(--r-3);
   font-size: 14px;
 }
+/* Архив разорванной связки с инстансом (Э2 часть Б, Ф7): замок и текст по центру, как у «Вы заблокировали…». */
+.composer-blocked.fed-archive {
+  color: var(--muted);
+  text-align: center;
+}
+/* Э5 (#141, `fedm5`): дом недоступен, пишем через инстанс собеседника — мелкая плашка над полем ввода (поле и плашка в одних полях 16px). */
+.fed-via-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 4px 16px -2px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-3);
+  border-radius: var(--r-3);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.3;
+}
+.fed-via-bar svg {
+  flex: none;
+}
+/* «Сообщения ждут, пока «X» их заберёт» (ЛС между инстансами, исправления ревью 12.10, п. 7): та же плашка, но НАД полем ввода —
+   поле остаётся, поэтому без нижнего отступа и ниже ростом. */
+.composer-blocked.fed-stale {
+  margin-bottom: 0;
+  padding: var(--sp-2) var(--sp-3);
+}
 .composer {
   position: relative;
   display: flex;
@@ -3334,6 +3364,37 @@ body:has(.sticker-pop) > .ctx-sheet-backdrop {
   background: var(--bg-2);
   color: var(--text);
 }
+/* Э2 часть Б (#141): вложения в беседе с человеком другого инстанса пока нельзя — кнопка приглушена, подсказка в title и тосте. */
+.att-btn.blocked,
+.att-btn.blocked:hover {
+  background: none;
+  color: var(--muted);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* ПК: порядок кнопок строки — как у tdesktop (`history/history_widget.cpp:7425-7463`, `updateControlsGeometry`): скрепка
+   слева, поле, эмодзи справа от поля, запись и «отправить» с краю (#218). У tdesktop своих кнопок «опрос» нет — он стоит
+   рядом со скрепкой. Телефон переопределяет всё блоком `.app.m-content` ниже. */
+.composer .att-btn.attach,
+.composer .att-btn.poll {
+  order: 0;
+}
+.composer .composer-input {
+  order: 1;
+}
+.composer .att-btn.sched,
+.composer .att-btn.textfile {
+  order: 2;
+}
+.composer .att-btn.emoji {
+  order: 3;
+}
+.composer .att-btn.voice {
+  order: 4;
+}
+.composer .send-btn {
+  order: 5;
+}
 /* «+» с шторкой действий — только телефонная раскладка (#159), там же он и включается. На
    компьютере место в строке есть, и каждое действие остаётся своей кнопкой. (0,2,0) перебивает
    `display: inline-flex` у `.att-btn`. */
@@ -3345,7 +3406,6 @@ body:has(.sticker-pop) > .ctx-sheet-backdrop {
 .composer .mic-btn,
 .composer .rec-inline,
 .composer .rec-lock,
-.composer .rec-lock-hint,
 .composer .rec-once,
 .composer .rec-stop {
   display: none;
@@ -3443,6 +3503,17 @@ span.att-pending {
   display: inline-flex;
   min-height: 0;
 }
+/* B12: картинка не загрузилась (файла нет) — плитка `--bg-3` того же размера со значком вместо «битой» браузерной картинки. */
+.att-pending.att-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  color: var(--muted);
+}
+.att-pending.att-broken .gv-icon {
+  opacity: 0.6;
+}
 .att-file {
   display: inline-flex;
   align-items: center;
@@ -3476,6 +3547,60 @@ span.att-pending {
 }
 .att-file:hover .att-file-dl {
   color: var(--accent);
+}
+/* Аудиофайл в ленте (15.10, `MusicFileCard`, приёмка 0.9.0) — карточка файла с круглой кнопкой ▶ (в пузыре ЛС — 44 px медовая,
+   `.message.bub .voice-play`; в канале — 40 px той же заливки), названием, «длительность · размер» и, пока играет, тонкой полосой
+   перемотки — как музыка у Telegram Android (`ChatMessageCell`: кнопка, название, `SeekBar`, `durationText`). */
+.att-file.att-audio {
+  min-width: 220px;
+}
+.att-audio .att-audio-play {
+  width: 40px;
+  height: 40px;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.att-audio .att-audio-play:hover {
+  background: var(--accent-2);
+}
+.message.bub .att-audio .voice-play {
+  margin-right: 0;
+}
+.att-audio-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.att-audio-title {
+  font-weight: 600;
+}
+.att-audio-seek {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 12px;
+  cursor: pointer;
+  touch-action: none;
+}
+.att-audio-seek::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+.att-audio-seek.hidden {
+  visibility: hidden;
+}
+.att-audio-seek-fill {
+  position: relative;
+  height: 3px;
+  border-radius: var(--r-1);
+  background: var(--accent);
 }
 /* Image attachments: hover ⬇ badge in the corner (always visible on touch). */
 .att-img-wrap {
@@ -3578,6 +3703,52 @@ span.att-pending {
   fill: none;
   margin-left: 0;
 }
+/* Э3 (#141, `fedm3`): вложение с `fedState: 'copying'` — копия файла с инстанса автора ещё едет (`AttachmentView.CopyingAttachment`).
+   Плитка того же размера, что будет у медиа, затенена; в круге по центру — крутилка вместо «Скачать»; не кнопка (курсор обычный). */
+.att-copying {
+  cursor: default;
+}
+.att-video.att-copying {
+  position: relative;
+  display: block;
+}
+.att-copying > .att-pending {
+  filter: brightness(0.82);
+}
+/* Крутилка — общая `.confirm-spin` (её гасят игровой и лёгкий режимы, `stylesGuards`), здесь — цвет по тексту и крупнее. */
+.confirm-spin.att-spin {
+  flex: none;
+  box-sizing: border-box;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  opacity: 0.85;
+}
+.confirm-spin.att-spin.big {
+  width: 24px;
+  height: 24px;
+  border-width: 2.5px;
+}
+.round-msg-btn.att-copying {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: brightness(0.82);
+  color: var(--muted);
+  cursor: default;
+}
+/* Голосовое, которое ещё загружается: плеер неактивен, огибающая приглушена, подпись «загружается» после времени. */
+.voice-msg.voice-copying .voice-play {
+  cursor: default;
+}
+.voice-msg.voice-copying .voice-wave {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.voice-copying-note {
+  margin-left: var(--sp-2);
+  font-size: 11px;
+  color: var(--muted);
+}
 .att-dur {
   position: absolute;
   left: var(--sp-3);
@@ -3591,6 +3762,13 @@ span.att-pending {
   line-height: normal;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+/* Видео играет в ленте само (#218): справа от остатка — значок «без звука», как `.video-time-icon` у Web K
+   (`tweb/src/scss/partials/_chatBubble.scss:1911-1917`) и подпись кружка `.round-msg-time`. */
+.att-dur.muted {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
 /* Файл качается в приложении Android (06.10, как у Telegram): вместо скрепки — кольцо прогресса с крестиком «отменить»,
    вместо веса — «пришло / всего». Кольцо — без бесконечной анимации: дуга растёт по ходу загрузки. */
@@ -3726,6 +3904,16 @@ span.att-pending {
   flex-direction: column;
 }
 .voice-view.center {
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+}
+/* Тело канала, куда ещё не вошли (B11): под шапкой с названием, гусь и «Присоединиться» по центру остатка. */
+.voice-idle-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: var(--sp-3);
@@ -3950,6 +4138,107 @@ span.att-pending {
   box-shadow: inset 0 0 0 2px var(--green);
   border-color: transparent;
 }
+/* 🔴 Сетка «под окно» (10.10; `useFitGrid` + чистый `fitStageGrid` в `stageGridRules.ts`): без
+   просмотра стрима карточки показов, камеры и люди без видео — одна сетка плиток 16:9 одного размера.
+   Размер ставит код переменными `--tile-w` / `--tile-h` (перебор числа колонок, как у Discord / Meet),
+   поэтому все плитки влезают без прокрутки. Прокрутка остаётся только на крайний случай — когда даже
+   при нижней границе плитки (`STAGE_TILE_MIN_W`) места нет; `safe` у центрирования не даёт верхнему
+   ряду уехать за край (см. урок `.voice-stage.watching .stage-people`). */
+.voice-stage.fit {
+  overflow: hidden;
+}
+.stage-grid {
+  flex: 1 1 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--tile-cols, 1), var(--tile-w, 156px));
+  grid-auto-rows: var(--tile-h, var(--stage-tile-h));
+  gap: var(--sp-4);
+  align-content: safe center;
+  justify-content: safe center;
+  /* Запас под подъём карточки показа при наведении и тень — иначе их срезал бы край сетки. */
+  padding: var(--sp-2);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.stage-grid > .stage-tile,
+.stage-grid > .stream-card {
+  flex: 0 0 auto;
+  width: var(--tile-w, 156px);
+  height: var(--tile-h, var(--stage-tile-h));
+  max-width: none;
+}
+/* 🔴 Перетаскивание плиток сетки (12.10, `useStageDrag.ts`): удержание 2 с поднимает плитку, как значок на
+   рабочем столе Android-оболочки. Двигает её код (inline `transform`), здесь — только состояния:
+   `pressing` — идёт удержание (с 0.3 с плитка сразу обводится и медленно поджимается до самого подъёма —
+   видно, что сейчас поднимется, а не зависло), `lifted` — поднята (поверх соседей, тень
+   «всплыло» → «поверх всего»), `settling` — садится в гнездо. Гнездо `.stage-drag-nest` — пустая ячейка
+   под поднятой плиткой (встаёт на новое место сразу, без перехода: расступаются соседи, а не гнездо); сетке нужен `position: relative`, чтобы гнездо стояло по её координатам. */
+.stage-grid {
+  position: relative;
+}
+.stage-grid > [data-drag='pressing'] {
+  transform: scale(0.94);
+  box-shadow: 0 0 0 3px var(--accent);
+  transition: transform 1.7s linear, box-shadow var(--t-fast) ease-out;
+}
+.stage-grid > [data-drag='lifted'],
+.stage-grid > [data-drag='settling'] {
+  z-index: 2;
+}
+.stage-grid > [data-drag='lifted'] {
+  box-shadow: var(--sh-3);
+  cursor: grabbing;
+  will-change: transform;
+}
+.stage-grid[data-dragging],
+.stage-grid[data-dragging] * {
+  cursor: grabbing;
+  user-select: none;
+}
+/* Пока тащим, кнопки «по наведению» и подсказка «Смотреть» на поднятой плитке не вылезают. */
+.stage-grid[data-dragging] .stream-card-overlay,
+.stage-grid[data-dragging] .stage-expand {
+  opacity: 0;
+}
+.stage-drag-nest {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft);
+  opacity: 0.6;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-grid > [data-drag='pressing'] {
+    transform: none;
+    transition: none;
+  }
+}
+/* Карточка показа целиком в плитке: кадр забирает всё, что осталось над подписью. */
+.stage-grid > .stream-card .stream-card-preview {
+  flex: 1 1 0;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+/* Имя — внизу слева, как на плитке Discord; длинное режется по ширине плитки, а не по 120 px. */
+.stage-grid .stage-meta {
+  justify-content: flex-start;
+}
+.stage-grid .stage-name {
+  max-width: calc(var(--tile-w, 156px) - 72px);
+}
+.stage-empty-hint {
+  align-self: center;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+}
+.voice-header-tool {
+  margin-left: auto;
+  /* Кнопка 32 px выше строки названия — не даём ей растить шапку (та же высота, что без кнопки). */
+  margin-block: -6px;
+}
 .voice-tip-balance {
   position: absolute;
   top: 10px;
@@ -4091,14 +4380,71 @@ span.att-pending {
   bottom: 0;
   display: flex;
   align-items: center;
-  /* WRAP is load-bearing: two streams open in the count-2 grid make each viewer HALF the content
-     width, so in a non-maximized window this control row (~400px min) overflowed the right edge and
-     got clipped by `.screen-viewer{overflow:hidden}` → the mute/fullscreen/close buttons became
-     unclickable until you maximized the app (#34, desktop counterpart of the mobile fix below). */
-  flex-wrap: wrap;
+  /* 🔴 10.10: ряд — в ОДНУ строку. Раньше здесь стоял перенос (#34): в сетке `count-2` вьювер вдвое
+     уже, и ряд с постоянным ползунком громкости (~400 px) не влезал — кнопки уезжали на вторую строку
+     поверх кадра. Ползунок теперь всплывает окном по клику на значок звука (`.stream-vol-pop`), ряд
+     без него ~200 px, а сжимается только имя (`.screen-title`). */
+  flex-wrap: nowrap;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
+}
+/* 10.10, как у Discord: всегда видно только имя (внизу слева), кнопки и затемнение — по наведению или
+   фокусу клавиатурой, на касании — по тапу по кадру (`.ctl-on`, `useControlsReveal`). Он же держит
+   ряд открытым, пока открыто окно громкости или меню качества. `:hover` — только там, где наведение
+   есть: на касании он «залипает» после тапа, и второй тап уже не прятал бы ряд.
+   ⚠️ Спрятанные кнопки — `display: none`, а не прозрачность: невидимые, они всё равно занимали бы
+   место, и имя в узком вьювере (два стрима рядом) резалось бы до «Участни» и без наведения.
+   Высоту ряда держит `min-height` — иначе имя прыгало бы при появлении кнопок. */
+.screen-controls {
+  min-height: calc(38px + 2 * var(--sp-3));
+}
+.screen-controls > :not(.screen-title) {
+  display: none;
+}
+.screen-viewer:focus-within .screen-controls,
+.screen-viewer.ctl-on .screen-controls {
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+}
+.screen-viewer:focus-within .screen-controls > .screen-spacer,
+.screen-viewer.ctl-on .screen-controls > .screen-spacer {
+  display: block;
+}
+.screen-viewer:focus-within .screen-controls > :not(.screen-title, .screen-spacer),
+.screen-viewer.ctl-on .screen-controls > :not(.screen-title, .screen-spacer) {
+  display: inline-flex;
+}
+@media (hover: hover) {
+  .screen-viewer:hover .screen-controls {
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+  }
+  .screen-viewer:hover .screen-controls > .screen-spacer {
+    display: block;
+  }
+  .screen-viewer:hover .screen-controls > :not(.screen-title, .screen-spacer) {
+    display: inline-flex;
+  }
+}
+.screen-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Окно громкости стрима: над значком звука, внутри вьювера (видно и в полноэкранном режиме). Вид —
+   как у всплывающего «Смотрят» (`.sv-tip`), шапка — от громкости человека (`.ctx-vol2-*`). */
+.stream-vol-pop {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  box-shadow: var(--sh-2);
+  cursor: default;
 }
 .screen-title {
   display: inline-flex;
@@ -4112,6 +4458,11 @@ span.att-pending {
   color: #fff;
   font-size: 13px;
   text-shadow: 0 1px 2px #000;
+  /* Имя видно и без затемнения ряда (оно теперь только по наведению) — своя тёмная подложка, как у
+     подписи на плитке Discord. */
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-1);
+  background: rgba(0, 0, 0, 0.45);
 }
 /* Who's currently watching this stream — avatar stack + count, with a hover tooltip of names. */
 .screen-viewers {
@@ -4181,10 +4532,10 @@ span.att-pending {
   flex: 1;
 }
 .screen-audio {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-3);
-  /* Keep the audio group whole; it wraps to its own line before it ever squishes the slider. */
   flex: 0 0 auto;
 }
 /* Stream-viewer controls sit over the video — subtle dark, not the global honey button (#34). */
@@ -6153,7 +6504,8 @@ button.admin-del:hover {
   .settings-modal input[type='range']::-webkit-slider-thumb {
     margin-top: 6px; /* (26 − 14) / 2 */
   }
-  /* Theme preview cards (macet E2): a mini app-mockup per theme, honey border on the selected one. */
+  /* Превью темы на телефоне (15.10, #218): не макет окна ПК с боковой колонкой, а кусок переписки — входящий и исходящий
+     пузыри на фоне темы (так показывает темы Telegram Android: пузыри, а не раскладка окна). Медовая рамка у выбранной. */
   .theme-cards {
     display: flex;
     gap: var(--sp-4);
@@ -6171,45 +6523,47 @@ button.admin-del:hover {
   }
   .tc-preview {
     display: flex;
-    height: 70px;
-  }
-  .tc-side {
-    width: 32%;
+    height: 76px;
   }
   .tc-lines {
     flex: 1;
-    padding: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
     display: flex;
     flex-direction: column;
+    justify-content: center;
     gap: var(--sp-2);
   }
   .tc-lines > span {
-    height: 7px;
-    border-radius: var(--r-1);
+    height: 18px;
+    border-radius: var(--r-2);
   }
   .tc-lines > span:first-child {
-    width: 70%;
+    width: 62%;
+    align-self: flex-start;
+    border-bottom-left-radius: var(--r-1);
   }
   .tc-lines > span:last-child {
-    width: 50%;
+    width: 48%;
+    align-self: flex-end;
+    border-bottom-right-radius: var(--r-1);
   }
   .theme-card.dark .tc-preview {
     background: #1b1a20;
   }
-  .theme-card.dark .tc-side {
-    background: #232128;
-  }
-  .theme-card.dark .tc-lines > span {
+  .theme-card.dark .tc-lines > span:first-child {
     background: #2c2a33;
+  }
+  .theme-card.dark .tc-lines > span:last-child {
+    background: #6b5420;
   }
   .theme-card.light .tc-preview {
     background: #f4f1ec;
   }
-  .theme-card.light .tc-side {
-    background: #eae5dc;
+  .theme-card.light .tc-lines > span:first-child {
+    background: #ffffff;
   }
-  .theme-card.light .tc-lines > span {
-    background: #ddd6cb;
+  .theme-card.light .tc-lines > span:last-child {
+    background: #f3d98f;
   }
   .tc-label {
     display: block;
@@ -6650,6 +7004,16 @@ button.admin-del:hover {
 .voice-bar.on {
   background: var(--accent);
   opacity: 1;
+}
+/* Телефон, лента (#218): столбик 2 px + зазор 1 px = шаг 3 (Telegram `SeekBarWaveform.java`); число столбиков — от ширины (`VoiceMessage`). */
+.message.bub .voice-wave.tg-bars {
+  gap: 0;
+}
+.message.bub .voice-wave.tg-bars .voice-bar {
+  flex: none;
+  width: 2px;
+  min-width: 2px;
+  margin-right: 1px;
 }
 /* Обрезка перед отправкой (08.10, G13; tdesktop `ListenWrap`): отрезанное — бледно, выбранное — в рамке с двумя ручками. */
 .voice-bar.cut {
@@ -8046,6 +8410,10 @@ button.danger-text:hover {
    состоянии, иначе база кнопки. Строки — прямые дети .dm-list. */
 .dm-list {
   display: grid;
+  /* Одна колонка ровно в ширину списка (15.10, приёмка 0.9.0): без явной колонки ширину неявной задаёт самый широкий
+     минимум ячейки — полоса вкладок поиска «Чаты … Голосовые» на телефоне 360–411 px шире списка, и вся лента (поле поиска,
+     строки «Файлов» со значком «Показать в чате») уезжала за правый край экрана. */
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--sp-1);
 }
@@ -8517,6 +8885,26 @@ button.dms-scope.on::after {
   border-radius: var(--r-1) var(--r-1) 0 0;
   background: var(--accent);
 }
+/* Телефон, поиск с запросом (12.10, #218): «Чаты / Медиа / Ссылки / Файлы / GIF / Голосовые» — как полоса вкладок Telegram Android
+   `SearchViewPager` (вкладки по ширине текста от левого края, полоса листается вбок; `DmSearchKinds.tsx`). */
+.dms-scopes.dms-kinds {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dms-scopes.dms-kinds::-webkit-scrollbar {
+  display: none;
+}
+.dms-kinds button.dms-scope {
+  flex: 0 0 auto;
+}
+/* Найденные вложения: ячейка сетки списка бесед (`.dm-list` — grid) не шире списка — длинная ссылка в строку раздвигала бы её
+   (`min-width: auto` у ячейки). Заголовки месяцев — как у «Общих медиа», но не прилипают (прокрутку ведёт список бесед). */
+.dms-kind-hits {
+  min-width: 0;
+}
+.dms-kind-hits .smedia-month-head {
+  position: static;
+}
 .dms-more {
   display: block;
   width: 100%;
@@ -8728,6 +9116,42 @@ button.dms-scope.on::after {
   color: var(--accent-ink);
 }
 /* Предел набран (C5): невыбранные строки притушены — выбрать их уже нельзя, и это видно до тапа. Выбранные снимаются как обычно. */
+/* Телефон, «Новая группа» (#218): плавающая «→» — Telegram `FragmentFloatingButton` 48 dp, справа 20, снизу 14 (+ вставка).
+   Лист прокручивается сам, поэтому кнопка «липнет» к низу окна прокрутки: сторож нулевой высоты в конце содержимого. */
+.group-fab-dock {
+  position: sticky;
+  /* Прилипание считается от поля содержимого листа (его нижний отступ 22 px + вставка), а кнопке нужно 14 px + вставка от края окна. */
+  bottom: -8px;
+  margin-top: 56px; /* запас прокрутки: последняя строка не под кнопкой */
+  height: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
+  pointer-events: none;
+}
+.group-fab {
+  pointer-events: auto;
+  flex: none;
+  width: 48px;
+  height: 48px;
+  margin-right: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-circle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: var(--sh-2);
+}
+.group-fab:active {
+  background: var(--accent-2);
+}
+.group-fab:disabled {
+  opacity: 0.5;
+}
 .sheet-row.group-pick.limited {
   opacity: 0.45;
 }
@@ -8921,7 +9345,7 @@ button.dms-scope.on::after {
        `--m-callbar-h` — место под полосу звонка (callbar D2: она над любым экраном, `.call-bar-top` ниже).
        Вставки — `max(env, --gv-sa*)`: старый WebView не кладёт строку состояния и кнопки навигации в `env` (D12, nativeSafeArea.ts). */
     padding-top: calc(max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
-    padding-bottom: calc(58px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+    padding-bottom: var(--m-nav-h);
     box-sizing: border-box;
   }
   /* Полоса идущего звонка на телефоне (callbar D2, 08.10; Telegram Android `FragmentContextView`): ОДНА над любым экраном —
@@ -8940,7 +9364,7 @@ button.dms-scope.on::after {
     z-index: 1001;
     height: var(--m-callbar-h, 36px);
     min-height: 0;
-    /* Сброс телефонного `.call-bar` панели голосового канала (крупные кнопки по центру, отступ под жест «домой»). */
+    /* Панель голосового канала телефона — `.voice-call-bar` (отдельное имя: раньше она делила `.call-bar` с этой зелёной полосой и красилась в зелёный). */
     justify-content: flex-start;
     gap: var(--sp-2);
     padding: 0 var(--sp-2);
@@ -9025,6 +9449,13 @@ button.dms-scope.on::after {
   }
   .app.m-list.m-norail > .rail > :not(.modal-overlay),
   .app.m-content > .rail > :not(.modal-overlay) {
+    display: none;
+  }
+  /* #218: на вкладке «Серверы» ленты тоже нет (`m-srvlist`) — вместо неё список серверов строками. Правило то же, что у `m-norail`. */
+  .app.m-list.m-srvlist > .rail {
+    display: contents;
+  }
+  .app.m-list.m-srvlist > .rail > :not(.modal-overlay) {
     display: none;
   }
   .app.m-list > .channels {
@@ -9170,6 +9601,30 @@ button.dms-scope.on::after {
   .app.m-chat {
     padding-bottom: max(env(safe-area-inset-bottom), var(--gv-sab, 0px));
   }
+  /* Список бесед (#218, Telegram Android): лента идёт до низа экрана и прокручивается ПОД стеклянной капсулой вкладок; нижнее
+     поле самой ленты = капсула + её отступы (`MAIN_TABS_HEIGHT_WITH_MARGINS`, `additionNavigationBarHeight`
+     `TA/ui/DialogsActivity.java:2980`), чтобы последняя строка поднималась над капсулой, плюс прежние 88 под кнопку «Написать»
+     (#212, правило `.app.m-list .channel-list.dm-list` ниже). В голосе внизу списка панель голоса — там прежнее место под капсулой. */
+  .app.m-dmlist:not(.in-voice) {
+    padding-bottom: 0;
+  }
+  .app.m-dmlist:not(.in-voice) .channels > .dm-list {
+    padding-bottom: calc(var(--m-nav-h) + 88px);
+    scroll-padding-bottom: var(--m-nav-h);
+  }
+  /* Пока идёт поиск в списке (фокус в поле или есть запрос), капсулы нет — `checkUi_mainTabsVisible`: `!searching`
+     (`TA/ui/DialogsActivity.java:14023`). Класс на корне ставит `DmSidebar`. */
+  :root.gv-listsearch .app.m-list .mobile-nav {
+    display: none;
+  }
+  /* Архив — отдельный экран без капсулы вкладок: у Telegram Android он открывается поверх `MainTabsActivity`
+     (`DialogsActivity` с `folderId = 1`). Класс на корне ставит `DmSidebar`; запас снизу под капсулу архиву не нужен. */
+  :root.gv-listarchive .app.m-list .mobile-nav {
+    display: none;
+  }
+  :root.gv-listarchive .app.m-dmlist:not(.in-voice) .channels > .dm-list {
+    padding-bottom: calc(var(--sp-4) + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+  }
   /* 2-column participant tile grid (aspect 3:4), green ring on the speaker. */
   .app.m-content .stage-people {
     display: grid;
@@ -9219,17 +9674,13 @@ button.dms-scope.on::after {
     background: rgba(0, 0, 0, 0.5);
   }
   /* Stream controls must fit a narrow screen — the close button was sliding off the right edge (#34).
-     The base rule now wraps the row and shrinks the title (same fix, desktop count-2 grid); here we
-     only drop the per-stream volume slider (mute + device volume are enough on a phone) and tighten
-     the padding. */
+     The base rule shrinks the title; here we only tighten the padding. Ползунок громкости больше не
+     стоит в ряду (10.10, окно `.stream-vol-pop` по значку звука) — прятать на телефоне нечего. */
   .screen-controls {
     padding: var(--sp-3) var(--sp-3);
   }
-  .screen-controls .stream-vol {
-    display: none;
-  }
   /* 60dp control bar: Микрофон / Звук / Камера / Отключиться (red). */
-  .call-bar {
+  .voice-call-bar {
     flex: 0 0 auto;
     display: flex;
     justify-content: center;
@@ -9390,43 +9841,96 @@ button.dms-scope.on::after {
   .voice-dock {
     left: var(--sa-l);
     right: var(--sa-r);
-    bottom: calc(58px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+    bottom: var(--m-nav-h);
   }
 
-  /* Bottom navigation. */
+  /* Нижние вкладки — плавающая стеклянная капсула, как Telegram Android 12.x (#218): высота 56, отступ 8 от краёв и от низа
+     над системной вставкой (`MAIN_TABS_HEIGHT` / `MAIN_TABS_MARGIN`, `TA/ui/DialogsActivity.java:290-292`), радиус 28
+     (`tabsViewBackground.setRadius(MAIN_TABS_HEIGHT / 2)`), ширина не больше 328 (`tabsView.setMaxWidth(328 + 2·8)` за вычетом
+     полей фона, `TA/ui/MainTabsActivity.java:310-311, 366`); вкладки — в 4 от края капсулы (поле `MAIN_TABS_MARGIN + 4` минус
+     поле фона 8). Фон — стекло `--glass-bg` (альфа 0.76, `BlurredBackgroundProviderImpl.mainTabs`). Список бесед прокручивается
+     ПОД капсулой (`.app.m-dmlist` ниже), остальные экраны держат под ней прежнее место `--m-nav-h`. */
+  :root {
+    --m-nav-h: calc(72px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+  }
+  /* Полоса во всю ширину без фона (как `tabsView` Telegram: поле вокруг фона-капсулы), касания проходят сквозь неё к ленте;
+     боковые вставки — в её полях (D23: панель навигации справа / вырез слева). Капсула — `.mnav-capsule` внутри. */
   .mobile-nav {
     display: flex;
+    justify-content: center;
     position: fixed;
     left: 0;
     right: 0;
     bottom: 0;
-    /* 58px tab row + the home-indicator inset filled by the nav background. */
-    height: calc(58px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
-    padding-bottom: max(env(safe-area-inset-bottom), var(--gv-sab, 0px));
-    /* D23: фон нижней панели во всю ширину, а вкладки — между боковыми вставками (панель навигации справа / вырез слева). */
+    box-sizing: border-box;
     padding-left: var(--sa-l);
     padding-right: var(--sa-r);
+    padding-bottom: calc(var(--sp-3) + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
     z-index: 95;
-    background: var(--bg-2);
-    border-top: 1px solid var(--border);
+    pointer-events: none;
   }
+  .mnav-capsule {
+    display: flex;
+    flex: 1;
+    max-width: 328px;
+    height: 56px;
+    margin: 0 var(--sp-3);
+    box-sizing: border-box;
+    padding: var(--sp-2);
+    border-radius: var(--r-pill);
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--sh-glass), var(--sh-2);
+    pointer-events: auto;
+  }
+  /* Затенение под капсулой (#218, решение владельца 12.10): строки списка бесед, уходящие под капсулу, плавно гаснут к цвету
+     ленты. Telegram: `MainTabsActivity.fadeView` — вид во всю ширину высотой `навигация + MAIN_TABS_HEIGHT_WITH_MARGINS` у низа
+     (`TA/ui/MainTabsActivity.java:373-378, 920-932`), фон `BlurredBackgroundWithFadeDrawable.setFadeHeight(dp(60), true)`:
+     градиент ВНИЗ 60dp от прозрачного до цвета `windowBackgroundWhite` с остановками 0 / 0x60 / 0xB0 / 0xE8 из 285
+     (= 0 / 0.34 / 0.62 / 0.81), дальше до низа — постоянные 0.81 (`TA/ui/Components/blur3/BlurredBackgroundWithFadeDrawable.java:211-219`).
+     Только там, где лента идёт под капсулой (`.app.m-dmlist`); на остальных экранах под капсулой пусто. Лежит ЗА капсулой
+     (z-index -1 внутри слоя `.mobile-nav`), касания проходят насквозь (`pointer-events: none`). */
+  .app.m-dmlist:not(.in-voice) .mobile-nav::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: var(--m-nav-h);
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--bg-2) 0%, transparent) 0,
+      color-mix(in srgb, var(--bg-2) 34%, transparent) 20px,
+      color-mix(in srgb, var(--bg-2) 62%, transparent) 40px,
+      color-mix(in srgb, var(--bg-2) 81%, transparent) 60px,
+      color-mix(in srgb, var(--bg-2) 81%, transparent) 100%
+    );
+  }
+  /* Вкладка — `GlassTabView.createMainTab`: значок 24 сверху, подпись 12 под ним (`TA/ui/Components/glass/GlassTabView.java:83-96`);
+     выбранная — пилюля во всю высоту вкладки цветом выбранной вкладки с альфой 0.09 (`dispatchDraw` `:153-163`) и жирная подпись (`:237`). */
   .mnav-tab {
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: var(--sp-1);
+    gap: 0;
     background: none;
     border: none;
     color: var(--muted);
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 500;
     padding: 0;
-    border-radius: 0;
+    border-radius: var(--r-pill);
   }
   .mnav-tab.active {
     color: var(--accent);
+    font-weight: 700;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
   }
   /* Touch sticks :hover on the last-tapped element; the global button:hover honey background then
      collided with the active tab's honey text (honey-on-honey, unreadable). Keep tabs transparent in
@@ -9441,20 +9945,33 @@ button.dms-scope.on::after {
   .mnav-tab.active:active,
   .mnav-tab.active:focus {
     color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
   }
   .mnav-ico {
     position: relative;
     display: inline-flex;
   }
+  /* Счётчик вкладки «Сообщения» — число, как у вкладки «Чаты» Telegram Android (`TA/ui/Components/glass/GlassTabView.java:
+     178-209`): высота 16, ширина ≥ 16 (текст + 8), текст 10 Medium белым по фирменному цвету, центр — в 11 правее середины
+     значка (у нас ≈ его правый край: значок 24), вырез 1,33 вокруг (здесь — обводка цветом стекла капсулы). Было: точка 8 px. */
   .mnav-badge {
     position: absolute;
-    top: -2px;
-    right: -3px;
-    width: 8px;
-    height: 8px;
-    border-radius: var(--r-circle);
-    background: var(--danger);
-    border: 2px solid var(--bg-2);
+    top: -6px;
+    left: 100%;
+    transform: translateX(-50%);
+    box-sizing: content-box;
+    min-width: 8px;
+    height: 16px;
+    padding: 0 var(--sp-2);
+    border-radius: var(--r-pill);
+    background: var(--accent);
+    color: var(--accent-ink);
+    border: 1.5px solid var(--bg-3);
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 16px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
   }
 
   /* Back affordance over an open chat / voice. */
@@ -9628,27 +10145,49 @@ button.dms-scope.on::after {
   .app.m-content .msg-react.corner {
     display: none !important;
   }
-  /* Input pill (design-step8 C1): rounded bar, circular +/emoji, round honey send. Emoji sits to the
-     right of the field (before send) via flex `order`. */
-  .app.m-content .composer {
-    gap: var(--sp-3);
-    margin: 6px 12px calc(8px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
-    padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  /* Поле ввода — как Telegram Android (#218; `ChatActivityEnterView.java:2755, 2794, 2840, 2977`): внутри пилюли смайлик слева,
+     поле, скрепка справа; микрофон/«отправить» — ОТДЕЛЬНЫЙ круг справа от пилюли. Высота строки и кнопки 44 (`DEFAULT_HEIGHT`
+     `:6471`), смайлик и скрепка 44×44. Решение #159 («＋ слева, смайлик справа») отменено владельцем в пользу Telegram.
+     Файл, голосовое, стикеры и опрос по-прежнему живут в листе под скрепкой: на 411 px с ними поле получало бы 128 px из 387.
+     Пилюля — это `::before` (позади кнопок, `isolation`), а сам `.composer` прозрачный: так круг справа остаётся в той же
+     строке, а разметка не меняется. Без явного order кнопки прыгали бы в начало (order:0).
+     Снизу — 9 px до системной панели, как «остров» ввода TG (`ChatInputViewsContainer.java:185`, `INPUT_BUBBLE_BOTTOM = 9`
+     `:30`). Саму панель (вставку) уже отступает `.app` (`.app.m-chat` / `.app.m-content` выше): вставка ещё и здесь давала
+     под полем пустую полосу в её высоту (аудит S20+ 10.10, B1). При клавиатуре вставка 0 — зазор те же 9 px. */
+  .app.m-content .composer:not(.sel-bar) {
+    isolation: isolate;
+    gap: 0;
+    margin: 6px 12px 9px;
+    padding: 0;
+    min-height: 44px;
+    background: none;
+    border: none;
+    border-radius: 0;
+  }
+  .app.m-content .composer:not(.sel-bar)::before {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: calc(44px + var(--sp-2));
+    background: var(--bg-3);
+    border: 1px solid transparent;
     border-radius: var(--r-5);
+    pointer-events: none;
+  }
+  .app.m-content .composer:not(.sel-bar):focus-within::before {
+    border-color: var(--accent-glow);
   }
   .app.m-content .composer .att-btn {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     border-radius: var(--r-circle);
   }
-  /* Порядок в пилле: [＋] [поле] [эмодзи] [отправить] (#159). Файл, голосовое, стикеры и опрос
-     живут в шторке под «+»: на 411 px с ними поле получало 128 px из 387 — меньше, чем ряд кнопок.
-     Раньше они прятались только пока набираешь текст, и пустое поле обрезало подсказку.
-     Эмодзи остаётся в строке — он открывает НАШ пикер с кастомными эмодзи сервера, клавиатурный
-     его не заменяет. Без явного order кнопки прыгали бы в начало (order:0). */
   .app.m-content .composer .att-btn.plus {
     display: inline-flex;
-    order: 1;
+    order: 3;
   }
   .app.m-content .composer .att-btn.attach,
   .app.m-content .composer .att-btn.voice,
@@ -9658,15 +10197,16 @@ button.dms-scope.on::after {
   .app.m-content .composer .composer-input {
     order: 2;
     font-size: 16px; /* ≥16px so the WebView doesn't zoom the page on focus */
-    padding: var(--sp-3) var(--sp-1);
+    padding: 11px var(--sp-1);
   }
   .app.m-content .composer .att-btn.emoji {
-    order: 3;
+    order: 1;
   }
   .app.m-content .composer .send-btn {
     order: 4;
     width: 44px;
     height: 44px;
+    margin-left: var(--sp-2);
     border-radius: var(--r-circle);
   }
   /* Пустое поле — на месте «отправить» микрофон (#159). Держишь — пишет, отпустил — ушло; вверх —
@@ -9684,6 +10224,7 @@ button.dms-scope.on::after {
   }
   .app.m-content .composer .mic-btn {
     order: 5;
+    margin-left: var(--sp-2);
     position: relative;
     z-index: 2;
     flex: 0 0 auto;
@@ -9701,8 +10242,43 @@ button.dms-scope.on::after {
     -webkit-touch-callout: none;
     transition: transform var(--t-fast) ease;
   }
+  /* Запись удержанием: круг `.rec-circle` под пальцем вместо прежнего увеличения кнопки, кнопка едет за пальцем (`--rx`/`--ry`). */
   .app.m-content .composer.rec-hold .mic-btn {
-    transform: scale(1.35);
+    transform: translate(var(--rx, 0px), var(--ry, 0px));
+    transition: none;
+  }
+  /* Круг записи — Telegram `ChatActivityEnterView.RecordCircle` + `BlobDrawable` (#218): обычно — холст `.rec-blob`
+     (`RecordBlob.tsx`: живые кляксы, круг `41 dp + 30 dp × громкость`, появление и уход рисует сам, `recordBlob.ts`).
+     Стилем `.rec-circle` — только без холста: оптимизированный режим (`.lite`, круг от `--lvl` без волн, как у Telegram
+     с выключенными анимациями чата) и `prefers-reduced-motion` (`.static`, круг стоит). Лежит под значком кнопки. */
+  .app.m-content .composer .rec-blob {
+    position: absolute;
+    z-index: -1;
+    left: 50%;
+    top: 50%;
+    width: 272px;
+    height: 272px;
+    margin: -136px 0 0 -136px;
+    color: var(--accent);
+    pointer-events: none;
+  }
+  .app.m-content .composer .rec-circle {
+    position: absolute;
+    z-index: -1;
+    left: 50%;
+    top: 50%;
+    width: 82px;
+    height: 82px;
+    margin: -41px 0 0 -41px;
+    border-radius: var(--r-circle);
+    background: var(--accent);
+    transform: scale(calc(1 + 0.7317 * var(--lvl, 0)));
+    transition: transform 90ms linear;
+    pointer-events: none;
+  }
+  .app.m-content .composer .rec-circle.static {
+    transform: none;
+    transition: none;
   }
   /* Плашка записи ложится ПОВЕРХ строки до самой кнопки: поле остаётся на месте и в фокусе, иначе
      клавиатура схлопнулась бы под пальцем посреди записи. Фон — как у пилюли, шов не виден. */
@@ -9713,12 +10289,12 @@ button.dms-scope.on::after {
     top: 0;
     bottom: 0;
     left: 0;
-    right: calc(44px + var(--sp-2) * 2);
+    right: calc(44px + var(--sp-2));
     align-items: center;
     gap: var(--sp-3);
     padding: 0 var(--sp-2) 0 var(--sp-4);
     overflow: hidden;
-    border-radius: var(--r-5) 0 0 var(--r-5);
+    border-radius: var(--r-5);
     background: var(--bg-3);
   }
   .app.m-content .composer .rec-inline .voice-rec-level {
@@ -9822,21 +10398,11 @@ button.dms-scope.on::after {
   body:has(.composer .rec-once) .toast-stack {
     bottom: calc(168px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
   }
-  /* Подпись к замку при удержании (Android `SlideUpToLock`): слева от замка, гаснет по мере подъёма пальца. */
-  .app.m-content .composer .rec-lock-hint {
-    display: block;
-    position: absolute;
-    z-index: 3;
-    right: calc(var(--sp-2) + 52px);
-    bottom: calc(100% + 30px);
-    padding: var(--sp-1) var(--sp-3);
-    border: 1px solid var(--border);
-    border-radius: var(--r-pill);
-    background: var(--bg-3);
-    color: var(--muted);
-    font-size: 13px;
-    white-space: nowrap;
-    pointer-events: none;
+  /* ЛС между инстансами Э7 (#141): тост из открытого листа («Нельзя позвать…», «Запрос отправлен инстансу…», «Фото меняется на
+     инстансе…») ложился ПОД лист (`.sheet-scrim` 1250 > 1000) и не был виден. Пока лист открыт — стопка над ним (Telegram: `Bulletin`
+     поверх нижнего листа). */
+  body:has(.sheet-scrim) .toast-stack {
+    z-index: 1251;
   }
   /* На телефоне запись показывает плашка в самой строке; отдельная полоса над ней — дубль. */
   .app.m-content .voice-rec {
@@ -9854,7 +10420,7 @@ button.dms-scope.on::after {
      телефона; время — тихим стилем пузыря вместо моноширинного --muted-2 (4.4994:1 на --bg-2). */
   .app.m-list .dm-row {
     gap: var(--sp-4);
-    height: 68px;
+    height: 70px;
     padding: 0 var(--sp-4);
     border-radius: var(--r-3);
     color: var(--text);
@@ -9862,14 +10428,20 @@ button.dms-scope.on::after {
   .app.m-list .dm-row .dm-name {
     flex: none;
     font-size: 16px;
-    font-weight: 700;
+    font-weight: 500;
     color: var(--text);
+  }
+  /* Точка «в сети» в строке списка — Telegram `DialogCell.java:5068-5079`: 10 px в обводке 2 px, центр на 6 px левее правого и на 8 px выше
+     нижнего края аватара ⇒ правый край точки на 1 px внутри аватара, нижний — на 3 px. */
+  .app.m-list .dm-row .mp-dot-wrap {
+    right: 1px;
+    bottom: 3px;
   }
   /* Floating compose button (58dp honey), above the tab bar; lifts over the call chip when in voice. */
   .dm-fab {
     position: fixed;
     right: calc(18px + var(--sa-r));
-    bottom: calc(72px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+    bottom: calc(var(--m-nav-h) + 14px);
     z-index: 92;
     width: 58px;
     height: 58px;
@@ -9885,7 +10457,7 @@ button.dms-scope.on::after {
     background: var(--accent-2);
   }
   .app.in-voice .dm-fab {
-    bottom: calc(136px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+    bottom: calc(var(--m-nav-h) + 78px);
   }
   /* Последняя строка списка ЛС уезжает из-под кнопки «Написать» (#212, S25: карандаш закрывал время и число у
      нижней беседы, а долистать её выше было некуда). Кнопка 58 px + зазор до панели 14 px + воздух. */
@@ -9903,13 +10475,123 @@ button.dms-scope.on::after {
   .app.m-list .dm-row .dm-preview {
     font-size: 15px;
   }
+  /* ── Строка списка как Telegram Android `DialogCell` (10.10, обычная раскладка — не «три строки») ──
+     Высота 70 (`heightDefault`, `TA/ui/Cells/DialogCell.java:171`), строка во всю ширину экрана: поля списка (12 px)
+     строка перекрывает отрицательными полями, угла нет. Аватар 52 в 11 от края и 9 сверху (`DialogCell.java:2463-2467`;
+     56 — только в режиме «три строки», `:2444`), текст с 76 (`messagePaddingStart + 4`), время в 15 от правого края
+     (`:2265`), счётчик в 15,67 (`BADGE_MARGIN`). Имя 16 полужирное Roboto Medium (`paintIndex = 1`, ветка `|| true`
+     `:1246-1258`; `AndroidUtilities.bold()` = 500), текст 15 обычный, время 12 (`TA/ui/ActionBar/Theme.java:7891`).
+     Счётчик 20,67 (`BADGE_SIZE`, `:1225`) с полями 6,33 и текстом 13 Medium (`dialogs_countTextPaint2`, `Theme.java:7791`). */
+  .app.m-list .dm-list > .dm-row {
+    width: calc(100% + 2 * var(--sp-4));
+    margin: 0 calc(-1 * var(--sp-4));
+    padding: 0 15px 0 11px;
+    column-gap: 13px;
+    row-gap: var(--sp-2);
+    border-radius: 0;
+  }
+  .app.m-list .dm-row .dm-preview {
+    font-weight: 400;
+  }
+  .app.m-list .dm-row .dm-when {
+    font-size: 12px;
+    font-weight: 400;
+  }
+  .app.m-list .dm-row .dm-badge {
+    min-width: 21px;
+    height: 21px;
+    margin-right: 1px;
+    padding: 0 6px;
+    border-radius: var(--r-pill);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 21px;
+  }
+  .app.m-list .dm-row .dm-badge.dot {
+    min-width: 0;
+    width: 10px;
+    height: 10px;
+    padding: 0;
+  }
+  /* ── Список серверов на телефоне (#218, `PhoneServerList`) ──
+     Строки — те же `.dm-row` (70 / аватар 52 / имя 16 / вторая строка 15 / счётчик 21), своё только ниже: стрелка «Назад»
+     в шапке каналов, заголовок группы чужого инстанса, закрытый сервер, пустое состояние. Источник размеров — Telegram Android
+     `DialogCell` (см. блок выше). */
+  .app.m-list .server-head .srv-back {
+    flex: none;
+    margin-left: calc(-1 * var(--sp-3));
+  }
+  .app.m-list .dm-list .srv-group-head {
+    width: 100%;
+    margin: 0;
+    padding: var(--sp-4) var(--sp-4) var(--sp-2);
+    border: 0;
+    background: none;
+    justify-content: flex-start;
+    gap: var(--sp-2);
+    text-align: left;
+  }
+  .app.m-list .dm-list .srv-group-head.off {
+    color: var(--muted);
+  }
+  /* Счётчик у канала (непрочитанное — медовый, упоминание — красный) — того же размера, что у строки беседы и сервера:
+     пилюля 21, цифра 13 Medium (Telegram Android `DialogCell` / ячейка темы форума `TopicsFragment` рисуют одним `dialogs_countTextPaint2`). */
+  .app.m-list .channel .ch-unread,
+  .app.m-list .channel .ch-mention {
+    min-width: 21px;
+    height: 21px;
+    padding: 0 6px;
+    border-radius: var(--r-pill);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 21px;
+  }
+  .app.m-list .dm-row.srv-solo .dm-name {
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
+  .app.m-list .dm-row.srv-solo .dm-badge {
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
+  .app.m-list .dm-row.srv-row.rail-closed .dm-ava {
+    opacity: 0.5;
+  }
+  .app.m-list .srv-list-screen .srv-empty {
+    padding: var(--sp-6) var(--sp-5);
+  }
+  /* Поле поиска списка — как Telegram Android `fragmentSearchField`: высота 48 (`SEARCH_FIELD_HEIGHT`), поля 7 слева и справа
+     (`LayoutHelper.createFrame(MATCH_PARENT, 48, TOP, 7, -2, 7, 0)`, `TA/ui/DialogsActivity.java:5338`). Лежит первой строкой
+     ленты (`.dm-find-zone`, `DmSidebar`): уезжает с ней и гаснет (`--find-a`); пока идёт поиск — прилипает сверху (`.on`) на фоне
+     списка; в режиме выбора — скрыто с сохранением места (`.pick`). */
   .app.m-list .dm-find {
-    padding: var(--sp-3) var(--sp-4) 0;
+    padding: var(--sp-2) 7px;
+  }
+  .app.m-list .dm-find .sheet-search {
+    height: 48px;
   }
   .app.m-list .dm-find .dm-find-clear {
-    top: calc(var(--sp-3) + 2px);
-    right: calc(var(--sp-4) + var(--sp-3));
+    top: calc(var(--sp-2) + 1px);
+    right: calc(7px + var(--sp-3));
     height: 46px;
+  }
+  /* Значок поиска в шапке (поле уехало с лентой): высота кнопки под палец больше строки заголовка — без отрицательных полей
+     шапка вырастала на 20 px в момент появления значка и лента прыгала. */
+  .app.m-list .dm-list-head .dm-find-btn {
+    margin-block: -12px;
+  }
+  .dm-find-zone {
+    opacity: var(--find-a, 1);
+  }
+  .dm-find-zone.on {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    opacity: 1;
+    background: var(--bg-2);
+  }
+  .dm-find-zone.pick {
+    visibility: hidden;
   }
   .app.m-list .dm-nores {
     font-size: 15px;
@@ -9924,8 +10606,13 @@ button.dms-scope.on::after {
     align-items: flex-start;
     gap: var(--sp-1);
   }
+  /* Имя 18 medium, как у Telegram Android (`titleTextView.setTextSize(18)` + `setTypeface(AndroidUtilities.bold())`
+     `ChatAvatarContainer.java:282-284`: `bold()` — Roboto Medium, 500, `AndroidUtilities.java:262-267`). Было 800: жирное имя
+     шире и резалось в пилюле на 360 (#218). */
   .app.m-content .dm-who > strong {
     max-width: 100%;
+    font-size: 18px;
+    font-weight: 500;
     line-height: 22px;
     transition: transform var(--t-base) ease;
   }
@@ -9933,6 +10620,8 @@ button.dms-scope.on::after {
     margin: 0;
     padding: 0;
     border: 0;
+    /* Статус 14, как у Telegram Android (`ChatAvatarContainer.java:307`, имя 18 — `:282`; #218). */
+    font-size: 14px;
     line-height: 16px;
     transition: opacity var(--t-base) ease;
   }
@@ -9950,78 +10639,119 @@ button.dms-scope.on::after {
     top: calc(max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
     left: var(--sa-l);
     right: var(--sa-r);
-    bottom: calc(58px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+    bottom: var(--m-nav-h);
     z-index: 93;
     background: var(--bg);
     overflow-y: auto;
   }
+  /* Экран «Профиль» как «Настройки» в Telegram Android (15.10, #218): шапка с аватаром и именем, ниже плоские группы строк
+     `TextCell` — высота 50 dp, значок слева на 16, текст на 58, подпись 16 обычным весом, разделитель в 1 px от текста до
+     правого края; группы разделяет полоса фона (`ShadowSectionCell`). Источник: TA/ui/Cells/TextCell.java (heightDp = 50,
+     imageLeft = 16, offsetFromImage = 58, textSize 16, onDraw — линия от dp(58)). Те же числа у строк списка разделов
+     настроек (`.set-rail-item` ниже) — один вид у обоих экранов. */
   .prof-scroll {
     display: flex;
     flex-direction: column;
-    gap: var(--sp-3);
-    padding: var(--sp-4) var(--sp-5);
+    padding: 0 0 var(--sp-4);
   }
-  .prof-card {
-    border-radius: var(--r-4);
-    overflow: hidden;
-    background: var(--bg-2);
-    margin-bottom: 8px;
+  .prof-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    padding: var(--sp-5) 16px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
   }
-  .prof-banner {
-    height: 80px;
-    background: linear-gradient(120deg, var(--accent), var(--accent-2));
-  }
-  .prof-card-body {
-    padding: 0 var(--sp-5) var(--sp-5);
-    margin-top: -34px;
+  /* Нажатие на шапку открывает свой профиль (приёмка 0.9.0) — отклик фоном, как у строк `.prof-row`. */
+  .prof-head:active {
+    background: var(--bg-3);
   }
   .prof-card-ava {
     display: inline-flex;
+    flex: 0 0 auto;
     border-radius: var(--r-circle);
-    border: 4px solid var(--bg-2);
-    background: var(--bg-2);
+  }
+  .prof-head-text {
+    min-width: 0;
   }
   .prof-name-row {
     display: flex;
     align-items: center;
     gap: var(--sp-3);
-    margin-top: 8px;
+    min-width: 0;
   }
   .prof-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 20px;
-    font-weight: 800;
+    font-weight: 700;
     color: var(--text);
   }
   .prof-handle {
-    font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 14px;
     color: var(--muted);
     margin-top: 2px;
   }
+  .prof-group {
+    background: var(--bg-2);
+  }
+  .prof-group + .prof-group {
+    margin-top: 12px;
+  }
   .prof-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--sp-4);
-    min-height: 58px;
-    padding: 0 var(--sp-5);
-    border-radius: var(--r-3);
-    background: var(--bg-2);
+    width: 100%;
+    height: 50px;
+    box-sizing: border-box;
+    padding: 0 16px;
+    background: none;
     color: var(--text);
-    font-size: 15px;
-    font-weight: 600;
+    font-size: 16px;
+    font-weight: 400;
     text-align: left;
     border: none;
+    border-radius: 0;
   }
   .prof-row:active {
     background: var(--bg-3);
   }
+  .prof-row > .gv-icon,
+  .prof-row > .stdot {
+    flex: 0 0 22px;
+    width: 22px;
+    height: 22px;
+    margin-right: var(--sp-3); /* 16 + 22 + 8 + зазор 12 = 58: текст там же, где у TextCell */
+  }
+  .prof-row > .stdot {
+    /* Точка статуса — в колонке значков: 12 px по центру 22-пиксельного места, текст на тех же 58. */
+    width: 12px;
+    height: 12px;
+    margin: 0 13px 0 5px;
+    flex-basis: 12px;
+  }
   .prof-row .gv-icon {
     color: var(--muted);
-    flex: 0 0 auto;
+  }
+  .prof-row:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 58px;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: var(--border);
   }
   .prof-row-label {
     flex: 1;
     min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .prof-row.danger {
     color: var(--danger);
@@ -10197,6 +10927,34 @@ button.dms-scope.on::after {
 .sheet-head {
   padding: var(--sp-1) var(--sp-3) var(--sp-3);
 }
+/* Стрелка «Назад» в шапке листа (`BottomSheet.onBack`): сторож нулевой высоты липнет к верху листа, кнопка 44 px стоит на строке заголовка. */
+.sheet-back-dock {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 3;
+}
+.sheet-back {
+  position: absolute;
+  top: 14px;
+  left: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-circle);
+  background: transparent;
+  color: var(--text);
+}
+.sheet-back:active {
+  background: var(--bg-3);
+}
+.sheet-head.with-back {
+  padding-left: 40px;
+}
 .sheet-title {
   font-size: 17px;
   font-weight: 800;
@@ -10360,19 +11118,27 @@ input.sheet-search {
   padding-bottom: calc(100px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
   /* Ряды сетки — квадратные по ширине колонки (`cqw`): ячейки на две строки и плитки без своих квадратов не схлопываются. */
   container-type: inline-size;
+  /* Без полосы прокрутки (как сетка Telegram): `cqw` считает ширину ВМЕСТЕ с полосой — с ней ячейки были 130×134 (эмулятор 10.10). */
+  scrollbar-width: none;
 }
+.gal-scroll::-webkit-scrollbar {
+  display: none;
+}
+/* Сетка как Telegram Android (tg-src ChatAttachAlertPhotoLayout.java, строки 3976-4000): поля `PADDING` и зазоры `GAP` по 2dp (`--sp-1` = 2px),
+   `itemSize = (ширина − 2·PADDING − зазоры) / колонки`; камера — ОДНА ячейка того же размера (#218, порция 2). */
 .gal-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: calc((100cqw - 2 * var(--sp-1)) / 3);
+  grid-auto-rows: calc((100cqw - 4 * var(--sp-1)) / 3);
   gap: var(--sp-1);
+  padding: 0 var(--sp-1);
 }
 /* Ландшафт телефона: четыре колонки, как у Telegram (`ChatAttachAlertPhotoLayout.onPreMeasure`: ширина больше высоты — 4, иначе 3).
    При трёх плитки были по 245 px при листе в 330: «Выбрать фото или видео» уходила под таблетку «Галерея / Файл». */
 @media (orientation: landscape) and (max-height: 600px) {
   .gal-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    grid-auto-rows: calc((100cqw - 3 * var(--sp-1)) / 4);
+    grid-auto-rows: calc((100cqw - 5 * var(--sp-1)) / 4);
   }
   /* Камера и «Выбрать фото или видео» — в один ряд (в два они занимали 367 px при видимых 283 и уходили под таблетку «Галерея / Файл»). */
   .gal-grid > button.gal-cam,
@@ -10404,6 +11170,12 @@ input.sheet-search {
 .gal.sys > .gal-scroll {
   height: auto;
   max-height: calc(92dvh - 48px);
+}
+/* Выбор мазком (G50): долгое нажатие на миниатюру не должно открывать меню картинки и выделять текст — палец ведёт выбор. */
+.gal-grid .gal-cell {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 button.gal-cell,
 span.gal-cell,
@@ -10437,11 +11209,127 @@ button.gal-system {
 span.gal-cell.sk {
   cursor: default;
 }
-/* Камера — первой, на две строки (Telegram), значок в верхнем правом углу. */
+/* Камера — первой: шириной в ячейку, высотой в две строки с зазором (Telegram `hasCameraSpaceRow` — пустая ячейка под камерой,
+   `CameraViewItemDecoration`: `itemSize * 2 + GAP`, tg-src ChatAttachAlertPhotoLayout.java, строки 4596-4598 и 4766-4769), значок в углу. */
 button.gal-cam {
   grid-row: span 2;
   background: #0d0c10;
   color: #fff;
+}
+/* Сетка не длиннее ряда или нет доступа к камере — камера в одну ячейку (`MediaSheet.camShort`: у Telegram тогда нет `hasCameraSpaceRow`). */
+button.gal-cam.short {
+  grid-row: span 1;
+}
+/* Нет доступа к камере — строка с кнопкой-пилюлей над сеткой (`MediaSheet.camPermRow`, Telegram `VIEW_TYPE_CAMERA_PERMISSION_BUTTON`:
+   строка 56dp, кнопка 44dp с полями 28 по центру, снизу 12). */
+.gal-cam-perm {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: 56px;
+  padding: 0 var(--sp-4) var(--sp-4);
+}
+.gal-cam-perm > button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 44px;
+  padding: 0 calc(var(--sp-6) + var(--sp-2));
+  border-radius: var(--r-pill);
+  font-size: 15px;
+  font-weight: 600;
+}
+/* Шапка листа без выбора — альбом со стрелкой (Telegram `dropDown` в шапке `ChatAttachAlertPhotoLayout`, строки 755-769: 17sp жирный). */
+.gal-album-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.gal-album-btn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Список альбомов — всплывающее меню под шапкой (Telegram `dropDownContainer.toggleSubMenu`, строки `AlbumButton`). */
+.gal-albums-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+.gal-albums {
+  position: absolute;
+  top: 0;
+  left: var(--sp-3);
+  z-index: 4;
+  min-width: 196px;
+  max-width: calc(100% - 2 * var(--sp-3));
+  max-height: 70%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sp-2) 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  box-shadow: var(--sh-3);
+  animation: ctxPopIn 0.16s ease both;
+}
+.gal-album {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 48px;
+  margin: 0;
+  padding: 0 var(--sp-5);
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.gal-album.on,
+.gal-album:active {
+  background: var(--bg-3);
+}
+.gal-album-cover {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-right: var(--sp-4);
+  /* У Telegram 4dp; ближайшая ступень шкалы — `--r-1` (6px). */
+  border-radius: var(--r-1);
+  overflow: hidden;
+  background: var(--bg-3);
+  color: var(--muted);
+}
+.gal-album-cover > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.gal-album-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+}
+.gal-album-count {
+  flex: 0 0 auto;
+  margin-left: var(--sp-3);
+  color: var(--muted);
+  font-size: 13px;
 }
 .gal-cam > video {
   position: absolute;
@@ -10499,6 +11387,12 @@ button.gal-system {
   font-weight: 800;
   line-height: 1;
   color: var(--accent-ink);
+}
+/* Кружок выбора — своя зона нажатия шире видимого (тап по фото открывает просмотр, по кружку — выбирает). */
+.gal-check::before {
+  content: '';
+  position: absolute;
+  inset: -12px;
 }
 .gal-check.on {
   background: var(--accent);
@@ -10725,6 +11619,11 @@ button.gal-send-btn:hover {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+}
+/* Поиск по названию во вкладке «Файл» (G50, tg-src ChatAttachAlertDocumentLayout): то же поле, что в «Кому написать?». */
+input.sheet-search.gal-file-search {
+  flex: 0 0 auto;
+  margin: 0;
 }
 .gal-card {
   flex: 0 0 auto;
@@ -11135,6 +12034,14 @@ button.cam-btn.send {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Телефон, «Новое сообщение» (#218, Telegram `ContactsActivity`): вторая строка — «в сети» (акцентом) / «был(а) …». */
+.dm-sub.seen {
+  display: block;
+  margin-top: 1px;
+}
+.dm-sub.seen.on {
+  color: var(--accent);
 }
 
 /* Member profile sheet (design-step8 F2) — banner + avatar + role chips + per-user volume + DM.
@@ -11849,8 +12756,9 @@ kbd.cheat-key.unset {
   /* Выше всего, откуда картинку открывают: карточка в меню (200), модалки (1000) и мобильный
      лист участника (1250). Ниже щипка и осыпания — чужой жест в твою сторону важнее картинки. */
   z-index: 1260;
-  /* Смахивание вниз (G11) светлит фон за пальцем — `Lightbox.tsx` ставит тот же цвет прозрачнее прямо в `style`. */
-  background: rgba(10, 9, 13, 0.93);
+  /* Фон НЕПРОЗРАЧНЫЙ чёрный, как у Telegram (Android `PhotoViewer.backgroundDrawable = 0xff000000`): сквозь 0.93 просвечивала лента (приёмка 13.10, B1).
+     Смахивание вниз (G11) светлит его за пальцем — `Lightbox.tsx` ставит тот же цвет прозрачнее прямо в `style`. */
+  background: #000;
   color: #ece9f0;
   animation: lbFade 0.14s ease;
 }
@@ -11945,15 +12853,57 @@ kbd.cheat-key.unset {
 /* Панель прячется тапом по середине (VA-10), пока мышь стоит (VD-22) и на время смахивания — плавно гаснет. */
 .lb-top,
 .lb-bottom,
-.lb-nav {
+.lb-nav,
+.lb-count {
   transition: opacity var(--t-base) ease;
 }
 .lightbox.lb-bare .lb-top,
 .lightbox.lb-bare .lb-bottom,
 .lightbox.lb-bare .lb-nav,
-.lightbox.lb-bare .lb-caption {
+.lightbox.lb-bare .lb-caption,
+.lightbox.lb-bare .lb-count {
   opacity: 0;
   pointer-events: none;
+}
+/* Шапка просмотра на телефоне — как Telegram Android 12.x `PhotoViewer` (#218): фон 0x7f000000 (`ACTION_BAR_PHOTO_VIEWER_COLOR`,
+   `Theme.java:2159`), «назад» слева на месте кнопки шапки (56), имя — 20 жирным с 72 от края, дата — 14 под ним
+   (`PhotoViewerActionBarContainer` `PhotoViewer.java:431-480`: отступ 72−16 + 16); номер — пилюлей ниже (`PhotoCountView`). */
+@media (max-width: 760px) {
+  .lightbox .lb-top {
+    padding-left: var(--sa-l);
+    gap: var(--sp-4);
+    background: rgb(0 0 0 / 0.5);
+  }
+  .lightbox .lb-back {
+    width: 56px;
+    height: 56px;
+    margin-right: calc(16px - var(--sp-4));
+    border-radius: 0;
+    background: none;
+  }
+  .lightbox .lb-name {
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .lightbox .lb-sub {
+    font-size: 14px;
+  }
+  .lightbox .lb-count {
+    position: absolute;
+    top: calc(56px + max(env(safe-area-inset-top), var(--gv-sat, 0px)) + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    height: 23px;
+    padding: 0 9px;
+    border-radius: var(--r-pill); /* 12dp при высоте 23 — та же пилюля */
+    background: rgb(0 0 0 / 0.5);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 23px;
+    white-space: nowrap;
+    z-index: 3;
+  }
 }
 /* Волна 6 телеграмности (G10, G33, G66). Строка «отправитель · дата»: имя — профиль, дата — к сообщению (ссылки без рамки). */
 .lb-link {
@@ -13511,6 +14461,289 @@ body:has(.lightbox) .confirm-overlay {
   background: transparent !important;
   overflow: hidden;
 }
+
+/* ===== Заставка при запуске десктопа (15.10; окно `?window=splash` 300×340, `SplashScreen.tsx`) =====
+   Как заставка Discord: маленькое окно без рамки по центру экрана — гусь, строка этапа, полоса. Скругление и тень
+   даёт сама Windows 11 у окна без рамки (`shadow: true` в `tauri.windows.conf.json`), поэтому внутри — сплошной
+   `--bg` во всё окно, без своей тени (её обрезали бы края окна). Полоса — классы карточки обновления
+   (`.update-progress`, `UpdatePanel`). Окно не перетаскивается и не выделяется. */
+.splash-window,
+.splash-window body,
+.splash-window #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.splash {
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-6) var(--sp-6) 28px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  text-align: center;
+}
+.splash-goose {
+  height: 150px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  margin-bottom: var(--sp-6);
+}
+.splash-goose-img {
+  height: 140px;
+  width: auto;
+  animation:
+    splashPoseIn 0.28s ease-out both,
+    splashBob 2.4s ease-in-out 0.28s 5; /* не `infinite`: окно живёт секунды, а вечные анимации на счету (`stylesGuards`) */
+}
+@keyframes splashPoseIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+}
+@keyframes splashBob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+.splash-title {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.splash-sub {
+  margin-top: var(--sp-2);
+  min-height: 16px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.splash-progress {
+  width: 200px;
+  margin-top: var(--sp-5);
+}
+.splash-bar-fill {
+  transition: width 0.1s linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .splash-goose-img,
+  .splash .update-shimmer {
+    animation: none;
+  }
+  .splash .update-progress-bar.indeterminate {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
+/* ===== Свои всплывающие уведомления на ПК (G38, ND-07; окно `?window=notify`, `NotifyPopups.tsx`) =====
+   Как «свои» уведомления Telegram Desktop (`window/window.style`): карточка 320 px, высота от 80 px, аватар 62 px с отступом
+   9 px, имя (верх 7 px) и текст правее на 12 px, крестик в правом верхнем углу; между карточками 7 px (`notifyDeltaY`).
+   Окно прозрачное и ровно по размеру стопки (`notify_popup.rs`): отступ от края экрана (6 px сбоку, 7 px сверху/снизу —
+   `notifyDeltaX`/`notifyDeltaY`) даёт само окно, внутри полей нет. Без тени — её обрезали бы края окна; рамка, как у
+   Telegram. Масштаб интерфейса (`zoom` у `<html>`) действует и здесь — окно меряет стопку экранным размером. */
+.nfp-root {
+  position: fixed;
+  left: 0;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  font-family: var(--font-ui);
+  user-select: none;
+}
+.nfp-root.bottom {
+  bottom: 0;
+}
+.nfp-root.top {
+  top: 0;
+}
+.nfp-card {
+  position: relative;
+  min-height: 80px;
+  box-sizing: border-box;
+  background: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  cursor: pointer;
+  overflow: hidden;
+}
+.nfp-main {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: 8px;
+  min-height: 78px;
+  box-sizing: border-box;
+}
+.nfp-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Имя — на 7 px от верха карточки (`notifyTextTop`), справа — колонка крестика (`notifyClose` 30 px + 1 px): ни имя, ни
+     текст под крестик не заходят (`itemWidth` у Telegram). */
+  margin-top: -2px;
+  padding: 0 22px 0 0;
+}
+.nfp-title {
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nfp-body {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 17px;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+}
+/* «Автор: » в группе и вид вложения («Фото, ») выделены, как в строке списка бесед (`.dm-preview .dm-from`); у Telegram —
+   `Ui::Text::Colorized`. */
+.nfp-from,
+.nfp-kind {
+  color: var(--text);
+}
+.nfp-close {
+  position: absolute;
+  z-index: 1;
+  top: 2px;
+  right: 2px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--r-circle);
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.nfp-close:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+/* «Ответить» — только при наведении на карточку (Telegram `toggleActionButtons`, 200 мс — `notifyActionsDuration`).
+   Как `prepareActionsCache`: полоса фона карточки от низа имени (7 + 18 px) до низа карточки, шириной в кнопку с отступом
+   и градиент слева (`notifyFadeRight`) — текст под кнопкой гаснет, а не просвечивает и не наезжает; без наведения текст
+   идёт до колонки крестика. Кнопка — в 9 px от правого и нижнего края (`_replyPadding` = 80 − 9 − 62). */
+.nfp-actions {
+  position: absolute;
+  top: 24px;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  padding: 0 8px 8px 36px;
+  background: linear-gradient(to right, transparent, var(--bg-2) 36px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms linear;
+}
+.nfp-card:hover .nfp-actions,
+.nfp-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.nfp-reply-btn {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 30px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.nfp-reply-btn:hover {
+  background: var(--row-hover);
+}
+.nfp-reply {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  padding: 0 8px 8px;
+  cursor: default;
+}
+.nfp-reply-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 96px;
+  resize: none;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  outline: none;
+}
+.nfp-reply-input:focus {
+  border-color: var(--accent);
+}
+.nfp-send {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--r-circle);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.nfp-send:disabled {
+  color: var(--muted-2);
+  cursor: default;
+}
+.nfp-hide-all {
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.nfp-hide-all:hover {
+  background: var(--row-hover);
+}
 .gv-overlay {
   position: fixed;
   top: 0;
@@ -14162,33 +15395,30 @@ body:has(.lightbox) .confirm-overlay {
   flex-direction: column;
   gap: var(--sp-3);
 }
-.lc-host {
-  font-size: 17px;
-  font-weight: 700;
-  word-break: break-all;
-}
+/* Окно «Открыть ссылку?» (#218, вид tdesktop): адрес целиком, символы чужого алфавита — цветом внимания и жирно,
+   при отсутствии подсветки жирным выделен домен. */
 .lc-url {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text);
   background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: var(--r-2);
   padding: var(--sp-3) var(--sp-3);
-  max-height: 84px;
+  max-height: 120px;
   overflow: auto;
   word-break: break-all;
 }
-.lc-check {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-3);
+.lc-bold {
+  font-weight: 700;
+}
+.lc-mark {
+  font-weight: 700;
+  color: var(--danger);
+}
+.lc-hint {
   font-size: 13px;
   color: var(--muted);
-  cursor: pointer;
-}
-.lc-check input {
-  margin-top: 2px;
 }
 /* Emoji row in composer autocomplete (`:code`) — same 28px slot the avatar/icon uses. */
 .ac-emoji {
@@ -17345,6 +18575,31 @@ input[type='radio']:disabled {
 .rail-group-head.go:disabled {
   cursor: default;
 }
+/* 15.10: заголовок недоступной группы — `aria-disabled`, а не `disabled` (иначе браузер не отдаёт правый клик, а меню
+   «Убрать из списка» нужнее всего у мёртвого соседа). Вид прежний: приглушён, без наведения. */
+.rail-group-head.go[aria-disabled='true'] {
+  cursor: default;
+}
+.rail-group-head.go[aria-disabled='true']:hover {
+  color: var(--muted-2);
+}
+.srv-group-head.go[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Связка цела, а хост не отвечает (`RailGroupView.silent`): группа серая целиком, но кнопки живые — ожил, и клик пройдёт.
+   Прозрачность та же, что у выключенной кнопки (`button:disabled`). */
+.rail-group.off .rail-icon,
+.srv-row.off {
+  opacity: 0.55;
+}
+.srv-group-note {
+  margin-left: auto;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
 /* Мобильный рейл — горизонтальная лента: там группы схлопываем в ряд и подпись прячем, иначе
    лента превращается в мешанину из текста и кружков на 46 точек высоты.
    ⚠️ Порог 760 px — тот же, что у остальных правил `.app.m-list`: свой порог развёл бы рейл и его
@@ -18298,6 +19553,16 @@ input[type='radio']:disabled {
   overflow-y: auto;
   padding: var(--sp-1) var(--sp-3) var(--sp-4);
 }
+/* Версия приложения последней строкой списка разделов настроек (приёмка 0.9.0) — как `versionView` под настройками
+   Telegram Android (`TA/ui/SettingsActivity.java`: 14 dp, серый, по центру, поля 10/21). */
+.settings-app-version {
+  padding: 10px 21px;
+  margin-top: var(--sp-2);
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+  user-select: text;
+}
 /* Админ-панель живёт на том же рельсе (#153). Ширину она сохраняет свою: в «Пользователях» таблица
    с почтой, ролями и тумблерами, и на 980 px последняя колонка уезжает под горизонтальную прокрутку. */
 /* 🔴 Шире прежних 1200: рельс отъедает 248 px у содержимого, и таблица пользователей (имя, почта,
@@ -18781,6 +20046,20 @@ input[type='radio']:disabled {
   .set-rail-title .icon-close {
     display: inline-flex;
   }
+  /* Стрелка «←» слева от названия (#218): название идёт следом, а не уезжает вправо; кнопка 40 px, цвет текста, стрелка 24. */
+  .set-rail-head.back-left,
+  .set-rail-title.back-left {
+    justify-content: flex-start;
+    gap: var(--sp-3);
+    margin-left: var(--sp-3);
+  }
+  .set-rail-head.back-left .icon-back,
+  .set-rail-title.back-left .icon-back {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    color: var(--text);
+  }
   .set-head {
     padding-top: calc(12px + max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
   }
@@ -18934,6 +20213,68 @@ input[type='radio']:disabled {
   }
   .modal.rail-modal.picked .set-main {
     animation: settingsDetailIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+}
+/* Телефон: список разделов настроек — плоский, как у Telegram Android (15.10, #218): строка `TextCell` 50 dp, значок слева,
+   подпись 16 обычным весом, разделитель от текста до края. Без выделенной «последней» строки и без второго уровня (якоря групп
+   живут на экране раздела — прокруткой). Источник чисел — TA/ui/Cells/TextCell.java (heightDp = 50, imageLeft = 16,
+   offsetFromImage = 58, textSize 16, onDraw: линия от dp(58)). Те же правила у «Профиля» (`.prof-row`). */
+@media (max-width: 760px) {
+  .set-rail-list {
+    padding: 0 0 var(--sp-4);
+  }
+  .set-rail-anchors {
+    display: none;
+  }
+  .set-rail-item {
+    position: relative;
+    height: 50px;
+    min-height: 50px;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0 16px;
+    gap: var(--sp-4);
+    border-radius: 0;
+    background: none;
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 400;
+  }
+  .set-rail-item > svg {
+    flex: 0 0 22px;
+    width: 22px;
+    height: 22px;
+    margin-right: var(--sp-3); /* 16 + 22 + 8 + зазор 12 = 58 */
+    color: var(--muted);
+  }
+  /* «Последний открытый» раздел не подсвечиваем: на телефоне список — это просто список. */
+  .set-rail-item:hover,
+  .set-rail-item.active {
+    background: none;
+    color: var(--text);
+    font-weight: 400;
+  }
+  .set-rail-item.active > svg {
+    color: var(--muted);
+  }
+  .set-rail-item:active {
+    background: var(--row-hover);
+  }
+  .set-rail-item::after {
+    content: '';
+    position: absolute;
+    left: 58px;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: var(--border);
+  }
+  .set-rail-list > :last-child .set-rail-item:last-child::after,
+  .set-rail-list > .set-rail-item:last-child::after {
+    display: none;
+  }
+  .set-rail-item .set-dot {
+    margin-left: auto;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -20227,6 +21568,37 @@ input[type='radio']:disabled {
   position: relative;
   overflow-x: hidden;
 }
+/* Выпадающее меню кнопки шапки (`ContextMenu drop`, 10.10; «⋮» беседы на телефоне), как Telegram Android
+   `ActionBarPopupWindow.startAnimation`: подложка раскрывается сверху от правого верхнего угла (pivot = ширина, 0) за
+   `150 + 16 × N` мс (`--drop-ms`), пункт — `alpha 0→1` и сдвиг −6 → 0 за 180 мс, когда край дошёл до него (`--drop-at`,
+   `ActionBarPopupWindowLayout.startChildAnimation`). Конец раскрытия — с запасом под тень карточки. */
+@keyframes ctxDropIn {
+  from {
+    opacity: 0;
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(-24px -24px -48px -24px);
+  }
+}
+@keyframes ctxDropItem {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ctx-stack.drop > .ctx-menu {
+  transform-origin: top right;
+  animation: ctxDropIn var(--drop-ms, 230ms) ease-in-out both;
+}
+.ctx-stack.drop > .ctx-menu > * {
+  animation: ctxDropItem 180ms ease-out var(--drop-at, 0ms) both;
+}
 .ctx-stack > .react-bar {
   animation: ctxPopIn var(--t-base) ease both;
 }
@@ -20967,9 +22339,84 @@ html.gv-sel-drag * {
   .ctx-stack.anchored .react-bar-btn {
     font-size: 26px;
   }
+  /* Пункт меню сообщения — как Telegram Android `ActionBarMenuSubItem`: высота 48 (`itemHeight`,
+     `TA/ui/ActionBar/ActionBarMenuSubItem.java:51`), текст 16 обычным (`:97`); было 44,6 / 15 / 600. */
   .ctx-menu.anchored .ctx-item {
-    padding: var(--sp-4);
-    font-size: 15px;
+    min-height: 48px;
+    padding: 0 var(--sp-4);
+    font-size: 16px;
+    font-weight: 400;
+  }
+  /* Разрыв групп в выпадающем меню («⋮» беседы) — толстая полоса, как Telegram Android `ActionBarPopupWindow.GapView`:
+     8 во всю ширину карточки (`addColoredGap` → `createLinear(MATCH_PARENT, 8)`, `TA/ui/ActionBar/ActionBarMenuItem.java:2389-2396`),
+     цвет `key_actionBarDefaultSubmenuSeparator` = фон окна `key_windowBackgroundGray` (`TA/ui/ActionBar/Theme.java:3607`) — у нас `--bg`. */
+  .ctx-stack.drop > .ctx-menu > .ctx-divider {
+    height: 8px;
+    margin: 0 calc(-1 * var(--sp-2));
+    background: var(--bg);
+  }
+  /* Пузырь на телефоне — как Telegram Android: угол 17 (`SharedConfig.bubbleRadius`, `TA/messenger/SharedConfig.java:319`),
+     угол к соседу по серии 6 (`nearRad = dp(Math.min(6, bubbleRadius))`, `TA/ui/ActionBar/MessageDrawable.java:575`); хвостовой
+     угол — прежний 0. Время 12 (`chat_timePaint`, `TA/ui/ActionBar/Theme.java:8402`). ПК — как было (15 / 5 / 10,5). */
+  .app.m-content {
+    --r-bubble: 17px;
+    --r-bubble-near: 6px;
+  }
+  .app.m-content .message.bub .bub-meta {
+    font-size: 12px;
+  }
+  /* Полоса ответа / правки / пересылки над полем — две строки, как Telegram Android `ChatReplyContainer`: высота 48
+     (`addTopView(…, 48)`, `TA/ui/ChatActivity.java:8150`), сверху «Ответ Имя» 14 Medium акцентом, под ним текст 14, строки
+     по 18 с 6 и 24 сверху (`TA/ui/Components/ChatReplyContainer.java:121-137`), значок и крестик — по центру высоты.
+     Миниатюра фото — 34 на обе строки (`:166`). Превью ссылки (`.link-strip`) — без подписи, его не трогаем. */
+  .app.m-content .reply-strip:has(> .rs-label) {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: 18px 18px;
+    align-items: center;
+    column-gap: var(--sp-3);
+    row-gap: 0;
+    box-sizing: border-box;
+    min-height: 48px;
+    padding: 6px var(--sp-4);
+    font-size: 14px;
+    line-height: 18px;
+  }
+  .app.m-content .reply-strip:has(> .rs-label) > :first-child {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+  .app.m-content .reply-strip:has(> .rs-label) > .rs-label {
+    grid-column: 2 / 4;
+    grid-row: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .app.m-content .reply-strip:has(> .rs-label) > .rs-label b {
+    font-weight: inherit;
+  }
+  .app.m-content .reply-strip:has(> .rs-label) > .rs-text {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
+  .app.m-content .reply-strip:has(> .rs-thumb) > .rs-label,
+  .app.m-content .reply-strip:has(> .rs-thumb) > .rs-text {
+    grid-column: 3;
+  }
+  .app.m-content .reply-strip:has(> .rs-label) > .rs-thumb {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    width: 34px;
+    height: 34px;
+    margin: 0;
+  }
+  .app.m-content .reply-strip:has(> .rs-label) > .rs-close {
+    grid-column: 4;
+    grid-row: 1 / span 2;
   }
   /* Подвал — сверху карточки: на телефоне нет наведения, «когда и дошло ли» читают первым. Кегль — тот же 10.5 px. */
   .ctx-menu.anchored .ctx-foot {
@@ -21138,6 +22585,8 @@ html.gv-sel-drag * {
 @media (prefers-reduced-motion: reduce) {
   .ctx-stack > .react-bar,
   .ctx-stack > .ctx-menu,
+  .ctx-stack.drop > .ctx-menu,
+  .ctx-stack.drop > .ctx-menu > *,
   .ctx-spot,
   .sel-check,
   .swipe-reply.armed,
@@ -21283,6 +22732,32 @@ html.gv-lite .goose-bonus {
   color: var(--muted-2);
   font-size: 11px;
   font-weight: 500;
+}
+/* «N прочитали» (15.10, `readers1`): пункт меню своего сообщения в группе — иконка ✓✓, текст, справа стопка до трёх
+   аватарок 20 с перекрытием (как `.reaction .re-faces`; Telegram Desktop `who_reacted_context_action.cpp`, Web A `AvatarList`
+   micro). Окно списка — то же, что «кто поставил» (`.who-head` / `.who-row`): ✓✓ в шапке акцентом, реакция прочитавшего справа. */
+.ctx-seen-faces {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+.ctx-seen-faces > * {
+  border-radius: var(--r-circle);
+  box-shadow: 0 0 0 1.5px var(--bg-2);
+}
+.ctx-seen-faces > * + * {
+  margin-left: -6px;
+}
+.who-emoji.seen-ico {
+  color: var(--accent);
+}
+.who-row .seen-react {
+  flex: none;
+  font-size: 16px;
+}
+.who-row .seen-react .custom-emoji {
+  width: 16px;
+  height: 16px;
 }
 
 /* ===== Папки бесед ЛС (07.10, #211, G40, `folders1`) ======================================================
@@ -21902,7 +23377,7 @@ button.dmf-emo.on {
   top: calc(56px + max(env(safe-area-inset-top), var(--gv-sat, 0px)));
   left: 0;
   right: 0;
-  bottom: calc(112px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+  bottom: calc(160px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
   margin: var(--sp-5) calc(var(--sp-5) + var(--sa-r)) var(--sp-5) calc(var(--sp-5) + var(--sa-l));
   display: flex;
   align-items: center;
@@ -22070,6 +23545,99 @@ button.dmf-emo.on {
 .pe-foot .link:disabled {
   opacity: 0.4;
 }
+/* ---- Рисовать и Текст в редакторе фото (14.10, G49; Telegram Desktop `editor/color_picker.cpp`, Android `PhotoPaintView`) ----
+   Вкладки «Кадр / Рисовать / Текст» над панелью; в двух последних рамка кадра остаётся тусклой подсказкой (то, что уйдёт в
+   файл), а поверх снимка лежит слой для пальца. Метки рисует отдельный холст `.pe-marks` (тот же поворот и отражение). */
+.photo-editor.paint .pe-stage {
+  bottom: calc(200px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+}
+.photo-editor.paint.text .pe-stage {
+  bottom: calc(244px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+}
+.pe-marks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  pointer-events: none;
+}
+.pe-crop.locked {
+  pointer-events: none;
+  cursor: default;
+  background-image: none;
+  outline-color: rgba(255, 255, 255, 0.4);
+}
+.pe-paint-area {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  cursor: crosshair;
+}
+.pe-paint-area.text {
+  cursor: text;
+}
+.pe-modes {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-1);
+}
+.pe-modes .pe-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.pe-paint {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.pe-text-input {
+  height: 36px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-2);
+  background: rgba(255, 255, 255, 0.1);
+  color: #ece9f0;
+  font-size: 14px;
+}
+.pe-text-input:disabled {
+  opacity: 0.55;
+}
+.pe-palette {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: center;
+}
+.pe-swatch {
+  flex: 1 1 0;
+  max-width: 30px;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--r-circle);
+  cursor: pointer;
+}
+.pe-swatch.on {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.pe-opts {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.pe-opts .pe-range {
+  flex: 1;
+  min-width: 0;
+}
+.photo-editor .lb-btn[data-on] {
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.18);
+}
+.photo-editor .lb-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 /* Переименование файла в окне отправки и на полосе (G49): поле на месте имени. */
 .sfb-rename {
   flex: 1;
@@ -22224,6 +23792,12 @@ button.dmf-emo.on {
 .fwd-foot .fwd-opt {
   margin: 0 var(--sp-2);
 }
+/* Файлы людям других инстансов пока не пересылаются (Э2 часть Б, #141) — предупреждение над «Комментарием». */
+.fwd-foot .fwd-warn {
+  margin: 0 var(--sp-2);
+  font-size: 13px;
+  color: var(--danger);
+}
 .fwd-send-row {
   display: flex;
   gap: var(--sp-2);
@@ -22264,6 +23838,139 @@ button.dmf-emo.on {
 .sched-foot .sched-go {
   flex: 1;
   width: auto;
+}
+/* 12.10, #218: «Переслать в…» на телефоне — сетка как `ShareAlert` Telegram Android (`ShareAlert.java` / `ShareDialogCell.java`):
+   4 в ряд, ячейка 103 dp, аватар 56 dp с отступом сверху 7, подпись 12 sp в две строки с отступом 66 и по 6 по бокам; у выбранной
+   аватар сжат до 0.857 и обведён кольцом 2 dp цвета акцента, значок выбора 21 dp (кольцо 1.5 dp цвета листа) справа внизу
+   аватара; точка «в сети» — центр в 10 dp от правого и в 6 dp от нижнего края аватара. Поиск — «таблетка» (у Telegram 36 dp,
+   радиус 18). Внизу при выборе — «Комментарий» и круглая кнопка «Отправить» 52 dp со счётчиком (`ShareAlert.writeButton`). */
+.fwd-pick-grid > .sheet-search {
+  height: 40px;
+  border-radius: var(--r-pill);
+}
+.fwd-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: 8px;
+}
+.fwd-cell {
+  position: relative;
+  display: block;
+  height: 103px;
+  padding: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--text);
+  text-align: center;
+}
+.fwd-cell-ava {
+  position: absolute;
+  top: 7px;
+  left: 50%;
+  width: 56px;
+  height: 56px;
+  margin-left: -28px;
+  border-radius: var(--r-circle);
+}
+.fwd-cell-ava::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-circle);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  opacity: 0;
+  transition: opacity var(--t-fast);
+  pointer-events: none;
+}
+.fwd-cell.picked .fwd-cell-ava::after {
+  opacity: 1;
+}
+.fwd-cell-pic {
+  display: block;
+  width: 56px;
+  height: 56px;
+  transition: transform var(--t-fast);
+}
+.fwd-cell.picked .fwd-cell-pic {
+  transform: scale(0.857);
+}
+.fwd-cell-dot {
+  position: absolute;
+  right: 4px;
+  bottom: 0;
+  display: inline-flex;
+  color: var(--bg-2);
+}
+.fwd-cell-check {
+  position: absolute;
+  top: 36px;
+  left: 27px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  border-radius: var(--r-circle);
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 0 0 2px var(--bg-2);
+  animation: selIn var(--t-base) ease both;
+}
+.fwd-cell-name {
+  position: absolute;
+  top: 66px;
+  left: 6px;
+  right: 6px;
+  height: 30px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 12px;
+  line-height: 15px;
+  word-break: break-word;
+}
+.fwd-pick-grid .fwd-foot {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.fwd-pick-grid .fwd-foot .fwd-opt {
+  flex: 1 1 100%;
+}
+.fwd-pick-grid .fwd-foot .fwd-comment {
+  order: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+}
+.fwd-pick-grid .fwd-foot .fwd-send-row {
+  order: 2;
+  flex: none;
+}
+.fwd-send.round {
+  position: relative;
+  flex: none;
+  width: 52px;
+  min-height: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: var(--r-circle);
+}
+.fwd-send-n {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: var(--r-circle);
+  background: var(--bg-2);
+  color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
 }
 /* Меню «⋯» окна «Переслать в…» (`ContextMenu`, портал в body, z-index 200) должно лечь ПОВЕРХ самого окна (1000, у листа телефона — 1250). */
 body:has(.fwd-pick) > .ctx-menu,
@@ -22369,7 +24076,19 @@ body:has(.fwd-pick) > .ctx-sheet-backdrop {
   }
   .stranger-bar-actions {
     flex: 1;
+    min-width: 0;
     justify-content: space-around;
+  }
+  /* Приёмка 15.10 (I2): подпись кнопки — всегда одной строкой, на узком экране и крупном шрифте ужимается с «…», как Telegram Android
+     (`ChatActivity.java` `addToContactsButton` / `reportSpamButton`: `setSingleLine`, поля 4dp, без разрядки). */
+  .stranger-bar-btn {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 0 var(--sp-2);
+    letter-spacing: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .stranger-bar-x {
     width: 40px;
@@ -22464,6 +24183,14 @@ button.smedia-row:hover {
   height: min(72vh, 680px);
   margin: 0 -12px;
 }
+/* B10 (аудит 10.10): в WebView Android раскрашенная полоса прокрутки (`*::-webkit-scrollbar` 12 px) занимает место — у листа и у
+   списка свою: сетка выходила 360 при окне 384, справа пустые 24. У Telegram сетка «Общих медиа» от края до края
+   (`TA/ui/Components/SharedMediaLayout.java`, 3 колонки — `mediaColumnsCount`, `:748`), полосы поверх. Здесь полосы без ширины:
+   листают пальцем. */
+.sheet:has(.smedia-phone)::-webkit-scrollbar,
+.smedia-phone .smedia-list::-webkit-scrollbar {
+  width: 0;
+}
 .smedia-tabs {
   display: flex;
   gap: var(--sp-1);
@@ -22548,6 +24275,14 @@ button.smedia-tile {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+/* Э3 (#141): нескачанная плитка общих медиа — затенена, крутилка по центру (как `.att-video.att-copying` в ленте). */
+button.smedia-tile.att-copying {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  filter: brightness(0.82);
 }
 .smedia-tile-badge {
   position: absolute;
@@ -22738,8 +24473,35 @@ a.smedia-link-url:hover {
   margin-top: var(--sp-6);
 }
 /* Телефон: аватар в верхней трети, кнопки внизу (Android `VoIPFragment`). */
+/* Размеры — Telegram `VoIPFragment.java` (кольцо 204 dp, отступ сверху 93, аватар 135 dp внутри `ImageWithWavesView`, имя 28 sp).
+   Кольцо — коробка 204: пульс звонка растёт от краёв аватара (inset 34,5) до краёв кольца (×1,51). */
 .call-scrim.phone .call-ava {
-  margin-top: 14vh;
+  box-sizing: border-box;
+  width: 204px;
+  height: 204px;
+  /* 93 от верхнего края экрана, как у Telegram: поле карточки (24 + вставка) уже съедено. */
+  margin-top: max(0px, calc(93px - var(--sp-6) - var(--sa-t)));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.call-scrim.phone .call-ava.ringing::before,
+.call-scrim.phone .call-ava.ringing::after {
+  inset: 34.5px;
+  animation-name: callPulsePhone;
+}
+@keyframes callPulsePhone {
+  from {
+    opacity: 0.35;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.51);
+  }
+}
+.call-scrim.phone .call-name {
+  font-size: 28px;
 }
 .call-scrim.phone .call-acts {
   margin-top: auto;
@@ -23390,4 +25152,1319 @@ body:has(.modal.sfb) > .ctx-sheet-backdrop {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+}
+
+/* ═══ tg3 (#218): верх беседы и панель эмодзи на телефоне — как Telegram Android 12.x ═══════════════════════════════════
+   Слой `.chat-top` (шапка + капсула полос) и капсула `.top-capsule` — обёртки разметки `MessagePane`. На ПК их нет
+   (`display: contents`): у Telegram Desktop полоса закрепа во всю ширину под шапкой — как у нас и было. */
+.chat-top,
+.top-capsule {
+  display: contents;
+}
+@media (max-width: 760px) {
+  /* Стекло Telegram (`BlurredBackgroundProviderImpl.topPanelChatActivity`): фон панели с альфой 0.76, под ним размытие
+     40dp (`DownscaleScrollableNoiseSuppressor.java:420` — радиус `RenderEffect` 40 → сигма ≈ 0.577·40 + 0.5 ≈ 24) и
+     насыщенность ×3 (`RenderNodeEffects.getSaturationX3RenderEffect`); обводка 0.55dp — в светлой теме белая и тень 0x20000000,
+     в тёмной — белая 0x20 сверху и 0x14 снизу. Фон панели у нас — цвет острова ввода (`--bg-3`). Переменные — на `.app`:
+     ими же пользуются «назад» и «участники», которые лежат вне беседы. */
+  .app.m-content {
+    --glass-bg: color-mix(in srgb, var(--bg-3) 76%, transparent);
+    --glass-blur: blur(24px) saturate(3);
+    --sh-glass: inset 0 0.55px 0 rgba(255, 255, 255, 0.125), inset 0 -0.55px 0 rgba(255, 255, 255, 0.08);
+  }
+  :root[data-theme='light'] .app.m-content {
+    --sh-glass: inset 0 0.55px 0 #fff, inset 0 -0.55px 0 #fff, 0 0 1px rgba(0, 0, 0, 0.125);
+  }
+  /* Размытия нет (старый WebView) или включена «Лёгкая версия» — фон непрозрачный, как у Telegram без размытия
+     (`checkBlurEnabled` → альфа 255). */
+  @supports not (backdrop-filter: blur(1px)) {
+    .app.m-content {
+      --glass-bg: var(--bg-3);
+      --glass-blur: none;
+    }
+  }
+  html.gv-lite .app.m-content {
+    --glass-bg: var(--bg-3);
+    --glass-blur: none;
+  }
+  /* То же стекло у капсулы нижних вкладок (#218; `BlurredBackgroundProviderImpl.mainTabs` — та же альфа 0.76, размытие и
+     обводка): она живёт и вне беседы (список, серверы, профиль), поэтому переменные — на ней самой. */
+  .mobile-nav {
+    --glass-bg: color-mix(in srgb, var(--bg-3) 76%, transparent);
+    --glass-blur: blur(24px) saturate(3);
+    --sh-glass: inset 0 0.55px 0 rgba(255, 255, 255, 0.125), inset 0 -0.55px 0 rgba(255, 255, 255, 0.08);
+  }
+  :root[data-theme='light'] .mobile-nav {
+    --sh-glass: inset 0 0.55px 0 #fff, inset 0 -0.55px 0 #fff, 0 0 1px rgba(0, 0, 0, 0.125);
+  }
+  @supports not (backdrop-filter: blur(1px)) {
+    .mobile-nav {
+      --glass-bg: var(--bg-3);
+      --glass-blur: none;
+    }
+  }
+  html.gv-lite .mobile-nav {
+    --glass-bg: var(--bg-3);
+    --glass-blur: none;
+  }
+
+  /* Слой поверх ленты (`ChatActivity.java:7784`: `topPanelLayout` и шапка — поверх `contentView`, Gravity.TOP). */
+  .app.m-content .chat > .chat-top {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 6;
+  }
+  /* Шапка прозрачная (`actionBar.setBackground(null)`, `ChatActivity.java:3680`), высота 56, без линии. Стекло — у «пилюль»
+     (`ActionBar.setupGlass` `ActionBar.java:214-239`: радиус 23dp = половина высоты, у нас `--r-pill`; поле 6dp; размеры — `dispatchDraw` `:2222-2270`:
+     пилюля 46dp, по 6dp от краёв и друг от друга). */
+  .app.m-content .chat > .chat-top > .channel-topbar {
+    position: relative;
+    min-height: 56px;
+    border-bottom: 0;
+    background: transparent;
+  }
+  /* Поля — как у TG: пилюля начинается за «назад» (6 + 46 + 6 = 58, `leftDefault = s + p`), меню стоит в 6 от правого края
+     (`glassDrawableMenu.setBounds(getWidth() - … - p * 2, …, getWidth(), …)`), между пилюлями 6 (`ActionBar.java:2236-2266`). Было
+     64 слева и 16 справа: на 360 имени и статусу оставалось 112 px, и обрезалось даже «Гамма Тестов» (#218). Справа «Участники»
+     (`.has-members`) — прежнее поле под кнопку. */
+  .app.m-content:not(.has-members) .chat > .chat-top > .channel-topbar {
+    padding-left: calc(58px + var(--sa-l, 0px));
+    padding-right: calc(6px + var(--sa-r, 0px));
+    column-gap: 6px;
+  }
+  /* Середина — имя с аватаром в пилюле по ширине содержимого, по центру между «назад» и меню (`ActionBar.java:2239-2246`). */
+  .app.m-content .chat > .chat-top > .channel-topbar > .topbar-title {
+    flex: 0 1 auto;
+    margin-inline: auto;
+    height: 46px;
+    padding: 0 var(--sp-4) 0 2px;
+    border-radius: var(--r-pill);
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--sh-glass);
+  }
+  /* Справа — пилюля меню (`glassDrawableMenu`): кнопки шапки в одной пилюле высотой 46. */
+  .app.m-content .chat > .chat-top > .channel-topbar > .topbar-actions {
+    flex: none;
+    margin-left: 0;
+    height: 46px;
+    border-radius: var(--r-pill);
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--sh-glass);
+  }
+  .app.m-content .chat > .chat-top > .channel-topbar > .topbar-actions > .topbar-btn,
+  .app.m-content .chat > .chat-top > .channel-topbar > .topbar-actions > .pins-btn {
+    height: 46px;
+  }
+  /* Выделение и поиск: пилюля во всю ширину между «назад» и правым краем (`ActionBar.java:2244` — в режиме действия ширина
+     пилюли = вся доступная). «Назад» — 6 + 46 + 6. */
+  .app.m-content .chat > .chat-top > .channel-topbar.sel-head::before,
+  .app.m-content .chat > .chat-top > .channel-topbar.chat-search-head::before {
+    content: '';
+    position: absolute;
+    top: 5px;
+    bottom: 5px;
+    left: 58px;
+    right: 6px;
+    border-radius: var(--r-pill);
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--sh-glass);
+    pointer-events: none;
+  }
+  .app.m-content .chat > .chat-top > .channel-topbar.sel-head > *,
+  .app.m-content .chat > .chat-top > .channel-topbar.chat-search-head > * {
+    position: relative;
+  }
+  /* «Назад» и «Участники» (фиксированные, `MainLayout`) над открытой лентой — круглые пилюли 46 в 6 от края, по оси шапки
+     (`glassDrawableBack`, `ActionBar.java:2262-2264`). */
+  .app.m-content:has(.chat > .chat-top) .mobile-back,
+  .app.m-content.has-members:has(.chat > .chat-top) .mobile-members-btn {
+    width: 46px;
+    height: 46px;
+    top: calc(5px + max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--sh-glass);
+  }
+  .app.m-content:has(.chat > .chat-top) .mobile-back {
+    left: calc(6px + var(--sa-l));
+  }
+  .app.m-content.has-members:has(.chat > .chat-top) .mobile-members-btn {
+    right: calc(6px + var(--sa-r));
+  }
+
+  /* Капсула верхних полос (`ChatActivityTopPanelLayout.java:65-79`): поля 7dp (`ChatActivity.java:46505`), радиус
+     min(18dp, h/2) — у нас `--r-4` (полосы не ниже 44), стеклянный фон; сообщения прокручиваются под ней и видны вокруг. Нижнее поле — в отступе ленты
+     (`--chat-top-h` + 4, как `chatListViewPaddingTop`). Стекло — на `::before`: `backdrop-filter` на самой капсуле сделал бы
+     её рамкой для `position: fixed` внутри (подложка списка закреплённых `.pins-backdrop`). */
+  .app.m-content .chat > .chat-top > .top-capsule {
+    display: block;
+    position: relative;
+    margin: 7px 7px 0;
+    border-radius: var(--r-4);
+  }
+  .app.m-content .chat > .chat-top > .top-capsule:empty {
+    display: none;
+  }
+  .app.m-content .chat > .chat-top > .top-capsule::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--sh-glass);
+    pointer-events: none;
+  }
+  .app.m-content .chat > .chat-top > .top-capsule > * {
+    position: relative;
+    border-bottom: 0;
+    background: transparent;
+  }
+  /* Полоса закрепа — 48dp (`ChatActivity.java:11429`). */
+  .app.m-content .chat > .chat-top > .top-capsule > .pin-bar {
+    height: 48px;
+  }
+  .app.m-content .chat > .chat-top > .top-capsule > .pin-bar .pin-bar-main {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+  .app.m-content .chat > .chat-top > .top-capsule .voice-topbar-progress {
+    bottom: 0;
+  }
+  /* Лента — под слоем: отступ сверху = высота слоя + 4 (`dp(4)` в `chatListViewPaddingTop`); переход к сообщению
+     (`scrollIntoView`) тоже не ставит строку под шапку. Плавающая дата — под слоем. */
+  .app.m-content .chat > .feed-frame > .messages {
+    padding-top: calc(var(--chat-top-h, 56px) + 4px);
+    scroll-padding-top: calc(var(--chat-top-h, 56px) + 4px);
+  }
+  .app.m-content .chat > .feed-frame > .bub-float {
+    top: calc(var(--chat-top-h, 56px) + var(--sp-3));
+  }
+
+  /* Панель эмодзи / стикеров / GIF на месте клавиатуры (`ChatActivityEnterView.showPopup`; Web K `.is-under` —
+     `_emojiDropdown.scss:64-73`: в потоке под полем, ширина 100%, без тени и скруглений). Высота — инлайном (`exprUnderH`). */
+  .app.m-content .chat.has-expr-under > .composer {
+    margin-bottom: 8px;
+  }
+  .app.m-content .chat > .expr-under {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: max(env(safe-area-inset-bottom), var(--gv-sab, 0px));
+    background: var(--bg-2);
+    border-top: 1px solid var(--border);
+  }
+  .app.m-content .chat > .expr-under > .emoji-pop.docked,
+  .app.m-content .chat > .expr-under > .sticker-pop.docked {
+    position: static;
+    flex: 1;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    animation: none;
+  }
+  /* Клавиатура ещё занимает место (`data-kbspace`, `popover.ts`) — панель ждёт её ухода, лента не прыгает. */
+  :root[data-kbspace] .app.m-content .chat > .expr-under:not(:focus-within) {
+    display: none;
+  }
+  /* Раскрытие протяжкой вверх (#218, `stickersExpand.ts`; Telegram Android `setStickersExpanded`): панель выше на
+     `--expr-lift` (высота и отрицательный верхний отступ — инлайном, место в потоке прежнее, лента не перестраивается),
+     поле ввода и строка ответа едут вверх на столько же (`setTranslationY(offset)` у `ChatActivityEnterView`). Доезд
+     300 мс `ease` = `CubicBezierInterpolator.DEFAULT`; под пальцем — без перехода. */
+  .app.m-content .chat.has-expr-under > .reply-strip,
+  .app.m-content .chat.has-expr-under > .composer {
+    position: relative;
+    z-index: 82;
+    transform: translateY(calc(-1 * var(--expr-lift, 0px)));
+    transition: transform 300ms ease;
+  }
+  .app.m-content .chat > .expr-under {
+    position: relative;
+    z-index: 82;
+    transition:
+      height 300ms ease,
+      margin-top 300ms ease;
+  }
+  /* Затемнение (`ScrimDrawable`: чёрный, альфа 102/255 × доля раскрытия) — над лентой, её кнопками (`.jump-down` — 5), шапкой (`.chat-top` — 6)
+     и её кнопками (`.mobile-back` и др. — 80): у Telegram это передний план `sizeNotifierLayout` (`ChatActivityEnterView.java:12528`, `:13755`), а шапка —
+     его дочка (`contentView.addView(actionBar)` `ChatActivity.java:7786`), прямоугольник от 0 до верха поля (`:13968`). Поле и панель — 82. */
+  .app.m-content .chat > .expr-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 81;
+    background: rgb(0 0 0 / 0.4);
+    pointer-events: none;
+    transition: opacity 300ms ease;
+  }
+  .app.m-content .chat.expr-dragging > .reply-strip,
+  .app.m-content .chat.expr-dragging > .composer,
+  .app.m-content .chat.expr-dragging > .expr-under,
+  .app.m-content .chat.expr-dragging > .expr-scrim {
+    transition: none;
+  }
+  /* За верх панели (поиск и строка наборов) тянут вверх-вниз — браузер их по вертикали не прокручивает. */
+  .app.m-content .chat > .expr-under .emoji-search,
+  .app.m-content .chat > .expr-under .emoji-tabs {
+    touch-action: pan-x;
+  }
+  /* Раскрыта или тянется — капсула закрепа гаснет (`animatorHideTopPanelByEmojiKeyboardExpanded`, `ChatActivity.java:46641`:
+     320 мс `EASE_OUT_QUINT` = (0.23, 1, 0.32, 1); альфа и `GONE` на нуле — `checkUi_topPanelLayoutVisibility` `:46493-46497`). */
+  .app.m-content .chat > .chat-top > .top-capsule {
+    transition:
+      opacity 320ms cubic-bezier(0.23, 1, 0.32, 1),
+      visibility 0s;
+  }
+  .app.m-content .chat.expr-up > .chat-top > .top-capsule {
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity 320ms cubic-bezier(0.23, 1, 0.32, 1),
+      visibility 0s 320ms;
+  }
+  /* Сетка стикеров под полем — как `EmojiView` Telegram Android: колонок = ширина / 72dp (`EmojiView.java:6827`), ряд 82dp
+     (`:6857`), без зазоров — поля у ячейки свои. */
+  .app.m-content .chat > .expr-under .sticker-grid {
+    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+    grid-auto-rows: 82px;
+    gap: 0;
+    padding: var(--sp-2) 0;
+  }
+  .app.m-content .chat > .expr-under .sticker-grid > .sticker-cell {
+    min-width: 0;
+    padding: 0;
+  }
+}
+
+/* Опасная ссылка (#218 п.5, `dangerousLink.tsx`): ссылка из списка угроз — красная, с плашкой; на токенах --danger. */
+.msg-link.danger-link {
+  color: var(--danger);
+  text-decoration: underline;
+}
+.danger-link-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+/* ——— Просмотр выбора листа вложений (`MediaPickViewer`, Telegram `PhotoViewer.openPhotoForSelect`) ——— */
+.pick-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: #000;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  touch-action: pan-y;
+}
+.pick-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.pick-media {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+/* Видео тянется — круг и проценты поверх кадра; крупное — кнопка «играть» с размером (`VIEW_AUTO_VIDEO_BYTES`). */
+.pick-load,
+.pick-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+.pick-play {
+  margin: 0;
+  padding: var(--sp-4) var(--sp-5);
+  border: 0;
+  border-radius: var(--r-4);
+  background: rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+.pick-wait {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: var(--r-circle);
+}
+.pick-dur {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: 14px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+.pick-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: calc(max(env(safe-area-inset-top), var(--gv-sat, 0px)) + 8px) 12px 8px;
+  background: linear-gradient(rgba(0, 0, 0, 0.55), transparent);
+}
+.pick-close {
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: var(--r-circle);
+  background: transparent;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pick-pos {
+  flex: 1 1 auto;
+  font-weight: 700;
+  font-size: 16px;
+}
+.pick-check {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  border: 2px solid #fff;
+  border-radius: var(--r-circle);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--accent-ink);
+  font-size: 15px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pick-check.on {
+  background: var(--accent);
+}
+.pick-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  padding: 8px 10px calc(max(env(safe-area-inset-bottom), var(--gv-sab, 0px)) + 8px);
+  background: rgba(0, 0, 0, 0.6);
+}
+.pick-bar > .gal-caption {
+  flex: 1 1 auto;
+}
+/* Окно подтверждения поверх листа (окно отказа в доступе из листа вложений, как Telegram `BasePermissionsActivity`): у
+   `.confirm-overlay` 1100, у `.sheet-scrim` 1250 — без этого окно вставало ПОД лист (эмулятор 10.10). */
+body:has(.sheet-scrim) .confirm-overlay {
+  z-index: 1260;
+}
+
+/* Профиль собеседника на телефоне (#218, `PhoneProfile.tsx`) — экран на всю высоту, как `ProfileActivity` Telegram Android:
+   полоса 56 + отступ системной строки; шапка цвета профиля с аватаром 96 (`lerp(42, 96)`), имя ≈ 17.5 × 1.12 = 20, статус 13.5;
+   ряд действий `ProfileActionsView` (поля 14 / 12, промежуток 7 → шаг шкалы 8, кнопка 74 − 12 = 62, скругление 16 → шаг 18, значок 24, подпись 11 жирным);
+   протяжка — аватар до 138 (`lerp(96, 138)`), раскрытый — квадрат на всю ширину; строки `TextDetailCell` (60, поля 23, 16 / 13).
+   Слой 195: над беседой и ручками выделения (`.tsel-handle` 191), под меню «⋮» (`.ctx-menu` 200) и просмотром (`.lightbox`). */
+.tgp {
+  --tgp-bar: calc(56px + max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
+  position: fixed;
+  inset: 0;
+  z-index: 195;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+}
+.tgp-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--tgp-bar);
+  box-sizing: border-box;
+  padding: calc(var(--tgp-bar) - 56px) 4px 0;
+  color: #fff;
+}
+.tgp.collapsed .tgp-bar {
+  background: var(--tgp-bg);
+}
+button.tgp-bar-btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  background: none;
+  color: inherit;
+  border-radius: var(--r-circle);
+}
+button.tgp-bar-btn:active {
+  background: rgba(255, 255, 255, 0.14);
+}
+.tgp-more .gv-icon {
+  transform: rotate(90deg); /* «⋮»: вертикальных точек в наборе значков нет, как и в шапке беседы */
+}
+.tgp.expanded .tgp-bar-btn {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+}
+.tgp-bar-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  opacity: 0;
+  transform: translateY(8px);
+  transition:
+    opacity 0.18s,
+    transform 0.18s;
+  pointer-events: none;
+}
+.tgp.collapsed .tgp-bar-title {
+  opacity: 1;
+  transform: none;
+}
+.tgp-bar-ava {
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+.tgp-bar-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tgp-bar-name {
+  font-size: 18px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tgp-bar-seen {
+  font-size: 13.5px;
+  color: rgba(255, 255, 255, 0.75);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tgp-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.tgp-scroll::-webkit-scrollbar {
+  width: 0;
+}
+.tgp-head {
+  padding-top: calc(var(--tgp-bar) + var(--tgp-pull, 0px));
+  background: var(--tgp-bg);
+  color: #fff;
+  text-align: center;
+}
+.tgp:not(.pulling) .tgp-head {
+  transition: padding-top 0.3s cubic-bezier(0.23, 1, 0.32, 1); /* EASE_OUT_QUINT */
+}
+/* Фон шапки из аватара (`ProfileGalleryBlurView`: сильное размытие, насыщенность 0.65, яркость 0.5). Слой — статичная картинка под
+   содержимым шапки; поля -48 прячут светлую кайму размытия. Без аватара слоя нет — работает цвет `--tgp-bg`. */
+.tgp-head {
+  position: relative;
+  overflow: hidden;
+}
+.tgp-head > :not(.tgp-bgimg) {
+  position: relative;
+}
+img.tgp-bgimg {
+  position: absolute;
+  inset: -48px;
+  width: calc(100% + 96px);
+  height: calc(100% + 96px);
+  max-width: none;
+  object-fit: cover;
+  filter: blur(32px) saturate(0.65) brightness(0.5);
+  pointer-events: none;
+}
+.tgp-bar-bg {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+.tgp.collapsed .tgp-bar-bg {
+  opacity: 1;
+}
+/* Оптимизированный режим (`liteMode.ts`): без размытия — плоский цвет профиля. */
+html.gv-lite .tgp .tgp-bgimg,
+html.gv-lite .tgp .tgp-bar-bg {
+  display: none;
+}
+.tgp-head-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 16px 16px;
+}
+.tgp-ava {
+  position: relative;
+  display: inline-flex;
+  border-radius: var(--r-circle);
+  transform-origin: 50% 0;
+  transform: scale(calc((1 + var(--tgp-grow, 0) * 0.4375) * (1 - var(--tgp-p, 0) * 0.5625)));
+  opacity: calc(1 - var(--tgp-p, 0));
+}
+.tgp:not(.pulling) .tgp-ava {
+  transition: transform 0.3s cubic-bezier(0.23, 1, 0.32, 1);
+}
+.tgp-name {
+  max-width: 100%;
+  margin-top: 12px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tgp-seen {
+  margin-top: 2px;
+  font-size: 13.5px;
+  line-height: 1.3; /* в раскрытом виде текст внутри кнопки просмотра (`.ava-zoom`), у неё своя высота строки */
+  color: rgba(255, 255, 255, 0.75);
+}
+.tgp-seen.online {
+  color: #fff;
+}
+.tgp-hero {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  margin-top: calc(-1 * var(--tgp-bar));
+  overflow: hidden;
+}
+.tgp-hero-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: tgp-hero-in 0.3s cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes tgp-hero-in {
+  from {
+    transform: scale(0.6);
+    border-radius: var(--r-circle);
+    opacity: 0.4;
+  }
+}
+.tgp-hero-text {
+  position: absolute;
+  color: #fff;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 32px 16px 12px;
+  text-align: left;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.45));
+}
+.tgp-hero-text .tgp-name {
+  margin-top: 0;
+}
+.tgp.expanded .tgp-actions {
+  padding-top: 12px;
+}
+.tgp-actions {
+  display: flex;
+  gap: var(--sp-3); /* Telegram 7 (поле 14 / 2) — ближайший шаг шкалы */
+  padding: 0 14px 12px;
+}
+button.tgp-action {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 62px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 0 2px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  border-radius: var(--r-4); /* Telegram 16 — ближайший шаг шкалы */
+}
+button.tgp-action:active {
+  background: rgba(255, 255, 255, 0.24);
+}
+.tgp-action-label {
+  max-width: 100%;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tgp-info {
+  margin-bottom: 12px;
+  background: var(--bg-2);
+}
+.tgp-info:empty {
+  display: none;
+}
+.tgp-info > .pe {
+  padding: 10px 23px;
+}
+.tgp-row {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 60px;
+  box-sizing: border-box;
+  padding: 8px 23px 10px;
+  text-align: left;
+}
+.tgp-row + .tgp-row {
+  border-top: 1px solid var(--border);
+}
+.tgp-row-value {
+  font-size: 16px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.tgp-row-label {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.tgp-row-emoji {
+  margin-right: 6px;
+}
+.tgp-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+/* Общие медиа в профиле (`SharedMediaPanel`): листает экран, вкладки прилипают под полосой, заголовки месяцев — под вкладками;
+   блок не короче экрана, чтобы вкладки доходили до верха, как у Telegram. */
+.tgp .smedia-embed {
+  min-height: calc(var(--vh-px, 100dvh) - var(--tgp-bar));
+  background: var(--bg-2);
+}
+.tgp .smedia-embed .smedia-tabs {
+  position: sticky;
+  top: var(--tgp-bar);
+  z-index: 2;
+  background: var(--bg-2);
+}
+.tgp .smedia-embed .smedia-list {
+  overflow: visible;
+}
+.tgp .smedia-embed .smedia-month-head {
+  top: calc(var(--tgp-bar) + 44px);
+}
+
+/* ── Геопозиция и карточка контакта в ЛС (14.10, G69, `geocontact1`, `ConvMediaCard.tsx`, `GeoPickDialog.tsx`) ──────────────
+   Как Telegram: геопозиция — значок места в круге и подписи (карту со сторонних серверов не тянем — приватность и CSP), круг
+   44 px и цвета — как у кнопки голосового в пузыре (`.message.bub .voice-play`); контакт — аватар 44 px, имя, @ник и
+   кнопка «Написать» под разделителем (Android `SharedContactCell` / Web K `contact`). */
+.msg-geo {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 200px;
+  max-width: 300px;
+  padding: var(--sp-1) 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.msg-geo-ico,
+.geo-pick-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-circle);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.msg-geo:hover .msg-geo-ico {
+  background: var(--accent-2);
+}
+.msg-geo-text,
+.geo-pick-text,
+.msg-contact-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--sp-1);
+}
+.msg-geo-title,
+.msg-contact-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-geo-sub,
+.msg-contact-sub {
+  font-size: 13px;
+  color: var(--bubble-in-meta, var(--muted));
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message.bub.mine .msg-geo-sub,
+.message.bub.mine .msg-contact-sub {
+  color: var(--bubble-out-meta);
+}
+.msg-contact {
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 300px;
+}
+.msg-contact-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.msg-contact-head {
+  cursor: pointer;
+}
+.msg-contact-home {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.msg-contact-act {
+  margin-top: var(--sp-1);
+  padding: var(--sp-2) 0 var(--sp-1);
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: none;
+  color: var(--bubble-accent-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.msg-contact-act:hover {
+  text-decoration: underline;
+}
+
+/* Карточка геопозиции с картинкой карты (14.10, `yamap1`, `ConvMediaCard.tsx` `GeoMapPic`): карта сверху на всю ширину, под ней — значок и
+   подписи. Картинка приходит с НАШЕГО сервера (прокси Яндекса), размер места держит aspect-ratio — лента не прыгает. */
+.msg-geo.has-map {
+  flex-wrap: wrap;
+  width: 280px;
+  max-width: 100%;
+}
+.msg-geo-map {
+  display: block;
+  flex: 0 0 100%;
+  overflow: hidden;
+  border-radius: var(--r-2);
+  background: var(--bg-3);
+  margin-bottom: var(--sp-1);
+}
+.msg-geo-map img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Подтверждение «Отправить контакт» (`ContactSendFlow.tsx`): карточка человека по центру и кнопки «Отмена» / «Отправить»
+   (Telegram `PhonebookShareAlert`). */
+.contact-send-modal {
+  width: min(380px, calc(100vw - 32px));
+}
+.contact-send {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-2) 0;
+}
+.contact-send-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  text-align: center;
+}
+.contact-send-name {
+  max-width: 100%;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.contact-send-sub {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Окно «Геопозиция»: строка «Отправить моё местоположение» с точностью под ней (Telegram `SendLocationCell`). */
+.geo-pick-modal {
+  width: min(420px, calc(100vw - 32px));
+}
+.geo-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+}
+.geo-pick-send {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-2);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.geo-pick-send:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+.geo-pick-send:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.geo-pick-title {
+  font-weight: 600;
+  color: var(--accent);
+}
+.geo-pick-sub,
+.geo-pick-coords {
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.geo-pick-coords {
+  padding: 0 var(--sp-3);
+}
+.geo-pick-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  font-size: 13px;
+  color: var(--danger);
+}
+
+/* ── Опрос в ЛС (14.10, `convpoll1`, `ConvPoll.tsx`): поверх карточки опроса каналов (`.poll*`). Telegram `ChatMessageCell`:
+   подпись вида под вопросом, кружки/квадраты до голоса, у викторины правильный — зелёным, неверный выбор — красным. ── */
+.conv-poll-kind {
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-3);
+  font-size: 12px;
+}
+.conv-poll .poll-opt[aria-disabled='true'] {
+  cursor: default;
+}
+.conv-poll-dot {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--muted);
+  border-radius: var(--r-circle);
+}
+.conv-poll-dot.square {
+  border-radius: var(--r-1);
+}
+.conv-poll-dot.on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.poll-opt.right {
+  border-color: var(--green);
+}
+.poll-opt.right .poll-mark {
+  color: var(--green);
+}
+.poll-opt.wrong {
+  border-color: var(--danger);
+}
+.poll-opt.wrong .poll-mark {
+  color: var(--danger);
+}
+.poll-opt.wrong .poll-bar {
+  background: var(--danger-soft);
+}
+.conv-poll-solution {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+.conv-poll-foot {
+  display: flex;
+  justify-content: center;
+}
+.conv-poll-modal {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+}
+.conv-poll-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+}
+.conv-poll-create .settings-row {
+  min-height: 40px;
+}
+.conv-poll-create textarea {
+  resize: vertical;
+}
+.conv-poll-create .pc-opt input[type='radio'] {
+  flex: none;
+}
+.conv-poll-votes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-3);
+}
+.conv-poll-votes-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.conv-poll-votes-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-weight: 600;
+  font-size: 13px;
+}
+.conv-poll-voter {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  font-size: 14px;
+}
+
+/* Живая карта своего сервера (14.10, `osmmap1`; `components/MapView.tsx`, `GeoMapLive.tsx`). `.gv-map` занимает весь контейнер; MapLibre
+   сам вешает свой `.maplibregl-map`. Подпись «© OpenStreetMap» видна всегда (лицензия ODbL), без нажатий в маленькой карточке. */
+.gv-map {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 80px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.msg-geo-live {
+  pointer-events: none;
+}
+.gv-map .maplibregl-ctrl.maplibregl-ctrl-attrib {
+  background: color-mix(in srgb, var(--bg-2) 80%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 var(--sp-1);
+}
+.gv-map .maplibregl-ctrl-attrib a {
+  color: inherit;
+}
+.gv-map .maplibregl-ctrl-group {
+  background: var(--bg-2);
+  border-radius: var(--r-2);
+  box-shadow: var(--sh-1);
+}
+.gv-map .maplibregl-ctrl-group button + button {
+  border-top: 1px solid var(--border);
+}
+html:not([data-theme='light']) .gv-map .maplibregl-ctrl-icon {
+  filter: invert(1);
+}
+/* Метка точки: капля цвета акцента или аватар в круге; подпись — под ней. */
+.gv-map-pin {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+.gv-map-pin-drop {
+  display: block;
+  fill: var(--accent);
+  stroke: var(--bg-2);
+  stroke-width: 1.5px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+.gv-map-pin-drop circle {
+  fill: var(--bg-2);
+  stroke: none;
+}
+.gv-map-pin-img {
+  display: block;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-circle);
+  border: 2px solid var(--accent);
+  object-fit: cover;
+  background: var(--bg-3);
+  box-shadow: var(--sh-1);
+}
+/* Подпись вне потока: иначе высота метки растёт и остриё капли уезжает от точки. */
+.gv-map-pin-label {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: var(--sp-1);
+  max-width: 140px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--sh-1);
+}
+
+/* Полноэкранная карта места (`GeoMapFull`): шапка со стрелкой «назад», карта, внизу «Открыть в картах». Выше лайтбокса не поднимаем. */
+.geo-full {
+  position: fixed;
+  inset: 0;
+  z-index: 1260;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  padding-top: max(env(safe-area-inset-top), var(--gv-sat, 0px));
+  outline: none;
+}
+.geo-full-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.geo-full-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-weight: 600;
+}
+.geo-full-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.geo-full-map {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.geo-full-fail {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+}
+.geo-full-foot {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-3) var(--sp-3) calc(var(--sp-3) + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+}
+
+/* ── Трансляция геопозиции в ЛС (14.10, `geolive1`, `GeoLiveCard.tsx`): карточка как `.msg-geo`, вокруг значка кольцо оставшегося
+   времени (Telegram `SharingLiveLocationCell`), у автора «Остановить» под разделителем (как «Написать» у контакта). ── */
+.geo-live {
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 300px;
+}
+.geo-live-ico {
+  position: relative;
+  margin: var(--sp-1);
+}
+.geo-live-ring {
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  pointer-events: none;
+}
+.geo-live-track {
+  stroke: var(--bubble-accent-text);
+  opacity: 0.25;
+}
+.geo-live-left {
+  stroke: var(--bubble-accent-text);
+}
+.geo-live.ended .geo-live-ico {
+  opacity: 0.6;
+}
+.msg-contact-act:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.geo-pick-back {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+}
+.geo-pick-hint {
+  padding: 0 var(--sp-3);
+  font-size: 13px;
+  color: var(--muted);
+}
+/* Карта в окне «Геопозиция» (15.10, `geopick2`; `GeoPickDialog`, `GeoPickMap`). Telegram Android `ChatAttachAlertLocationLayout`: карта
+   над строками отправки (видимая высота 189 dp, раскрывается до 310 dp), булавка выбора `markerImageView` по центру кончиком в центр,
+   своё место — точкой, «к моему месту» (`locationButton`) — справа внизу над подписью © OpenStreetMap. */
+.geo-pick-map {
+  position: relative;
+  height: 240px;
+  margin: 0 var(--sp-3);
+  border-radius: var(--r-2);
+  overflow: hidden;
+  background: var(--bg-3);
+}
+.geo-pick-map-pin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -100%);
+  pointer-events: none;
+  z-index: 2;
+}
+.geo-pick-map-status {
+  position: absolute;
+  top: var(--sp-2);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--bg-2) 90%, transparent);
+  box-shadow: var(--sh-1);
+  font-size: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.geo-pick-map-me {
+  position: absolute;
+  right: var(--sp-2);
+  bottom: 28px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: var(--r-circle);
+  background: var(--bg-2);
+  color: var(--muted);
+  box-shadow: var(--sh-1);
+  cursor: pointer;
+}
+.geo-pick-map-me.is-on {
+  color: var(--accent);
+}
+/* Своё место на карте выбора — точка цвета акцента в светлом кольце (капля там — выбранное место). */
+.gv-map-me {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 3px solid var(--bg-2);
+  border-radius: var(--r-circle);
+  background: var(--accent);
+  box-shadow: var(--sh-1);
+}
+/* Плашка «Вы транслируете геопозицию» (`GeoLiveBar`): на телефоне `.stranger-bar-text` прячется — здесь подпись нужна, кнопка справа. */
+.geo-live-bar {
+  justify-content: space-between;
+}
+.geo-live-bar .stranger-bar-text {
+  display: block;
+  color: var(--text);
+  font-weight: 600;
+}
+.geo-live-bar .stranger-bar-actions {
+  flex: 0 0 auto;
+}
+.geo-live .msg-geo-title {
+  white-space: normal;
 }

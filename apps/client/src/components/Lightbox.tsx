@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { downloadInApp, fileJobOf, progressRatio, progressText, subscribeFileJobs, type DownloadNote } from '../fileActions';
-import { canShareFiles, ringDownloads, shareDownload, startDownload, toggleDownload, type DownloadTarget } from '../pcDownloads';
+import { canShareFiles, ringDownloads, savedFilePath, shareDownload, showInFolder, startDownload, toggleDownload, type DownloadTarget } from '../pcDownloads';
 import { ProgressRing } from './FileCard';
 import {
   DOUBLE_TAP_MS,
@@ -494,6 +494,9 @@ export function Lightbox({
     else swipe.current = null;
     if (isTap) onTap(e.clientX, e.clientY, e.timeStamp);
     restartGesture();
+    // Телефон: щипок отпустили мельче «по размеру» — картинка возвращается к нему (Telegram Android `PhotoViewer.java:19190-19193`:
+    // `minScale = 1`, `scale < minScale` -> `animateTo(minScale)`). Кнопок «−» на телефоне нет, мельче ей держаться незачем.
+    if (phone && fingers.current.size === 0 && zoomRef.current < baseZoom.current - 0.001) resetZoom();
   };
   // Кнопки и клавиши сменили масштаб — сдвиг не уводит картинку за край (при «влезает» — снова посередине).
   useEffect(() => {
@@ -808,6 +811,21 @@ export function Lightbox({
         ...(img.downloadUrl
           ? [{ id: 'save' as const, icon: 'download' as const, label: phone ? 'Сохранить' : 'Сохранить как…', run: () => (dlTarget && ringDownloads() ? startDownload(dlTarget) : dlRef.current?.click()) }]
           : []),
+        // «Показать в папке» (G10, tdesktop `OverlayWidget::showInFolder`, `media_view_overlay_widget.cpp`): файл, который это приложение
+        // уже сохранило на диск (десктоп, путь от оболочки); нет такого — пункта нет.
+        ...(img.downloadUrl && dlTarget && savedFilePath(dlTarget.key, dlTarget.url)
+          ? [
+              {
+                id: 'folder' as const,
+                icon: 'folder' as const,
+                label: 'Показать в папке',
+                run: () => {
+                  const p = savedFilePath(dlTarget.key, dlTarget.url);
+                  if (p) showInFolder(p);
+                },
+              },
+            ]
+          : []),
         // «Поделиться» (G10): системное окно браузера с самим файлом — где `navigator.canShare({ files })` (Edge, Chrome на
         // Windows, браузер телефона); нет — пункта нет. Приложение Android — свой натив (меню сообщения).
         ...(img.downloadUrl && dlTarget && canShareFiles()
@@ -838,7 +856,7 @@ export function Lightbox({
 
   // Подпись собирается из того, что известно: назначение картинки, вес файла, место в наборе.
   // Для одиночной картинки «1 из 1» — шум, поэтому счётчик появляется только у набора.
-  const sub = [img.sub, img.size != null ? kb(img.size) : null, images.length > 1 ? `${index + 1} из ${images.length}` : null]
+  const sub = [img.sub, img.size != null && !phone ? kb(img.size) : null, images.length > 1 && !phone ? `${index + 1} из ${images.length}` : null]
     .filter(Boolean)
     .join(' · ');
   // Вложение сообщения (G10): «отправитель» крупно, ниже «дата · вес · N из M»; дата ведёт к сообщению.
@@ -850,8 +868,8 @@ export function Lightbox({
   const bare = bareTap || idle || dim < 1;
   const pannable = !isVideo && canPan();
   const [stripFrom, stripTo] = stripWindow(images.length, index);
-  // Смахивание вниз: фон светлеет за пальцем (тот же цвет, что у `.lightbox`, прозрачнее).
-  const rootStyle: CSSProperties | undefined = dim < 1 ? { backgroundColor: `rgba(10, 9, 13, ${(0.93 * dim).toFixed(3)})` } : undefined;
+  // Смахивание вниз: чёрный фон светлеет за пальцем, но не прозрачнее половины (Android `PhotoViewer`: `setAlpha(max(127, 255 * (1 - |aty| / maxValue)))`).
+  const rootStyle: CSSProperties | undefined = dim < 1 ? { backgroundColor: `rgba(0, 0, 0, ${Math.max(0.5, dim).toFixed(3)})` } : undefined;
 
   return createPortal(
     <div
@@ -885,6 +903,13 @@ export function Lightbox({
           if (menu) setMenu(null);
         }}
       >
+        {/* Телефон (#218): «назад» стрелкой слева, как шапка Telegram Android `PhotoViewer` (`actionBar.setBackButtonImage(ic_ab_back)`
+            `PhotoViewer.java:4896`); крестика справа там нет. */}
+        {phone && (
+          <button type="button" className="lb-btn lb-back" title="Назад" onClick={onClose}>
+            <Icon name="chevron-left" size={24} />
+          </button>
+        )}
         <div className="lb-meta">
           {img.from ? (
             <button
@@ -991,10 +1016,19 @@ export function Lightbox({
             <Icon name="more" size={18} />
           </button>
         )}
-        <button type="button" className="lb-btn" title="Закрыть" onClick={onClose}>
-          <Icon name="close" size={18} />
-        </button>
+        {!phone && (
+          <button type="button" className="lb-btn" title="Закрыть" onClick={onClose}>
+            <Icon name="close" size={18} />
+          </button>
+        )}
       </div>
+      {/* «N из M» на телефоне — пилюлей под шапкой посередине (`PhotoCountView` `PhotoViewer.java:695-858`: отступ 10dp от шапки,
+          высота 23dp, радиус 12dp, фон 0x7f000000, текст 14dp жирный); имя и дата — в шапке (`setTitle`/`setSubtitle` `:14524-14530`). */}
+      {phone && images.length > 1 && (
+        <div className="lb-count" aria-live="polite" onClick={(e) => e.stopPropagation()}>
+          {index + 1} из {images.length}
+        </div>
+      )}
 
       {/* Пальцы — щипок, сдвиг увеличенного, листание, смахивание и тапы; мышь — перетаскивание увеличенного.
           `touch-action: none` у сцены — жест не забирает браузер. Щелчок по фону закрывает (обработчик корня). */}
@@ -1113,7 +1147,9 @@ export function Lightbox({
           if (menu) setMenu(null);
         }}
       >
-        {images.length > 1 && (
+        {/* Телефон — без полосы миниатюр и без «− 100% +» (#218): у Telegram Android `PhotoViewer` их нет — масштаб щипком
+            и двойным тапом, номер «N из M» — в шапке; полоса `GroupedPhotosListView` там только у альбома. ПК — как было. */}
+        {images.length > 1 && !phone && (
           <div className="lb-strip">
             {/* Только соседи текущей (`stripWindow`): медиатека беседы бывает в сотни файлов. */}
             {images.slice(stripFrom, stripTo).map((im, k) => {
@@ -1142,7 +1178,7 @@ export function Lightbox({
           </div>
         )}
         {/* Масштаб — только у фото: у видео свой плеер. */}
-        {!isVideo && (
+        {!isVideo && !phone && (
           <div className="lb-zoom">
             <button
               type="button"

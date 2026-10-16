@@ -15,6 +15,39 @@ function mutant(from: string, to: string): typeof rules {
 const folder: rules.DmFolder = { id:'f',title:'Папка',emoticon:null,flags:rules.DM_FOLDER_PERSONAL,include:[],exclude:[] };
 const chat: rules.DmFolderChat = { id:'c',muted:false,unread:true };
 
+function systemTitle(api: typeof rules) {
+  assert.equal(api.DM_FOLDER_SYSTEM_TITLE, 'Все чаты', 'системная подпись Все чаты');
+  for (const title of ['Личные', 'Личные сообщения', '', 'Сохранённое имя']) {
+    const system: rules.DmFolder = { ...folder, system: 'dms', title };
+    assert.equal(api.dmFolderTitle(system), 'Все чаты', 'system dms сильнее устаревшего title');
+    assert.equal(system.system, 'dms', 'протокольный дискриминатор сохраняется');
+    assert.equal(system.title, title, 'выбор подписи не мигрирует сохранённые данные');
+    assert.equal(api.dmFolderContains(system, { ...chat, group: true }), true, 'Все чаты включает группы');
+  }
+}
+it('R181 системная папка Все чаты сохраняет system dms и не берёт устаревшее имя из протокола', () => {
+  // Класс ошибки: переименование подписи меняет протокол или уступает старому title.
+  systemTitle(rules);
+});
+it('R181 несистемная папка сохраняет собственное имя даже совпадающее со старой системной подписью', () => {
+  // Класс ошибки: глобальная замена названия перезаписывает пользовательские папки.
+  for (const title of ['Личные', 'Личные сообщения', 'Все чаты', 'Друзья 🪿', '']) {
+    const custom = { ...folder, title };
+    assert.equal(rules.dmFolderTitle(custom), title);
+    assert.equal(custom.system, undefined);
+    assert.equal(rules.dmFolderContains(custom, { ...chat, group: true }), false);
+  }
+});
+it('R181 возврат прежней системной подписи обнаруживается на целом модуле правил', () => {
+  // Класс ошибки: регрессия системного названия при неизменном system dms.
+  systemTitle(rules);
+  const source = readFileSync(new URL('./dmFolders.ts', import.meta.url), 'utf8');
+  const anchor = "export const DM_FOLDER_SYSTEM_TITLE = 'Все чаты';";
+  assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь системной подписи');
+  assert.throws(() => systemTitle(mutant(anchor, "export const DM_FOLDER_SYSTEM_TITLE = 'Личные';")),
+    e => e instanceof assert.AssertionError && e.message.includes('системная подпись Все чаты'));
+});
+
 it('R129 собственные закрепы отличаются от общего режима: null у системы и старой папки, пустой набор у новой', () => {
   // Иначе отсутствие собственных закрепов случайно включает общий набор либо переносит его в системную папку.
   for (const input of [{}, { pinned: ['a'] }, { system: 'dms' as const, pinnedOwn: true as const, pinned: ['a'] }]) {

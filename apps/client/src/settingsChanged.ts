@@ -62,6 +62,8 @@ export interface SettingsSnapshot {
   /** Быстрая реакция двойного клика (`quickReaction.ts`, G45). Необязательное: старые снимки его не знают. */
   quickReaction?: string;
   osNotify: OsNotifyLevel;
+  /** Свои всплывающие окна ПК (G38, ND-07, `notifyPopupPrefs.ts`): [системные, угол, число, монитор]. Необязательное: старые снимки его не знают. */
+  notifyPopup?: [boolean, string, number, string];
   coinNotify: CoinNotifyLevel;
   closeBehavior: CloseBehavior;
   /** null = папка не выбрана, спросим при первом скачивании. */
@@ -113,6 +115,8 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
   ],
   'set-g-stream-cursor': [(s) => s.stream.cursor !== false],
   'set-g-osn': [(s) => s.osNotify],
+  // Один пункт на всю группу: системные/угол/число/монитор — одно решение «как показывать». Нет поля — умолчание.
+  'set-g-notify-popup': [(s) => s.notifyPopup ?? [false, 'br', 3, '']],
   'set-g-coin': [(s) => s.coinNotify],
   'set-g-poke-toast': [
     (s) => s.toast.enabled,

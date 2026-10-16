@@ -4,12 +4,28 @@ import { api } from '../api';
 import { confirmAction } from '../confirm';
 import { useDialogChrome } from '../dialogChrome';
 import { dmComposeCandidates, dmSearchHits, serverSearchesUsers, USER_SEARCH_DELAY_MS, userSearchQuery } from '../dmRules';
-import { GROUP_LIMIT_HINT, GROUP_MEMBER_LIMIT, groupMembersLabel, groupPickState } from '../groupChatRules';
+import {
+  GROUP_LIMIT_HINT,
+  GROUP_MEMBER_LIMIT,
+  fedGroupDownText,
+  fedGroupPendingText,
+  fedGroupPhotoHint,
+  groupHomeLabel,
+  groupHostHome,
+  groupMembersLabel,
+  groupNotInvitableText,
+  groupOpPending,
+  groupPickable,
+  groupPickState,
+  serverFedGroups,
+} from '../groupChatRules';
+import { useVisibleOnline } from '../dmOnline';
 import { usePhoneLayout } from '../phoneLayout';
 import { contactMatches, serverContacts, sortContacts } from '../contactRules';
 import { useContactList } from '../contacts';
 import { usePeerName } from '../peerName';
 import { useStore } from '../store';
+import { useContactSeen } from '../useContactSeen';
 import { toast, toastError } from '../toast';
 import { Avatar } from './Avatar';
 import { BottomSheet } from './BottomSheet';
@@ -63,12 +79,41 @@ export async function leaveGroup(convId: string, title: string): Promise<void> {
     confirmLabel: 'Покинуть',
   });
   if (!ok) return;
+  const host = groupHostLabel(convId);
   try {
-    await api.convLeaveGroup(convId);
+    const r = await api.convLeaveGroup(convId);
     closeGroupDialog();
+    // Э7 (`fedm6`): группа чужого дома — выход уходит хосту, из списка она пропадёт событием `conv.change`.
+    if (groupOpPending(r)) toast('info', fedGroupPendingText(host));
   } catch (e) {
-    toastError(e as Error);
+    groupError(e, host);
   }
+}
+
+/**
+ * Э7 (#141, `fedm6`): группа чужого дома (`ConvSummary.fedGroupHost`) → название её инстанса (у участника оттуда, иначе у собеседника
+ * 1:1), `null` — группа своя или имени не знаем.
+ */
+function groupHostLabel(convId: string): string | null {
+  const s = useStore.getState();
+  const host = s.conv.summaries[convId]?.fedGroupHost;
+  if (!host) return null;
+  const dm = s.dms.find((d) => d.id === convId);
+  return groupHomeLabel(groupHostHome(host.instanceId, dm?.group?.members ?? [], s.dms));
+}
+
+/**
+ * Отказ ручки группы словами: `group_not_invitable { userIds }` — «Нельзя позвать: инстанс «X» не поддерживает группы» (имена — у выбранных),
+ * коды федерации (`dm_group_host_down` / `dm_group_host_only`) — через `toastError` → `fedErrorText` с именем дома группы (`fedWho`).
+ */
+function groupError(e: unknown, host: string | null, picked: readonly Person[] = []): void {
+  const err = e as (Error & { userIds?: string[]; fedWho?: string | null }) | null;
+  if (err?.message === 'group_not_invitable') {
+    toast('error', groupNotInvitableText(err.userIds, picked));
+    return;
+  }
+  if (err && typeof err === 'object' && host && err.fedWho === undefined) err.fedWho = host;
+  toastError(err);
 }
 
 /** Хост окон групп — у корня ЛС (`DmSidebar`). */
@@ -78,12 +123,12 @@ export function GroupDialogHost() {
   return d.kind === 'new' ? <NewGroupDialog /> : <GroupInfoDialog convId={d.convId} />;
 }
 
-function Shell({ title, children }: { title: string; children: ReactNode }) {
+function Shell({ title, onBack, children }: { title: string; onBack?: () => void; children: ReactNode }) {
   const phone = usePhoneLayout();
   const ref = useDialogChrome<HTMLDivElement>(closeGroupDialog);
   if (phone)
     return (
-      <BottomSheet title={title} onClose={closeGroupDialog}>
+      <BottomSheet title={title} onClose={closeGroupDialog} onBack={onBack}>
         {children}
       </BottomSheet>
     );
@@ -105,7 +150,30 @@ function Shell({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-type Person = Pick<UserSearchHit, 'id' | 'username' | 'displayName' | 'avatarUrl'>;
+type Person = Pick<UserSearchHit, 'id' | 'username' | 'displayName' | 'avatarUrl'> & {
+  /** Э7 (`fedm6`): человек соседнего инстанса (собеседник 1:1) — значок инстанса и имя в отказе `group_not_invitable`. */
+  homeInstance?: ConvGroupMember['homeInstance'];
+};
+
+/** «С инстанса «X»» / «С другого инстанса» (имени и домена нет — человек третьего инстанса). */
+function homeFromText(home: NonNullable<Person['homeInstance']>, from = 'С'): string {
+  const label = groupHomeLabel(home);
+  return label ? `${from} инстанса «${label}»` : `${from} другого инстанса`;
+}
+
+/**
+ * Значок инстанса у человека соседа — как `GuestMark` (импорт сюда нельзя: перечень зависимостей окна закрыт). Человек третьего инстанса
+ * (связки с ним нет, знаем со слов дома группы) приходит без названия и домена — значок всё равно есть, подпись «с другого инстанса».
+ */
+function HomeMark({ home }: { home: Person['homeInstance'] }) {
+  if (!home) return null;
+  const from = homeFromText(home);
+  return (
+    <span className="guest-mark" title={from} aria-label={from}>
+      <Icon name="globe" size={12} />
+    </span>
+  );
+}
 
 /** Подсказка предела (Р-5) с кнопкой «Создать сервер» — у кого есть право создавать серверы. */
 function LimitHint() {
@@ -163,9 +231,12 @@ export function PeoplePicker({
   const round = useRef(0);
   // Подпись контакта вместо имени (решение владельца 08.10 п.27, `peerName.ts`): в строках, чипах и поиске.
   const nameOf = usePeerName();
+  // Э7 (#141, `fedm6`): в группу можно звать людей соседей (собеседников 1:1 — их теневые строки); без признака и в списках со своим
+  // потолком (`maxPick`, исключения «Времени захода») — только свои, как раньше.
+  const fedGroups = useStore((s) => serverFedGroups(s.serverFeatures)) && maxPick === undefined;
   const candidates = useMemo(
-    () => dmComposeCandidates({ members, dms, meId: me?.id, query, nameOf }).filter((u) => !u.homeInstance),
-    [members, dms, me?.id, query, nameOf],
+    () => dmComposeCandidates({ members, dms, meId: me?.id, query, nameOf }).filter((u) => groupPickable(u, fedGroups)),
+    [members, dms, me?.id, query, nameOf, fedGroups],
   );
   const searchQuery = searchOn ? userSearchQuery(query) : null;
   useEffect(() => {
@@ -202,7 +273,10 @@ export function PeoplePicker({
       if (maxPick !== undefined) toast('info', `Можно выбрать не больше ${maxPick}`);
       return;
     }
-    setPicked([...picked, { id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl }]);
+    setPicked([
+      ...picked,
+      { id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl, ...(u.homeInstance ? { homeInstance: u.homeInstance } : {}) },
+    ]);
   };
   // Контакты (`contacts1`): блок «Контакты» сверху, как в «Написать» (C5); остальные — под «Остальные».
   const contactsOn = useStore((s) => serverContacts(s.serverFeatures)) && !me?.homeInstance;
@@ -213,6 +287,12 @@ export function PeoplePicker({
   );
   const contactIds = new Set(contactRows.map((c) => c.id));
   const rows = [...candidates, ...found].filter((u) => !taken.includes(u.id) && !contactIds.has(u.id));
+  // Телефон (#218, `ContactsActivity`): под именем «в сети» / «был(а) …», а не @ник, как в «Написать»; клавиатура сама не открывается.
+  const phone = usePhoneLayout();
+  const idKey = [...contactRows.map((c) => c.id), ...rows.map((u) => u.id)].join(',');
+  const rowIds = useMemo(() => (idKey ? idKey.split(',') : []), [idKey]);
+  const onlineSet = useVisibleOnline(rowIds);
+  const seenText = useContactSeen(rowIds, onlineSet, phone);
   const renderRow = (u: Person & { displayName: string }) => {
     const on = pickedIds.has(u.id);
     return (
@@ -228,7 +308,12 @@ export function PeoplePicker({
         </span>
         <span className="sr-label">
           {nameOf(u.id, u.displayName)}
-          <span className="dm-sub"> @{u.username}</span>
+          <HomeMark home={u.homeInstance} />
+          {seenText.get(u.id) ? (
+            <span className={`dm-sub seen${onlineSet.has(u.id) ? ' on' : ''}`}>{seenText.get(u.id)}</span>
+          ) : (
+            <span className="dm-sub"> @{u.username}</span>
+          )}
         </span>
         <span className="group-check" aria-hidden="true">
           {on && <Icon name="check" size={14} />}
@@ -250,12 +335,13 @@ export function PeoplePicker({
             <button type="button" key={p.id} className="group-chip" title="Убрать" onClick={() => toggle(p)}>
               <Avatar url={p.avatarUrl} name={nameOf(p.id, p.displayName)} size={22} />
               <span>{nameOf(p.id, p.displayName)}</span>
+              <HomeMark home={p.homeInstance} />
               <Icon name="close" size={12} />
             </button>
           ))}
         </div>
       )}
-      <input className="sheet-search" autoFocus value={query} placeholder="Кого добавить?" onChange={(e) => setQuery(e.target.value)} />
+      <input className="sheet-search" autoFocus={!phone} value={query} placeholder="Кого добавить?" onChange={(e) => setQuery(e.target.value)} />
       {overflow && maxPick === undefined && <LimitHint />}
       <div className="dm-compose-list">
         {rows.length === 0 && contactRows.length === 0 && (
@@ -271,10 +357,17 @@ export function PeoplePicker({
 }
 
 /** Фото группы: круг с камерой, нажатие — выбор картинки. */
-function PhotoPick({ url, name, onFile }: { url: string | null; name: string; onFile: (f: File) => void }) {
+function PhotoPick({ url, name, onFile, locked }: { url: string | null; name: string; onFile: (f: File) => void; locked?: string }) {
   const input = useRef<HTMLInputElement>(null);
+  // Э7 (`fedm6`): фото группы чужого дома меняется только там — нажатие объясняет это тостом (на телефоне подсказки `title` не видно).
   return (
-    <button type="button" className="group-photo" title="Фото группы" onClick={() => input.current?.click()}>
+    <button
+      type="button"
+      className="group-photo"
+      title={locked ?? 'Фото группы'}
+      aria-disabled={locked ? true : undefined}
+      onClick={() => (locked ? toast('info', locked) : input.current?.click())}
+    >
       {url ? <Avatar url={url} name={name || 'Группа'} size={64} /> : <Icon name="photo" size={26} />}
       <input
         ref={input}
@@ -298,6 +391,7 @@ function NewGroupDialog() {
   const [photo, setPhoto] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const me = useStore((s) => s.user);
+  const phone = usePhoneLayout();
   const photoUrl = useMemo(() => (photo ? URL.createObjectURL(photo) : null), [photo]);
   useEffect(() => () => void (photoUrl && URL.revokeObjectURL(photoUrl)), [photoUrl]);
 
@@ -312,24 +406,43 @@ function NewGroupDialog() {
       closeGroupDialog();
       await s.selectDm(summary.id);
     } catch (e) {
-      toastError(e as Error);
+      groupError(e, null, picked);
       setBusy(false);
     }
   };
 
   return (
-    <Shell title="Новая группа">
+    <Shell title="Новая группа" onBack={phone && step === 'name' ? () => setStep('people') : undefined}>
       {step === 'people' ? (
         <>
           <PeoplePicker taken={me ? [me.id] : []} picked={picked} setPicked={setPicked} />
-          <div className="modal-actions">
-            <button type="button" className="link" onClick={closeGroupDialog}>
-              Отмена
-            </button>
-            <button type="button" disabled={picked.length === 0} onClick={() => setStep('name')}>
-              Далее
-            </button>
-          </div>
+          {phone ? (
+            /* Телефон (#218): круглая «→» внизу справа, видна всегда, а не «Отмена / Далее» в конце листа —
+               Telegram `GroupCreateActivity` + `FragmentFloatingButton` (48 dp, поля 20 справа и 14 снизу). */
+            <div className="group-fab-dock">
+              <button
+                type="button"
+                className="group-fab"
+                aria-label="Далее"
+                title="Далее"
+                disabled={picked.length === 0}
+                onClick={() => setStep('name')}
+              >
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M5 12 H19 M13 6 L19 12 L13 18" />
+                </svg>
+              </button>
+            </div>
+          ) : (
+            <div className="modal-actions">
+              <button type="button" className="link" onClick={closeGroupDialog}>
+                Отмена
+              </button>
+              <button type="button" disabled={picked.length === 0} onClick={() => setStep('name')}>
+                Далее
+              </button>
+            </div>
+          )}
         </>
       ) : (
         <form
@@ -344,14 +457,30 @@ function NewGroupDialog() {
             <input className="sheet-search" autoFocus value={title} maxLength={128} placeholder="Название группы" onChange={(e) => setTitle(e.target.value)} />
           </div>
           <div className="muted group-name-sub">{groupMembersLabel(picked.length + 1)}</div>
-          <div className="modal-actions">
-            <button type="button" className="link" onClick={() => setStep('people')}>
-              Назад
-            </button>
-            <button type="submit" disabled={busy || !title.trim()}>
-              {busy ? '…' : 'Создать'}
-            </button>
-          </div>
+          {phone ? (
+            /* Телефон (#218): круглая «✓» вместо «Назад / Создать» — Telegram `GroupCreateFinalActivity` (`doneItem` / плавающая кнопка
+               `FragmentFloatingButton`, как «→» первого шага); «Назад» — стрелка в шапке листа. */
+            <div className="group-fab-dock">
+              <button type="submit" className="group-fab" aria-label="Создать" title="Создать" disabled={busy || !title.trim()}>
+                {busy ? (
+                  '…'
+                ) : (
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M5 12.5 L10 17.5 L19 7.5" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          ) : (
+            <div className="modal-actions">
+              <button type="button" className="link" onClick={() => setStep('people')}>
+                Назад
+              </button>
+              <button type="submit" disabled={busy || !title.trim()}>
+                {busy ? '…' : 'Создать'}
+              </button>
+            </div>
+          )}
         </form>
       )}
     </Shell>
@@ -368,18 +497,27 @@ function GroupInfoDialog({ convId }: { convId: string }) {
   const [busy, setBusy] = useState(false);
   const group = dm?.group;
   const former = useStore((s) => !!s.conv.summaries[convId]?.former);
+  // Э7 (#141, `fedm6`): группа чужого дома — состав/название уходят туда (`pending`), фото там же; лежит — менять нельзя.
+  const fedHost = useStore((s) => s.conv.summaries[convId]?.fedGroupHost ?? null);
+  const dms = useStore((s) => s.dms);
+  const hostLabel = fedHost ? groupHomeLabel(groupHostHome(fedHost.instanceId, dm?.group?.members ?? [], dms)) : null;
+  const hostDown = !!fedHost?.down;
+  const downHint = hostDown ? fedGroupDownText(hostLabel) : undefined;
+  const [sentTitle, setSentTitle] = useState<string | null>(null);
   useEffect(() => {
     if (!group) closeGroupDialog();
   }, [group]);
   if (!group || !dm) return null;
   const owner = group.ownerId === me?.id;
-  const run = async (f: () => Promise<unknown>) => {
+  const run = async (f: () => Promise<unknown>, after?: () => void) => {
     if (busy) return;
     setBusy(true);
     try {
-      await f();
+      const r = await f();
+      after?.();
+      if (groupOpPending(r)) toast('info', fedGroupPendingText(hostLabel));
     } catch (e) {
-      toastError(e as Error);
+      groupError(e, hostLabel, picked);
     } finally {
       setBusy(false);
     }
@@ -408,14 +546,17 @@ function GroupInfoDialog({ convId }: { convId: string }) {
             type="button"
             disabled={busy || picked.length === 0}
             onClick={() =>
-              void run(async () => {
-                await api.convAddMembers(
-                  convId,
-                  picked.map((p) => p.id),
-                );
-                setPicked([]);
-                setAdding(false);
-              })
+              void run(
+                () =>
+                  api.convAddMembers(
+                    convId,
+                    picked.map((p) => p.id),
+                  ),
+                () => {
+                  setPicked([]);
+                  setAdding(false);
+                },
+              )
             }
           >
             Добавить
@@ -431,17 +572,35 @@ function GroupInfoDialog({ convId }: { convId: string }) {
         onSubmit={(e) => {
           e.preventDefault();
           const t = title.trim();
-          if (t && t !== group.title) void run(() => api.convRenameGroup(convId, t));
+          if (t && t !== group.title && !hostDown) void run(() => api.convRenameGroup(convId, t), () => fedHost && setSentTitle(t));
         }}
       >
-        <PhotoPick url={group.avatarUrl} name={group.title} onFile={(f) => void run(() => api.convGroupPhoto(convId, f))} />
-        <input className="sheet-search" value={title} maxLength={128} aria-label="Название группы" onChange={(e) => setTitle(e.target.value)} />
-        {title.trim() && title.trim() !== group.title && (
-          <button type="submit" disabled={busy}>
+        <PhotoPick
+          url={group.avatarUrl}
+          name={group.title}
+          locked={fedHost ? fedGroupPhotoHint(hostLabel) : undefined}
+          onFile={(f) => void run(() => api.convGroupPhoto(convId, f))}
+        />
+        <input
+          className="sheet-search"
+          value={title}
+          maxLength={128}
+          aria-label="Название группы"
+          disabled={hostDown}
+          title={downHint}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+        {title.trim() && title.trim() !== group.title && title.trim() !== sentTitle && (
+          <button type="submit" disabled={busy || hostDown} title={downHint}>
             Сохранить
           </button>
         )}
       </form>
+      {downHint && (
+        <div className="group-limit" role="status">
+          {downHint}
+        </div>
+      )}
       <SharedMediaRows convId={convId} former={!!former} onOpen={closeGroupDialog} />
       <div className="group-pick-head">
         <span className="muted">{groupMembersLabel(group.members.length)}</span>
@@ -450,7 +609,13 @@ function GroupInfoDialog({ convId }: { convId: string }) {
         </span>
       </div>
       <div className="dm-compose-list">
-        <button type="button" className="sheet-row group-add" onClick={() => setAdding(true)} disabled={group.members.length >= group.limit}>
+        <button
+          type="button"
+          className="sheet-row group-add"
+          onClick={() => setAdding(true)}
+          disabled={group.members.length >= group.limit || hostDown}
+          title={downHint}
+        >
           <span className="dm-ava group-add-ico">
             <Icon name="user-plus" size={20} />
           </span>
@@ -464,18 +629,24 @@ function GroupInfoDialog({ convId }: { convId: string }) {
             </span>
             <span className="sr-label">
               {nameOf(m.id, m.displayName)}
-              <span className="dm-sub"> @{m.username}</span>
+              <HomeMark home={m.homeInstance} />
+              <span className="dm-sub">
+                {' '}
+                @{m.username}
+                {/* Э7 (`fedm6`): человек соседа — откуда он (как `GuestLine` карточки), логин — на его доме. */}
+                {m.homeInstance && ` · ${homeFromText(m.homeInstance, 'с')}`}
+              </span>
             </span>
             {m.role === 'owner' ? (
               <span className="group-role muted">создатель</span>
             ) : owner && m.id !== me?.id ? (
-              <button type="button" className="link danger" disabled={busy} onClick={() => remove(m)}>
+              <button type="button" className="link danger" disabled={busy || hostDown} title={downHint} onClick={() => remove(m)}>
                 Удалить
               </button>
             ) : null}
           </div>
         ))}
-        <button type="button" className="sheet-row group-leave danger" onClick={leave} disabled={busy}>
+        <button type="button" className="sheet-row group-leave danger" onClick={leave} disabled={busy || hostDown} title={downHint}>
           <span className="dm-ava group-add-ico">
             <Icon name="logout" size={20} />
           </span>

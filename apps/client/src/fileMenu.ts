@@ -23,7 +23,7 @@ export function fileFromTarget(
   target: Element | null,
   fallback = false,
 ): Attachment | undefined {
-  const list = (attachments ?? []).filter((a) => a.url && !a.contentType.startsWith('image/'));
+  const list = (attachments ?? []).filter((a) => a.url && a.fedState !== 'copying' && !a.contentType.startsWith('image/'));
   const el = target?.closest('[data-att]');
   if (el) {
     const key = el.getAttribute('data-att');

@@ -216,7 +216,7 @@ async function mouseHoldIsOrdinary(component: ReactionBar, buttonCode: number) {
     await frameAt(2000);
     assert.deepEqual(big, [], `мышь button=${buttonCode} не запускает большую реакцию после 2 с`);
     assert.equal(button.classList.contains('held'), false, 'мышь не получает визуальное состояние held');
-    assert.equal(host!.querySelector('.react-bar.holding'), null, 'мышь не получает визуальное состояние holding');
+    assert.equal(host!.querySelector('.react-bar.holding') === null, true, 'мышь не получает визуальное состояние holding');
     await eventInAct(() => pointer(button, 'pointerup', 'mouse', 20, 20, buttonCode));
     await eventInAct(() => click(button));
     assert.deepEqual(big, [], 'отпускание мыши также не отправляет onBig');
@@ -255,7 +255,7 @@ it('контекстное меню после касания подавлено
       pointer(button, 'pointerdown', 'touch');
       button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     });
-    assert.equal(host!.querySelector('.react-bar-setq'), null, 'палец не открывает меню «Выбрать по умолчанию»');
+    assert.equal(host!.querySelector('.react-bar-setq') === null, true, 'палец не открывает меню «Выбрать по умолчанию»');
     await eventInAct(() => {
       pointer(button, 'pointerdown', 'mouse', 20, 20, 2);
       button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
@@ -310,7 +310,7 @@ it('BigReactionLayer требует видимый messageId, уважает red
   await mount(Layer);
   try {
     await emitBig('missing');
-    assert.equal(host!.querySelector('.big-react'), null, 'отсутствующий data-mid не создаёт пустой эффект');
+    assert.equal(host!.querySelector('.big-react') === null, true, 'отсутствующий data-mid не создаёт пустой эффект');
     addMessage('present');
     await emitBig('present');
     assert.ok(host!.querySelector('.big-react'), 'эффект появляется только у существующего сообщения');
@@ -321,7 +321,7 @@ it('BigReactionLayer требует видимый messageId, уважает red
     await advanceTimeouts(2049);
     assert.ok(host!.querySelector('.big-react'), 'до cleanup-границы эффект остаётся');
     await advanceTimeouts(2050);
-    assert.equal(host!.querySelector('.big-react'), null, 'после 2 с анимации и 50 мс страховки эффект удалён');
+    assert.equal(host!.querySelector('.big-react') === null, true, 'после 2 с анимации и 50 мс страховки эффект удалён');
   } finally {
     await unmount(); feed.remove();
     currentGlobals.__gvCurrentDm = null; currentGlobals.__gvReducedMotion = false;

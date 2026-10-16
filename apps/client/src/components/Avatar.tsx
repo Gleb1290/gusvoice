@@ -6,7 +6,7 @@ import { useWindowMotion } from '../windowCovered';
 /**
  * Renders an avatar image when available, otherwise a fallback:
  *  - `fallback="letter"` (default): a coloured initial circle.
- *  - `fallback="icon"`: a grey person silhouette (matches the voice stage placeholder).
+ *  - `fallback="icon"`: тоже буква (B5, 10.10); серый силуэт — только у безымянного.
  *
  * 🔴 **Анимация (#117) показывается ВСЕГДА и всем, кому её передали (решение 01.09).**
  * Первая версия крутила её только по наведению — из осторожности к слабым машинам. Решение
@@ -69,7 +69,10 @@ export function Avatar({
       />
     );
   }
-  if (fallback === 'icon') {
+  // B5 (10.10, как Telegram — везде инициал на цвете): силуэт остаётся только у безымянного (буквы взять неоткуда);
+  // `fallback="icon"` у вызывающих больше не означает силуэт — прежние серые заглушки профиля/«Новой группы» стали буквой.
+  const initial = Array.from(name.trim())[0];
+  if (!initial) {
     return (
       <span className="avatar-icon" style={style} role="img" aria-label={name}>
         <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
@@ -81,7 +84,7 @@ export function Avatar({
   }
   return (
     <span className="avatar-letter" style={{ ...style, fontSize: Math.round(size * 0.42) }}>
-      {name[0]?.toUpperCase()}
+      {initial.toUpperCase()}
     </span>
   );
 }

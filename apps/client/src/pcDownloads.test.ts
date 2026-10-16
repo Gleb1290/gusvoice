@@ -4,12 +4,14 @@ import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import type * as pcDownloads from './pcDownloads';
+import * as toastRuntime from './toast';
 
 interface Harness {
   api: typeof pcDownloads;
   fetches: number;
   saved: string[];
   toasts: string[];
+  errorToasts: Array<{ title: string; subtitle?: string }>;
   records: Array<{ key: string; state?: string; href?: string }>;
   jobs: Map<string, { aborted: boolean }>;
   resolveFetch: ((blob: { size: number; type: string }) => void) | null;
@@ -17,12 +19,16 @@ interface Harness {
   setDone: (key: string, href: string) => void;
   sharedFiles: string[];
   setShareError: (name: string | null) => void;
+  legacyCalls: Array<{ url: string; name: string; mime: string; then: string }>;
 }
 
-function harness(source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8')): Harness {
+function harness(
+  source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8'),
+  options: { filesViaNative?: boolean; bridgeResult?: string; legacyBridge?: boolean } = {},
+): Harness {
   const state: Harness = {
-    api: {} as typeof pcDownloads, fetches: 0, saved: [], toasts: [], records: [], jobs: new Map(),
-    resolveFetch: null, rejectFetch: null, setDone: () => undefined, sharedFiles: [], setShareError: () => undefined,
+    api: {} as typeof pcDownloads, fetches: 0, saved: [], toasts: [], errorToasts: [], records: [], jobs: new Map(),
+    resolveFetch: null, rejectFetch: null, setDone: () => undefined, sharedFiles: [], setShareError: () => undefined, legacyCalls: [],
   };
   const done = new Map<string, string>();
   let shareError: string | null = null;
@@ -32,7 +38,7 @@ function harness(source = readFileSync(new URL('./pcDownloads.ts', import.meta.u
   const fileActions = {
     attachmentKey: (a: { id?: string; url?: string }) => a.id || a.url || 'att',
     attachmentMime: (a: { contentType?: string }) => a.contentType || 'application/octet-stream',
-    filesViaNative: () => false,
+    filesViaNative: () => options.filesViaNative ?? false,
     progressRatio: (loaded: number, total: number) => total ? loaded / total : 0,
     trackFileJob: (key: string) => {
       if (state.jobs.has(key)) return null;
@@ -71,16 +77,37 @@ function harness(source = readFileSync(new URL('./pcDownloads.ts', import.meta.u
       if (id === './api') return { api: { attachmentDownloadUrl: (a: { url?: string }) => a.url } };
       if (id === './fileActions') return fileActions;
       if (id === './downloadList') return downloadList;
-      if (id === './toast') return { toast: (_kind: string, text: string) => state.toasts.push(text) };
+      if (id === './toast') return { toast: (_kind: string, text: string) => state.toasts.push(text), toastError: (e: unknown, title?: string) => {
+        const prior = toastRuntime.useToasts.getState();
+        try { toastRuntime.toastError(e, title); const last = toastRuntime.useToasts.getState().toasts.at(-1)!; state.toasts.push(last.title); state.errorToasts.push({ title: last.title, subtitle: last.subtitle }); }
+        finally { toastRuntime.useToasts.setState(prior, true); }
+      } };
       throw new Error(`неожиданный импорт ${id}`);
     }, navigator, File: MockFile, ReadableStream: function ReadableStream() {}, URL: { createObjectURL: () => 'blob:new' },
-      window: { setTimeout: (fn: () => void) => fn() }, document, Error });
+      window: {
+        setTimeout: (fn: () => void) => fn(),
+        GusVoiceNative: options.legacyBridge ? {
+          downloadFile: (json: string) => { state.legacyCalls.push(JSON.parse(json)); return options.bridgeResult ?? 'ok'; },
+        } : undefined,
+      }, document, Error });
   state.api = module.exports as typeof pcDownloads;
   return state;
 }
 
 const target = { key: 'file-1', url: '/download', name: 'file.bin', size: 12, type: 'application/octet-stream' };
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+for (const who of ['Гусь', null]) it(`R195 ПК скачивание недоступного дома ${who ? 'с именем' : 'без имени'} сообщает восстановление связи`, async () => {
+  // Класс ошибки: общий загрузчик ПК теряет маркированный федеративный отказ.
+  const h = harness(); h.api.startDownload(target);
+  assert.equal(!!h.rejectFetch, true);
+  h.rejectFetch!(Object.assign(new Error('federation.att_unavailable'), { fedFile: true, fedWho: who }));
+  await tick();
+  assert.equal(h.records.at(-1)?.state, 'failed');
+  assert.equal(h.errorToasts.length, 1); assert.equal(h.errorToasts[0].title, target.name);
+  assert.equal(h.errorToasts[0].subtitle, who ? 'Файл появится, когда «Гусь» снова будет на связи' : 'Файл появится, когда инстанс собеседника снова будет на связи');
+  assert.equal(h.saved.length, 0); assert.equal(h.jobs.size, 0);
+});
 
 it('повторный щелчок отменяет текущую загрузку без ошибки или тоста', async () => {
   const h = harness();
@@ -121,4 +148,35 @@ it('после NotAllowedError «Поделиться» оставляет фа�
   await h.api.shareDownload(target, n => notes.push(n));
   assert.equal(h.fetches, 1); assert.deepEqual(h.sharedFiles, ['file.bin', 'file.bin']);
   assert.equal(JSON.stringify(notes.at(-1)), JSON.stringify({ text: '', final: true }));
+});
+
+it('старый WebView сохраняет через мост, не скачивая blob; отказ показывает ошибку', () => {
+  const check = (h: Harness) => {
+    h.api.startDownload(target);
+    assert.deepEqual(h.legacyCalls, [{ url: target.url, name: target.name, mime: target.type, then: 'save' }], 'мост получает save');
+    assert.equal(h.fetches, 0, 'страница не качает blob, который старый WebView не умеет сохранять');
+    assert.ok(h.toasts.includes('Файл скачивается'), 'успешная постановка показывает ход');
+  };
+  const h = harness(undefined, { legacyBridge: true }); check(h);
+  const denied = harness(undefined, { legacyBridge: true, bridgeResult: 'denied' }); denied.api.startDownload(target);
+  assert.ok(denied.toasts.includes('Не удалось скачать файл'), 'отказ моста не выглядит как успешное скачивание');
+
+  const alwaysOpen = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8')
+    .replace("legacyDownloadWithToast(t.url, t.name, t.type, 'save');", "legacyDownloadWithToast(t.url, t.name, t.type, 'open');");
+  assert.notEqual(alwaysOpen, readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8'), 'мутант меняет then');
+  assert.throws(() => check(harness(alwaysOpen, { legacyBridge: true })), assert.AssertionError, 'тест ловит мутант then=open');
+});
+
+it('современный WebView не вызывает устаревший мост, даже если тот объявлен', () => {
+  const check = (h: Harness) => {
+    h.api.startDownload(target);
+    assert.deepEqual(h.legacyCalls, [], 'при нативной передаче файлов строковый мост не нужен');
+    assert.equal(h.fetches, 1, 'остаётся обычный поток загрузки современного WebView');
+  };
+  check(harness(undefined, { filesViaNative: true, legacyBridge: true }));
+
+  const source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8');
+  const withoutGate = source.replace('  if (filesViaNative()) return false;\n', '');
+  assert.notEqual(withoutGate, source, 'мутант убирает проверку filesViaNative');
+  assert.throws(() => check(harness(withoutGate, { filesViaNative: true, legacyBridge: true })), assert.AssertionError, 'тест ловит удалённую проверку');
 });

@@ -15,7 +15,7 @@ import { plural } from '../dmRowRules';
 import { Icon } from './Icon';
 import { archiveDms } from './DmArchive';
 import { DmMuteMenuItems, switchDmBlock, toggleDmPinned } from './DmChatView';
-import { DmFolderMenuItems, FolderRemoveItem, toggleFolderPinned, useFoldersOn } from './DmFolderBar';
+import { DmFolderMenuItems, DmFolderPickEntries, DmFolderPickItems, FolderRemoveItem, toggleFolderPinned, useFoldersOn } from './DmFolderBar';
 
 /** Открытое меню строки: беседа, точка (ПКМ / палец), уровень (`mute` — сроки «Выключить уведомления»), «сейчас» для сроков. */
 type Target = { dm: DmChannel; pos: MenuPos; level: 'main' | 'mute' | 'folders'; now: number };
@@ -130,8 +130,16 @@ export function useDmRowMenu(reorderHere?: { readonly current: PinReorderScope }
       close();
       fn();
     };
+    // Системная «Назад» на телефоне (#218): из уровня «Уведомления» / «Добавить в папку» — к основному списку меню строки (`onBack`),
+    // из основного — закрыть; сроки внутри «Уведомлений» забирает своя стрелка `DmMuteMenuItems` раньше.
     menu = (
-      <ContextMenu pos={pos} onClose={close} width={target.level === 'main' ? 264 : 256} fit>
+      <ContextMenu
+        pos={pos}
+        onClose={close}
+        onBack={target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'main' })}
+        width={target.level === 'main' ? 264 : 256}
+        fit
+      >
         {target.level === 'mute' ? (
           <DmMuteMenuItems peerId={dm.otherUser.id} mute={mute} now={now} onDone={close} />
         ) : target.level === 'folders' ? (
@@ -269,7 +277,10 @@ export async function blockDms(dms: readonly DmChannel[]): Promise<boolean> {
  * выбранных есть уже заблокированный). Правила панели Telegram: закрепить — если среди выбранных есть незакреплённые
  * (закрепляются они), иначе открепить все; звук — если есть заглушённые, им включается звук, иначе все глушатся навсегда;
  * «прочитано» — если есть непрочитанные или помеченные, иначе «непрочитанное» всем. После действия выбор закрывается.
- * Архив (G41, `archive1`) — первая кнопка справа: «В архив» выбранных (или «Вернуть из архива», если все уже там).
+ * Архив (G41, `archive1`): «В архив» выбранных (или «Вернуть из архива», если все уже там).
+ * Порядок кнопок — как у Telegram Android (`DialogsActivity.createActionMode`, `TA/ui/DialogsActivity.java:6736-6750`): Закрепить ·
+ * Уведомления · Архив · Удалить · «⋯»; в «⋯» — В папку ▸ / Убрать из папки (папки, `folders1`; `DmFolderPickEntries`), затем
+ * прочитано, очистить, заблокировать (#218).
  */
 export function DmPickHead({
   ids,
@@ -289,6 +300,9 @@ export function DmPickHead({
   const markOn = useStore((s) => s.convActive && serverUnreadMark(s.serverFeatures));
   const archiveOn = useStore((s) => s.convActive && serverArchive(s.serverFeatures));
   const [moreAt, setMoreAt] = useState<MenuPos | null>(null);
+  // Второй уровень «⋯»: список папок для «В папку» (`FiltersListBottomSheet` у Telegram).
+  const [foldersLevel, setFoldersLevel] = useState(false);
+  const foldersOn = useFoldersOn();
   const picked = dms.filter((d) => ids.includes(d.id));
   const toPin = picked.filter((d) => (pinIn ? !pinIn.own.includes(d.id) : !d.pinnedAt));
   // В архив — если среди выбранных есть не в архиве (уходят они), иначе вернуть все (Android: действие `archive` / `unarchive`).
@@ -331,6 +345,11 @@ export function DmPickHead({
     setMoreAt(null);
     void blockDms(picked).then((done) => done && onClose());
   };
+  // Папка выбрана — выбор закрывается, как после остальных действий панели.
+  const done = () => {
+    setMoreAt(null);
+    onClose();
+  };
   const n = picked.length;
   return (
     <div className="server-head dm-list-head dm-pick-head">
@@ -339,17 +358,6 @@ export function DmPickHead({
       </button>
       <strong aria-live="polite">{n}</strong>
       <div className="dm-pick-acts">
-        {archiveOn && (
-          <button
-            type="button"
-            className="head-icon"
-            aria-label={archiveMenuLabel(toArchive.length === 0)}
-            title={archiveMenuLabel(toArchive.length === 0)}
-            onClick={archive}
-          >
-            <Icon name={toArchive.length > 0 ? 'archive' : 'unarchive'} size={20} />
-          </button>
-        )}
         {prefsOn && (
           <button
             type="button"
@@ -370,12 +378,23 @@ export function DmPickHead({
         >
           <Icon name={muted.length > 0 ? 'bell' : 'bell-off'} size={20} />
         </button>
+        {archiveOn && (
+          <button
+            type="button"
+            className="head-icon"
+            aria-label={archiveMenuLabel(toArchive.length === 0)}
+            title={archiveMenuLabel(toArchive.length === 0)}
+            onClick={archive}
+          >
+            <Icon name={toArchive.length > 0 ? 'archive' : 'unarchive'} size={20} />
+          </button>
+        )}
         {clearOn && (
           <button type="button" className="head-icon" aria-label="Удалить" title="Удалить" onClick={del}>
             <Icon name="trash" size={20} />
           </button>
         )}
-        {markOn && (
+        {(markOn || foldersOn) && (
           <button
             type="button"
             className="head-icon"
@@ -384,6 +403,7 @@ export function DmPickHead({
             onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               setMoreAt({ x: r.right, y: r.bottom });
+              setFoldersLevel(false);
             }}
           >
             <Icon name="more" size={20} />
@@ -392,13 +412,21 @@ export function DmPickHead({
       </div>
       {moreAt && (
         <ContextMenu pos={moreAt} onClose={() => setMoreAt(null)} width={264} fit>
-          {unreadOnes.length > 0 ? (
-            <MenuItem icon="checks" label="Пометить как прочитанное" onClick={read} />
+          {foldersLevel ? (
+            <DmFolderPickItems picked={picked} isMuted={isMuted} onDone={done} />
           ) : (
-            <MenuItem icon="mail" label="Пометить как непрочитанное" onClick={read} />
+            <>
+              {foldersOn && <DmFolderPickEntries picked={picked} isMuted={isMuted} onDone={done} onFolders={() => setFoldersLevel(true)} />}
+              {markOn &&
+                (unreadOnes.length > 0 ? (
+                  <MenuItem icon="checks" label="Пометить как прочитанное" onClick={read} />
+                ) : (
+                  <MenuItem icon="mail" label="Пометить как непрочитанное" onClick={read} />
+                ))}
+              {clearOn && <MenuItem icon="close" label="Очистить историю" onClick={clear} />}
+              {canBlock && <MenuItem icon="ban" label="Заблокировать" danger onClick={block} />}
+            </>
           )}
-          {clearOn && <MenuItem icon="close" label="Очистить историю" onClick={clear} />}
-          {canBlock && <MenuItem icon="ban" label="Заблокировать" danger onClick={block} />}
         </ContextMenu>
       )}
     </div>

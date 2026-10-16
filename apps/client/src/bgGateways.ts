@@ -1,4 +1,4 @@
-import { mentionsMe, type GatewayServerMessage, type UnreadSummary, type User } from '@gusvoice/shared';
+import { CAP_CONV1, mentionsMe, type GatewayServerMessage, type UnreadSummary, type User } from '@gusvoice/shared';
 import { instances, rememberInstanceServers, type Instance } from './config';
 import { PING_MS, socketStale } from './socketHealth';
 
@@ -32,6 +32,12 @@ export interface BgUnread {
   servers: Record<string, { unread: number; mentions: number }>;
   /** Сколько бесед в личке с непрочитанным. */
   dms: number;
+  /**
+   * Инстанс НЕ ОТВЕЧАЕТ (15.10): две попытки подряд кончились сетью, таймаутом или 5xx. Счётчиков тогда нет (пусто честнее
+   * вчерашнего), а рейл красит группу серой с «не отвечает» (`railRules`, `RailGroupView.silent`) — но не убирает: упасть
+   * может и живая связка. Ответил — признак снимается сам (следующий удачный `/unread` пишет запись заново).
+   */
+  down?: true;
 }
 
 /** Локальный id записи реестра → её счётчики. Записи без соединения здесь нет вовсе. */
@@ -50,6 +56,24 @@ export type BgVoiceEvent = {
   msg: Extract<GatewayServerMessage, { t: 'voice.move' }> | Extract<GatewayServerMessage, { t: 'server.access_closed' }>;
 };
 const voiceListeners = new Set<(e: BgVoiceEvent) => void>();
+
+/**
+ * Событие `federation.guest_links` с ФОНОВОГО шлюза (15.10): дом этой записи сообщает, что связка с инстансом, где человек
+ * гость, сменилась. Подписчик — `guestGone.ts` (перечитать «Где я гость» у этого дома); модуль сам стор не трогает.
+ */
+const guestLinksListeners = new Set<(instanceId: string) => void>();
+
+export function onBgGuestLinks(fn: (instanceId: string) => void): () => void {
+  guestLinksListeners.add(fn);
+  return () => {
+    guestLinksListeners.delete(fn);
+  };
+}
+
+/** Две неудачи подряд по сети/таймауту/5xx — инстанс «не отвечает» (`BgUnread.down`). Одна — ещё не повод: моргнула сеть. */
+const DOWN_AFTER_FAILS = 2;
+/** Предел ожидания фонового запроса: мёртвый хост за NAT-дырой иначе держал бы «загрузку» минутами, а признак — не вставал. */
+const ASK_TIMEOUT_MS = 15_000;
 
 export function onBgVoiceEvent(fn: (e: BgVoiceEvent) => void): () => void {
   voiceListeners.add(fn);
@@ -94,6 +118,9 @@ const links = new Map<string, BgLink>();
 async function ask<T>(inst: Instance, path: string): Promise<T> {
   const res = await fetch(`${inst.apiUrl}/api${path}`, {
     headers: inst.token ? { Authorization: `Bearer ${inst.token}` } : {},
+    ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? { signal: AbortSignal.timeout(ASK_TIMEOUT_MS) }
+      : {}),
   });
   if (!res.ok) {
     const err = new Error(`HTTP ${res.status}`) as Error & { status?: number };
@@ -178,6 +205,12 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
       return;
     }
     link.fails += 1;
+    // 15.10: сеть, таймаут или 5xx дважды подряд — «не отвечает» (`BgUnread.down`). 4xx — инстанс отвечает, просто отказом.
+    const status = (e as { status?: number }).status;
+    if (link.fails >= DOWN_AFTER_FAILS && (status === undefined || status >= 500) && !state[link.instanceId]?.down) {
+      state[link.instanceId] = { servers: {}, dms: 0, down: true };
+      publish();
+    }
     scheduleRetry(link, inst);
     return;
   }
@@ -193,7 +226,7 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
     }
     link.lastRecv = Date.now();
     // D4 (08.10): приложение скрыто — соседский шлюз тоже не считает нас «в сети» (`setBgPresent`).
-    socket.send(JSON.stringify({ t: 'identify', token: inst.token, ...(bgPresent ? {} : { hidden: true }) }));
+    socket.send(JSON.stringify({ t: 'identify', token: inst.token, ...(bgPresent ? {} : { hidden: true }), caps: [CAP_CONV1] }));
     link.ping = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN) return;
       if (socketStale(link.lastRecv, Date.now())) {
@@ -242,9 +275,17 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
         bump(link.instanceId, msg.serverId, mentionsMe(msg.message.content, link.me.username, link.me.home));
         return;
       }
-      case 'dm.create': {
+      /* ЛС (вывод старых `dm.*`, шаг 3): шлюз с `caps: ['conv1']` получает `conv.change`. Точку на иконке инстанса даёт ТОЛЬКО
+         новое чужое сообщение (`created`, автор ≠ я); сводки без сообщения, правки, надгробия и `ConvLeft` — не считаются.
+         Сосед без `conv1` (старый сервер) `conv.change` не пришлёт — точки ЛС там не будет (допустимо, правило 11). */
+      case 'conv.change': {
+        if (!msg.created || !msg.message || 'gone' in msg.message) return;
         if (link.userId && msg.message.author.id === link.userId) return;
         bumpDm(link.instanceId);
+        return;
+      }
+      case 'federation.guest_links': {
+        for (const l of guestLinksListeners) l(link.instanceId);
         return;
       }
       case 'voice.move':

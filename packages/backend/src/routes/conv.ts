@@ -1,6 +1,7 @@
-import { FEATURE_BIGREACT1, FED_ERRORS, REPLY_QUOTE_MAX, SHARED_MEDIA_PAGE } from '@gusvoice/shared';
+import { CONV_GEOLIVE_FEDERATED_ERROR, CONV_POLL_FEDERATED_ERROR, CONV_POLL_LIMITS, FEATURE_BIGREACT1, FED_ERRORS, MESSAGE_PRIVACY_ERROR, REPLY_QUOTE_MAX, SHARED_MEDIA_PAGE, convMediaFallback, convMediaPreview } from '@gusvoice/shared';
 import type { ConvGone, ConvMessage } from '@gusvoice/shared';
-import { eq } from 'drizzle-orm';
+import { ALBUM_ITEM_PEER_OLD_ERROR, type ConvAlbumItemDeleteResponse } from '@gusvoice/shared';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { isSuperAdmin, requireAuth } from '../auth.js';
@@ -12,7 +13,11 @@ import { dmDeliveryPlan } from '../blockRules.js';
 import { blockedBy, isBlockedBy } from '../blocks.js';
 import {
   createDirect,
+  resolveConvMedia,
+  convHasRemote,
+  convPollFederates,
   ensureSaved,
+  deleteAlbumItem,
   deleteMessage,
   clearHistory,
   deleteMessages,
@@ -55,8 +60,17 @@ import {
   setConversationArchived,
   syncSince,
   unpinMessage,
+  type ConvAccess,
 } from '../conversations.js';
 import { fanOutSend, pushGroupPack } from '../convSendFanout.js';
+// Опрос (convpoll1): действия — в `convPolls.ts`, подгружаются в ручках через `import()` (`pollActions`): тесты держат закрытый
+// перечень импортов этого модуля при загрузке (`federationDmOpenRoutes.itest.ts`, `indexErrors.test.ts`).
+import type { ConvPollActResult } from '../convPolls.js';
+const pollActions = () => import('../convPolls.js');
+// Трансляция геопозиции (geolive1): так же — через `import()` в ручках.
+import type { ConvGeoLiveActResult } from '../convGeoLives.js';
+const geoLiveActions = () => import('../convGeoLives.js');
+
 import { hideStrangerBar, reportConversationPeer } from '../dmReports.js';
 import { DM_REPORT_LIMIT, isDmReportReason } from '../strangerRules.js';
 import { createScheduled, deleteScheduled, editScheduled, sendScheduledNow } from '../scheduled.js';
@@ -91,19 +105,11 @@ import { db } from '../db/index.js';
 import { publishToUser } from '../realtime.js';
 import { publishDmFolders } from './dmFolders.js';
 import { shareServer } from '../db/peerQueries.js';
-import { canScheduleUntilOnline, readAtFor } from '../lastSeen.js';
-import { users } from '../db/schema.js';
+import { canScheduleUntilOnline, readAtFor, readersFor } from '../lastSeen.js';
+import { conversationMessages, users } from '../db/schema.js';
 import { canWriteDm, DM_NEW_LIMIT, DM_PEER_GONE_ERROR, dmOpenRefusal, openDm } from '../dmRules.js';
 import { dmPolicy } from '../instanceSetup.js';
 import { reachableUser } from '../userSearchRules.js';
-import {
-  publishLegacyDelete,
-  publishLegacyDeleteMany,
-  publishLegacyEdit,
-  publishLegacyReaction,
-  publishLegacyRead,
-  publishLegacySendMany,
-} from '../dmLegacyEvents.js';
 import { forwardPreview, pushThrottleSource, sendPushToUsers, sendReadSyncPush, withSilent } from '../push.js';
 import { asUserId } from '../superAdminRules.js';
 
@@ -111,16 +117,10 @@ import { asUserId } from '../superAdminRules.js';
  * ЛС, этап 1 — ручки бесед `/api/conv/*` (#211, `docs/dm/STAGE1.md`, «Новые ручки»). Вся запись и чтение — в
  * `conversations.ts`, правила — в `convRules.ts`; здесь разбор запроса, права, лимиты и коды ответа.
  *
- * С шага 1б живые ЛС лежат в беседах, старые `/api/dm*` (`routes/dm.ts`) — проекция поверх того же слоя, и сервер
- * объявляет `features: ['conv1']` (`instanceFeatures.ts`). В шаге 1а ручки стояли за флагом `CONV_API_ENABLED`: пока
- * таблицы были пустыми, заведённая через них беседа столкнулась бы с переносом по ключу пары.
- *
- * 🔴 Каждое изменение рассылается дважды, как и у старых ручек: `conv.change` (`deliver`) — соединениям с `conv1`, `dm.*`
- * и `read.dm` (`dmLegacyEvents.ts`) — без неё: у собеседника или у меня самого бывает десктоп/APK 0.8.x. Сбой старой
- * рассылки ответ не портит — запись уже сделана, а повтор отправки вернул бы то же сообщение. Старая — ДО `deliver`
- * (как в `/api/dm*`): упади `deliver`, повтор запроса событий уже не шлёт, а старый клиент журнала не догоняет.
+ * С шага 1б живые ЛС лежат в беседах, и сервер объявляет `features: ['conv1']` (`instanceFeatures.ts`). Старые
+ * ручки `/api/dm*` и их рассылка `dm.*`/`read.dm` клиентам 0.8.x сняты (вывод старых ЛС, шаг 5): изменение уходит
+ * одним `conv.change` (`deliver`) соединениям с `conv1`.
  */
-const legacy = (p: Promise<void>): Promise<void> => p.catch(() => {});
 
 const convParams = z.object({ id: z.string().min(1).max(64) });
 const msgParams = z.object({ id: z.string().min(1).max(64), mid: z.string().min(1).max(64) });
@@ -174,6 +174,185 @@ function scheduleError(reply: FastifyReply, error: ScheduleTargetError) {
   return reply.code(400).send(error === 'send_at too far' ? { error, maxDays: SCHEDULE_MAX_AHEAD_DAYS } : { error });
 }
 
+/**
+ * ЛС между инстансами, Э1 (#141, `fedm1`): «Написать» человеку связанного инстанса — `federation/convOpen.openFederatedDirect`.
+ * Подключает `index.ts` при `FEDERATION_DM_ENABLED` (как `configureFederatedConv`): этот модуль компилируют проверки с явным
+ * перечнем зависимостей, и федерация (ключи, связки) ему не нужна. Не подключено — прежний отказ `federation.dm_unavailable`.
+ */
+export type FedDirectOpener = (
+  me: string,
+  target: { instanceId: string; homeUserId: string },
+) => Promise<
+  | { ok: true; conversationId: string; created: boolean }
+  | { ok: false; status: number; body: Record<string, unknown>; retryAfter?: number }
+>;
+let fedDirect: FedDirectOpener | null = null;
+export function configureFedDirect(open: FedDirectOpener | null): void {
+  fedDirect = open;
+}
+
+/**
+ * Файлы в беседу 1:1 с человеком другого инстанса (Э2 → Э3 часть 1, #141): можно, если его инстанс умеет вложения (`dm2`).
+ * Проверку подключает `index.ts` при `FEDERATION_DM_ENABLED` (`federation/convAtt.fedFilesAllowedFor`, визитка перечитывается
+ * не чаще раза в час) — крючком, как `configureFedDirect`: этот модуль проверки собирают с явным перечнем зависимостей.
+ * Не подключено — прежний отказ Э2. Все входы записи с файлами (правило «все входы»): загрузка одним запросом и кусками
+ * (`routes/uploads.ts`), «Мои GIF» и внешний GIF (`routes/gifs.ts`), отправка и отложенное с вложениями, пересылка с файлами.
+ */
+let fedFilesAllowed: ((peerId: string) => Promise<boolean>) | null = null;
+export function configureFedFilesGuard(guard: ((peerId: string) => Promise<boolean>) | null): void {
+  fedFilesAllowed = guard;
+}
+
+/** Собеседник — человек другого инстанса (теневая строка с `home_instance_id`). */
+async function isRemotePeer(peerId: string | null): Promise<boolean> {
+  if (!peerId) return false;
+  const [row] = await db.select({ home: users.homeInstanceId }).from(users).where(eq(users.id, peerId)).limit(1);
+  return !!row?.home;
+}
+
+/**
+ * «Кто может мне писать» (`msgpriv1`) — крючок `index.ts` (`messagePrivacy.ts`; проверки маршрута держат закрытый перечень модулей):
+ * `allowed` — пускает ли получатель отправителя (`messageAllowedFor`), `wrote` — писал ли автор собеседнику в их 1:1
+ * (`wroteInDirect`), `remoteRefused` — дом собеседника с другого инстанса сказал «тебе писать нельзя» (`dmEphemeral`, `noMessages`).
+ * Нет крючка — проверки нет (как до настройки).
+ */
+export interface MessagePrivacyGuard {
+  allowed(senderId: string, recipientId: string): Promise<boolean>;
+  wrote(authorId: string, otherId: string): Promise<boolean>;
+  remoteRefused?(peerId: string, me: string): boolean;
+}
+let messagePrivacy: MessagePrivacyGuard | null = null;
+export function configureMessagePrivacy(guard: MessagePrivacyGuard | null): void {
+  messagePrivacy = guard;
+}
+
+/**
+ * «Кто может мне писать» (13.10, #218, `msgpriv1`): беседа 1:1, собеседник ограничил круг (только контакты и те, кому писал сам),
+ * а я не прохожу — 403 `MESSAGE_PRIVACY_ERROR` (ответ отправлен — `true`). Telegram: `PRIVACY_PREMIUM_REQUIRED`, tdesktop
+ * `Data::RestrictionError` → `lng_restricted_send_non_premium`. Группа и «Избранное» — мимо (группы — отдельная настройка у
+ * Telegram «кто может приглашать»). Политика инстанса (`dmPolicy`) — отдельно, это ограничение поверх.
+ */
+async function messagePrivacyRefused(
+  reply: FastifyReply,
+  me: string,
+  access: { kind?: string; saved?: boolean; peerId: string | null } | null,
+): Promise<boolean> {
+  const g = messagePrivacy;
+  if (!g || !access || access.kind === 'group' || access.saved || !access.peerId) return false;
+  const local = !(await g.allowed(me, access.peerId));
+  // Человек соседа: решает его дом (`noMessages`), но если он сам мне уже писал — отвечать можно (Telegram «кому я писал первым»).
+  const remote = !local && g.remoteRefused?.(access.peerId, me) === true && !(await g.wrote(access.peerId, me));
+  if (!local && !remote) return false;
+  await reply.code(403).send({ error: MESSAGE_PRIVACY_ERROR });
+  return true;
+}
+
+/** Файлы этому собеседнику нельзя: 400 `federation.dm_attachments_later` (ответ отправлен — `true`). Группа и местный — можно. */
+export async function fedFilesRefused(reply: FastifyReply, peerId: string | null): Promise<boolean> {
+  if (!(await isRemotePeer(peerId))) return false;
+  if (fedFilesAllowed && (await fedFilesAllowed(peerId!))) return false;
+  await reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });
+  return true;
+}
+
+/** Вложения с «один раз» (`voice3`). */
+function onceRefs(list: readonly { once?: true | null }[]): boolean {
+  return list.some((a) => a.once === true);
+}
+
+/**
+ * «Один раз» человеку соседа (Э3 часть 3, #141): можно, если его инстанс объявил `dm2once` — понимает пометку `once` в копии,
+ * стирает копию после прослушивания и отдаёт «прослушано». Проверку подключает `index.ts` при `FEDERATION_DM_ENABLED`
+ * (`federation/convAtt.fedOnceAllowedFor`) — крючком, как `configureFedFilesGuard`. Не подключено или признака нет — прежний
+ * отказ `federation.dm_attachments_later` (старый сосед показал бы такое голосовое обычным навсегда).
+ */
+/**
+ * G56: убрать один элемент альбома «у обоих» в беседе с людьми соседа — только если их дома понимают меньший список вложений
+ * (`dmalbum1`). Подключает `index.ts` при `FEDERATION_DM_ENABLED` (`federation/convAtt.fedAlbumAllowedFor`); не подключено —
+ * можно (соседу правка всё равно не уезжает).
+ */
+let fedAlbumAllowed: ((memberIds: readonly string[]) => Promise<boolean>) | null = null;
+export function configureFedAlbumGuard(guard: ((memberIds: readonly string[]) => Promise<boolean>) | null): void {
+  fedAlbumAllowed = guard;
+}
+
+let fedOnceAllowed: ((peerId: string) => Promise<boolean>) | null = null;
+export function configureFedOnceGuard(guard: ((peerId: string) => Promise<boolean>) | null): void {
+  fedOnceAllowed = guard;
+}
+
+async function fedOnceRefused(peerId: string | null): Promise<boolean> {
+  if (!(await isRemotePeer(peerId))) return false;
+  return !(fedOnceAllowed && (await fedOnceAllowed(peerId!)));
+}
+
+/**
+ * Э2 часть Б (#141, Ф7): связка с инстансом собеседника разорвана, на паузе или доверие потеряно — беседа становится архивом
+ * только для чтения (`ConvSummary.fedLink`). Проверку подключает `index.ts` при `FEDERATION_DM_ENABLED`
+ * (`federation/convLink.fedLinkBrokenFor`) — тем же крючком, что `configureFedDirect`. Не подключено — запись как раньше.
+ */
+let fedLinkGuard: ((peerId: string) => Promise<boolean>) | null = null;
+export function configureFedLinkGuard(guard: ((peerId: string) => Promise<boolean>) | null): void {
+  fedLinkGuard = guard;
+}
+
+/**
+ * Запись в беседу с человеком соседа при разорванной связке: 403 `federation.dm_link_broken` (ответ отправлен — `true`).
+ * Действия «только у меня» (удалить, закрепить у себя, черновик, прочитано, архив) сюда не ходят: они не уезжают соседу.
+ */
+async function fedLinkRefused(
+  reply: FastifyReply,
+  access: { peerId: string | null; kind: string; memberIds?: readonly string[] } | null,
+  opts: { viaOk?: boolean } = {},
+): Promise<boolean> {
+  // Э5 часть 1: человек соседа по долгой сессии («через») пишет только текст/ответ — остальная запись ему закрыта.
+  const me = access?.peerId ? access.memberIds?.find((id) => id !== access.peerId) : undefined;
+  if (fedVia && me && !opts.viaOk && (await fedVia.isShadow(me))) {
+    await reply.code(403).send({ error: FED_ERRORS.dmViaLimited });
+    return true;
+  }
+  // Э7 часть 3: в группе собеседника нет — человек соседа определяется по тому, кто сейчас пишет (`reply.request.user`).
+  const groupActor = !access?.peerId && access?.kind === 'group' ? (reply.request as { user?: { sub?: string } }).user?.sub : undefined;
+  if (fedVia && groupActor && !opts.viaOk && (await fedVia.isShadow(groupActor))) {
+    await reply.code(403).send({ error: FED_ERRORS.dmViaLimited });
+    return true;
+  }
+  if (!fedLinkGuard || !access?.peerId || access.kind === 'group') return false;
+  if (!(await fedLinkGuard(access.peerId))) return false;
+  await reply.code(403).send({ error: FED_ERRORS.dmLinkBroken });
+  return true;
+}
+
+/**
+ * Э5 часть 1 (#141, «мой дом лежит — пишу через инстанс собеседника», `federation/convVia.ts`): подключает `index.ts` при
+ * `FEDERATION_DM_ENABLED` — крючком, как `configureFedDirect`. Не подключено — маршрутов `/conv/:id/fallback` и
+ * `/conv/via-claims` нет (404), отправка человеком соседа — как раньше.
+ * - `gate` — отправка: `null` — наш человек; `'refused'` — 403 `federation.dm_via_limited`; иначе «через» с домом автора.
+ * - `isShadow` — человек соседа (теневая строка): прочая запись в беседу ему закрыта.
+ * - `fallback` / `claims` — дом автора: реквизиты долгой сессии и отчёт клиента об отправленном в обход.
+ */
+export interface FedViaHooks {
+  gate(me: string, access: ConvAccess): Promise<null | 'refused' | { instanceId: string }>;
+  isShadow(me: string): Promise<boolean>;
+  /** `purpose` (Э6): `call` — сессия для ответа на звонок у инстанса звонящего (нужен его `dmcall1`, а не `dm4`). */
+  fallback(me: string, conversationId: string, purpose?: 'via' | 'call'): Promise<{ status: number; body: Record<string, unknown> }>;
+  claims(me: string, raw: unknown): Promise<{ status: number; body: Record<string, unknown> }>;
+}
+let fedVia: FedViaHooks | null = null;
+export function configureFedVia(hooks: FedViaHooks | null): void {
+  fedVia = hooks;
+}
+
+/**
+ * Э2 часть Б (#141, §4 п. 2): жалоба из ЛС на человека другого инстанса уходит и держателю его дома событием `report.create`
+ * (`federation/convLink.reportFedDmPeer`); подключает `index.ts`. Местная жалоба (`dmReports`) пишется как раньше.
+ */
+type FedDmReporter = (me: string, conversationId: string, peerId: string, input: { reason: string; comment: string | null }) => Promise<void>;
+let fedDmReport: FedDmReporter | null = null;
+export function configureFedDmReport(fn: FedDmReporter | null): void {
+  fedDmReport = fn;
+}
+
 export async function convRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
@@ -203,12 +382,38 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post('/conv/direct', async (req, reply) => {
     const me = req.user!.sub;
-    const { userId } = z.object({ userId: z.string().min(1).max(64) }).parse(req.body);
+    // Э1 (`fedm1`): вместо `userId` — человек связанного инстанса из поиска, у которого может не быть строки у нас.
+    const body = z
+      .object({
+        userId: z.string().min(1).max(64).optional(),
+        instanceId: z.string().min(1).max(64).optional(),
+        homeUserId: z.string().min(1).max(64).optional(),
+      })
+      .refine((b) => !!b.userId || (!!b.instanceId && !!b.homeUserId))
+      .parse(req.body);
+    const sendFed = async (target: { instanceId: string; homeUserId: string }) => {
+      const r = await fedDirect!(me, target);
+      if (!r.ok) {
+        if (r.retryAfter) reply.header('Retry-After', String(r.retryAfter));
+        return reply.code(r.status).send(r.body);
+      }
+      const list = await listConversations(me);
+      const summary = list.conversations.find((c) => c.id === r.conversationId);
+      return reply.code(r.created ? 201 : 200).send(summary ?? { id: r.conversationId });
+    };
+    if (!body.userId) {
+      if (!fedDirect) return reply.code(403).send({ error: FED_ERRORS.dmUnavailable });
+      return sendFed({ instanceId: body.instanceId!, homeUserId: body.homeUserId! });
+    }
+    const userId = body.userId;
     if (userId === me) return reply.code(400).send({ error: 'cannot DM yourself' });
     const [other] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!other) return reply.code(404).send({ error: 'user not found' });
     const [meRow] = await db.select({ home: users.homeInstanceId }).from(users).where(eq(users.id, me)).limit(1);
-    // Личка между инстансами — этап 6 (§5.8, `routes/dm.ts` — почему половинчатая хуже никакой).
+    // Человек другого инстанса: с Э1 — через его дом (`fedDirect`), без флага — прежний отказ (§5.8).
+    if (other.homeInstanceId !== null && other.homeUserId && !meRow?.home && fedDirect) {
+      return sendFed({ instanceId: other.homeInstanceId, homeUserId: other.homeUserId });
+    }
     if (other.homeInstanceId !== null || meRow?.home) return reply.code(403).send({ error: FED_ERRORS.dmUnavailable });
 
     let created = null as Awaited<ReturnType<typeof createDirect>>;
@@ -246,6 +451,30 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
    * со сводкой (`saved: true`). Заводит её человек сам (Ctrl+0, «Переслать» → «Избранное»), не сервер при регистрации.
    * Беседа локальная: гостю (человеку чужого инстанса) её нет — у него «дом» на другом инстансе.
    */
+  /**
+   * Э5 часть 1 (#141): реквизиты долгой сессии на инстансе собеседника — клиент берёт их заранее (при открытии беседы с
+   * человеком соседа) и пишет по ним, когда дом лежит. Только владельцу беседы; `{ instanceId, apiBase, userId, token,
+   * expiresAt }` (мс эпохи). Нет `dm4` у соседа — 409 `federation.unsupported`; сосед не ответил — 503.
+   */
+  app.get('/conv/:id/fallback', async (req, reply) => {
+    if (!fedVia) return reply.code(404).send({ error: 'not found' });
+    const { id } = convParams.parse(req.params);
+    if (await limited(reply, await rateHit(`conv-fallback:${req.user!.sub}`, 30, 600))) return;
+    const res = await fedVia.fallback(req.user!.sub, id, (req.query as { for?: unknown } | undefined)?.for === 'call' ? 'call' : 'via');
+    return reply.code(res.status).send(res.body);
+  });
+
+  /**
+   * Э5 часть 1 (#141): клиент вернулся домой — отчитывается, что отправил в обход (`{ items: [{ conversationId, clientId,
+   * payloadHash }] }`, отпечаток — `convRules.payloadHash` по ОБРЕЗАННОМУ тексту и ответу). Дом сверяет с копиями соседа.
+   */
+  app.post('/conv/via-claims', async (req, reply) => {
+    if (!fedVia) return reply.code(404).send({ error: 'not found' });
+    if (await limited(reply, await rateHit(`conv-via-claims:${req.user!.sub}`, 30, 600))) return;
+    const res = await fedVia.claims(req.user!.sub, req.body);
+    return reply.code(res.status).send(res.body);
+  });
+
   app.post('/conv/saved', { preHandler: requireLocalUser }, async (req, reply) => {
     const me = req.user!.sub;
     if (await limited(reply, await rateHit(`conv-saved:${me}`, 20, 10))) return;
@@ -350,6 +579,9 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
         kind: z.enum(['media', 'file', 'link', 'gif', 'voice']).optional(),
         before: z.string().max(100).optional(),
         limit: z.coerce.number().int().min(1).max(50).default(30),
+        // Вкладки поиска на телефоне (12.10): имена вложений в поиск и целые сообщения в ответ — `searchAllConversations`.
+        names: z.enum(['1']).optional(),
+        full: z.enum(['1']).optional(),
       })
       .parse(req.query);
     const pattern = searchPattern(q.q);
@@ -357,7 +589,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-search:${me}`, READ_MAX, WINDOW_S))) return;
     const before = q.before ? decodeCursor(q.before) : undefined;
     if (before === null) return reply.code(400).send({ error: 'bad cursor' });
-    return searchAllConversations(me, { pattern, conversationId: q.conversationId, since: q.since, until: q.until, kind: q.kind, before, limit: q.limit });
+    return searchAllConversations(me, { pattern, conversationId: q.conversationId, since: q.since, until: q.until, kind: q.kind, before, limit: q.limit, names: q.names === '1', full: q.full === '1' });
   });
 
   /* «Частые» в поиске из списка (G35, признак `freq1`; Telegram top peers): мои беседы по числу моих сообщений за 90 дней с
@@ -434,7 +666,10 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
   app.post('/conv/:id/attachments', async (req, reply) => {
     const me = req.user!.sub;
     const { id: conversationId } = convParams.parse(req.params);
-    if (!(await loadAccess(conversationId, me))) return reply.code(404).send({ error: 'not found' });
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    if (await fedLinkRefused(reply, access)) return;
+    if (await fedFilesRefused(reply, access.peerId)) return;
     return acceptDmUpload(req, reply, conversationId, me);
   });
 
@@ -465,10 +700,45 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
         captionAbove: z.boolean().optional(),
         // Стикер каталога (С2, `stickers2`): сообщение-стикер — без текста и вложений, как у Telegram.
         stickerId: z.string().min(1).max(64).nullish(),
+        // Геопозиция / контакт (G69, `geocontact1`): отдельное сообщение без текста, вложений и стикера, как у Telegram.
+        media: z
+          .discriminatedUnion('kind', [
+            z.object({ kind: z.literal('geo'), lat: z.number().finite(), lon: z.number().finite(), accuracy: z.number().finite().nullish() }),
+            z.object({ kind: z.literal('contact'), userId: z.string().min(1).max(64) }),
+            // Трансляция геопозиции (`geolive1`): срок и диапазоны проверяет `geoLiveStart` (общий с клиентом).
+            z.object({
+              kind: z.literal('geolive'),
+              lat: z.number().finite(),
+              lon: z.number().finite(),
+              accuracy: z.number().finite().nullish(),
+              heading: z.number().finite().nullish(),
+              period: z.number().int(),
+            }),
+            // Опрос (`convpoll1`): форма — здесь (потолки длины), смысл — `convPollDraft` (общий с формой клиента).
+            z.object({
+              kind: z.literal('poll'),
+              question: z.string().max(CONV_POLL_LIMITS.question * 2),
+              options: z.array(z.string().max(CONV_POLL_LIMITS.option * 2)).max(CONV_POLL_LIMITS.maxOptions * 2),
+              anonymous: z.boolean().optional(),
+              multi: z.boolean().optional(),
+              quiz: z.boolean().optional(),
+              correct: z.number().int().min(0).max(CONV_POLL_LIMITS.maxOptions * 2).nullish(),
+              solution: z.string().max(CONV_POLL_LIMITS.solution * 2).nullish(),
+            }),
+          ])
+          .nullish(),
       })
       .parse(req.body);
     const silent = body.silent === true;
-    const content = body.content.trim();
+    let content = body.content.trim();
+    if (body.media && (content || body.attachments.length > 0 || body.stickerId))
+      return reply.code(400).send({ error: 'геопозиция и контакт отправляются отдельным сообщением' });
+    // Вид сообщения собираем ДО проверок пустоты: `content` у него — запасная фраза (её видят старый клиент и старый сосед).
+    const media = body.media ? await resolveConvMedia(body.media) : null;
+    if (media === 'bad-geo') return reply.code(400).send({ error: 'координаты вне диапазона' });
+    if (media === 'no-contact') return reply.code(400).send({ error: 'контакт не найден' });
+    if (media && typeof media === 'object' && 'pollError' in media) return reply.code(400).send({ error: media.pollError });
+    if (media) content = convMediaFallback(media);
     if (!content && body.attachments.length === 0 && !body.stickerId) return reply.code(400).send({ error: 'empty message' });
     if (body.stickerId && (content || body.attachments.length > 0))
       return reply.code(400).send({ error: 'стикер отправляется отдельным сообщением' });
@@ -485,6 +755,20 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const write = isGroup || access?.saved ? (access ? 'ok' : 'not-a-member') : canWriteDm({ member: !!access, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
     if (write === 'not-a-member' || !access) return reply.code(404).send({ error: 'not found' });
     if (write === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
+    if (await messagePrivacyRefused(reply, me, access)) return;
+    // Э5 часть 1: человек соседа по долгой сессии — «через», только текст и ответ (без цитаты фрагмента).
+    const via = fedVia ? await fedVia.gate(me, access) : null;
+    if (via === 'refused' || (via && (body.attachments.length > 0 || body.stickerId || body.replyQuote || media))) {
+      return reply.code(403).send({ error: FED_ERRORS.dmViaLimited });
+    }
+    if (await fedLinkRefused(reply, access, { viaOk: !!via })) return;
+    // Опрос с людьми других инстансов — только если все их дома объявили `dmpoll1` (`convPollFederates`): иначе их копия была бы текстом.
+    if (media?.kind === 'poll' && (await convHasRemote(db, conversationId)) && !(await convPollFederates(db, conversationId))) return reply.code(403).send({ error: 'опрос в беседе с людьми других инстансов пока недоступен', reason: CONV_POLL_FEDERATED_ERROR });
+    // Трансляция геопозиции — так же: провода соседям нет, точки им не дойдут (сосед видит только запасной текст первой точки).
+    if (media?.kind === 'geolive' && (await convHasRemote(db, conversationId)))
+      return reply.code(403).send({ error: 'трансляция геопозиции в беседе с людьми других инстансов пока недоступна', reason: CONV_GEOLIVE_FEDERATED_ERROR });
+    if (body.attachments.length > 0 && (await fedFilesRefused(reply, access.peerId))) return;
+    if (onceRefs(body.attachments) && (await fedOnceRefused(access.peerId))) return reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });
 
     // «Избранное»: получателя нет — придерживать и пушить некому (`saved1`).
     const plan = access.saved
@@ -503,6 +787,9 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
       noPreview: body.noPreview === true,
       captionAbove: body.captionAbove === true,
       ...(sticker ? { sticker } : {}),
+      // Ссылка на карту в запасной фразе — не повод для карточки превью (сервер сходил бы на сторонний сайт).
+      ...(media ? { media, noPreview: true } : {}),
+      ...(via ? { via: { instanceId: via.instanceId, state: 'pending' as const } } : {}),
     });
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'bad-reply') return reply.code(400).send({ error: 'invalid reply target' });
@@ -529,7 +816,19 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
       attachments: res.row.attachments,
       silent,
       sticker: res.row.sticker,
+      // Пуш (G69): «Геопозиция» / «Контакт: Имя» вместо запасной фразы со ссылкой.
+      ...(media ? { content: convMediaPreview(media) } : {}),
     });
+    // Отправил — значит, прочитал всё до своего сообщения (как Telegram: tdesktop `ApiWrap::sendAction` → `readInbox`; решение
+    // владельца 15.10): мои непрочитанные в беседе гаснут, собеседник получает ✓✓ на свои сообщения до этого. Тот же путь, что
+    // у `/conv/:id/read` (журнал, ✓✓ соседу через `fedRecord`, тихий пуш моим телефонам). Придержанное (меня заблокировали) — без отметки.
+    if (!access.saved && !plan.withheld) {
+      const read = await markRead(me, access, res.row.sortKey);
+      if (read.kind === 'ok' && read.delivery) {
+        await deliver(read.delivery);
+        void sendReadSyncPush(me, conversationId, read.lastReadKey).catch(() => {});
+      }
+    }
     return reply.code(201).send(view);
   });
 
@@ -540,12 +839,12 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-edit:${me}`, EDIT_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
+    if (await fedLinkRefused(reply, access)) return;
     const res = await editMessage(me, access, mid, raw.trim());
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
     if (res.kind === 'empty') return reply.code(400).send({ error: 'empty message' });
     // Правка без изменений (`delivery` пуст) — событий нет: сообщение не менялось.
-    if (res.delivery) await legacy(publishLegacyEdit(me, access.peerId, conversationId, mid, res.row.withheld));
     await deliver(res.delivery);
     return reply.send(await messageFor(mid, me));
   });
@@ -562,13 +861,39 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-edit:${me}`, EDIT_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
+    if (scope === 'both' && (await fedLinkRefused(reply, access))) return;
     const res = await deleteMessage(me, access, mid, scope, { othersForBoth: true });
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
     // Повтор уже сделанного удаления (`delivery` пуст) — событий второй раз нет.
-    if (res.delivery) await legacy(publishLegacyDelete(me, access.peerId, conversationId, mid, scope, res));
     await deliver(res.delivery);
     return reply.code(204).send();
+  });
+
+  /**
+   * Удалить ОДИН элемент альбома (G56, признак `album1`; Telegram — элемент альбома отдельное сообщение): `both` — только своё
+   * (элемент уходит из списка вложений у всех, файл — в уборку), `me` — спрятать у себя; последний видимый элемент — удаление
+   * сообщения целиком (`removed: 'message'`). Повтор — 200 без событий. «У обоих» с человеком соседа, чей дом без `dmalbum1`, —
+   * 409 `album_item_peer_old`.
+   */
+  app.delete('/conv/:id/messages/:mid/attachments/:aid', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const { aid } = z.object({ aid: z.string().min(1).max(64) }).parse(req.params);
+    const { for: scope } = z.object({ for: z.enum(['me', 'both']) }).parse(req.query ?? {});
+    if (await limited(reply, await rateHit(`conv-edit:${me}`, EDIT_MAX, WINDOW_S))) return;
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    if (scope === 'both' && (await fedLinkRefused(reply, access))) return;
+    if (scope === 'both' && fedAlbumAllowed && !(await fedAlbumAllowed(access.memberIds.filter((id) => id !== me)))) {
+      return reply.code(409).send({ error: ALBUM_ITEM_PEER_OLD_ERROR });
+    }
+    const res = await deleteAlbumItem(me, access, mid, aid, scope, { othersForBoth: true });
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
+    await deliver(res.delivery);
+    const body: ConvAlbumItemDeleteResponse = { removed: res.removed };
+    return reply.send(body);
   });
 
   /**
@@ -586,10 +911,10 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-edit:${me}`, EDIT_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
+    if (body.for === 'both' && (await fedLinkRefused(reply, access))) return;
     const res = await deleteMessages(me, access, body.ids, body.for, { othersForBoth: true });
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found', missing: res.missing });
     if (res.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden', ids: res.ids });
-    await legacy(publishLegacyDeleteMany(me, access.peerId, conversationId, body.for, res.changed, res.lastMessageAt));
     await deliverMany(res.deliveries);
     return reply.code(204).send();
   });
@@ -614,9 +939,12 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
         silent: z.boolean().optional(),
         hideSender: z.boolean().optional(),
         hideCaptions: z.boolean().optional(),
+        // G56 (`album1`): один элемент альбома — только с одним сообщением.
+        attachmentId: z.string().min(1).max(64).optional(),
       })
       .parse(req.body);
     const silent = body.silent === true;
+    if (body.attachmentId !== undefined && body.messageIds.length !== 1) return reply.code(400).send({ error: 'attachmentId needs one message' });
     if (new Set(body.messageIds).size !== body.messageIds.length) return reply.code(400).send({ error: 'duplicate message ids' });
     if (await limited(reply, await messageSendBlock(me))) return;
     if (await limited(reply, await rateHit(`conv-forward:${me}`, FORWARD_MAX, FORWARD_WINDOW_S))) return;
@@ -630,7 +958,22 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const write = access?.kind === 'group' || access?.saved ? 'ok' : canWriteDm({ member: !!access, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
     if (write === 'not-a-member' || !access || !source) return reply.code(404).send({ error: 'not found' });
     if (write === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
+    if (await messagePrivacyRefused(reply, me, access)) return;
+    if (await fedLinkRefused(reply, access)) return;
 
+    if (await isRemotePeer(access.peerId)) {
+      const withFiles = await db
+        .select({ id: conversationMessages.id })
+        .from(conversationMessages)
+        .where(
+          and(
+            inArray(conversationMessages.id, body.messageIds),
+            sql`jsonb_array_length(${conversationMessages.attachments}) > 0`,
+          ),
+        )
+        .limit(1);
+      if (withFiles.length > 0 && (await fedFilesRefused(reply, access.peerId))) return;
+    }
     const isGroup = access.kind === 'group';
     // «Избранное» (`saved1`): собеседника нет — не придерживается, ни пуша, ни старых событий.
     const plan = isGroup
@@ -646,6 +989,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
       silent,
       hideSender: body.hideSender === true,
       hideCaptions: body.hideCaptions === true,
+      ...(body.attachmentId !== undefined ? { attachmentId: body.attachmentId } : {}),
     });
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'source-missing') return reply.code(400).send({ error: 'forward source not found', missing: res.missing });
@@ -664,13 +1008,12 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (res.kind === 'replay') return reply.code(200).send({ messages });
 
     if (isGroup) {
-      // Группа: старых `dm.*` нет; пуш участникам — как у отправки в группу (один на пачку, заглушка группы чтится).
+      // Группа: пуш участникам — как у отправки в группу (один на пачку, заглушка группы чтится).
       await deliverMany(res.deliveries);
       const first = rows[0];
       pushGroupPack(me, conversationId, access.memberIds, forwardPreview(rows.length, { content: first.content, attachments: first.attachments }), silent);
       return reply.code(201).send({ messages });
     }
-    if (!access.saved) await legacy(publishLegacySendMany(me, access.peerId, conversationId, rows, plan.notifyRecipient));
     await deliverMany(res.deliveries);
     if (plan.notifyRecipient) {
       const peerId = access.peerId!;
@@ -704,22 +1047,90 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-react:${me}`, REACT_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
+    if (await fedLinkRefused(reply, access)) return;
     // Кто из участников заблокировал меня — тем моя реакция не доходит ни событием, ни журналом (`blockRules.reachesPeer`).
     const blockedActor = new Set<string>();
     for (const uid of access.memberIds) if (uid !== me && (await blockedBy(uid)).has(me)) blockedActor.add(uid);
     const res = await reactMessage(me, access, mid, emoji, op, blockedActor);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
-    // Только настоящее изменение: повтор старым клиентам прибавил бы реакцию второй раз.
-    if (res.changed) {
-      const peerBlockedMe = !!access.peerId && blockedActor.has(access.peerId);
-      await legacy(publishLegacyReaction(me, access.peerId, conversationId, mid, emoji, op, peerBlockedMe));
-    }
     await deliver(res.delivery);
     // «Большая» реакция — только эффект: соединениям с `bigreact1`, старые получают обычную реакцию выше.
     for (const uid of bigReactionTargets({ big: big === true, op, actorId: me, audience: res.audience })) {
       await publishToUser(uid, { t: 'reaction.big', conversationId, messageId: mid, emoji, userId: me }, { cap: FEATURE_BIGREACT1 }).catch(() => {});
     }
     return reply.code(204).send();
+  });
+
+  /**
+   * Опрос в ЛС (14.10, `convpoll1`): голос (`optionIds`) или отмена голоса (пустой список) — ответ: сообщение моими глазами
+   * (клиент кладёт его сразу, не дожидаясь `conv.change`); остальным участникам — `conv.change` с их видом опроса.
+   */
+  const pollReply = async (reply: FastifyReply, res: ConvPollActResult, mid: string, me: string) => {
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'refused') return reply.code(res.code).send({ error: res.error });
+    await deliver(res.delivery);
+    const view = await messageFor(mid, me);
+    return view ? reply.send(view) : reply.code(404).send({ error: 'not found' });
+  };
+  app.post('/conv/:id/messages/:mid/poll/vote', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const { optionIds } = z.object({ optionIds: z.array(z.string().min(1).max(8)).max(CONV_POLL_LIMITS.maxOptions) }).parse(req.body);
+    if (await limited(reply, await rateHit(`conv-react:${me}`, REACT_MAX, WINDOW_S))) return;
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    if (await fedLinkRefused(reply, access)) return;
+    return pollReply(reply, await (await pollActions()).voteConvPoll(me, access, mid, optionIds), mid, me);
+  });
+  /** «Остановить опрос» — автор; навсегда (Telegram `StopPoll`). */
+  app.post('/conv/:id/messages/:mid/poll/close', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    return pollReply(reply, await (await pollActions()).closeConvPoll(me, access, mid), mid, me);
+  });
+  /**
+   * Трансляция геопозиции в ЛС (14.10, `geolive1`): новая точка автора и «Остановить». Ответ — сообщение моими глазами; остальным
+   * участникам — `conv.change` (как правка опроса: без «изменено», без пуша, беседу не поднимает). Предел частоты: клиент шлёт не
+   * чаще раза в 5 с, сервер точку чаще 3 с принимает молча (`geoLiveUpdate`); поверх — общий предел на человека.
+   */
+  const geoLiveReply = async (reply: FastifyReply, res: ConvGeoLiveActResult, mid: string, me: string) => {
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'refused') return reply.code(res.code).send({ error: res.error });
+    await deliver(res.delivery);
+    const view = await messageFor(mid, me);
+    return view ? reply.send(view) : reply.code(404).send({ error: 'not found' });
+  };
+  app.post('/conv/:id/messages/:mid/live', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const point = z
+      .object({ lat: z.number().finite(), lon: z.number().finite(), accuracy: z.number().finite().nullish(), heading: z.number().finite().nullish() })
+      .parse(req.body);
+    if (await limited(reply, await rateHit(`conv-live:${me}`, 40, 60))) return;
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    return geoLiveReply(reply, await (await geoLiveActions()).updateConvGeoLive(me, access, mid, point), mid, me);
+  });
+  /** «Остановить трансляцию» — автор; навсегда (Telegram `stopSharingLocation`). */
+  app.post('/conv/:id/messages/:mid/live/stop', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    return geoLiveReply(reply, await (await geoLiveActions()).stopConvGeoLive(me, access, mid), mid, me);
+  });
+  /** «Посмотреть голоса» неанонимного опроса (Telegram `PollVotesAlert`): итоги должны быть открыты смотрящему. */
+  app.get('/conv/:id/messages/:mid/poll/voters', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    const res = await (await pollActions()).convPollVoters(me, access, mid);
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'refused') return reply.code(res.code).send({ error: res.error });
+    return reply.send({ options: res.options });
   });
 
   /**
@@ -779,14 +1190,24 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     const { id: conversationId, mid } = msgParams.parse(req.params);
     const { for: scope } = z.object({ for: z.enum(['me', 'both']) }).parse(req.body ?? {});
+    // G4 (приёмка 13.10): «Уведомить всех участников» окна закрепа группы (Telegram `messages.updatePinnedMessage` с `silent`).
+    // Только добавлением: старый клиент поля не шлёт — всё как раньше.
+    const notify = pinNotifyOf(req.body);
     if (await limited(reply, await rateHit(`conv-pin:${me}`, PIN_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
-    const res = await pinMessage(me, access, mid, scope);
+    if (scope === 'both' && (await fedLinkRefused(reply, access))) return;
+    const groupNotify = access.kind === 'group' && scope === 'both' ? notify : undefined;
+    const res = await pinMessage(me, access, mid, scope, groupNotify === false ? { silent: true } : undefined);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'limit') return reply.code(409).send({ error: 'pin limit', max: PINS_MAX });
     await deliver(res.delivery);
     await deliver(res.service ?? null); // строка «X закрепил(а) сообщение» (`pins2`) — после списка закрепов
+    // G4: группа, галочка стоит и строка закрепа встала — пуш участникам «закрепил(а) «…»» (окно «Уведомить всех участников»).
+    if (groupNotify === true && res.service) {
+      const pinned = res.list.pins.find((x) => x.message.id === mid);
+      pushGroupPack(me, conversationId, access.memberIds, pinPushText(pinned?.message.text ?? ''), false);
+    }
     return res.list;
   });
 
@@ -802,6 +1223,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-pin:${me}`, PIN_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
+    if (scope === 'both' && (await fedLinkRefused(reply, access))) return;
     const res = await unpinMessage(me, access, mid, scope);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     await deliver(res.delivery);
@@ -862,6 +1284,10 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const write = access?.kind === 'group' || access?.saved ? 'ok' : canWriteDm({ member: !!access, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
     if (write === 'not-a-member' || !access) return reply.code(404).send({ error: 'not found' });
     if (write === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
+    if (await messagePrivacyRefused(reply, me, access)) return;
+    if (await fedLinkRefused(reply, access)) return;
+    if (body.attachments.length > 0 && (await fedFilesRefused(reply, access.peerId))) return;
+    if (onceRefs(body.attachments) && (await fedOnceRefused(access.peerId))) return reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });
     if (when.target.whenOnline && !(await whenOnlineAllowed(me, access))) {
       return reply.code(409).send({ error: SCHEDULE_STATUS_PRIVATE });
     }
@@ -957,6 +1383,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const write = access?.kind === 'group' || access?.saved ? 'ok' : canWriteDm({ member: !!access, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
     if (write === 'not-a-member' || !access) return reply.code(404).send({ error: 'not found' });
     if (write === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
+    if (await messagePrivacyRefused(reply, me, access)) return;
+    if (await fedLinkRefused(reply, access)) return;
     const res = await sendScheduledNow(me, access, sid);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'peer-gone') return reply.code(403).send({ error: DM_PEER_GONE_ERROR });
@@ -980,6 +1408,20 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     return view;
   });
 
+  /**
+   * «Кто прочитал» (15.10, `readers1`) — строка «N прочитали» в меню СВОЕГО сообщения в группе (`ConvReaders`; Telegram
+   * `messages.getMessageReadParticipants`). 1:1, «Избранное», чужое сообщение, не участник — 404. Старше 7 суток — `expired`.
+   */
+  app.get('/conv/:id/messages/:mid/readers', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    const view = await readersFor(me, access, mid);
+    if (!view) return reply.code(404).send({ error: 'not found' });
+    return view;
+  });
+
   app.post('/conv/:id/read', async (req, reply) => {
     const me = req.user!.sub;
     const { id: conversationId } = convParams.parse(req.params);
@@ -990,9 +1432,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (!access) return reply.code(404).send({ error: 'not found' });
     const res = await markRead(me, access, key);
     if (res.kind === 'bad-key') return reply.code(400).send({ error: 'bad key' });
-    // Своим старым соединениям (десктоп/APK 0.8.x) — только когда «прочитано» сдвинулось. Собеседнику — только
-    // `conv.change` со сводкой (Р6, ✓✓, `deliver`): старое `read.dm` его 0.8.x принял бы за СВОЁ «прочитано».
-    if (res.delivery) await legacy(publishLegacyRead(me, conversationId, res.lastReadKey));
+    // Собеседнику — `conv.change` со сводкой (Р6, ✓✓, `deliver`).
     await deliver(res.delivery);
     // Р1 (G17): мои телефоны снимают уведомление беседы — тихий пуш «прочитано» (только приложениям с `read1`).
     if (res.delivery) void sendReadSyncPush(me, conversationId, res.lastReadKey).catch(() => {});
@@ -1114,7 +1554,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
   /**
    * «Пожаловаться» на собеседника 1:1 (08.10, #211, С7, G30, Р-10, признак `stranger1`): `{ reason, comment? }` → `{ ok, merged }`.
    * Жалоба уходит держателю инстанса (супер-админу, `GET /admin/dm-reports`) с последними пятью сообщениями собеседника;
-   * плашка после неё гаснет. Жалоба на гостя соседа соседу не уходит: личка между инстансами выключена.
+   * плашка после неё гаснет. Собеседник с другого инстанса (Э2 часть Б) — жалоба ещё и держателю его дома (`fedDmReport`).
    */
   app.post('/conv/:id/report', async (req, reply) => {
     const me = req.user!.sub;
@@ -1128,6 +1568,12 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     if (res.kind === 'not-direct') return reply.code(400).send({ error: 'not a direct conversation' });
     await deliver(res.delivery);
+    // Э2 часть Б: собеседник — человек соседа → жалоба ещё и держателю его дома (`report.create`, best-effort).
+    if (fedDmReport && access.peerId) {
+      await fedDmReport(me, access.conversationId, access.peerId, { reason: body.reason, comment: body.comment ?? null }).catch((err) => {
+        console.warn(`[fed-dm] жалоба соседу не ушла: ${err instanceof Error ? err.message : err}`);
+      });
+    }
     return { ok: true, merged: res.merged };
   });
 
@@ -1140,7 +1586,6 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     if (await limited(reply, await rateHit(`conv-read-all:${me}`, CONV_READ_ALL_MAX, WINDOW_S))) return;
     const res = await markAllRead(me);
-    for (const l of res.legacy) await legacy(publishLegacyRead(me, l.conversationId, l.lastReadKey));
     await deliverMany(res.deliveries);
     // Р1 (G17): снять уведомления прочитанных бесед на моих телефонах (ключ не нужен — прочитано всё).
     for (const d of res.deliveries) void sendReadSyncPush(me, d.conversationId, null).catch(() => {});
@@ -1160,8 +1605,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-edit:${me}`, EDIT_MAX, WINDOW_S))) return;
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
+    if (body.for === 'both' && (await fedLinkRefused(reply, access))) return;
     for (const res of await clearHistory(me, access, body.for)) {
-      await legacy(publishLegacyDeleteMany(me, access.peerId, conversationId, body.for, res.changed, res.lastMessageAt));
       await deliverMany(res.deliveries);
     }
     return reply.code(204).send();
@@ -1190,7 +1635,6 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (hidden.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     await deliver(hidden.delivery);
     for (const res of await clearHistory(me, access, body.for, hidden.upToKey)) {
-      await legacy(publishLegacyDeleteMany(me, access.peerId, conversationId, body.for, res.changed, res.lastMessageAt));
       await deliverMany(res.deliveries);
     }
     return reply.code(204).send();
@@ -1208,4 +1652,17 @@ async function whenOnlineAllowed(me: string, access: { peerId: string | null; ki
   // «Избранное» (`saved1`): «когда будет в сети» себе не бывает (Telegram: пункта нет у «Saved Messages»).
   if (access.saved) return false;
   return !access.peerId || (await canScheduleUntilOnline(me, access.peerId));
+}
+
+/** G4: поле `notify` тела закрепа — только булево; нет поля или мусор — `undefined` (как старый клиент). */
+function pinNotifyOf(body: unknown): boolean | undefined {
+  const v = body && typeof body === 'object' ? (body as { notify?: unknown }).notify : undefined;
+  return typeof v === 'boolean' ? v : undefined;
+}
+
+/** G4: тело пуша закрепа группы — «закрепил(а) «текст»» (Telegram Android `NotificationMessageGroupPinned…`), без текста — «закрепил(а) сообщение». */
+function pinPushText(content: string): string {
+  const one = content.replace(/\s+/g, ' ').trim();
+  if (!one) return 'закрепил(а) сообщение';
+  return `закрепил(а) «${one.length > 60 ? `${one.slice(0, 60)}…` : one}»`;
 }

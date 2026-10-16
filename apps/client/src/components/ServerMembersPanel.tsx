@@ -1,16 +1,15 @@
 import type { ServerMemberInfo } from '@gusvoice/shared';
-import { useState } from 'react';
 import { isMobile } from '../hotkeys';
+import { usePhoneUi } from '../phoneLayout';
 import { customStatusVisible, effectiveDot } from '../status';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
-import { dmBlockText } from '../dmRules';
+import { dmBlockText, serverFedDm } from '../dmRules';
 import { Avatar } from './Avatar';
 import { CrownMark, crownGlow, useCrownId } from './Crown';
 import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
 import { GuestMark } from './GuestMark';
 import { Icon } from './Icon';
-import { MemberProfileSheet } from './MemberProfileSheet';
 import { StatusDot } from './StatusDot';
 import { useUserMenu } from './UserContextMenu';
 
@@ -22,6 +21,8 @@ export function ServerMembersPanel() {
   const userActivities = useStore((s) => s.userActivities);
   const me = useStore((s) => s.user);
   const openDmWith = useStore((s) => s.openDmWith);
+  // Э1 (`fedm1`): гостю с другого инстанса — «Написать» через его дом.
+  const fedDm = useStore((s) => serverFedDm(s.serverFeatures));
   const setMobileMembersOpen = useStore((s) => s.setMobileMembersOpen);
   const { open: openMenu, menu } = useUserMenu();
   // The SHARED store roster (store.loadMembers fills it on server open/refresh) — NOT a private
@@ -29,9 +30,10 @@ export function ServerMembersPanel() {
   // store.applyUserProfile patches s.members, and this panel re-renders with it. The old local
   // useState+listMembers copy was the "right column only updates after a re-join" bug.
   const members = useStore((s) => s.members);
-  // Mobile: tapping a member opens their profile bottom-sheet instead of jumping straight to a DM.
-  const [sheetMember, setSheetMember] = useState<ServerMemberInfo | null>(null);
   const mobile = isMobile();
+  // Телефон: нажатие на участника открывает полноэкранный профиль (#218, `PhoneProfile.tsx`; бывший лист `MemberProfileSheet`
+  // для телефона больше не открывается) вместо прямого перехода в ЛС. Громкость, роли, модерация — внутри экрана.
+  const phoneUi = usePhoneUi();
   const serverId = bootstrap?.server.id;
   // ⚠️ ДО раннего выхода ниже: хук нельзя звать после условного `return`. `useCrownId` сам терпит
   // `undefined`, поэтому порядок безопасен.
@@ -59,7 +61,7 @@ export function ServerMembersPanel() {
    * человек получал тостом код `federation.dm_unavailable`. Отвечаем сразу и словами (§5.8).
    */
   const openDm = (m: ServerMemberInfo) => {
-    const blocked = dmBlockText(me?.homeInstance, m.user.homeInstance);
+    const blocked = dmBlockText(me?.homeInstance, m.user.homeInstance, fedDm);
     if (blocked) {
       toast('info', blocked);
       return;
@@ -84,13 +86,13 @@ export function ServerMembersPanel() {
         title={
           mobile || self
             ? undefined
-            : dmBlockText(me?.homeInstance, m.user.homeInstance)
+            : dmBlockText(me?.homeInstance, m.user.homeInstance, fedDm)
               ? 'ПКМ — меню'
               : 'ЛКМ — написать, ПКМ — меню'
         }
         onClick={
-          mobile
-            ? () => setSheetMember(m)
+          mobile || phoneUi
+            ? (e) => openMenu(e, { userId: m.user.id, name, avatarUrl: m.user.avatarUrl, username: m.user.username }, 'profile')
             : self
               ? undefined
               : () => openDm(m)
@@ -157,7 +159,6 @@ export function ServerMembersPanel() {
         </>
       )}
       {menu}
-      {sheetMember && <MemberProfileSheet member={sheetMember} onClose={() => setSheetMember(null)} />}
     </div>
   );
 }

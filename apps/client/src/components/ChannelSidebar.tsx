@@ -32,6 +32,7 @@ import { useStreamPreview } from './StreamPreviewTip';
 import { useUserMenu } from './UserContextMenu';
 import { BottomSheet, SheetRow } from './BottomSheet';
 import { isMobile } from '../hotkeys';
+import { usePhoneLayout } from '../phoneLayout';
 import type { DropHint } from '../channelSidebarRules';
 import { computeReorder, dropHintForRow, rowClickOpensCard } from '../channelSidebarRules';
 import { economyVisible } from '../economyVisible';
@@ -48,12 +49,15 @@ export function ChannelSidebar() {
   const guestHomeOf = useGuestHome();
   const currentChannelId = useStore((s) => s.currentChannelId);
   const mobilePane = useStore((s) => s.mobilePane);
+  const setServerListOpen = useStore((s) => s.setServerListOpen);
+  // Телефонная раскладка (≤ 760 px) — и в приложении, и в браузере: шапка из «+» и «⋯», а не ряд из шести значков ПК (#218).
+  const phoneLayout = usePhoneLayout();
   /* Значок непрочитанного прячется у канала, который ВИДНО, а не у «текущего»: на телефоне список
      и лента — разные экраны (правило целиком — `channelRules.isFeedOnScreen`). Подсветка строки
      остаётся по `currentChannelId`: человеку полезно видеть, куда он вернётся. */
   const shownChannelId =
     currentChannelId &&
-    isFeedOnScreen({ id: currentChannelId, currentId: currentChannelId, mobile: isMobile(), mobilePane })
+    isFeedOnScreen({ id: currentChannelId, currentId: currentChannelId, mobile: isMobile() || phoneLayout, mobilePane })
       ? currentChannelId
       : null;
   const openChannel = useStore((s) => s.openChannel);
@@ -570,15 +574,22 @@ export function ChannelSidebar() {
   return (
     <div className="channels">
       <div className="server-head">
+        {/* Телефон (#218): «Назад» к списку серверов — как стрелка в шапке беседы; системная «назад» делает то же (`androidBack.stepBack`). */}
+        {phoneLayout && (
+          <button type="button" className="head-icon srv-back" title="К списку серверов" aria-label="К списку серверов" onClick={() => setServerListOpen(true)}>
+            <Icon name="chevron-left" size={24} />
+          </button>
+        )}
         <strong>{bootstrap.server.name}</strong>
         <CoinChip serverId={bootstrap.server.id} />
         {/* Mobile (design-step8 A): a single primary + (create) and a ⋯ that opens the "More" sheet with
             the rare actions — no cramped 6-icon row. Desktop keeps the full compact row below. */}
-        {isMobile() ? (
+        {isMobile() || phoneLayout ? (
           <div className="head-actions mobile">
+            {/* «+» — только тем, у кого есть право MANAGE_CHANNELS (`canManage`); размер — как у «⋯» рядом (#218: было 54 px и мёдом). */}
             {canManage && (
-              <button className="head-icon primary" title="Новый канал" onClick={() => setShowCreate(true)}>
-                <Icon name="plus" size={24} />
+              <button className="head-icon" title="Новый канал" aria-label="Новый канал" onClick={() => setShowCreate(true)}>
+                <Icon name="plus" size={22} />
               </button>
             )}
             <button className="head-icon" title="Ещё" onClick={() => setShowMore(true)}>

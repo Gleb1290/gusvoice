@@ -2,9 +2,33 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { chipFaces, copyMediaLabel, doubleTapStep, editDecision, fieldEscape, insertAtCaret, menuFootLines, pressByTouch, quickReactOp, timeTooltip } from './messagePaneRules';
+import { bubbleTimeLabel, chipFaces, copyMediaLabel, doubleTapStep, editDecision, fieldEscape, insertAtCaret, menuFootLines, pressByTouch, quickReactOp, timeTooltip } from './messagePaneRules';
 import { describe, it } from 'node:test';
 import * as wheelRules from './messagePaneRules';
+
+function viaCaptionContract(api: typeof wheelRules) {
+  const via = { instance: 'opaque-id', confirmed: false };
+  const names = { self: '  Дом  ', peer: '  Сосед  ' };
+  assert.equal(api.viaCaption(via, true, names), 'через «Сосед», не подтверждено', 'свой обход назван инстансом собеседника');
+  assert.equal(api.viaCaption(via, false, names), 'через «Дом», не подтверждено', 'чужой обход назван нашим инстансом');
+  for (const mine of [false, true]) {
+    assert.equal(api.viaCaption(undefined, mine, names), null);
+    assert.equal(api.viaCaption({ ...via, confirmed: true }, mine, names), null, 'подтверждённое сообщение без подписи');
+    for (const missing of [undefined, null, {}, { self: '  ', peer: '' }]) assert.equal(api.viaCaption(via, mine, missing), 'через «другой инстанс», не подтверждено');
+  }
+  assert.equal(api.bubbleTimeLabel('12:00', { createdAt: '2026-10-12T09:00:00Z' }, api.viaCaption(via, true, names)), '12:00 · через «Сосед», не подтверждено');
+}
+it('R200 viaCaption различает свой и чужой обход, исчезает после подтверждения и не печатает служебный id', () => viaCaptionContract(wheelRules));
+for (const [name, anchor, replacement, target] of [
+  ['перепутаны дома', 'mine ? names?.peer : names?.self', 'mine ? names?.self : names?.peer', 'свой обход назван'],
+  ['подтверждение игнорируется', 'if (!via || via.confirmed) return null;', 'if (!via) return null;', 'подтверждённое сообщение без подписи'],
+] as const) it(`R200 мутант подписи «${name}» ловится тем же whole-module контрактом`, () => {
+  const source = readFileSync(new URL('./messagePaneRules.ts', import.meta.url), 'utf8');
+  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь подписи обхода');
+  viaCaptionContract(wheelRules); viaCaptionContract(mutatedPaneRules(anchor, anchor));
+  assert.throws(() => viaCaptionContract(mutatedPaneRules(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target));
+});
 
 it('канал показывает аватарки только при полной сумме до трёх, ЛС проверяет каждый чип отдельно', () => {
   // Порог относится ко всему сообщению: две группы по два человека не должны смешивать лица и числа.
@@ -61,6 +85,19 @@ it('тачпад отвечает только при явной горизон�
   check(wheelRules);
   for (const [a, b] of [['dx > 0 && ', ''], ['ay * 1.5', 'ay'], ['deltaMode !== 0 || shift', 'false'], ['ax < 3 && ay < 3', 'ax < 10 && ay < 10']])
     assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+});
+
+it('R190 пузырь сохраняет ЧЧ:ММ отправки и помечает позднюю доставку только при deliveredAt', () => {
+  // Класс ошибки: время прихода подменяет время отправки или обычное сообщение получает ложную пометку опоздания.
+  const createdAt = '2026-10-12T10:00:00.000Z';
+  const deliveredAt = '2026-10-12T10:07:00.000Z';
+  assert.equal(bubbleTimeLabel('13:00', { createdAt }), '13:00');
+  assert.equal(bubbleTimeLabel('13:00', { createdAt, deliveredAt }), 'отправлено в 13:00, доставлено позже');
+  assert.equal(bubbleTimeLabel('13:00', { createdAt, deliveredAt: 'invalid' }), '13:00');
+  const tooltip = timeTooltip({ createdAt, deliveredAt });
+  assert.equal(tooltip.split('\n').length, 2);
+  assert.match(tooltip.split('\n')[1]!, /^Доставлено:/);
+  assert.equal(timeTooltip({ createdAt }).split('\n').length, 1);
 });
 
 it('путь свайпа растёт только влево, возврат уменьшает до нуля и большой шаг обрезается', () => {

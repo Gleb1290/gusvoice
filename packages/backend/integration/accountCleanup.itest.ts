@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import { eq, sql } from 'drizzle-orm';
 import { anonymizeAccountRows } from '../src/accountRows.js';
-import { dmMessages, messages, users } from '../src/db/schema.js';
+import { conversationMessages, messages, users } from '../src/db/schema.js';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
 let t: TestDb;
@@ -27,8 +30,6 @@ test('транзакционное обезличивание сохраняет
     INSERT INTO channels (id, server_id, category_id, name, type) VALUES ('ch', 's', 'cat', 'chat', 'text');
     INSERT INTO server_members (server_id, user_id) VALUES ('s', 'victim');
     INSERT INTO messages (id, channel_id, author_id, content) VALUES ('m', 'ch', 'victim', 'kept channel history');
-    INSERT INTO dm_channels (id, user_a, user_b) VALUES ('dm', 'keeper', 'victim');
-    INSERT INTO dm_messages (id, dm_channel_id, author_id, content) VALUES ('dm-m', 'dm', 'victim', 'kept dm history');
     INSERT INTO conversations (id, kind, direct_key, created_by) VALUES ('conv', 'direct', 'keeper:victim', 'victim');
     INSERT INTO conversation_members (conversation_id, user_id) VALUES ('conv', 'keeper'), ('conv', 'victim');
     INSERT INTO conversation_messages (id, conversation_id, author_id, sort_key, content)
@@ -66,7 +67,7 @@ test('транзакционное обезличивание сохраняет
   assert.equal((await t.raw.query(`SELECT 1 FROM user_contacts WHERE owner_id='victim' OR contact_id='victim'`)).rows.length, 0,
     'удаление аккаунта стирает и его личный список, и чужие подписи на него');
   assert.equal((await t.db.select().from(messages)).length, 1);
-  assert.equal((await t.db.select().from(dmMessages)).length, 1);
+  assert.equal((await t.db.select().from(conversationMessages)).length, 1);
   assert.deepEqual((await t.raw.query(`SELECT id FROM conversation_messages`)).rows, [{ id: 'conv-m' }]);
   assert.deepEqual((await t.raw.query(`SELECT user_id FROM conversation_members WHERE user_id = 'victim'`)).rows,
     [{ user_id: 'victim' }]);
@@ -96,8 +97,7 @@ test('purgeUnverifiedUsers удаляет только старый пустой
       ('anonymized', 'deleted_anonymized', false, 'Deleted', 'hash', now() - interval '20 days', now() - interval '10 days'),
       ('owner-footprint', 'OwnerFootprint', false, 'Owner', 'hash', now() - interval '20 days', null),
       ('message-footprint', 'MessageFootprint', false, 'Message', 'hash', now() - interval '20 days', null),
-      ('dm-message-footprint', 'DmMessageFootprint', false, 'DM Message', 'hash', now() - interval '20 days', null),
-      ('dm-pair-footprint', 'DmPairFootprint', false, 'DM Pair', 'hash', now() - interval '20 days', null),
+      ('conv-message-footprint', 'ConvMessageFootprint', false, 'Conv Message', 'hash', now() - interval '20 days', null),
       ('conv-member-footprint', 'ConvMemberFootprint', false, 'Conv Member', 'hash', now() - interval '20 days', null),
       ('member-footprint', 'MemberFootprint', false, 'Member', 'hash', now() - interval '20 days', null),
       ('role-footprint', 'RoleFootprint', false, 'Role', 'hash', now() - interval '20 days', null);
@@ -108,12 +108,11 @@ test('purgeUnverifiedUsers удаляет только старый пустой
     INSERT INTO categories (id, server_id, name) VALUES ('cat', 'main', 'Category');
     INSERT INTO channels (id, server_id, category_id, name, type) VALUES ('ch', 'main', 'cat', 'chat', 'text');
     INSERT INTO messages (id, channel_id, author_id, content) VALUES ('m', 'ch', 'message-footprint', 'history');
-    INSERT INTO dm_channels (id, user_a, user_b) VALUES
-      ('dm-author', 'dm-pair-footprint', 'keeper'),
-      ('dm-third', 'keeper', 'verified-old');
-    INSERT INTO dm_messages (id, dm_channel_id, author_id, content)
-      VALUES ('dm-m', 'dm-third', 'dm-message-footprint', 'history');
-    INSERT INTO conversations (id, kind, direct_key) VALUES ('empty-conv', 'direct', 'conv-member-footprint:keeper');
+    INSERT INTO conversations (id, kind, direct_key) VALUES
+      ('empty-conv', 'direct', 'conv-member-footprint:keeper'),
+      ('history-conv', 'direct', 'keeper:verified-old');
+    INSERT INTO conversation_messages (id, conversation_id, author_id, sort_key, content)
+      VALUES ('conv-m', 'history-conv', 'conv-message-footprint', 1, 'history');
     INSERT INTO conversation_members (conversation_id, user_id) VALUES
       ('empty-conv', 'conv-member-footprint'), ('empty-conv', 'keeper');
     INSERT INTO server_members (server_id, user_id) VALUES ('main', 'member-footprint');
@@ -131,14 +130,72 @@ test('purgeUnverifiedUsers удаляет только старый пустой
     'anonymized',
     'owner-footprint',
     'message-footprint',
-    'dm-message-footprint',
-    'dm-pair-footprint',
+    'conv-message-footprint',
     'conv-member-footprint',
     'member-footprint',
     'role-footprint',
   ]) assert.equal(remaining.rows.some((r) => r.id === id), true, id);
   const verification = await t.raw.query(`SELECT 1 FROM email_verifications WHERE user_id = 'eligible'`);
   assert.equal(verification.rows.length, 0);
+});
+
+async function checkFrozenLegacyFootprints(purge: () => Promise<number>): Promise<void> {
+  await truncateAll(t.raw);
+  await t.raw.exec(`
+    INSERT INTO users (id, username, verified, display_name, password_hash, created_at) VALUES
+      ('keeper', 'Keeper', true, 'Keeper', 'hash', now() - interval '20 days'),
+      ('legacy-author', 'LegacyAuthor', false, 'Legacy Author', 'hash', now() - interval '20 days'),
+      ('legacy-pair', 'LegacyPair', false, 'Legacy Pair', 'hash', now() - interval '20 days'),
+      ('modern-author', 'ModernAuthor', false, 'Modern Author', 'hash', now() - interval '20 days'),
+      ('modern-member', 'ModernMember', false, 'Modern Member', 'hash', now() - interval '20 days');
+    INSERT INTO conversations (id, kind, direct_key) VALUES ('modern', 'direct', 'keeper:modern-member');
+    INSERT INTO conversation_members (conversation_id, user_id) VALUES ('modern', 'keeper'), ('modern', 'modern-member');
+    INSERT INTO conversation_messages (id, conversation_id, author_id, sort_key, content)
+      VALUES ('modern-message', 'modern', 'modern-author', 1, 'живая история');
+  `);
+  // Авторство и участие изолированы: одно не может скрыть отсутствие проверки другого.
+  assert.equal(await purge(), 2, 'оба пустых аккаунта удаляются после DROP старых таблиц');
+  assert.deepEqual((await t.raw.query(`SELECT id FROM users ORDER BY id`)).rows,
+    [{ id: 'keeper' }, { id: 'modern-author' }, { id: 'modern-member' }]);
+  assert.deepEqual((await t.raw.query(`SELECT id FROM conversation_messages`)).rows, [{ id: 'modern-message' }]);
+  assert.equal(await purge(), 0, 'повторная уборка сохраняет живую беседу');
+}
+
+async function compileCleanup(mutant: boolean): Promise<() => Promise<number>> {
+  const source = readFileSync(new URL('../src/cleanup.ts', import.meta.url), 'utf8');
+  const anchor = 'sql`${users.id} NOT IN (SELECT author_id FROM conversation_messages)`,';
+  assert.equal(source.split(anchor).length, 2, 'якорь живой защиты авторства уникален');
+  const changed = mutant ? source.replace(anchor,
+    anchor + '\n        sql`${users.id} NOT IN (SELECT author_id FROM dm_messages)`,') : source;
+  if (mutant) assert.notEqual(changed, source);
+  const unused = async () => { assert.fail('этот сценарий не должен запускать другие уборщики'); };
+  const deps: Record<string, unknown> = {
+    'drizzle-orm': await import('drizzle-orm'),
+    './db/index.js': await import('../src/db/index.js'),
+    './db/schema.js': await import('../src/db/schema.js'),
+    './env.js': await import('../src/env.js'),
+    './convJournal.js': { pruneJournal: unused },
+    './attachments.js': { purgeAttachments: unused },
+    './bigUploads.js': { purgeStaleUploads: unused },
+  };
+  const module = { exports: {} as { purgeUnverifiedUsers: () => Promise<number> } };
+  runInNewContext(ts.transpileModule(changed, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { module, exports: module.exports, Date,
+    require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `неожиданная зависимость ${id}`); return deps[id]; },
+  });
+  return module.exports.purgeUnverifiedUsers;
+}
+
+test('R140: после DROP старых ЛС пустые аккаунты удаляются, авторство и участие в беседе защищают', async () => {
+  const { purgeUnverifiedUsers } = await import('../src/cleanup.js');
+  await checkFrozenLegacyFootprints(purgeUnverifiedUsers);
+});
+
+test('R140 контрфакт: возврат NOT IN dm_messages ломает уборку после DROP', async () => {
+  await checkFrozenLegacyFootprints(await compileCleanup(false));
+  const mutant = await compileCleanup(true);
+  await assert.rejects(() => checkFrozenLegacyFootprints(mutant), /dm_messages/);
 });
 
 test('уборка журнала поднимает min_pts до последней удалённой строки', async () => {

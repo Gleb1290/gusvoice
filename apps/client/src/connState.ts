@@ -46,11 +46,28 @@ let state: ConnState = 'online';
 const subs = new Set<() => void>();
 let watching = false;
 
+/** Слушатели смены состояния связи вне React (Э5, `fedVia.ts`: «мой дом лежит» — проба начинается, когда шлюз оборвался). */
+const listeners = new Set<(s: ConnState) => void>();
+
+/** Подписка на смену состояния связи (не хук). Возвращает отписку. */
+export function onConnChange(fn: (s: ConnState) => void): () => void {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
+
+/** Шлюз сейчас на связи (был `ready` и не оборвался с тех пор). */
+export function gatewayLiveNow(): boolean {
+  return wasLive && !lost;
+}
+
 function update(): void {
   const next = connStateOf({ deviceOffline, gatewayLost: lost });
   if (next === state) return;
   state = next;
   for (const f of subs) f();
+  for (const f of listeners) f(next);
 }
 
 /** Шлюз сказал `ready` (`true`) или оборвался его сокет (`false`). */

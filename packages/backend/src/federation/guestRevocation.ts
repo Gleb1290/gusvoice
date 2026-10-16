@@ -87,7 +87,15 @@ async function announce(input: {
    * И по индексу членств, и по поручительствам (F-26): у хоста, которому мы ручались за человека,
    * гостевая сессия могла остаться и без членства (сессия — это личность, не членство, §5.6).
    */
-  const hosts = [...new Set([...(await hostsOf(input.userId)), ...(await grantHostsOf(input.userId))])];
+  const hosts = [
+    ...new Set([
+      ...(await hostsOf(input.userId)),
+      ...(await grantHostsOf(input.userId)),
+      // Э2 часть Б (#141, §1.6, Ф26): удалённый аккаунт — и инстансам собеседников по ЛС (у них теневая строка без гостевания).
+      // Журнал отзывов надёжнее события каталога: тот догоняет только дельтой кеша, а теневую строку — лишь событием.
+      ...(input.kind === 'revoked' ? await dmHostsOf(input.userId) : []),
+    ]),
+  ];
 
   /**
    * 🔴 Строка журнала — на КАЖДОГО хоста, с его адресом (аудит run-1 20.09, F-26). Раньше запись
@@ -119,6 +127,25 @@ async function announce(input: {
     }
   }
   return hosts;
+}
+
+/** Инстансы собеседников человека по ЛС 1:1 (теневые участники его бесед). */
+async function dmHostsOf(userId: string): Promise<string[]> {
+  const res = await db.execute(sql`
+    SELECT DISTINCT u.home_instance_id AS home FROM conversation_members me
+    JOIN conversation_members o ON o.conversation_id = me.conversation_id AND o.user_id <> me.user_id
+    JOIN users u ON u.id = o.user_id
+    WHERE me.user_id = ${userId} AND u.home_instance_id IS NOT NULL`);
+  return (res.rows as { home: string }[]).map((r) => r.home);
+}
+
+/**
+ * Э2 часть Б: «аккаунта дома нет» для теневой строки собеседника по ЛС — обезличить (подключает `index.ts`:
+ * `guestProfile.anonymizeShadow`). Здесь не импортом: модуль профиля сам зовёт `applyRevocation`.
+ */
+let shadowGone: ((shadowId: string) => Promise<void>) | null = null;
+export function configureShadowGone(fn: ((shadowId: string) => Promise<void>) | null): void {
+  shadowGone = fn;
 }
 
 /**
@@ -185,9 +212,10 @@ export async function applyRevocation(input: {
   if (input.account) {
     /**
      * Аккаунта дома нет (§5.6.2). Строку НЕ удаляем никогда: на неё ссылаются сообщения, и `DELETE`
-     * унёс бы каскадом всю переписку человека на наших серверах. Обезличивание делает вызывающий
-     * (`anonymizeAccount`) — здесь только гасим сессии и снимаем членства.
+     * унёс бы каскадом всю переписку человека на наших серверах. Обезличивание — `shadowGone` (Э2 часть Б: беседы ЛС
+     * остаются, имя — «Удалённый пользователь»; уже обезличенную строку не трогает); здесь — гасим сессии и снимаем членства.
      */
+    if (shadow.deletedAt === null && shadowGone) await shadowGone(shadow.id);
     await db
       .update(serverMembers)
       .set({ state: FED_MEMBERSHIP_STATES.removed })

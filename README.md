@@ -1,53 +1,112 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-dark.svg">
+  <img alt="GusVoice" src="docs/readme/banner-light.svg" width="100%">
+</picture>
+
 # 🪿 GusVoice
 
 **English** · [Русский](README.ru.md)
 
-**Self-hosted voice, video, screen-share & text chat for you and your friends.**
-Think Discord / TeamSpeak — but it runs on *your* server, on *one* `docker compose`, with every secret generated for you.
+**Your own Discord — voice, screen sharing, servers and Telegram-grade direct messages — on your own server.**
 
-[![Latest release](https://img.shields.io/github/v/release/Gleb1290/gusvoice?label=release&color=4f46e5)](https://github.com/Gleb1290/gusvoice/releases/latest)
-![Platforms](https://img.shields.io/badge/clients-web%20%C2%B7%20windows%20%C2%B7%20android-informational)
-![No tracking](https://img.shields.io/badge/telemetry-none-success)
-![Self-hosted](https://img.shields.io/badge/self--hosted-one%20compose-blue)
+[![Latest release](https://img.shields.io/github/v/release/Gleb1290/gusvoice?label=release&color=f2b33d)](https://github.com/Gleb1290/gusvoice/releases/latest)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
+![Clients](https://img.shields.io/badge/clients-web%20%C2%B7%20windows%20%C2%B7%20android-informational)
+![Self-hosted](https://img.shields.io/badge/self--hosted-one%20docker%20compose-2c2a33)
+![No telemetry](https://img.shields.io/badge/telemetry-none-success)
 [![Boosty](https://img.shields.io/badge/Boosty-support-F15F2C?logo=boosty&logoColor=white)](https://boosty.to/glebbuster)
+
+[Features](#features) · [Quick start](#quick-start) · [Architecture](#architecture) · [Clients](#clients) · [Build from source](#build-from-source) · [Contributing](#contributing)
 
 </div>
 
----
+<p align="center">
+  <img src="docs/readme/desktop-voice.png" alt="A voice channel with a screen share and five participants" width="100%">
+</p>
 
-GusVoice gives a group of friends their own private place to talk: **servers → categories → text & voice channels**, Discord-style **roles & permissions**, DMs, reactions, custom sounds, in-app **noise suppression**, 2FA, and **background push** on Android with **no Google/FCM** dependency. All audio and video is relayed by a self-hosted **[LiveKit](https://livekit.io) SFU** — there is no peer-to-peer path, so nobody's IP is exposed to the rest of the room.
+GusVoice gives a group of friends, a community or a small team a private place to talk: **servers → categories → text and
+voice channels** with Discord-style roles, plus **direct messages that work like Telegram** — voice notes, round videos,
+polls, calls, folders. Every byte of audio and video goes through a self-hosted **[LiveKit](https://livekit.io) SFU**, so there
+is no peer-to-peer path and nobody's IP address is shown to the rest of the room. The whole stack comes up from **one
+`docker compose`**, the installer generates every secret, and the web, Windows and Android apps all talk to *your* server.
 
-The whole stack — `postgres · redis · livekit · backend · presence · web client`, plus bundled **Caddy** (auto-HTTPS), **versitygw** (S3 media storage) and **ntfy** (push) — comes up from a single compose file.
+## Screenshots
 
-## Highlights
+<table>
+  <tr>
+    <td width="50%"><img src="docs/readme/desktop-server.png" alt="Server with categories, text and voice channels"><br><sub>Servers, channels and a live list of who is in voice</sub></td>
+    <td width="50%"><img src="docs/readme/desktop-dm.png" alt="Direct messages: replies, reactions, a voice note, a location"><br><sub>Direct messages: replies, reactions, voice notes, location</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/readme/desktop-group-light.png" alt="A group chat with a poll, light theme"><br><sub>Groups and polls — light theme</sub></td>
+    <td width="50%"><img src="docs/readme/desktop-settings.png" alt="Voice settings with noise suppression options"><br><sub>Noise suppression: system, RNNoise or DeepFilter</sub></td>
+  </tr>
+</table>
 
-- 🌐 **Federation** *(new in 0.8)* — link your instance with a friend's. Invite people from the other instance to your servers with a link: they join with **their own account**, no new sign-up, and every server they are on — at home and as a guest — sits in one sidebar with live unread badges. Both owners approve the link, each instance has its own signing key, and an owner can close a server to guests or ban a person from the whole instance at any time. **Off by default** — see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
-- 🎙️ **Voice, video & screen-share** with per-channel quality/FPS controls and a live sidebar of who's talking. On Windows the screen share is native and hardware-encoded (NVENC), viewers pick the quality they receive, and the app stops redrawing while a game covers it — it stays out of your game's way.
-- 💬 **Text chat** — reactions, replies, @mentions (including `@everyone`), unread/mention badges, file attachments, message search. Your message shows up instantly, and read state clears on all your devices at once.
-- 🪙 **Fun extras** — a per-server coin economy with a shop, a soundboard, and a "Playing …" status.
-- 🛡️ **Roles & permissions** with per-channel and per-category overrides, server-side voice moderation, and an audit log.
-- 📱 **One app, your server** — web, auto-updating **Windows** desktop, and **Android**. You type your server's address at login; switch servers anytime.
-- 🔔 **Background notifications** for DMs/@mentions on Android via UnifiedPush — no Google Play Services required.
-- 🔒 **Secure by default** — every secret is generated at install, fail-closed config, rate-limited auth, optional 2FA, anti-bot signup guards.
-- 📦 **Batteries included** — bundled TLS, object storage and push gateway. Nothing external to sign up for.
+<p align="center">
+  <img src="docs/readme/phone-dms.png" alt="Android: chat list" width="24%">
+  <img src="docs/readme/phone-chat.png" alt="Android: a conversation" width="24%">
+  <img src="docs/readme/phone-profile.png" alt="Android: a contact's profile" width="24%">
+  <img src="docs/readme/phone-group-light.png" alt="Android: group with a poll, light theme" width="24%">
+</p>
 
-## Requirements
+## Features
 
-- A **Linux host** (a small VPS or a home box) with **~2 GB RAM** free.
-- A **domain** you control (GusVoice uses six sub-domains: `voice` · `api` · `presence` · `lk` · `media` · `ntfy`).
-- The ability to **open a few ports** (`80`, `443`, and LiveKit media `7881/tcp` + `7882/udp`).
-- **Docker** — the installer offers to set it up for you if it's missing.
+**🎙️ Voice and screen sharing**
+- Voice channels with a live sidebar of who is talking; per-person volume, push-to-talk, global mute/deafen hotkeys on desktop.
+- Noise suppression — system, **RNNoise** or **DeepFilter** — plus echo cancellation and auto-gain.
+- Screen sharing in native resolution up to 4K, 15/30/60 fps, "Sharpness" or "Smoothness"; viewers pick the quality they receive.
+- On Windows the share is native and hardware-encoded (NVENC), carries application audio, and the app stops redrawing while a game covers it.
+- All media is relayed by the server — no P2P, no exposed IPs.
 
-## Install
+**🏠 Servers, channels, roles**
+- Servers → categories → text and voice channels; invite links with expiry and use limits.
+- Discord-style roles and permissions with per-category and per-channel overrides; voice moderation; audit log.
+- Replies, reactions, @mentions (including `@everyone`), pins, attachments, search, custom emoji and per-server sounds.
+- Optional extras: a per-server coin economy with a shop and soundboard, "Playing …" status.
+
+**💬 Direct messages, the Telegram way**
+- Bubbles, albums of up to 10 photos and videos, replies to a fragment, forwarding to several chats, pinned messages and chats.
+- Voice notes up to 30 minutes (1× / 1.5× / 2×, "listen once") and round video messages.
+- One-to-one calls with voice, video and screen sharing; on Android an incoming call opens full screen even when locked.
+- Groups, Saved Messages, polls and quizzes, location and live location, contacts, files up to 512 MB that resume after a drop.
+- Folders and archive, drafts on every device, "send later" and "send when online", silent send, mute for any period.
+- Instant start from the on-device cache; unsent messages go out by themselves when the network is back.
+- Privacy: who sees your last-seen time, who may message and call you, a stranger bar with Report and Block.
+
+**🌐 Federation** *(off by default)*
+- Link your server with a friend's: both admins approve, each instance signs its requests with its own key.
+- People from the other server join yours with **their own account** via an invite link; all their servers sit in one sidebar.
+- Direct messages between servers (`@name@server`), including groups, calls and files; a conversation keeps going if one side is down.
+
+**📱 Clients**
+- Web app, auto-updating **Windows** desktop app (tray, global hotkeys, notifications in the style of Telegram Desktop) and **Android**.
+- You type your server's address at sign-in and can switch between servers at any time.
+
+**🗺️ Own map** — locations in DMs are drawn from an OpenStreetMap extract on *your* server; clients never call third-party map services. See [docs/maps.md](docs/maps.md).
+
+**🔔 Push without Google** — DMs and mentions wake the Android app through [UnifiedPush](https://unifiedpush.org) and the bundled [ntfy](https://ntfy.sh) gateway — no Firebase, no Google Play Services.
+
+**🔄 One-click updates** — the admin panel tells you when a new version is out; the **Update** button backs up the database and updates the server — no console, no SSH. The Windows and Android apps update themselves.
+
+**🔒 Secure by default** — secrets generated at install, fail-closed config, rate-limited sign-in, optional 2FA, sign-up policy (open, approval or invite-only).
+
+## Quick start
+
+You need:
+
+- a **Linux host** — a small VPS is fine (2 vCPU / 4 GB RAM / 20 GB disk to start);
+- a **domain** you control — GusVoice uses six sub-domains: `voice` · `api` · `presence` · `lk` · `media` · `ntfy`;
+- open ports **80** and **443**, plus LiveKit media **7881/tcp** and **7882/udp**;
+- **Docker** — the installer offers to install it if it's missing.
 
 ```bash
-# one-liner — fetches everything, asks a few questions, brings the stack up
 curl -fsSL https://raw.githubusercontent.com/Gleb1290/gusvoice/main/install.sh | bash
 ```
 
-or, if you'd rather clone first and read before running:
+Prefer to read before running?
 
 ```bash
 git clone https://github.com/Gleb1290/gusvoice.git
@@ -55,77 +114,88 @@ cd gusvoice
 ./install.sh
 ```
 
-The installer **generates every secret**, writes `.env`, and brings the stack up behind the bundled Caddy with automatic Let's Encrypt HTTPS (or stays behind a reverse proxy you already run — it asks). It finishes by printing the exact **DNS records** and **port forwards** to set up. Full walkthrough — including connecting the desktop & Android clients — in **[docs/SELF-HOSTING.md](docs/SELF-HOSTING.md)**.
+The installer asks a few questions, **generates every secret**, writes `.env` and brings the stack up behind the bundled
+Caddy with automatic Let's Encrypt HTTPS — or behind the reverse proxy you already run (Nginx Proxy Manager, nginx, Traefik;
+it asks). It finishes by printing the exact **DNS records** and **port forwards** to set up.
 
-When it's done, open `https://voice.<your-domain>` and enter the **setup code** it printed: a short web wizard creates your admin account and sets the name, e-mail, who may register and a first server with an invite link.
+Then open `https://voice.<your-domain>` and enter the **setup code** the installer printed: a short web wizard creates your
+admin account and sets the server name, e-mail, who may register and a first server with an invite link.
+
+Full walkthrough — DNS, your own proxy, connecting the apps — in **[docs/SELF-HOSTING.md](docs/SELF-HOSTING.md)**.
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/architecture-dark.svg">
+  <img alt="GusVoice architecture" src="docs/readme/architecture-light.svg" width="100%">
+</picture>
+
+- **backend** (Node.js, Fastify, Drizzle/PostgreSQL) — accounts, servers, channels, roles, messages and DMs, the real-time gateway, and the **LiveKit tokens**: what you may publish is decided by your permissions.
+- **livekit-server** — the SFU; voice, video and screen shares all flow through it (`7882/udp`, `7881/tcp` fallback). There is no P2P mode.
+- **presence** — receives LiveKit webhooks and tells every client who is in which voice channel.
+- **client** — the React web app; the Windows (Tauri) and Android apps wrap the same code.
+- **PostgreSQL** + **Redis** for data and fan-out, **versitygw** for uploads (S3 API), **ntfy** for push, **Caddy** for TLS.
+
+How the pieces fit together in detail: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Update
 
-Grab the newest server images and stack files — one line, from anywhere:
+**From the admin panel — the main way.** The **Instance** tab shows the installed and the newest version; the **Update**
+button backs up the database and updates the server step by step, with progress right in the panel. The installer enables the
+button by itself when it runs as root or with password-less `sudo`; otherwise it prints one command at the end —
+`sudo ./update.sh --install-updater`. The backend never gets access to Docker: it leaves a request that a small systemd
+watcher on the host picks up. The desktop and Android apps update themselves.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Gleb1290/gusvoice/main/update.sh | bash
-```
-
-or, from inside your install directory:
+**From the console** — the same thing in one command:
 
 ```bash
 cd gusvoice
 ./update.sh
 ```
 
-`update.sh` backs up your current `docker-compose.yml` + `config/`, refreshes them to the latest release, pulls the new images, **saves a copy of the database** into `./.gusvoice-backups/`, and recreates only the containers that changed. **Your `.env` and all data are left untouched**, and the backend runs any pending database migrations automatically on boot.
+`update.sh` backs up your `docker-compose.yml` and `config/`, refreshes them to the latest release, pulls the new images,
+**saves a copy of the database** into `./.gusvoice-backups/` and recreates only the containers that changed. Your `.env` and
+data are left alone; database migrations run by themselves on start.
 
 | Flag | Effect |
 |------|--------|
-| `--images-only` | Only pull images + recreate — don't touch your `docker-compose.yml` / `config/`. |
-| `--prune` | Remove old dangling images afterwards to reclaim disk. |
-| `--no-db-backup` | Skip the database copy taken before containers are recreated. |
-| `--install-updater` | (root, needs systemd) Enable the **Update** button in the admin panel. |
-| `-y`, `--yes` | Run non-interactively. |
+| `--images-only` | Only pull images and recreate — don't touch `docker-compose.yml` / `config/`. |
+| `--prune` | Remove old dangling images afterwards. |
+| `--no-db-backup` | Skip the database copy. |
+| `--install-updater` | (root, systemd) Enable the **Update** button in the admin panel. |
+| `-y`, `--yes` | Non-interactive. |
 
-Or update **without the console**: the admin panel's **Instance** tab shows the installed version next to the newest release and updates the server for you, step by step. The backend never gets access to Docker — it only leaves a request that a small systemd watcher on the host picks up. The installer enables that watcher when it can (root or password-less sudo); otherwise run `sudo ./update.sh --install-updater` once.
-
-> The desktop and Android apps **update themselves** — you only ever update the server.
 
 ## Uninstall
 
 ```bash
-cd gusvoice
-./uninstall.sh            # stop & remove the containers — your DATA is kept
+./uninstall.sh            # stop and remove the containers — your data is kept
+./uninstall.sh --purge    # asks you to type "yes", then deletes data volumes and .env
 ```
-
-This stops GusVoice but preserves your database, uploads and secrets, so `./install.sh` (or `./update.sh`) later resumes exactly where you left off.
-
-To wipe **everything** — all accounts, messages, uploads and secrets — permanently:
-
-```bash
-./uninstall.sh --purge    # asks you to type "yes"; then deletes data volumes + .env
-```
-
-## Clients
-
-Download the desktop or Android app from the **[Releases page](https://github.com/Gleb1290/gusvoice/releases/latest)**, launch it, and enter your server's address (e.g. `voice.example.com`). Add or switch servers anytime from **Settings → Federation → My instances**. The web client is served at `https://voice.<your-domain>` — no download needed.
 
 ## Where things live
 
 | What | Where |
 |------|-------|
-| Your config & **all secrets** | `.env` (generated by the installer, `chmod 600` — never commit it) |
-| Database, media, push & TLS state | Docker **named volumes** (`gusvoice_pgdata`, `gusvoice_s3data`, `gusvoice_ntfydata`, `gusvoice_caddydata`, …) |
-| Reverse-proxy / TLS templates | `config/Caddyfile`, `config/livekit.yaml` (driven by `.env`) |
+| Config and **all secrets** | `.env` (written by the installer, `chmod 600` — never commit it) |
+| Database, uploads, push and TLS state | Docker named volumes (`gusvoice_pgdata`, `gusvoice_s3data`, `gusvoice_ntfydata`, `gusvoice_caddydata`, …) |
+| Proxy and SFU config | `config/Caddyfile`, `config/livekit.yaml` (driven by `.env`) |
 | Update backups | `./.gusvoice-backups/<timestamp>/` |
 
-To reconfigure from scratch, delete `.env` and re-run `./install.sh`. To run behind **your own** reverse proxy (Nginx Proxy Manager / nginx / Traefik) instead of the bundled Caddy, the installer asks — see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
+## Clients
 
-## Support
+| Platform | How to get it |
+|----------|---------------|
+| **Web** | `https://voice.<your-domain>` — nothing to install |
+| **Windows** | installer from **[Releases](https://github.com/Gleb1290/gusvoice/releases/latest)**; updates itself |
+| **Android** | APK from **[Releases](https://github.com/Gleb1290/gusvoice/releases/latest)**; background voice, full-screen calls, push via UnifiedPush |
 
-GusVoice is free to self-host and built in the open. If it's useful to you, you can support development on **[Boosty](https://boosty.to/glebbuster)** — it helps cover servers and build hardware. Thank you 🪿
+Launch the app and type your server's address (for example `voice.example.com`). More servers can be added later in
+**Settings → Federation → My instances**. Desktop details: [apps/desktop/README.md](apps/desktop/README.md).
 
 ## Build from source
 
-Everything above ships as prebuilt images, but nothing stops you from building your own — the compose file
-carries a `build:` section for every service:
+Prebuilt images are the default, but the compose file has a `build:` section for every service:
 
 ```bash
 git clone https://github.com/Gleb1290/gusvoice.git && cd gusvoice
@@ -134,18 +204,29 @@ docker compose build         # build the images from this source
 docker compose up -d
 ```
 
-For working on the code itself (Node.js 20+, pnpm, typecheck, tests) see **[CONTRIBUTING.md](CONTRIBUTING.md)**; how the
-pieces fit together is in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+Working on the code itself (Node.js, pnpm, typecheck, tests, the desktop app with Rust) — see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+```
+packages/shared      permission bitfield, DTO types, WebSocket protocol
+packages/backend     REST + gateway + LiveKit tokens (Fastify, Drizzle)
+packages/presence    LiveKit webhooks → Redis → presence WebSocket
+apps/client          React web app (also inside the desktop and Android apps)
+apps/desktop         Tauri v2 shell for Windows and Android
+config/              LiveKit and Caddy config (no secrets)
+docker-compose.yml   the whole stack
+```
 
 ## Contributing
 
-Bug reports, fixes and translations are welcome, in **English or Russian** — start with
-**[CONTRIBUTING.md](CONTRIBUTING.md)**. Before your first pull request is merged you'll be asked to accept the
-**[CLA](CLA.md)** ([why](LICENSING.md)). Found a security problem? Report it privately — see
-**[SECURITY.md](SECURITY.md)**, never a public issue.
+Bug reports, fixes and translations are welcome, in **English or Russian** — start with **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+Before your first pull request is merged you'll be asked to accept the **[CLA](CLA.md)** ([why](LICENSING.md)). Found a
+security problem? Report it privately — see **[SECURITY.md](SECURITY.md)**, never in a public issue.
+
+If GusVoice is useful to you, you can support development on **[Boosty](https://boosty.to/glebbuster)** — it pays for servers
+and build hardware. Thank you 🪿
 
 ## License
 
-**[AGPL-3.0-only](LICENSE)** — free to use, self-host and modify. If you run a modified GusVoice as a service for other
-people, you must offer them your changes under the same licence. Third-party components, the NVIDIA Video Codec SDK
-exception and the reasoning behind the CLA are listed in **[LICENSING.md](LICENSING.md)**.
+**[AGPL-3.0-only](LICENSE)** — free to use, self-host and modify. If you run a modified GusVoice as a service for other people,
+you must offer them your changes under the same licence. Third-party components, the NVIDIA Video Codec SDK exception and the
+reasoning behind the CLA are in **[LICENSING.md](LICENSING.md)**.

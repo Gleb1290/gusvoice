@@ -1,0 +1,40 @@
+{
+  "id": "0199d2a1-7b3c-7d4e-8f5a-6b7c8d9e0f1a",
+  "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "author": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" },
+  "client_id": "c-0199d2a1-7b3c",
+  "payload_hash": "a1b2c3d4e5f60718",
+  "created_at": 1760270400000,
+  "origin_sort_key": 1760270400000123,
+  "content": "Привет! Это копия сообщения с другого инстанса.",
+  "reply_to_id": null,
+  "forwarded_from": {
+    "author": { "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k", "user_id": "0193f1a2-0000-7e8f-9a0b-1c2d3e4f5a6b" },
+    "name": "Утка",
+    "at": 1760260000000
+  },
+  "silent": false,
+  "no_preview": true,
+  "caption_above": false,
+  "reply_quote": { "text": "Привет", "offset": 0 },
+  "sticker": null,
+  "service": null,
+  "attachments": [
+    {
+      "id": "0199d2a1-aaaa-7d4e-8f5a-6b7c8d9e0f1a",
+      "name": "voice.ogg",
+      "content_type": "audio/ogg",
+      "size": 48213,
+      "width": null,
+      "height": null,
+      "duration_ms": 3200,
+      "waveform": [0, 12, 40, 87, 100, 63, 20, 5],
+      "as_file": false,
+      "spoiler": false,
+      "sha256": null
+    }
+  ],
+  "edit_version": 2,
+  "edited_at": 1760270460000,
+  "deleted": false
+}

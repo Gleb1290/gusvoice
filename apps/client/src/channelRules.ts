@@ -1,4 +1,4 @@
-import type { ServerBootstrap } from '@gusvoice/shared';
+import type { Server, ServerBootstrap } from '@gusvoice/shared';
 
 /**
  * Правила непрочитанного и загрузки истории — вынуты из `store.ts` (просьба Codex, #80).
@@ -125,4 +125,44 @@ export interface HistoryPlan {
 export function historyLoadPlan(input: { channelType?: 'text' | 'voice'; hasCache: boolean }): HistoryPlan {
   if (input.channelType !== 'text') return { refetch: false, blocking: false };
   return { refetch: true, blocking: !input.hasCache };
+}
+
+/** Карты серверных счётчиков стора (`unreadServers` / `mentionServers`). */
+export interface ServerCountMaps {
+  unreadServers: Record<string, number>;
+  mentionServers: Record<string, number>;
+}
+
+/**
+ * Засев серверных счётчиков из ответа `GET /servers` (12.10): до этого значки серверов появлялись только от событий
+ * шлюза, и холодный старт показывал пустой список. Правила:
+ * - по большему из серверного и живого — живое событие могло прийти, пока шёл запрос, и уменьшать его нельзя;
+ * - открытый сервер (`currentServerId`) пропускается: его значок не ставится вовсе (`channelRules.applyUnread`);
+ * - нет поля (старый бэкенд, сосед) или не число — сервер не трогается, прежнее поведение;
+ * - ноль не пишется (карта хранит только ненулевые записи).
+ * Изменений нет — возвращается тот же объект `live` (стор не перерисовывается зря).
+ * Живёт здесь, а не в `serverRowRules`, потому что `store.ts` уже берёт этот модуль (тесты стора подменяют импорты по списку).
+ */
+export function seedServerCounts(
+  servers: readonly Pick<Server, 'id' | 'unread' | 'mentions'>[],
+  live: ServerCountMaps,
+  currentServerId: string | null,
+): ServerCountMaps {
+  let unreadServers = live.unreadServers;
+  let mentionServers = live.mentionServers;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+  for (const s of servers) {
+    if (s.id === currentServerId) continue;
+    const u = num(s.unread);
+    if (u > (unreadServers[s.id] ?? 0)) {
+      if (unreadServers === live.unreadServers) unreadServers = { ...unreadServers };
+      unreadServers[s.id] = u;
+    }
+    const m = num(s.mentions);
+    if (m > (mentionServers[s.id] ?? 0)) {
+      if (mentionServers === live.mentionServers) mentionServers = { ...mentionServers };
+      mentionServers[s.id] = m;
+    }
+  }
+  return unreadServers === live.unreadServers && mentionServers === live.mentionServers ? live : { unreadServers, mentionServers };
 }

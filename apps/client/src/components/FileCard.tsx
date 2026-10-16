@@ -138,7 +138,7 @@ export function FileCard({ a, href, sizeLabel }: { a: Attachment; href: string; 
  * «⬇» в углу фото и видео (в пузырях ЛС скрыт стилями — там «Скачать» в просмотре). Приложение: в «Загрузки», пока
  * качается — кольцо; повторное нажатие — отмена.
  */
-export function DownloadBadge({ a, href }: { a: Attachment; href: string }) {
+export function DownloadBadge({ a, href, cls = 'att-dl' }: { a: Attachment; href: string; /** Класс значка: в углу картинки — `att-dl`, в строке карточки звука — `att-file-dl`. */ cls?: string }) {
   const job = useFileJob(a);
   const onClick = (e: ReactMouseEvent<HTMLAnchorElement>) => {
     e.stopPropagation();
@@ -153,7 +153,7 @@ export function DownloadBadge({ a, href }: { a: Attachment; href: string }) {
     saveAttachmentFile(a);
   };
   return (
-    <a className={job ? 'att-dl busy' : 'att-dl'} href={href} title={job ? 'Отменить загрузку' : 'Скачать'} onClick={onClick}>
+    <a className={job ? `${cls} busy` : cls} href={href} title={job ? 'Отменить загрузку' : 'Скачать'} onClick={onClick}>
       {job ? <ProgressRing ratio={progressRatio(job.loaded, job.total)} /> : <Icon name="download" size={15} />}
     </a>
   );

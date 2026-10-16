@@ -4,3 +4,15 @@
 # (Applies only to the Windows MSVC target; other targets are unaffected.)
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
+
+# Картинки и GIF из клавиатуры (G50, 14.10): тело `{{class-extension}}` сгенерированного wry `RustWebView` (wry/build.rs читает
+# `WRY_RUSTWEBVIEW_CLASS_EXTENSION`; переопределение отдаёт подключение поля ввода `KeyboardContent.wrap`).
+# 🔴 ДВЕ КОПИИ, держать дословно одинаковыми: эта (по ней проверка Codex R218 `keyboardAndroidGuards.test.ts`) и
+# ../../.cargo/config.toml (apps/desktop/.cargo) — ДЕЙСТВУЮЩАЯ для Android: сборка Android зовёт cargo не из src-tauri, и отсюда
+# раздел переменных не читался (приёмка 14.10, Б2). Что wry его получил, проверяет CI по самому APK (android.yaml, dexdump).
+[env]
+WRY_RUSTWEBVIEW_CLASS_EXTENSION = '''
+    override fun onCreateInputConnection(outAttrs: android.view.inputmethod.EditorInfo): android.view.inputmethod.InputConnection? {
+        return KeyboardContent.wrap(super.onCreateInputConnection(outAttrs), outAttrs)
+    }
+'''

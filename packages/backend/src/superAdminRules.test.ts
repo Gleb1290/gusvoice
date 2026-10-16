@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import {
   asUserId,
   bindSuperAdminWith,
@@ -9,6 +12,38 @@ import {
   isSuperAdminId,
   type BindingIo,
 } from './superAdminRules.js';
+
+function loadSuperAdminRules(source: string): typeof import('./superAdminRules.js') {
+  const module = { exports: {} as Record<string, unknown> };
+  runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { module, exports: module.exports });
+  return module.exports as typeof import('./superAdminRules.js');
+}
+
+async function ensureApprovedContract(bind: typeof bindSuperAdminWith): Promise<void> {
+  const calls: string[] = [];
+  const io: BindingIo = {
+    readStored: async () => (calls.push('read'), undefined),
+    userExists: async (id) => (calls.push(`exists:${id}`), true),
+    findIdByUsername: async (name) => (calls.push(`find:${name}`), 'final-id'),
+    persist: async (id) => void calls.push(`persist:${id}`),
+    ensureApproved: async (id) => void calls.push(`approve:${id}`),
+    envUsername: 'admin',
+    log: () => {},
+  };
+  const result = await bind(io);
+  assert.equal(result.superAdminId, 'final-id', 'одобряется итоговый id после новой привязки');
+  assert.deepEqual(calls, ['read', 'find:admin', 'persist:final-id', 'approve:final-id'], 'одобрение следует после записи и получает её id');
+
+  calls.length = 0;
+  const stored = await bind({
+    ...io,
+    readStored: async () => (calls.push('read'), { value: { userId: 'already-bound' } }),
+  });
+  assert.equal(stored.superAdminId, 'already-bound', 'одобряется ранее сохранённая привязка');
+  assert.deepEqual(calls, ['read', 'exists:already-bound', 'approve:already-bound']);
+}
 
 type IsSuperAdmin = typeof import('./auth.js').isSuperAdmin;
 const checkBrandedBoundary = (check: IsSuperAdmin) => {
@@ -75,7 +110,10 @@ describe('привязка супер-админа с внешними опер�
   it('каждая нечитаемая сохранённая запись закрывает права без поиска и записи', async () => {
     // Ловит трактовку пустого, отсутствующего или нестрокового userId как свободного места для новой привязки.
     for (const value of [{}, { userId: 42 }, { userId: '   ' }]) {
-      const { io, calls, logs } = bindingIo({ readStored: async () => ({ value }) });
+      const { io, calls, logs } = bindingIo({
+        readStored: async () => ({ value }),
+        ensureApproved: async (id) => void calls.push(`approve:${id}`),
+      });
       const result = await bindSuperAdminWith(io);
       assert.equal(result.superAdminId, null);
       assert.deepEqual(calls, []);
@@ -89,6 +127,7 @@ describe('привязка супер-админа с внешними опер�
     const { io, calls, logs } = bindingIo({
       readStored: async () => ({ value: { userId: 'gone' } }),
       userExists: async (id) => (checked = id, false),
+      ensureApproved: async (id) => void calls.push(`approve:${id}`),
     });
     const result = await bindSuperAdminWith(io);
     assert.equal(result.superAdminId, null);
@@ -119,11 +158,31 @@ describe('привязка супер-админа с внешними опер�
       envUsername: 'Supergoose',
       findIdByUsername: async (name) => (name === 'SuperGoose' ? 'real-id' : null),
       persist: async () => void (persisted += 1),
+      ensureApproved: async () => assert.fail('одобрение не зовётся без найденного id'),
     });
     const result = await bindSuperAdminWith(io);
     assert.equal(result.superAdminId, null);
     assert.equal(persisted, 0);
     assert.equal(logs[0]?.level, 'warn');
+  });
+
+  it('новая и сохранённая привязки одобряют только итоговый id', async () => {
+    // Ловит одобрение найденного кандидата до принятия решения или пропуск уже готового супер-админа.
+    await ensureApprovedContract(bindSuperAdminWith);
+  });
+
+  it('контрфакт: целый модуль отвергает привязку без ensureApproved', async () => {
+    // Ловит регрессию при удалении необязательного одобрения из реального модуля правил.
+    const source = readFileSync(new URL('./superAdminRules.ts', import.meta.url), 'utf8');
+    await ensureApprovedContract(loadSuperAdminRules(source).bindSuperAdminWith);
+
+    const anchor = '  if (decision.superAdminId && io.ensureApproved) await io.ensureApproved(decision.superAdminId);';
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь одобрения должен встретиться ровно один раз');
+    await assert.rejects(
+      () => ensureApprovedContract(loadSuperAdminRules(source.replace(anchor, '')).bindSuperAdminWith),
+      (error) => error instanceof assert.AssertionError && error.message.includes('одобрение следует после записи и получает её id'),
+      'контракт должен отвергнуть модульный мутант без ensureApproved',
+    );
   });
 });
 

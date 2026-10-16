@@ -1,5 +1,5 @@
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
-import { pruneJournal } from './convJournal.js';
+import { pruneFedConvChanges, pruneJournal } from './convJournal.js';
 import { purgeAttachments } from './attachments.js';
 import { purgeStaleUploads } from './bigUploads.js';
 import { db } from './db/index.js';
@@ -40,12 +40,9 @@ export async function purgeUnverifiedUsers(): Promise<number> {
         sql`${users.id} NOT IN (SELECT owner_id FROM servers)`,
         sql`${users.id} NOT IN (SELECT author_id FROM messages)`,
         // ⚠️ И личка: сменивший почту (снова `verified=false`) человек, у которого только ЛС, иначе
-        // удалялся бы вместе со всеми своими сообщениями в беседах.
-        sql`${users.id} NOT IN (SELECT author_id FROM dm_messages)`,
-        // ⚠️ Беседа ЛС уходит каскадом ЦЕЛИКОМ — вместе с репликами второго человека, даже если этот
-        // сам не написал ни слова. И членство: «не держит членства» раньше проверялось только по ролям.
-        sql`${users.id} NOT IN (SELECT user_a FROM dm_channels UNION SELECT user_b FROM dm_channels)`,
-        // С шага 1б ЛС живут в беседах: то же самое — автор и участник (старые `dm_*` заморожены, но тоже держат).
+        // удалялся бы вместе со всеми своими сообщениями в беседах. И участие: беседа уходит каскадом
+        // ЦЕЛИКОМ — вместе с репликами второго человека, даже если этот сам не написал ни слова.
+        // Старые `dm_*` (до 30.09) сняты миграцией 0135: 0079 перенесла их в беседы, проверка ниже покрывает всё.
         sql`${users.id} NOT IN (SELECT author_id FROM conversation_messages)`,
         sql`${users.id} NOT IN (SELECT user_id FROM conversation_members)`,
         sql`${users.id} NOT IN (SELECT user_id FROM server_members)`,
@@ -178,6 +175,13 @@ export function startDailyCleanup(): void {
       if (n > 0) console.log(`[cleanup] pruned ${n} DM journal row(s)`);
     } catch (err) {
       console.error('[cleanup] DM journal prune failed:', (err as Error).message);
+    }
+    // Журнал на связку (Э0 ЛС между инстансами): тот же срок, отставший сосед получит `reset` и сделает полный проход.
+    try {
+      const n = await pruneFedConvChanges();
+      if (n > 0) console.log(`[cleanup] pruned ${n} federated DM journal row(s)`);
+    } catch (err) {
+      console.error('[cleanup] federated DM journal prune failed:', (err as Error).message);
     }
   };
   void run();

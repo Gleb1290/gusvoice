@@ -14,12 +14,15 @@ import { Icon } from './Icon';
  */
 export function StrangerBar({
   peerName,
+  peerHome,
   onAdd,
   onBlock,
   onHide,
   onReport,
 }: {
   peerName: string;
+  /** Название инстанса собеседника (Э2 часть Б, #141) — у человека другого инстанса; «Пожаловаться» тогда уходит держателю ЕГО инстанса. */
+  peerHome?: string | null;
   /** Сервер умеет контакты (`contacts1`) — первой кнопкой «Добавить в контакты», как Telegram `Type::AddOrBlock`. */
   onAdd?: () => void;
   onBlock: () => void;
@@ -28,7 +31,9 @@ export function StrangerBar({
 }) {
   return (
     <div className="stranger-bar" role="region" aria-label={`${peerName} — незнакомый собеседник`}>
-      <span className="stranger-bar-text">Вы с {peerName} не состоите на одном сервере</span>
+      <span className="stranger-bar-text">
+        {peerHome ? `${peerName} с инстанса «${peerHome}» — вы не состоите на одном сервере` : `Вы с ${peerName} не состоите на одном сервере`}
+      </span>
       <span className="stranger-bar-actions">
         {onAdd && (
           <button type="button" className="stranger-bar-btn" onClick={onAdd}>
@@ -59,12 +64,15 @@ export function StrangerBar({
 export function StrangerReportModal({
   convId,
   peer,
+  holder,
   blocked,
   onBlock,
   onClose,
 }: {
   convId: string;
   peer: { id: string; displayName: string };
+  /** Название инстанса собеседника, если он с другого инстанса (Э2 часть Б, #141): жалоба уйдёт держателю ЕГО инстанса (`report.create`). */
+  holder?: string | null;
   blocked: boolean;
   onBlock: () => Promise<void>;
   onClose: () => void;
@@ -87,7 +95,7 @@ export function StrangerReportModal({
     setBusy(true);
     try {
       await useStore.getState().reportStranger(convId, reason, comment.trim() || undefined);
-      toast('success', 'Жалоба отправлена', 'Её увидит администратор инстанса.');
+      toast('success', 'Жалоба отправлена', holder ? `Её увидит администратор инстанса «${holder}».` : 'Её увидит администратор инстанса.');
     } catch (e) {
       toastError(e);
       setBusy(false);
@@ -121,7 +129,10 @@ export function StrangerReportModal({
           Комментарий (необязательно)
           <textarea value={comment} onChange={(e) => setComment(e.target.value)} maxLength={REPORT_COMMENT_MAX} rows={2} placeholder="Что произошло" />
         </label>
-        <div className="reg-policy-note">К жалобе приложатся последние сообщения {peer.displayName} (до пяти). Остальную переписку администратор не увидит.</div>
+        <div className="reg-policy-note">
+          {holder ? `Жалоба уйдёт администратору инстанса «${holder}», где живёт ${peer.displayName}. ` : ''}К жалобе приложатся последние сообщения{' '}
+          {peer.displayName} (до пяти). Остальную переписку администратор не увидит.
+        </div>
         {!blocked && (
           <label className="ctx-ban-report">
             <input type="checkbox" checked={alsoBlock} onChange={(e) => setAlsoBlock(e.target.checked)} />

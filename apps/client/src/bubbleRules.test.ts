@@ -8,6 +8,24 @@ import * as imageSize from './imageSize';
 import { bubbleLook, bubblesAllLeft, emojiOnlyCount, MEDIA_MIN_W, TEXT_BUBBLE, ALBUM_MAX, replyQuoteLook, replyQuoteVideo, readByPeer, showsForwardedFrom, forwardedAuthorOpenable } from './bubbleRules';
 type Source = Parameters<typeof bubbleLook>[0];
 
+it('R194 цитата копирующегося фото не запрашивает thumb, готовое фото сохраняет миниатюру', () => {
+  // Класс ошибки: ответ обращается к ещё не приехавшим байтам вне основной плитки.
+  const photo = { url: '/remote-photo', name: 'photo.png', contentType: 'image/png', size: 12, width: 100, height: 80 };
+  const reply = { content: '', deleted: false };
+  assert.equal(replyQuoteLook(reply, message({ attachments: [{ ...photo, fedState: 'copying' }] })).thumb, undefined);
+  assert.equal(replyQuoteLook(reply, message({ attachments: [photo] })).thumb, photo.url);
+});
+it('R194 контрфакт thumb копирующегося фото ловится настоящим правилом ответа', () => {
+  // Класс ошибки: цитата раскрывает ещё не приехавшую миниатюру.
+  const original = { attachments: [{ url: '/remote', name: 'Фото', contentType: 'image/png', size: 12, fedState: 'copying' as const }] };
+  const check = (api: typeof import('./bubbleRules')) => assert.equal(api.replyQuoteLook({ content: '', deleted: false }, original).thumb, undefined, 'копия не имеет thumb');
+  const source = readFileSync(new URL('./bubbleRules.ts', import.meta.url), 'utf8');
+  const anchor = "a.fedState === 'copying' ? undefined : a.url || undefined";
+  assert.equal(source.split(anchor).length - 1, 1, 'единственный thumb-якорь'); check(loadBubble(source));
+  assert.throws(() => check(loadBubble(source.replace(anchor, 'a.url || undefined'))),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('копия не имеет thumb'));
+});
+
 it('как файлы не становится ни одиночным кадром, ни альбомом фото и видео', () => {
   // Ловит потерю явно выбранного режима файлов в ленте.
   const image = { url: '/a.png', name: 'a.png', contentType: 'image/png', size: 1, width: 100, height: 100, asFile: true as const };

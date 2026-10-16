@@ -27,6 +27,21 @@ import { applyRevocation } from './guestRevocation.js';
  * Возвращает `true`, если строка нашлась и что-то поменялось. Человека без теневой строки здесь
  * попросту нет — это обычное дело: в каталоге соседа сотни людей, а гостями у нас бывают единицы.
  */
+/**
+ * Обезличить теневую строку (аккаунта дома больше нет, §5.6.2): сообщения остаются. Уже обезличенную — не трогает. Членства и
+ * сессии — `applyRevocation` (зовёт вызывающий; `user.revoked` зовёт это сам через `configureShadowGone`).
+ */
+export async function anonymizeShadow(shadowId: string): Promise<void> {
+  const [shadow] = await db.select({ id: users.id, deletedAt: users.deletedAt }).from(users).where(eq(users.id, shadowId)).limit(1);
+  if (!shadow || shadow.deletedAt !== null) return;
+  const unusable = await hashPassword(randomBytes(32).toString('hex'));
+  const fields = anonymizedUserFields(shadow.id, unusable, new Date());
+  await db.update(users).set(fields).where(eq(users.id, shadow.id));
+  forgetTokenGeneration(shadow.id);
+  // Рассылка синхронная и сама не падает — обёртка не нужна.
+  broadcastUserProfile(shadow.id, fields.displayName, null, null);
+}
+
 export async function applyGuestProfile(instanceId: string, entry: FedDirectoryEntry): Promise<boolean> {
   const [shadow] = await db
     .select()

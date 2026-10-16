@@ -1,0 +1,34 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W7A",
+      "seq": 81,
+      "kind": "call.state",
+      "created_at": 1760280605000,
+      "payload": {
+        "call_id": "044f6645-d5bd-471a-8d04-83e656e6561e",
+        "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        "phase": "active",
+        "callee_device": "tab-3f9c2a",
+        "answered_at": 1760280605000
+      }
+    },
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W7B",
+      "seq": 82,
+      "kind": "call.state",
+      "created_at": 1760280785000,
+      "payload": {
+        "call_id": "044f6645-d5bd-471a-8d04-83e656e6561e",
+        "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        "phase": "ended",
+        "callee_device": "tab-3f9c2a",
+        "answered_at": 1760280605000,
+        "reason": "hangup",
+        "duration": 180,
+        "video": true
+      }
+    }
+  ]
+}

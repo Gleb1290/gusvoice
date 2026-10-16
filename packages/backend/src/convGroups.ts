@@ -1,7 +1,7 @@
 import type { ConvGroupService } from '@gusvoice/shared';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { dropUploadsOfMember } from './bigUploads.js';
-import { journal, lockConversation, type Delivery, type Tx } from './conversations.js';
+import { fedRecordGroup, journal, lockConversation, type Delivery, type Tx } from './conversations.js';
 import { db } from './db/index.js';
 import { conversationMembers, conversationMessages, conversations, users } from './db/schema.js';
 import { canRemoveMember, groupAddCheck, groupCreateCheck, nextOwner, serviceText, type GroupRole } from './groupRules.js';
@@ -54,6 +54,10 @@ async function insertService(
   audience: readonly string[],
 ): Promise<Delivery> {
   const names = await displayNames(tx, [actorId]);
+  // Э7 часть 1 (#141, §3.6): каждое действие с группой — новая версия состава; дома участников с других инстансов получают
+  // строку `conv` раньше служебной записи (журнал на связку пишется только при `FEDERATION_DM_ENABLED`).
+  await tx.update(conversations).set({ groupVersion: sql`${conversations.groupVersion} + 1` }).where(eq(conversations.id, conversationId));
+  await fedRecordGroup(tx, conversationId);
   const [row] = await tx
     .insert(conversationMessages)
     .values({
@@ -163,7 +167,8 @@ export async function removeGroupMember(me: string, conversationId: string, targ
     if (!leaving && !canRemoveMember(mine.role, me, targetId)) return { kind: 'forbidden' };
     await tx
       .update(conversationMembers)
-      .set({ leftAt: new Date(), role: 'member', pinnedAt: null, archivedAt: null, unreadMarkedAt: null })
+      // `now()` базы, а не часы процесса: журнал на связку сверяет с ним время своих строк (ушедшему — только записанное до ухода).
+      .set({ leftAt: sql`now()`, role: 'member', pinnedAt: null, archivedAt: null, unreadMarkedAt: null })
       .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, targetId)));
     // Его незаконченные загрузки кусками в этой беседе — тоже (ревью `bigfile1`, L1): строка участника остаётся (`left_at`),
     // каскад внешнего ключа не срабатывает.

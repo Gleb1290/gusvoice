@@ -27,6 +27,7 @@ import {
 } from './linkCode.js';
 import { nextLinkState, type LinkState } from './linkRules.js';
 import type { PeerDocument, PeerProblem } from './peerClient.js';
+import { peerScheme } from './devPeers.js';
 
 export interface StoredLink {
   instanceId: string;
@@ -343,7 +344,7 @@ const sendConfirmationOnce = async (
        * Запасной путь по домену оставлен для кодов от инстансов прежней версии: у них поля нет, и
        * для однодоменной установки старое поведение верно.
        */
-      const probe = code.apiBase ?? `https://${code.domain}`;
+      const probe = code.apiBase ?? `${peerScheme(code.domain)}://${code.domain}`;
       const doc = await deps.fetchDocument(probe, hostsOf(probe));
       if (!doc.ok) return doc;
 

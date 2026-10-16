@@ -25,12 +25,24 @@ const androidBack = readFileSync(new URL('./androidBack.ts', import.meta.url), '
 const mainLayout = readFileSync(new URL('./components/MainLayout.tsx', import.meta.url), 'utf8');
 const dmSidebar = readFileSync(new URL('./components/DmSidebar.tsx', import.meta.url), 'utf8');
 
+function socketCase(name: string): string {
+  const marker = `case '${name}':`;
+  const start = sockets.indexOf(marker);
+  assert.ok(start >= 0, `не найдена ветка ${marker}`);
+  const nextCase = /\n\s+case '[^']+':/.exec(sockets.slice(start + marker.length));
+  assert.ok(nextCase, `не найдена следующая граница после ${marker}`);
+  const end = start + marker.length + nextCase.index;
+  assert.ok(end > start, `граница ${marker} должна идти после её начала`);
+  return sockets.slice(start, end);
+}
+
 describe('провода компонентов, не требующие React-окружения', () => {
-  it('правка из телефонной шторки переходит в композер, а кнопки сохраняют фокус поля', () => {
-    // Ловит исчезновение клавиатуры при отправке и маленький редактор вместо полноразмерного поля.
-    const edit = messagePane.match(/label="Изменить"[\s\S]{0,230}?close\(\)/)?.[0] ?? '';
-    assert.match(edit, /startComposerEdit\(m\)/);
-    assert.doesNotMatch(edit, /setEditingId/);
+  it('новое меню сообщения правит в основном композере, а кнопки сохраняют фокус поля', () => {
+    // Старой телефонной шторки больше нет: правка должна оставаться доступна из общего меню пузыря.
+    const edit = messagePane.match(/const editItem =[\s\S]*?label="Изменить"[\s\S]*?editFromMenu\(m\)/)?.[0] ?? '';
+    assert.match(edit, /!readOnly && mine && !m\.forwardedFrom/);
+    assert.match(messagePane.match(/function editFromMenu\(m: Message\) \{[\s\S]*?\n  \}/)?.[0] ?? '', /startComposerEdit\(m\)/);
+    assert.doesNotMatch(messagePane, /sheetMsg|setSheetMsg/);
     for (const title of ['Отменить правку', 'Отменить ответ']) {
       const button = messagePane.match(new RegExp(`title="${title}"[\\s\\S]{0,150}?onClick=`))?.[0] ?? '';
       assert.match(button, /onPointerDown=\{keepFocus\}/);
@@ -169,8 +181,8 @@ describe('провода компонентов, не требующие React-�
 
   it('уведомление ЛС мигает окном, а отказ нативной команды явно падает на plugin fallback', () => {
     // Ловит тост, незаметный в игре, и полную потерю уведомления на старой desktop-сборке.
-    const dmCreate = sockets.match(/case 'dm\.create':[\s\S]*?return store\.appendDmMessage/)?.[0] ?? '';
-    assert.match(dmCreate, /if \(d\.osNotify\)[\s\S]*?osNotify\([\s\S]*?flashWindow\(\)/);
+    const convChange = socketCase('conv.change');
+    assert.match(convChange, /if \(d\.osNotify\)[\s\S]*?osNotify\([\s\S]*?flashWindow\(\)/);
     assert.match(notifications, /core\.invoke\('gv_notify_clickable'[\s\S]*?\.catch\(\(\) => \{[\s\S]*?deliverViaPlugin/);
   });
 
@@ -178,13 +190,10 @@ describe('провода компонентов, не требующие React-�
     // Иначе тихая отправка теряет само уведомление или обычные нотификации получают новую опцию.
     assert.match(notifications, /new Notification\(title, silent \? \{ body, silent: true \} : \{ body \}\)/);
     assert.match(sockets, /silent: m\.silent === true/);
-    const legacy = sockets.slice(sockets.indexOf("case 'dm.create':"), sockets.indexOf("case 'conv.change':"));
-    const fresh = sockets.slice(sockets.indexOf("case 'conv.change':"), sockets.indexOf("case 'dm.update':"));
-    for (const source of [legacy, fresh]) {
-      assert.match(source, /dmSilentDecision\(/);
-      assert.match(source, /if \(d\.sound\) playSound\('dm'\)/);
-      assert.match(source, /if \(d\.osNotify\)[\s\S]*osNotify\([\s\S]*silent:[\s\S]*flashWindow\(\)/);
-    }
+    const fresh = socketCase('conv.change');
+    assert.match(fresh, /dmSilentDecision\(/);
+    assert.match(fresh, /if \(d\.sound\) playSound\('dm'\)/);
+    assert.match(fresh, /if \(d\.osNotify\)[\s\S]*osNotify\([\s\S]*silent:[\s\S]*flashWindow\(\)/);
   });
 
   it('Android-назад знает верхние просмотрщики, но не перехватывает общую подложку настроек', () => {

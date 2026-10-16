@@ -4,7 +4,18 @@
     <!-- Voice + camera in LiveKit WebRTC (getUserMedia inside the WebView). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Геопозиция в ЛС (G69, 14.10): navigator.geolocation в WebView. Окно разрешения и рантайм-запрос ведёт клиент wry
+         (RustWebChromeClient.onGeolocationPermissionsShowPrompt → ACCESS_COARSE + ACCESS_FINE); без строк здесь Android
+         отказывает сразу, и «Геопозиция» в ЛС не получает места. Спрашиваем только по нажатию «Геопозиция». -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Android 12+: имя Bluetooth-гарнитуры и звук звонка на неё (кнопка «Динамик», CallAudio.kt); спрашиваем, лишь когда гарнитура подключена. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- «Поднести к уху» (G67, RaiseToEar.kt): PROXIMITY_SCREEN_OFF_WAKE_LOCK гасит экран у уха; нужно обычное разрешение WAKE_LOCK (окна нет). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Keep the voice call alive when the screen locks / app is backgrounded (#89). FGS_MICROPHONE
          (API 34+) requires RECORD_AUDIO (above); POST_NOTIFICATIONS (API 33+) shows the FGS notice.
          FGS_MEDIA_PLAYBACK: the mic type only tells the OS we RECORD in the background (upstream) — it
@@ -14,6 +25,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- «Транслировать геопозицию» (14.10, geolive1, LiveLocationService.kt): служба переднего плана с типом location шлёт точки при
+         свёрнутом приложении. Android 14+ требует FOREGROUND_SERVICE_LOCATION и выданное ACCESS_COARSE/FINE_LOCATION (выше) на
+         момент старта; ACCESS_BACKGROUND_LOCATION НЕ нужен — служба стартует из открытого приложения (как у Telegram). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Embedded push distributor: a data-sync FGS holds the socket to the instance's ntfy so DMs /
          @mentions wake the app when it's closed, with no separate distributor app. -->
@@ -29,12 +44,12 @@
          `canUseFullScreenIntent`, без него уведомление звонка всплывает обычным heads-up. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- Своя галерея во вложениях (05.10, MediaBridge.kt): фото и видео устройства. Android 13+ — READ_MEDIA_IMAGES/VIDEO,
-         Android 14+ — ещё частичный доступ (человек выбирает, какие фото видно приложению), ниже 13 — чтение памяти.
+         ниже 13 — чтение памяти. READ_MEDIA_VISUAL_USER_SELECTED НЕ объявляем — как Telegram Android (TMessagesProj
+         AndroidManifest.xml:38-40, #218 10.10): «Выбрать фото» в окне Android 14+ тогда даёт временный доступ к выбранному.
          Спрашиваются при первом открытии галереи, не на старте. Запись в галерею («Сохранить», Android 10+) своих файлов
          разрешения не требует — WRITE_EXTERNAL_STORAGE не нужен. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <!-- AndroidTV support -->
@@ -104,6 +119,13 @@
             android:name=".VoiceForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- Трансляция геопозиции (14.10, geolive1): служба переднего плана с типом location. Не экспортирована — стартует
+             только мост JS (MainActivity.startLiveLocation) и PendingIntent кнопки «Остановить» своего уведомления. -->
+        <service
+            android:name=".LiveLocationService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
 
         <!-- UnifiedPush receiver — the ntfy distributor broadcasts push events here (DM / @mention wake),
              firing even when GusVoice's own process is dead. Exported so the external distributor reaches it.

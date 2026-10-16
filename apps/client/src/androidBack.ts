@@ -41,10 +41,11 @@ function topLayer(): boolean {
  * входили, хотя комментарий выше обещал «выбор эмодзи». «Назад» уводила ленту в список, а просмотрщик —
  * портал в `body` — оставался висеть поверх списка. Заодно звуковая панель и выбор статуса: тоже
  * закрываются по Esc и тоже висели.
+ * 🔴 Приёмка 14.10 (D2): карта на весь экран (`.geo-full`, портал `GeoMapFull`) — «назад» закрывала беседу под ней, а не карту.
  * ⚠️ `.modal-overlay` НЕ добавлять: им же закрываются настройки, и Esc закрыл бы окно целиком, минуя шаг
  * «из раздела к списку разделов» (перехватчики ниже) — эту ошибку уже чинили.
  */
-export const TOP_LAYERS = '.sheet, .ctx-menu, .confirm-overlay, .dd-pop, .lightbox, .emoji-backdrop, .sb-pop, .status-pop';
+export const TOP_LAYERS = '.sheet, .ctx-menu, .confirm-overlay, .dd-pop, .lightbox, .emoji-backdrop, .sb-pop, .status-pop, .geo-full';
 
 /**
  * Есть ли над окном `el` слой из `TOP_LAYERS` (лист выбора, меню, подтверждение…), который должен
@@ -157,8 +158,12 @@ export function stepBack(): boolean {
     s.setSettingsOpen(false);
     return true;
   }
+  // Корневая вкладка «Профиль» → «Сообщения» (список), а не прошлая вкладка (приёмка 0.9.0). Как Telegram Android:
+  // «назад» не на стартовой вкладке листает к стартовой («Чаты»), на ней — выход (`MainTabsActivity.onBackPressed`,
+  // `TA/ui/MainTabsActivity.java` — `getStartPosition()` = `POSITION_CHATS`). Тот же переход, что у нажатия вкладки в `MobileNav`.
   if (s.mobileProfileOpen) {
     s.setMobileProfileOpen(false);
+    toChatsTab(s);
     return true;
   }
   // Панель участников поверх канала.
@@ -171,7 +176,25 @@ export function stepBack(): boolean {
     s.setMobilePane('list');
     return true;
   }
+  // Список каналов сервера → список серверов (#218, вкладка «Серверы» на телефоне: тот же шаг, что «Назад» в шапке каналов).
+  if (s.view === 'server' && s.currentServerId && !s.serverListOpen) {
+    s.setServerListOpen(true);
+    return true;
+  }
+  // Корень вкладки «Серверы» (список серверов) → «Сообщения», как «Профиль» выше (R230 D.1, решение владельца — как Telegram:
+  // с любой корневой вкладки, кроме стартовой, «назад» ведёт на стартовую; с неё — выход).
+  if (s.view === 'server') {
+    toChatsTab(s);
+    return true;
+  }
   return false;
+}
+
+/** Переход на вкладку «Сообщения» к списку бесед — как нажатие вкладки в `MobileNav` (вид, подгрузка списка, список). */
+function toChatsTab(s: ReturnType<typeof useStore.getState>): void {
+  if (s.view !== 'dm') s.setView('dm');
+  void s.loadDms();
+  s.setMobilePane('list');
 }
 
 /**

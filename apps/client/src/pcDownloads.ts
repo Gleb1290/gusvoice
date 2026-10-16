@@ -1,6 +1,7 @@
 import type { Attachment } from '@gusvoice/shared';
 import { api } from './api';
 import { addDownload, doneHrefOf, patchDownload } from './downloadList';
+import { savedPathOf } from './downloadList';
 import {
   attachmentKey,
   attachmentMime,
@@ -11,7 +12,7 @@ import {
   trackFileJob,
   type DownloadNote,
 } from './fileActions';
-import { toast } from './toast';
+import { toast, toastError } from './toast';
 
 /**
  * Скачивание на ПК и в браузере телефона (G31 / G59 / G10, 08.10): кольцо прогресса с отменой на карточке файла, у «⬇»
@@ -91,13 +92,15 @@ async function runDownload(t: DownloadTarget): Promise<void> {
     const href = URL.createObjectURL(blob.slice(0, blob.size, type));
     patchDownload(rec, { state: 'done', loaded: blob.size, total: blob.size, href });
     saveObjectUrl(href, t.name);
-  } catch {
+  } catch (e) {
     if (job.signal.aborted) {
       patchDownload(rec, { state: 'cancelled' });
       return;
     }
     patchDownload(rec, { state: 'failed' });
-    toast('error', 'Не удалось скачать файл', t.name);
+    // Э3 (#141): отказ кодом федерации (инстанс автора не на связи) — его словами (`fileActions.fedRefusal`), не «не удалось».
+    if ((e as { fedFile?: boolean } | null)?.fedFile === true) toastError(e, t.name);
+    else toast('error', 'Не удалось скачать файл', t.name);
   } finally {
     job.end();
   }
@@ -236,4 +239,34 @@ export function legacyDownloadWithToast(url: string, name: string, mime: string 
   }
   toast('error', 'Не удалось скачать файл', name);
   return false;
+}
+
+/**
+ * «Показать в папке» (G10 / G31 / G59): Проводник с выделенным файлом — только в оболочке десктопа (Windows, мост Tauri),
+ * как `File::ShowInFolder` у tdesktop (`core/file_utilities.cpp`). Пункт есть, лишь когда оболочка сообщила путь файла,
+ * сохранённого этим приложением (`gv-download-done`, `downloadList.noteSavedFile`): как у Telegram, пункта нет у того, чего
+ * нет на диске. Веб и Android моста не имеют — пункта нет.
+ */
+type ShellBridge = { core?: { invoke?: (cmd: string, args?: unknown) => Promise<unknown> } };
+
+function shellInvoke(): ((cmd: string, args?: unknown) => Promise<unknown>) | null {
+  const t = (window as unknown as { __TAURI__?: ShellBridge }).__TAURI__;
+  return typeof t?.core?.invoke === 'function' && !filesViaNative() ? t.core.invoke.bind(t.core) : null;
+}
+
+/** Есть ли мост оболочки десктопа, умеющий показывать файл в папке. */
+export function showInFolderAvailable(): boolean {
+  return shellInvoke() !== null;
+}
+
+/** Путь сохранённого вложения для «Показать в папке»: есть мост и этот сеанс его сохранял; иначе `undefined` (пункта нет). */
+export function savedFilePath(key: string, url?: string): string | undefined {
+  return showInFolderAvailable() ? savedPathOf(key, url) : undefined;
+}
+
+/** Показать файл в Проводнике. Оболочка сверяет путь со своим списком сохранённого; отказ (файла и папки нет) — тост. */
+export function showInFolder(path: string): void {
+  const invoke = shellInvoke();
+  if (!invoke || !path) return;
+  invoke('gv_show_in_folder', { path }).catch(() => toast('error', 'Не удалось показать файл в папке', 'Файл или папка уже недоступны'));
 }

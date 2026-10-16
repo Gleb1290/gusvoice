@@ -81,5 +81,5 @@ it('показывает личную громкость при каждом н�
 it('не показывает локальную громкость в текстовой беседе без признаков голоса', async () => {
   // В текстовом групповом чате ползунок без живого голосового адресата вводил бы в заблуждение.
   await mount({ userId: 'peer-b', name: 'Другой собеседник', micMuted: true, serverMuted: true });
-  assert.equal(document.querySelector('.ctx-vol2'), null);
+  assert.equal(document.querySelector('.ctx-vol2') === null, true);
 });

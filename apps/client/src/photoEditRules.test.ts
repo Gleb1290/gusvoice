@@ -78,3 +78,43 @@ it('имя при переименовании сохраняет расшире
   assert.equal(rules.editIsPristine(rules.PRISTINE_EDIT), true);
   assert.equal(rules.editIsPristine({ ...rules.PRISTINE_EDIT, angle: 90 }), false);
 });
+
+const marksSource = readFileSync(new URL('./photoEditRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+function marksModule(raw = marksSource): typeof rules {
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module, exports: module.exports, require: (id: string) => { assert.equal(id, './attachRules'); return { photoCompressible }; } });
+  return module.exports as typeof rules;
+}
+const drawing: NonNullable<rules.PhotoEdit['marks']> = [
+  { kind: 'stroke', color: '#ea2739', width: 0.012, points: [{ x: 1, y: 2 }, { x: 3, y: 4 }] },
+  { kind: 'text', color: '#ffffff', size: 0.07, text: 'Гусь', x: 0.4, y: 0.7 },
+];
+function carried(api: typeof rules, action: 'rotateLeft' | 'flipEdit') {
+  for (const angle of [0, 90, 180, 270] as const) for (const flipped of [false, true]) {
+    const original: rules.PhotoEdit = { angle, flipped, crop: { x: 0.13, y: 0.22, w: 0.41, h: 0.37 }, aspect: 'free', marks: drawing };
+    const snapshot = structuredClone(original), result = api[action](original);
+    assert.equal(result.marks === drawing, true, `${action} сохраняет исходные метки без преобразования координат`);
+    assert.equal(result.marks?.[0], drawing[0]); assert.equal(result.marks?.[1], drawing[1]); assert.deepEqual(original, snapshot);
+    assert.notEqual(result, original);
+  }
+}
+it('R214 поворот во всех четвертях и отражениях сохраняет штрихи и надписи в координатах исходника', () => carried(rules, 'rotateLeft'));
+it('R214 отражение во всех четвертях сохраняет штрихи и надписи, не мутируя их список', () => carried(rules, 'flipEdit'));
+it('R214 геометрия не создаёт marks при отсутствии рисунка и сохраняет явный пустой список', () => {
+  for (const action of ['rotateLeft', 'flipEdit'] as const) {
+    const absent = { ...rules.PRISTINE_EDIT }, empty: rules.PhotoEdit = { ...rules.PRISTINE_EDIT, marks: [] };
+    assert.equal('marks' in rules[action](absent), false); assert.equal(rules[action](empty).marks, empty.marks);
+  }
+});
+for (const [action, anchor, replacement] of [
+  ['rotateLeft', 'return { ...e, angle:', 'return { ...e, marks: undefined, angle:'],
+  ['flipEdit', 'return { ...e, flipped:', 'return { ...e, marks: undefined, flipped:'],
+] as const) it(`R214 контрфакт ${action} теряет нарисованное при геометрической правке`, () => {
+  carried(marksModule(), action);
+  assert.equal(marksSource.split(anchor).length - 1, 1, 'единственный якорь переноса меток');
+  const mutant = marksModule(marksSource.replace(anchor, replacement));
+  assert.throws(() => carried(mutant, action), e => e instanceof assert.AssertionError
+    && e.message.startsWith(`${action} сохраняет исходные метки без преобразования координат`)
+    && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+});

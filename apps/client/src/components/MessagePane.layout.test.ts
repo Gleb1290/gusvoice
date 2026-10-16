@@ -217,7 +217,7 @@ async function openLaterAndClose(component: typeof h.Pane) {
   await act(async () => { later.click(); await h.flush(); });
   assert.ok(document.querySelector('.sched-pick'), 'лист планирования открыт');
   assert.ok(blurStacks.some((stack) => stack.includes('openLater')), 'именно открытие расписания явно снимает фокус, не последующий modal effect');
-  assert.notEqual(document.activeElement, field, 'открытый лист не оставляет фокус и клавиатуру поверх времени');
+  assert.equal(document.activeElement !== field, true, 'открытый лист не оставляет фокус и клавиатуру поверх времени');
   const close = document.querySelector<HTMLButtonElement>('.sched-pick .modal-actions .link');
   assert.ok(close, 'окно планирования даёт отменить выбор без отправки');
   act(() => { close.click(); });
@@ -269,7 +269,7 @@ it('выбор времени возвращает фокус только на 
       act(() => { quick.click(); });
       await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); await h.flush(); });
       assert.equal(scheduled.length, phone ? 2 : 1, 'выбор быстрого времени вызвал callback расписания');
-      if (phone) assert.notEqual(document.activeElement, field, 'после выбора на телефоне фокус не поднимает клавиатуру');
+      if (phone) assert.equal(document.activeElement !== field, true, 'после выбора на телефоне фокус не поднимает клавиатуру');
       else assert.ok(document.activeElement === field, 'после выбора на ПК можно продолжить печатать');
       h.unmount();
     } finally { if (h.root) h.unmount(); h.desktop(); restore(); }

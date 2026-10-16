@@ -1,5 +1,11 @@
 import { FED_ERRORS } from '@gusvoice/shared';
 
+/** Отказ записи в беседу с человеком инстанса, связь с которым разорвана (Э2 часть Б, #141; в `FED_ERRORS` придёт вместе с бэкендом). */
+export const FED_DM_LINK_BROKEN = 'federation.dm_link_broken';
+
+/** Отдача вложения, копия которого с инстанса автора ещё едет (Э3, #141, `fedm3`; 503). В `FED_ERRORS` придёт вместе с бэкендом. */
+export const FED_ATT_PENDING = 'federation.att_pending';
+
 /**
  * Код отказа федерации → фраза для человека (#139, §5.8, §5.11).
  *
@@ -64,6 +70,34 @@ export function fedErrorText(code: string, who?: string | null): string | null {
         ? `Место, отведённое гостям с ${named}, закончилось. Скажите об этом держателю этого инстанса.`
         : 'Место, отведённое гостям, закончилось. Скажите об этом держателю этого инстанса.';
 
+    // Э2 (#141): вложение в беседу с человеком другого инстанса — до Э3. Код приходит и в «Не отправлено» (`sendErrorText`),
+    // поэтому текст здесь, а не только в `fedDmOpenText`: иначе человек читал бы `federation.dm_attachments_later`.
+    case FED_ERRORS.dmAttachmentsLater:
+      return 'Файлы людям других инстансов можно будет отправлять в следующем обновлении. Текст доходит.';
+    // Э5 (#141, `fedm5`): по долгой сессии у собеседника уходит только текст — остальное закрыто, пока дом недоступен (403).
+    case FED_ERRORS.dmViaLimited:
+      return 'Дом недоступен — пока только текст';
+    // Э2 часть Б (#141, Ф7): связка разорвана или приостановлена — беседа осталась архивом только для чтения (403).
+    case FED_DM_LINK_BROKEN:
+      return named
+        ? `Связь с инстансом ${named} разорвана — переписка доступна только для чтения`
+        : 'Связь с инстансом собеседника разорвана — переписка доступна только для чтения';
+
+    // Э3 (#141, `fedm3`): файл прислал человек другого инстанса, и копия на наш инстанс ещё едет (503 при отдаче).
+    case FED_ATT_PENDING:
+      return named ? `Файл ещё загружается с инстанса ${named}` : 'Файл ещё загружается с инстанса собеседника';
+    // Э3 часть 2 (#141): копии файла у нас нет, а инстанс автора не отвечает (503 при отдаче, `instance` — его имя).
+    case FED_ERRORS.attUnavailable:
+      return named ? `Файл появится, когда ${named} снова будет на связи` : 'Файл появится, когда инстанс собеседника снова будет на связи';
+    // Э7 (#141, `fedm6`): группа чужого дома — состав и название меняет только он; лежит — менять нельзя, писать можно (403).
+    case FED_ERRORS.dmGroupHostDown:
+      return named
+        ? `Инстанс ${named}, где живёт группа, недоступен — состав сейчас не меняется. Сообщения доедут, когда он вернётся`
+        : 'Инстанс, где живёт группа, недоступен — состав сейчас не меняется. Сообщения доедут, когда он вернётся';
+    // Э7: фото группы чужого дома отсюда не меняется (403).
+    case FED_ERRORS.dmGroupHostOnly:
+      return named ? `Фото меняется на инстансе ${named}` : 'Фото меняется на инстансе, где живёт группа';
+
     // --- Служебные отказы. Человек их не чинит, поэтому текст сразу называет того, кто чинит.
     case FED_ERRORS.clockSkew:
       return 'Часы инстансов разошлись — запрос отклонён. Это чинит админ инстанса.';
@@ -71,6 +105,70 @@ export function fedErrorText(code: string, who?: string | null): string | null {
       return 'Поручительство вашего инстанса не принято — попробуйте войти заново по свежей ссылке.';
     default:
       return null;
+  }
+}
+
+/**
+ * «Кто может мне писать» (`msgpriv1`, 13.10): отказ словами — плашка вместо поля ввода, «Не отправлено» и отказ `conv.open` соседа
+ * (причина `privacy`). По мотивам tdesktop `lng_send_non_premium_message_toast` («{user} only accepts messages from contacts and
+ * Premium subscribers»): Premium у нас нет.
+ */
+export function messagePrivacyText(name?: string | null): string {
+  return name ? `${name} принимает сообщения только от своих контактов.` : 'Этот человек принимает сообщения только от своих контактов.';
+}
+
+/** Код отказа отправки `message_privacy` (403, `shared` `MESSAGE_PRIVACY_ERROR`) — словами; иначе `null`. */
+export function messageErrorText(raw: string): string | null {
+  return raw === 'message_privacy' ? messagePrivacyText() : null;
+}
+
+/**
+ * Э1 ЛС между инстансами (#141, `fedm1`): отказ «Написать» человеку другого инстанса — словами (`docs/dm/FEDERATION.md` §1.2).
+ * `reason` — причина `federation.dm_refused` (`FED_DM_REFUSAL`, незнакомая — как `policy`); `who` — название или домен
+ * инстанса собеседника. Незнакомый код — `null` (вызывающий покажет общий текст).
+ */
+export function fedDmOpenText(code: string, reason: string | null | undefined, who?: string | null): string | null {
+  const named = who ? `«${who}»` : null;
+  switch (code) {
+    case FED_ERRORS.dmRefused:
+      if (reason === 'privacy') return messagePrivacyText();
+      if (reason === 'no_user') return named ? `Этого человека нет на ${named}.` : 'Этого человека нет на его инстансе.';
+      if (reason === 'hidden') return 'Этому человеку нельзя написать первым с другого инстанса.';
+      if (reason === 'rate')
+        return named
+          ? `${named} не принимает больше новых переписок от вас в этот час — попробуйте позже.`
+          : 'Его инстанс не принимает больше новых переписок от вас в этот час — попробуйте позже.';
+      return 'Этот человек принимает сообщения с других инстансов только от людей с общих серверов.';
+    case FED_ERRORS.peerUnreachable:
+      return named
+        ? `Инстанс ${named} сейчас недоступен — начать переписку можно, когда он ответит.`
+        : 'Инстанс собеседника сейчас недоступен — начать переписку можно, когда он ответит.';
+    case FED_ERRORS.unsupported:
+      return named
+        ? `На инстансе ${named} нужна новая версия GusVoice, чтобы писать в личку.`
+        : 'На инстансе собеседника нужна новая версия GusVoice, чтобы писать в личку.';
+    default:
+      return fedErrorText(code, who);
+  }
+}
+
+/**
+ * Э6 (#141, `fedcall1`): отказ «Позвонить» человеку другого инстанса (`POST /conv/:id/call`) и «Ответить» на его звонок — словами.
+ * 409 `federation.unsupported` — его инстанс не принимает звонки, 503 `federation.peer_unreachable` — молчит. Остальные коды связки — общие тексты.
+ */
+export function fedCallText(code: string, who?: string | null): string | null {
+  const named = who ? `«${who}»` : null;
+  switch (code) {
+    case FED_ERRORS.unsupported:
+      return named
+        ? `На инстансе ${named} нужна новая версия GusVoice, чтобы принимать звонки.`
+        : 'Инстанс собеседника пока не принимает звонки.';
+    case FED_ERRORS.peerUnreachable:
+      return named
+        ? `Инстанс ${named} сейчас недоступен — позвонить не получится, попробуйте позже.`
+        : 'Инстанс собеседника сейчас недоступен — позвонить не получится, попробуйте позже.';
+    default:
+      return fedErrorText(code, who);
   }
 }
 

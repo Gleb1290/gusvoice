@@ -309,6 +309,16 @@ EOF
   chmod 600 .env
 fi
 
+# --- Own map for location sharing (optional) --------------------------------
+# Asked here with the other questions, but the big download waits until the stack is up (see below). The map is optional: nothing
+# in this block may fail the install (deploy/maps/maps-install.sh never exits; its failures only print a note).
+if [ -f deploy/maps/maps-install.sh ]; then
+  # shellcheck source=deploy/maps/maps-install.sh
+  . deploy/maps/maps-install.sh
+  MAPS_ASK_MODE=tty   # answers come from the terminal even when stdin is the piped script
+  maps_install_prepare </dev/null || true
+fi
+
 # --- Bring the stack up -----------------------------------------------------
 if [ "${USE_CADDY:-1}" = "1" ]; then
   PROFILES=(--profile caddy --profile storage --profile push)
@@ -350,6 +360,12 @@ if ! grep -q '^NTFY_TOKEN=..' .env; then
   else
     info "Could not auto-create the ntfy token — push is off until you set NTFY_TOKEN in .env."
   fi
+fi
+
+# --- Own map: the download chosen above (needs a running stack only to restart the backend afterwards) ----
+if [ "${MAPS_PLAN_READY:-0}" = "1" ]; then
+  maps_apply </dev/null || true
+  if [ "${MAPS_ENV_CHANGED:-0}" = "1" ]; then docker compose "${PROFILES[@]}" up -d backend </dev/null || true; fi
 fi
 
 # --- "Update" button in the admin panel (systemd watcher) -------------------

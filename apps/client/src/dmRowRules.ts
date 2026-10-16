@@ -1,4 +1,4 @@
-import { attachmentWords, stripFormatting, type ConvAttachmentKind, type ConvLastMessage } from '@gusvoice/shared';
+import { attachmentWords, callServiceText, stripFormatting, type ConvAttachmentKind, type ConvLastMessage } from '@gusvoice/shared';
 import { readByPeer } from './bubbleRules';
 import type { IconName } from './components/Icon';
 
@@ -265,7 +265,7 @@ export type DmPreview =
  * один ответ без слов — не черновик для списка. Последнего сообщения нет (беседа пустая или список без сводок — старый
  * путь `/api/dm`) — `none`.
  */
-export function dmRowPreview(p: { typing: boolean; draft?: string | null; last?: ConvLastMessage | null }): DmPreview {
+export function dmRowPreview(p: { typing: boolean; draft?: string | null; last?: ConvLastMessage | null; meId?: string | null }): DmPreview {
   if (p.typing) return { kind: 'typing' };
   // Маркеры формата (G51) в строке списка не показываем — как Telegram: свой черновик словами, чужой спойлер закрыт.
   const draft = typeof p.draft === 'string' ? oneLine(stripFormatting(p.draft, { spoiler: 'keep' })) : '';
@@ -274,6 +274,8 @@ export function dmRowPreview(p: { typing: boolean; draft?: string | null; last?:
   if (!last || typeof last !== 'object') return { kind: 'none' };
   const att = dmAttachmentPreview(last);
   if (att) return { kind: 'attachment', ...att };
+  // Запись о звонке (`calls1`, B3): подпись глазами читателя, как в ленте — звонивший видит «Отменённый», принявший «Пропущенный».
+  if (last.call && p.meId) return { kind: 'text', text: callServiceText(last.call, last.authorId === p.meId) };
   const text = typeof last.text === 'string' ? stripFormatting(last.text).trim() : '';
   return text ? { kind: 'text', text } : { kind: 'none' };
 }

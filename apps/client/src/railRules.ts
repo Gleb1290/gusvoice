@@ -57,6 +57,11 @@ export interface RailGroupView {
   /** Строка «где я гость», если она есть: по ней заводится гостевая сессия при первом клике. */
   place: RailPlace | null;
   servers: RailServerView[];
+  /**
+   * Связка цела, но сам инстанс НЕ ОТВЕЧАЕТ (15.10): фоновый шлюз записи дважды подряд не достучался (`BgUnread.down`).
+   * Группа серая с «не отвечает» и НЕ убирается — упасть может и живой сосед; ожил — обычный вид. Поля нет — отвечает.
+   */
+  silent?: true;
 }
 
 export interface RailInput {
@@ -77,7 +82,7 @@ export interface RailInput {
    * ⚠️ Тип описан структурно, а не импортом из `bgGateways`: правила рейла обязаны оставаться
    * чистыми, а тот модуль держит сокеты и таймеры.
    */
-  bgUnread: Record<string, { servers: Record<string, { unread: number; mentions: number }> }>;
+  bgUnread: Record<string, { servers: Record<string, { unread: number; mentions: number }>; down?: boolean }>;
   /** «Где я гость» от дома; пусто — групп от индекса просто не будет, снимки остаются. */
   places: RailPlace[];
   /**
@@ -134,6 +139,65 @@ export function groupTitle(inst: Instance | null, place: RailPlace | null): stri
   const domain = inst?.domain?.trim() || place?.domain?.trim();
   if (domain) return domain;
   return serverHost(inst?.apiUrl ?? '');
+}
+
+/**
+ * Связки с этим инстансом у дома БОЛЬШЕ НЕТ (15.10): держатель её разорвал (`blocked`) или строки связки нет вовсе (`unknown`
+ * в «Где я гость»). Его группа уходит из рейла, гостевая запись — с устройства (`guestGone.ts`), с тостом.
+ *
+ * 🔴 Пауза (`paused`) и потеря доверия (`trust-lost`) — НЕ разрыв: первая снимается кнопкой, вторая чинится перепривязкой, и
+ * человек вернётся на свои серверы. Их группа остаётся серой с объяснением, как и была. Заявка (`requested`/`pending`) — тоже.
+ */
+export function linkGone(linkState: string): boolean {
+  return linkState === 'blocked' || linkState === 'unknown';
+}
+
+/** Строка «где я гость» для записи реестра: `federationInstanceId` → `domain` → хост адреса API (тот же порядок, что в рейле). */
+export function placeOfEntry(inst: Instance, places: readonly RailPlace[]): RailPlace | null {
+  if (inst.federationInstanceId) {
+    const byId = places.find((p) => p.instanceId === inst.federationInstanceId);
+    if (byId) return byId;
+  }
+  if (inst.domain) {
+    const byDomain = places.find((p) => p.domain === inst.domain);
+    if (byDomain) return byDomain;
+  }
+  const host = serverHost(inst.apiUrl);
+  return places.find((p) => serverHost(`https://${p.domain}`) === host) ?? null;
+}
+
+/**
+ * Гостевые записи ЭТОГО дома, чья связка у дома разорвана (15.10) — их убирают с устройства.
+ *
+ * ⚠️ Только записи с `guestOf === homeId`: места пришли от этого дома, а связки у каждого дома свои (мультиаккаунт — гость
+ * второго дома решается ответом второго). ⚠️ Активную запись не трогаем: в ней стоим прямо сейчас, её уберут, когда
+ * человек вернётся домой. ⚠️ Записи без места не трогаем: дом их не подтвердил, но и разрыва не сообщил — рейл их и так
+ * прячет (`buildRail`), а стирать данные по молчанию нельзя.
+ */
+export function goneGuestEntries(
+  instances: readonly Instance[],
+  homeId: string,
+  activeId: string | null,
+  places: readonly RailPlace[],
+): { entry: Instance; title: string }[] {
+  const out: { entry: Instance; title: string }[] = [];
+  for (const inst of instances) {
+    if (inst.guestOf !== homeId || inst.id === activeId) continue;
+    const place = placeOfEntry(inst, places);
+    if (!place || !linkGone(place.linkState)) continue;
+    out.push({ entry: inst, title: groupTitle(inst, place) });
+  }
+  return out;
+}
+
+/**
+ * Место «Где я гость», которое человек убрал из рейла руками (`Instance.hiddenGuests` дома): скрыто, пока у места нет
+ * сервера, которого не было в миг скрытия.
+ */
+export function placeHidden(place: RailPlace, hidden: Record<string, string[]> | undefined): boolean {
+  const was = hidden?.[place.instanceId];
+  if (!was) return false;
+  return place.servers.every((s) => s.state === 'removed' || was.includes(s.serverId));
 }
 
 /**
@@ -271,27 +335,36 @@ export function buildRail(input: RailInput): RailView {
      * ⚠️ Только когда ответ дома уже получен — иначе группы моргали бы на каждой загрузке.
      */
     if (inst.guestOf && !live && placesLoaded && !place) continue;
+    // 15.10: связки у дома больше нет — группы нет (запись тем временем убирает `guestGone.ts`, с тостом).
+    if (inst.guestOf && !live && place && linkGone(place.linkState)) continue;
     // Пустая группа не нужна: заголовок инстанса без единого сервера читается как поломка. Два
     // исключения: ЖИВАЯ (человек только что вошёл и вот-вот создаст первый сервер) и ДОМ, из
     // которого мы ушли гостить, — без него из гостей некуда возвращаться.
     if (servers.length === 0 && !live && inst.id !== homeOfActive) continue;
+    const reachable = !inst.guestOf || !place || place.linkState === 'active';
     groups.push({
       key: inst.id,
       instanceId: inst.id,
       title: groupTitle(inst, place),
       guest: !!inst.guestOf,
       live,
-      reachable: !inst.guestOf || !place || place.linkState === 'active',
+      reachable,
       place,
       servers,
+      // 15.10: связка цела, а хост молчит фоновому шлюзу — серая «не отвечает», но на месте.
+      ...(inst.guestOf && !live && reachable && bgUnread[inst.id]?.down ? { silent: true as const } : {}),
     });
   }
 
   // Инстансы, куда человек вошёл с другого устройства: записи на этом ещё нет, но серверы показать
   // надо — клик по ним заведёт сессию (ручается дом, а не запомненный токен).
+  // Места убранные руками — у ДОМА, откуда пришли места (стоим дома: места спрашиваются только оттуда).
+  const hidden = instances.find((i) => i.id === activeId && !i.guestOf)?.hiddenGuests;
   for (const place of places) {
     if (usedPlaces.has(place.instanceId)) continue;
     if (place.servers.length === 0) continue;
+    // 15.10: разорванная связка — группы нет; убранная руками на этом устройстве — тоже (до нового сервера там).
+    if (linkGone(place.linkState) || placeHidden(place, hidden)) continue;
     groups.push({
       key: `fed:${place.instanceId}`,
       instanceId: null,
@@ -342,6 +415,7 @@ export function serverTitle(group: RailGroupView, server: RailServerView): strin
   if (server.closed) return `${server.name} — закрыт держателем`;
   if (trustLost(group)) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;
   if (!group.reachable) return `${server.name} — «${group.title}» сейчас недоступен`;
+  if (group.silent) return `${server.name} — «${group.title}» не отвечает`;
   if (group.live) return server.name;
   return `${server.name} · ${group.title}`;
 }
@@ -350,5 +424,6 @@ export function serverTitle(group: RailGroupView, server: RailServerView): strin
 export function groupHeadTitle(group: RailGroupView): string {
   if (trustLost(group)) return `${group.title} · связь разорвана: ${TRUST_LOST_WHY}`;
   if (!group.reachable) return `${group.title} · сейчас недоступен`;
+  if (group.silent) return `${group.title} · не отвечает`;
   return `Перейти в «${group.title}»`;
 }

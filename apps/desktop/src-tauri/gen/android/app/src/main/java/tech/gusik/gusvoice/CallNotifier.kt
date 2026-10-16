@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit
  * Нагрузка — пуш `type: "call"` сервера (`callRules.incomingCallPush`: `callId`, `dmId`, `title` = звонящий, `body` =
  * «Входящий звонок» / «Входящий видеозвонок», `avatar`, `ts`, `video`, `uid`). Снимается: тихим пушем `type: "read"`
  * той же беседы (`calls.unringPush` — ответили на любом устройстве, отклонили, отменили, не дождались) после сверки
- * `GET /api/calls/active` (тот же пуш шлёт и обычное «прочитано» беседы, а звонок при этом ещё звонит), по сроку
+ * `GET /api/calls/active?fed=1` (тот же пуш шлёт и обычное «прочитано» беседы, а звонок при этом ещё звонит), по сроку
  * `CALL_RING_TIMEOUT_MS` (`setTimeoutAfter`), по «Ответить» / «Отклонить».
  *
  * Один звонок за раз (у Telegram тоже одна линия): текущий — в личных настройках [PREFS].
@@ -177,10 +177,22 @@ object CallNotifier {
     return ConversationNotifier.letterAvatar(call.name, call.authorId.ifEmpty { call.name })
   }
 
-  /** Отклонить без открытия интерфейса: `POST /api/calls/:id/decline` токеном получателя ([NotifAuth]). */
+  /**
+   * Отклонить без открытия интерфейса: `POST /api/calls/:id/decline` токеном получателя ([NotifAuth]). Звонок с другого
+   * инстанса (ЛС между инстансами, Э6, #141: у звонка из `GET /api/calls/active?fed=1` есть `host`) живёт у звонящего —
+   * отклонение уходит туда ([declineAtHost]), как у веб-клиента (`callFed.callApiFor`); свой дом такой звонок не знает.
+   */
   fun decline(context: Context, callId: String, uid: String): Boolean {
     if (!validCallId(callId)) return false
     val auth = NotifAuth.forUser(context, uid) ?: return false
+    val active = try {
+      activeCall(context, auth)
+    } catch (e: Exception) {
+      Log.w(TAG, "active call check failed", e)
+      null
+    }
+    val host = active?.takeIf { it.optString("id") == callId }?.optJSONObject("host")
+    if (host != null) return declineAtHost(context, auth, callId, active.optString("conversationId"), host.optString("instanceId"))
     val req = Request.Builder()
       .url("${auth.apiUrl}/api/calls/$callId/decline")
       .header("Authorization", "Bearer ${auth.token}")
@@ -209,16 +221,61 @@ object CallNotifier {
 
   private fun stillRinging(context: Context, call: Call): Boolean {
     val auth = NotifAuth.forUser(context, call.uid) ?: return false
+    val active = activeCall(context, auth) ?: return false
+    return active.optString("id") == call.callId && active.optString("phase") == "ringing"
+  }
+
+  /**
+   * Мой текущий звонок у своего дома. `?fed=1` (Э6): и входящий с другого инстанса (`DmCall.host`) — без него звонок соседа
+   * не виден, и «прочитано» беседы снимало бы ещё звонящий звонок. Нет ответа или звонка — null.
+   */
+  private fun activeCall(context: Context, auth: NotifAuth.Entry): JSONObject? {
     val req = Request.Builder()
-      .url("${auth.apiUrl}/api/calls/active")
+      .url("${auth.apiUrl}/api/calls/active?fed=1")
       .header("Authorization", "Bearer ${auth.token}")
       .get()
       .build()
     http.newCall(req).execute().use { res ->
       res.header("x-refresh-token")?.takeIf { it.isNotEmpty() }?.let { NotifAuth.updateToken(context, auth, it) }
-      if (!res.isSuccessful) return false
-      val active = JSONObject(res.body?.string().orEmpty()).optJSONObject("call") ?: return false
-      return active.optString("id") == call.callId && active.optString("phase") == "ringing"
+      if (!res.isSuccessful) return null
+      return JSONObject(res.body?.string().orEmpty()).optJSONObject("call")
+    }
+  }
+
+  /**
+   * Отклонить звонок соседа у инстанса звонящего: гостевую сессию там выдаёт свой дом (`GET /api/conv/:id/fallback?for=call`,
+   * `convVia.fallbackFor`), ею — `POST <apiBase>/api/calls/:id/decline`. Сессия другого инстанса, чем `host.instanceId`, не
+   * годится — токен чужому не отдаём (как `callFed.hostSession`). Токен сессии не сохраняется: звонок короткий.
+   */
+  private fun declineAtHost(context: Context, auth: NotifAuth.Entry, callId: String, dmId: String, hostId: String): Boolean {
+    if (!CALL_ID.matches(dmId) || hostId.isEmpty()) return false
+    val sessionReq = Request.Builder()
+      .url("${auth.apiUrl}/api/conv/$dmId/fallback?for=call")
+      .header("Authorization", "Bearer ${auth.token}")
+      .get()
+      .build()
+    val creds = http.newCall(sessionReq).execute().use { res ->
+      res.header("x-refresh-token")?.takeIf { it.isNotEmpty() }?.let { NotifAuth.updateToken(context, auth, it) }
+      if (!res.isSuccessful) {
+        Log.w(TAG, "fed call session -> ${res.code}")
+        return false
+      }
+      JSONObject(res.body?.string().orEmpty())
+    }
+    val apiBase = creds.optString("apiBase").trimEnd('/')
+    val token = creds.optString("token")
+    if (creds.optString("instanceId") != hostId || token.isEmpty() || !apiBase.startsWith("https://")) {
+      Log.w(TAG, "fed call session unusable")
+      return false
+    }
+    val req = Request.Builder()
+      .url("$apiBase/api/calls/$callId/decline")
+      .header("Authorization", "Bearer $token")
+      .post("{}".toRequestBody(JSON))
+      .build()
+    http.newCall(req).execute().use { res ->
+      if (!res.isSuccessful) Log.w(TAG, "fed decline -> ${res.code}")
+      return res.isSuccessful
     }
   }
 

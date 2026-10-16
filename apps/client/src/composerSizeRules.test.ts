@@ -38,17 +38,43 @@ it('R117 список закрепов ограничен местом от ег
 });
 
 it('R117 настоящее поле пересчитывает потолок на повороте и клавиатуре и снимает слушателей', () => {
-  const source = readFileSync(new URL('./components/MessagePane.tsx', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('./components/MessagePane.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const composerEffect = (s: string) => {
+    const tree = ts.createSourceFile('MessagePane.tsx', s, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const effects: string[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'useEffect') {
+        const fn = node.arguments[0];
+        if (fn && ts.isArrowFunction(fn) && ts.isBlock(fn.body)) {
+          const bindsComposer = fn.body.statements.some(statement => ts.isVariableStatement(statement) && statement.declarationList.declarations.some(d =>
+            ts.isIdentifier(d.name) && d.name.text === 'onViewport' && d.initializer && ts.isArrowFunction(d.initializer)
+            && ts.isCallExpression(d.initializer.body) && ts.isIdentifier(d.initializer.body.expression) && d.initializer.body.expression.text === 'fitComposer'));
+          if (bindsComposer) effects.push(fn.body.getText(tree));
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    assert.equal(effects.length, 1, 'проверяется единственный эффект fitComposer, не соседний якорь ленты');
+    return effects[0];
+  };
   const check = (s: string) => {
     assert.match(s, /composerMaxPx\(safe\.vh - \(safe\.top \?\? 0\)\)/);
-    assert.match(s, /const onViewport = \(\) => fitComposer\(\)/);
+    const effect = composerEffect(s);
     for (const target of ['window', 'window.visualViewport?']) for (const method of ['add', 'remove'])
-      assert.ok(s.includes(`${target}.${method}EventListener('resize', onViewport)`));
+      assert.ok(effect.includes(`${target}.${method}EventListener('resize', onViewport)`), `эффект поля содержит ${target}.${method}`);
     assert.match(s, /Math\.min\(full, cap\)/);
   };
   check(source);
-  for (const old of ["window.addEventListener('resize', onViewport);", "window.visualViewport?.addEventListener('resize', onViewport);", 'composerMaxPx(safe.vh - (safe.top ?? 0))']) {
-    assert.ok(source.includes(old));
-    assert.throws(() => check(source.replace(old, '')), assert.AssertionError);
+  const effect = composerEffect(source);
+  // Второй onViewport принадлежит B9 и может остаться: он не компенсирует потерю пересчёта поля.
+  for (const target of ['window', 'window.visualViewport?']) for (const method of ['add', 'remove']) {
+    const old = `${target}.${method}EventListener('resize', onViewport);`;
+    assert.equal(effect.split(old).length - 1, 1, 'контрфакт имеет один якорь внутри эффекта поля');
+    assert.equal(source.split(effect).length - 1, 1);
+    assert.throws(() => check(source.replace(effect, effect.replace(old, ''))), assert.AssertionError);
   }
+  const cap = 'composerMaxPx(safe.vh - (safe.top ?? 0))';
+  assert.equal(source.split(cap).length - 1, 1);
+  assert.throws(() => check(source.replace(cap, '')), assert.AssertionError);
 });

@@ -1,3 +1,4 @@
+import { RecordCircle } from './RecordBlob';
 import {
   BROADCAST_MENTIONS,
   customReactionId,
@@ -7,6 +8,7 @@ import {
   ROUND_MAX_MS,
   type Attachment,
   type ConvPin,
+  type ConvReader,
   type Message,
   type MessageReplyPreview,
   type ReactionGroup,
@@ -19,8 +21,9 @@ import {
   callServiceMark,
   callServiceTitle,
   REPLY_QUOTE_MAX,
+  ALBUM_ITEM_PEER_OLD_ERROR,
 } from '@gusvoice/shared';
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSelBarFit } from '../useSelBarFit';
 import { api } from '../api';
@@ -61,6 +64,8 @@ import {
   sentAtLabel,
   menuFootLines,
   timeTooltip,
+  bubbleTimeLabel,
+  viaCaption,
   copyMediaLabel,
   swipeArmed,
   swipeFromEdge,
@@ -83,7 +88,6 @@ import { loadRecentHashtags, matchHashtags, rememberSentHashtags } from '../hash
 import { attachKey, chatEscape, fieldKeyAction, isTypingKey, replyNavKey, replyNavTarget } from '../chatKeysRules';
 import { getSendMode, insertLineBreak } from '../sendMode';
 import { getDoubleClickAction, getQuickReaction, quickBarOrder, setQuickReaction, useDoubleClickAction, useQuickReaction } from '../quickReaction';
-import { dmBubblesSwitch } from '../dmBubbles';
 import { TYPING_SEND_MS } from '../typing';
 import {
   holdSelection,
@@ -104,6 +108,7 @@ import {
 } from '../dmSelection';
 import { plural } from '../dmRowRules';
 import { takeFilesDrop, useFilesDropSeq } from '../filesDrop';
+import { collectDrop } from '../folderZip';
 import { DRAG_MSG_MIME, downloadUrlValue, dragIds, encodeMsgDrag, grabsMessage, onForwardDrop } from '../dragOut';
 import { usePhoneLayout } from '../phoneLayout';
 import { deleteBothDefault, deleteRememberAvailable, rememberDeleteChoice } from '../deleteChoiceRules';
@@ -122,6 +127,8 @@ import { canMarkRead, feedCovered, idleMs, lastSeenIndex, watchReadActivity } fr
 import { windowFocused } from '../notifications';
 import { onConvCacheUrgent } from '../convCacheWriter';
 import { isOwnLink, LinkConfirmModal, MessageLink, openLink, shouldWarnAboutLink } from '../linkGuard';
+import { openDangerousLink } from '../dangerousLink';
+import { isDangerousLink, serverLinkThreats } from '../dangerousLinkRules';
 import {
   addedBelow,
   isFarFromBottom,
@@ -139,7 +146,10 @@ import { renderMessageText, type EmojiResolver } from '../messageText';
 import { toast, toastError } from '../toast';
 import { toastCopied } from '../copyConfirm';
 import { canCopyImage, canSaveImage, copyImage, photoFromTouch, saveImage } from '../imageActions';
+import { ALBUM_ITEM_PEER_OLD_TEXT, albumCellFromTarget, albumItemNoun, isAlbumItem } from '../albumItemRules';
 import { ReadAtLine } from './ReadAtLine';
+import { ReadersLine, readerLook } from './ReadersLine';
+import { readersLineShown } from '../lastSeenText';
 import { Avatar } from './Avatar';
 import { CrownMark, crownGlow, useCrownId } from './Crown';
 import { useAnimatedAvatarUrl } from '../avatarAnimation';
@@ -175,7 +185,7 @@ import { compressPhotos } from '../imageCompress';
 import { canShareFileNative, nativeMediaAvailable, pickDocumentsNative } from '../nativeMedia';
 import { canCopyFileName, fileFromTarget, fileMenuActions, fileMenuLabel, runFileMenuAction } from '../fileMenu';
 import { attachmentKey, cancelFileJob, fileJobOf } from '../fileActions';
-import { attachmentTarget, ringDownloads, startDownload } from '../pcDownloads';
+import { attachmentTarget, ringDownloads, savedFilePath, showInFolder, startDownload } from '../pcDownloads';
 import {
   addOutgoing,
   outgoingFailed,
@@ -269,9 +279,15 @@ import {
   pinTrack,
   type PinMedia,
 } from '../pinBarRules';
-import { groupServiceMark, peerColorIndex } from '../groupChatRules';
+import { groupServiceLabel, groupServiceMark, peerColorIndex } from '../groupChatRules';
 import { readPinHidden, writePinHidden } from '../pinHide';
 import { PollCard } from './PollCard';
+import { ConvMediaView, convMediaOf, withoutMediaFallback } from './ConvMediaCard';
+import { ConvPollCard, ConvPollCreate, ConvPollMenuItems } from './ConvPoll';
+import { GeoPickDialog } from './GeoPickDialog';
+import { GeoPickMapLazy, geoSystemHooks } from '../geoSystem';
+import { GeoLiveBar, GeoLiveCard } from './GeoLiveCard';
+import { ContactSendFlow } from './ContactSendFlow';
 import { PollComposer } from './PollComposer';
 import { Goose } from './Goose';
 import { Icon } from './Icon';
@@ -298,7 +314,8 @@ import { requestFeedJump, takeFeedJump, useFeedJumpSeq } from '../feedJump';
 import { AutoDownloadSource } from '../autoDownload';
 import { quoteFromSelection, replyJumpTarget, replyQuoteFragment, type ReplyQuoteDraft } from '../replyQuoteRules';
 import { composerMaxPx } from '../composerSizeRules';
-import { viewportSafe } from '../popover';
+import { rememberedKeyboardHeight, rootZoom, viewportSafe } from '../popover';
+import { canDragExpand, dragExtra, expandAfterDrag, expandedExtra, EXPAND_SLOP } from '../stickersExpand';
 
 /** Candidates for @-mention / #-channel autocomplete in the composer (channels only; DMs omit it). */
 export type AutocompleteData = {
@@ -465,10 +482,11 @@ function renderContent(
   authorId: string | null,
   authorName: string,
   onEmoji?: EmojiResolver,
+  dangerous?: readonly string[] | null,
 ) {
   return renderMessageText(
     content,
-    (url, key) => <MessageLink key={key} url={url} authorId={authorId} authorName={authorName} />,
+    (url, key) => <MessageLink key={key} url={url} dangerous={dangerous} />,
     onEmoji,
   );
 }
@@ -490,6 +508,8 @@ const NO_PICKED: ReadonlySet<string> = new Set();
  * слушатель ширины поля (вешается один раз), а набранное, ответ и правка ждут выхода из выделения.
  */
 const COMPOSER_HIDDEN = { display: 'none' } as const;
+/** Панель стикеров не раскрыта и не тянется (`exprLift`). */
+const LIFT_NONE = { open: false, max: 0, drag: null } as const;
 /** Сколько висит плашка «Переслано» (HANDOFF §9): гаснет сама. */
 const FWD_DONE_MS = 4000;
 /** Сколько черновик пересылки ждёт ушедший с ним текст (`outboxSettled`): дальше пересылка уходит и без него. */
@@ -533,7 +553,8 @@ const hasMedia = (m: Message) => mediaCount(m) > 0;
  * курсором или пальцем (пункты «Сохранить как…» / «Сохранить в загрузки» / «в галерею» / «Поделиться», `fileMenu.ts`),
  * `link` — ссылка в тексте («Открыть ссылку», «Скопировать ссылку»), `linkRect` — где она (меню ссылки на телефоне — у неё).
  */
-type MenuMore = { file?: Attachment; link?: string; linkRect?: DOMRect };
+/** `item` — ячейка альбома под правым кликом (G56): на ПК «Переслать»/«Удалить» меню берут её одну, как tdesktop `GroupPart`. */
+type MenuMore = { file?: Attachment; link?: string; linkRect?: DOMRect; item?: Attachment };
 
 /**
  * Действия строки ленты. Объект ОДИН на всю жизнь `MessagePane` и внутри зовёт свежие обработчики (`rowActsRef`):
@@ -603,6 +624,8 @@ interface MessageRowProps {
   animatedUrl: string | undefined;
   crowned: boolean;
   guestHome: GuestHome;
+  /** Э5 (#141): подпись «через «X», не подтверждено» у времени (`messagePaneRules.viaCaption`); нет — обычное сообщение. */
+  viaText?: string | null;
   canReact: boolean;
   /** Удержание реакции в полосе ставит «большую» (G43, `onReactBig` у ленты). */
   canBig: boolean;
@@ -611,7 +634,7 @@ interface MessageRowProps {
   onEmoji: EmojiResolver | undefined;
   emojiById: (id: string) => ServerEmoji | null;
   act: RowActions;
-  /** ЛС как в Telegram (`dmBubbles.ts`): пузырь, свои справа, время внутри, без аватара и имени. */
+  /** ЛС как в Telegram (Р13): пузырь, свои справа, время внутри, без аватара и имени. */
   bubbles: boolean;
   /** Последнее в группе подряд идущих — пузырь с «хвостиком» и отступ до следующей группы. */
   tail: boolean;
@@ -681,6 +704,7 @@ const MessageRow = memo(function MessageRow({
   animatedUrl,
   crowned,
   guestHome,
+  viaText,
   canReact,
   canBig,
   canDelete,
@@ -705,7 +729,13 @@ const MessageRow = memo(function MessageRow({
   const time = TIME_FMT.format(new Date(m.createdAt));
   const who: UserMenuTarget = { userId: m.author.id, name: author, avatarUrl: m.author.avatarUrl };
   // `noPreview` (G19, `linkprev1`): автор убрал превью крестиком над полем — карточку под сообщением не рисуем.
-  const previews = m.content && !m.noPreview && linkPreviewsEnabled() ? previewableLinks(m.content) : [];
+  // Опасные ссылки (#218 п.5, `linkthreats1`): хосты, найденные сервером в списке угроз; без признака сервера — пусто.
+  const dangerous = useStore((s) => (serverLinkThreats(s.serverFeatures) ? m.dangerousLinks : undefined));
+  // Карточку по опасной ссылке не рисуем: сервер её и не собирает.
+  const previews =
+    m.content && !m.noPreview && linkPreviewsEnabled()
+      ? previewableLinks(m.content).filter((u) => !isDangerousLink(u, dangerous))
+      : [];
   const hasReactions = !!m.reactions?.length;
   const quick = useQuickReaction();
   // Let avatar/author (user menu), links, images and controls keep their own
@@ -732,6 +762,7 @@ const MessageRow = memo(function MessageRow({
       file: fileEl ? fileFromTarget(m.attachments, t) : undefined,
       link: linkEl?.getAttribute('href') ?? undefined,
       linkRect: linkEl?.getBoundingClientRect(),
+      item: photoLink ? albumCellFromTarget(m.attachments, t) : undefined,
     };
     // Палец или перо (системное долгое нажатие WebView) — это не правый клик: решит лента (`openMsgMenu`).
     act.aim(more);
@@ -753,9 +784,28 @@ const MessageRow = memo(function MessageRow({
     />
   ) : null;
   const stickerSets = useStore((s) => !!m.sticker && serverDmStickers(s.serverFeatures));
+  // Геопозиция / контакт (G69, `geocontact1`): карточка вместо запасного текста (его снимает `withoutMediaFallback` у ленты).
+  const convMedia = convMediaOf(m as { media?: unknown });
   const pollAndSticker = (
     <>
       {m.poll ? <PollCard poll={m.poll} channelId={m.channelId} messageId={m.id} /> : null}
+      {/* Опрос в ЛС (14.10, `convpoll1`): своя карточка с голосом (`ConvPoll.tsx`). */}
+      {convMedia?.kind === 'poll' ? <ConvPollCard poll={convMedia} conversationId={m.channelId} messageId={m.id} /> : null}
+      {/* Трансляция геопозиции в ЛС (14.10, `geolive1`): карточка с кольцом срока и «Остановить» у автора (`GeoLiveCard.tsx`). */}
+      {convMedia?.kind === 'geolive' ? <GeoLiveCard live={convMedia} conversationId={m.channelId} messageId={m.id} mine={mine} /> : null}
+      {convMedia && convMedia.kind !== 'poll' && convMedia.kind !== 'geolive' ? (
+        <ConvMediaView
+          media={convMedia}
+          onProfile={(e, userId) =>
+            act.userMenu(
+              e,
+              { userId, name: convMedia.kind === 'contact' ? convMedia.displayName || convMedia.username : '', avatarUrl: convMedia.kind === 'contact' ? convMedia.avatarUrl : null },
+              'profile',
+            )
+          }
+          onMessage={(userId) => void useStore.getState().openDmWith(userId).catch(toastError)}
+        />
+      ) : null}
       {/* Стикер (#68) — крупно и без рамки сообщения. Лежит копией в самом сообщении,
           поэтому переживает удаление набора, из которого пришёл. */}
       {m.sticker ? (
@@ -783,7 +833,7 @@ const MessageRow = memo(function MessageRow({
   );
   /* Карточки ссылок (#64). Своим инстансом не занимаемся — предпросмотр
      собственных страниц бессмысленен, а запрос лишний. */
-  const previewCards = previews.map((u) => <LinkPreviewCard key={u} url={u} authorId={m.author.id} authorName={author} />);
+  const previewCards = previews.map((u) => <LinkPreviewCard key={u} url={u} />);
   /* Голосовое: сообщение-источник для «не прослушано», автоперехода и полосы плеера (07.10, G12). У каждой ленты — и ЛС,
      и канала: признак «прослушано» есть только у бесед с `voice1`, без него точек и вызовов нет, а полоса и автопереход
      работают. */
@@ -920,7 +970,7 @@ const MessageRow = memo(function MessageRow({
        по «прочитано до» собеседника из сводки беседы; сервер без `conv4` его не шлёт — тогда всегда ✓). */
     const status: BubbleStatus | undefined = mine ? (read ? 'read' : 'sent') : undefined;
     const meta = (
-      <BubbleMeta time={time} edited={!!m.editedAt} over={metaAt === 'over'} status={status} title={timeTooltip(m)} />
+      <BubbleMeta time={bubbleTimeLabel(time, m, viaText)} edited={!!m.editedAt} over={metaAt === 'over'} status={status} title={timeTooltip(m, viaText)} />
     );
     // Цитата в пузыре знает, что цитирует (раунд 10): миниатюра фото или стикера, голосовое, файл, удалённое.
     const rq = m.replyTo ? replyQuoteLook(m.replyTo, replyOf) : null;
@@ -941,7 +991,7 @@ const MessageRow = memo(function MessageRow({
       ) : null;
     const body = m.content ? (
       <div className="message-body">
-        {renderContent(m.content, m.author.id, author, onEmoji)}
+        {renderContent(m.content, m.author.id, author, onEmoji, dangerous)}
         {metaAt === 'body' ? meta : null}
       </div>
     ) : null;
@@ -1151,7 +1201,7 @@ const MessageRow = memo(function MessageRow({
               {pollAndSticker}
               {m.content ? (
                 <div className="message-body">
-                  {renderContent(m.content, m.author.id, author, onEmoji)}
+                  {renderContent(m.content, m.author.id, author, onEmoji, dangerous)}
                   {m.editedAt ? <span className="ts muted edited"> (изм.)</span> : null}
                 </div>
               ) : null}
@@ -1176,11 +1226,12 @@ interface MessageListProps {
   /** Id сообщений, с которыми сейчас работают (меню, пикер, шторка, правка в поле), — у их строк рамка `active`. */
   menuId: string | undefined;
   pickerId: string | undefined;
-  sheetId: string | undefined;
   composerEditId: string | undefined;
   nameOf: (userId: string, fallback: string) => string;
   animatedOf: (userId: string | undefined) => string | undefined;
   guestHomeOf: (userId: string | undefined) => GuestHome;
+  /** Э5: имена инстансов для подписи «через «X»» (свой / собеседника); нет — подписи нет. */
+  viaNames?: { self?: string; peer?: string } | null;
   crownId: string | undefined;
   canReact: boolean;
   canBig: boolean;
@@ -1188,7 +1239,7 @@ interface MessageListProps {
   onEmoji: EmojiResolver | undefined;
   emojiById: (id: string) => ServerEmoji | null;
   act: RowActions;
-  /** ЛС как в Telegram — пузыри (`dmBubbles.ts`). */
+  /** ЛС как в Telegram — пузыри (Р13). */
   bubbles: boolean;
   /** Широкая лента «все слева» — аватары у групп (`MessageRow.avatars`). */
   avatars: boolean;
@@ -1362,7 +1413,8 @@ const MessageList = memo(function MessageList(props: MessageListProps) {
                 </div>
               )}
               <div className="msg-service" role="status" data-mid={m.id} data-svc="group">
-                <DayDivider label={m.content} pill />
+                {/* G6: «Имя удалил(а) вас» — глазами читателя (`groupServiceLabel`). */}
+                <DayDivider label={groupServiceLabel(groupSvc, m.content, p.meId)} pill />
               </div>
             </Fragment>
           );
@@ -1421,20 +1473,21 @@ const MessageList = memo(function MessageList(props: MessageListProps) {
         return (
           <MessageRow
             key={m.id}
-            m={m}
+            m={withoutMediaFallback(m)}
             grouped={grouped}
             firstUnread={unreadAt === null ? isFirstUnread(row, prevRow, p.meId, p.newSince) : i === unreadAt}
             unreadText={p.readKey === undefined ? 'Новые сообщения' : 'Непрочитанные сообщения'}
             newDay={newDay}
             mine={mine}
             active={
-              p.menuId === m.id || p.pickerId === m.id || p.sheetId === m.id || p.composerEditId === m.id
+              p.menuId === m.id || p.pickerId === m.id || p.composerEditId === m.id
             }
             // Имя автора — через резолвер: в канале сервера это ник, в ЛС остаётся обычное имя (#73).
             author={p.nameOf(m.author.id, m.author.displayName)}
             animatedUrl={p.animatedOf(m.author.id)}
             crowned={p.crownId === m.author.id}
             guestHome={p.guestHomeOf(m.author.id)}
+            viaText={viaCaption((m as { via?: { instance: string; confirmed: boolean } }).via, mine, p.viaNames)}
             canReact={p.canReact}
             canBig={p.canBig}
             canDelete={mine || p.canDeleteOthers}
@@ -1448,7 +1501,7 @@ const MessageList = memo(function MessageList(props: MessageListProps) {
             quoteNameOf={p.quoteNames ? p.nameOf : undefined}
             replyOf={m.replyTo && p.byId ? p.byId.get(m.replyTo.id) : undefined}
             pressing={p.pressingId === m.id}
-            // ✓✓ (Р6): сообщение беседы несёт `sortKey` (`ConvMessage`); у старого пути ЛС его нет — остаётся ✓.
+            // ✓✓ (Р6): сообщение беседы несёт `sortKey` (`ConvMessage`); нет его — остаётся ✓.
             read={p.bubbles && mine && readByPeer((m as { sortKey?: number }).sortKey, p.peerReadKey)}
             selecting={p.selecting}
             picked={p.selecting && p.picked.has(m.id)}
@@ -1755,6 +1808,9 @@ function flipReactPop(e: React.SyntheticEvent<HTMLElement>) {
   el.dataset.flip = room < 56 ? 'down' : '';
 }
 
+/** Сколько после `resize` окна (клавиатура) смена высоты ленты считается её следствием и держит низ ленты (B9, 10.10). */
+const VIEWPORT_ANCHOR_MS = 400;
+
 function phoneTaps(touch: boolean | null = null): boolean {
   return (touch ?? window.matchMedia('(pointer: coarse)').matches) && window.matchMedia('(max-width: 760px)').matches;
 }
@@ -1795,7 +1851,7 @@ export interface FeedWindowProps {
 
 /**
  * Действия над сообщениями беседы пачкой (раунд 12, порция 5): пересылка, удаление выделенного. Даёт только ЛС в режиме
- * бесед у сервера с `conv5` (`DmChatView`); ленты без них (каналы, старый путь ЛС, старый сервер) — без «Переслать»,
+ * бесед у сервера с `conv5` (`DmChatView`); ленты без них (каналы, старый сервер) — без «Переслать»,
  * «Выделить» и выделения. Ошибку сети или сервера каждое действие бросает — тост показывает лента.
  */
 export interface MessageBatch {
@@ -1822,6 +1878,13 @@ export interface MessageBatch {
   later?: (to: string, texts: string[], at: Date, silent: boolean) => Promise<void>;
   /** Удалить пачкой: `both` — у обоих, `me` — у себя; ответ уже в сторе. */
   deleteMany: (messageIds: string[], scope: 'me' | 'both') => Promise<void>;
+  /**
+   * G56 (`album1`): переслать ОДИН элемент альбома — новое сообщение с ним одним. Нет — пунктов «одного элемента» нет, просмотр
+   * и меню пересылают сообщение целиком, как раньше.
+   */
+  forwardItem?: (messageId: string, attachmentId: string, to: string, silent?: boolean, opts?: { hideSender?: boolean }) => Promise<void>;
+  /** G56 (`album1`): убрать ОДИН элемент альбома (`both` — у всех, только своё; `me` — у себя). Последний — сообщение целиком. */
+  deleteItem?: (messageId: string, attachmentId: string, scope: 'me' | 'both') => Promise<void>;
   /** Имя собеседника беседы — для плашки «Переслано: <имя>». */
   peerName: (conversationId: string) => string;
   /** «Открыть» на плашке — к беседе получателя. */
@@ -1830,21 +1893,24 @@ export interface MessageBatch {
 
 /**
  * Закреп в ЛС (раунд 12, порция 7; сервер С2, `conv7`): мои закреплённые этой беседы и действия с ними. Даёт только
- * `DmChatView` в режиме бесед у сервера с признаком; видно только за переключателем пузырей (`round12`). Нет пропа —
+ * `DmChatView` в режиме бесед у сервера с признаком. Нет пропа —
  * ни «Закрепить» в меню, ни полосы под шапкой. Ошибку сети или сервера действия бросают — тост показывает лента.
  */
 export interface MessagePins {
   /** Мои закреплённые — от старых к новым по ленте (`ConvPin`: превью, миниатюра, «для обоих»). */
   list: readonly ConvPin[];
-  /** Закрепить: `both` — ещё и у собеседника. Ответ сервера уже в сторе. */
-  pin: (messageId: string, scope: 'me' | 'both') => Promise<void>;
+  /**
+   * Закрепить: `both` — ещё и у собеседника. Ответ сервера уже в сторе. `notify` — только группа: галочка «Уведомить всех
+   * участников» (G4); в 1:1 не передаётся.
+   */
+  pin: (messageId: string, scope: 'me' | 'both', notify?: boolean) => Promise<void>;
   /** Открепить: `both` — и закреп «для обоих» у собеседника. Ответ сервера уже в сторе. */
   unpin: (messageId: string, scope: 'me' | 'both') => Promise<void>;
 }
 
 /**
  * Раунд 12, порция 8 — меню кнопки «Отправить» и «Отложенные» (сервер С3 `conv8`, С4 `conv9`; HANDOFF §8). Даёт только
- * `DmChatView` в режиме бесед; видно только за переключателем пузырей (`round12`). Нет пропа — у кнопки «Отправить» меню
+ * `DmChatView` в режиме бесед. Нет пропа — у кнопки «Отправить» меню
  * нет и входа «Отложенные» нет, как раньше. Пункт, которого сервер не объявил, — `false` (его нет в меню).
  */
 export interface MessageSendMenu {
@@ -1932,8 +1998,12 @@ export function MessagePane({
   emptyState,
   headerActions,
   composerReplacement,
+  composerNotice,
   topBar,
   readOnly = false,
+  filesBlocked,
+  viaNames,
+  composerNote,
   nameOf = PLAIN_NAME,
   onEmoji,
   customEmojis,
@@ -1941,6 +2011,9 @@ export function MessagePane({
   stickerPacks,
   onSendSticker,
   onSendGif,
+  onSendMedia,
+  convPoll,
+  geoLive,
   onSaveGif,
   stickerRecent,
   stickerCatalog,
@@ -1958,6 +2031,7 @@ export function MessagePane({
   quoteNames = false,
   peerReadKey = null,
   readAtConvId = null,
+  readersConvId = null,
   bigFiles = false,
   onSeen,
   loadMediaPage,
@@ -2000,7 +2074,7 @@ export function MessagePane({
    * — только когда человек смотрит (`canMarkRead`) и не до прыжка к черте «Новые». Беседы ЛС; каналы не передают.
    */
   onSeen?: (sortKey: number) => void;
-  /** ЛС как в Telegram (Р13, `dmBubbles.ts`): пузыри, свои справа. Каналы не передают. */
+  /** ЛС как в Telegram (Р13): пузыри, свои справа. Каналы не передают. */
   bubbles?: boolean;
   /** «Перезвонить» у записи о звонке в ленте (08.10, С5, `calls1`): беседа 1:1, сервер умеет звонки. */
   onRedial?: () => void;
@@ -2018,6 +2092,11 @@ export function MessagePane({
   peerReadKey?: number | null;
   /** Беседа 1:1 с «Прочитано в 12:34» в подвале меню своего прочитанного (С1, `lastseen1`); `null` — строки нет. */
   readAtConvId?: string | null;
+  /**
+   * Группа ЛС с «N прочитали» в меню своего прочитанного сообщения (15.10, `readers1`; Telegram «Seen by»); `null` — строки нет.
+   * Взаимоисключающе с `readAtConvId` (тот — только 1:1).
+   */
+  readersConvId?: string | null;
   /** Лента бесед ЛС: предел файла — по серверу (`bigfile1`: до 512 МБ кусками, `attachRules.dmAttachMaxBytes`); нет — 25 МБ. */
   bigFiles?: boolean;
   messages: Message[];
@@ -2035,7 +2114,7 @@ export function MessagePane({
   /**
    * Очередь исходящих снаружи (ЛС этап 2, шаг 2в): строки «в пути» живут в сторе по беседе и на диске, а не в этом
    * компоненте, — переживают смену беседы, вход в голос и перезапуск, повторяются сами. Нет — прежний список в
-   * компоненте (каналы, старый путь ЛС), и тогда отправка идёт через `onSend`.
+   * компоненте (каналы), и тогда отправка идёт через `onSend`.
    */
   /**
    * Черновик (ЛС этап 2, шаг 2д): что лежало в поле этой ленты в прошлый раз. Лента пересоздаётся при смене беседы и
@@ -2091,8 +2170,8 @@ export function MessagePane({
    */
   deletePeerName?: string;
   /**
-   * Раунд 12, порция 5 — пересылка, выделение, удаление пачкой (`MessageBatch`; только ЛС в режиме бесед, `conv5`). Видно
-   * только за переключателем пузырей (`round12`); без него лента такая же, как без этого пропа.
+   * Раунд 12, порция 5 — пересылка, выделение, удаление пачкой (`MessageBatch`; только ЛС в режиме бесед, `conv5`). Нет
+   * пропа — лента без пересылки, выделения и удаления пачкой.
    */
   batch?: MessageBatch;
   /**
@@ -2167,6 +2246,15 @@ export function MessagePane({
   onSendSticker?: (stickerId: string) => Promise<void>;
   /** ЛС (`gifs1`, Р-7): вкладка «GIF» в панели строки ввода — «Мои GIF» и поиск (`GifPicker`); отправка GIF. */
   onSendGif?: (pick: GifPick) => Promise<void>;
+  /**
+   * ЛС (14.10, G69, `geocontact1`): пункты «Геопозиция» и «Контакт» в листе вложений (телефон), меню скрепки (ПК) и шторке «+»;
+   * отправка вида сообщения. Нет пропа — пунктов нет.
+   */
+  onSendMedia?: (media: import('@gusvoice/shared').ConvMediaInput) => Promise<void>;
+  /** ЛС (14.10, `convpoll1`): пункт «Опрос» рядом с «Геопозицией» (отправка — тот же `onSendMedia`). */
+  convPoll?: boolean;
+  /** ЛС (14.10, `geolive1`): в окне «Геопозиция» пункт «Транслировать геопозицию» (только телефонная раскладка; отправка — `onSendMedia`). */
+  geoLive?: boolean;
   /** ЛС (`gifs1`): «Сохранить GIF» в меню сообщения с GIF. */
   onSaveGif?: (a: Attachment) => void;
   /**
@@ -2203,6 +2291,11 @@ export function MessagePane({
   headerActions?: ReactNode;
   /** Вместо поля ввода — эта разметка (например, плашка блокировки в ЛС, #212). */
   composerReplacement?: ReactNode;
+  /**
+   * Плашка НАД полем ввода, поле остаётся (ЛС между инстансами, исправления ревью 12.10, п. 7: «Сообщения ждут, пока «X» их
+   * заберёт»). Не показывается вместе с `composerReplacement`, в выделении и в поиске на телефоне.
+   */
+  composerNotice?: ReactNode;
   /** Полоса под шапкой беседы, над закрепом (08.10, `stranger1`, С7: плашка незнакомца в ЛС). */
   topBar?: ReactNode;
   /**
@@ -2210,6 +2303,16 @@ export function MessagePane({
    * сервер ответил бы «нет такой». Реакции выключает вызывающий (`onReact` пуст), пересылку — тоже (`batch` пуст).
    */
   readOnly?: boolean;
+  /**
+   * Вложения в эту ленту пока нельзя (Э2 часть Б, #141: беседа с человеком другого инстанса — файлы ездят с Э3). Значение — подсказка:
+   * скрепка неактивна (нажатие показывает её), вставка и бросок файла отвечают ею же, рамка броска не рисуется; сервер всё равно
+   * откажет (`federation.dm_attachments_later`), но человек узнаёт это ДО отправки. Текст и ответы не затрагиваются.
+   */
+  filesBlocked?: string;
+  /** Э5 (#141): названия инстансов для подписи «через «X», не подтверждено» у сообщений, принятых в обход дома (`ConvMessage.via`). */
+  viaNames?: { self?: string; peer?: string } | null;
+  /** Э5 (#141): плашка над полем ввода («Инстанс «X» недоступен — пишем через «Y»»); нет — ничего. */
+  composerNote?: ReactNode;
   /**
    * Как звать автора (#19/#73). Канал сервера передаёт резолвер ников (`useNameResolver`), **ЛС не
    * передают ничего** — по умолчанию берётся имя из самого сообщения. Ник живёт в пределах сервера,
@@ -2276,6 +2379,16 @@ export function MessagePane({
   /** Индекс картинки, открытой на просмотр ДО отправки (null — просмотр закрыт). */
   const [pendingBox, setPendingBox] = useState<number | null>(null);
   const [pollOpen, setPollOpen] = useState(false);
+  // «Геопозиция» / «Контакт» (G69): открытое окно выбора.
+  const [mediaPick, setMediaPick] = useState<'geo' | 'contact' | 'poll' | null>(null);
+  const mediaActions: { key: string; icon: 'map-pin' | 'user' | 'activity'; label: string; run: () => void }[] = onSendMedia
+    ? [
+        { key: 'geo', icon: 'map-pin', label: 'Геопозиция', run: () => setMediaPick('geo') },
+        // Опрос (`convpoll1`) — между «Геопозицией» и «Контактом», как кнопки листа Telegram Android (`ChatAttachAlert`).
+        ...(convPoll ? [{ key: 'poll', icon: 'activity' as const, label: 'Опрос', run: () => setMediaPick('poll') }] : []),
+        { key: 'contact', icon: 'user', label: 'Контакт', run: () => setMediaPick('contact') },
+      ]
+    : [];
   // Вкладка пикера строки ввода (#159): стикеры — соседняя вкладка эмодзи, а не отдельная кнопка.
   const [exprTab, setExprTabState] = useState<ExprTab>(getExprTab);
   // Шторка «+» на телефоне (#159): где стоит кнопка — туда же встанет пикер стикеров. null = закрыта.
@@ -2565,9 +2678,104 @@ export function MessagePane({
   /* Панель эмодзи колонкой справа от ленты (G61, `exprDock.ts`): ПК, поле ввода на месте, беседа шире 380 + 345 px. `chatEl` — корень беседы
      (`.chat`, колбэк-реф). Закреплённая панель — не всплывающая: наведение её не открывает, щелчок по кнопке смайлика её убирает. */
   const [chatEl, setChatEl] = useState<HTMLDivElement | null>(null);
+  /** Верхний слой беседы — шапка и капсула полос (tg3, #218; эффект `--chat-top-h` ниже). */
+  const chatTopRef = useRef<HTMLDivElement>(null);
   const dockPhone = usePhoneLayout();
   const dock = useExprDock(chatEl, !dockPhone && !composerReplacement);
   const docked = dock.docked;
+  /* Панель эмодзи / стикеров / GIF на телефоне — НА МЕСТЕ КЛАВИАТУРЫ под полем ввода, во всю ширину, высотой с клавиатуру
+     (tg3, #218; Telegram Android `ChatActivityEnterView.showPopup` `:12657-12727`, Web K на узком экране — `is-under`,
+     `input.ts:1663`). Всплывающее окно над кнопкой — только ПК. Высота берётся в момент открытия: запомненная высота
+     клавиатуры (`rememberedKeyboardHeight`, `popover.ts`) в вёрсточных px. */
+  const exprUnder = dockPhone && picker?.kind === 'composer';
+  const exprUnderH = useMemo(() => (exprUnder ? Math.round(rememberedKeyboardHeight() / rootZoom()) : 0), [exprUnder]);
+  const exprUnderRef = useRef(false);
+  exprUnderRef.current = exprUnder;
+  /* Раскрытие панели стикеров / GIF протяжкой вверх (#218; Telegram Android `setStickersExpanded`, числа — `stickersExpand.ts`):
+     `open` — раскрыта, `max` — на сколько выше обычной, `drag` — надбавка под пальцем (протяжка идёт). Панель и поле ввода едут
+     вверх вместе (`--expr-lift` у `.chat`, поток ленты не меняется), капсула закрепа гаснет (`.expr-up`). */
+  const [exprLift, setExprLift] = useState<{ open: boolean; max: number; drag: number | null }>(LIFT_NONE);
+  const liftTouch = useRef<{ x: number; y: number; on: boolean; start: number; wasOpen: boolean; max: number; pts: { t: number; y: number }[] } | null>(null);
+  const liftExtra = exprUnder ? (exprLift.drag ?? (exprLift.open ? exprLift.max : 0)) : 0;
+  const liftUp = exprUnder && (exprLift.open || exprLift.drag !== null);
+  // Панель закрылась или ушли на «Эмодзи» — свернуть (`updateExpandabilityRunnable`, `ChatActivityEnterView.java:815-821`).
+  useEffect(() => {
+    if (!exprUnder || exprTab === 'emoji') setExprLift((l) => (l === LIFT_NONE ? l : LIFT_NONE));
+  }, [exprUnder, exprTab]);
+  /** Сколько панели расти до шапки: низ шапки + 6, поле ввода (со строкой ответа) — над панелью. Вёрсточные px. */
+  const measureLiftMax = (): number => {
+    const top = chatTopRef.current;
+    const chat = top?.parentElement;
+    const head = top?.querySelector<HTMLElement>(':scope > .channel-topbar');
+    const comp = chat?.querySelector<HTMLElement>(':scope > form.composer');
+    if (!top || !chat || !head || !comp) return 0;
+    const strip = chat.querySelector<HTMLElement>(':scope > .reply-strip');
+    const mb = parseFloat(getComputedStyle(comp).marginBottom) || 0;
+    return expandedExtra({
+      headerBottom: top.offsetTop + head.offsetTop + head.offsetHeight,
+      chatBottom: chat.clientHeight,
+      composerHeight: comp.offsetHeight + mb + (strip?.offsetHeight ?? 0),
+      panelHeight: exprUnderH,
+    });
+  };
+  /* Протяжка за верх панели — строку поиска и наборов (`EmojiView.DraggableScrollSlidingTabStrip`, `EmojiView.java:1227-1310`):
+     сдвиг вертикально больше 8 — наша, вбок — прокрутка наборов. Касания, не указатель: `touch-action: pan-x` на этих строках. */
+  const onLiftStart = (e: React.TouchEvent) => {
+    liftTouch.current = null;
+    if (e.touches.length !== 1 || !(e.target instanceof Element) || !e.target.closest('.emoji-search, .emoji-tabs')) return;
+    // Стикеры есть: свои наборы, недавние или избранные (`areThereAnyStickers`).
+    const hasStickers = !!(stickerPacks?.some((p) => p.stickers.length > 0) || stickerRecent?.length || dmFaved?.length);
+    if (!canDragExpand(exprTab, exprLift.open, text, hasStickers)) return;
+    const t = e.touches[0];
+    liftTouch.current = { x: t.clientX, y: t.clientY, on: false, start: 0, wasOpen: exprLift.open, max: 0, pts: [] };
+  };
+  const onLiftMove = (e: React.TouchEvent) => {
+    const g = liftTouch.current;
+    if (!g || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const z = rootZoom();
+    if (!g.on) {
+      const dx = Math.abs(t.clientX - g.x) / z;
+      const dy = Math.abs(t.clientY - g.y) / z;
+      if (dx >= EXPAND_SLOP && dx > dy) {
+        liftTouch.current = null;
+        return;
+      }
+      if (dy < EXPAND_SLOP) return;
+      const max = measureLiftMax();
+      if (max <= 0) {
+        liftTouch.current = null;
+        return;
+      }
+      // Отсчёт пути — с этой точки (как `downY = ev.getRawY()` при старте протяжки у Telegram).
+      Object.assign(g, { on: true, y: t.clientY, max, start: g.wasOpen ? max : 0 });
+    }
+    const now = performance.now();
+    g.pts.push({ t: now, y: t.clientY / z });
+    while (g.pts.length > 2 && now - g.pts[0].t > 100) g.pts.shift();
+    setExprLift({ open: g.wasOpen, max: g.max, drag: dragExtra(g.start, (t.clientY - g.y) / z, g.max) });
+  };
+  const onLiftEnd = (e: React.TouchEvent) => {
+    const g = liftTouch.current;
+    liftTouch.current = null;
+    if (!g?.on) return;
+    if (e.type === 'touchcancel') {
+      setExprLift({ open: g.wasOpen, max: g.max, drag: null });
+      return;
+    }
+    // Скорость — по последним 100 мс вместе с точкой отпускания (`VelocityTracker`): палец остановился и подержал — броска нет.
+    const now = performance.now();
+    const up = e.changedTouches[0];
+    if (up) g.pts.push({ t: now, y: up.clientY / rootZoom() });
+    const pts = g.pts.filter((p) => now - p.t <= 100);
+    const a = pts[0];
+    const b = pts[pts.length - 1];
+    const v = a && b && b.t > a.t ? ((b.y - a.y) / (b.t - a.t)) * 1000 : 0;
+    setExprLift((l) => {
+      const extra = l.drag ?? 0;
+      return { open: expandAfterDrag(g.wasOpen, v, g.max > 0 ? extra / g.max : 0), max: g.max, drag: null };
+    });
+  };
   // Панель эмодзи и меню скрепки по наведению мыши (G61, `hoverPanel.ts`): открываются через 200 мс, закрываются через 300 мс после ухода мыши.
   const emojiHover = useHoverPanel({
     isOpen: picker?.kind === 'composer' || docked,
@@ -2606,13 +2814,15 @@ export function MessagePane({
     photo?: Attachment;
     file?: Attachment;
     link?: string;
+    /** G56: ячейка альбома под правым кликом (ПК) — «Переслать»/«Удалить» для неё одной. */
+    item?: Attachment;
     /** Выделенный в пузыре текст (G55): «Ответить с цитатой» вместо «Ответить» (Telegram 1.30). */
     quote?: ReplyQuoteDraft | 'too-long';
   } | null>(null);
   /** Меню ссылки на телефоне (07.10, Telegram 2.21 / 10.03): удержание пальцем по ссылке в тексте — «Открыть · Скопировать ссылку». */
   const [linkMenu, setLinkMenu] = useState<{ m: Message; url: string; anchor: DOMRect } | null>(null);
-  /** Окно «Переход на сторонний сайт» для «Открыть ссылку» из меню (то же, что у нажатия на ссылку, `linkGuard`). */
-  const [linkAsk, setLinkAsk] = useState<{ url: string; authorId: string; authorName: string } | null>(null);
+  /** Окно «Открыть ссылку?» для «Открыть ссылку» из меню (то же, что у нажатия на ссылку, `linkGuard`). */
+  const [linkAsk, setLinkAsk] = useState<{ url: string } | null>(null);
   // «Поделиться» (приложение Android): есть ли он у натива — спросить заранее, к первому меню ответ уже будет.
   useEffect(() => {
     canShareFileNative();
@@ -2627,8 +2837,8 @@ export function MessagePane({
   /* Окно «кто поставил» (07.10): чья реакция — по id сообщения и эмодзи (список берём из ленты на каждой перерисовке —
      снял реакцию собеседник, окно это видит); у точки правого клика (ПК) или у чипа (палец, узкое окно). */
   const [who, setWho] = useState<{ id: string; emoji: string; pos?: MenuPos; anchor?: DOMRect } | null>(null);
-  // Mobile long-press: the message whose bottom-sheet action menu is open (design-step8 C2).
-  const [sheetMsg, setSheetMsg] = useState<Message | null>(null);
+  /** Окно «кто прочитал» (15.10, `readers1`): из строки «N прочитали» меню своего сообщения в группе — у того же места. */
+  const [seen, setSeen] = useState<{ id: string; list: ConvReader[]; pos?: MenuPos; anchor?: DOMRect } | null>(null);
   /* Неотправленное (раунд 10): «Удалить» и «Повторить отправку» живут в листе (телефон) и в меню (ПК), а не в строке
      под пузырём. Ключ строки «в пути» — у неё ещё нет id. Раунд 12: на телефоне и в узком окне — меню у пузыря. */
   const [outSheet, setOutSheet] = useState<string | null>(null);
@@ -2636,25 +2846,20 @@ export function MessagePane({
   /** Строка «в пути», у пузыря которой открыто меню (раунд 12): за ней меню следит, пока открыто (`data-mid` у неё нет). */
   const outMenuRow = useRef<HTMLElement | null>(null);
   /**
-   * Раунд 12 — действия с сообщением «как в Telegram» (`docs/design/design-step12/HANDOFF.md`): меню с полосой реакций и
-   * подвалом, тап по пузырю на телефоне, меню у пузыря вместо листа. До приёмки — ТОЛЬКО за переключателем пузырей
-   * устройства (`dmBubbles.ts`, решение владельца 04.10), и в ЛС, и в каналах (хотя пузырей в каналах нет). Читается
-   * один раз, как в `DmChatView` (смена переключателя перезагружает страницу). Выключен — всё как было.
+   * Раунд 12, порция 5 — пересылка, выделение и удаление пачкой (`batch`): только у пузырей (ЛС). Нет — ни «Переслать»,
+   * ни «Выделить», ни выделения. Действия с сообщением раунда 12 (меню с полосой реакций, тап по пузырю на телефоне, меню
+   * у пузыря вместо листа; `docs/design/design-step12/HANDOFF.md`) — у всех лент, и в ЛС, и в каналах (с 09.10 без
+   * переключателя устройства).
    */
-  const [round12] = useState(dmBubblesSwitch);
+  const batchOn = bubbles ? batch : undefined;
+  const othersForBoth = deleteOthersForBoth;
   /**
-   * Раунд 12, порция 5 — пересылка, выделение и удаление пачкой (`batch`): только за переключателем и только у пузырей
-   * (ЛС). Нет — ни «Переслать», ни «Выделить», ни выделения; галочка чужого «у обоих» (С1) — тоже только за ним.
-   */
-  const batchOn = round12 && bubbles ? batch : undefined;
-  const othersForBoth = round12 && deleteOthersForBoth;
-  /**
-   * Раунд 12, порция 7 — закреп в ЛС (HANDOFF §2.3, §10): только за переключателем и только у пузырей (ЛС). Полоса под
+   * Раунд 12, порция 7 — закреп в ЛС (HANDOFF §2.3, §10): только у пузырей (ЛС). Полоса под
    * шапкой показывает одно закреплённое: при открытии — самое новое; нажатие ведёт к нему (переход к цитате) и
    * показывает предыдущее по кругу. Какое показано — по id (`pinShown`), а не по номеру: список меняется событиями, а
    * показанное остаётся на месте; его не стало (открепили, удалили) — снова самое новое.
    */
-  const pinsOn = round12 && bubbles ? pins : undefined;
+  const pinsOn = bubbles ? pins : undefined;
   /**
    * Волна 5 (07.10, G27/G28; Telegram Desktop `history_widget.cpp`, `history_view_pinned_tracker.cpp`): полоса идёт за прокруткой
    * (`trackPinned`), правый щелчок — следующее закреплённое (`nextPinned`), долгое нажатие — список; «Открепить» из меню откладывается
@@ -2710,6 +2915,8 @@ export function MessagePane({
   const pickedSet = useMemo(() => (picked.length ? new Set(picked) : NO_PICKED), [picked]);
   /** «Переслать в…» открыто — какие сообщения уйдут (по порядку ленты). */
   const [fwdIds, setFwdIds] = useState<string[] | null>(null);
+  /** G56: «Переслать в…» открыто для ОДНОГО элемента альбома (`fwdIds` — его сообщение). */
+  const [fwdItem, setFwdItem] = useState<{ messageId: string; attachmentId: string } | null>(null);
   /** Беседы, отмеченные в «Переслать в…» заранее: бросок сообщений на строку списка (G76). */
   /** «Изменить получателя» полосы «Пересылка»: окно «Переслать в…» берёт сообщения и опции черновика, а не ленты. */
   const [fwdSrc, setFwdSrc] = useState<FwdDraft | null>(null);
@@ -2736,7 +2943,7 @@ export function MessagePane({
    * Прокрутку ведёт браузер: у строк `touch-action: pan-y` (класс ленты `swipes`, CSS «Раунд 12» §4) — жест, пошедший
    * вбок, он не прокручивает, а пошедший по вертикали свайпом не станет.
    */
-  const swipeReply = round12 && bubbles && !selecting && !composerReplacement;
+  const swipeReply = bubbles && !selecting && !composerReplacement;
   const [swipingId, setSwipingId] = useState<string | null>(null);
   const swipe = useRef<SwipeGesture | null>(null);
   /** Отпустил за порогом — ответ. Через ref: конец жеста ловит слушатель на окне, а лента и поле к тому времени свежее. */
@@ -2774,6 +2981,9 @@ export function MessagePane({
   const lpTouch = useRef<{ id: number; x: number; y: number } | null>(null);
   /** Сработать долгому нажатию прямо сейчас, не дожидаясь таймера: системное долгое нажатие пришло раньше (`openMsgMenu`). */
   const lpFire = useRef<(() => void) | null>(null);
+  /** Слушатели протяжки из меню (`startMenuRange`, 10.10): снять — новым удержанием и при уходе ленты, конца касания могло не быть. */
+  const menuRangeOff = useRef<(() => void) | null>(null);
+  useEffect(() => () => menuRangeOff.current?.(), []);
   const fileRef = useRef<HTMLInputElement>(null);
   /** Системный выбор «Фото или видео» (`accept` — фото и видео); `mediaCompress` — сжимать фото, как у Telegram. */
   const mediaRef = useRef<HTMLInputElement>(null);
@@ -2839,13 +3049,12 @@ export function MessagePane({
    * последний экран (`unreadDividerNeeded`) или пришло новое, пока человек внизу. Только окно беседы.
    */
   const [dividerOffAt, setDividerOffAt] = useState<string | null>(null);
-  const unreadDropped = (round12 && unreadDropAt === (scrollKey ?? '')) || dividerOffAt === (scrollKey ?? '');
+  const unreadDropped = unreadDropAt === (scrollKey ?? '') || dividerOffAt === (scrollKey ?? '');
   function dropUnreadLine() {
-    if (!round12) return;
     wantUnreadJump.current = false;
     setUnreadDropAt(scrollKey ?? '');
   }
-  /** Чем отмечено прочитанное: беседа — ключ (`readKey`), канал и старые ЛС — метка визита (`newSince`). */
+  /** Чем отмечено прочитанное: беседа — ключ (`readKey`), канал — метка визита (`newSince`). */
   const unreadMark = unreadDropped ? null : feedWindow ? feedWindow.readKey : newSince;
   const newerBusy = useRef(false);
   /** Якорь, который держим, пока идёт операция окна (подгрузка вверх/вниз с обрезкой края). */
@@ -2991,7 +3200,7 @@ export function MessagePane({
     aim: (more) => {
       menuAim.current = more;
     },
-    photoMenu: () => round12,
+    photoMenu: () => true,
     tap: (e, m) => onRowTap(e, m),
     press: (e, m) => onRowPress(e, m),
     dbl: (e, m) => onRowDouble(e, m),
@@ -3041,8 +3250,13 @@ export function MessagePane({
    */
   function stickDown() {
     const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    // Куда встали (браузер упёр в край): `scroll` отсюда — это «прижато», даже если строка уже успела подрасти (kbjump).
+    stickWant.current = el.scrollTop;
   }
+  /** Прокрутка, которую поставил `stickDown` и чей `scroll` ещё не пришёл; `null` — нет. Читает эффект прилипания (kbjump). */
+  const stickWant = useRef<number | null>(null);
 
   // ─── Окно беседы (шаг 2г): якорь, переходы, место ───────────────────────────────────────────────────────────────
   function rowsOf(box: HTMLElement): NodeListOf<HTMLElement> {
@@ -3364,6 +3578,9 @@ export function MessagePane({
      если уже открыта, или когда откроется — и кладёт файлы в окно отправки (как бросок прямо в ленту, `addFiles`). Телефон и
      не-ЛС (`outbox`) не участвуют: на них строка файлов не принимает. */
   const filesDropSeq = useFilesDropSeq();
+  /* Беседа сейчас: упаковка папки (`collectDrop`) идёт секунды, и файл не должен упасть в чужую беседу, если успели переключиться. */
+  const feedNow = useRef(feedId);
+  feedNow.current = feedId;
   useEffect(() => {
     if (!feedId || !outbox || phoneLayout) return;
     const files = takeFilesDrop(feedId);
@@ -3535,7 +3752,7 @@ export function MessagePane({
   }, [showOlderHint]);
 
   /* ─── Канал и любая лента без окна: тот же якорь на подгрузке старого (06.10, хвост «+33 / −5 px») ──────────────────────
-     Без окна (каналы; ЛС при `gv_feed_window = '0'` и без новых ЛС) место держала разница высот (`keepPositionAfterPrepend`,
+     Без окна (каналы) место держала разница высот (`keepPositionAfterPrepend`,
      кадром позже), а подсказку она не видела: колесо докатывало ленту до нуля, подсказка вставала над строками (+33 px,
      браузер на нулевой прокрутке их не держит), а приход порции возвращал строку к положению «без подсказки» (−33); листал
      человек, пока порция в пути, — порция отбрасывала его назад на всю прокрутку (стенд: −150 / +167 px). Теперь — как у окна
@@ -3710,22 +3927,190 @@ export function MessagePane({
    * выросла — низ держит сам браузер (прокрутка упирается в край). Открыто меню у пузыря — ленту не двигаем (как `onLoad`
    * выше), идёт переход (`pendingScroll`) — место ставит он.
    */
+  /* Окно телефона сменило высоту (клавиатура, вставка системной панели вслед за ней) — низ ленты стоит на месте при ЛЮБОЙ
+     прокрутке, не только у прижатой: так ведёт себя перевёрнутый список TG Android (`ChatActivity.java:6499`,
+     `GridLayoutManagerFixed(…, !reversed)` — якорь у нижнего края). Раньше лента, стоявшая хоть на 3 px выше низа, при
+     клавиатуре держала верх, и сообщение, на которое отвечают свайпом, уходило под клавиатуру на её высоту (аудит S20+
+     10.10, B9: «лента на 370 px выше низа»). Закрылась клавиатура — та же поправка обратно, место не теряется. `lastTop` —
+     прокрутка до смены (браузер мог уже упереть её в край); окно смены — `VIEWPORT_ANCHOR_MS` после `resize`. ПК — как было.
+     🔴 kbjump (S20+ 13.10): отправил при клавиатуре, закрыл её «Назад» — лента уезжала вверх на высоту клавиатуры. Обработчик
+     `resize` (поле ввода, `fitComposer`) читает раскладку раньше кадра — браузер уже упёр прокрутку в новый край и шлёт
+     `scroll` ДО `ResizeObserver`; `lastTop` становился этой упёртой прокруткой, и поправка вычиталась второй раз. Теперь
+     `scroll`, пришедший при высоте, которую наблюдатель ещё не видел (`el.clientHeight !== h`), `lastTop` не трогает, а
+     прижатая к низу лента (`pinned`, до низа ≤ 2 px) после смены окна встаёт ровно в низ — как перевёрнутый список TG Android. */
   useEffect(() => {
     const el = listRef.current;
     if (!el || typeof ResizeObserver !== 'function') return;
     let h = el.clientHeight;
+    let lastTop = el.scrollTop;
+    let vpAt = Number.NEGATIVE_INFINITY;
+    const gapOf = (box: number) => el.scrollHeight - el.scrollTop - box;
+    // Прижата ли лента к низу по последней прокрутке, которую видели при ИЗВЕСТНОЙ высоте ленты.
+    let pinned = gapOf(h) <= 2;
+    const onScroll = () => {
+      const want = stickWant.current;
+      stickWant.current = null;
+      if (el.clientHeight !== h) return;
+      lastTop = el.scrollTop;
+      // Свой прыжок вниз — прижата, даже если строка (медиа, превью) выросла между прыжком и этим `scroll`.
+      pinned = gapOf(h) <= 2 || (want !== null && Math.abs(el.scrollTop - want) <= 2);
+    };
+    const onViewport = () => {
+      vpAt = performance.now();
+    };
     const ro = new ResizeObserver(() => {
       const next = el.clientHeight;
       const shrink = h - next;
       h = next;
-      if (shrink <= 0 || holdFeedRef.current || pendingScroll.current) return;
+      const top = lastTop;
+      lastTop = el.scrollTop;
+      if (shrink === 0 || holdFeedRef.current || pendingScroll.current) return;
+      if (performance.now() - vpAt < VIEWPORT_ANCHOR_MS && phoneTaps()) {
+        // Прижатая и с тех пор не сдвинутая (браузер разве что упёр её в новый край) — в низ; иначе низ держит `top + shrink`.
+        const stayed = Math.abs(el.scrollTop - Math.min(top, el.scrollHeight - next)) <= 2;
+        el.scrollTop = pinned && stayed ? Math.max(0, el.scrollHeight - next) : Math.max(0, top + shrink);
+        lastTop = el.scrollTop;
+        pinned = gapOf(next) <= 2;
+        return;
+      }
+      if (shrink < 0) return;
       // До смены: прокрутка та же (лента ужалась снизу), высота — прежняя.
       if (el.scrollHeight - el.scrollTop - (next + shrink) > 2) return;
       el.scrollTop += shrink;
+      lastTop = el.scrollTop;
+      pinned = true;
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    /* 🔴 kbjump, второе (S20+ 13.10): прижатая к низу лента, а последняя строка ВЫРОСЛА после вставки — превью ссылки
+       (карточка с заголовком и описанием приходит правкой сообщения, число строк не меняется), «печатает», ответ сервера
+       на строку «в пути». Ни прокрутки, ни `[messages.length]`, ни `load` картинки — и карточка оставалась под полем.
+       Как TG Android (перевёрнутый список, якорь у нижнего края): была прижата — остаётся прижатой. Только если с последней
+       прокрутки положение не трогали (`lastTop`): иначе это чужой переход (черта непрочитанного, цитата) — его не перебиваем. */
+    const onContent = () => {
+      const want = stickWant.current;
+      // Только что прыгнули вниз (`stickDown`), а `scroll` ещё не пришёл — строка выросла в том же кадре: догоняем низ.
+      const jumped = want !== null && Math.abs(el.scrollTop - want) <= 2;
+      if (!jumped && (!pinned || Math.abs(el.scrollTop - lastTop) > 1)) return;
+      if (el.clientHeight !== h) return;
+      if (gapOf(h) <= 2 || pendingScroll.current || heldAnchor.current || chanHeld.current || fwRef.current?.hasNewer) return;
+      if (holdFeedRef.current) {
+        stickAfterMenu.current = true;
+        return;
+      }
+      el.scrollTop = Math.max(0, el.scrollHeight - h);
+      lastTop = el.scrollTop;
+      if (jumped) stickWant.current = el.scrollTop;
+    };
+    const rows = new ResizeObserver(onContent);
+    for (const child of Array.from(el.children)) rows.observe(child);
+    const kids = typeof MutationObserver === 'function'
+      ? new MutationObserver((list) => {
+          for (const m of list) {
+            for (const n of Array.from(m.addedNodes)) if (n instanceof Element) rows.observe(n);
+            for (const n of Array.from(m.removedNodes)) if (n instanceof Element) rows.unobserve(n);
+          }
+        })
+      : null;
+    kids?.observe(el, { childList: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onViewport);
+    window.visualViewport?.addEventListener('resize', onViewport);
+    return () => {
+      ro.disconnect();
+      el.removeEventListener('scroll', onScroll);
+      rows.disconnect();
+      kids?.disconnect();
+      window.removeEventListener('resize', onViewport);
+      window.visualViewport?.removeEventListener('resize', onViewport);
+    };
   }, []);
+
+  /**
+   * Верхний слой беседы на телефоне (tg3, #218): шапка и капсула полос лежат ПОВЕРХ ленты, лента начинается под ними
+   * отступом (`.messages` — `padding-top: var(--chat-top-h) + 4px`, как `chatListViewPaddingTop` = `dp(4)` + шапка + панель
+   * в `ChatActivity.java:11943-11953`). Высоту слоя меряем и отдаём `.chat` переменной `--chat-top-h`. Слой вырос или
+   * сжался (встал закреп, заиграло голосовое) — прокрутку сдвигаем на ту же величину: строки на экране стоят на месте, а
+   * прижатая к низу лента остаётся прижатой (раньше это делал `ResizeObserver` выше — лента сжималась по высоте). ПК — слой
+   * `display: contents`, переменной нет.
+   */
+  useEffect(() => {
+    const top = chatTopRef.current;
+    const chat = chatEl;
+    if (!chat) return;
+    if (!top || !dockPhone || typeof ResizeObserver !== 'function') {
+      chat.style.removeProperty('--chat-top-h');
+      return;
+    }
+    let h = -1;
+    const apply = () => {
+      const next = top.offsetHeight;
+      if (next === h) return;
+      const d = h < 0 ? 0 : next - h;
+      h = next;
+      chat.style.setProperty('--chat-top-h', `${next}px`);
+      const list = listRef.current;
+      if (list && d !== 0 && !pendingScroll.current) list.scrollTop += d;
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(top);
+    return () => {
+      ro.disconnect();
+      chat.style.removeProperty('--chat-top-h');
+    };
+  }, [chatEl, dockPhone]);
+
+  /**
+   * Панель под полем → клавиатура (tg3, #218): касание поля или кнопки «клавиатура» поднимает клавиатуру, а панель уходит,
+   * только когда клавиатура встала (`data-kb` на `<html>`, `refreshKeyboardFlag`) — иначе лента на миг вырастала бы на высоту
+   * панели и снова сжималась. Клавиатура не поднялась (внешняя, эмуляция) — панель уходит через 600 мс.
+   */
+  /** Ожидание «клавиатура встала → убрать панель». `cancel` — без закрытия: панель уже закрыли иначе (Esc/«назад»), и старый
+   *  таймер не должен закрыть НОВУЮ, открытую за эти 600 мс (находка Codex R146). */
+  const kbFromPanelRef = useRef<{ cancel: () => void } | null>(null);
+  function keyboardFromPanel() {
+    if (kbFromPanelRef.current) return;
+    const root = document.documentElement;
+    const cancel = () => {
+      clearTimeout(timer);
+      obs.disconnect();
+      kbFromPanelRef.current = null;
+    };
+    const done = () => {
+      cancel();
+      setPicker((p) => (p?.kind === 'composer' ? null : p));
+    };
+    const obs = new MutationObserver(() => {
+      if (root.hasAttribute('data-kb')) done();
+    });
+    obs.observe(root, { attributes: true, attributeFilter: ['data-kb'] });
+    const timer = window.setTimeout(done, 600);
+    kbFromPanelRef.current = { cancel };
+    if (root.hasAttribute('data-kb')) done();
+  }
+  useEffect(() => () => kbFromPanelRef.current?.cancel(), []);
+  /* Панель под полем закрывают «назад» Android и Esc (у всплывающей это делал сам пикер; под полем он `docked` и молчит). */
+  useEffect(() => {
+    if (!exprUnder) return;
+    const close = () => setPicker((p) => (p?.kind === 'composer' ? null : p));
+    // Перехват на погружении: Esc закрывает только панель, а не беседу (выход из ленты по Esc слушает окно дальше).
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || document.querySelector(TOP_LAYERS)) return;
+      e.stopPropagation();
+      close();
+    };
+    window.addEventListener('keydown', onKey, true);
+    const back = pushBackHandler(() => {
+      close();
+      return true;
+    });
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      back();
+      // Панель закрылась (чем угодно) — ожидание её закрытия больше не нужно.
+      kbFromPanelRef.current?.cancel();
+    };
+  }, [exprUnder]);
 
   /**
    * Встать у границы непрочитанного — отдельным эффектом, а НЕ вместе с прокруткой по приходу
@@ -4023,7 +4408,8 @@ export function MessagePane({
     for (const m of [...extraOlder, ...messages, ...extraNewer])
       for (const a of m.attachments ?? []) {
         const video = isVideo(a.contentType);
-        if (!a.asFile && (isImage(a.contentType) || video))
+        // Э3 (#141): вложение, чья копия с инстанса автора ещё едет, просмотру не показывается — файла у нас пока нет.
+        if (!a.asFile && a.fedState !== 'copying' && (isImage(a.contentType) || video))
           list.push({
             url: a.url,
             name: a.name,
@@ -4072,6 +4458,22 @@ export function MessagePane({
       },
     ];
     if (!x.video && canCopyImage()) list.push({ id: 'copy', icon: 'copy', label: 'Копировать', run: () => copyPhoto(x.att) });
+    /* G56: элемент альбома — «Переслать» и «Удалить» берут ЕГО одного (Telegram: в просмотрщике действия текущего элемента
+       группы — Android `PhotoViewer`, tdesktop `OverlayWidget`). */
+    if (batchOn?.forwardItem && batchOn.deleteItem && isAlbumItem(m.attachments, x.att)) {
+      const att = x.att;
+      list.push({
+        id: 'forward',
+        icon: 'forward',
+        label: 'Переслать',
+        run: () => {
+          setLightbox(null);
+          openForwardItem(m, att);
+        },
+      });
+      if (canDelete(m)) list.push({ id: 'delete', icon: 'trash', label: 'Удалить', danger: true, run: () => void delItem(m, att) });
+      return list;
+    }
     if (batchOn)
       list.push({
         id: 'forward',
@@ -4239,6 +4641,7 @@ export function MessagePane({
    */
   function addFiles(list: FileList | File[] | null, opts?: { box?: boolean; way?: Partial<SendWay>; caption?: string }) {
     if (!list || list.length === 0) return;
+    if (filesBlocked) return void toast('info', filesBlocked);
     // Правка меняет только текст (#212): новое вложение к ней не прицепить (Telegram Desktop `lng_edit_caption_attach`).
     if (composerEdit) return void toast('info', 'Во время правки сообщения вложения не добавить');
     // ЛС на ПК: файлы идут в окно отправки (G48), а не на полосу у поля — как у Telegram Desktop.
@@ -4426,7 +4829,7 @@ export function MessagePane({
     mediaRef.current?.click();
   }
 
-  /** Предел одного файла этой ленты, байт (`bigfile1`): беседы ЛС — по серверу, каналы и старый путь ЛС — 25 МБ. */
+  /** Предел одного файла этой ленты, байт (`bigfile1`): беседы ЛС — по серверу, каналы — 25 МБ. */
   const fileMaxBytes = bigFiles ? dmAttachMaxBytes() : ATTACH_MAX_BYTES;
 
   /** «Файл»: в приложении Android — системное приложение «Файлы» (натив), иначе — выбор любого файла. */
@@ -4641,7 +5044,7 @@ export function MessagePane({
   }
 
   /** Поставить сообщение в очередь отправки; исход — в строку «в пути», а не в тост. */
-  /** Загрузки строк «в пути» без очереди ЛС (каналы, старый путь ЛС): «Отменить отправку» обрывает их (07.10). */
+  /** Загрузки строк «в пути» без очереди ЛС (каналы): «Отменить отправку» обрывает их (07.10). */
   const localUploads = useRef(new Map<string, AbortController>());
   /** Отменённые, пока ждали своей очереди: до отправки дело не дойдёт. */
   const localCancelled = useRef(new Set<string>());
@@ -4708,7 +5111,21 @@ export function MessagePane({
     }
     setReplyingTo(m);
     setReplyExtra(quote ? { id: m.id, quote, foreign: false } : null);
-    inputRef.current?.focus();
+    /* Ответ поднимает клавиатуру всегда (аудит S20+ 10.10, B8). Поле уже в фокусе, а клавиатуру убрали «назад» — повторный
+       `focus()` её не зовёт: фокус надо снять и поставить заново, как TG Android `ChatActivityEnterView.openKeyboard`
+       (`ChatActivityEnterView.java:13123`: `clearFocus()` + `requestFocus()`), который ответ зовёт, когда клавиатуры и панели
+       нет (`showTopView`, `:6339`: `!(keyboardVisible || isPopupShowing())`). Клавиатура на месте (`data-kbspace`) или открыта
+       панель эмодзи — не трогаем: иначе клавиатура мигнула бы, а панель сменилась бы клавиатурой. */
+    const field = inputRef.current;
+    if (
+      field &&
+      phoneTaps() &&
+      document.activeElement === field &&
+      !exprUnderRef.current &&
+      !document.documentElement.hasAttribute('data-kbspace')
+    )
+      field.blur();
+    field?.focus();
   }
 
   /**
@@ -4791,11 +5208,18 @@ export function MessagePane({
     setReplyingTo(null);
     setComposerEdit(m);
     setText(m.content);
+    /* Фокус — сразу, не только в кадре ниже: до кадра поле было не в фокусе, и Ctrl+A выделял страницу, а набранное затем
+       дописывалось к старому тексту. Кадр остаётся: меню/кнопка, из которых вошли в правку, могут вернуть фокус себе. */
+    inputRef.current?.focus();
     // Каретка — в конец: правят чаще всего хвост («опечатка в последнем слове»).
     requestAnimationFrame(() => {
       const el = inputRef.current;
       if (!el) return;
       el.focus();
+      /* Кадр мог прийти ПОСЛЕ того, как человек уже нажал Ctrl+A или начал печатать (кадр запаздывает под нагрузкой и в
+         фоновой вкладке): сворачивать выделение в каретку нельзя — набранное поверх «выделить всё» дописывалось к
+         старому тексту. Каретку ставим, только если поле нетронуто. */
+      if (el.selectionStart !== el.selectionEnd || el.value !== m.content) return;
       el.setSelectionRange(el.value.length, el.value.length);
     });
   }
@@ -4901,38 +5325,35 @@ export function MessagePane({
     tapDown(m);
     // Раунд 12, порция 6: может стать свайп-ответом — решит движение пальца (`swipeMove`).
     swipeStart(e, m);
-    /* Раунд 12: долгое нажатие в ЛС с действиями пачкой — режим выделения с этим сообщением (HANDOFF §5–§6), в каналах (и
-       где пачки нет) — то же меню у пузыря, что и тап (листа сообщения нет). В самом выделении долгого нажатия и отклика
-       `pressing` нет: тап переключает строку. */
-    if (round12) {
-      const row = e.currentTarget as HTMLElement;
-      const target = e.target as Element;
-      /* G43, Telegram `ChatActivity.startMultiselect`: удержание в самом выделении переключает строку и сразу ведёт диапазон
-         (тап — по-прежнему переключает). Ссылка, фото и прочее своё в выделении не делают: нажатие гасит `onPick`. */
-      if (selecting) {
-        if (batchOn) startLongPress(e, m.id, () => startTouchRange(m), true);
-        return;
-      }
-      /* Удержание по аватарке отправителя (G43, Telegram `didLongPressUserAvatar`): меню человека, а не тап-карточка. */
-      if (target.closest('.msg-ava') && isMobile() && e.touches.length === 1) {
-        startAvatarPress(e, m);
-        return;
-      }
-      /* Удержание по ссылке в тексте (07.10, Telegram 2.21 / 10.03) — своё меню ссылки «Открыть · Скопировать ссылку»,
-         не выделение и не меню сообщения. */
-      const link = target.closest<HTMLAnchorElement>('a.msg-link');
-      const url = link?.getAttribute('href');
-      if (link && url) {
-        startLongPress(e, m.id, () => openLinkMenu(m, url, link.getBoundingClientRect()), true);
-        return;
-      }
-      // Какое фото (файл, видео, голосовое) под пальцем — узнаём сразу, на касании: к срабатыванию удержания палец мог уже уйти.
-      const photo = photoFromTouch(m.attachments, target);
-      const file = fileFromTarget(m.attachments, target);
-      startLongPress(e, m.id, batchOn ? () => startTouchRange(m) : () => openMsgMenuAt(m, row, photo, { file }), true);
+    /* 10.10 (#218), как Telegram Android `ChatActivity.onItemLongClickListener`: долгое нажатие — то же меню у пузыря, что и
+       тап (`createMenu`), а в ЛС с действиями пачкой ещё и протяжка (`startMultiselect` → `startMenuRange`): повёл палец —
+       меню закрылось, выбор диапазоном. Раньше (раунд 12) долгое нажатие в ЛС сразу входило в выделение. В самом выделении
+       удержание переключает строку и ведёт диапазон (ниже), тап переключает строку. */
+    const row = e.currentTarget as HTMLElement;
+    const target = e.target as Element;
+    /* G43, Telegram `ChatActivity.startMultiselect`: удержание в самом выделении переключает строку и сразу ведёт диапазон
+       (тап — по-прежнему переключает). Ссылка, фото и прочее своё в выделении не делают: нажатие гасит `onPick`. */
+    if (selecting) {
+      if (batchOn) startLongPress(e, m.id, () => startTouchRange(m), true);
       return;
     }
-    startLongPress(e, m.id, () => setSheetMsg(m));
+    /* Удержание по аватарке отправителя (G43, Telegram `didLongPressUserAvatar`): меню человека, а не тап-карточка. */
+    if (target.closest('.msg-ava') && isMobile() && e.touches.length === 1) {
+      startAvatarPress(e, m);
+      return;
+    }
+    /* Удержание по ссылке в тексте (07.10, Telegram 2.21 / 10.03) — своё меню ссылки «Открыть · Скопировать ссылку»,
+       не выделение и не меню сообщения. */
+    const link = target.closest<HTMLAnchorElement>('a.msg-link');
+    const url = link?.getAttribute('href');
+    if (link && url) {
+      startLongPress(e, m.id, () => openLinkMenu(m, url, link.getBoundingClientRect()), true);
+      return;
+    }
+    // Какое фото (файл, видео, голосовое) под пальцем — узнаём сразу, на касании: к срабатыванию удержания палец мог уже уйти.
+    const photo = photoFromTouch(m.attachments, target);
+    const file = fileFromTarget(m.attachments, target);
+    startLongPress(e, m.id, batchOn ? () => startMenuRange(m, row, photo, { file }) : () => openMsgMenuAt(m, row, photo, { file }), true);
   }
   /**
    * Долгое нажатие на строку «в пути» — её действия: у неотправленного — повторить/скопировать/удалить, у отправляемого
@@ -4942,13 +5363,9 @@ export function MessagePane({
     // Неотправленное свайпом не отвечается (порция 6): прежний жест, если висит, — долой.
     swipeDrop();
     // Раунд 12: вместо листа — меню у пузыря; в режиме выделения — ничего (неотправленное в нём не участвует).
-    if (round12) {
-      if (selecting) return;
-      const row = e.currentTarget as HTMLElement;
-      startLongPress(e, key, () => openOutMenuAt(key, row), true);
-      return;
-    }
-    startLongPress(e, key, () => setOutSheet(key));
+    if (selecting) return;
+    const row = e.currentTarget as HTMLElement;
+    startLongPress(e, key, () => openOutMenuAt(key, row), true);
   }
   /**
    * `menu` — раунд 12: долгое нажатие открывает меню у пузыря или выделение, а не лист под пальцем
@@ -4966,7 +5383,7 @@ export function MessagePane({
       /* D15 (S20+, 08.10, решение 40): и на кружке (`.round-msg-btn` — кнопка с видео внутри). Кольцо перемотки сюда не
          доходит: его касание гасит `RoundVideo.onTouchStart`; короткий тап — по-прежнему play/пауза/звук (клик гасит только
          сработавшее удержание, `swallowNativeLongPress`). */
-      !(round12 && target.closest('.att-img-link, a.msg-link, [data-att], .message-sticker, .round-msg-btn'))
+      !target.closest('.att-img-link, a.msg-link, [data-att], .message-sticker, .round-msg-btn')
     )
       return;
     const t = e.touches[0];
@@ -5142,6 +5559,43 @@ export function MessagePane({
       window.removeEventListener('touchend', end, true);
       window.removeEventListener('touchcancel', end, true);
     };
+  }
+
+  /**
+   * Долгое нажатие вне выделения в ЛС с пачкой (10.10, #218), как Telegram Android `ChatActivity.onItemLongClickListener`:
+   * меню у пузыря (`createMenu`) и сразу `startMultiselect` — палец, не отрываясь, ушёл по вертикали дальше порога
+   * (`SELECT_TOUCH_SLOP_PX`, у Telegram `touchSlop` в `RecyclerListView.onTouchEvent`): меню закрывается, сообщение выбрано и
+   * диапазон ведёт тот же палец (`startTouchRange`). Отпустил на месте — меню остаётся. Пока палец держит меню, лента под
+   * ним не листается (`touchmove` не пассивный, гасит прокрутку) — как у Telegram, где жест забирает список.
+   */
+  function startMenuRange(m: Message, row: HTMLElement, photo?: Attachment, more?: MenuMore) {
+    openMsgMenuAt(m, row, photo, more);
+    menuRangeOff.current?.();
+    const lp = lpTouch.current;
+    if (!lp) return;
+    const mine = (l: TouchList | undefined) => (l ? Array.from(l).find((t) => t.identifier === lp.id) : undefined);
+    const off = () => {
+      window.removeEventListener('touchmove', move, true);
+      window.removeEventListener('touchend', end, true);
+      window.removeEventListener('touchcancel', end, true);
+      if (menuRangeOff.current === off) menuRangeOff.current = null;
+    };
+    menuRangeOff.current = off;
+    const move = (ev: TouchEvent) => {
+      const t = mine(ev.touches);
+      if (!t) return;
+      if (ev.cancelable) ev.preventDefault();
+      if (Math.abs(t.clientY - lp.y) <= SELECT_TOUCH_SLOP_PX) return;
+      off();
+      startTouchRange(m);
+    };
+    // Событие без списка изменённых касаний (синтетическое) — тоже конец: слушатели не должны пережить жест.
+    const end = (ev: TouchEvent) => {
+      if (!ev.changedTouches || mine(ev.changedTouches)) off();
+    };
+    window.addEventListener('touchmove', move, { capture: true, passive: false });
+    window.addEventListener('touchend', end, true);
+    window.addEventListener('touchcancel', end, true);
   }
 
   /**
@@ -5450,7 +5904,7 @@ export function MessagePane({
     outActionsFrom.current = { key, btn };
     // Раунд 12: на телефоне и в узком окне — меню у пузыря, а не лист (кнопка стоит в строке сразу под ним).
     const row = btn.closest('.bub-fail')?.previousElementSibling;
-    if (round12 && (isMobile() || narrowWindow()) && row instanceof HTMLElement) {
+    if ((isMobile() || narrowWindow()) && row instanceof HTMLElement) {
       openOutMenuAt(key, row);
       return;
     }
@@ -5488,7 +5942,7 @@ export function MessagePane({
     };
   }, [outMenuKey, outSheet]);
 
-  // ─── Раунд 12: меню сообщения у пузыря (только за переключателем пузырей, `round12`) ─────────────────────────────────
+  // ─── Раунд 12: меню сообщения у пузыря ─────────────────────────────────
 
   /**
    * Где встать меню у строки: якорь — пузырь (в канале — тело сообщения рядом с аватаром, тот же `.message-main`),
@@ -5517,7 +5971,7 @@ export function MessagePane({
     const guess = isMobile() && !photo && !more?.file;
     const shown = photo ?? (guess ? photoFromTouch(m.attachments, null) : undefined);
     const file = more?.file ?? (guess ? fileFromTarget(m.attachments, null, true) : undefined);
-    setMsgMenu({ m, pos: { x: bubble.anchor.left, y: bubble.anchor.top }, bubble, photo: shown, file, link: more?.link, quote: selectionQuote(m) ?? undefined });
+    setMsgMenu({ m, pos: { x: bubble.anchor.left, y: bubble.anchor.top }, bubble, photo: shown, file, link: more?.link, item: more?.item, quote: selectionQuote(m) ?? undefined });
   }
 
   /** Меню ссылки у самой ссылки (телефон, 07.10): удержание пальцем; `anchor` — где ссылка. */
@@ -5525,10 +5979,15 @@ export function MessagePane({
     setLinkMenu({ m, url, anchor });
   }
 
-  /** «Открыть ссылку» из меню — как нажатие на неё (`MessageLink`): чужая внешняя — сперва окно «Переход на сторонний сайт». */
+  /** «Открыть ссылку» из меню — как нажатие на неё (`MessageLink`): опасная — окно предупреждения, подозрительный адрес — сперва окно «Открыть ссылку?». */
   function openMessageLink(m: Message, url: string) {
-    if (shouldWarnAboutLink(url, m.author.id)) {
-      setLinkAsk({ url, authorId: m.author.id, authorName: nameOf(m.author.id, m.author.displayName) });
+    // Опасная ссылка (`linkthreats1`) — всегда через окно предупреждения.
+    if (serverLinkThreats(useStore.getState().serverFeatures) && isDangerousLink(url, m.dangerousLinks)) {
+      void openDangerousLink(url);
+      return;
+    }
+    if (shouldWarnAboutLink(url)) {
+      setLinkAsk({ url });
     } else {
       openLink(url);
     }
@@ -5557,30 +6016,30 @@ export function MessagePane({
     /* 🔴 Приложение, раунд 12: `contextmenu` от пальца — системное долгое нажатие WebView, а не правый клик (05.10, APK на
        S25: долгое нажатие открывало меню, как тап, и выделения не было). Оно и есть наше долгое нажатие: ждёт таймер —
        сработать сейчас (`lpFire`); таймера нет (касание до ленты не дошло или его сняли) — то же, что сделал бы он:
-       в ЛС с действиями пачкой выделение, иначе меню у пузыря. В браузере телефона долгого нажатия у ленты нет — меню,
-       как было. */
+       меню у пузыря (10.10: и в ЛС с пачкой; протяжки тогда нет — касание не наше). В браузере телефона долгого нажатия у
+       ленты нет — меню, как было. */
     /* Удержание пальцем по ссылке в тексте (07.10) — меню ссылки: ждёт таймер — сработать сейчас (`lpFire` уже знает про
        ссылку); нет — открыть самим. И в браузере телефона: там это было бы меню браузера. */
-    if (touch && round12 && more?.link && more.linkRect) {
+    if (touch && more?.link && more.linkRect) {
       const fire = lpFire.current;
       if (fire) return fire();
       swipeDrop();
       openLinkMenu(m, more.link, more.linkRect);
       return;
     }
-    if (touch && round12 && isMobile()) {
+    if (touch && isMobile()) {
       const fire = lpFire.current;
       if (fire) return fire();
       swipeDrop();
       navigator.vibrate?.(8);
       const at = rowOf(m.id);
-      if (batchOn) startSelection(m);
-      else if (at) openMsgMenuAt(m, at, photo, more);
+      // 10.10: и в ЛС с пачкой — меню у пузыря (выбор — пунктом «Выбрать» или протяжкой, `startMenuRange`).
+      if (at) openMsgMenuAt(m, at, photo, more);
       return;
     }
-    const row = round12 && narrowWindow() ? rowOf(m.id) : null;
+    const row = narrowWindow() ? rowOf(m.id) : null;
     if (row) openMsgMenuAt(m, row, photo, more);
-    else setMsgMenu({ m, pos: { x, y }, photo, file: more?.file, link: more?.link, quote: selectionQuote(m) ?? undefined });
+    else setMsgMenu({ m, pos: { x, y }, photo, file: more?.file, link: more?.link, item: more?.item, quote: selectionQuote(m) ?? undefined });
   }
 
   /**
@@ -5591,7 +6050,7 @@ export function MessagePane({
    */
   function onRowTap(e: React.MouseEvent<HTMLElement>, m: Message) {
     if (recording) return; // см. openMsgMenu
-    if (!round12 || selecting || e.defaultPrevented) return;
+    if (selecting || e.defaultPrevented) return;
     const t = e.target as Element;
     // Палец ли — по самому нажатию (у `click` в Chromium есть `pointerType`), не сказано — по указателю устройства.
     if (!phoneTaps(pressByTouch(e.nativeEvent))) {
@@ -5638,7 +6097,7 @@ export function MessagePane({
    * телефоне открывает меню сразу, двойной клик на ПК выделяет слово как обычно).
    */
   function quickReactable(m: Message): boolean {
-    if (!round12 || !bubbles || selecting) return false;
+    if (!bubbles || selecting) return false;
     if (dblAction === 'react') return !!onReact;
     if (dblAction === 'reply') return !composerReplacement;
     return false;
@@ -5683,7 +6142,7 @@ export function MessagePane({
   tapConfirm.current = () => {
     const p = tapWait.current;
     tapWait.current = null;
-    if (!p || p.second || !round12 || selecting || !p.row.isConnected) return;
+    if (!p || p.second || selecting || !p.row.isConnected) return;
     openMsgMenuAt(p.m, p.row);
   };
   useEffect(() => () => dropTap(), []);
@@ -5741,6 +6200,10 @@ export function MessagePane({
         : { id: m.id, emoji: r.emoji, pos: { x: e.clientX, y: e.clientY } },
     );
   }
+  // Сообщение ушло из ленты или вошли в выделение — окно «кто прочитал» долой.
+  useEffect(() => {
+    if (seen && (selecting || !messages.some((x) => x.id === seen.id))) setSeen(null);
+  }, [seen, messages, selecting]);
   // Реакцию сняли (у обоих — некого показать), сообщение ушло из ленты, вошли в выделение — окно «кто поставил» долой.
   useEffect(() => {
     if (!who) return;
@@ -5757,7 +6220,7 @@ export function MessagePane({
   /** Правый клик по неотправленному: меню у точки, как было; раунд 12 в узком окне — у пузыря; в выделении — ничего. */
   function openOutMenu(key: string, e: React.MouseEvent<HTMLElement>) {
     if (selecting) return;
-    if (round12 && narrowWindow()) openOutMenuAt(key, e.currentTarget);
+    if (narrowWindow()) openOutMenuAt(key, e.currentTarget);
     else setOutMenu({ key, pos: { x: e.clientX, y: e.clientY } });
   }
 
@@ -5865,7 +6328,7 @@ export function MessagePane({
   /* Клавиши меню сообщения нового вида (раунд 12): подсказок R / E / Del в пунктах больше нет, как в макете, а сами клавиши
      работают — R ответить, E изменить своё, Del удалить. По месту клавиши (`code`): в русской раскладке R — это «к». В
      поле ввода это буквы, не команды. */
-  const keyedMenu = round12 ? msgMenu : null;
+  const keyedMenu = msgMenu;
   useEffect(() => {
     if (!keyedMenu) return;
     const m = keyedMenu.m;
@@ -6048,7 +6511,8 @@ export function MessagePane({
       const src = media instanceof HTMLImageElement ? media.currentSrc || media.src : (media as HTMLAnchorElement).href;
       att = list[0].attachments?.find((a) => a.url && (abs(a.url) === src || abs(api.attachmentDownloadUrl(a)) === src));
     }
-    const dl = att?.url ? downloadUrlValue(att.contentType, att.name, api.attachmentDownloadUrl(att), location.href) : null;
+    // Э3 (#141): вложение, чья копия ещё едет, наружу не тащится — отдача ответила бы 503.
+    const dl = att?.url && att.fedState !== 'copying' ? downloadUrlValue(att.contentType, att.name, api.attachmentDownloadUrl(att), location.href) : null;
     const text = pickedCopyText(list, idSet);
     // Обычная ссылка из текста: адрес как текст кладёт браузер (так же у Telegram — ссылка тащится ссылкой), мы лишь добавляем свой тип.
     const plainLink = !ownRow && !att && media instanceof HTMLAnchorElement;
@@ -6082,7 +6546,7 @@ export function MessagePane({
   function onSelPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     const list = e.currentTarget;
     const t = e.target as Element;
-    // Порталы строк (окно «Переход на сторонний сайт» у ссылки) всплывают сюда по дереву React, а в ленте их нет.
+    // Порталы строк (окно «Открыть ссылку?» у ссылки) всплывают сюда по дереву React, а в ленте их нет.
     if (!list.contains(t)) return;
     armMsgDrag(e, t);
     const kind = selectPress({
@@ -6412,6 +6876,15 @@ export function MessagePane({
     if (!batchOn || ids.length === 0) return;
     setMsgMenu(null);
     setFwdIds(ids);
+    setFwdItem(null);
+  }
+
+  /** G56: «Переслать» одного элемента альбома — то же окно «Переслать в…», без черновика и «позже». */
+  function openForwardItem(m: Message, att: Attachment) {
+    if (!batchOn?.forwardItem || !att.id) return;
+    setMsgMenu(null);
+    setFwdIds([m.id]);
+    setFwdItem({ messageId: m.id, attachmentId: att.id });
   }
 
   /**
@@ -6424,6 +6897,7 @@ export function MessagePane({
     targets: string[],
     o: { silent: boolean; at: Date | null; comment: string; hideSender: boolean; hideCaptions: boolean },
     src: FwdDraft | null = null,
+    item: { messageId: string; attachmentId: string } | null = null,
   ) {
     const b = batchOn;
     if (!b || targets.length === 0) return;
@@ -6441,7 +6915,8 @@ export function MessagePane({
           await b.later(to, o.comment ? [o.comment, ...texts] : texts, o.at, o.silent);
         } else {
           if (o.comment && b.comment) await b.comment(to, o.comment, o.silent);
-          await b.forward(ids, to, o.silent, {
+          if (item && b.forwardItem) await b.forwardItem(item.messageId, item.attachmentId, to, o.silent, { hideSender: o.hideSender });
+          else await b.forward(ids, to, o.silent, {
             hideSender: o.hideSender,
             hideCaptions: o.hideCaptions,
             ...(src ? { from: src.from } : {}),
@@ -6593,6 +7068,10 @@ export function MessagePane({
   async function pinMessage(m: Message) {
     const p = pinsOn;
     if (!p) return;
+    if (groupChat) {
+      await pinInGroup(p, m);
+      return;
+    }
     const r = await confirmWithOption({
       title: 'Закрепить сообщение?',
       body: `Оно появится над лентой беседы. Без галочки сообщение будет закреплено только у вас — ${deletePeerName ?? 'собеседник'} его там не увидит.`,
@@ -6602,6 +7081,29 @@ export function MessagePane({
     if (!r) return;
     try {
       await p.pin(m.id, r.option ? 'both' : 'me');
+      setPinShown(m.id);
+    } catch (err) {
+      if (isPinLimit(err)) {
+        toast('error', 'Не удалось закрепить', `Закреплено уже ${DM_PINS_MAX} сообщений — больше нельзя. Открепите какое-нибудь и попробуйте снова.`);
+      } else toastError(err, 'Не удалось закрепить');
+    }
+  }
+
+  /**
+   * G4 (приёмка 13.10): закреп в ГРУППЕ — как Telegram (Android `ChatActivity` OPTION_PIN → `PinMessageAlert` + галочка `PinNotify`,
+   * tdesktop `PinMessageBox`): закрепляется у всех участников, «только у себя» в группе нет; галочка «Уведомить всех участников»
+   * стоит по умолчанию — участникам пуш «закрепил(а) «…»», без неё строка закрепа ложится «без звука».
+   */
+  async function pinInGroup(p: MessagePins, m: Message) {
+    const r = await confirmWithOption({
+      title: 'Закрепить сообщение?',
+      body: 'Закрепить это сообщение для всех участников группы?',
+      confirmLabel: 'Закрепить',
+      option: { label: 'Уведомить всех участников', checked: true },
+    });
+    if (!r) return;
+    try {
+      await p.pin(m.id, 'both', r.option);
       setPinShown(m.id);
     } catch (err) {
       if (isPinLimit(err)) {
@@ -6698,6 +7200,15 @@ export function MessagePane({
         ? 'Открепить все сообщения?'
         : `Открепить ${ids.length} ${plural(ids.length, 'сообщение', 'сообщения', 'сообщений')}?`
       : 'Открепить сообщение?';
+    // G4: в группе закреп общий — открепляется у всех без галочки «для собеседника» (Telegram `UnpinMessageAlert`).
+    if (anyBoth && groupChat) {
+      const ok = await confirmAction({
+        title,
+        body: many ? 'Они пропадут из полосы закрепа у всех участников группы.' : 'Оно пропадёт из полосы закрепа у всех участников группы.',
+        confirmLabel: 'Открепить',
+      });
+      return ok ? { both: true } : null;
+    }
     if (anyBoth) {
       const r = await confirmWithOption({
         title,
@@ -7008,7 +7519,7 @@ export function MessagePane({
         tone: 'danger',
         confirmLabel: 'Удалить',
         option: {
-          label: round12 ? 'Также удалить для собеседника' : `Также удалить для ${deletePeerName}`,
+          label: 'Также удалить для собеседника',
           checked: delBothDefault(),
           remember: delRemember,
         },
@@ -7032,6 +7543,47 @@ export function MessagePane({
       return true;
     } catch (err) {
       toastError(err);
+      return false;
+    }
+  }
+  /**
+   * G56: удалить ОДИН элемент альбома — с подтверждением (Telegram `lng_delete_photo_sure`, галочка «у обоих» — как у сообщения,
+   * Р-1): своё — «Также удалить для собеседника» (без неё — только у себя), чужое — только у себя. `true` — удалено.
+   */
+  async function delItem(m: Message, att: Attachment): Promise<boolean> {
+    const run = batchOn?.deleteItem;
+    if (!run || !att.id) return false;
+    const noun = albumItemNoun(att);
+    const peer = deletePeerName ?? '';
+    let scope: 'me' | 'both';
+    if (m.author.id === meId) {
+      const r = await confirmWithOption({
+        title: `Удалить ${noun}?`,
+        body: `Без галочки ${noun} исчезнет только у вас${peer ? `, а ${peer} по-прежнему увидит его` : ''}. Остальное в альбоме останется. Вернуть удалённое нельзя.`,
+        tone: 'danger',
+        confirmLabel: 'Удалить',
+        option: { label: 'Также удалить для собеседника', checked: delBothDefault(), remember: delRemember },
+      });
+      if (!r) return false;
+      if (r.remember) rememberDeleteChoice(r.option);
+      scope = r.option ? 'both' : 'me';
+    } else {
+      const ok = await confirmAction({
+        title: `Удалить ${noun} у себя?`,
+        body: `${noun === 'фото' ? 'Фото' : 'Видео'} пропадёт только у вас${peer ? ` — ${peer} по-прежнему увидит его` : ''}.`,
+        tone: 'danger',
+        confirmLabel: 'Удалить',
+      });
+      if (!ok) return false;
+      scope = 'me';
+    }
+    try {
+      await run(m.id, att.id, scope);
+      return true;
+    } catch (err) {
+      // 409 `album_item_peer_old`: дом собеседника не понимает меньший список вложений — подсказать, что делать.
+      if (err instanceof Error && err.message === ALBUM_ITEM_PEER_OLD_ERROR) toast('error', ALBUM_ITEM_PEER_OLD_TEXT);
+      else toastError(err);
       return false;
     }
   }
@@ -7319,7 +7871,7 @@ export function MessagePane({
      ПК — правый клик по кнопке, телефон — долгое нажатие (кнопка видна, пока в поле есть что отправить). Меню без полосы
      реакций и подвала: на ПК — от точки клика, на телефоне — у кнопки (`anchor`), яркой остаётся полоса поля. Слушатели —
      на форме поля (по цели — кнопке), а не на самой кнопке: разметку кнопки держат стражи Codex. */
-  const sendOn = round12 && bubbles ? sendMenu : undefined;
+  const sendOn = bubbles ? sendMenu : undefined;
   const [sendMenuAt, setSendMenuAt] = useState<{ pos?: MenuPos; spot?: BubbleSpot } | null>(null);
   /** «Отправить позже» открыто: что уйдёт (текст и ответ — на момент выбора пункта). */
   const [laterDraft, setLaterDraft] = useState<{ content: string; replyTo: Message | null; files: File[] } | null>(null);
@@ -7907,10 +8459,13 @@ export function MessagePane({
     <AutoDownloadSource.Provider value={serverId ? 'channel' : groupChat ? 'group' : 'dm'}>
     <div
       ref={setChatEl}
-      className={`chat${dragOver ? ' drag-over' : ''}${docked ? ' has-expr-dock' : ''}`}
+      className={`chat${dragOver ? ' drag-over' : ''}${docked ? ' has-expr-dock' : ''}${exprUnder ? ' has-expr-under' : ''}${
+        liftUp ? ' expr-up' : ''
+      }${exprLift.drag !== null ? ' expr-dragging' : ''}`}
+      style={exprUnder ? ({ '--expr-lift': `${liftExtra}px` } as CSSProperties) : undefined}
       onDragEnter={(e) => {
         // Текст из другого поля тоже «перетаскивается» — рамку показываем только для файлов.
-        if (![...e.dataTransfer.types].includes('Files')) return;
+        if (![...e.dataTransfer.types].includes('Files') || filesBlocked) return;
         dragDepth.current += 1;
         setDragOver(true);
         // Две зоны броска (G37): в `dragenter` видны только типы файлов, по ним и выбираем вид (`dropKind`).
@@ -7940,7 +8495,15 @@ export function MessagePane({
         // Верхняя зона — без сжатия, нижняя — быстро (`wayForZone`); одна зона и бросок в уже открытое окно способ не задают.
         const way = dropInfo && dropInfo.kind !== 'files' ? wayForZone(dropInfo.zone) : undefined;
         setDropInfo(null);
-        addFiles(e.dataTransfer.files, way ? { way } : undefined);
+        // Папка (ровно одна) собирается в `<папка>.zip` и встаёт в окно отправки как один файл (`folderZip.ts`); без папок — как раньше.
+        const dropFeed = feedId;
+        const got = filesBlocked || composerEdit ? Array.from(e.dataTransfer.files) : collectDrop(e.dataTransfer);
+        if (Array.isArray(got)) addFiles(got, way ? { way } : undefined);
+        else
+          void got.then((zip) => {
+            if (feedNow.current === dropFeed) addFiles(zip, way ? { way } : undefined);
+            else if (zip.length > 0) toast('info', 'Архив собран, но беседа уже другая — бросьте папку заново');
+          });
       }}
     >
       {dragOver &&
@@ -7988,6 +8551,11 @@ export function MessagePane({
           onSend={(r) => void sendFromBox(r)}
         />
       )}
+      {/* Верх беседы (tg3, #218): шапка и верхние полосы одним слоем. ПК — `display: contents`, раскладка прежняя (Telegram
+          Desktop: полоса закрепа во всю ширину под шапкой). Телефон — слой поверх ленты, лента идёт под ним, как у Telegram Android
+          12.x: `ChatActivity.java:7784` (`topPanelLayout` поверх `contentView`), отступ ленты `:11943-11953`. Высоту слоя
+          меряет `chatTopRef` → `--chat-top-h` у `.chat`. */}
+      <div className="chat-top" ref={chatTopRef}>
       {selecting ? (
         /* Раунд 12, выделение (HANDOFF §6, макеты `*-select-*`): «Выбрано N» и действия над выбранным. ПК — крестик первой
            кнопкой шапки (и Esc); телефон — крестик на месте «назад» (`MainLayout`). */
@@ -8072,7 +8640,12 @@ export function MessagePane({
           {headerActions ? <span className="topbar-actions">{headerActions}</span> : null}
         </div>
       )}
+      {/* Капсула верхних полос (телефон): плашка незнакомца, плеер, закреп — одним стеклом с полями 7 px и радиусом до 18 px
+          (`ChatActivityTopPanelLayout.java:65-79`, поля — `ChatActivity.java:46505`). Пустая — не видна (`:empty`). */}
+      <div className="top-capsule">
       {topBar}
+      {/* Плашка «Вы транслируете геопозицию · Остановить» (`geolive1`) — только в беседе, где трансляция идёт. */}
+      <GeoLiveBar conversationId={feedId} />
       {/* Полоса плеера голосовых (07.10): над закрепом, как у Telegram; живёт, пока играет, в любой ленте. */}
       <VoiceTopBar feedId={feedId} onJump={(id) => void jumpToMessage(id)} />
       {pinCur && (
@@ -8120,6 +8693,8 @@ export function MessagePane({
           )}
         </PinnedBar>
       )}
+      </div>
+      </div>
       {/* Обёртка ленты — ВСЕГДА, и в каналах: её класс меняется с пузырями, а сама она — нет. Пересоздай ленту при
           переключении пузырей — отвалились бы слушатели, которые эффекты вешают на неё один раз (`wheel`, `load`). */}
       <div className={bubbles ? 'feed-frame bub-feed' : 'feed-frame'}>
@@ -8207,11 +8782,11 @@ export function MessagePane({
             menuId={msgMenu?.m.id}
             pickerId={picker?.kind === 'msg' ? picker.messageId : undefined}
             // Телефон: шторка действий и правка в поле — видно, к какому сообщению они относятся (#212).
-            sheetId={sheetMsg?.id}
             composerEditId={composerEdit?.id}
             nameOf={nameOf}
             animatedOf={animatedOf}
             guestHomeOf={guestHomeOf}
+            viaNames={viaNames}
             crownId={crownId}
             canReact={!!onReact}
             canBig={!!onReact && !!onReactBig}
@@ -8232,7 +8807,7 @@ export function MessagePane({
             peerReadKey={bubbles ? peerReadKey : null}
             selecting={selecting}
             picked={pickedSet}
-            forwards={bubbles && round12}
+            forwards={bubbles}
             swipingId={swipingId}
           />
           {inFlight.map((o, j) => {
@@ -8335,7 +8910,7 @@ export function MessagePane({
                       openOutMenu(o.key, e);
                     }}
                     // Раунд 12: на телефоне тап по строке «в пути» — её меню у пузыря, как у остальных.
-                    onClick={round12 ? (e) => onOutTap(e, o.key) : undefined}
+                    onClick={(e) => onOutTap(e, o.key)}
                     onTouchStart={(e) => onOutTouchStart(e, o.key)}
                     onTouchMove={onMsgTouchMove}
                     onTouchEnd={cancelLongPress}
@@ -8358,7 +8933,7 @@ export function MessagePane({
                         type="button"
                         className="bub-fail-btn"
                         // Раунд 12: листа неотправленного нет — и на телефоне меню (у пузыря).
-                        aria-haspopup={isMobile() && !round12 ? 'dialog' : 'menu'}
+                        aria-haspopup="menu"
                         aria-expanded={outMenu?.key === o.key || outSheet === o.key}
                         aria-label="Не отправлено — действия с сообщением"
                         title={failHint}
@@ -8684,6 +9259,11 @@ export function MessagePane({
         </div>
       )}
       {pollOpen && pollChannelId && <PollComposer channelId={pollChannelId} onClose={() => setPollOpen(false)} />}
+      {mediaPick === 'geo' && onSendMedia && <GeoPickDialog onSend={onSendMedia} live={geoLive} system={geoSystemHooks} map={GeoPickMapLazy} onClose={() => setMediaPick(null)} />}
+      {mediaPick === 'poll' && onSendMedia && <ConvPollCreate onSend={onSendMedia} onClose={() => setMediaPick(null)} />}
+      {mediaPick === 'contact' && onSendMedia && (
+        <ContactSendFlow onSend={onSendMedia} onClose={() => setMediaPick(null)} />
+      )}
       {pendingBox !== null && pendingImages.length > 0 && (
         <Lightbox
           images={pendingImages.map((f) => ({ url: previewUrls.get(f) ?? '', name: f.name, size: f.size }))}
@@ -8788,6 +9368,12 @@ export function MessagePane({
           <Icon name="forward" size={14} />
           <span className="rs-label">
             Пересылка <b>{fwdDraft.hideSender ? 'без имени отправителя' : fwdSenders(fwdDraft.messages, nameOf)}</b>
+            {/* Файлы в беседу с человеком другого инстанса сервер не примет (Э2 часть Б): предупреждаем до отправки. */}
+            {filesBlocked && fwdDraft.messages.some((m) => (m.attachments?.length ?? 0) > 0) && (
+              <span className="rs-warn" role="note">
+                {' · '}файлы не уйдут
+              </span>
+            )}
           </span>
           {fwdDraft.messages.length === 1 ? (
             <StripText
@@ -8796,7 +9382,7 @@ export function MessagePane({
                   ? { ...fwdDraft.messages[0]!, content: '' }
                   : fwdDraft.messages[0]!
               }
-              thumb={round12}
+              thumb
             />
           ) : (
             <span className="rs-text">
@@ -8879,7 +9465,7 @@ export function MessagePane({
           <span className="rs-label">
             <b>Редактирование</b>
           </span>
-          <StripText m={composerEdit} thumb={round12} />
+          <StripText m={composerEdit} thumb />
           <button
             type="button"
             className="rs-close"
@@ -8918,7 +9504,7 @@ export function MessagePane({
             {replyNow?.quote ? (
               <span className="rs-text rs-quote">{replyNow.quote.text}</span>
             ) : (
-              <StripText m={replyingTo} thumb={round12} />
+              <StripText m={replyingTo} thumb />
             )}
             <button
               type="button"
@@ -9047,6 +9633,8 @@ export function MessagePane({
       {/* Поиск на телефоне (G05): «N из M» и стрелки — на месте поля ввода, как выделение. */}
       {searchFoot && !selecting && <ChatSearchFoot cs={cs} />}
       {cs.calendarAt && <JumpDateDialog at={cs.calendarAt} onPick={cs.pickDay} onClose={cs.closeCalendar} />}
+      {!selecting && !searchFoot && !composerReplacement && composerNote}
+      {!composerReplacement && !selecting && !searchFoot && composerNotice}
       {(selecting || searchFoot) && composerReplacement ? null : (composerReplacement ?? (
       <form
         className={`composer${text.trim() || pending.length || composerEdit || fwdDraft ? '' : ' empty'}${
@@ -9123,25 +9711,25 @@ export function MessagePane({
             ))}
           </div>
         )}
-        {/* Телефон (#159): файл, голосовое, стикеры и опрос уезжают под «+», иначе поле ввода
+        {/* Телефон (#159, порядок кнопок с #218 — как Telegram Android): файл, голосовое, стикеры и опрос уезжают под скрепку справа, иначе поле ввода
             сжималось до 128 px из 387 — места под текст было меньше, чем под ряд кнопок. Кнопка
             есть в разметке всегда, а показывает её только мобильная раскладка (styles.css) — она
             же прячет четыре кнопки ниже. На компьютере строка остаётся прежней. */}
         {/* Правка меняет только текст: вложения, голосовое и опрос к ней не относятся (#212). */}
-        {!composerEdit && (
+        {!composerEdit && !filesBlocked && (
         <button
           type="button"
           className="att-btn plus"
-          title="Добавить"
+          title="Прикрепить"
           aria-haspopup="dialog"
           aria-expanded={!!plusAnchor || mediaOpen}
           // Телефон с камерой или своей галереей — сразу лист вложений, как скрепка Telegram (05.10); иначе прежняя шторка.
           onClick={(e) => (mediaMode() !== 'input' ? setMediaOpen(true) : setPlusAnchor(e.currentTarget.getBoundingClientRect()))}
         >
-          <Icon name="plus" size={21} />
+          <Icon name="paperclip" size={22} />
         </button>
         )}
-        {!composerEdit && (
+        {!composerEdit && !filesBlocked && (
         <button
           type="button"
           className="att-btn attach"
@@ -9154,6 +9742,17 @@ export function MessagePane({
         >
           <Icon name="paperclip" size={19} />
         </button>
+        )}
+        {/* Вложения закрыты (`filesBlocked`, Э2 часть Б): те же две кнопки, но неактивные — подсказка в title и тосте (разметка выше — прежняя; порядок кнопок в строке задаёт `order` в styles.css). */}
+        {!composerEdit && filesBlocked && (
+          <>
+            <button type="button" className="att-btn plus blocked" title={filesBlocked} aria-disabled onClick={() => toast('info', filesBlocked)}>
+              <Icon name="paperclip" size={22} />
+            </button>
+            <button type="button" className="att-btn attach blocked" title={filesBlocked} aria-disabled onClick={() => toast('info', filesBlocked)}>
+              <Icon name="paperclip" size={19} />
+            </button>
+          </>
         )}
         <input
           ref={fileRef}
@@ -9188,7 +9787,7 @@ export function MessagePane({
         <button
           type="button"
           className="att-btn emoji"
-          title={canSticker && !composerEdit ? 'Эмодзи и стикеры' : 'Эмодзи'}
+          title={exprUnder ? 'Клавиатура' : canSticker && !composerEdit ? 'Эмодзи и стикеры' : 'Эмодзи'}
           onMouseEnter={emojiHover.onMouseEnter}
           onMouseLeave={emojiHover.onMouseLeave}
           onClick={(e) => {
@@ -9197,10 +9796,18 @@ export function MessagePane({
             else if (dock.canPin && hoverPanelsAvailable()) {
               setPicker(null);
               dock.setPinned(true);
-            } else setPicker({ kind: 'composer', anchor: e.currentTarget.getBoundingClientRect(), el: e.currentTarget });
+            } else if (exprUnder) {
+              // Телефон, панель под полем: кнопка — «клавиатура» (Telegram Android меняет смайлик на клавиатуру).
+              inputRef.current?.focus();
+              keyboardFromPanel();
+            } else {
+              // Телефон: клавиатура уходит, панель встаёт на её место (`exprUnder`).
+              if (dockPhone && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+              setPicker({ kind: 'composer', anchor: e.currentTarget.getBoundingClientRect(), el: e.currentTarget });
+            }
           }}
         >
-          <Icon name="reaction" size={19} />
+          <Icon name={exprUnder ? 'keyboard' : 'reaction'} size={19} />
         </button>
         {micAvailable && !composerEdit && (canVoice || !!holdUi) && (
           <button
@@ -9238,6 +9845,10 @@ export function MessagePane({
           rows={1}
           value={text}
           data-fmt="1"
+          onFocus={() => {
+            // Панель эмодзи под полем: касание поля — клавиатура вместо панели (Telegram Android, `ChatActivityEnterView`).
+            if (exprUnderRef.current) keyboardFromPanel();
+          }}
           onPaste={(e) => {
             onPasteFiles(e);
             // Огромная вставка (≥ 8 пределов в поле) уходит файлом `message.txt`, как у Telegram Desktop (G22, `CheckLargeTextPaste`).
@@ -9474,16 +10085,7 @@ export function MessagePane({
             <Icon name="chevron-up" size={14} />
           </div>
         )}
-        {/* Подпись к замку (Android `SlideUpToLock`, по-русски у Telegram — «Вверх — продолжать запись»): гаснет по мере подъёма. */}
-        {holdUi && (
-          <span
-            className="rec-lock-hint"
-            aria-hidden
-            style={{ opacity: Math.max(0, 1 - voiceHoldProgress(holdUi.dx, holdUi.dy).lock) }}
-          >
-            Вверх — продолжать запись
-          </span>
-        )}
+        {/* Подписи «Вверх — продолжать запись» над замком нет (#218): у Telegram замок — пилюля со стрелкой без текста. */}
         {/* «1» над «стопом» (Android: кнопка «один раз» над замком в записи без рук). */}
         {voiceOnceBtn(((recording && !holdUi) || (paused && preview)) ? 'rec-once up' : 'rec-once')}
         {/* Замок над кнопкой становится «стопом», как в Telegram: запись встаёт, её можно послушать. */}
@@ -9514,6 +10116,15 @@ export function MessagePane({
                     : 'Держи, чтобы записать голосовое'
             }
             disabled={recBusy}
+            style={
+              holdUi
+                ? ({
+                    /* Кнопка едет за пальцем, как круг записи Telegram (`RecordCircle`): влево — отмена, вверх — замок. */
+                    '--rx': `${Math.max(-voiceCancelPath(window.innerWidth), Math.min(0, holdUi.dx))}px`,
+                    '--ry': `${Math.max(-VOICE_HOLD.lockDy, Math.min(0, holdUi.dy))}px`,
+                  } as React.CSSProperties)
+                : undefined
+            }
             onPointerDown={onMicDown}
             onPointerMove={onMicMove}
             onPointerUp={onMicUp}
@@ -9522,6 +10133,15 @@ export function MessagePane({
             onContextMenu={(e) => e.preventDefault()}
             onClick={onMicClick}
           >
+            {/* Большой круг под пальцем с живыми кляксами вокруг (Telegram `ChatActivityEnterView.RecordCircle` + `BlobDrawable`,
+                #218) — холст `RecordBlob.tsx`, после удержания доигрывает уход (замок / отправка / отмена). */}
+            <RecordCircle
+              hold={!!holdUi}
+              level={Math.min(1, recLevel * 1.6)}
+              slide={holdUi ? voiceHoldProgress(holdUi.dx, holdUi.dy, voiceCancelPath(window.innerWidth)).cancel : 0}
+              recording={recording}
+              recBusy={recBusy}
+            />
             <Icon name={(recording && !holdUi) || preview ? 'send' : roundMode && roundOkNow ? 'camera' : 'mic'} size={20} />
           </button>
         )}
@@ -9545,10 +10165,13 @@ export function MessagePane({
           count={fwdIds.length}
           canSilent={!!batchOn.silentForward}
           canHide={!!batchOn.hideOptions}
-          hasCaptions={(fwdSrc?.messages ?? messages).some(
-            (m) => fwdIds.includes(m.id) && !!m.content && (m.attachments?.length ?? 0) > 0,
-          )}
+          hasFiles={(fwdSrc?.messages ?? messages).some((m) => fwdIds.includes(m.id) && (m.attachments?.length ?? 0) > 0)}
+          hasCaptions={
+            !fwdItem &&
+            (fwdSrc?.messages ?? messages).some((m) => fwdIds.includes(m.id) && !!m.content && (m.attachments?.length ?? 0) > 0)
+          }
           canLater={
+            !fwdItem &&
             !!batchOn.later &&
             (fwdSrc?.messages ?? messages)
               .filter((m) => fwdIds.includes(m.id))
@@ -9557,10 +10180,11 @@ export function MessagePane({
                   !!m.content && (m.attachments?.length ?? 0) === 0 && !m.sticker && m.content.length <= MESSAGE_TEXT_MAX,
               )
           }
-          onSend={(to, o) => void forwardMany(fwdIds, to, o, fwdSrc)}
-          // Одна беседа — черновик пересылки в ней (08.10, решение владельца п.9; Telegram 5.11 / 5.15).
-          onDraft={(to) => startFwdDraft(to, fwdIds, fwdSrc)}
-          onClose={() => (setFwdIds(null), setFwdSrc(null))}
+          onSend={(to, o) => void forwardMany(fwdIds, to, o, fwdSrc, fwdItem)}
+          // Одна беседа — черновик пересылки в ней (08.10, решение владельца п.9; Telegram 5.11 / 5.15). Один элемент альбома
+          // (G56) — без черновика: черновик пересылает сообщения целиком.
+          onDraft={fwdItem ? undefined : (to) => startFwdDraft(to, fwdIds, fwdSrc)}
+          onClose={() => (setFwdIds(null), setFwdSrc(null), setFwdItem(null))}
         />
       )}
       {/* «Ответить в…» (G55, Telegram `ShowReplyToChatBox`, `lng_reply_in_another_title`): то же окно, одна беседа. */}
@@ -9686,7 +10310,24 @@ export function MessagePane({
       )}
       {/* Вид «Отложенные» (порция 8) — поверх ленты, внутри `.chat`: лента под ним не пересоздаётся. */}
       {sendOn?.view}
-      {picker && renderExpr(picker, false)}
+      {picker && !exprUnder && renderExpr(picker, false)}
+      {exprUnder && picker && (
+        <>
+          {/* Затемнение ленты над полем при раскрытии (`ScrimDrawable`, `ChatActivityEnterView.java:13963-13968`: чёрный, альфа 102 × доля). */}
+          <div className="expr-scrim" style={{ opacity: exprLift.max > 0 ? liftExtra / exprLift.max : 0 }} aria-hidden="true" />
+          <div
+            className="expr-under"
+            style={{ height: exprUnderH + liftExtra, marginTop: -liftExtra }}
+            aria-label="Эмодзи, стикеры и GIF"
+            onTouchStart={onLiftStart}
+            onTouchMove={onLiftMove}
+            onTouchEnd={onLiftEnd}
+            onTouchCancel={onLiftEnd}
+          >
+            {renderExpr(picker, true)}
+          </div>
+        </>
+      )}
       {docked && (
         <aside className="expr-dock" aria-label="Эмодзи, стикеры и GIF">
           {renderExpr({ kind: 'composer', anchor: new DOMRect() }, true)}
@@ -9698,6 +10339,17 @@ export function MessagePane({
               жеста пользователя браузер диалог выбора файла не покажет. */}
           <SheetRow icon="photo" label="Фото или видео" onClick={openMediaPicker} />
           <SheetRow icon="file" label="Файл" onClick={openFilePicker} />
+          {mediaActions.map((a) => (
+            <SheetRow
+              key={a.key}
+              icon={a.icon}
+              label={a.label}
+              onClick={() => {
+                setPlusAnchor(null);
+                a.run();
+              }}
+            />
+          ))}
           {canVoice && (
             <SheetRow
               icon="mic"
@@ -9725,6 +10377,17 @@ export function MessagePane({
         <ContextMenu anchor={attachAnchor} onClose={() => setAttachAnchor(null)} width={208}>
           <MenuItem icon="photo" label="Фото или видео" onClick={openMediaPicker} />
           <MenuItem icon="file" label="Файл" onClick={openFilePicker} />
+          {mediaActions.map((a) => (
+            <MenuItem
+              key={a.key}
+              icon={a.icon}
+              label={a.label}
+              onClick={() => {
+                setAttachAnchor(null);
+                a.run();
+              }}
+            />
+          ))}
         </ContextMenu>
       )}
       {mediaOpen && (
@@ -9739,17 +10402,29 @@ export function MessagePane({
               : undefined
           }
           actions={
-            pollChannelId
+            pollChannelId || mediaActions.length > 0
               ? [
-                  {
-                    key: 'poll',
-                    icon: 'activity',
-                    label: 'Опрос',
+                  ...(pollChannelId
+                    ? [
+                        {
+                          key: 'poll',
+                          icon: 'activity' as const,
+                          label: 'Опрос',
+                          run: () => {
+                            setMediaOpen(false);
+                            setPollOpen(true);
+                          },
+                        },
+                      ]
+                    : []),
+                  // G69: «Геопозиция» и «Контакт» — вкладками листа после «Галерея / Файл», как у Telegram Android.
+                  ...mediaActions.map((a) => ({
+                    ...a,
                     run: () => {
                       setMediaOpen(false);
-                      setPollOpen(true);
+                      a.run();
                     },
-                  },
+                  })),
                 ]
               : undefined
           }
@@ -9840,117 +10515,6 @@ export function MessagePane({
             </ContextMenu>
           );
         })()}
-      {msgMenu &&
-        !round12 &&
-        (() => {
-          // Меню сообщения до раунда 12 (переключатель пузырей выключен). Новое — блоком в конце разметки.
-          const m = msgMenu.m;
-          const mine = m.author.id === meId;
-          return (
-            <ContextMenu pos={msgMenu.pos} onClose={() => setMsgMenu(null)} width={232}>
-              <MenuItem
-                icon="reply"
-                label={msgMenu.quote ? 'Ответить с цитатой' : 'Ответить'}
-                shortcut="R"
-                onClick={(e?: React.MouseEvent) => {
-                  setMsgMenu(null);
-                  if (msgMenu.quote) replyWithQuote(m, msgMenu.quote, e);
-                  else startReply(m, null, e);
-                }}
-              />
-              {voiceTimecodeOf(m) && (
-                <MenuItem
-                  icon="reply"
-                  label="Ответить с тайм-кодом"
-                  shortcut={voiceTimecodeOf(m) ?? undefined}
-                  onClick={() => {
-                    replyWithTimecode(m);
-                    setMsgMenu(null);
-                  }}
-                />
-              )}
-              {onReact && (
-                <MenuItem
-                  icon="reaction"
-                  label="Добавить реакцию"
-                  onClick={() => {
-                    setPicker({ kind: 'msg', messageId: m.id, anchor: new DOMRect(msgMenu.pos.x, msgMenu.pos.y, 0, 0) });
-                    setMsgMenu(null);
-                  }}
-                />
-              )}
-              {(m.content || onCopyLink) && <MenuDivider />}
-              {m.content && (
-                <MenuItem
-                  icon="copy"
-                  label="Скопировать текст"
-                  onClick={() => {
-                    copyMessageText(m.content);
-                    setMsgMenu(null);
-                  }}
-                />
-              )}
-              {onCopyLink && (
-                <MenuItem
-                  icon="link"
-                  label="Копировать ссылку"
-                  onClick={() => {
-                    onCopyLink(m);
-                    setMsgMenu(null);
-                  }}
-                />
-              )}
-              {onPin && (
-                <MenuItem
-                  icon="pin"
-                  label={m.pinnedAt ? 'Открепить' : 'Закрепить'}
-                  onClick={() => {
-                    onPin(m, !m.pinnedAt);
-                    setMsgMenu(null);
-                  }}
-                />
-              )}
-              {/* 🔴 «Приложить к жалобе» — только у сообщений ГОСТЯ и только тому, кто вправе банить (`attachToReport`). */}
-              {canModerate && guestHomeOf(m.author.id) && m.content && (
-                <MenuItem
-                  icon="shield"
-                  label="Приложить к жалобе"
-                  onClick={() => {
-                    attachToReport(m);
-                    setMsgMenu(null);
-                  }}
-                />
-              )}
-              {canDelete(m) && (
-                <>
-                  <MenuDivider />
-                  {/* Пересланное правке не подлежит (сервер ответит 403). */}
-                  {mine && !m.forwardedFrom && !m.sticker && (
-                    <MenuItem
-                      icon="edit"
-                      label="Изменить"
-                      shortcut="E"
-                      onClick={() => {
-                        setMsgMenu(null);
-                        editFromMenu(m);
-                      }}
-                    />
-                  )}
-                  <MenuItem
-                    icon="trash"
-                    label="Удалить"
-                    danger
-                    shortcut="Del"
-                    onClick={() => {
-                      setMsgMenu(null);
-                      void del(m);
-                    }}
-                  />
-                </>
-              )}
-            </ContextMenu>
-          );
-        })()}
       {outSheet &&
         (() => {
           // Неотправленное (раунд 10), телефон: первой строкой — повтор, «Изменить» нет (сообщения на сервере ещё нет).
@@ -10018,119 +10582,6 @@ export function MessagePane({
                   close();
                 }}
               />
-            </BottomSheet>
-          );
-        })()}
-      {sheetMsg &&
-        (() => {
-          const m = sheetMsg;
-          const mine = m.author.id === meId;
-          const close = () => setSheetMsg(null);
-          return (
-            <BottomSheet
-              onClose={close}
-              /* Пузыри (раунд 10): чьё сообщение и когда — словами в шапке листа: наведения на телефоне нет, а время
-                 в пузыре мелкое. Каналы — как были. */
-              title={bubbles ? (mine ? 'Ваше сообщение' : nameOf(m.author.id, m.author.displayName)) : undefined}
-              subtitle={
-                bubbles
-                  ? `${dayLabel(m.createdAt)}, ${TIME_FMT.format(new Date(m.createdAt))}${mine ? ' · отправлено' : ''}`
-                  : undefined
-              }
-            >
-              {onReact && (
-                <div className="sheet-reactions">
-                  {quickBarOrder(QUICK_REACTIONS, quickNow).map((emo) => (
-                    <button
-                      type="button"
-                      key={emo}
-                      className="sheet-react"
-                      onClick={() => {
-                        onReact(m.id, emo, 'add');
-                        close();
-                      }}
-                    >
-                      {emo}
-                    </button>
-                  ))}
-                  {/* «Все реакции» — по макету раунда 10: стрелка вниз (раскрыть весь набор). Набор быстрых — наш, с 🦆. */}
-                  <button
-                    type="button"
-                    className="sheet-react more"
-                    aria-label="Все реакции"
-                    onClick={() => {
-                      setPicker({
-                        kind: 'msg',
-                        messageId: m.id,
-                        anchor: new DOMRect(window.innerWidth / 2, window.innerHeight - 24, 0, 0),
-                      });
-                      close();
-                    }}
-                  >
-                    <Icon name="chevron-down" size={22} />
-                  </button>
-                </div>
-              )}
-              <SheetRow
-                icon="reply"
-                label="Ответить"
-                onClick={() => {
-                  startReply(m);
-                  close();
-                }}
-              />
-              {m.content && (
-                <SheetRow
-                  icon="copy"
-                  label="Скопировать текст"
-                  onClick={() => {
-                    copyMessageText(m.content);
-                    close();
-                  }}
-                />
-              )}
-              {onCopyLink && (
-                <SheetRow
-                  icon="link"
-                  label="Копировать ссылку"
-                  onClick={() => {
-                    onCopyLink(m);
-                    close();
-                  }}
-                />
-              )}
-              {onPin && (
-                <SheetRow
-                  icon="pin"
-                  label={m.pinnedAt ? 'Открепить' : 'Закрепить'}
-                  onClick={() => {
-                    onPin(m, !m.pinnedAt);
-                    close();
-                  }}
-                />
-              )}
-              {mine && !m.forwardedFrom && !m.sticker && (
-                <SheetRow
-                  icon="edit"
-                  label="Изменить"
-                  onClick={() => {
-                    // Телефон — правка в основном поле (#212), а не маленьким полем в сообщении.
-                    startComposerEdit(m);
-                    close();
-                  }}
-                />
-              )}
-              {canDelete(m) && (
-                <SheetRow
-                  icon="trash"
-                  label="Удалить"
-                  danger
-                  onClick={() => {
-                    close();
-                    void del(m);
-                  }}
-                />
-              )}
             </BottomSheet>
           );
         })()}
@@ -10222,9 +10673,8 @@ export function MessagePane({
             </ContextMenu>
           );
         })()}
-      {/* ── Раунд 12: меню сообщения нового вида — только за переключателем пузырей (`round12`) ── */}
+      {/* ── Раунд 12: меню сообщения (с 09.10 единственное — старое меню и лист сообщения сняты вместе с переключателем) ── */}
       {msgMenu &&
-        round12 &&
         (() => {
           /* ПК — правый клик: карточка у точки, полоса реакций над ней. Телефон (тап; в каналах и долгое нажатие) и узкое
              окно — у пузыря, экран приглушён, кроме строки. Пункты — один порядок (HANDOFF §3): Ответить · Изменить (своё,
@@ -10235,6 +10685,13 @@ export function MessagePane({
              как отметка в пузыре. */
           const m = msgMenu.m;
           const photo = msgMenu.photo;
+          /* G56: правый клик мышью по ячейке альбома (ПК) — «Переслать»/«Удалить» для неё одной, как tdesktop по
+             `PointState::GroupPart`; альбом целиком — «Выделить». Телефон — альбом целиком, как Telegram Android
+             (`ChatActivity`, `selectedObjectGroup`); один элемент там — из просмотра. */
+          const item =
+            !isMobile() && msgMenu.item && batchOn?.forwardItem && batchOn.deleteItem && isAlbumItem(m.attachments, msgMenu.item)
+              ? msgMenu.item
+              : undefined;
           const link = msgMenu.link;
           const file = msgMenu.file;
           const fileActs = file ? fileMenuActions(file, isMobile()) : [];
@@ -10249,7 +10706,7 @@ export function MessagePane({
              Закрепить · Изменить · Удалить). Каналы держат порядок ПК везде. */
           const androidOrder = bubbles && isMobile();
           const editItem =
-            !readOnly && mine && !m.forwardedFrom && !m.sticker ? (
+            !readOnly && mine && !m.forwardedFrom && !m.sticker && !convMediaOf(m as { media?: unknown }) ? (
               // Пересланное правке не подлежит (сервер ответит 403) — «Изменить» у него нет.
               <MenuItem
                 icon="edit"
@@ -10349,11 +10806,16 @@ export function MessagePane({
                 />
               )}
               {!androidOrder && editPin}
+              {/* Опрос в ЛС (`convpoll1`): «Отменить голос» / «Остановить опрос» (автору). */}
+              {!readOnly && (() => {
+                const pm = convMediaOf(m as { media?: unknown });
+                return pm?.kind === 'poll' ? <ConvPollMenuItems poll={pm} conversationId={m.channelId} messageId={m.id} mine={mine} onDone={close} /> : null;
+              })()}
               {/* «Сохранить GIF» (`gifs1`, Р-7, tdesktop `history_view_context_menu.cpp` `lng_context_save_gif`) — у GIF в
                   сообщении: под курсором или первый в нём. */}
               {onSaveGif &&
                 (() => {
-                  const g = [file, photo, ...(m.attachments ?? [])].find((a): a is Attachment => !!a && isGifAttachment(a));
+                  const g = [file, photo, ...(m.attachments ?? [])].find((a): a is Attachment => !!a && a.fedState !== 'copying' && isGifAttachment(a));
                   return g ? (
                     <MenuItem
                       icon="sticker"
@@ -10442,6 +10904,21 @@ export function MessagePane({
                   />
                 ))
               )}
+              {/* «Показать в папке» (G10 / G31 / G59, tdesktop `ShowInFolder` в `history_view_context_menu.cpp`): файл или видео,
+                  которое это приложение уже сохранило на диск (десктоп, путь от оболочки); фото — то же по ссылке «Скачать». */}
+              {(() => {
+                const folder = file ? savedFilePath(attachmentKey(file), api.attachmentDownloadUrl(file)) : photo ? savedFilePath(attachmentKey(photo), api.attachmentDownloadUrl(photo)) : undefined;
+                return folder ? (
+                  <MenuItem
+                    icon="folder"
+                    label="Показать в папке"
+                    onClick={() => {
+                      close();
+                      showInFolder(folder);
+                    }}
+                  />
+                ) : null;
+              })()}
               {file && !isMobile() && canCopyFileName(file) && !fileJobOf(attachmentKey(file)) && (
                 <MenuItem
                   icon="copy"
@@ -10503,26 +10980,40 @@ export function MessagePane({
               {batchOn && !m.attachments?.some((a) => a.once === true) && (
                 <MenuItem
                   icon="forward"
-                  label="Переслать"
+                  label={item ? `Переслать ${albumItemNoun(item)}` : 'Переслать'}
                   onClick={() => {
                     close();
-                    openForward([m.id]);
+                    if (item) openForwardItem(m, item);
+                    else openForward([m.id]);
                   }}
                 />
               )}
               {androidOrder && editPin}
-              {canDelete(m) && (
+              {/* «Выбрать» (приложение на телефоне, 10.10, #218): долгое нажатие теперь открывает меню, как Telegram Android, — выбор
+                  отсюда или протяжкой (`startMenuRange`); слово — строка Telegram `Select`; перед «Удалить», оно у Telegram последнее. */}
+              {batchOn && isMobile() && (
                 <MenuItem
-                  icon="trash"
-                  label="Удалить"
-                  danger
+                  icon="circle-check"
+                  label="Выбрать"
                   onClick={() => {
                     close();
-                    void del(m);
+                    startSelection(m);
                   }}
                 />
               )}
-              {/* «Выделить» — где нет долгого нажатия (ПК): в приложении на телефоне выделение — долгим нажатием. */}
+              {canDelete(m) && (
+                <MenuItem
+                  icon="trash"
+                  label={item ? `Удалить ${albumItemNoun(item)}` : 'Удалить'}
+                  danger
+                  onClick={() => {
+                    close();
+                    if (item) void delItem(m, item);
+                    else void del(m);
+                  }}
+                />
+              )}
+              {/* «Выделить» (ПК, как Telegram Desktop: после «Удалить») — режим выбора с этим сообщением. */}
               {batchOn && !isMobile() && (
                 <MenuItem
                   icon="circle-check"
@@ -10538,7 +11029,27 @@ export function MessagePane({
                 const [sent, ...more] = menuFootLines(m);
                 // «Прочитано в 12:34» (С1): своё прочитанное в беседе 1:1 — строка ниже (Telegram Desktop: строка ✓✓ в меню).
                 const readAt = readAtConvId && mine && read ? <ReadAtLine convId={readAtConvId} messageId={m.id} /> : null;
+                // «N прочитали» (15.10, `readers1`): своё прочитанное в группе, не старше 7 суток — пункт над подвалом, как у
+                // Telegram Web A (разделитель, пункт со стопкой аватарок, ниже — сведения о сообщении).
+                const readers =
+                  readersConvId && readersLineShown({ mine, read, createdAt: m.createdAt, now: Date.now() }) ? (
+                    <>
+                      <MenuDivider />
+                      <ReadersLine
+                        convId={readersConvId}
+                        messageId={m.id}
+                        lookup={reactorOf}
+                        onOpen={(list) => {
+                          const spot = msgMenu.bubble;
+                          close();
+                          setSeen(spot ? { id: m.id, list, anchor: spot.anchor } : { id: m.id, list, pos: msgMenu.pos });
+                        }}
+                      />
+                    </>
+                  ) : null;
                 return (
+                  <>
+                  {readers}
                   <div className={more.length || readAt ? 'ctx-foot multi' : 'ctx-foot'} role="none">
                     <span className="ctx-foot-ico">
                       {bubbles && mine ? (
@@ -10553,6 +11064,7 @@ export function MessagePane({
                     ))}
                     {readAt}
                   </div>
+                  </>
                 );
               })()}
             </>
@@ -10594,12 +11106,7 @@ export function MessagePane({
         </ContextMenu>
       )}
       {linkAsk && (
-        <LinkConfirmModal
-          url={linkAsk.url}
-          authorId={linkAsk.authorId}
-          authorName={linkAsk.authorName}
-          onClose={() => setLinkAsk(null)}
-        />
+        <LinkConfirmModal url={linkAsk.url} onClose={() => setLinkAsk(null)} />
       )}
       {who &&
         (() => {
@@ -10652,6 +11159,61 @@ export function MessagePane({
             </ContextMenu>
           ) : (
             <ContextMenu pos={who.pos ?? { x: 0, y: 0 }} onClose={close} width={232}>
+              {rows}
+            </ContextMenu>
+          );
+        })()}
+      {seen &&
+        (() => {
+          /* Окно «кто прочитал» (15.10, `readers1`; Telegram Desktop — подменю списка у строки «N Seen», Web A `SeenByModal`):
+             шапка как у окна «кто поставил» — ✓✓ и «прочитали N», ниже люди: аватар, имя, справа — реакция, если ставил
+             (Telegram показывает реакцию у прочитавшего). Времени у групп нет — без подстроки (как Telegram для старых).
+             Нажатие — карточка профиля. */
+          const m = messages.find((x) => x.id === seen.id);
+          if (!m) return null;
+          const close = () => setSeen(null);
+          const reactionOf = new Map<string, string>();
+          for (const r of m.reactions ?? []) for (const p of r.reactors ?? []) if (!reactionOf.has(p.userId)) reactionOf.set(p.userId, r.emoji);
+          const rows = (
+            <>
+              <div className="who-head" role="none">
+                <span className="who-emoji seen-ico">
+                  <Icon name="checks" size={18} />
+                </span>
+                <span className="who-count">
+                  прочитали <b>{seen.list.length}</b>
+                </span>
+              </div>
+              {seen.list.map((r) => {
+                const look = readerLook(r, reactorOf);
+                const emoji = reactionOf.get(r.userId);
+                return (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="ctx-item who-row"
+                    key={r.userId}
+                    onClick={(e) => {
+                      close();
+                      openUserMenu(e, { userId: r.userId, name: look.name, avatarUrl: look.avatarUrl }, 'profile');
+                    }}
+                  >
+                    <Avatar url={look.avatarUrl} name={look.name} size={22} />
+                    <span className="ctx-label">
+                      <span className="ctx-label-main">{look.name}</span>
+                    </span>
+                    {emoji ? <span className="who-emoji seen-react">{renderReaction(emoji, emojiById)}</span> : null}
+                  </button>
+                );
+              })}
+            </>
+          );
+          return seen.anchor ? (
+            <ContextMenu anchor={seen.anchor} onClose={close} width={232}>
+              {rows}
+            </ContextMenu>
+          ) : (
+            <ContextMenu pos={seen.pos ?? { x: 0, y: 0 }} onClose={close} width={232}>
               {rows}
             </ContextMenu>
           );

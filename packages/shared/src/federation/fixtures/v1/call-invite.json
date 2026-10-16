@@ -1,0 +1,10 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "call_id": "044f6645-d5bd-471a-8d04-83e656e6561e",
+  "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "from": { "user_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W1A" },
+  "to_user_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W2B",
+  "video": false,
+  "created_at": 1760280600000,
+  "expires_at": 1760280690000
+}

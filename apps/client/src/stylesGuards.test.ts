@@ -1,8 +1,923 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import ts from 'typescript';
 
 const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+function popupCssFailure(prefix: string, actual: unknown, expected: unknown) {
+  return (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(prefix) &&
+    error.operator === 'strictEqual' && error.actual === actual && error.expected === expected;
+}
+function popupReplyCase(raw = css) {
+  const declarations = guardDeclarations(guardCssBlocks(raw), '.nfp-reply-btn');
+  assert.equal(declarations.size > 0, true, 'R233-reply-rule: кнопка ответа имеет живой CSS');
+  assert.equal(declarations.get('text-transform')?.toLowerCase().replace(/\s*!important$/, '') === 'uppercase', false,
+    'R233-reply-case: ответ не превращается в обрезанный верхний регистр');
+}
+it('R233 кнопка ответа уведомления сохраняет обычный регистр русского текста', () => {
+  // Happy-dom не рассчитывает uppercase и обрезание: проверяется реальная декларация кнопки.
+  popupReplyCase();
+});
+it('R233 возврат uppercase в кнопке ответа обнаруживается независимо от правильного комментария', () => {
+  popupReplyCase();
+  const anchor = '.nfp-reply-btn {';
+  assert.equal(css.split(anchor).length - 1, 1);
+  for (const value of ['uppercase', 'UPPERCASE !important']) {
+    popupReplyCase();
+    assert.throws(() => popupReplyCase(css.replace(anchor, `${anchor}\n  text-transform: ${value};`) +
+      '\n/* .nfp-reply-btn { text-transform: none; } */'), popupCssFailure('R233-reply-case:', true, false));
+  }
+});
+function popupActions(raw = css) {
+  const blocks = guardCssBlocks(raw);
+  const hidden = guardDeclarations(blocks, '.nfp-actions');
+  assert.equal(hidden.get('position'), 'absolute', 'R233-actions-position: действия лежат поверх текста без изменения его ширины');
+  assert.equal(hidden.get('opacity'), '0', 'R233-actions-hidden: до наведения текст не закрыт действиями');
+  assert.equal(hidden.get('pointer-events'), 'none', 'R233-actions-pass: скрытые действия не перехватывают нажатие карточки');
+  for (const selector of ['.nfp-card:hover .nfp-actions', '.nfp-actions:focus-within']) {
+    const shown = guardDeclarations(blocks, selector);
+    assert.equal(shown.get('opacity'), '1', `R233-actions-visible: ${selector}`);
+    assert.equal(shown.get('pointer-events'), 'auto', `R233-actions-clickable: ${selector}`);
+  }
+}
+it('R233 действия скрыты и пропускают нажатие до наведения, при hover и клавиатурном фокусе видны и доступны', () => {
+  // Пара скрыто/доступно не позволяет спрятать кнопку навсегда ради свободного превью.
+  popupActions();
+});
+it('R233 контрфакты постоянно видимых невидимо кликабельных и недоступных по hover действий ловятся адресным CSS', () => {
+  const blocks = guardCssBlocks(css);
+  const base = blocks.filter(block => block.header === '.nfp-actions');
+  const hover = blocks.filter(block => splitCss(block.header, ',').includes('.nfp-card:hover .nfp-actions'));
+  assert.equal(base.length, 1);
+  assert.equal(hover.length, 1);
+  const cases = [
+    [base[0], 'position', 'static', 'R233-actions-position:', 'absolute'],
+    [base[0], 'opacity', '1', 'R233-actions-hidden:', '0'],
+    [base[0], 'pointer-events', 'auto', 'R233-actions-pass:', 'none'],
+    [hover[0], 'opacity', '0', 'R233-actions-visible: .nfp-card:hover', '1'],
+    [hover[0], 'pointer-events', 'none', 'R233-actions-clickable: .nfp-card:hover', 'auto'],
+  ] as const;
+  for (const [block, property, actual, prefix, expected] of cases) {
+    popupActions();
+    assert.throws(() => popupActions(mutateGuardDeclaration(block, property, actual)), popupCssFailure(prefix, actual, expected));
+  }
+});
+function popupRootPadding(raw = css) {
+  const declarations = guardDeclarations(guardCssBlocks(raw), '.nfp-root');
+  assert.equal(declarations.size > 0, true, 'R233-root-rule: корень стопки имеет живой CSS');
+  assert.equal([...declarations.keys()].some(property => /^padding(?:-|$)/.test(property)), false,
+    'R233-root-padding: отступ от экрана задаёт окно, а не невидимое поле стопки');
+}
+it('R233 корень стопки уведомлений не добавляет padding к размеру прозрачного окна', () => {
+  popupRootPadding();
+});
+it('R233 скрытые поля корня ловятся и в shorthand и по отдельной стороне включая логическую', () => {
+  const anchor = '.nfp-root {';
+  assert.equal(css.split(anchor).length - 1, 1);
+  for (const property of ['padding', 'padding-top', 'padding-inline-start']) {
+    popupRootPadding();
+    assert.throws(() => popupRootPadding(css.replace(anchor, `${anchor}\n  ${property}: 7px;`)),
+      popupCssFailure('R233-root-padding:', true, false));
+  }
+});
+
+function dmListTrack(source = css) {
+  assert.equal(guardDeclarations(guardCssBlocks(source), '.dm-list').get('grid-template-columns'), 'minmax(0, 1fr)',
+    'R230-dm-track: колонка списка допускает сжатие длинных вкладок');
+}
+it('R230 список бесед сжимает единственную колонку вместо расширения всего экрана вкладками', () => {
+  // Happy-dom не меряет grid: проверяем реальное итоговое объявление, а не выдуманные clientWidth.
+  dmListTrack();
+});
+it('R230 контрфакт auto-min колонки списка ловится даже при правильном тексте в комментарии', () => {
+  // Возврат неявного минимума раздвигал поиск и строки файлов на телефоне S20.
+  dmListTrack();
+  const blocks = guardCssBlocks(css).filter(b => b.header === '.dm-list' && guardDeclarations([b], '.dm-list').has('grid-template-columns'));
+  assert.equal(blocks.length, 1);
+  const changed = mutateGuardDeclaration(blocks[0], 'grid-template-columns', '1fr');
+  assert.throws(() => dmListTrack(changed + '\n/* .dm-list { grid-template-columns: minmax(0, 1fr); } */'), e => e instanceof assert.AssertionError
+    && e.message.startsWith('R230-dm-track:') && e.operator === 'strictEqual' && e.actual === '1fr' && e.expected === 'minmax(0, 1fr)');
+});
+
+it('R200 голосовая панель телефона имеет свой selector в760px и не заимствует зелёный фон звонка ЛС', () => {
+  // Класс ошибки: .call-bar делилась двумя разными панелями, из-за чего голосовая сцена окрашивалась в зелёный.
+  const check = (raw: string) => {
+    const blocks = guardCssBlocks(raw), phone = guardScope(blocks, '@media (max-width: 760px)');
+    const rules = phone.filter(b => splitCss(b.header, ',').includes('.voice-call-bar'));
+    assert.equal(rules.length, 1, 'голосовая панель находится в телефонном media');
+    const declarations = guardDeclarations(phone, '.voice-call-bar');
+    assert.equal(declarations.get('display'), 'flex');
+    assert.equal(guardDeclarations(blocks, '.voice-call-bar').size, 0, 'мобильный layout не становится глобальным');
+    for (const [name, value] of declarations) if (name.startsWith('background')) assert.equal(value.includes('--green'), false, 'голосовая панель не получает зелёный фон');
+  };
+  check(css); const anchor = '.voice-call-bar {'; assert.equal(css.split(anchor).length - 1, 1);
+  assert.throws(() => check(css.replace(anchor, '.call-bar {')), e => e instanceof assert.AssertionError && e.message.includes('находится в телефонном media'));
+  assert.throws(() => check(css.replace(anchor, anchor + '\nbackground: var(--green);')), e => e instanceof assert.AssertionError && e.message.includes('не получает зелёный фон'));
+});
+
+it('R194 индикатор copying использует общую останавливаемую крутилку без пятнадцатой вечной анимации', () => {
+  // Класс ошибки: новая заглушка постоянно будит GPU поверх игровых и лёгких режимов.
+  const check = (source: string) => {
+    const clean = source.replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.equal((clean.match(/animation\s*:[^;{}]*\binfinite\b/g) ?? []).length, 14, 'всего четырнадцать вечных анимаций');
+    const spin = guardDeclarations(guardCssBlocks(clean), '.confirm-spin.att-spin');
+    assert.equal(spin.get('border-right-color'), 'transparent');
+    for (const prefix of ['html.gv-game-fg', 'html.gv-lite']) assert.equal(clean.includes(`${prefix} .confirm-spin`), true);
+  };
+  check(css); const anchor = '.confirm-spin.att-spin {\n'; assert.equal(css.split(anchor).length - 1, 1, 'единственный selector крутилки');
+  assert.throws(() => check(css.replace(anchor, `${anchor}  animation: extra-spin 1s linear infinite;\n`)),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('всего четырнадцать вечных анимаций'));
+});
+
+describe('R183 вложения поиска не раздвигают ленту', () => {
+  it('список вкладки вида допускает сжатие до ширины ленты, возврат auto обнаруживается', () => {
+    // Длинная ссылка не должна превратить grid-ячейку списка в полосу 1207 px; layout happy-dom не измеряется.
+    const selector = '.dms-kind-hits';
+    const check = (raw = css) => assert.equal(guardDeclarations(guardCssBlocks(raw), selector).get('min-width'), '0', 'min-width найденных вложений 0');
+    check(); const block = guardCssBlocks(css).find(b => b.header === selector); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'min-width', 'auto')), e => e instanceof assert.AssertionError && e.message.includes('найденных вложений'));
+  });
+  it('вкладки видов листаются вбок вместо сжатия или обрезания, числовая подмена обнаруживается', () => {
+    // Последние виды должны оставаться доступными на узком телефоне.
+    const selector = '.dms-scopes.dms-kinds';
+    const check = (raw = css) => assert.equal(guardDeclarations(guardCssBlocks(raw), selector).get('overflow-x'), 'auto', 'вкладки листаются вбок');
+    check(); const block = guardCssBlocks(css).find(b => b.header === selector); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'overflow-x', 'hidden')), e => e instanceof assert.AssertionError && e.message.includes('листаются вбок'));
+  });
+});
+
+describe('R179 затенение ленты под телефонной капсулой', () => {
+  const selector = '.app.m-dmlist:not(.in-voice) .mobile-nav::before';
+  const media = '@media (max-width: 760px)';
+  const gradient = 'linear-gradient(to bottom, color-mix(in srgb, var(--bg-2) 0%, transparent) 0, color-mix(in srgb, var(--bg-2) 34%, transparent) 20px, color-mix(in srgb, var(--bg-2) 62%, transparent) 40px, color-mix(in srgb, var(--bg-2) 81%, transparent) 60px, color-mix(in srgb, var(--bg-2) 81%, transparent) 100%)';
+  const value = (raw: string) => {
+    const blocks = guardCssBlocks(raw), phone = guardScope(blocks, media);
+    assert.equal(guardDeclarations(blocks, selector).size, 0, 'затенение не становится глобальным правилом ПК');
+    const rule = phone.filter(b => b.header === selector);
+    assert.equal(rule.length, 1, 'один телефонный слой ленты вне голоса');
+    return { block: rule[0], declarations: guardDeclarations(phone, selector) };
+  };
+  const check = (raw = css) => {
+    const { declarations: d } = value(raw);
+    assert.equal(d.get('pointer-events'), 'none', 'затенение пропускает касания');
+    assert.equal(d.get('z-index'), '-1', 'затенение лежит за капсулой');
+    assert.equal(d.get('background')?.replace(/\s+/g, ''), gradient.replace(/\s+/g, ''), 'градиент цвета ленты сохраняет остановки и альфу 0.81 до низа');
+  };
+  it('слой существует только у ленты вне голоса на телефоне, лежит за капсулой и не ловит касания', () => {
+    // Глобальное правило или слой над капсулой меняет другие экраны и блокирует её кнопки.
+    check(); const { declarations: d } = value(css);
+    for (const [property, expected] of [['content', "''"], ['position', 'absolute'], ['left', '0'], ['right', '0'], ['bottom', '0'], ['height', 'var(--m-nav-h)']])
+      assert.equal(d.get(property), expected, property);
+    const phone = guardScope(guardCssBlocks(css), media);
+    assert.equal(guardDeclarations(phone, '.app.m-dmlist .mobile-nav::before').size, 0, 'голос не получает соседнее безусловное правило');
+  });
+  it('первые 60 px плавно переходят от прозрачного к 0.81 цвета bg-2, остаток сохраняет 0.81', () => {
+    // Нельзя подменить плавный переход непрозрачной плашкой или фоном другого экрана.
+    check(); const background = value(css).declarations.get('background')!;
+    const stops = [...background.matchAll(/var\(--bg-2\) (\d+)%, transparent\) (\d+(?:px|%)?)/g)].map(m => [Number(m[1]) / 100, m[2]]);
+    assert.deepEqual(stops, [[0, '0'], [.34, '20px'], [.62, '40px'], [.81, '60px'], [.81, '100%']]);
+  });
+  it('контрфакты голоса перехвата касаний верхнего слоя и полной непрозрачности обнаруживаются адресным CSS', () => {
+    // Все четыре контрфакта меняют настоящее правило, а не отдельную строку с ожидаемым ответом.
+    check(); const { block } = value(css); const anchor = `${selector} {`;
+    assert.equal(css.split(anchor).length - 1, 1, 'уникальный якорь селектора');
+    assert.throws(() => check(css.replace(anchor, '.app.m-dmlist .mobile-nav::before {')),
+      e => e instanceof assert.AssertionError && e.message.includes('один телефонный слой'));
+    for (const [property, replacement, message] of [
+      ['pointer-events', 'auto', 'пропускает касания'], ['z-index', '1', 'за капсулой'],
+      ['background', gradient.replaceAll('81%', '100%'), 'альфу 0.81'],
+    ]) assert.throws(() => check(mutateGuardDeclaration(block, property, replacement)),
+      e => e instanceof assert.AssertionError && e.message.includes(message));
+  });
+});
+
+describe('R181 телефонная шапка и архив', () => {
+  const phone = (raw: string) => guardScope(guardCssBlocks(raw), '@media (max-width: 760px)');
+  it('имя собеседника 18 medium не наследует прежние 800, обе числовые подмены обнаруживаются', () => {
+    // Ширина имени влияет на доступность статуса; проверяется нужный телефонный блок, не глобальная похожая строка.
+    const selector = '.app.m-content .dm-who > strong';
+    const check = (raw = css) => {
+      const d = guardDeclarations(phone(raw), selector);
+      assert.equal(d.get('font-size'), '18px', 'телефонное имя 18');
+      assert.equal(d.get('font-weight'), '500', 'телефонное имя medium 500');
+    };
+    check(); const block = phone(css).find(b => b.header === selector); assert.ok(block);
+    for (const [prop, value, target] of [['font-weight', '800', 'medium 500'], ['font-size', '20px', 'имя 18']])
+      assert.throws(() => check(mutateGuardDeclaration(block, prop, value)), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
+  it('шапка без участников оставляет поля 58 и 6 с безопасными вставками и промежуток 6', () => {
+    // Лишние 64/16 обрезали статус; поле для кнопки участников менять этим правилом нельзя.
+    const selector = '.app.m-content:not(.has-members) .chat > .chat-top > .channel-topbar';
+    const check = (raw = css) => {
+      const d = guardDeclarations(phone(raw), selector);
+      assert.equal(d.get('padding-left'), 'calc(58px + var(--sa-l, 0px))', 'поле слева 58 с native-safe вставкой');
+      assert.equal(d.get('padding-right'), 'calc(6px + var(--sa-r, 0px))', 'поле справа 6 с native-safe вставкой');
+      assert.equal(d.get('column-gap'), '6px', 'промежуток пилюль 6');
+      assert.equal(guardDeclarations(guardCssBlocks(raw), selector).size, 0, 'узкое правило не стало общим для ПК');
+    };
+    check(); const block = phone(css).find(b => b.header === selector); assert.ok(block);
+    for (const [prop, bad, target] of [['padding-left', 'calc(64px + var(--sa-l, 0px))', 'поле слева 58'], ['padding-right', 'calc(16px + var(--sa-r, 0px))', 'поле справа 6']])
+      assert.throws(() => check(mutateGuardDeclaration(block, prop, bad)), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
+  it('архив прячет капсулу только при gv-listarchive на экране списка, возврат селектора обнаруживается', () => {
+    // Архив не должен показывать нижние вкладки поверх своего списка, остальные экраны сохраняют навигацию.
+    const selector = ':root.gv-listarchive .app.m-list .mobile-nav';
+    const check = (raw = css) => assert.equal(guardDeclarations(phone(raw), selector).get('display'), 'none', 'капсула скрыта в архиве');
+    check(); const block = phone(css).find(b => b.header === selector); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'display', 'flex')), e => e instanceof assert.AssertionError && e.message.includes('капсула скрыта'));
+  });
+});
+
+describe('R163–R164 сцена без случайного переноса и невидимых кнопок', () => {
+  it('сетка задаёт колонки явно, резервирует полосу и безопасно центрирует ряды', () => {
+    const check = (source: string) => {
+      const d = guardDeclarations(guardCssBlocks(source), '.stage-grid');
+      assert.equal(d.get('display'), 'grid');
+      assert.equal(d.get('grid-template-columns'), 'repeat(var(--tile-cols, 1), var(--tile-w, 156px))');
+      assert.equal(d.get('grid-auto-rows'), 'var(--tile-h, var(--stage-tile-h))');
+      assert.equal(d.get('align-content'), 'safe center');
+      assert.equal(d.get('scrollbar-gutter'), 'stable');
+      assert.equal(d.has('flex-wrap'), false);
+    };
+    check(css);
+    const block = guardCssBlocks(css).find(b => b.header === '.stage-grid'); assert.ok(block);
+    for (const [prop, bad] of [['display', 'flex'], ['grid-template-columns', 'none'], ['scrollbar-gutter', 'auto']])
+      assert.throws(() => check(mutateGuardDeclaration(block, prop, bad)), assert.AssertionError);
+  });
+  it('кнопки зрителя не занимают места скрытыми, ряд не переносится и сохраняет высоту', () => {
+    const d = guardDeclarations(guardCssBlocks(css), '.screen-controls');
+    assert.equal(d.get('flex-wrap'), 'nowrap');
+    assert.equal(d.get('min-height'), 'calc(38px + 2 * var(--sp-3))');
+    assert.equal(guardDeclarations(guardCssBlocks(css), '.screen-controls > :not(.screen-title)').get('display'), 'none');
+    for (const prefix of ['.screen-viewer:focus-within', '.screen-viewer.ctl-on'])
+      assert.equal(guardDeclarations(guardCssBlocks(css), `${prefix} .screen-controls > :not(.screen-title, .screen-spacer)`).get('display'), 'inline-flex');
+  });
+  it('hover зрителя раскрывает кнопки только на устройстве с наведением, телефон не прячет ползунок', () => {
+    const blocks = guardCssBlocks(css);
+    const selector = '.screen-viewer:hover .screen-controls > :not(.screen-title, .screen-spacer)';
+    assert.equal(guardDeclarations(blocks, selector).size, 0);
+    assert.equal(guardDeclarations(guardScope(blocks, '@media (hover: hover)'), selector).get('display'), 'inline-flex');
+    const visit = (items: GuardCssBlock[]) => {
+      for (const block of items) {
+        if (!block.header.startsWith('@') && block.header.includes('.screen-controls .stream-vol'))
+          assert.notEqual(guardDeclarations([block], block.header).get('display'), 'none', 'мобильный ползунок не прячется');
+        visit(block.children);
+      }
+    };
+    visit(blocks);
+  });
+});
+
+describe('R161 выпадающее меню раскрывается от кнопки и уважает меньше движения', () => {
+  it('карточка и пункты имеют отдельные анимации с задержками из DOM', () => {
+    // Наличие keyframes без привязки к drop не даёт нужного раскрытия карточки.
+    const check = (source: string) => {
+      const blocks = guardCssBlocks(source);
+      const card = guardDeclarations(blocks, '.ctx-stack.drop > .ctx-menu');
+      assert.equal(card.get('transform-origin'), 'top right');
+      assert.equal(card.get('animation'), 'ctxDropIn var(--drop-ms, 230ms) ease-in-out both');
+      assert.equal(guardDeclarations(blocks, '.ctx-stack.drop > .ctx-menu > *').get('animation'), 'ctxDropItem 180ms ease-out var(--drop-at, 0ms) both');
+      const keyframes = blocks.find(b => b.header === '@keyframes ctxDropIn'); assert.ok(keyframes);
+      assert.equal(guardDeclarations(keyframes.children, 'from').get('clip-path'), 'inset(0 0 100% 0)');
+      assert.equal(guardDeclarations(keyframes.children, 'to').get('opacity'), '1');
+    };
+    check(css);
+    const block = guardCssBlocks(css).find(b => b.header === '.ctx-stack.drop > .ctx-menu'); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'animation', 'none')), assert.AssertionError);
+  });
+  it('reduced-motion гасит и карточку drop и её пункты с нужной специфичностью', () => {
+    const check = (source: string) => {
+      const blocks = guardScope(guardCssBlocks(source), '@media (prefers-reduced-motion: reduce)');
+      for (const selector of ['.ctx-stack.drop > .ctx-menu', '.ctx-stack.drop > .ctx-menu > *'])
+        assert.equal(guardDeclarations(blocks, selector).get('animation'), 'none', selector);
+    };
+    check(css);
+    const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const reduced = guardCssBlocks(css).find(b => b.header === '@media (prefers-reduced-motion: reduce)' && b.body.includes('.ctx-stack.drop')); assert.ok(reduced);
+    for (const selector of ['.ctx-stack.drop > .ctx-menu,', '.ctx-stack.drop > .ctx-menu > *,']) {
+      assert.equal(reduced.body.split(selector).length - 1, 1);
+      assert.throws(() => check(clean.replace(reduced.body, reduced.body.replace(selector, ''))), assert.AssertionError);
+    }
+  });
+});
+
+describe('R158 низ поля не считает системную вставку дважды', () => {
+  const phone = (source: string) => guardScope(guardCssBlocks(source), '@media (max-width: 760px)');
+  const composer = '.app.m-content .composer:not(.sel-bar)';
+  it('поле имеет нижний отступ ровно 9, без повторной safe area', () => {
+    // Иначе клавиатура отодвигается на вторую высоту системной панели.
+    const check = (source: string) => {
+      const values = guardDeclarations(phone(source), composer);
+      assert.equal(values.get('margin'), '6px 12px 9px');
+      assert.equal(values.get('padding'), '0');
+      assert.doesNotMatch(values.get('margin') ?? '', /safe-area|--gv-sab/);
+    };
+    check(css);
+    const block = phone(css).find(b => guardDeclarations([b], composer).has('margin')); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'margin', '6px 12px calc(8px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)))')), assert.AssertionError);
+  });
+  it('системную нижнюю вставку сохраняет обёртка беседы, не само поле', () => {
+    const check = (source: string) => assert.equal(guardDeclarations(phone(source), '.app.m-chat').get('padding-bottom'), 'max(env(safe-area-inset-bottom), var(--gv-sab, 0px))');
+    check(css);
+    const block = phone(css).find(b => guardDeclarations([b], '.app.m-chat').has('padding-bottom')); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'padding-bottom', '0')), assert.AssertionError);
+  });
+});
+
+describe('R170 капсула навигации, поиск с лентой и разрыв меню', () => {
+  const phone = (raw: string) => guardScope(guardCssBlocks(raw), '@media (max-width: 760px)');
+  const scope = (raw: string, fallback = false) => fallback ? guardScope(phone(raw), '@supports not (backdrop-filter: blur(1px))') : phone(raw);
+  function pair(selector: string, property: string, expected: string, bad: string, fallback = false) {
+    const check = (raw: string) => assert.equal(guardDeclarations(scope(raw, fallback), selector).get(property), expected, `${selector}: ${property}`);
+    check(css);
+    const block = scope(css, fallback).filter(b => splitCss(b.header, ',').includes(selector) && guardDeclarations([b], selector).has(property)).at(-1);
+    assert.ok(block, `${selector}: ${property}`);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  }
+  it('плавающая капсула 56 на 328 имеет поля, пилюлю и оба свойства размытия', () => {
+    // Полноширинный фон вместо отдельной капсулы перекрывал бы ленту по краям.
+    for (const [prop, value, bad] of [['height', '56px', '58px'], ['max-width', '328px', '100%'],
+      ['border-radius', 'var(--r-pill)', '10px'], ['margin', '0 var(--sp-3)', '0'],
+      ['padding', 'var(--sp-2)', '0'], ['background', 'var(--glass-bg)', 'var(--bg)'],
+      ['backdrop-filter', 'var(--glass-blur)', 'none'], ['-webkit-backdrop-filter', 'var(--glass-blur)', 'none']])
+      pair('.mnav-capsule', prop, value, bad);
+  });
+  it('касания вокруг капсулы проходят к списку, сама капсула нажимается и учитывает вставки', () => {
+    // pointer-events на всей полосе оставляли бы невидимую преграду поверх последних строк.
+    pair('.mobile-nav', 'pointer-events', 'none', 'auto'); pair('.mnav-capsule', 'pointer-events', 'auto', 'none');
+    pair('.mobile-nav', 'padding-bottom', 'calc(var(--sp-3) + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)))', 'var(--sp-3)');
+    pair('.mobile-nav', 'padding-left', 'var(--sa-l)', '0'); pair('.mobile-nav', 'padding-right', 'var(--sa-r)', '0');
+    pair(':root', '--m-nav-h', 'calc(72px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)))', '58px');
+  });
+  it('стекло принадлежит навигации и имеет светлую обводку, fallback и экономный режим', () => {
+    // Наследование только от беседы потеряло бы стекло на экране списка и профиля.
+    pair('.mobile-nav', '--glass-bg', 'color-mix(in srgb, var(--bg-3) 76%, transparent)', 'var(--bg-3)');
+    pair('.mobile-nav', '--glass-blur', 'blur(24px) saturate(3)', 'none');
+    pair('.mobile-nav', '--sh-glass', 'inset 0 0.55px 0 rgba(255, 255, 255, 0.125), inset 0 -0.55px 0 rgba(255, 255, 255, 0.08)', 'none');
+    pair(':root[data-theme=\'light\'] .mobile-nav', '--sh-glass', 'inset 0 0.55px 0 #fff, inset 0 -0.55px 0 #fff, 0 0 1px rgba(0, 0, 0, 0.125)', 'none');
+    for (const fallback of [false, true]) {
+      const selector = fallback ? '.mobile-nav' : 'html.gv-lite .mobile-nav';
+      pair(selector, '--glass-bg', 'var(--bg-3)', 'transparent', fallback);
+      pair(selector, '--glass-blur', 'none', 'blur(24px)', fallback);
+    }
+  });
+  it('список ЛС идёт под капсулой, запас прокрутки остаётся внутри списка, поиск скрывает капсулу', () => {
+    // Отступ одновременно на app и на ленте забирает лишнюю высоту; без отступа ленты последняя строка недоступна.
+    pair('.app.m-dmlist:not(.in-voice)', 'padding-bottom', '0', 'var(--m-nav-h)');
+    pair('.app.m-dmlist:not(.in-voice) .channels > .dm-list', 'padding-bottom', 'calc(var(--m-nav-h) + 88px)', '88px');
+    pair('.app.m-dmlist:not(.in-voice) .channels > .dm-list', 'scroll-padding-bottom', 'var(--m-nav-h)', '0');
+    pair(':root.gv-listsearch .app.m-list .mobile-nav', 'display', 'none', 'flex');
+  });
+  it('активное поле поиска липнет сверху, выбор скрывает поле с сохранением места', () => {
+    // Поле должно уезжать с лентой обычно и оставаться видимым только во время ввода.
+    pair('.dm-find-zone', 'opacity', 'var(--find-a, 1)', '1');
+    for (const [prop, value, bad] of [['position', 'sticky', 'static'], ['top', '0', '8px'],
+      ['opacity', '1', '0'], ['background', 'var(--bg-2)', 'transparent']]) pair('.dm-find-zone.on', prop, value, bad);
+    pair('.dm-find-zone.pick', 'visibility', 'hidden', 'visible');
+    assert.notEqual(guardDeclarations(phone(css), '.dm-find-zone.pick').get('display'), 'none', 'скрытие не схлопывает место и scrollTop');
+  });
+  it('значок поиска не увеличивает шапку, поле сохраняет высоту 48', () => {
+    // Без отрицательных полей кнопка увеличивает шапку ровно в момент исчезновения поля и дёргает список.
+    pair('.app.m-list .dm-list-head .dm-find-btn', 'margin-block', '-12px', '0');
+    pair('.app.m-list .dm-find .sheet-search', 'height', '48px', '56px');
+    pair('.app.m-list .dm-find .dm-find-clear', 'height', '46px', '48px');
+  });
+  it('разрыв групп выпадающего меню на телефоне имеет высоту 8 и фон окна', () => {
+    // Тонкая линия из меню ПК не соответствует отдельной группе действий телефона.
+    const selector = '.ctx-stack.drop > .ctx-menu > .ctx-divider';
+    pair(selector, 'height', '8px', '1px'); pair(selector, 'background', 'var(--bg)', 'var(--border)');
+    pair(selector, 'margin', '0 calc(-1 * var(--sp-2))', '0');
+  });
+  it('размеры капсулы, скрытие навигации поиском и sticky поиска ограничены телефоном', () => {
+    // Наличие корректного media не спасает от утечки такого же правила в десктопную область.
+    const check = (raw: string) => {
+      const global = guardCssBlocks(raw);
+      assert.equal(guardDeclarations(global, '.mnav-capsule').has('height'), false);
+      assert.equal(guardDeclarations(global, ':root.gv-listsearch .app.m-list .mobile-nav').has('display'), false);
+      assert.equal(guardDeclarations(global, '.dm-find-zone.on').has('position'), false);
+    };
+    check(css);
+    for (const declaration of ['.mnav-capsule { height: 56px; }', ':root.gv-listsearch .app.m-list .mobile-nav { display: none; }', '.dm-find-zone.on { position: sticky; }'])
+      assert.throws(() => check(css + '\n' + declaration), assert.AssertionError);
+  });
+});
+
+describe('R169 телефонные размеры Telegram и плоские настройки', () => {
+  const phone = (raw: string) => guardScope(guardCssBlocks(raw), '@media (max-width: 760px)');
+  function pair(selector: string, property: string, expected: string, bad: string, mobile = true) {
+    const blocks = (raw: string) => mobile ? phone(raw) : guardCssBlocks(raw);
+    const check = (raw: string) => assert.equal(guardDeclarations(blocks(raw), selector).get(property), expected, `${selector}: ${property}`);
+    check(css);
+    const block = blocks(css).filter(b => splitCss(b.header, ',').includes(selector) && guardDeclarations([b], selector).has(property)).at(-1);
+    assert.ok(block, `${selector}: ${property}`);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  }
+  it('плавающая Далее имеет круг 48 и липкий сторож нулевой высоты', () => {
+    // Высота сторожа или pointer-events на нём перекрыли бы последнего участника списка.
+    for (const [prop, value, bad] of [['width', '48px', '56px'], ['height', '48px', '56px'],
+      ['border-radius', 'var(--r-circle)', '10px'], ['pointer-events', 'auto', 'none']]) pair('.group-fab', prop, value, bad, false);
+    for (const [prop, value, bad] of [['position', 'sticky', 'static'], ['height', '0', '48px'],
+      ['bottom', '-8px', '0'], ['margin-top', '56px', '0'], ['pointer-events', 'none', 'auto']]) pair('.group-fab-dock', prop, value, bad, false);
+  });
+  it('телефонный звонок сохраняет контейнер 204, имя 28 и внутренний аватар 135 против 96 на ПК', () => {
+    // Контейнер пульса и сама картинка — разные размеры; проверка только одного не ловит рассинхронизацию.
+    for (const prop of ['width', 'height']) pair('.call-scrim.phone .call-ava', prop, '204px', '200px', false);
+    pair('.call-scrim.phone .call-name', 'font-size', '28px', '24px', false);
+    const raw = readFileSync(new URL('./components/CallLayer.tsx', import.meta.url), 'utf8');
+    const check = (text: string) => {
+      const ast = ts.createSourceFile('CallLayer.tsx', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      let size: string | undefined;
+      const visit = (node: ts.Node) => {
+        if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === 'Avatar') {
+          const attr = node.attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText(ast) === 'size');
+          if (attr && ts.isJsxAttribute(attr) && attr.initializer && ts.isJsxExpression(attr.initializer)) size = attr.initializer.expression?.getText(ast);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(ast); assert.equal(size, 'phone ? 135 : 96');
+    };
+    check(raw); const anchor = 'size={phone ? 135 : 96}'; assert.equal(raw.split(anchor).length - 1, 1);
+    assert.throws(() => check(raw.replace(anchor, 'size={96}')), assert.AssertionError);
+  });
+  it('точка онлайна телефона 10 смещена внутрь аватара на 1 справа и 3 снизу', () => {
+    // Правильный диаметр при старой позиции всё равно рисует точку за краем аватара.
+    pair('.app.m-list .dm-row .mp-dot-wrap', 'right', '1px', '-1px');
+    pair('.app.m-list .dm-row .mp-dot-wrap', 'bottom', '3px', '-1px');
+    const raw = readFileSync(new URL('./components/DmSidebar.tsx', import.meta.url), 'utf8');
+    const check = (text: string) => {
+      const ast = ts.createSourceFile('DmSidebar.tsx', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      let diameter: string | undefined; let binding = false;
+      const visit = (node: ts.Node) => {
+        if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'DM_ONLINE_DOT_PHONE') diameter = node.initializer?.getText(ast);
+        if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === 'StatusDot') {
+          const size = node.attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText(ast) === 'size');
+          if (size && ts.isJsxAttribute(size) && size.initializer?.getText(ast) === '{phone ? DM_ONLINE_DOT_PHONE : 12}') binding = true;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(ast); assert.equal(diameter, '10'); assert.equal(binding, true);
+    };
+    check(raw); const anchor = 'const DM_ONLINE_DOT_PHONE = 10;'; assert.equal(raw.split(anchor).length - 1, 1);
+    assert.throws(() => check(raw.replace(anchor, 'const DM_ONLINE_DOT_PHONE = 12;')), assert.AssertionError);
+  });
+  it('волна телефона имеет столбик 2 и зазор 1 без второго gap', () => {
+    // Одновременные gap и margin увеличат шаг и неверно заполнят измеренную ширину.
+    pair('.message.bub .voice-wave.tg-bars', 'gap', '0', '1px', false);
+    for (const prop of ['width', 'min-width']) pair('.message.bub .voice-wave.tg-bars .voice-bar', prop, '2px', '3px', false);
+    pair('.message.bub .voice-wave.tg-bars .voice-bar', 'margin-right', '1px', '0', false);
+  });
+  it('R176 лёгкий круг записи 82 сохраняет громкость, живые волны принадлежат холсту 272', () => {
+    // Страж арифметики CSS не опирается на неполный layout HappyDOM.
+    const circle = '.app.m-content .composer .rec-circle';
+    for (const prop of ['width', 'height']) pair(circle, prop, '82px', '80px');
+    pair(circle, 'margin', '-41px 0 0 -41px', '-40px 0 0 -40px');
+    pair(circle, 'transform', 'scale(calc(1 + 0.7317 * var(--lvl, 0)))', 'scale(1.35)');
+    const canvas = '.app.m-content .composer .rec-blob';
+    for (const prop of ['width', 'height']) pair(canvas, prop, '272px', '270px');
+    pair(canvas, 'margin', '-136px 0 0 -136px', '-135px 0 0 -135px');
+    pair(canvas, 'pointer-events', 'none', 'auto');
+    pair('.app.m-content .composer .rec-circle.static', 'transform', 'none', 'scale(1.35)');
+    pair('.app.m-content .composer .rec-circle.static', 'transition', 'none', 'transform 90ms linear');
+    assert.equal(guardDeclarations(phone(css), '.app.m-content .mic-btn .rec-circle::before').size, 0);
+    assert.equal(guardDeclarations(phone(css), '.app.m-content .mic-btn .rec-circle::after').size, 0);
+    assert.equal(guardCssBlocks(css).flatMap(b => b.children).some(b => b.header.includes('.rec-lock-hint')), false);
+  });
+  it('настройки и профиль телефона имеют плоские строки 50 с подписью 16 обычного веса', () => {
+    // Возврат gap20/углов10 выглядит другой карточкой и сдвигает текст относительно Telegram TextCell.
+    for (const selector of ['.set-rail-item', '.prof-row']) {
+      for (const [prop, value, bad] of [['height', '50px', '48px'], ['font-size', '16px', '14px'],
+        ['font-weight', '400', '600'], ['padding', '0 16px', '0 20px'], ['gap', 'var(--sp-4)', '20px'], ['border-radius', '0', '10px']]) pair(selector, prop, value, bad);
+    }
+    pair('.set-rail-item::after', 'left', '58px', '50px');
+    pair('.prof-row:not(:last-child)::after', 'left', '58px', '50px');
+  });
+  it('последний раздел телефона не подсвечен active, настольное выделение остаётся', () => {
+    // Отмена active нужна только телефону: глобальный сброс сломает навигацию ПК.
+    for (const selector of ['.set-rail-item.active', '.set-rail-item:hover']) {
+      pair(selector, 'background', 'none', 'var(--accent)'); pair(selector, 'font-weight', '400', '600');
+    }
+    const desktop = guardDeclarations(guardCssBlocks(css), '.set-rail-item.active');
+    assert.notEqual(desktop.get('background'), 'none'); assert.ok(desktop.has('background'));
+  });
+  it('якоря разделов скрыты только в media телефона, не из списка ПК', () => {
+    // Безусловный display:none удалит второй уровень навигации на компьютере.
+    pair('.set-rail-anchors', 'display', 'none', 'flex');
+    assert.notEqual(guardDeclarations(guardCssBlocks(css), '.set-rail-anchors').get('display'), 'none');
+    const check = (raw: string) => {
+      const visit = (blocks: GuardCssBlock[], scopes: string[] = []) => {
+        for (const block of blocks) {
+          if (guardDeclarations([block], '.set-rail-anchors').get('display') === 'none')
+            assert.ok(scopes.includes('@media (max-width: 760px)'), 'скрытие якорей ограничено телефоном');
+          visit(block.children, [...scopes, block.header]);
+        }
+      };
+      visit(guardCssBlocks(raw));
+    };
+    check(css); assert.throws(() => check(css + '\n.set-rail-anchors { display: none; }'), assert.AssertionError);
+  });
+  it('превью тем больше не содержит боковую колонку настольного окна', () => {
+    // Боковая колонка в телефонной карточке делает превью нечитаемым при той же ширине.
+    const check = (raw: string) => {
+      const visit = (blocks: GuardCssBlock[]) => {
+        for (const block of blocks) { assert.doesNotMatch(block.header, /\.tc-side\b/); visit(block.children); }
+      };
+      visit(guardCssBlocks(raw));
+    };
+    check(css); assert.throws(() => check(css + '\n.tc-side { width: 20px; }'), assert.AssertionError);
+  });
+});
+
+describe('R157 телефонные размеры Telegram не меняют ПК', () => {
+  const phone = (source: string) => guardScope(guardCssBlocks(source), '@media (max-width: 760px)');
+  const pair = (selector: string, property: string, expected: string, bad: string, mobile = true) => {
+    const blocks = (source: string) => mobile ? phone(source) : guardCssBlocks(source);
+    const check = (source: string) => assert.equal(guardDeclarations(blocks(source), selector).get(property), expected, `${selector}: ${property}`);
+    check(css);
+    const block = blocks(css).filter(b => splitCss(b.header, ',').includes(selector) && guardDeclarations([b], selector).has(property)).at(-1);
+    assert.ok(block, `${selector}: ${property}`);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  };
+
+  it('строка телефона высотой 70 идёт от края до края с полями 11/15 и зазором 13, ПК сохраняет 62', () => {
+    pair('.app.m-list .dm-row', 'height', '70px', '68px');
+    pair('.app.m-list .dm-row', 'height', '70px', '48px');
+    const row = '.app.m-list .dm-list > .dm-row';
+    for (const [property, value, bad] of [
+      ['width', 'calc(100% + 2 * var(--sp-4))', '100%'],
+      ['margin', '0 calc(-1 * var(--sp-4))', '0'],
+      ['padding', '0 15px 0 11px', '0 12px'],
+      ['column-gap', '13px', '12px'], ['border-radius', '0', 'var(--r-3)'],
+    ]) pair(row, property, value, bad);
+    pair(':root', '--dm-row-h', '62px', '70px', false);
+    pair('.dm-row', 'height', 'var(--dm-row-h)', '70px', false);
+    pair('.dm-row', 'width', '100%', 'calc(100% + 2 * var(--sp-4))', false);
+    pair('.dm-row', 'padding', 'var(--sp-3)', '0 15px 0 11px', false);
+  });
+
+  it('имя 16/500, превью 15/400 и время 12/400 ограничены телефонным списком', () => {
+    for (const [part, size, weight] of [['dm-name', '16px', '500'], ['dm-preview', '15px', '400'], ['dm-when', '12px', '400']]) {
+      const selector = `.app.m-list .dm-row .${part}`;
+      pair(selector, 'font-size', size, '14px');
+      pair(selector, 'font-weight', weight, '600');
+      // Перенос правильных чисел в общий селектор всё равно ломает контракт телефона/ПК.
+      const check = (source: string) => assert.equal(guardDeclarations(phone(source), selector).get('font-size'), size);
+      const mutant = css.replaceAll(`${selector} {`, `.dm-row .${part} {`);
+      assert.notEqual(mutant, css); assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
+
+  it('счётчик строки — пилюля 21 с текстом 13/500, точка непрочитанного остаётся 10', () => {
+    const selector = '.app.m-list .dm-row .dm-badge';
+    for (const [property, value, bad] of [['min-width', '21px', '20px'], ['height', '21px', '20px'],
+      ['font-size', '13px', '12px'], ['font-weight', '500', '600'], ['border-radius', 'var(--r-pill)', '0'],
+      ['line-height', '21px', '20px'], ['padding', '0 6px', '0']]) pair(selector, property, value, bad);
+    for (const property of ['width', 'height']) {
+      pair(`${selector}.dot`, property, '10px', '21px');
+    }
+  });
+
+  it('вкладка сообщений даёт акцентную пилюлю 16 с текстом 10/500 вместо точки 8', () => {
+    for (const [property, value, bad] of [['height', '16px', '8px'], ['font-size', '10px', '0'],
+      ['font-weight', '500', '600'], ['background', 'var(--accent)', 'var(--muted)'],
+      ['border-radius', 'var(--r-pill)', '0'], ['line-height', '16px', '8px']]) pair('.mnav-badge', property, value, bad);
+    assert.equal(guardDeclarations(guardCssBlocks(css), '.mnav-badge').size, 0, 'бейдж живёт внутри телефонного media');
+  });
+
+  it('радиусы пузыря 17/6 и время 12 только на телефоне, база остаётся 15/5 и 10,5', () => {
+    for (const [property, phoneValue, baseValue] of [['--r-bubble', '17px', '15px'], ['--r-bubble-near', '6px', '5px']]) {
+      pair('.app.m-content', property, phoneValue, baseValue);
+      pair(':root', property, baseValue, phoneValue, false);
+      const check = (source: string) => assert.equal(guardDeclarations(phone(source), '.app.m-content').get(property), phoneValue);
+      const block = phone(css).find(b => guardDeclarations([b], '.app.m-content').has(property)); assert.ok(block);
+      const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
+      const without = block.body.replace(new RegExp(`${property}:\\s*[^;]+;`), '');
+      assert.notEqual(without, block.body);
+      const mutant = clean.replace(block.body, without); assert.notEqual(mutant, clean);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    }
+    pair('.app.m-content .message.bub .bub-meta', 'font-size', '12px', '10.5px');
+    pair('.message.bub .bub-meta', 'font-size', '10.5px', '12px', false);
+  });
+
+  it('только закреплённое меню телефона имеет строки 48 и шрифт 16/400', () => {
+    for (const [property, value, bad] of [['min-height', '48px', '44px'], ['font-size', '16px', '15px'],
+      ['font-weight', '400', '600']]) pair('.ctx-menu.anchored .ctx-item', property, value, bad);
+    const check = (source: string) => assert.equal(guardDeclarations(phone(source), '.ctx-menu.anchored .ctx-item').get('min-height'), '48px');
+    const mutant = css.replaceAll('.ctx-menu.anchored .ctx-item {', '.ctx-menu .ctx-item {');
+    assert.notEqual(mutant, css); assert.throws(() => check(mutant), assert.AssertionError);
+    assert.notEqual(guardDeclarations(guardCssBlocks(css), '.ctx-menu.anchored .ctx-item').get('min-height'), '48px');
+  });
+
+  it('ответ имеет две строки по 18 в высоте 48, превью ссылки без подписи остаётся прежним', () => {
+    const selector = '.app.m-content .reply-strip:has(> .rs-label)';
+    for (const [property, value, bad] of [['min-height', '48px', '36px'], ['line-height', '18px', '16px'],
+      ['display', 'grid', 'flex'], ['grid-template-rows', '18px 18px', 'auto'],
+      ['padding', '6px var(--sp-4)', '0']]) pair(selector, property, value, bad);
+    pair(`${selector} > .rs-label`, 'grid-row', '1', '2');
+    pair(`${selector} > .rs-text`, 'grid-row', '2', '1');
+    pair(`${selector} > .rs-thumb`, 'height', '34px', '18px');
+    pair(`${selector} > .rs-close`, 'grid-row', '1 / span 2', '1');
+    pair('.reply-strip', 'display', 'flex', 'grid', false);
+    const check = (source: string) => {
+      const blocks = phone(source);
+      assert.equal(guardDeclarations(blocks, selector).get('min-height'), '48px');
+      assert.equal(guardDeclarations(blocks, '.app.m-content .reply-strip').has('grid-template-rows'), false, 'без подписи не навязываем две строки');
+      assert.equal(guardDeclarations(blocks, '.app.m-content .reply-strip.link-strip').has('grid-template-rows'), false, 'ссылка не получает сетку ответа');
+    };
+    check(css);
+    const mutant = css.replace(`${selector} {`, '.app.m-content .reply-strip {');
+    assert.notEqual(mutant, css); assert.throws(() => check(mutant), assert.AssertionError);
+  });
+
+  it('общие медиа убирают обе полосы WebView, общий скроллбар ПК остаётся 12', () => {
+    pair('*::-webkit-scrollbar', 'width', '12px', '0', false);
+    for (const selector of ['.sheet:has(.smedia-phone)::-webkit-scrollbar', '.smedia-phone .smedia-list::-webkit-scrollbar']) {
+      pair(selector, 'width', '0', '12px', false);
+      const check = (source: string) => assert.equal(guardDeclarations(guardCssBlocks(source), selector).get('width'), '0');
+      const removed = css.replace(selector, selector.replace('.smedia-phone', '.never-phone'));
+      assert.notEqual(removed, css); assert.throws(() => check(removed), assert.AssertionError);
+    }
+  });
+});
+
+describe('R146 верх беседы и панель вместо клавиатуры', () => {
+  const cap = '.app.m-content .chat > .chat-top > .top-capsule';
+  const phone = (source: string) => guardScope(guardCssBlocks(source), '@media (max-width: 760px)');
+  const rule = (source: string, selector: string) => {
+    const block = phone(source).find(b => splitCss(b.header, ',').includes(selector));
+    assert.ok(block, selector); return block;
+  };
+  const pair = (selector: string, property: string, value: string, bad: string) => {
+    const check = (source: string) => assert.equal(guardDeclarations(phone(source), selector).get(property), value, `${selector} ${property}`);
+    check(css);
+    const block = phone(css).filter(b => splitCss(b.header, ',').includes(selector) && guardDeclarations([b], selector).has(property)).at(-1);
+    assert.ok(block, `${selector} ${property}`);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  };
+  it('ПК не получает отдельные коробки шапки и капсулы', () => {
+    const check = (source: string) => {
+      for (const selector of ['.chat-top', '.top-capsule']) assert.equal(guardDeclarations(guardCssBlocks(source), selector).get('display'), 'contents', selector);
+    };
+    check(css);
+    const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes('.chat-top')); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, 'display', 'block')), assert.AssertionError);
+  });
+  it('телефон накладывает шапку поверх ленты, оба отступа учитывают измеренную высоту плюс 4px', () => {
+    pair('.app.m-content .chat > .chat-top', 'position', 'absolute', 'relative');
+    pair('.app.m-content .chat > .chat-top', 'display', 'block', 'contents');
+    for (const property of ['padding-top', 'scroll-padding-top']) pair('.app.m-content .chat > .feed-frame > .messages', property,
+      'calc(var(--chat-top-h, 56px) + 4px)', '60px');
+  });
+  it('капсула имеет поля 7px и радиус шкалы, пустая не оставляет остров', () => {
+    pair(cap, 'margin', '7px 7px 0', '0');
+    pair(cap, 'border-radius', 'var(--r-4)', '0');
+    pair(`${cap}:empty`, 'display', 'none', 'block');
+    const check = (source: string) => assert.equal(guardDeclarations(phone(source), `${cap}:empty`).get('display'), 'none');
+    const removed = css.replace(`${cap}:empty`, `${cap}.never-empty`);
+    assert.notEqual(removed, css); assert.throws(() => check(removed), assert.AssertionError);
+  });
+  it('стекло размытия 24px с насыщенностью ×3 живёт в псевдослое, не превращает капсулу в рамку fixed', () => {
+    // backdrop-filter на родителе меняет containing block закрепов с position: fixed.
+    const check = (source: string) => {
+      const blocks = phone(source), parent = guardDeclarations(blocks, cap), glass = guardDeclarations(blocks, `${cap}::before`);
+      assert.equal(guardDeclarations(blocks, '.app.m-content').get('--glass-blur'), 'blur(24px) saturate(3)');
+      for (const property of ['backdrop-filter', '-webkit-backdrop-filter']) {
+        assert.equal(parent.has(property), false, 'родитель не размывает');
+        assert.equal(glass.get(property), 'var(--glass-blur)', property);
+      }
+      for (const [property, value] of [['content', "''"], ['position', 'absolute'], ['inset', '0'], ['background', 'var(--glass-bg)'], ['pointer-events', 'none']]) assert.equal(glass.get(property), value, property);
+    };
+    check(css);
+    pair('.app.m-content', '--glass-blur', 'blur(24px) saturate(3)', 'blur(12px) saturate(1)');
+    const moved = css.replace(`${cap} {`, `${cap} { backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);`);
+    assert.notEqual(moved, css); assert.throws(() => check(moved), assert.AssertionError);
+    assert.throws(() => check(mutateGuardDeclaration(rule(css, `${cap}::before`), 'backdrop-filter', 'none')), assert.AssertionError);
+  });
+  it('старый WebView и лёгкая версия получают непрозрачный фон без размытия', () => {
+    const check = (source: string) => {
+      const blocks = phone(source);
+      const fallback = guardScope(blocks, '@supports not (backdrop-filter: blur(1px))');
+      for (const values of [guardDeclarations(fallback, '.app.m-content'), guardDeclarations(blocks, 'html.gv-lite .app.m-content')]) {
+        assert.equal(values.get('--glass-bg'), 'var(--bg-3)'); assert.equal(values.get('--glass-blur'), 'none');
+      }
+    };
+    check(css);
+    assert.throws(() => check(mutateGuardDeclaration(rule(css, 'html.gv-lite .app.m-content'), '--glass-bg', 'transparent')), assert.AssertionError);
+    const removed = css.replace('html.gv-lite .app.m-content {', 'html.gv-lite .app.never-content {');
+    assert.notEqual(removed, css); assert.throws(() => check(removed), assert.AssertionError);
+    const fallback = guardScope(phone(css), '@supports not (backdrop-filter: blur(1px))').find(b => b.header === '.app.m-content'); assert.ok(fallback);
+    assert.throws(() => check(mutateGuardDeclaration(fallback, '--glass-bg', 'transparent')), assert.AssertionError);
+  });
+  it('панель находится в потоке, доки без оконной тени и клавиатура скрывает её только без фокуса внутри', () => {
+    pair('.app.m-content .chat > .expr-under', 'display', 'flex', 'none');
+    pair('.app.m-content .chat > .expr-under', 'flex', 'none', '1');
+    for (const kind of ['emoji', 'sticker']) {
+      const selector = `.app.m-content .chat > .expr-under > .${kind}-pop.docked`;
+      for (const [property, value, bad] of [['position', 'static', 'fixed'], ['border-radius', '0', 'var(--r-4)'], ['box-shadow', 'none', 'var(--sh-glass)'], ['height', 'auto', '200px']]) pair(selector, property, value, bad);
+    }
+    const selector = ':root[data-kbspace] .app.m-content .chat > .expr-under:not(:focus-within)';
+    pair(selector, 'display', 'none', 'flex');
+    const check = (source: string) => assert.equal(guardDeclarations(phone(source), selector).get('display'), 'none');
+    for (const replacement of [selector.replace(':not(:focus-within)', ''), selector.replace('[data-kbspace]', '[data-kb]')]) {
+      const mutant = css.replace(selector, replacement); assert.notEqual(mutant, css); assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
+});
+
+it('R143 телефон ставит эмодзи перед полем, скрепку после поля и отправку перед микрофоном', () => {
+  const expected = [['.att-btn.emoji', '1'], ['.composer-input', '2'], ['.att-btn.plus', '3'], ['.send-btn', '4'], ['.mic-btn', '5']] as const;
+  const check = (source: string) => {
+    const phone = guardScope(guardCssBlocks(source), '@media (max-width: 760px)');
+    for (const [button, order] of expected) assert.equal(guardDeclarations(phone, `.app.m-content .composer ${button}`).get('order'), order, button);
+  };
+  check(css);
+  for (const [button, oldOrder] of [['.att-btn.emoji', '3'], ['.att-btn.plus', '1']] as const) {
+    const block = guardScope(guardCssBlocks(css), '@media (max-width: 760px)').find(b => b.header === `.app.m-content .composer ${button}`);
+    assert.ok(block); assert.throws(() => check(mutateGuardDeclaration(block, 'order', oldOrder)), assert.AssertionError);
+  }
+});
+
+it('R143 ПК оставляет скрепку и опрос слева, затем поле, служебные кнопки, эмодзи, голос и отправку', () => {
+  const check = (source: string) => {
+    const base = guardCssBlocks(source);
+    for (const [button, order] of [['.att-btn.attach', '0'], ['.att-btn.poll', '0'], ['.composer-input', '1'], ['.att-btn.sched', '2'], ['.att-btn.textfile', '2'], ['.att-btn.emoji', '3'], ['.att-btn.voice', '4'], ['.send-btn', '5']]) {
+      assert.equal(guardDeclarations(base, `.composer ${button}`).get('order'), order, button);
+    }
+  };
+  check(css);
+  // Возвращение хотя бы одной кнопки на старую сторону поля нарушает desktop/TG-порядок.
+  const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes('.composer .att-btn.attach'));
+  assert.ok(block); assert.throws(() => check(mutateGuardDeclaration(block, 'order', '2')), assert.AssertionError);
+});
+
+it('R143 пилюля телефона изолирована за кнопками, оставляет справа 44px и не захватывает полосу выделения', () => {
+  const parent = '.app.m-content .composer:not(.sel-bar)';
+  const check = (source: string) => {
+    const phone = guardScope(guardCssBlocks(source), '@media (max-width: 760px)');
+    assert.equal(guardDeclarations(phone, parent).get('isolation'), 'isolate');
+    const pill = guardDeclarations(phone, `${parent}::before`);
+    assert.equal(pill.get('background'), 'var(--bg-3)');
+    assert.equal(pill.get('right'), 'calc(44px + var(--sp-2))');
+    assert.equal(pill.get('z-index'), '-1');
+    assert.equal(pill.get('pointer-events'), 'none');
+    // Проверяем и альтернативные селекторы: одной правильной декларации недостаточно при утечке на sel-bar.
+    for (const block of phone) for (const selector of splitCss(block.header, ',')) {
+      if (/\.composer.*::before/.test(selector)) assert.ok(selector.includes(':not(.sel-bar)'), selector);
+    }
+  };
+  check(css);
+  const phone = guardScope(guardCssBlocks(css), '@media (max-width: 760px)');
+  const parentBlock = phone.find(b => b.header === parent); assert.ok(parentBlock);
+  assert.throws(() => check(mutateGuardDeclaration(parentBlock, 'isolation', 'auto')), assert.AssertionError);
+  const pillBlock = phone.find(b => b.header === `${parent}::before`); assert.ok(pillBlock);
+  assert.throws(() => check(mutateGuardDeclaration(pillBlock, 'background', 'var(--bg-2)')), assert.AssertionError);
+  assert.throws(() => check(mutateGuardDeclaration(pillBlock, 'right', '0')), assert.AssertionError);
+  const leak = css.replace(`${parent}::before {`, '.app.m-content .composer::before {');
+  assert.notEqual(leak, css); assert.throws(() => check(leak), assert.AssertionError);
+});
+
+it('R153 короткая камера занимает одну строку сетки вместо двух', () => {
+  // Класс short сам по себе не уменьшает чёрную плитку: нужен отдельный grid-row в каскаде.
+  const selector = 'button.gal-cam.short';
+  const check = (source: string) => assert.equal(guardDeclarations(guardCssBlocks(source), selector).get('grid-row'), 'span 1');
+  check(css);
+  const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes(selector));
+  assert.ok(block);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'grid-row', 'span 2')), assert.AssertionError);
+});
+
+it('R154 строка доступа к камере имеет высоту 56, кнопку 44 и радиус пилюли', () => {
+  // Плитка-разрешение не должна снова выглядеть как чёрная камера/видео в сетке.
+  const check = (raw: string) => {
+    const blocks = guardCssBlocks(raw);
+    const row = guardDeclarations(blocks, '.gal-cam-perm');
+    const button = guardDeclarations(blocks, '.gal-cam-perm > button');
+    assert.equal(row.get('height'), '56px');
+    assert.equal(row.get('display'), 'flex');
+    assert.equal(row.get('justify-content'), 'center');
+    assert.equal(button.get('height'), '44px');
+    assert.equal(button.get('border-radius'), 'var(--r-pill)');
+  };
+  check(css);
+  for (const [selector, property, bad] of [['.gal-cam-perm', 'height', '44px'],
+    ['.gal-cam-perm > button', 'height', '56px'], ['.gal-cam-perm > button', 'border-radius', '0']]) {
+    const block = guardCssBlocks(css).find(b => b.header === selector); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  }
+});
+it('R154 загрузка большого видео доступна явной кнопкой по центру без бесконечной анимации', () => {
+  // Явное действие вместо автоматической загрузки должно оставаться заметным и нажимаемым.
+  const check = (raw: string) => {
+    const button = guardDeclarations(guardCssBlocks(raw), '.pick-play');
+    for (const [property, expected] of [['position', 'absolute'], ['top', '50%'], ['left', '50%'],
+      ['transform', 'translate(-50%, -50%)'], ['cursor', 'pointer']]) assert.equal(button.get(property), expected);
+    assert.equal(button.has('animation'), false);
+  };
+  check(css);
+  const block = guardCssBlocks(css).find(b => b.header === '.pick-play'); assert.ok(block);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'top', '0')), assert.AssertionError);
+  const animated = css.replace('.pick-play {', '.pick-play { animation: spin 1s linear infinite;');
+  assert.notEqual(animated, css); assert.throws(() => check(animated), assert.AssertionError);
+});
+
+it('R151 сетка из трёх колонок учитывает поля и зазоры, полоса прокрутки скрыта', () => {
+  const check = (raw: string) => {
+    const blocks = guardCssBlocks(raw);
+    const grid = guardDeclarations(blocks, '.gal-grid');
+    assert.equal(grid.get('grid-auto-rows'), 'calc((100cqw - 4 * var(--sp-1)) / 3)');
+    assert.equal(grid.get('gap'), 'var(--sp-1)');
+    assert.equal(grid.get('padding'), '0 var(--sp-1)');
+    assert.equal(guardDeclarations(blocks, '.gal-scroll').get('scrollbar-width'), 'none');
+    assert.equal(guardDeclarations(blocks, '.gal-scroll::-webkit-scrollbar').get('display'), 'none');
+  };
+  check(css);
+  for (const [selector, property, bad] of [['.gal-grid', 'grid-auto-rows', 'calc((100cqw - 2 * var(--sp-1)) / 3)'],
+    ['.gal-grid', 'gap', '0'], ['.gal-grid', 'padding', '0'], ['.gal-scroll', 'scrollbar-width', 'auto'],
+    ['.gal-scroll::-webkit-scrollbar', 'display', 'block']]) {
+    const block = guardCssBlocks(css).find(b => b.header === selector); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  }
+});
+it('R153 высокая камера занимает два ряда, окно доступа выше листа', () => {
+  const check = (raw: string) => {
+    const blocks = guardCssBlocks(raw);
+    assert.equal(guardDeclarations(blocks, 'button.gal-cam').get('grid-row'), 'span 2');
+    assert.equal(guardDeclarations(blocks, 'body:has(.sheet-scrim) .confirm-overlay').get('z-index'), '1260');
+  };
+  check(css);
+  for (const [selector, property, bad] of [['button.gal-cam', 'grid-row', 'span 1'],
+    ['body:has(.sheet-scrim) .confirm-overlay', 'z-index', '1100']]) {
+    const block = guardCssBlocks(css).find(b => b.header === selector); assert.ok(block);
+    assert.throws(() => check(mutateGuardDeclaration(block, property, bad)), assert.AssertionError);
+  }
+});
+it('R151 ожидание миниатюры не крутит бесконечную анимацию в игровом режиме', () => {
+  const check = (raw: string) => {
+    const wait = guardDeclarations(guardCssBlocks(raw), '.pick-wait');
+    assert.equal(wait.has('animation'), false);
+    assert.equal(wait.has('animation-name'), false);
+  };
+  check(css);
+  const changed = css.replace('.pick-wait {', '.pick-wait { animation: spin 1s linear infinite;');
+  assert.notEqual(changed, css); assert.throws(() => check(changed), assert.AssertionError);
+});
+
+it('R139 статус беседы на телефоне имеет размер 14px в мобильной области', () => {
+  // Подпись Telegram-шапки не должна наследовать мелкий десктопный размер или менять ПК.
+  const selector = '.app.m-content .dm-who .dm-who-sub';
+  const check = (source: string) => {
+    const phone = guardScope(guardCssBlocks(source), '@media (max-width: 760px)');
+    assert.equal(guardDeclarations(phone, selector).get('font-size'), '14px');
+  };
+  check(css);
+  const phone = guardScope(guardCssBlocks(css), '@media (max-width: 760px)');
+  const block = phone.find(b => splitCss(b.header, ',').includes(selector) && guardDeclarations([b], selector).has('font-size'));
+  assert.ok(block);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'font-size', '12px')), assert.AssertionError);
+});
+
+it('R139 подпись беззвучного видео располагает значок и отсчёт в одной строке', () => {
+  // Без inline-flex значок выключенного звука не образует единый бейдж с оставшимся временем.
+  const selector = '.att-dur.muted';
+  const check = (source: string) => assert.equal(guardDeclarations(guardCssBlocks(source), selector).get('display'), 'inline-flex');
+  check(css);
+  const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes(selector));
+  assert.ok(block);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'display', 'block')), assert.AssertionError);
+});
+
+it('R133 подвал пересылки оставляет 22px и нативный нижний inset после кнопок', () => {
+  // Запас под кнопками нужен даже без CSS env(): WebView передаёт нижнюю панель отдельной переменной.
+  const selector = '.fwd-foot::after';
+  const check = (source: string) => {
+    const height = guardDeclarations(guardCssBlocks(source), selector).get('height');
+    assert.ok(height); assert.match(height, /\b22px\b/); assert.match(height, /--gv-sab\b/);
+  };
+  check(css);
+  const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes(selector)); assert.ok(block);
+  const height = guardDeclarations([block], selector).get('height'); assert.ok(height);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'height', height.replace('22px', '0px'))), assert.AssertionError);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'height', '22px')), assert.AssertionError);
+});
+
+it('R133 человек в частых не выделяет текст при удержании', () => {
+  // Нативное выделение слова уводило поиск и превращало удержание в меню беседы под ним.
+  const selector = '.dms-person';
+  const check = (source: string) => assert.equal(guardDeclarations(guardCssBlocks(source), selector).get('user-select'), 'none');
+  check(css);
+  const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes(selector) && guardDeclarations([b], selector).has('user-select'));
+  assert.ok(block); assert.throws(() => check(mutateGuardDeclaration(block, 'user-select', 'text')), assert.AssertionError);
+});
+
+it('R133 содержимое строки частого человека не перехватывает указатель у кнопки', () => {
+  // Удержание аватара/имени должно попадать в единый обработчик строки, не в дочерний узел.
+  const selector = '.dms-person > *';
+  const check = (source: string) => assert.equal(guardDeclarations(guardCssBlocks(source), selector).get('pointer-events'), 'none');
+  check(css);
+  const block = guardCssBlocks(css).find(b => splitCss(b.header, ',').includes(selector)); assert.ok(block);
+  assert.throws(() => check(mutateGuardDeclaration(block, 'pointer-events', 'auto')), assert.AssertionError);
+});
 
 it('R132 подвал выбора пересылки прилипает к низу прокрутки, а не уходит под длинный список', () => {
   // В листе телефона кнопка отправки должна оставаться доступной при большом количестве бесед.
@@ -502,10 +1417,10 @@ describe('R118 узкие экраны — правила с областью д
       pair(b => b, '.dm-who-status', property, value, bad);
     pair(b => b, '.dm-who .dm-who-sub', 'max-width', '100%', 'none');
   });
-  it('низкий ландшафт галереи имеет четыре колонки и квадратные строки с тремя зазорами', () => {
+  it('низкий ландшафт галереи имеет четыре колонки и квадратные строки с полями и зазорами', () => {
     const scope = (b: GuardCssBlock[]) => guardScope(b, landscapeMedia);
     pair(scope, '.gal-grid', 'grid-template-columns', 'repeat(4, minmax(0, 1fr))', 'repeat(3, minmax(0, 1fr))');
-    pair(scope, '.gal-grid', 'grid-auto-rows', 'calc((100cqw - 3 * var(--sp-1)) / 4)', 'calc((100cqw - 2 * var(--sp-1)) / 3)');
+    pair(scope, '.gal-grid', 'grid-auto-rows', 'calc((100cqw - 5 * var(--sp-1)) / 4)', 'calc((100cqw - 3 * var(--sp-1)) / 4)');
   });
   it('камера и системный выбор в ландшафте занимают один ряд с весом выше базовой кнопки', () => {
     const scope = (b: GuardCssBlock[]) => guardScope(b, landscapeMedia);

@@ -46,7 +46,7 @@ export function photoFromTouch(attachments: readonly Attachment[] | undefined, t
     const src = cell.querySelector('img')?.getAttribute('src');
     return src ? attachments?.find((a) => a.url === src) : undefined;
   }
-  const images = (attachments ?? []).filter((a) => a.url && a.contentType.startsWith('image/'));
+  const images = (attachments ?? []).filter((a) => a.url && a.fedState !== 'copying' && a.contentType.startsWith('image/'));
   return images.length === 1 ? images[0] : undefined;
 }
 

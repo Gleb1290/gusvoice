@@ -1,6 +1,4 @@
 import {
-  CAP_CONV1,
-  FEATURE_CONV2,
   normalizeNotifyRepeat,
   normalizeNotifyView,
   notifyRepeatLabel,
@@ -23,15 +21,12 @@ import { api, setToken } from '../api';
 import { getAudioSettings, setAudioSettings, type AudioSettings } from '../audioSettings';
 import { VAD_THRESHOLD_MAX, VAD_THRESHOLD_MIN } from '../micProcessorRules';
 import {
-  activeInstance,
-  activeInstanceId,
   clearServer,
   config,
   currentServer,
   isPickerBuild,
   multiInstanceEnabled,
   RELEASES_URL,
-  renameInstance,
   serverHost,
 } from '../config';
 import {
@@ -45,11 +40,10 @@ import {
 } from '../desktopWindow';
 import { useDialogChrome } from '../dialogChrome';
 import { chooseDownloadDir, getDownloadDir, setDownloadDir } from '../downloads';
+import { usePhoneUi } from '../phoneLayout';
 import { comboFromEvent, comboFromMouse, formatCombo, getHotkeys, type Hotkeys, isAndroid, isDesktop, isMobile, isTauri, setHotkeys } from '../hotkeys';
 import { hasPushDistributor } from '../nativeUnifiedPush';
 import { useStore } from '../store';
-import { convClientSwitch, feedWindowSwitch, setConvClientSwitch, setFeedWindowSwitch } from '../convStore';
-import { dmBubblesSwitch, setDmBubblesSwitch } from '../dmBubbles';
 import {
   coinNotifyLevel,
   notifyPermissionState,
@@ -91,13 +85,24 @@ import {
   sectionMark,
   type SettingsMarks,
 } from '../settingsChanged';
-import { SEARCH_MIN, searchSettings, SECTIONS, sectionOf, type SectionKey, visibleSections } from '../settingsNav';
+import {
+  appVersionLabel,
+  SEARCH_MIN,
+  searchSettings,
+  SECTIONS,
+  sectionOf,
+  sectionSub,
+  type SectionKey,
+  visibleSections,
+  withoutInAppGroups,
+} from '../settingsNav';
 import { factorySettings, readSettings } from '../settingsSnapshot';
 import { GuestPlacesPanel } from './GuestPlacesPanel';
 import { InstancesPanel } from './InstancesPanel';
 import { useFederationEnabled } from '../federationClient';
 import { OverlaySettingsPanel } from './OverlaySettingsPanel';
 import { ToastSettingsPanel } from './ToastSettingsPanel';
+import { NotifyPopupSetting } from './NotifyPopupSetting';
 import { SoundSettingsPanel } from './SoundSettingsPanel';
 import { StreamQualityPanel } from './StreamQualityPanel';
 import { getStreamSettings, setStreamSettings } from '../streamSettings';
@@ -119,16 +124,11 @@ import {
 } from '../quickReaction';
 import { QUICK_REACTIONS } from './ContextMenu';
 import { EmojiPicker } from './EmojiPicker';
-import {
-  forgetTrustedLinkAuthors,
-  linkWarningsOff,
-  setLinkWarningsOff,
-  trustedLinkAuthors,
-} from '../linkGuard';
 import { DiagSettingsSection } from './DiagConsent';
 import type { LastSeenPrivacy } from '@gusvoice/shared';
 import { serverLastSeen } from '../lastSeenText';
 import { LastSeenExceptionsBlock } from './LastSeenExceptions';
+import { MessagePrivacySetting } from './MessagePrivacySetting';
 import { serverCallPrivacy } from '../lastSeenExceptionsRules';
 import { serverCalls } from '../callView';
 import { serverPush2, serverPush3 } from '../convSyncRules';
@@ -410,6 +410,7 @@ function DeviceSelect({
 }
 
 function AudioVideoTab() {
+  const phoneUi = usePhoneUi();
   const [s, setS] = useState<AudioSettings>(getAudioSettings());
   const [hk, setHk] = useState<Hotkeys>(getHotkeys());
   const [pttCapturing, setPttCapturing] = useState(false);
@@ -763,7 +764,7 @@ function AudioVideoTab() {
       {/* 🔴 Клавиша — только там, где есть клавиатура. На телефоне строка честно писала «Пробел»,
           и это читалось как издевательство: нажать его не на чем. Кнопка поверх игр — отдельная
           задача, до неё режим рации на телефоне живёт без назначения клавиши. */}
-      {s.pushToTalk && !isMobile() && (
+      {s.pushToTalk && !phoneUi && (
         <div className="settings-row">
           <span>Клавиша</span>
           <button
@@ -796,7 +797,7 @@ function AudioVideoTab() {
 
       {/* Вся группа — про физическую клавиатуру, поэтому на телефоне её нет: там она показывала
           три «Не задано», которые назначить нечем. */}
-      {!isMobile() && (
+      {!phoneUi && (
         <>
       <div className="settings-group-label" id="set-g-hotkeys" style={{ marginTop: 18 }}>
         Горячие клавиши
@@ -823,10 +824,16 @@ function AudioVideoTab() {
         </>
       )}
 
-      <div className="settings-group-label" id="set-g-stream" style={{ marginTop: 18 }}>
-        Качество трансляции экрана
-      </div>
-      <StreamQualityPanel />
+      {/* Телефон показа экрана не ведёт (в приложении кнопки показа нет, в браузере телефона getDisplayMedia нет) —
+          качество трансляции там настраивать нечем; группа скрыта и в навигации (`notMobile`). */}
+      {!phoneUi && (
+        <>
+          <div className="settings-group-label" id="set-g-stream" style={{ marginTop: 18 }}>
+            Качество трансляции экрана
+          </div>
+          <StreamQualityPanel />
+        </>
+      )}
 
       {isDesktop() && <StreamCursorSetting />}
 
@@ -866,13 +873,12 @@ function AudioVideoTab() {
 }
 
 function AppearanceTab() {
+  const phoneUi = usePhoneUi();
   const [theme, setT] = useState<Theme>(getTheme());
   const [scale, setScale] = useState<UiScale>(getUiScale());
   const [sidebar, setSidebar] = useState<number>(() => Math.max(getSidebarWidth(), SIDEBAR_MIN)); // «только аватары» (72) на ползунке — нижняя граница
   // Настройки ссылок (#63/#64) — пер-девайсные, в localStorage, аккаунт не синкают.
   const [previews, setPreviews] = useState(linkPreviewsEnabled);
-  const [warnOff, setWarnOff] = useState(linkWarningsOff);
-  const [trusted, setTrusted] = useState(() => trustedLinkAuthors().length);
   /**
    * Анимированные аватары — тоже пер-девайсная настройка: «не тянет» это про конкретный ноутбук и
    * конкретный интернет, а не про аккаунт.
@@ -886,7 +892,7 @@ function AppearanceTab() {
       <div className="settings-group-label" id="set-g-theme">
         Тема
       </div>
-      {isMobile() ? (
+      {phoneUi ? (
         // Mobile (design-step8 E2): tappable preview cards instead of a text segment.
         <div className="theme-cards" role="group" aria-labelledby="set-g-theme">
           {(['dark', 'light'] as Theme[]).map((t) => (
@@ -901,7 +907,6 @@ function AppearanceTab() {
               }}
             >
               <span className="tc-preview">
-                <span className="tc-side" />
                 <span className="tc-lines">
                   <span />
                   <span />
@@ -960,7 +965,7 @@ function AppearanceTab() {
 
       {/* The mobile sidebar is a full-screen pane (no draggable edge), so the width control + its
           desktop-only "drag the right edge" hint are dead weight on phones — hide them there. */}
-      {!isMobile() && (
+      {!phoneUi && (
         <>
           <label className="settings-group-label" id="set-g-sidebar" style={{ marginTop: 16 }} htmlFor="set-sidebar-w">
             Ширина боковой панели · {sidebar}px
@@ -1001,9 +1006,9 @@ function AppearanceTab() {
         />
       </div>
       <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Для слабых компьютеров и игр: интерфейс перестаёт двигаться сам. Анимированные аватары замирают на
-        первом кадре и оживают при наведении, пульсирующие значки и прочие украшения стоят на месте. Звук,
-        показ и сообщения работают как обычно. Настройка только для этого устройства.
+        {phoneUi
+          ? 'Для слабых телефонов: интерфейс перестаёт двигаться сам. Анимированные аватары замирают на первом кадре, пульсирующие значки и прочие украшения стоят на месте. Звук и сообщения работают как обычно. Настройка только для этого устройства.'
+          : 'Для слабых компьютеров и игр: интерфейс перестаёт двигаться сам. Анимированные аватары замирают на первом кадре и оживают при наведении, пульсирующие значки и прочие украшения стоят на месте. Звук, показ и сообщения работают как обычно. Настройка только для этого устройства.'}
       </div>
 
       <div className="settings-group-label" id="set-g-avatars">Аватары</div>
@@ -1019,7 +1024,7 @@ function AppearanceTab() {
         />
       </div>
       <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Движущиеся аватары тех, кто их купил. Выключи, если компьютер или интернет не тянет: тогда
+        Движущиеся аватары тех, кто их купил. Выключи, если {phoneUi ? 'телефон' : 'компьютер'} или интернет не тянет: тогда
         анимация не только не показывается, но и НЕ СКАЧИВАЕТСЯ — вместо неё останется обычная
         картинка. Настройка только для этого устройства.
       </div>
@@ -1045,38 +1050,10 @@ function AppearanceTab() {
         а не твой браузер — сторонний сайт не узнает, что ты читаешь сообщение. Картинки в карточке
         нет по той же причине.
       </div>
-      <div className="settings-row" style={{ marginTop: 12 }}>
-        <span>Предупреждать при переходе на сторонний сайт</span>
-        <Toggle
-          checked={!warnOff}
-          onChange={(v) => {
-            setLinkWarningsOff(!v);
-            setWarnOff(!v);
-          }}
-          label="Предупреждать при переходе на сторонний сайт"
-        />
-      </div>
-      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Клик по чужой ссылке сначала показывает, куда она ведёт. Ссылки на этот же сервер не
-        спрашивают никогда.
-      </div>
-      {trusted > 0 && (
-        <button
-          type="button"
-          className="link"
-          style={{ marginTop: 6 }}
-          onClick={() => {
-            forgetTrustedLinkAuthors();
-            setTrusted(0);
-          }}
-        >
-          Забыть доверенных отправителей ({trusted})
-        </button>
-      )}
-      {!isMobile() && <SendModeSetting />}
+      {!phoneUi && <SendModeSetting />}
       <EmojiSuggestSetting />
       <DoubleClickSetting />
-      {isMobile() && <ChatSwipeSetting />}
+      {phoneUi && <ChatSwipeSetting />}
     </div>
   );
 }
@@ -1087,6 +1064,7 @@ function AppearanceTab() {
  * Настройка устройства (`dmListView.ts`); на ПК список ещё сворачивается в аватары — тянуть колонку за правый край.
  */
 function ListViewSetting() {
+  const phoneUi = usePhoneUi();
   const lines = useListLines();
   const opts: { val: ListLines; label: string; sub: string }[] = [
     { val: 'two', label: 'Две строки', sub: 'Имя и одна строка сообщения' },
@@ -1114,7 +1092,7 @@ function ListViewSetting() {
           </button>
         ))}
       </div>
-      {!isMobile() && (
+      {!phoneUi && (
         <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
           Колонку списка можно стянуть за правый край до конца — останутся только аватары с отметками непрочитанного.
         </div>
@@ -1128,6 +1106,7 @@ function ListViewSetting() {
  * `:слову` и по слову целиком. По умолчанию включено; настройка устройства (`emojiSuggest.ts`).
  */
 function EmojiSuggestSetting() {
+  const phoneUi = usePhoneUi();
   const [on, setOn] = useState(emojiSuggestEnabled);
   return (
     <>
@@ -1148,7 +1127,7 @@ function EmojiSuggestSetting() {
       <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
         Набери «:» и две буквы (например, «:огон»), либо одно слово в пустом поле («привет») — над полем появится полоса эмодзи.
         {/* C4: на телефоне нет клавиш — там подсказку выбирают касанием (без Tab/Enter/Esc). */}
-        {isMobile() ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}
+        {phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}
         «:код:» с закрывающим двоеточием заменяется и без подсказок.
       </div>
     </>
@@ -1203,13 +1182,14 @@ function SendModeSetting() {
  * ответ). Настройка устройства (`quickReaction.ts`); на телефоне — двойной тап.
  */
 function DoubleClickSetting() {
+  const phoneUi = usePhoneUi();
   const [action, setAction] = useState<DoubleClickAction>(getDoubleClickAction);
   const [quick, setQuick] = useState(getQuickReaction);
   const [pick, setPick] = useState<DOMRect | null>(null);
   const opts: { val: DoubleClickAction; label: string; sub: string }[] = [
-    { val: 'react', label: 'Ставить реакцию', sub: 'Повторный двойной клик снимает её' },
-    { val: 'reply', label: 'Отвечать на сообщение', sub: 'Двойной клик открывает ответ в поле ввода' },
-    { val: 'none', label: 'Ничего', sub: 'Двойной клик выделяет слово' },
+    { val: 'react', label: 'Ставить реакцию', sub: phoneUi ? 'Повторное двойное касание снимает её' : 'Повторный двойной клик снимает её' },
+    { val: 'reply', label: 'Отвечать на сообщение', sub: phoneUi ? 'Двойное касание открывает ответ в поле ввода' : 'Двойной клик открывает ответ в поле ввода' },
+    { val: 'none', label: 'Ничего', sub: phoneUi ? 'Двойное касание ничего не делает' : 'Двойной клик выделяет слово' },
   ];
   const choose = (emoji: string) => {
     setQuickReaction(emoji);
@@ -1218,7 +1198,7 @@ function DoubleClickSetting() {
   return (
     <>
       <div className="settings-group-label" id="set-g-dblclick" style={{ marginTop: 18 }}>
-        Двойной клик по сообщению
+        {phoneUi ? 'Двойное касание по сообщению' : 'Двойной клик по сообщению'}
       </div>
       <div role="group" aria-labelledby="set-g-dblclick" style={{ display: 'contents' }}>
         {opts.map((o) => (
@@ -1291,7 +1271,6 @@ function AccountTab({ onClose }: { onClose: () => void }) {
   const setAuth = useStore((s) => s.setAuth);
   const logout = useStore((s) => s.logout);
   const [displayName, setDisplayName] = useState(user.displayName);
-  const [instanceName, setInstanceName] = useState(activeInstance()?.name ?? '');
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [cropFile, setCropFile] = useState<File | null>(null);
@@ -1348,14 +1327,6 @@ function AccountTab({ onClose }: { onClose: () => void }) {
     } finally {
       setBusy(false);
     }
-  }
-
-  function saveInstanceName() {
-    const id = activeInstanceId();
-    if (!id) return;
-    renameInstance(id, instanceName); // empty → falls back to the server host
-    setInstanceName(activeInstance()?.name ?? '');
-    toast('success', 'Имя сервера сохранено');
   }
 
   async function saveName() {
@@ -1579,37 +1550,9 @@ function AccountTab({ onClose }: { onClose: () => void }) {
         </button>
       </div>
 
-      {/* Active instance display name (#7) — desktop (multi-instance). Lets you label this server; empty
-          resets to the server host. Все записи разом — «Федерация › Мои инстансы» (`InstancesPanel`, 23.09). */}
-      {multiInstanceEnabled() && activeInstance() && (
-        <>
-          <div className="settings-group-label" style={{ marginTop: 14 }}>
-            Сервер · {serverHost(activeInstance()!.apiUrl)}
-          </div>
-          <label className="settings-row col">
-            <span>Отображаемое имя сервера</span>
-            <input
-              value={instanceName}
-              placeholder={serverHost(activeInstance()!.apiUrl)}
-              maxLength={40}
-              onChange={(e) => setInstanceName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') saveInstanceName();
-              }}
-            />
-          </label>
-          <div className="settings-row" style={{ justifyContent: 'flex-end' }}>
-            <button
-              type="button"
-              onClick={saveInstanceName}
-              disabled={instanceName === (activeInstance()?.name ?? '')}
-            >
-              Сохранить
-            </button>
-          </div>
-        </>
-      )}
-
+      {/* Подпись инстанса на этом устройстве (#7) отсюда убрана (приёмка 0.9.0): в «Аккаунте» её принимали за имя сервера,
+          которое меняет только администратор инстанса (`PUT /admin/instance`, админ-панель). Своя подпись записей реестра
+          инстансов — «Федерация › Мои инстансы» (`InstancesPanel`, `renameInstance`). */}
       {/* Server the app is connected to — only on generic picker builds (a server was chosen). Changing
           it returns to the server-picker and logs out on this device (the token is per-instance).
           On desktop, the multi-instance switcher (#7) in the rail supersedes this. */}
@@ -2000,14 +1943,19 @@ function AndroidInstallTab() {
   // Whether a UnifiedPush distributor (the ntfy app) is installed — gates the push-setup hint (#120).
   // Only meaningful in the Android APK; false on web/desktop, so the guide always renders there.
   const [hasDist, setHasDist] = useState(() => hasPushDistributor());
+  // Внутри самого Android-приложения инструкция «как его установить» не к месту (приёмка 0.9.0) — остаётся только пуш.
+  const inApp = isAndroid();
   useEffect(() => {
+    if (inApp) return;
     api
       .fdroidInfo()
       .then(setInfo)
       .catch(() => setInfo(null));
-  }, []);
+  }, [inApp]);
   return (
     <div className="settings-pane">
+      {!inApp && (
+        <>
       <div className="settings-group-label" id="set-g-android">GusVoice на Android</div>
       {info === undefined && (
         <div className="muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 12 }}>Загружаю данные репозитория…</div>
@@ -2090,10 +2038,12 @@ function AndroidInstallTab() {
           </div>
         </>
       )}
+        </>
+      )}
 
       {/* Push-setup guide (#120): DMs/@mentions wake the phone even when GusVoice is closed only if a
           UnifiedPush distributor (ntfy) is installed AND pointed at our server. */}
-      <div className="settings-group-label" id="set-g-push" style={{ marginTop: 22 }}>Пуш-уведомления (ntfy)</div>
+      <div className="settings-group-label" id="set-g-push" style={inApp ? undefined : { marginTop: 22 }}>Пуш-уведомления (ntfy)</div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
         <b>Без ntfy уведомления (ЛС, упоминания) в фоне и при закрытом приложении приходить не будут.</b> Нужен
         маленький бесплатный приёмник <b>UnifiedPush</b> — <b>ntfy</b>.
@@ -2139,76 +2089,6 @@ function AndroidInstallTab() {
         </button>
       )}
     </div>
-  );
-}
-
-/**
- * ЛС этап 2 (`docs/dm/STAGE2.md`, «Переключение»): новый путь ЛС через беседы на ЭТОМ устройстве — для приёмки
- * владельцем до включения всем. Смена перезагружает страницу: шлюз должен подключиться заново с другими `caps`.
- */
-function ConvClientTestRow() {
-  const [on, setOn] = useState(convClientSwitch());
-  const [feedWin, setFeedWin] = useState(feedWindowSwitch());
-  const [bubbles, setBubbles] = useState(dmBubblesSwitch());
-  const features = useStore((s) => s.serverFeatures);
-  const active = useStore((s) => s.convActive);
-  const supported = !!features?.includes(CAP_CONV1) && !!features?.includes(FEATURE_CONV2);
-  return (
-    <>
-      <div className="settings-group-label" id="set-g-conv-test" style={{ marginTop: 22 }}>
-        Новые ЛС
-      </div>
-      <div className="settings-row">
-        <span>Личные сообщения через беседы</span>
-        <Toggle
-          checked={on}
-          onChange={(v) => {
-            setConvClientSwitch(v);
-            setOn(v);
-            location.reload();
-          }}
-          label="Личные сообщения через беседы"
-        />
-      </div>
-      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Включены у всех, где сервер умеет беседы. Выключить — только на этом устройстве, если с ЛС что-то не так:
-        вернётся прежний путь. Сейчас: {active ? 'включено' : supported ? 'выключено' : 'сервер не умеет беседы'}. После
-        переключения страница перезагрузится.
-      </div>
-      <div className="settings-row" style={{ marginTop: 12 }}>
-        <span>Лента бесед: окно и переходы</span>
-        <Toggle
-          checked={feedWin}
-          onChange={(v) => {
-            setFeedWindowSwitch(v);
-            setFeedWin(v);
-            location.reload();
-          }}
-          label="Лента бесед: окно и переходы"
-        />
-      </div>
-      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Беседа открывается у первого непрочитанного или там, где вы её оставили; клик по цитате ведёт к сообщению, «Назад»
-        — обратно; длинная история не копится в памяти. Включено у всех. Выключить — только на этом устройстве, если с
-        лентой что-то не так: вернётся прежняя. После переключения страница перезагрузится.
-      </div>
-      <div className="settings-row" style={{ marginTop: 12 }}>
-        <span>Пузыри в ЛС, как в Telegram (проверка)</span>
-        <Toggle
-          checked={bubbles}
-          onChange={(v) => {
-            setDmBubblesSwitch(v);
-            setBubbles(v);
-            location.reload();
-          }}
-          label="Пузыри в ЛС, как в Telegram"
-        />
-      </div>
-      <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        Свои сообщения — справа на цветном пузыре, собеседника — слева, время внутри. Каналы не меняются. Только на этом
-        устройстве, пока идёт проверка.
-      </div>
-    </>
   );
 }
 
@@ -2391,6 +2271,9 @@ function NotifyPermissionRow() {
   const refresh = () => void notifyPermissionState().then(setPerm);
   useEffect(refresh, []);
   if (perm === null) return null;
+  // B7: в Android-сборке плагина тостов в WebView нет (`lib.rs`, он только для десктопа) → `unsupported`, но уведомления идут
+  // нативно (пуш ntfy/UnifiedPush, `PushNotifier.kt`, уведомление звонка) — плашка «недоступны» там ложная.
+  if (perm === 'unsupported' && isAndroid()) return null;
   if (perm === 'granted') {
     return (
       <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
@@ -2413,7 +2296,7 @@ function NotifyPermissionRow() {
           >
             Запросить
           </button>
-          {isTauri() && (
+          {isDesktop() && (
             <>
               {' · '}
               <button
@@ -2530,7 +2413,8 @@ function NotifyContentSetting({ onClose }: { onClose: () => void }) {
 }
 
 /** «Системные уведомления» — OS-level toasts while the window is unfocused (#77: три положения). */
-function OsNotifyPanel() {
+/** `phoneUi` — телефонный вид подписей (читает окно настроек, `usePhoneUi`); сам блок хука не зовёт. */
+function OsNotifyPanel({ phoneUi = false }: { phoneUi?: boolean } = {}) {
   const [level, setLevel] = useState<OsNotifyLevel>(osNotifyLevel());
   const [hint, setHint] = useState<string | null>(null);
   const on = level !== 'off';
@@ -2547,7 +2431,9 @@ function OsNotifyPanel() {
         setHint(
           perm === 'denied'
             ? 'Выбор сохранён, но разрешение не выдано — всплывашки не придут, пока не разрешите их системе.'
-            : 'В этой среде системные уведомления пока недоступны — выбор сохранён на будущее.',
+            : isAndroid()
+              ? null // B7: в Android-сборке уведомления нативные (пуш), плагина тостов в WebView нет — «недоступны» было бы ложью
+              : 'В этой среде системные уведомления пока недоступны — выбор сохранён на будущее.',
         );
         setOsNotifyLevel(next);
         setLevel(next);
@@ -2587,7 +2473,7 @@ function OsNotifyPanel() {
         ))}
       </div>
       <div className="muted" style={{ fontSize: 12 }}>
-        Показываются системой, только когда окно GusVoice не в фокусе. «Все сообщения» уважают
+        Показываются системой, только когда {phoneUi ? 'GusVoice не на экране' : 'окно GusVoice не в фокусе'}. «Все сообщения» уважают
         настройку каждого канала: заглушённый канал молчит, а из живого приходит не чаще одного
         уведомления в 20 секунд. Личные сообщения приходят в обоих включённых режимах.
         {on && (
@@ -2621,7 +2507,7 @@ function OsNotifyPanel() {
  * ⚠️ Панель показывается только там, где экономика вообще видна: настройка про то, чего нет, —
  * мусор в окне.
  */
-function CoinNotifyPanel() {
+function CoinNotifyPanel({ phoneUi = false }: { phoneUi?: boolean } = {}) {
   const [level, setLevel] = useState<CoinNotifyLevel>(coinNotifyLevel());
   const [hint, setHint] = useState<string | null>(null);
 
@@ -2633,7 +2519,9 @@ function CoinNotifyPanel() {
         setHint(
           perm === 'denied'
             ? 'Выбор сохранён, но разрешение не выдано — всплывашки не придут, пока не разрешите их системе.'
-            : 'В этой среде системные уведомления пока недоступны — выбор сохранён на будущее.',
+            : isAndroid()
+              ? null // B7: в Android-сборке уведомления нативные (пуш), плагина тостов в WebView нет — «недоступны» было бы ложью
+              : 'В этой среде системные уведомления пока недоступны — выбор сохранён на будущее.',
         );
         setCoinNotifyLevel(next);
         setLevel(next);
@@ -2673,11 +2561,11 @@ function CoinNotifyPanel() {
         ))}
       </div>
       <div className="muted" style={{ fontSize: 12 }}>
-        Типы и щипки — как и остальные уведомления, только когда окно не в фокусе и не стоит «не
+        Типы и щипки — как и остальные уведомления, только когда {phoneUi ? 'GusVoice не на экране' : 'окно не в фокусе'} и не стоит «не
         беспокоить». «Все в канале» показывают и чужие, но не чаще одного раза в 20 секунд; когда
         типают или щипают лично тебя, уведомление приходит всегда.
         {/* C4: «полноэкранная игра Windows» — про десктоп, на телефоне предупреждение не нужно. */}
-        {!isMobile() && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}
+        {!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}
       </div>
       {hint && (
         <div className="muted" role="alert" style={{ fontSize: 12, color: 'var(--danger, #e5484d)', marginTop: 4 }}>
@@ -2715,16 +2603,23 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
   // бы на вопрос, которого у человека нет, и пугал бы словом «гость» на ровном месте.
   const fed = useFederationEnabled();
   const desktop = isDesktop();
-  const mobile = isMobile();
+  const mobile = usePhoneUi();
   // «Мои инстансы» — там, где у приложения свой реестр инстансов (десктоп, Android); в вебе инстанс один.
   const multi = multiInstanceEnabled();
   const superAdmin = useStore((s) => !!s.user?.superAdmin);
   // Папки бесед ЛС (G40) — только при сервере `folders1` и новых ЛС; из меню вкладки окно открывается сразу на них.
   const folders = useFoldersOn();
+  // Само Android-приложение: инструкция по установке Android-приложения в нём не показывается (приёмка 0.9.0).
+  const androidApp = isAndroid();
   const sections = useMemo(
-    () => visibleSections({ federation: fed, desktop, mobile, multi, superAdmin, folders }),
-    [fed, desktop, mobile, multi, superAdmin, folders],
+    () => withoutInAppGroups(visibleSections({ federation: fed, desktop, mobile, multi, superAdmin, folders }), androidApp),
+    [fed, desktop, mobile, multi, superAdmin, folders, androidApp],
   );
+  // Строка версии внизу списка разделов (`appVersionLabel`): у приложений — версия установленной сборки, у веба — без номера.
+  const [appVer, setAppVer] = useState<string | null>(null);
+  useEffect(() => {
+    if (isTauri()) void appVersion().then(setAppVer);
+  }, []);
   const [section, setSection] = useState<SectionKey>(() => (hasFolderEditRequest() ? 'folders' : 'sound'));
   const [query, setQuery] = useState('');
   const [anchor, setAnchor] = useState<string | null>(null);
@@ -3046,13 +2941,15 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
               )}
             </div>
           ))}
+          {/* Версия приложения — последней строкой списка, как подпись под настройками Telegram Android (`versionView`). */}
+          <div className="settings-app-version">{appVersionLabel(androidApp ? 'android' : isTauri() ? 'desktop' : 'web', appVer)}</div>
         </SettingsRail>
       }
     >
       <SettingsHead
         title={current.label}
         titleId="settings-title"
-        sub={current.sub}
+        sub={sectionSub(current, mobile)}
         // Счётчик молчит, когда всё заводское: «изменено 0 из 14» — это шум в каждом окне у каждого, кто
         // настройки не трогал. Клик ведёт к первой изменённой группе и подсвечивает все изменённые тем же
         // приёмом, что и поиск (`set-hit` гаснет сам — это подсказка, а не состояние).
@@ -3103,9 +3000,11 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
         {section === 'notif' && (
           <div className="settings-pane">
             <NotifyPermissionRow />
-            <OsNotifyPanel />
+            <OsNotifyPanel phoneUi={mobile} />
+            {/* Свои всплывающие окна ПК вместо тостов Windows (G38, ND-07) — только десктоп. */}
+            {desktop && <NotifyPopupSetting />}
             <NotifyContentSetting onClose={onClose} />
-            <CoinNotifyPanel />
+            <CoinNotifyPanel phoneUi={mobile} />
             {/* Плашка «кто кого типнул» переехала сюда из «Аудио и видео»: искали её здесь. */}
             {desktop && <ToastSettingsPanel />}
             <div className="settings-group-label" id="set-g-sounds">
@@ -3128,6 +3027,12 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
           <>
             <AccountTab onClose={onClose} />
             <SecurityTab />
+          </>
+        )}
+        {/* «Конфиденциальность» — отдельный раздел, как у Telegram (приёмка 0.9.0); первой — «Кто может мне писать». */}
+        {section === 'privacy' && (
+          <>
+            <MessagePrivacySetting />
             <LastSeenPrivacySetting />
             <CallPrivacySetting />
             <BlockedUsersSetting />
@@ -3152,9 +3057,11 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
         {section === 'folders' && <DmFolderSettings />}
         {section === 'apps' && (
           <>
-            {isTauri() ? <DesktopTab /> : <WindowsDownload />}
+            {/* Крестик/трей/GPU/папка загрузок/обновления — только ПК (на APK `isTauri()` тоже истинно, и они показывались
+                при пустой навигации); «Скачать для Windows» на телефоне не нужно. */}
+            {desktop && <DesktopTab />}
+            {!isTauri() && !mobile && <WindowsDownload />}
             <AndroidInstallTab />
-            {superAdmin && <ConvClientTestRow />}
           </>
         )}
         </div>

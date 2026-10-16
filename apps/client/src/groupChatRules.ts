@@ -1,4 +1,4 @@
-import { GROUP_MEMBER_LIMIT, type ConvGroupInfo, type ConvGroupService, type ConvLastMessage, type ConvSummary } from '@gusvoice/shared';
+import { FEATURE_FEDM6, GROUP_MEMBER_LIMIT, type ConvGroupInfo, type ConvGroupService, type ConvLastMessage, type ConvSummary, type User } from '@gusvoice/shared';
 import { peerReadKeyOf } from './convSyncRules';
 import { plural } from './plural';
 
@@ -30,6 +30,22 @@ export function chatReadKeyOf(s: ConvSummary | undefined): number | null {
 export function groupServiceMark(m: { service?: unknown }): ConvGroupService | null {
   const s = m.service as { kind?: unknown; type?: unknown } | null | undefined;
   return s && s.kind === 'group' && typeof s.type === 'string' ? (s as ConvGroupService) : null;
+}
+
+/**
+ * Текст служебной строки группы глазами читателя (G6, приёмка 13.10): «добавил(а)» / «удалил(а)» МЕНЯ — «Имя удалил(а) вас»
+ * (Telegram `ActionKickUserYou` «un1 removed you», `ActionAddUserYou` «un1 added you»), остальные из списка — следом через запятую.
+ * Сервер собирает фразу один раз на всех (`groupRules.serviceText`: «Имя удалил(а) Имя2»), поэтому меняется только хвост с именами;
+ * хвост не совпал (старый сервер, другая форма) или меня в списке нет — текст сервера как есть.
+ */
+export function groupServiceLabel(svc: ConvGroupService, content: string, meId: string | undefined): string {
+  if (!meId || (svc.type !== 'remove' && svc.type !== 'add')) return content;
+  const users = svc.users ?? [];
+  if (!users.some((u) => u.id === meId)) return content;
+  const names = users.map((u) => u.displayName).join(', ');
+  if (!names || !content.endsWith(names)) return content;
+  const rest = users.filter((u) => u.id !== meId).map((u) => u.displayName);
+  return content.slice(0, content.length - names.length) + ['вас', ...rest].join(', ');
 }
 
 /** «3 участника» — подпись шапки группы. */
@@ -103,4 +119,77 @@ export function peerColorIndex(id: string): number {
     h = Math.imul(h, 0x01000193) >>> 0;
   }
   return h % PEER_COLOR_COUNT;
+}
+
+// ─── ЛС между инстансами, Э7 часть 2 (#141, `fedm6`): группы со смешанным составом на клиенте ─────────────────────────────
+
+type GroupHome = NonNullable<User['homeInstance']>;
+
+/** Сервер умеет группы со смешанным составом (Э7, `fedm6`): в выбор участников можно звать людей соседних инстансов. */
+export function serverFedGroups(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_FEDM6);
+}
+
+/** Человек годится в выбор участников группы: свой — всегда, человек соседа (`homeInstance`) — только при `fedm6`. */
+export function groupPickable(u: { homeInstance?: GroupHome | null }, fedGroups: boolean): boolean {
+  return !u.homeInstance || fedGroups;
+}
+
+/** Как назвать инстанс: название от держателя, иначе домен (как `GuestMark.guestHomeLabel`); не знаем ничего — `null`. */
+export function groupHomeLabel(home: Pick<GroupHome, 'name' | 'domain'> | null | undefined): string | null {
+  return home?.name?.trim() || home?.domain || null;
+}
+
+/**
+ * Дом группы чужого инстанса (`ConvSummary.fedGroupHost.instanceId`) → его название: сводка несёт только id, имя берём у участника
+ * с того инстанса (создатель живёт там), иначе у собеседника 1:1 оттуда. Не нашли — `null` (фразы строятся без имени).
+ */
+export function groupHostHome(
+  hostId: string | null | undefined,
+  members: readonly { homeInstance?: GroupHome | null }[],
+  dms: readonly { otherUser: { homeInstance?: GroupHome | null } }[] = [],
+): GroupHome | null {
+  if (!hostId) return null;
+  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;
+  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;
+  return null;
+}
+
+/** Ответ ручки группы чужого дома: запрос ушёл хосту, сводка доедет событием `conv.change` (`{ ok: true, pending: true }`). */
+export function groupOpPending(r: unknown): boolean {
+  return !!r && typeof r === 'object' && (r as { pending?: unknown }).pending === true;
+}
+
+/** Тост после `pending`: «Запрос отправлен инстансу «X»». */
+export function fedGroupPendingText(host: string | null): string {
+  return host ? `Запрос отправлен инстансу «${host}»` : 'Запрос отправлен инстансу, где живёт группа';
+}
+
+/** Подсказка у фото группы чужого дома (`federation.dm_group_host_only`). */
+export function fedGroupPhotoHint(host: string | null): string {
+  return host ? `Фото меняется на инстансе «${host}»` : 'Фото меняется на инстансе, где живёт группа';
+}
+
+/** Плашка над полем и подсказка у кнопок состава, когда дом группы недоступен (`fedGroupHost.down`). */
+export function fedGroupDownText(host: string | null): string {
+  return host
+    ? `Инстанс «${host}», где живёт группа, недоступен — сообщения доедут, когда он вернётся; состав сейчас не меняется`
+    : 'Инстанс, где живёт группа, недоступен — сообщения доедут, когда он вернётся; состав сейчас не меняется';
+}
+
+/**
+ * Отказ 403 `group_not_invitable { userIds }`: инстанс человека не умеет группы (нет `dmgroup1`) или связка не работает. Имена
+ * инстансов — у отказанных из выбранных; не знаем — без имени.
+ */
+export function groupNotInvitableText(
+  refused: readonly string[] | null | undefined,
+  picked: readonly { id: string; homeInstance?: GroupHome | null }[],
+): string {
+  const ids = refused && refused.length > 0 ? new Set(refused) : null;
+  const names = [
+    ...new Set(picked.filter((p) => p.homeInstance && (!ids || ids.has(p.id))).map((p) => groupHomeLabel(p.homeInstance)).filter((n): n is string => !!n)),
+  ];
+  if (names.length === 1) return `Нельзя позвать: инстанс «${names[0]}» не поддерживает группы`;
+  if (names.length > 1) return `Нельзя позвать: инстансы ${names.map((n) => `«${n}»`).join(', ')} не поддерживают группы`;
+  return 'Нельзя позвать: инстанс этого человека не поддерживает группы';
 }

@@ -1,9 +1,14 @@
 package tech.gusik.gusvoice
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.ActionMode
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -15,6 +20,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.graphics.Insets
+import androidx.core.location.LocationManagerCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
@@ -35,7 +41,37 @@ class MainActivity : TauriActivity() {
   private val pickDocuments =
     registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { media.onDocumentsPicked(it) }
 
+  // Системная камера листа (10.10, #218): CAMERA объявлено в манифесте (камера звонков), а при объявленном и не выданном
+  // разрешении ACTION_IMAGE_CAPTURE / ACTION_VIDEO_CAPTURE падают с SecurityException — сначала окно разрешения, потом камера.
+  private val requestCamera =
+    registerForActivityResult(ActivityResultContracts.RequestPermission()) { media.onCameraPermission(it) }
+  private val capture =
+    registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { media.onCaptureResult(it.resultCode, it.data) }
+
+  // Вывод звука звонка 1:1 — кнопка «Динамик» (13.10, #218; CallAudio.kt). Изменение вывода → клиент перечитывает `callAudioState`.
+  private var btAsked = false
+  // Лениво: в конструкторе Activity контекст ещё не привязан (`applicationContext` — NPE); тип явно — лямбда ссылается на само поле.
+  private val callAudioLazy: Lazy<CallAudio> = lazy {
+    CallAudio(this) {
+      webViewRef?.evaluateJavascript("window.__gvCallAudioChanged && window.__gvCallAudioChanged()", null)
+      // Android 12+: к гарнитуре без «Устройств поблизости» нет имени (и часть телефонов не даёт переключиться) — спросить один раз.
+      if (!btAsked && callAudio.needsBluetoothPermission()) {
+        btAsked = true
+        requestPerms.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT))
+      }
+    }
+  }
+  private val callAudio: CallAudio by callAudioLazy
+
+  // «Поднести к уху» (14.10, G67; RaiseToEar.kt): датчик приближения, пока в ленте играет голосовое. Во время звонка 1:1 звук не трогает.
+  private val raiseToEarLazy: Lazy<RaiseToEar> = lazy { RaiseToEar(this) { callAudioLazy.isInitialized() && callAudio.isActive() } }
+  private val raiseToEar: RaiseToEar by raiseToEarLazy
+
   fun launchMediaPermissions(perms: Array<String>) = requestMediaPerms.launch(perms)
+
+  fun launchCameraPermission() = requestCamera.launch(Manifest.permission.CAMERA)
+
+  fun launchCapture(intent: Intent) = capture.launch(intent)
 
   // Системное приложение «Файлы» (DocumentsUI): ACTION_OPEN_DOCUMENT с несколькими, любой тип.
   fun launchDocumentPicker() = pickDocuments.launch(arrayOf("*/*"))
@@ -69,6 +105,11 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     installRendererGoneGuard()
     enableEdgeToEdge()
+    // Phones are portrait-only (owner, 10.10): rotating re-laid the WebView mid-screen and everything drifted.
+    // Tablets/TV (smallest width >= 600dp) keep rotating; Android 16 ignores the lock on large screens anyway.
+    if (resources.configuration.smallestScreenWidthDp < 600) {
+      requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
     super.onCreate(savedInstanceState)
     fitAboveKeyboard()
 
@@ -329,6 +370,10 @@ class MainActivity : TauriActivity() {
     // Объект `GusVoiceMedia` для галереи, «Файлов» и меню фото — байты сообщениями ArrayBuffer (MediaBridge.kt). Тоже до
     // первой загрузки: объект вставляется в документы, которые начнут грузиться после этого вызова.
     media.attach(webView)
+
+    // Картинки и GIF из клавиатуры (G50): переопределение `onCreateInputConnection` в сгенерированном `RustWebView` (wry, см.
+    // `src-tauri/.cargo/config.toml`) зовёт `KeyboardContent.wrap`; присланное оно отдаёт мосту медиа.
+    KeyboardContent.bind(media)
   }
 
   override fun onResume() {
@@ -339,8 +384,18 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
+    if (callAudioLazy.isInitialized()) callAudio.stop()
+    if (raiseToEarLazy.isInitialized()) raiseToEar.shutdown()
     media.shutdown()
     super.onDestroy()
+  }
+
+  /** Ссылка для ACTION_VIEW из моста (`openExternalUri`): только `geo:` и `https:`, иначе null. */
+  private fun safeViewUri(raw: String): Uri? {
+    if (raw.length > 2048) return null
+    val u = try { Uri.parse(raw) } catch (_: Exception) { return null }
+    val scheme = u.scheme?.lowercase() ?: return null
+    return if (scheme == "geo" || scheme == "https") u else null
   }
 
   inner class NativeBridge {
@@ -354,6 +409,63 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun stopVoiceService() {
       VoiceForegroundService.stop(this@MainActivity)
+    }
+
+    // «Транслировать геопозицию» в ЛС (14.10, `geolive1`, `LiveLocationService.kt`, клиент — `geoLiveSharing.ts`). start: JSON
+    // {apiUrl, token, conversationId, messageId, until, backgroundMs} → true, если служба переднего плана взяла трансляцию
+    // (токен — только в памяти службы); false — не взято (нет разрешения на геопозицию и т. п.), ведёт страница. stop — снять
+    // одну (серверу стоп шлёт страница), stopAll — выход из аккаунта, ids — JSON-массив id сообщений, которые служба ведёт.
+    @JavascriptInterface
+    fun startLiveLocation(json: String): Boolean = LiveLocationService.start(this@MainActivity, json)
+
+    @JavascriptInterface
+    fun stopLiveLocation(messageId: String) {
+      LiveLocationService.stop(messageId)
+    }
+
+    @JavascriptInterface
+    fun stopAllLiveLocations() {
+      LiveLocationService.stopAll()
+    }
+
+    @JavascriptInterface
+    fun liveLocationIds(): String = LiveLocationService.idsJson()
+
+    // Вывод звука звонка (кнопка «Динамик», `CallAudio.kt`, клиент — `nativeCallAudio.ts`). Нет этих методов (старый APK) —
+    // клиент кнопку не рисует. start/stop — на входе и выходе из разговора; select — `earpiece|speaker|wired|bluetooth`;
+    // state — JSON `{"active","route","devices":[{"kind","name"?}]}` ("" — не вышло). Изменения клиенту — `__gvCallAudioChanged`.
+    @JavascriptInterface
+    fun callAudioStart(video: Boolean) {
+      callAudio.start(video)
+    }
+
+    @JavascriptInterface
+    fun callAudioStop() {
+      callAudio.stop()
+    }
+
+    @JavascriptInterface
+    fun callAudioSelect(kind: String) {
+      callAudio.select(kind)
+    }
+
+    @JavascriptInterface
+    fun callAudioState(): String = callAudio.state()
+
+    // Разговорный режим звука на время звонка (`CallAudio.commMode`, по умолчанию выключен): вызывать ДО `callAudioStart`.
+    @JavascriptInterface
+    fun callAudioSetCommMode(on: Boolean) {
+      callAudio.commMode = on
+    }
+
+    // «Поднести к уху» (G67, `RaiseToEar.kt`, клиент — `nativeRaiseToEar.ts`): supported — есть датчик приближения;
+    // set(true) — слушать датчик (играет голосовое и настройка включена), set(false) — перестать и вернуть звук на громкий.
+    @JavascriptInterface
+    fun raiseToEarSupported(): Boolean = raiseToEar.supported()
+
+    @JavascriptInterface
+    fun raiseToEarSet(on: Boolean) {
+      raiseToEar.enable(on)
     }
 
     // Системные вставки в CSS-пикселях (`publishSafeArea`): JSON {top,right,bottom,left} или "" до первого прохода.
@@ -380,6 +492,55 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun exitApp() {
       runOnUiThread { moveTaskToBack(true) }
+    }
+
+    // Геопозиция в ленте ЛС (G69, 14.10): «открыть во внешних картах» — ACTION_VIEW по `geo:` (приложение карт, как
+    // Telegram `LocationActivity` → «Open in…»), нет такого приложения — запасная https-ссылка OpenStreetMap в браузере.
+    // Только схемы `geo` и `https`: страница своя, но мост не открывает что угодно. false — ссылка не принята.
+    @JavascriptInterface
+    fun openExternalUri(uri: String, fallback: String): Boolean {
+      val main = safeViewUri(uri) ?: return false
+      val spare = safeViewUri(fallback)
+      runOnUiThread {
+        try {
+          startActivity(Intent(Intent.ACTION_VIEW, main))
+        } catch (_: ActivityNotFoundException) {
+          if (spare != null) {
+            try {
+              startActivity(Intent(Intent.ACTION_VIEW, spare))
+            } catch (_: ActivityNotFoundException) {
+            }
+          }
+        }
+      }
+      return true
+    }
+
+    // Геопозиция (15.10, приёмка 0.9.0): геолокация выключена в системе — WebView молчит до таймаута (20 с), поэтому
+    // страница спрашивает сама и показывает окно «включите геолокацию» с переходом в настройки, как Telegram Android
+    // (`ChatAttachAlertLocationLayout`: `isProviderEnabled(GPS_PROVIDER)` → `GpsDisabledAlertText` → `ACTION_LOCATION_SOURCE_SETTINGS`).
+    // Ошибка опроса — «включена»: окно не должно врать.
+    @JavascriptInterface
+    fun locationEnabled(): Boolean = try {
+      val lm = this@MainActivity.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+      LocationManagerCompat.isLocationEnabled(lm)
+    } catch (_: Exception) {
+      true
+    }
+
+    @JavascriptInterface
+    fun openLocationSettings(): Boolean {
+      runOnUiThread {
+        try {
+          startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+        } catch (_: ActivityNotFoundException) {
+          try {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+          } catch (_: ActivityNotFoundException) {
+          }
+        }
+      }
+      return true
     }
 
     // --- Push (UnifiedPush) --- driven by the web client on mobile boot. registerForPush kicks off

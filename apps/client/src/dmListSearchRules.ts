@@ -333,7 +333,33 @@ export function scopeView(scope: SearchScope, q: string, chips: SearchChips, ser
   return { tabs: true, dm: scope !== 'servers', servers: scope !== 'dm', serversFull: scope === 'servers' };
 }
 
-/** Один источник найденного для вкладки «Все»: загруженные страницы (новые сверху) и курсор следующей (`null` — больше нет). */
+/**
+ * Вкладки поиска с запросом на ТЕЛЕФОНЕ (12.10, #218, решение владельца): как у Telegram Android `Components/SearchViewPager.java`
+ * (`ViewPagerAdapter.updateItems`: «Чаты» — `DIALOGS_TYPE`, затем фильтры `Adapters/FiltersView.java` `filters[]`: Медиа / Ссылки /
+ * Файлы / Музыка / Голосовые; каждая — `FilteredSearchView`, найденные вложения этого вида по запросу). «Музыки» у нас нет;
+ * на её месте — «GIF» (вид есть в поиске и в «Общих медиа»). «Чаты» — беседы, люди, «Глобальный поиск» и сообщения (личные и
+ * серверов одним списком). Прежние вкладки «Все / Личные / Серверы» — только на ПК.
+ */
+export type PhoneSearchTab = 'chats' | SharedMediaKind;
+
+export const PHONE_SEARCH_TABS: readonly PhoneSearchTab[] = ['chats', 'media', 'link', 'file', 'gif', 'voice'];
+
+/** Подпись вкладки: «Чаты» (`SearchAllChatsShort`), у видов — те же, что во вкладках «Общих медиа». */
+export function phoneSearchTabLabel(tab: PhoneSearchTab): string {
+  return tab === 'chats' ? 'Чаты' : SHARED_MEDIA_TITLES[tab];
+}
+
+/**
+ * Показывать ли вкладки на телефоне: поиск открыт (`open` — поле в фокусе или есть чип) либо набран текст; как у Telegram
+ * (`SearchViewPager`), вкладки видны сразу, при пустом поле тоже: «Чаты» — «Частые» и недавнее, виды — свежие вложения из всех
+ * личных бесед. Чип типа на телефоне не ставится (его роль играют вкладки), но если он есть — вкладки не показываем (чип сам
+ * сужает выдачу до вида). Чипы человека и даты остаются: они сужают и «Чаты», и вкладки видов.
+ */
+export function phoneSearchTabsShown(q: string, chips: SearchChips, open = false): boolean {
+  return (open || q.trim() !== '') && !chips.kind;
+}
+
+/** Один источник найденного для вкладки «Все»:загруженные страницы (новые сверху) и курсор следующей (`null` — больше нет). */
 export interface HitSource<T> {
   hits: readonly T[];
   next: string | null;
@@ -369,4 +395,26 @@ export function mergeSearchHits<A extends { createdAt: string }, B extends { cre
     .sort((x, y) => at(y.hit.createdAt) - at(x.hit.createdAt));
   const more = horizon === null ? null : dmTail === horizon ? 'dm' : 'servers';
   return { rows, more };
+}
+
+/**
+ * Поле «Найти беседу» в списке на телефоне (#218) — как Telegram Android 12.x: поле высотой 48 (`SEARCH_FIELD_HEIGHT`,
+ * `TA/ui/DialogsActivity.java:295`) лежит над лентой и уезжает вместе с ней, по пути гаснет; погасло — в шапке списка значок
+ * поиска (`checkUi_searchFieldVisibility` `:14029-14049`: альфа `1 − clamp(прокрутка / 48)`, кнопка — при альфе ≤ 0.01). Пока идёт
+ * поиск — поле видно всегда (`animatorSearchVisible`), в режиме выбора — скрыто (`1 − actionModeVisible`).
+ */
+export const SEARCH_FIELD_H = 48;
+/** Порог «поле погасло»: значок поиска в шапке появляется при альфе ≤ 0.01 (`animatorSearchButtonVisible`). */
+export const SEARCH_FIELD_GONE_ALPHA = 0.01;
+
+export function searchFieldAlpha({ scrollTop, searching, selecting }: { scrollTop: number; searching: boolean; selecting: boolean }): number {
+  if (selecting) return 0;
+  if (searching) return 1;
+  return 1 - Math.min(1, Math.max(0, scrollTop / SEARCH_FIELD_H));
+}
+
+/** Показывать ли значок поиска в шапке списка: поле погасло от прокрутки (не от режима выбора — там своя шапка). */
+export function searchButtonShown({ scrollTop, searching, selecting }: { scrollTop: number; searching: boolean; selecting: boolean }): boolean {
+  if (selecting || searching) return false;
+  return searchFieldAlpha({ scrollTop, searching, selecting }) <= SEARCH_FIELD_GONE_ALPHA;
 }

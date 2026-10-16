@@ -1,4 +1,4 @@
-import { isAnimatedImage } from '@gusvoice/shared';
+import { FED_ERRORS, isAnimatedImage } from '@gusvoice/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -9,7 +9,7 @@ import { addGroupMembers, createGroup, removeGroupMember, updateGroupInfo, type 
 import { deliver, findDirect, listConversations, type Delivery } from '../conversations.js';
 import { db } from '../db/index.js';
 import { shareServer } from '../db/peerQueries.js';
-import { users } from '../db/schema.js';
+import { conversations, users } from '../db/schema.js';
 import { decideDmOpen } from '../dmRules.js';
 import { GROUP_MEMBER_LIMIT, GROUP_TITLE_MAX, normalizeGroupTitle } from '../groupRules.js';
 import { requireLocalUser } from '../guestGuard.js';
@@ -41,6 +41,51 @@ async function limited(reply: FastifyReply, me: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * ЛС между инстансами, Э7 часть 1 (#141, §3.6): группы со смешанным составом. `invitable` — можно ли звать людей этого инстанса
+ * (связка рабочая, у него `dmgroup1`); `op` — действие с группой чужого дома (запрос хосту, `federation/convGroup.groupOpRemote`).
+ * Подключает `index.ts` при `FEDERATION_DM_ENABLED`; без крючков человека соседа позвать нельзя, а чужих групп у нас нет.
+ */
+export interface FedGroupHooks {
+  invitable(homeInstanceId: string): Promise<boolean>;
+  op(
+    me: string,
+    conversationId: string,
+    host: string,
+    op: 'leave' | 'remove' | 'add' | 'title',
+    args: { targetId?: string; userIds?: readonly string[]; title?: string },
+  ): Promise<{ status: number; body: Record<string, unknown> }>;
+}
+let fedGroups: FedGroupHooks | null = null;
+export function configureFedGroups(hooks: FedGroupHooks | null): void {
+  fedGroups = hooks;
+}
+
+/** Дом группы, если он не наш (`conversations.origin_instance_id`); местная группа или не группа — `null`. */
+async function groupHostOf(conversationId: string): Promise<string | null> {
+  const [c] = await db
+    .select({ kind: conversations.kind, origin: conversations.originInstanceId })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .limit(1);
+  return c?.kind === 'group' && c.origin ? c.origin : null;
+}
+
+/** Ответ хоста на действие с группой чужого дома — как есть (его код и тело); успех — `{ ok: true, pending: true }`. */
+async function remoteOp(
+  reply: FastifyReply,
+  me: string,
+  conversationId: string,
+  host: string,
+  op: 'leave' | 'remove' | 'add' | 'title',
+  args: { targetId?: string; userIds?: readonly string[]; title?: string },
+) {
+  if (!fedGroups) return reply.code(403).send({ error: FED_ERRORS.dmGroupHostDown });
+  const res = await fedGroups.op(me, conversationId, host, op, args);
+  if (res.status >= 200 && res.status < 300) return reply.code(200).send({ ok: true, pending: true });
+  return reply.code(res.status).send(res.body);
+}
+
 /** Кого из `ids` звать НЕЛЬЗЯ (нет такого, гость, удалён, меня заблокировал, писать ему мне нельзя). */
 async function notInvitable(me: string, ids: readonly string[]): Promise<string[]> {
   if (ids.length === 0) return [];
@@ -50,6 +95,11 @@ async function notInvitable(me: string, ids: readonly string[]): Promise<string[
   const out: string[] = [];
   for (const id of ids) {
     const u = byId.get(id);
+    // Э7 часть 1: человек соседа (теневая строка) — если его инстанс умеет группы (`dmgroup1`) и связка рабочая; группа — наша.
+    if (u && u.homeInstanceId && !u.deletedAt) {
+      if (!fedGroups || !(await fedGroups.invitable(u.homeInstanceId))) out.push(id);
+      continue;
+    }
     if (!u || !reachableUser(u) || (await isBlockedBy(id, me))) {
       out.push(id);
       continue;
@@ -81,7 +131,12 @@ async function pushAdded(conversationId: string, delivery: Delivery, added: read
   const { conversationMessages, conversations } = await import('../db/schema.js');
   const [m] = await db.select({ content: conversationMessages.content }).from(conversationMessages).where(eq(conversationMessages.id, delivery.messageId));
   const [c] = await db.select({ title: conversations.title }).from(conversations).where(eq(conversations.id, conversationId));
-  await sendPushToUsers([...added], { type: 'dm', title: c?.title ?? '', body: m?.content ?? '', dmId: conversationId });
+  // Э7 (#141, приёмка 13.10): добавленный с другого инстанса — пуш шлёт его дом по своей копии; наш ушёл бы туда событием
+  // `guest.notify` и встал бы в очереди связки перед звонком в дверь — новая группа доезжала бы до его дома с опозданием.
+  const homes = await db.select({ id: users.id, home: users.homeInstanceId }).from(users).where(inArray(users.id, [...added]));
+  const local = added.filter((id) => homes.some((h) => h.id === id && h.home === null));
+  if (local.length === 0) return;
+  await sendPushToUsers(local, { type: 'dm', title: c?.title ?? '', body: m?.content ?? '', dmId: conversationId });
 }
 
 export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
@@ -110,6 +165,8 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     const title = normalizeGroupTitle(z.object({ title: z.string().max(GROUP_TITLE_MAX * 4) }).parse(req.body).title);
     if (!title) return reply.code(400).send({ error: 'group_title' });
     if (await limited(reply, me)) return;
+    const host = await groupHostOf(id);
+    if (host) return remoteOp(reply, me, id, host, 'title', { title });
     const res = await updateGroupInfo(me, id, { title });
     if (res.kind === 'same') return reply.code(200).send({ ok: true });
     return answer(reply, me, res);
@@ -120,6 +177,8 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     const { id } = convParams.parse(req.params);
     if (await limited(reply, me)) return;
+    // Э7 часть 1: фото группы чужого дома отсюда не меняется (файл пришлось бы везти хосту) — честный отказ.
+    if (await groupHostOf(id)) return reply.code(403).send({ error: FED_ERRORS.dmGroupHostOnly });
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: 'no file' });
     if (!isSupportedImage(file.mimetype)) return reply.code(400).send({ error: 'unsupported image type (png/jpeg/webp/gif)' });
@@ -146,6 +205,8 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     const { userIds } = z.object({ userIds: userIdList }).parse(req.body);
     if (await limited(reply, me)) return;
     const ids = [...new Set(userIds)].filter((x) => x !== me);
+    const host = await groupHostOf(id);
+    if (host) return remoteOp(reply, me, id, host, 'add', { userIds: ids });
     const refused = await notInvitable(me, ids);
     if (refused.length > 0) return reply.code(403).send({ error: 'group_not_invitable', userIds: refused });
     const res = await addGroupMembers(me, id, ids);
@@ -158,6 +219,8 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     const { id, uid } = z.object({ id: z.string().min(1).max(64), uid: z.string().min(1).max(64) }).parse(req.params);
     if (await limited(reply, me)) return;
+    const host = await groupHostOf(id);
+    if (host) return remoteOp(reply, me, id, host, uid === me ? 'leave' : 'remove', { targetId: uid });
     return answer(reply, me, await removeGroupMember(me, id, uid));
   });
 
@@ -166,6 +229,8 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     const { id } = convParams.parse(req.params);
     if (await limited(reply, me)) return;
+    const host = await groupHostOf(id);
+    if (host) return remoteOp(reply, me, id, host, 'leave', {});
     return answer(reply, me, await removeGroupMember(me, id, me));
   });
 }

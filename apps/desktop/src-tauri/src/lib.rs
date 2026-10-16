@@ -105,6 +105,71 @@ struct DownloadInfo {
     name: String,
     dir: String,
     path: String,
+    /// Откуда качали (`blob:` страницы или ссылка выдачи) — по ней клиент находит свою запись в «Загрузках» и ведёт
+    /// «Показать в папке». Добавлено позже остальных полей: старый клиент его игнорирует. Пусто, если WebView2 не отдал.
+    url: String,
+}
+
+/// Файлы, которые это приложение само сохранило на диск (путь из `gv-download-done`). «Показать в папке»
+/// (`gv_show_in_folder`) открывает ТОЛЬКО их: страница не может заставить оболочку показать произвольный путь.
+/// Живёт до выхода из приложения, последние `SAVED_FILES_MAX`.
+#[cfg(target_os = "windows")]
+static SAVED_FILES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+#[cfg(target_os = "windows")]
+const SAVED_FILES_MAX: usize = 500;
+
+#[cfg(target_os = "windows")]
+fn remember_saved(path: &str) {
+    if let Ok(mut g) = SAVED_FILES.lock() {
+        let p = std::path::PathBuf::from(path);
+        g.retain(|x| *x != p);
+        g.push(p);
+        let over = g.len().saturating_sub(SAVED_FILES_MAX);
+        if over > 0 {
+            g.drain(..over);
+        }
+    }
+}
+
+/// «Показать в папке» (tdesktop `File::ShowInFolder`, `core/file_utilities.cpp`): Проводник с выделенным файлом. Путь —
+/// только из списка сохранённых этим приложением (`SAVED_FILES`). Файл уже убрали — открываем его папку, если она на месте.
+#[tauri::command]
+fn gv_show_in_folder(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let wanted = std::path::PathBuf::from(&path);
+        let known = SAVED_FILES
+            .lock()
+            .map(|g| g.iter().any(|p| *p == wanted))
+            .unwrap_or(false);
+        if !known {
+            return Err("файл не из сохранённых этим приложением".into());
+        }
+        // Проводник читает путь после запятой сам; кавычка в пути Windows невозможна, но не полагаемся на это.
+        if path.contains('"') {
+            return Err("недопустимый путь".into());
+        }
+        let win = path.replace('/', "\\");
+        let mut cmd = std::process::Command::new("explorer.exe");
+        if wanted.exists() {
+            cmd.raw_arg(format!("/select,\"{win}\""));
+        } else {
+            match wanted.parent() {
+                Some(dir) if dir.exists() => {
+                    cmd.raw_arg(format!("\"{}\"", dir.to_string_lossy().replace('/', "\\")));
+                }
+                _ => return Err("файл и папка уже недоступны".into()),
+            }
+        }
+        // Код возврата explorer.exe бывает 1 и при успехе — его не ждём.
+        cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("gv_show_in_folder is Windows-only".into())
+    }
 }
 
 /// Emitted instead of downloading when we have nowhere to put the file. The client picks a folder and
@@ -248,7 +313,15 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                         .collect();
                     args.SetResultFilePath(windows::core::PCWSTR(wide.as_ptr()))?;
                 }
+                // Откуда качаем (для клиента — привязать файл к своей записи). Не отдал — пусто, не ошибка.
+                let mut uri_raw = windows::core::PWSTR::null();
+                let uri = if op.Uri(&mut uri_raw).is_ok() {
+                    take_pwstr(uri_raw)
+                } else {
+                    String::new()
+                };
                 let info = DownloadInfo {
+                    url: uri,
                     name: target
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
@@ -269,6 +342,7 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                         let mut st = COREWEBVIEW2_DOWNLOAD_STATE::default();
                         op.State(&mut st)?;
                         if st == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
+                            remember_saved(&info.path);
                             let _ = app_done.emit("gv-download-done", info.clone());
                         } else if st == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
                             let _ = app_done.emit("gv-download-failed", info.clone());
@@ -307,9 +381,15 @@ mod os_notify;
 /// Тост беседы с полем ответа и «Прочитано» (Р1, G17) — WinRT напрямую: у notify-rust поля ввода нет.
 #[cfg(desktop)]
 mod notify_conv;
+/// Свои всплывающие уведомления на ПК, как у Telegram Desktop (G38, ND-07) — окно `overlay::NOTIFY`.
+#[cfg(desktop)]
+mod notify_popup;
 /// Число непрочитанных ЛС на значке панели задач и в трее (Р1, G39).
 #[cfg(desktop)]
 mod unread_badge;
+/// Заставка при запуске (15.10): страховка «главное окно всё равно покажется» и команды окна `splash`.
+#[cfg(desktop)]
+mod splash;
 #[cfg(desktop)]
 mod overlay;
 /// Нативная тряска ОКНА для МЕГА пока (#117). Десктоп целиком — двигать окно умеет любая из
@@ -1245,7 +1325,23 @@ pub fn run() {
             #[cfg(desktop)]
             notify_conv::gv_notify_remove,
             #[cfg(desktop)]
+            notify_popup::gv_notify_popup_push,
+            #[cfg(desktop)]
+            notify_popup::gv_notify_popup_action,
+            #[cfg(desktop)]
+            notify_popup::gv_notify_popup_layout,
+            #[cfg(desktop)]
+            notify_popup::gv_notify_popup_monitors,
+            #[cfg(desktop)]
             unread_badge::gv_set_unread_badge,
+            #[cfg(desktop)]
+            splash::gv_splash_ping,
+            #[cfg(desktop)]
+            splash::gv_splash_done,
+            #[cfg(desktop)]
+            splash::gv_launch_splash,
+            #[cfg(desktop)]
+            splash::gv_update_test_mode,
             gv_open_external,
             gv_tray_set_state,
             gv_overlay_show,
@@ -1267,6 +1363,7 @@ pub fn run() {
             gv_list_apps,
             gv_overlay_watch,
             gv_set_download_dir,
+            gv_show_in_folder,
             gv_close_ack,
             gv_window_covered,
             gv_window_cover_pct,
@@ -1293,6 +1390,11 @@ pub fn run() {
                 // Второе окно — всплывающая плашка «кто кого типнул». Создаётся ЗДЕСЬ по той же
                 // причине, что и первое: `build()` из команды дедлочит событийный цикл Windows.
                 let _ = overlay::ensure(_app.handle(), overlay::TOAST);
+                // Третье — свои всплывающие уведомления (G38, `notify_popup.rs`), по той же причине здесь.
+                let _ = overlay::ensure(_app.handle(), overlay::NOTIFY);
+                // Заставка при запуске (окно `splash` есть только в Windows-сборке, `tauri.windows.conf.json`):
+                // сторож покажет главное окно, если заставка замолчит (`splash.rs`).
+                splash::start(_app.handle());
                 if let Some(window) = _app.get_webview_window("main") {
                     let emitter = window.clone();
                     let handle = _app.handle().clone();

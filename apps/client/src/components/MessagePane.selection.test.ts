@@ -26,7 +26,10 @@ h.mutantTest('R114 подписи панели выделения и число 
       const context = new Event('contextmenu', { bubbles: true, cancelable: true });
       Object.defineProperty(context, 'pointerType', { value: 'touch' });
       await act(async () => { first.dispatchEvent(context); await h.flush(); });
-      assert.ok(h.host.querySelector('.sel-head'), 'касательное меню включает пачку');
+      const choose = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find((b) => b.textContent?.trim() === 'Выбрать');
+      assert.ok(choose, 'касательное меню предлагает выбор сообщения');
+      await act(async () => { choose.click(); await h.flush(); });
+      assert.ok(h.host.querySelector('.sel-head'), 'пункт меню включает пачку');
       const reply = h.host.querySelector('.sel-bar-btn .sel-bar-label');
       assert.equal(reply?.textContent, 'Ответить', 'при одном выбранном подпись ответа обёрнута отдельно');
       await act(async () => { second.click(); await h.flush(); });
@@ -93,7 +96,10 @@ async function checkSelectionKeyboard(component: typeof h.Pane, confirm = h.Conf
       const touchRow = h.host.querySelector<HTMLElement>('[data-mid="key-touch"]'); assert.ok(touchRow, 'телефонная строка смонтирована');
       const context = new Event('contextmenu', { bubbles: true, cancelable: true }); Object.defineProperty(context, 'pointerType', { value: 'touch' });
       await act(async () => { touchRow.dispatchEvent(context); await h.flush(); });
-      assert.ok(h.host.querySelector('.sel-head'), 'touch contextmenu при первом жесте включает выбор, не мышиное меню');
+      const choose = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find((b) => b.textContent?.trim() === 'Выбрать');
+      assert.ok(choose, 'touch contextmenu сначала открывает меню с выбором');
+      await act(async () => { choose.click(); await h.flush(); await h.delay(220); });
+      assert.ok(h.host.querySelector('.sel-head'), 'Выбрать включает выбор одного сообщения');
       const secondContext = new Event('contextmenu', { bubbles: true, cancelable: true }); Object.defineProperty(secondContext, 'pointerType', { value: 'touch' });
       await act(async () => { touchRow.dispatchEvent(secondContext); await h.flush(); });
       assert.ok(!document.querySelector('.ctx-menu'), 'touch contextmenu внутри выделения не открывает мышиное меню');
@@ -362,36 +368,29 @@ async function checkCancelSendingMenus(component: typeof h.Pane) {
   h.unmount(); calls.length = 0;
   const restore = h.pointerLayout(true, 390); h.mobile();
   try {
-    localStorage.setItem('gv_dm_bubbles', '0');
     await h.mount({ outbox }, component);
     const phoneRow = h.host.querySelector<HTMLElement>('.message.outgoing'); assert.ok(phoneRow, 'телефонная строка отправки доступна');
     await act(async () => { h.touch(phoneRow, 'touchstart', 20, 20); await h.delay(510); h.touch(phoneRow, 'touchend', 20, 20); await h.flush(); });
     await act(async () => { await h.delay(450); });
-    const sheetAction = [...document.querySelectorAll<HTMLButtonElement>('.sheet button')].find((b) => b.textContent?.includes('Отменить отправку'));
-    assert.ok(sheetAction, 'старый мобильный лист содержит отмену sending');
-    await act(async () => { sheetAction.click(); await h.flush(); });
-    assert.deepEqual(calls, ['sending-key'], 'мобильный лист отменяет запись отправки ровно один раз');
-    h.unmount(); calls.length = 0; h.round12();
-    await h.mount({ outbox: { ...outbox, items: [sending] } }, component);
-    const bubble = h.host.querySelector<HTMLElement>('.message.outgoing'); assert.ok(bubble, 'третья точка входа смонтировала исходящую строку');
-    await act(async () => { h.touch(bubble, 'touchstart', 20, 20); await h.delay(510); h.touch(bubble, 'touchend', 20, 20); await h.flush(); });
-    await act(async () => { await h.delay(450); });
+    assert.equal(document.querySelector('.sheet') === null, true, 'удержание не возвращает старый outSheet');
+    assert.ok(document.querySelector('.ctx-stack.anchored'), 'меню отправки закреплено у пузыря');
     const bubbleAction = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find((b) => b.textContent?.includes('Отменить отправку'));
-    assert.ok(bubbleAction, 'меню пузыря в новом mobile-пути также содержит отмену');
+    assert.ok(bubbleAction, 'меню пузыря телефона содержит отмену');
     await act(async () => { bubbleAction.click(); await h.flush(); });
-    assert.deepEqual(calls, ['sending-key'], 'в третьем меню отмена вызывает тот же outbox discard');
+    assert.deepEqual(calls, ['sending-key'], 'меню телефона отменяет нужный ключ ровно один раз');
   } finally { if (h.root) h.unmount(); h.desktop(); restore(); wide(); }
 }
 
 h.mutantTest('мутант оставляет отмену отправки только в части меню', async () => {
-  // Три разметки разошлись бы при следующем рефакторе; общий обработчик отмены должен остаться у каждой.
+  // ПК остаётся рабочим: сценарий обязан дойти до телефона и обнаружить потерю именно его команды.
   await h.rejectMutant((source) => {
-    const occurrences = source.match(/cancelSending\(o\.key\);/g) ?? [];
-    assert.equal(occurrences.length, 3, 'в исходнике есть три команды отмены: контекстное, sheet и меню у пузыря');
-    const changed = source.replaceAll('cancelSending(o.key);', '/* mutant: отправка остаётся живой */');
-    assert.notEqual(changed, source, 'все три команды отмены удалены мутантом');
-    return changed;
-  }, checkCancelSendingMenus);
+    const at = source.indexOf('{outMenu?.bubble &&');
+    assert.ok(at >= 0, 'найдена живая ветка меню у пузыря');
+    const tail = source.slice(at);
+    const changed = tail.replace('cancelSending(o.key);', '/* mutant: отправка остаётся живой */');
+    assert.notEqual(changed, tail, 'убрана команда только телефонного меню');
+    return source.slice(0, at) + changed;
+  }, checkCancelSendingMenus, 'меню телефона отменяет нужный ключ ровно один раз');
 });
 
 it('«Отменить отправку» доступно в широком меню и phone bubble menu', async () => {

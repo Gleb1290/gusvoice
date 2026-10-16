@@ -1,4 +1,4 @@
-import { formatDuration, isRoundVideo, isVoiceMessage, type Attachment } from '@gusvoice/shared';
+import { formatDuration, isMusicFile, isRoundVideo, isVoiceMessage, type Attachment } from '@gusvoice/shared';
 import { useState } from 'react';
 import { api } from '../api';
 import { loadedByHandHas, markLoadedByHand, saveDataOn, useAutoDownload, useAutoLoad } from '../autoDownload';
@@ -11,7 +11,7 @@ import { Icon } from './Icon';
 import { SpoilerCover, useSpoilerHidden } from './SpoilerCover';
 import { VideoAttachment } from './VideoAttachment';
 import { RoundVideo } from './RoundVideo';
-import { VoiceMessage, type VoiceMeta } from './VoiceMessage';
+import { MusicFileCard, VoiceMessage, type VoiceMeta } from './VoiceMessage';
 
 /**
  * Вложение в ленте — картинка, видео, голосовое или карточка файла. Вынесено из `MessagePane` (06.10), чтобы вид «Отложенные»
@@ -56,8 +56,12 @@ export function AttachmentView({
   const roundAutoplay = shouldAutoplayRound(autoSettings, saveDataOn());
   const key = attachmentKey(a);
   const [byHand, setByHand] = useState(() => loadedByHandHas(key));
+  // B12: файла нет в хранилище / не картинка — вместо сырой браузерной «битой» картинки аккуратная плитка (как Telegram).
+  const [brokenUrl, setBrokenUrl] = useState<string | null>(null);
   /* Закрытый файл ЛС из кеша на диске (этап 2, шаг 2б): ссылки нет — она своя у каждого и гаснет, поэтому не
      кешируется. Держим место по размеру и ждём свежую порцию — она приносит ссылку за доли секунды. */
+  // Э3 (#141, `fedm3`): копия файла с инстанса автора ещё едет — к файлу не обращаемся (отдача ответила бы 503), рисуем заглушку «Загружается…».
+  if (a.fedState === 'copying') return <CopyingAttachment a={a} fill={fill} />;
   if (!a.url) {
     // Видео держит место так же, как фото: в ленте оно тоже кадр, а не карточка (06.10).
     if (!a.asFile && (isImage(a.contentType) || isVideo(a.contentType))) {
@@ -124,6 +128,19 @@ export function AttachmentView({
   }
   if (isImage(a.contentType)) {
     const box = fill ? null : attachmentBox(a.width, a.height, ATT_IMG_MAX_W, ATT_IMG_MAX_H);
+    if (brokenUrl === a.url) {
+      return (
+        <div
+          className="att-img att-pending att-broken"
+          role="img"
+          aria-label={a.name}
+          title={a.name}
+          style={box ? { width: box.width, aspectRatio: `${box.width} / ${box.height}` } : undefined}
+        >
+          <Icon name="photo" size={32} />
+        </div>
+      );
+    }
     return (
       <div className={`att-img-wrap${hidden ? ' spoiled' : ''}`}>
         <button type="button" className="att-img-link" title={a.name} onClick={() => onOpen?.(a)}>
@@ -136,6 +153,7 @@ export function AttachmentView({
             src={a.url}
             alt={a.name}
             loading="lazy"
+            onError={() => setBrokenUrl(a.url)}
             style={box ? { width: box.width, aspectRatio: `auto ${box.width} / ${box.height}` } : undefined}
           />
         </button>
@@ -145,8 +163,72 @@ export function AttachmentView({
       </div>
     );
   }
+  // Аудиофайл (15.10; звук не бывает ни картинкой, ни видео, ни «как файл» — проверка последней, приёмка 0.9.0): mp3/m4a/ogg/opus/flac/wav — музыкальной карточкой с ▶ и длительностью, как Telegram;
+  // форматы, которых WebView не играет, остаются файлом (`isMusicFile`, `shared/voiceMessage.ts`). «⬇» — тот же значок, что у картинки.
+  if (isMusicFile(a))
+    return <MusicFileCard a={a} sizeLabel={kb(a.size)} meta={voice} badge={<DownloadBadge a={a} href={dl} cls="att-file-dl att-audio-dl" />} />;
   // Карточка файла: веб и десктоп — прежняя ссылка; приложение Android — открыть / в «Загрузки» с прогрессом (06.10).
   return <FileCard a={a} href={dl} sizeLabel={kb(a.size)} />;
+}
+
+/**
+ * Э3 (#141, `fedm3`): вложение с `fedState: 'copying'` — файл прислал человек другого инстанса, и его копия на наш инстанс ещё едет.
+ * Ни запроса к файлу, ни просмотра, ни скачивания (нет `data-att` — меню файла не цепляется). Фото, видео, GIF — плитка того же размера
+ * (по `width`/`height`), затенённая, в центре крутилка, в углу «Загружается…» (как заглушка `MediaStub`, у Telegram — круг загрузки на
+ * месте медиа); кружок — круг с крутилкой; голосовое — плеер неактивен, подпись «загружается»; файл — карточка без ссылки.
+ */
+function CopyingAttachment({ a, fill }: { a: Attachment; fill: boolean }) {
+  if (isVoiceMessage(a)) {
+    const bars = a.waveform?.length ? a.waveform : Array.from({ length: 40 }, () => 20);
+    return (
+      <div className="voice-msg voice-copying" aria-busy="true" aria-label="Голосовое сообщение загружается">
+        <span className="voice-play" aria-disabled="true">
+          <span className="confirm-spin att-spin" aria-hidden="true" />
+        </span>
+        <div className="voice-wave" role="presentation">
+          {bars.map((v, i) => (
+            <span key={i} className="voice-bar" style={{ height: `${Math.max(8, v)}%` }} />
+          ))}
+        </div>
+        <span className="voice-time">{a.durationMs ? formatDuration(a.durationMs) : ''}</span>
+        <span className="voice-copying-note">загружается</span>
+      </div>
+    );
+  }
+  if (isRoundVideo(a)) {
+    return (
+      <div className="round-msg" aria-busy="true" aria-label="Видеосообщение загружается">
+        <div className="round-msg-btn att-copying">
+          <span className="confirm-spin att-spin big" aria-hidden="true" />
+        </div>
+      </div>
+    );
+  }
+  if (!a.asFile && (isImage(a.contentType) || isVideo(a.contentType))) {
+    const box = fill ? null : attachmentBox(a.width || STUB_VIDEO_W, a.height || STUB_VIDEO_H, ATT_IMG_MAX_W, ATT_IMG_MAX_H);
+    return (
+      <div className="att-img-wrap">
+        <div className="att-video att-copying" aria-busy="true" aria-label={`${a.name}: загружается`} title={a.name}>
+          <span className="att-img att-pending" style={box ? { width: box.width, aspectRatio: `${box.width} / ${box.height}` } : undefined} />
+          <span className="att-play" aria-hidden="true">
+            <span className="confirm-spin att-spin big" />
+          </span>
+          <span className="att-dur" aria-hidden="true">
+            Загружается… · {kb(a.size)}
+          </span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <span className="att-file att-copying" title={a.name} aria-busy="true">
+      <span className="att-file-icon">
+        <span className="confirm-spin att-spin" aria-hidden="true" />
+      </span>
+      <span className="att-file-name">{a.name}</span>
+      <span className="att-file-size">загружается · {kb(a.size)}</span>
+    </span>
+  );
 }
 
 /** Нет размера во вложении — видео держит 16:9, фото — квадрат (как место до загрузки). */

@@ -529,27 +529,6 @@ describe('голос переживает навигацию между инст
     assert.equal(Object.keys(f.get().channelDrafts).length, 0);
   });
 
-  it('DM-реакция ведёт список новых участников, но не выдумывает список для старой группы', () => {
-    // Старый gateway присылает только дельту: нельзя выдавать уже существовавших участников за известных.
-    const f = storeFixture();
-    const old = { emoji: '🔥', count: 4, me: false };
-    f.set({ user: { id: 'me' }, dmMessages: { c: [{ id: 'm', reactions: [old] }] } });
-    f.get().applyDmReaction('c', 'm', '🔥', 'peer-1', 'add');
-    let reaction = f.get().dmMessages.c[0].reactions![0];
-    assert.equal(reaction.count, 5);
-    assert.equal('reactors' in reaction, false, 'legacy group remains unknown rather than inventing identities');
-    f.get().applyDmReaction('c', 'm', '✨', 'peer-2', 'add');
-    reaction = f.get().dmMessages.c[0].reactions!.find((r: { emoji: string }) => r.emoji === '✨')!;
-    assert.equal(reaction.reactors?.map((r: { userId: string }) => r.userId).join(','), 'peer-2');
-    f.get().applyDmReaction('c', 'm', '✨', 'peer-3', 'add');
-    reaction = f.get().dmMessages.c[0].reactions!.find((r: { emoji: string }) => r.emoji === '✨')!;
-    assert.equal(reaction.reactors?.map((r: { userId: string }) => r.userId).join(','), 'peer-2,peer-3');
-    f.get().applyDmReaction('c', 'm', '✨', 'peer-2', 'remove');
-    reaction = f.get().dmMessages.c[0].reactions!.find((r: { emoji: string }) => r.emoji === '✨')!;
-    assert.equal(reaction.count, 1);
-    assert.equal(reaction.reactors?.map((r: { userId: string }) => r.userId).join(','), 'peer-3');
-  });
-
   it('восстановление при живом голосе ничего не читает и не меняет навигацию', async () => {
     // Ловит переподключение гостевого голоса при bootstrap домашнего экрана.
     const f = storeFixture();
@@ -588,7 +567,7 @@ it('фоновый шлюз передаёт перемещение и закр�
     close() { this.readyState = 3; }
   }
   const mod = load<typeof import('./bgGateways')>('bgGateways.ts', {
-    '@gusvoice/shared': { mentionsMe: () => false }, './socketHealth': { PING_MS: 30_000, socketStale: () => false },
+    '@gusvoice/shared': { CAP_CONV1: 'conv1', mentionsMe: () => false }, './socketHealth': { PING_MS: 30_000, socketStale: () => false },
     './config': { instances: () => [{ id: 'home', apiUrl: 'https://home.test', token: 'h' }, { id: 'guest', apiUrl: 'https://guest.test', token: 'g' }], rememberInstanceServers: () => {} },
   }, { WebSocket: FakeSocket, fetch: async (url: string) => Response.json(url.endsWith('/unread') ? { servers: {}, dms: 0 } : { username: 'me' }) });
   const events: import('./bgGateways').BgVoiceEvent[] = [];
@@ -606,6 +585,152 @@ it('фоновый шлюз передаёт перемещение и закр�
     guest.onmessage!({ data: JSON.stringify({ t: 'voice.move', channelId: 'gc' }) });
     assert.equal(events.length, 2);
   } finally { unsub(); mod.stopBgGateways(); }
+});
+
+function bgConvContract(text: string): void {
+  const ast = ts.createSourceFile('bgGateways.ts', text, ts.ScriptTarget.Latest, true);
+  let identifies = 0;
+  const visit = (node: ts.Node) => {
+    if (ts.isCaseClause(node) && ts.isStringLiteral(node.expression)) {
+      assert.notEqual(node.expression.text, 'dm.create', 'старого события ЛС в шлюзе нет');
+    }
+    if (ts.isObjectLiteralExpression(node) && node.properties.some(p =>
+      ts.isPropertyAssignment(p) && p.name.getText(ast) === 't' &&
+      ts.isStringLiteral(p.initializer) && p.initializer.text === 'identify')) {
+      identifies++;
+      const caps = node.properties.find(p => ts.isPropertyAssignment(p) && p.name.getText(ast) === 'caps');
+      assert.ok(caps && ts.isPropertyAssignment(caps) && ts.isArrayLiteralExpression(caps.initializer), 'identify объявляет caps');
+      assert.deepEqual(caps.initializer.elements.map(e => e.getText(ast)), ['CAP_CONV1']);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(identifies, 1, 'проверен настоящий identify фонового шлюза');
+}
+
+async function withBgConv(run: (mod: typeof import('./bgGateways'), socket: FakeBgConvSocket) => void,
+  mutate?: (s: string) => string): Promise<void> {
+  const sockets: FakeBgConvSocket[] = [];
+  class Socket extends FakeBgConvSocket {
+    constructor(url: string) { super(url); sockets.push(this); }
+  }
+  const mod = load<typeof import('./bgGateways')>('bgGateways.ts', {
+    '@gusvoice/shared': { CAP_CONV1: 'conv1', mentionsMe: () => false },
+    './socketHealth': { PING_MS: 30_000, socketStale: () => false },
+    './config': { instances: () => [{ id: 'background', apiUrl: 'https://background.test', token: 'test-token' }], rememberInstanceServers: () => {} },
+  }, {
+    WebSocket: Socket,
+    fetch: async (url: string) => Response.json(url.endsWith('/unread') ? { servers: {}, dms: 4 } : url.endsWith('/servers') ? [] : { username: 'local' }),
+    setInterval: () => 1, clearInterval: () => {},
+  }, mutate);
+  try {
+    mod.syncBgGateways(null);
+    for (let i = 0; i < 20 && sockets.length === 0; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(sockets.length, 1, 'открыт фоновый сокет после HTTP-сводки');
+    const socket = sockets[0];
+    socket.onopen!();
+    socket.receive({ t: 'ready', userId: 'local-id' });
+    assert.equal(mod.bgUnread().background.dms, 4, 'начало не с нуля, а со сводки сервера');
+    run(mod, socket);
+  } finally { mod.stopBgGateways(); }
+}
+
+class FakeBgConvSocket {
+  static OPEN = 1;
+  readyState = 1;
+  onmessage: ((e: { data: string }) => void) | null = null;
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  frames: Record<string, unknown>[] = [];
+  constructor(public url: string) {}
+  send(data: string) { this.frames.push(JSON.parse(data)); }
+  close() { this.readyState = 3; }
+  receive(msg: object) { this.onmessage!({ data: JSON.stringify(msg) }); }
+}
+
+const foreignConvCreated = () => ({ t: 'conv.change', created: true, message: { author: { id: 'foreign-id' } } });
+
+describe('R136 фоновые ЛС приходят только через conv.change', () => {
+  it('identify объявляет conv1, старого dm.create нет даже при возврате мутантом', () => {
+    // Без capability сервер продолжил бы слать событие, обработчика которого больше нет.
+    const original = source('bgGateways.ts');
+    bgConvContract(original);
+    const noCaps = original.replace('caps: [CAP_CONV1]', '');
+    assert.notEqual(noCaps, original);
+    assert.throws(() => bgConvContract(noCaps), assert.AssertionError);
+    const oldEvent = original.replace("case 'conv.change':", "case 'dm.create':\n      case 'conv.change':");
+    assert.notEqual(oldEvent, original);
+    assert.throws(() => bgConvContract(oldEvent), assert.AssertionError);
+  });
+
+  it('новое чужое сообщение увеличивает фоновый счётчик ровно на один', async () => {
+    // Парный принимаемый путь исключает шлюз, который молча отвергает все события.
+    await withBgConv((mod, socket) => {
+      assert.deepEqual(socket.frames[0], { t: 'identify', token: 'test-token', caps: ['conv1'] });
+      socket.receive(foreignConvCreated());
+      assert.equal(mod.bgUnread().background.dms, 5);
+      assert.deepEqual(Object.keys(mod.bgUnread().background.servers), []);
+    });
+  });
+
+  it('своё сообщение определяется по ready и не увеличивает счётчик', async () => {
+    // Ник из auth/me не заменяет id текущего автора, присланный шлюзом.
+    await withBgConv((mod, socket) => {
+      socket.receive({ ...foreignConvCreated(), message: { author: { id: 'local-id' } } });
+      assert.equal(mod.bgUnread().background.dms, 4);
+    });
+  });
+
+  it('правка без created и created:false не выдаются за новое сообщение', async () => {
+    // Редактирование не должно каждый раз зажигать новый непрочитанный значок.
+    await withBgConv((mod, socket) => {
+      socket.receive({ t: 'conv.change', message: foreignConvCreated().message });
+      socket.receive({ ...foreignConvCreated(), created: false });
+      assert.equal(mod.bgUnread().background.dms, 4);
+    });
+  });
+
+  it('надгробие сообщения не увеличивает счётчик и не требует author', async () => {
+    // ConvGone не содержит автора: проверка gone обязана предшествовать чтению author.id.
+    await withBgConv((mod, socket) => {
+      socket.receive({ ...foreignConvCreated(), message: { gone: true } });
+      socket.receive({ ...foreignConvCreated(), message: { gone: false } });
+      assert.equal(mod.bgUnread().background.dms, 4);
+    });
+  });
+
+  it('сводка беседы без message не увеличивает счётчик даже при created', async () => {
+    // Изменение метаданных беседы не равно получению текста от собеседника.
+    await withBgConv((mod, socket) => {
+      socket.receive({ t: 'conv.change', conversation: { id: 'conversation' } });
+      socket.receive({ t: 'conv.change', created: true, conversation: { id: 'conversation' } });
+      assert.equal(mod.bgUnread().background.dms, 4);
+    });
+  });
+
+  it('мутанты без created, авторского фильтра и gone нарушают тот же счётчик', async () => {
+    // Каждый контрфакт проверяется тем же наблюдением на оригинале, а не наличием строки.
+    const cases = [
+      { before: '!msg.created || ', after: '', msg: { t: 'conv.change', message: foreignConvCreated().message } },
+      { before: 'if (link.userId && msg.message.author.id === link.userId) return;', after: '', msg: { ...foreignConvCreated(), message: { author: { id: 'local-id' } } } },
+      { before: " || 'gone' in msg.message", after: '', msg: { ...foreignConvCreated(), message: { gone: true, author: { id: 'foreign-id' } } } },
+    ];
+    for (const c of cases) {
+      const verify = (mod: typeof import('./bgGateways'), socket: FakeBgConvSocket) => {
+        socket.receive(c.msg);
+        assert.equal(mod.bgUnread().background.dms, 4);
+      };
+      await withBgConv(verify);
+      await assert.rejects(() => withBgConv(verify, s => {
+        // Авторский фильтр есть и у канальных сообщений — меняем только conv.change.
+        const start = s.indexOf("case 'conv.change':");
+        assert.ok(start >= 0);
+        const tail = s.slice(start);
+        assert.ok(tail.includes(c.before), `найден мутируемый гейт ${c.before}`);
+        return s.slice(0, start) + tail.replace(c.before, c.after);
+      }), assert.AssertionError);
+    }
+  });
 });
 
 it('домашняя админка выбирает свой API без смены активного инстанса', () => {

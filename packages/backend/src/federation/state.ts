@@ -30,6 +30,8 @@ export interface FederationDeps {
   apiBase: string;
   /** Только для диагностики: решения по версии приложения не принимаются (`federation-compat.md`). */
   appVersion: string | null;
+  /** ЛС между инстансами (Э1, `FEDERATION_DM_ENABLED`): объявлять `dm1`. Нет поля — не объявлять (как до Э1). */
+  dmEnabled?: boolean;
   log(level: 'info' | 'warn' | 'error', message: string): void;
 }
 
@@ -165,7 +167,36 @@ export function createFederation(deps: FederationDeps): Federation {
          * жалобы (§5.11), и у соседа галочка «Пожаловаться» тогда неактивна — с подсказкой, а не
          * с отправкой в пустоту.
          */
-        features: [FED_FEATURES.link, FED_FEATURES.directory, FED_FEATURES.guests, FED_FEATURES.reports],
+        // `dm1` (Э1, #141) — только при `FEDERATION_DM_ENABLED`: маршрут `conv.open` без флага не регистрируется.
+        features: [
+          FED_FEATURES.link,
+          FED_FEATURES.directory,
+          FED_FEATURES.guests,
+          FED_FEATURES.reports,
+          ...(deps.dmEnabled ? [FED_FEATURES.dm1] : []),
+          // `dm2` (Э3, #141): вложения между инстансами (`GET /fed/v1/att/:id`, копия при приёме) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dm2] : []),
+          // `dm2once` (Э3 часть 3, #141): «один раз» у голосового/кружка между инстансами (пометка `once`, `listen`) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dm2once] : []),
+          // `dm3` (Э4, #141): мгновенное — `POST /fed/v1/ephemeral` («печатает», «в сети / был(а)») — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dm3] : []),
+          // `dm4` (Э5 часть 1, #141): приём «через»-сообщений по долгой сессии и их сверка домом автора — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dm4] : []),
+          // `dmcall1` (Э6, #141): звонки 1:1 с людьми соседа (`POST /fed/v1/call/invite`, событие `call.state`) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmcall1] : []),
+          // `dmgroup1` (Э7 часть 1, #141): группы со смешанным составом (звезда через хост, подпись дома автора) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmgroup1] : []),
+          // `dmgroup2` (Э7 часть 3, #141): «печатает» и «через» в группах со смешанным составом (пересылка хостом) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmgroup2] : []),
+          // `dmgroupmarks1` (Э7 часть 3, #141): реакции/«прочитано»/закреп/«прослушано» в группах между инстансами — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmgroupmarks1] : []),
+          // `dmalbum1` (G56): правка копии с меньшим списком вложений (убран один элемент альбома) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmalbum1] : []),
+          // `dmmedia1` (G69): геопозиция и карточка контакта (`media` в строке `msg`) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmmedia1] : []),
+          // `dmpoll1` (14.10): опрос в ЛС с людьми соседа — определение в `media`, голоса строкой `pollvote` — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dmpoll1] : []),
+        ],
         appVersion: deps.appVersion,
         rootKey: Buffer.from(identity.rootPublicKeyDer).toString('base64url'),
         keys: publishedKeys(keys, now).map(toDocumentKey),

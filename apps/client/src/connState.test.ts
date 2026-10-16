@@ -4,13 +4,13 @@ import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
 
-function fixture(browser = true) {
+const source = readFileSync(new URL('./connState.ts', import.meta.url), 'utf8');
+function fixture(browser = true, raw = source) {
   const handlers = new Map<string, () => void>();
   const navigator = { onLine: true };
   let changes = 0;
   let release: (() => void) | undefined;
   const module = { exports: {} };
-  const raw = readFileSync(new URL('./connState.ts', import.meta.url), 'utf8');
   const code = ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   runInNewContext(code, { module, exports: module.exports,
     ...(browser ? { navigator, window: { addEventListener: (key: string, fn: () => void) => handlers.set(key, fn) } } : {}),
@@ -62,4 +62,30 @@ it('первая подписка сразу видит уже отключён�
   // Вкладка могла открыться уже без сети, когда нового события браузер не пришлёт.
   const f = fixture(); f.navigator.onLine = false;
   assert.equal(f.api.useConnState(), 'waiting');
+});
+
+it('R200 gatewayLiveNow истинно только после ready и до обрыва, reset забывает прошлый дом', () => {
+  const { api } = fixture(false);
+  assert.equal(api.gatewayLiveNow(), false); api.setGatewayLive(false); assert.equal(api.gatewayLiveNow(), false);
+  api.setGatewayLive(true); assert.equal(api.gatewayLiveNow(), true);
+  api.setGatewayLive(false); assert.equal(api.gatewayLiveNow(), false);
+  api.setGatewayLive(true); api.resetGatewayLive(); assert.equal(api.gatewayLiveNow(), false);
+});
+function observerContract(raw = source) {
+  const f = fixture(true, raw); const events: string[] = [];
+  const off = f.api.onConnChange(state => events.push(state)); f.api.useConnState();
+  f.api.setGatewayLive(true); assert.equal(events.length, 0, 'первый ready не повторяет прежний online');
+  f.api.setGatewayLive(false); assert.equal(events.join(','), 'connecting', 'обходной путь слышит потерю шлюза');
+  f.api.setGatewayLive(false); assert.equal(events.length, 1, 'повтор состояния не будит пробу дома');
+  f.navigator.onLine = false; f.handlers.get('offline')!(); assert.equal(events.join(','), 'connecting,waiting');
+  f.navigator.onLine = true; f.handlers.get('online')!(); assert.equal(events.join(','), 'connecting,waiting,connecting');
+  f.api.setGatewayLive(true); assert.equal(events.at(-1), 'online'); off();
+  const count = events.length; f.api.setGatewayLive(false); assert.equal(events.length, count, 'отписка прекращает внешние уведомления');
+}
+it('R200 onConnChange уведомляет внешнего наблюдателя только о сменах, включая устройство и возвращение дома', () => observerContract());
+it('R200 мутант потерянного onConnChange не запускает договор обхода при обрыве шлюза', () => {
+  observerContract(); const anchor = 'for (const f of listeners) f(next);';
+  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь внешних слушателей');
+  assert.throws(() => observerContract(source.replace(anchor, '')),
+    e => e instanceof assert.AssertionError && e.message.includes('обходной путь слышит потерю шлюза'));
 });

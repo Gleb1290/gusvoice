@@ -12,6 +12,9 @@ import { toastError } from '../toast';
 import { DmHitRow } from './DmListSearch';
 import { ServerHitRow } from './DmServerSearch';
 
+/** Вкладки поиска на телефоне (12.10, #218) — свой модуль; список бесед берёт их отсюда вместе с вкладкой «Все». */
+export { DmKindHits, DmSearchTabs } from './DmSearchKinds';
+
 interface Side<T> {
   status: 'idle' | 'loading' | 'done' | 'error';
   hits: T[];

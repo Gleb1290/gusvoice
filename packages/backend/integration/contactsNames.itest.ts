@@ -48,7 +48,6 @@ async function compileFanOut(mutant?: readonly [string, string][]): Promise<type
     './contactRules.js': await import('../src/contactRules.js'),
     './db/schema.js': await import('../src/db/schema.js'),
     './groupRules.js': await import('../src/groupRules.js'),
-    './dmLegacyEvents.js': { publishLegacySend: async () => {} },
     './push.js': await import('../src/push.js'),
   };
   const module = { exports: {} as Record<string, unknown> };

@@ -278,6 +278,14 @@ export const FEATURE_LASTSEEN2 = 'lastseen2';
 export const FEATURE_LASTSEEN3 = 'lastseen3';
 
 /**
+ * Признак СЕРВЕРА (15.10, #218): «кто прочитал» своё сообщение в группе ЛС — `GET /api/conv/:id/messages/:mid/readers`
+ * (`ConvReaders`), как Telegram `messages.getMessageReadParticipants`: только автору, только группа, не старше 7 суток; без
+ * автора, без скрывших время прочтения (правило `readTimeHidden`, взаимно) и без блокировок в любую сторону. Без признака
+ * клиент строки «N прочитали» не рисует (и в группе не зовёт `read-at` — он только для 1:1).
+ */
+export const FEATURE_READERS1 = 'readers1';
+
+/**
  * Признак СЕРВЕРА (08.10, #211, решения владельца по «в сети» и звонкам):
  * - «в сети» в ЛС — по факту присутствия, всегда (и при «Время захода: Никто» / исключении «никогда»): приватность прячет только
  *   ВРЕМЯ («был(а) недавно» вместо «был(а) 5 минут назад»), взаимно. «Невидимый» действует только на серверах: в ЛС он не влияет.
@@ -339,6 +347,72 @@ export const FEATURE_SAVED1 = 'saved1';
  * Только добавление (правило 11): без признака клиент полей не шлёт и в окне нет переключателей — старый сервер выдал бы автора.
  */
 export const FEATURE_FWD2 = 'fwd2';
+
+/**
+ * Признак СЕРВЕРА (13.10, G56): действия над ОДНИМ элементом альбома, как у Telegram (там элемент альбома — отдельное
+ * сообщение). `DELETE /api/conv/:id/messages/:mid/attachments/:aid?for=me|both` — убрать элемент (`both` — только своё
+ * сообщение, правкой списка вложений; `me` — спрятать у себя; последний видимый — удаление сообщения целиком), ответ
+ * `ConvAlbumItemDeleteResponse`; `POST /api/conv/:id/forward` с `attachmentId` — переслать один элемент. Миграция 0144
+ * (`hidden_attachments`). Только добавление: без признака клиент пунктов «одного элемента» не показывает — старый сервер
+ * не знает ручки и переслал бы альбом целиком.
+ */
+export const FEATURE_ALBUM1 = 'album1';
+
+/**
+ * Признак СЕРВЕРА (14.10, G69): геопозиция и карточка контакта в ЛС. `POST /api/conv/:id/messages` принимает
+ * `media: { kind: 'geo', lat, lon, accuracy? } | { kind: 'contact', userId }` (без текста, вложений и стикера); сообщение
+ * получает `ConvMessage.media` (`shared/convMedia.ts`), а `content` — запасную фразу с координатами и ссылкой на карту или
+ * именем и ником (её видит старый клиент). Миграция 0145 (`conversation_messages.media`). Только добавление: без признака
+ * клиент пунктов «Геопозиция» и «Контакт» в листе вложений не показывает.
+ */
+export const FEATURE_GEOCONTACT1 = 'geocontact1';
+
+/**
+ * Признак СЕРВЕРА (14.10): опрос в ЛС (`shared/convPoll.ts`). `POST /api/conv/:id/messages` принимает
+ * `media: { kind: 'poll', question, options, anonymous?, multi?, quiz?, correct?, solution? }`; сообщение получает
+ * `ConvMessage.media` с `kind: 'poll'` (вид глазами смотрящего: итоги — после своего голоса или закрытия), `content` —
+ * запасной текст «📊 Опрос: …» с вариантами (его видит старый клиент). Голос/отмена — `POST /api/conv/:id/messages/:mid/poll/vote`
+ * (`optionIds`, пусто — отмена), закрыть (автор) — `POST …/poll/close`, «кто голосовал» (неанонимный, итоги открыты) —
+ * `GET …/poll/voters`. Изменения итогов приходят обычным `conv.change` с сообщением. Миграция 0147 (`conv_poll_votes`).
+ * Только в беседах без людей других инстансов (провод соседям — признак связки `dmpoll1`, ещё не сделан): иначе 403
+ * `reason: 'conv_poll_federated'`. Без признака клиент пункта «Опрос» в листе вложений ЛС не показывает.
+ */
+export const FEATURE_CONVPOLL1 = 'convpoll1';
+/** Ответ 403 отправки опроса в беседу с человеком другого инстанса (`convpoll1`). */
+export const CONV_POLL_FEDERATED_ERROR = 'conv_poll_federated';
+
+/**
+ * Признак СЕРВЕРА (14.10): геопозиция в реальном времени в ЛС (`shared/convGeoLive.ts`). `POST /api/conv/:id/messages` принимает
+ * `media: { kind: 'geolive', lat, lon, accuracy?, heading?, period: 900 | 3600 | 28800 }`; сообщение получает `ConvMessage.media`
+ * с `kind: 'geolive'` (`lat, lon, accuracy, heading, period, startedAt, until, updatedAt, stopped`; истёкшая отдаётся с
+ * `stopped: true` — истечение на чтении), `content` — запасной текст с ПЕРВОЙ точкой (его видит старый клиент). Новая точка —
+ * `POST /api/conv/:id/messages/:mid/live` `{ lat, lon, accuracy?, heading? }` (только автор, пока идёт; точка чаще раза в 3 с
+ * принимается молча, без записи), «Остановить» — `POST …/live/stop` (только автор). Обновление приходит участникам обычным
+ * `conv.change` с сообщением (без `editedAt`, без пуша, беседу в списке не поднимает). Только в беседах без людей других
+ * инстансов (провода соседям нет): иначе 403 `reason: 'conv_geolive_federated'`. Без признака клиент пункта «Транслировать
+ * геопозицию» не показывает.
+ */
+export const FEATURE_GEOLIVE1 = 'geolive1';
+/** Ответ 403 отправки трансляции в беседу с человеком другого инстанса (`geolive1`). */
+export const CONV_GEOLIVE_FEDERATED_ERROR = 'conv_geolive_federated';
+
+/**
+ * Признак СЕРВЕРА: картинка карты в карточке геопозиции ЛС (14.10): сервер проксирует Static API Яндекса — `GET /api/maps/static` (`shared/mapStatic.ts`).
+ * Объявляется только при заданном `YANDEX_MAPS_STATIC_KEY`; без признака клиент рисует карточку без картинки. Провод не меняется.
+ */
+export const FEATURE_YAMAP1 = 'yamap1';
+
+/**
+ * Признак СЕРВЕРА: своя карта OpenStreetMap (14.10): плитки PMTiles из файла на сервере — `GET /api/maps/info`, `/api/maps/tiles/{z}/{x}/{y}.mvt`,
+ * `/api/maps/glyphs/…`. Объявляется только при заданном `MAP_PMTILES_PATH`; сильнее `yamap1` (картинка Яндекса остаётся запасной). Провод не меняется.
+ */
+export const FEATURE_OSMMAP1 = 'osmmap1';
+
+/**
+ * Ответ 409 удаления элемента альбома «у обоих» (G56): у человека другого инстанса в беседе дом без признака `dmalbum1`
+ * не понял бы меньший список вложений (у него фото осталось бы). Клиент предлагает удалить сообщение целиком или «у меня».
+ */
+export const ALBUM_ITEM_PEER_OLD_ERROR = 'album_item_peer_old';
 
 /**
  * Признак СЕРВЕРА (07.10, #211, порция 2 групп): заглушка группы (`POST /api/push/mute`, `scope: 'dm_user'`,
@@ -623,6 +697,13 @@ export type GatewayServerMessage =
    */
   | { t: 'federation.links' }
   /**
+   * Связка дома с инстансом, где человек ГОСТЬ, сменила состояние (15.10): разрыв, пауза, снятие паузы, потеря доверия,
+   * перепривязка. Уходит людям из индекса членств этого инстанса (`publishToUser`), без нагрузки — клиент перечитывает
+   * «Где я гость» (`GET /fed/my-guest`, поле `linkState`) и сам убирает группы разорванных связок. Кто ещё с кем связан,
+   * событие не говорит. Старый клиент событие не знает и игнорирует; выключенный — узнает из того же ответа при запуске.
+   */
+  | { t: 'federation.guest_links' }
+  /**
    * Мой кошелёк на сервере изменился. Уходит ТОЛЬКО собственным подключениям человека
    * (`publishToUser`): чужой баланс — не их дело (#117).
    *
@@ -871,6 +952,7 @@ const SERVER_MESSAGE_TYPES: Record<GatewayServerMessage['t'], true> = {
   'server.access_closed': true,
   'server.access_restored': true,
   'federation.links': true,
+  'federation.guest_links': true,
   'economy.wallet': true,
   'economy.tipsFull': true,
   'user.update': true,
@@ -934,3 +1016,80 @@ export function channelFromRoom(room: string): string | null {
  * запросом `/conv/:id/attachments` и держит прежний предел 25 МБ.
  */
 export const FEATURE_BIGFILE1 = 'bigfile1';
+
+/**
+ * «Кто может мне писать» (13.10, #218, решение владельца; Telegram: Настройки → Конфиденциальность → «Сообщения»,
+ * `GlobalPrivacySettings.new_noncontact_peers_require_premium`). `PATCH /users/me` + `messagePrivacy` (`everyone` / `contacts`),
+ * исключения «Всегда разрешать» — `GET`/`PUT /users/me/message-exceptions` (`LastSeenExceptions`, список `never` пуст);
+ * `UserLastSeen.canMessage` в `GET /users/:id/last-seen`; отправка в беседу 1:1 при запрете — 403 `{ error: MESSAGE_PRIVACY_ERROR }`.
+ * Без признака клиент пункт настроек не показывает. Миграция 0146.
+ */
+export const FEATURE_MSGPRIV1 = 'msgpriv1';
+
+/**
+ * Отказ «он ограничил круг людей, которые могут ему писать» (`msgpriv1`; Telegram `PRIVACY_PREMIUM_REQUIRED` →
+ * tdesktop `lng_send_non_premium_message_toast`). Отправка в беседу 1:1 → 403.
+ */
+export const MESSAGE_PRIVACY_ERROR = 'message_privacy';
+
+/**
+ * Опасные ссылки (09.10, #218 п.5, `linkthreats1`): сервер сверяет ссылки сообщения с локальным списком угроз и кладёт в DTO
+ * `Message.dangerousLinks` (хосты) — только у сообщений с такой ссылкой. Отправку не блокирует. Без признака клиент плашку
+ * «Опасная ссылка» не рисует.
+ */
+export const FEATURE_LINKTHREATS1 = 'linkthreats1';
+
+/**
+ * ЛС между инстансами, этап Э1 (12.10, #141, `fedm1`): «Написать» человеку связанного инстанса — поиск `@имя@домен` и по
+ * имени в кеше каталога (`UserSearchResponse.remote`), `POST /conv/direct` с `{ instanceId, homeUserId }` или с id теневого,
+ * отказы `federation.dm_refused` (+`reason`) / `federation.peer_unreachable` / `federation.unsupported`; настройка инстанса
+ * `fedDmPolicy`. Только при `FEDERATION_DM_ENABLED`. Без признака клиент у людей других инстансов «Написать» не показывает.
+ */
+export const FEATURE_FEDM1 = 'fedm1';
+
+/**
+ * ЛС между инстансами, этап Э2 (12.10, #141, `fedm2`): переписка текстом с человеком другого инстанса работает — поле ввода
+ * в такой беседе открыто (без признака клиент Э1 показывает плашку «появится в следующем обновлении»), у сообщения бывает
+ * `deliveredAt` (Ф9). Вложения до Э3 — отказ `federation.dm_attachments_later` при загрузке. Только при `FEDERATION_DM_ENABLED`.
+ */
+export const FEATURE_FEDM2 = 'fedm2';
+
+/**
+ * ЛС между инстансами, этап Э5 часть 1 (12.10, #141, `fedm5`): сервер умеет «мой дом лежит — пишу через инстанс собеседника» —
+ * `GET /conv/:id/fallback` (реквизиты долгой сессии на инстансе собеседника), `POST /conv/via-claims` (отчёт об отправленном в
+ * обход), у сообщения бывает `via`. Только при `FEDERATION_DM_ENABLED`.
+ */
+export const FEATURE_FEDM5 = 'fedm5';
+
+/**
+ * ЛС между инстансами, этап Э6 (12.10, #141, `fedcall1`): звонки 1:1 с человеком другого инстанса. Сервер объявляет его в
+ * `/auth/me features`; клиент, который умеет такой звонок, шлёт тот же признак в `identify.caps` — только таким соединениям
+ * дом шлёт `call.state` входящего звонка с `DmCall.host` (пропуск — у инстанса звонящего по гостевой сессии
+ * `GET /conv/:id/fallback?for=call`, ответ — `POST <host.apiBase>/api/calls/:id/answer`). `GET /calls/active?fed=1` отдаёт и
+ * такой звонок. Беседа с соседом без `dmcall1` — `ConvSummary.fedNoCalls`. Только при `FEDERATION_DM_ENABLED`.
+ */
+export const FEATURE_FEDCALL1 = 'fedcall1';
+
+/**
+ * ЛС между инстансами, этап Э7 часть 1 (12.10, #141, `fedm6`): группы со смешанным составом. В `ConvSummary.members` группы
+ * могут быть люди других инстансов (`homeInstance`); `ConvSummary.fedGroupHost` — дом группы, если он не наш (состав меняется
+ * запросом туда; лежит — 403 `federation.dm_group_host_down`). Позвать в группу человека соседа — `POST /conv/group` /
+ * `POST /conv/:id/members` с id его теневой строки (как у беседы 1:1). Только при `FEDERATION_DM_ENABLED`.
+ */
+export const FEATURE_FEDM6 = 'fedm6';
+
+/**
+ * ЛС между инстансами, этап Э3 часть 1 (#141, `fedm3`): файлы в беседе с человеком другого инстанса — загрузка и пересылка
+ * разрешены, если его инстанс умеет `dm2` (иначе в сводке беседы `fedNoFiles: true` и прежний отказ
+ * `federation.dm_attachments_later`); вложение из копии соседа, пока не скопировано к нам, приходит с `fedState: 'copying'`,
+ * а его ссылка отвечает 503 `federation.att_pending`. Только при `FEDERATION_DM_ENABLED`.
+ */
+export const FEATURE_FEDM3 = 'fedm3';
+
+/**
+ * ЛС между инстансами, этап Э4 (#141, `fedm4`): у собеседника с другого инстанса «печатает…» и «в сети / был(а) …» приходят
+ * ТЕМИ ЖЕ событиями и полями, что у местного (`typing` с `dmId`, `online.update`/`online.dm`/`online.snapshot`,
+ * `GET`/`POST /users/last-seen`) — от имени его теневой строки. Нового в событиях нет: признак говорит клиенту, что пустота у
+ * такого собеседника теперь значит «не в сети», а не «не умеем». Только при `FEDERATION_DM_ENABLED`.
+ */
+export const FEATURE_FEDM4 = 'fedm4';

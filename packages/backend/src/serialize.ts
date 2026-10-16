@@ -21,10 +21,16 @@ import { isSuperAdmin } from './auth.js';
 import { asUserId } from './superAdminRules.js';
 import { env } from './env.js';
 import { instanceLabel } from './federation/instanceLabels.js';
+
+/** Дом человека другого инстанса для значка (Э1 ЛС между инстансами: собеседник в сводке беседы) — как `homeInstance` в `serializeUser`. */
+export function homeInstanceOf(homeInstanceId: string | null): ReturnType<typeof instanceLabel> | null {
+  return homeInstanceId ? instanceLabel(homeInstanceId) : null;
+}
 import { statusFieldsOf, statusSeenBy } from './statusRules.js';
 import { animatedAvatarFor, avatarRentalActive } from './shopRules.js';
 import { normalizeCallPrivacy } from './callRules.js';
 import { normalizeLastSeenPrivacy } from './lastSeenRules.js';
+import { dangerousLinksOf } from './linkThreats.js';
 
 type UserRow = {
   id: string;
@@ -54,6 +60,7 @@ type UserRow = {
   lastSeenPrivacy?: string | null;
   hideReadTime?: boolean | null;
   callPrivacy?: string | null;
+  messagePrivacy?: string | null;
   notifyView?: string | null;
   notifyGroups?: boolean | null;
   notifyDm?: boolean | null;
@@ -132,6 +139,8 @@ export function serializeUser(u: UserRow, viewerId?: string): User {
           hideReadTime: u.hideReadTime ?? false,
           // «Кто может звонить» (`presence4`) — тоже только своему профилю.
           callPrivacy: normalizeCallPrivacy(u.callPrivacy),
+          // «Кто может мне писать» (`msgpriv1`) — только своему профилю; мусор — `everyone` (`messagePrivacyRules.normalizeMessagePrivacy`).
+          messagePrivacy: u.messagePrivacy === 'contacts' ? ('contacts' as const) : ('everyone' as const),
         }
       : {}),
     // Настройки уведомлений (G38, `push2`) — тоже только своему профилю.
@@ -261,6 +270,7 @@ export function serializeMessage(m: {
   sticker?: MessageSticker | null;
   author: UserRow;
 }): Message {
+  const dangerous = dangerousLinksOf(m.content);
   return {
     id: m.id,
     channelId: m.channelId,
@@ -273,6 +283,9 @@ export function serializeMessage(m: {
     pinnedAt: m.pinnedAt ? m.pinnedAt.toISOString() : null,
     poll: m.poll ?? null,
     sticker: m.sticker ?? null,
+    // Опасные ссылки (`linkthreats1`, #218 п.5): считается при каждой отдаче по локальному списку; поле — только у
+    // сообщений с такой ссылкой, у остальных DTO прежний.
+    ...(dangerous.length ? { dangerousLinks: dangerous } : {}),
     author: {
       id: m.author.id,
       username: m.author.username,

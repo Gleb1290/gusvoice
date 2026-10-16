@@ -121,51 +121,62 @@ it('R114 короткий тап по настоящему кружку игра
     assert.equal(video.muted, false, 'кружок после тапа играет со звуком, не только в беззвучной петле');
     assert.ok(button.closest('.round-msg.playing'), 'RoundVideo действительно перешёл в режим звука');
     await act(async () => { await h.delay(560); });
-    assert.equal(h.host.querySelector('.sel-head'), null, 'таймер удержания отменён отпусканием и не выбирает сообщение позднее');
-    assert.equal(document.querySelector('.ctx-menu,.sheet'), null, 'короткий тап не открывает меню сообщения');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'таймер удержания отменён отпусканием и не выбирает сообщение позднее');
+    assert.equal(document.querySelector('.ctx-menu,.sheet') === null, true, 'короткий тап не открывает меню сообщения');
   });
 });
 
 async function checkRoundHold(component: typeof h.Pane, runtime: ViteDevServer) {
   await roundGestureCase(component, runtime, async ({ button, row, plays }) => {
     await act(async () => { h.touch(button, 'touchstart', 100, 100); await h.delay(560); });
-    assert.ok(h.host.querySelector('.sel-head'), 'удержание кнопки настоящего кружка включает пачечное выделение');
-    assert.equal(row.getAttribute('aria-checked'), 'true', 'выбран именно кружок, а не соседняя строка');
+    assert.equal(document.querySelector('.ctx-menu') !== null, true, 'удержание кнопки настоящего кружка открывает меню');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'удержание само не включает выделение');
     let end!: Event;
     await act(async () => { end = h.touch(button, 'touchend', 100, 100); });
     assert.ok(end.defaultPrevented, 'отпускание после удержания не синтезирует обычный тап');
     const click = new MouseEvent('click', { bubbles: true, cancelable: true });
     await act(async () => { button.dispatchEvent(click); });
     assert.ok(click.defaultPrevented, 'синтетический click после долгого касания поглощён');
-    assert.equal(plays(), 0, 'удержание выделяет сообщение, не запускает видео');
+    assert.equal(plays(), 0, 'удержание открывает меню, не запускает видео');
+    const select = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(b => b.textContent?.trim() === 'Выбрать');
+    assert.ok(select, 'меню кружка предлагает выбор сообщения');
+    await act(async () => { await h.delay(450); select.click(); await h.flush(); });
+    assert.equal(h.host.querySelector('.sel-head') !== null, true, 'пункт меню включает пачечное выделение');
+    assert.equal(row.getAttribute('aria-checked'), 'true', 'выбран именно кружок, а не соседняя строка');
+    assert.equal(plays(), 0, 'выбор через меню не запускает видео');
   });
 }
 
-h.mutantTest('R114 удержание кружка выбирает пачку; мутант исключает его как обычную кнопку', async () => {
+h.mutantTest('R114 удержание кружка открывает меню выбора; мутант исключает его как обычную кнопку', async () => {
   await h.rejectMutant((source) => source.replace(
     "target.closest('.att-img-link, a.msg-link, [data-att], .message-sticker, .round-msg-btn')",
     "target.closest('.att-img-link, a.msg-link, [data-att], .message-sticker')",
   ), async (component, _confirm, _answer, runtime) => {
     assert.ok(runtime, 'сценарий использует настройки того же Vite realm, что и MessagePane');
     await checkRoundHold(component, runtime);
-  }, 'удержание кнопки настоящего кружка включает пачечное выделение');
+  }, 'удержание кнопки настоящего кружка открывает меню');
 });
 
-it('R114 удержание кольца играющего кружка не выбирает сообщение, а удержание центра выбирает', async () => {
+it('R114 удержание кольца играющего кружка не открывает меню, а центр предлагает выбор', async () => {
   // .round-msg-seek — визуальное кольцо с pointer-events:none; настоящий палец попадает в кнопку под ним.
   await roundGestureCase(h.Pane, h.server, async ({ button, video, row, plays }) => {
     await act(async () => { button.click(); });
     assert.ok(row.querySelector('.round-msg-seek'), 'у играющего кружка появилось настоящее кольцо перемотки');
     await act(async () => { h.touch(button, 'touchstart', 100, 5); await h.delay(560); });
-    assert.equal(h.host.querySelector('.sel-head'), null, 'RoundVideo гасит touchstart у края до удержания строки');
-    assert.equal(document.querySelector('.ctx-menu,.sheet'), null, 'удержание кольца не открывает меню сообщения');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'RoundVideo гасит touchstart у края до удержания строки');
+    assert.equal(document.querySelector('.ctx-menu,.sheet') === null, true, 'удержание кольца не открывает меню сообщения');
     await act(async () => { h.touch(button, 'touchend', 100, 5); });
     assert.equal(plays(), 1, 'удержание кольца само не переключает воспроизведение');
     assert.equal(video.paused, false, 'звук продолжается без лишней паузы');
     await act(async () => { h.touch(button, 'touchstart', 100, 100); await h.delay(560); });
-    assert.ok(h.host.querySelector('.sel-head') && row.getAttribute('aria-checked') === 'true',
-      'тот же играющий кружок выбирается в центре: защита относится к кольцу, не ко всей кнопке');
+    assert.equal(document.querySelector('.ctx-menu') !== null, true, 'центр открывает меню того же играющего кружка');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'центр не выбирает кружок до команды меню');
     await act(async () => { h.touch(button, 'touchend', 100, 100); button.click(); });
+    const select = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(b => b.textContent?.trim() === 'Выбрать');
+    assert.ok(select, 'защита относится к кольцу, не ко всей кнопке');
+    await act(async () => { await h.delay(450); select.click(); await h.flush(); });
+    assert.equal(row.getAttribute('aria-checked'), 'true', 'команда выбирает тот же играющий кружок');
+    assert.equal(video.paused, false, 'выбор через меню не прерывает звук');
   });
 });
 
@@ -204,22 +215,19 @@ it('свайп на телефоне двигает только выбранн�
     assert.equal(h.rendered.length, 2, 'на весь жест строка перерисовалась только в начале и конце');
   } finally { restore(); }
 });
-it('свайп не включается без телефона, round12, пузырей или вне 32 px края', async () => {
+it('свайп ограничен шириной телефона, пузырями и отступом 32 px от края', async () => {
   // Эти ограничения предотвращают конфликт с каналами, планшетом и системным жестом Android.
   const cases = [
-    { label: 'переключатель выключен', enabled: false, bubbles: true, coarse: true, width: 390, startX: 100 },
-    { label: 'канал без пузырей', enabled: true, bubbles: false, coarse: true, width: 390, startX: 100 },
-    { label: 'широкий планшет', enabled: true, bubbles: true, coarse: true, width: 800, startX: 100 },
-    { label: 'палец в узком окне при fine primary pointer', enabled: true, bubbles: true, coarse: false, width: 390, startX: 100 },
-    { label: 'системный край', enabled: true, bubbles: true, coarse: true, width: 390, startX: 380 },
+    { label: 'канал без пузырей', bubbles: false, coarse: true, width: 390, startX: 100 },
+    { label: 'широкий планшет', bubbles: true, coarse: true, width: 800, startX: 100 },
+    { label: 'палец в узком окне при fine primary pointer', bubbles: true, coarse: false, width: 390, startX: 100 },
+    { label: 'системный край', bubbles: true, coarse: true, width: 390, startX: 380 },
   ];
   for (const scenario of cases) {
     if (h.root) h.unmount();
     const restore = h.pointerLayout(scenario.coarse, scenario.width);
     const innerWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth');
     try {
-      if (scenario.enabled) h.round12();
-      else localStorage.setItem('gv_dm_bubbles', '0');
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: scenario.width });
       await h.mount({ messages: [h.msg(scenario.label)], bubbles: scenario.bubbles, onReact: () => {} });
       const body = h.host.querySelector<HTMLElement>(`[data-mid="${scenario.label}"] .message-body`);
@@ -350,7 +358,7 @@ it('закрытие меню по Escape возвращает фокус на �
   await act(async () => { await h.delay(40); });
   await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
   await act(async () => { await h.delay(40); });
-  assert.equal(document.querySelector('.ctx-menu'), null); assert.ok(document.activeElement === btn, 'фокус вернулся к исходной кнопке');
+  assert.equal(document.querySelector('.ctx-menu') === null, true); assert.ok(document.activeElement === btn, 'фокус вернулся к исходной кнопке');
 });
 it('панель эмодзи закрепляется третьей колонкой только на широком ПК и переживает выбор', async () => {
   // Настройка должна менять настоящую разметку MessagePane; в узком окне/телефоне колонка скрыта, а не ломает композер.
@@ -377,40 +385,40 @@ it('панель эмодзи закрепляется третьей колон
     let restore = media(false, 800, true);
     try {
       await h.mount({ messages: [h.msg('dock') ] }, fixturePane);
-      assert.equal(h.host.querySelector('.expr-dock'), null, 'незакреплённая настройка не создаёт колонку сама');
+      assert.equal(h.host.querySelector('.expr-dock') === null, true, 'незакреплённая настройка не создаёт колонку сама');
       const emoji = h.host.querySelector<HTMLButtonElement>('.composer .att-btn.emoji'); assert.ok(emoji);
       await act(async () => { emoji!.click(); await h.delay(40); });
       assert.ok(h.host.querySelector('.expr-dock .emoji-pop.docked'), 'клик на широком ПК закрепляет настоящий EmojiPicker');
       assert.ok(h.host.querySelector('.chat.has-expr-dock'), 'корень беседы отражает занятую колонку');
       assert.equal(localStorage.getItem('gv_expr_dock'), '1', 'закрепление запомнено');
-      assert.equal(h.host.querySelector('.emoji-backdrop'), null, 'закреплённый picker без подложки');
+      assert.equal(h.host.querySelector('.emoji-backdrop') === null, true, 'закреплённый picker без подложки');
       assert.equal(h.host.querySelector('.expr-dock .emoji-pop')?.hasAttribute('style'), false, 'у колонки нет экранных координат поповера');
-      assert.notEqual(document.activeElement, h.host.querySelector('.emoji-search input'), 'закреплённый поиск не перехватывает фокус');
+      assert.equal(document.activeElement !== h.host.querySelector('.emoji-search input'), true, 'закреплённый поиск не перехватывает фокус');
       await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await h.delay(20); });
       assert.ok(h.host.querySelector('.expr-dock .emoji-pop.docked'), 'Esc не закрывает закреплённую колонку');
       const cell = h.host.querySelector<HTMLButtonElement>('.expr-dock .emoji-cell'); assert.ok(cell, 'есть доступный эмодзи для выбора');
       await act(async () => { cell!.click(); await h.delay(30); });
       assert.ok(h.host.querySelector('.expr-dock .emoji-pop.docked'), 'выбор эмодзи не закрывает колонку');
       await act(async () => { h.host.querySelector<HTMLButtonElement>('.composer .att-btn.emoji')!.click(); await h.delay(30); });
-      assert.equal(h.host.querySelector('.expr-dock'), null, 'повторный клик убирает колонку');
+      assert.equal(h.host.querySelector('.expr-dock') === null, true, 'повторный клик убирает колонку');
       assert.equal(localStorage.getItem('gv_expr_dock'), null, 'убранная колонка очищает настройку');
     } finally { if (h.root) h.unmount(); restore(); }
 
     localStorage.setItem('gv_expr_dock', '1'); paneWidth = 724;
     restore = media(false, 724, true);
-    try { await h.mount({}, fixturePane); assert.equal(h.host.querySelector('.expr-dock'), null, '724 px меньше порога, колонка не появляется'); }
+    try { await h.mount({}, fixturePane); assert.equal(h.host.querySelector('.expr-dock') === null, true, '724 px меньше порога, колонка не появляется'); }
     finally { if (h.root) h.unmount(); restore(); }
 
     localStorage.removeItem('gv_expr_dock'); paneWidth = 800; restore = media(false, 800, false);
     try {
       await h.mount({}, fixturePane);
       await act(async () => { h.host.querySelector<HTMLButtonElement>('.composer .att-btn.emoji')!.click(); await h.delay(30); });
-      assert.equal(h.host.querySelector('.expr-dock'), null, 'без hover обычный клик не превращает поповер в dock');
+      assert.equal(h.host.querySelector('.expr-dock') === null, true, 'без hover обычный клик не превращает поповер в dock');
       assert.ok(h.host.querySelector('.emoji-pop:not(.docked)'), 'без hover остаётся доступен обычный поповер');
     } finally { if (h.root) h.unmount(); restore(); }
 
     paneWidth = 800; restore = media(true, 900, false); h.mobile();
-    try { await h.mount({}, fixturePane); assert.equal(h.host.querySelector('.expr-dock'), null, 'телефон скрывает закреплённую колонку даже при ширине 900 px'); }
+    try { await h.mount({}, fixturePane); assert.equal(h.host.querySelector('.expr-dock') === null, true, 'телефон скрывает закреплённую колонку даже при ширине 900 px'); }
     finally { if (h.root) h.unmount(); restore(); h.desktop(); }
 
     const match = source.match(/const dock = useExprDock\(chatEl, ([^)]*)\);/);

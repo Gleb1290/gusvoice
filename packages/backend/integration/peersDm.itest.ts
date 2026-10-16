@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { and, eq } from 'drizzle-orm';
-import { dmChannels } from '../src/db/schema.js';
+import { conversations } from '../src/db/schema.js';
 import { openDm, type OpenDmIo } from '../src/dmRules.js';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
@@ -183,7 +183,7 @@ test('два одновременных openDm получают одну стр�
   let release!: () => void;
   const bothStarted = new Promise<void>((resolve) => { release = resolve; });
   let ids = 0;
-  type Row = typeof dmChannels.$inferSelect;
+  type Row = typeof conversations.$inferSelect;
   const io: OpenDmIo<Row> = {
     findExisting: async (a, b) => {
       finds += 1;
@@ -194,8 +194,8 @@ test('два одновременных openDm получают одну стр�
       }
       const [row] = await t.db
         .select()
-        .from(dmChannels)
-        .where(and(eq(dmChannels.userA, a), eq(dmChannels.userB, b)))
+        .from(conversations)
+        .where(and(eq(conversations.kind, 'direct'), eq(conversations.directKey, `${a}:${b}`)))
         .limit(1);
       return row ?? null;
     },
@@ -203,8 +203,8 @@ test('два одновременных openDm получают одну стр�
     initiatorIsSuperAdmin: () => false,
     create: async (a, b) => {
       const [row] = await t.db
-        .insert(dmChannels)
-        .values({ id: `race-${++ids}`, userA: a, userB: b })
+        .insert(conversations)
+        .values({ id: `race-${++ids}`, kind: 'direct', directKey: `${a}:${b}` })
         .onConflictDoNothing()
         .returning();
       return row ?? null;
@@ -217,7 +217,7 @@ test('два одновременных openDm получают одну стр�
   if (!one.ok || !two.ok) assert.fail('обе операции должны открыть беседу');
   assert.equal(one.row.id, two.row.id);
   assert.equal(finds, 3);
-  const rows = await t.db.select().from(dmChannels);
+  const rows = await t.db.select().from(conversations);
   assert.equal(rows.length, 1);
-  assert.deepEqual([rows[0]?.userA, rows[0]?.userB], ['a', 'b']);
+  assert.equal(rows[0]?.directKey, 'a:b');
 });

@@ -252,7 +252,12 @@ function mediaFixture(staleCamera = false) {
     return new Promise<Stream>(resolve => { requests.push({ video: true, at: offset, resolve }); });
   } });
   set(HTMLCanvasElement.prototype, 'captureStream', () => new Stream([{ kind: 'video', stop() {} }]));
-  set(HTMLCanvasElement.prototype, 'getContext', () => ({ drawImage() {} }));
+  // RecordCircle теперь рисует кляксы настоящим RecordBlob; тот же canvas-мок обслуживает и круглый рекордер.
+  // Это только контракт 2D API, не симуляция пикселей: контроллерные проверки записи остаются прежними.
+  set(HTMLCanvasElement.prototype, 'getContext', () => ({
+    drawImage() {}, setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},
+    bezierCurveTo() {}, closePath() {}, fill() {}, arc() {}, fillStyle: '', globalAlpha: 1,
+  }));
   set(HTMLMediaElement.prototype, 'play', async () => {});
   // HappyDOM может иметь собственную реализацию play у video; она не должна оставлять
   // настоящий roundRecorder между getUserMedia и созданием MediaRecorder.

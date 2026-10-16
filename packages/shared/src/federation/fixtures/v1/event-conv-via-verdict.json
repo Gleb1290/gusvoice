@@ -1,0 +1,27 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "events": [
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W6V",
+      "seq": 73,
+      "kind": "conv.via_verdict",
+      "created_at": 1760280600000,
+      "payload": {
+        "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        "message_id": "0199d2b0-1c2d-7e3f-8a4b-5c6d7e8f9a0b",
+        "verdict": "confirmed"
+      }
+    },
+    {
+      "event_id": "01J7Q8ZK3M4N5P6Q7R8S9T0W6W",
+      "seq": 74,
+      "kind": "conv.via_verdict",
+      "created_at": 1760280600001,
+      "payload": {
+        "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        "message_id": "0199d2b0-2d3e-7f4a-8b5c-6d7e8f9a0b1c",
+        "verdict": "rejected"
+      }
+    }
+  ]
+}

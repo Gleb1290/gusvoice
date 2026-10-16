@@ -1,4 +1,4 @@
-import { useRef, type PointerEvent, type ReactNode, type TouchEvent } from 'react';
+import { useRef, useState, type PointerEvent, type ReactNode, type TouchEvent } from 'react';
 import { clampPinIndex, PIN_BAR_LONG_PRESS_MS, pinSegments, pinTitle } from '../pinBarRules';
 import { Icon } from './Icon';
 
@@ -55,6 +55,8 @@ export interface PinnedBarProps {
 export function PinnedBar({ count, index, text, thumb, thumbSpoiler, onOpen, onUnpin, onList, onNext, onLongPress, listOpen = false, children }: PinnedBarProps) {
   // Каким был последний указатель над полосой: контекстное событие от пальца — долгое нажатие, от мыши — правый щелчок.
   const lastPointer = useRef<string>('mouse');
+  // Э3 (#141): миниатюру даёт сервер ссылкой; вложение с соседнего инстанса может ещё копироваться (503) — без «битой» картинки.
+  const [badThumb, setBadThumb] = useState<string | null>(null);
   // Долгое нажатие пальцем — своим таймером (как у пузырей ленты): системное контекстное событие WebView есть не везде, а когда
   // есть — приходит следом; `longFired` не даёт списку открыться и тут же закрыться, а нажатие после удержания — открыть сообщение.
   const longTimer = useRef<number | null>(null);
@@ -120,7 +122,9 @@ export function PinnedBar({ count, index, text, thumb, thumbSpoiler, onOpen, onU
             <i className={on ? 'on' : undefined} key={i} />
           ))}
         </span>
-        {thumb && <img className={thumbSpoiler ? 'pin-bar-thumb spoiled-thumb' : 'pin-bar-thumb'} src={thumb} alt="" />}
+        {thumb && thumb !== badThumb && (
+          <img className={thumbSpoiler ? 'pin-bar-thumb spoiled-thumb' : 'pin-bar-thumb'} src={thumb} alt="" onError={() => setBadThumb(thumb)} />
+        )}
         <span className="pin-bar-text">
           <span className="pin-bar-title">
             {pinTitle(count, at)}

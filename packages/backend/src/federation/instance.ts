@@ -33,6 +33,7 @@ export const federation = createFederation({
   clientOrigin: env.clientOrigin,
   apiBase: env.federation.apiBase,
   appVersion: process.env.GV_VERSION ?? null,
+  dmEnabled: env.federation.dmEnabled,
   async loadInstanceMeta() {
     const [row] = await db
       .select({ value: instanceSettings.value })

@@ -147,8 +147,12 @@ export interface DmFolderInput {
   exclude: string[];
 }
 
-/** Подпись системной папки. */
-export const DM_FOLDER_SYSTEM_TITLE = 'Личные сообщения';
+/**
+ * Подпись системной папки — «Все чаты», как у Telegram (`FilterAllChats`; tdesktop `lng_filters_all`). Папка берёт ВСЕ беседы,
+ * и группы тоже (`dmFolderContains`: `f.system` → да), поэтому прежнее «Личные сообщения» вводило в заблуждение (#218, 12.10).
+ * Только подпись: в базе и протоколе системная папка по-прежнему `system: 'dms'`.
+ */
+export const DM_FOLDER_SYSTEM_TITLE = 'Все чаты';
 
 /** Подпись папки для вкладки и меню. */
 export function dmFolderTitle(f: Pick<DmFolder, 'system' | 'title'>): string {

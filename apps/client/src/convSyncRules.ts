@@ -1,4 +1,5 @@
 import {
+  FEATURE_READERS1,
   FEATURE_CONV3,
   FEATURE_CONV4,
   FEATURE_CONV5,
@@ -14,9 +15,13 @@ import {
   FEATURE_ARCHIVE1,
   FEATURE_VOICE3,
   FEATURE_CIRCLES1,
+  FEATURE_ALBUM1,
   FEATURE_QUOTE1,
   FEATURE_LINKPREV1,
   FEATURE_GROUPS1,
+  FEATURE_FEDM3,
+  FEATURE_FEDM4,
+  FEATURE_FEDM5,
   FEATURE_SAVED1,
   FEATURE_REACTUNREAD1,
   FEATURE_GSEARCH1,
@@ -33,6 +38,11 @@ import {
   FEATURE_PINSET1,
   FEATURE_FWD2,
   FEATURE_GIFS1,
+  FEATURE_GEOCONTACT1,
+  FEATURE_CONVPOLL1,
+  FEATURE_GEOLIVE1,
+  FEATURE_YAMAP1,
+  FEATURE_OSMMAP1,
   FEATURE_MEDIA2,
 } from '@gusvoice/shared';
 import type {
@@ -654,9 +664,34 @@ export function serverGroups(features: readonly string[] | null | undefined): bo
   return !!features?.includes(FEATURE_GROUPS1);
 }
 
+/** Опрос в ЛС (14.10, `convpoll1`): пункт «Опрос» в листе вложений ЛС, голос, «Остановить опрос», «Посмотреть голоса». */
+export function serverConvPoll(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_CONVPOLL1);
+}
+
+/** Геопозиция в реальном времени в ЛС (14.10, `geolive1`): пункт «Транслировать геопозицию», точки, «Остановить». */
+export function serverGeoLive(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_GEOLIVE1);
+}
+
 /** «Мои GIF» и вкладка «GIF» (07.10, Р-7): сервер с `gifs1`. */
 export function serverGifs(features: readonly string[] | null | undefined): boolean {
   return !!features?.includes(FEATURE_GIFS1);
+}
+
+/** Геопозиция и карточка контакта в ЛС (14.10, G69, `geocontact1`): пункты «Геопозиция» и «Контакт» в листе вложений. */
+export function serverGeoContact(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_GEOCONTACT1);
+}
+
+/** Картинка карты в карточке геопозиции (14.10, `yamap1`): сервер проксирует Static API Яндекса (`GET /api/maps/static`). */
+export function serverYandexMap(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_YAMAP1);
+}
+
+/** Своя карта OpenStreetMap (14.10, `osmmap1`): плитки PMTiles с нашего сервера, живая карта вместо картинки Яндекса (`MapView`). */
+export function serverOsmMap(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_OSMMAP1);
 }
 
 /** Сервер умеет архив бесед (07.10, `archive1`, G41): только тогда есть строка «Архив» и пункты «В архив» / «Вернуть из архива». */
@@ -667,6 +702,11 @@ export function serverArchive(features: readonly string[] | null | undefined): b
 /** Сервер умеет голосовое «Прослушать один раз» (`voice3`, G54): без признака кнопки «1» в панели записи нет. */
 export function serverVoiceOnce(features: readonly string[] | null | undefined): boolean {
   return !!features?.includes(FEATURE_VOICE3);
+}
+
+/** G56 (13.10, `album1`): сервер умеет удалить/переслать одно фото альбома (`albumItemRules.serverAlbumItems` — то же для ленты). */
+export function serverAlbumItemsOn(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_ALBUM1);
 }
 
 /** Сервер умеет кружки (08.10, `circles1`, G68): пометку `round` у видео, «Видеосообщение» в списке и пуше. */
@@ -750,6 +790,11 @@ export function patchPeer(state: ConvState, userId: string, displayName: string,
 /** Сервер шлёт «прочитано собеседником» (Р6): объявил `conv4`. Здесь, а не в сторе, — как `serverKeepsDrafts`. */
 export function serverSendsPeerRead(features: readonly string[] | null | undefined): boolean {
   return !!features?.includes(FEATURE_CONV4);
+}
+
+/** Сервер отдаёт «кто прочитал» своё сообщение в группе (15.10, `readers1`); без признака строки «N прочитали» нет. */
+export function serverReaders(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_READERS1);
 }
 
 /**
@@ -1169,4 +1214,173 @@ export function serverMediaFlags(features: readonly string[] | null | undefined)
  */
 export function serverQuote(features: readonly string[] | null | undefined): boolean {
   return !!features?.includes(FEATURE_QUOTE1);
+}
+
+/**
+ * ЛС между инстансами, Э2 часть Б (#141, Ф7, `docs/dm/FEDERATION.md` §1.6): сводка беседы с человеком соседа несёт `fedLink: 'broken'`,
+ * пока связка разорвана или приостановлена, — беседа остаётся АРХИВОМ ТОЛЬКО ДЛЯ ЧТЕНИЯ (поле ввода заменено плашкой, записи нет).
+ * Поля нет в `ConvSummary` (бэкенд добавляет его добавлением, правило 11), поэтому читаем его без типа.
+ */
+export function fedLinkBroken(summary: object | null | undefined): boolean {
+  return (summary as { fedLink?: unknown } | null | undefined)?.fedLink === 'broken';
+}
+
+/**
+ * Плашка вместо поля ввода у архива (Ф7); `label` — название инстанса собеседника (`peerHomeLabel`). Слово в слово как отказ записи
+ * `federation.dm_link_broken` в `fedErrorText` (модуль не импортируем: у этого файла закрытый перечень зависимостей).
+ */
+export function fedLinkStale(summary: object | null | undefined): boolean {
+  return (summary as { fedStale?: unknown } | null | undefined)?.fedStale === true;
+}
+
+/**
+ * Исправления ревью ЛС 12.10, п. 7 (`ConvSummary.fedStale`): инстанс собеседника не забирает наши сообщения дольше 10 минут — плашка
+ * над полем ввода (писать можно, доедут, когда заберёт). `label` — как у архива (`peerHomeLabel`).
+ */
+export function fedLinkStaleText(label: string | null | undefined): string {
+  return label ? `Сообщения ждут, пока «${label}» их заберёт` : 'Сообщения ждут, пока инстанс собеседника их заберёт';
+}
+
+/**
+ * Хвост Э7 (14.10, `ConvSummary.fedPeerDown`): дом собеседника 1:1 не отвечает дольше 10 минут — тот же признак, что у плашки
+ * группы «Инстанс «X», где живёт группа, недоступен» (`groupChatRules.fedGroupDownText`). Плашка над полем (писать можно); важнее
+ * «Сообщения ждут» (`fedLinkStale`): одна плашка, а «доедут, когда вернётся» покрывает и очередь.
+ */
+export function fedPeerDown(summary: object | null | undefined): boolean {
+  return (summary as { fedPeerDown?: unknown } | null | undefined)?.fedPeerDown === true;
+}
+
+/** Текст плашки `fedPeerDown`; `label` — название инстанса собеседника для соседей, иначе домен (`peerHomeLabel`). */
+export function fedPeerDownText(label: string | null | undefined): string {
+  return label
+    ? `Инстанс «${label}» недоступен — сообщения доедут, когда он вернётся`
+    : 'Инстанс собеседника недоступен — сообщения доедут, когда он вернётся';
+}
+
+export function fedLinkBrokenText(label: string | null | undefined): string {
+  return label
+    ? `Связь с инстансом «${label}» разорвана — переписка доступна только для чтения`
+    : 'Связь с инстансом собеседника разорвана — переписка доступна только для чтения';
+}
+
+/**
+ * Подсказка у недоступных вложений в беседе с человеком другого инстанса (Э2 часть Б, п.1): файлы между инстансами ездят с Э3.
+ * Показывается ДО отправки — у скрепки, при вставке и броске файла, — а не только отказом сервера `federation.dm_attachments_later`.
+ */
+export const FED_FILES_LATER_HINT = 'Вложения в переписке с людьми других инстансов появятся в следующем обновлении';
+
+/** Сервер возит вложения между инстансами (Э3, #141, `fedm3`). Без признака вложения в беседах с людьми соседей закрыты, как в Э2. */
+export function serverFedFiles(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_FEDM3);
+}
+
+/** Сервер переносит «печатает» и «в сети» / «был(а) в сети» людей соседних инстансов (Э4, #141, `fedm4`). */
+export function serverFedPresence(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_FEDM4);
+}
+
+/**
+ * Э4 (#141, `fedm4`): показывать ли статус собеседника в ЛС (шапка, карточка из ЛС): «в сети», точку, «был(а) …», «печатает».
+ * У человека другого инстанса (`peerHome`) — только если сервер объявил `fedm4`: без него теневой пользователь никогда не «в сети»,
+ * а его `last-seen` отдаёт «был(а) давно» — ложь про живого человека. Для местных — всегда, как раньше.
+ */
+export function peerPresenceShown(peerHome: boolean, features: readonly string[] | null | undefined): boolean {
+  return !peerHome || serverFedPresence(features);
+}
+
+/** Э3 (#141, `fedm3`): наш сервер вложения умеет, а инстанс собеседника — ещё нет (`fedNoFiles` в сводке беседы). */
+export const FED_FILES_PEER_HINT = 'Инстанс собеседника пока не принимает вложения — текст доходит';
+
+/**
+ * Э3 (#141, `fedm3`): закрыты ли вложения (файлы, голосовые, кружки, GIF) в беседе. Только в беседе с человеком другого инстанса
+ * (`peerHome`) и только если сервер не объявил `fedm3` (`fedFiles`) ИЛИ у сводки беседы `fedNoFiles`. Возвращает подсказку для
+ * `filesBlocked` (скрепка, вставка, бросок, «Поделиться», пересылка) или `null` — тогда беседа как обычная ЛС.
+ */
+export function fedFilesHint(peerHome: boolean, fedFiles: boolean, summary: { fedNoFiles?: unknown } | null | undefined): string | null {
+  if (!peerHome) return null;
+  if (!fedFiles) return FED_FILES_LATER_HINT;
+  return summary?.fedNoFiles ? FED_FILES_PEER_HINT : null;
+}
+
+// ─── Э5 (#141, `fedm5`): «мой дом лежит — пишу через инстанс собеседника» ─────────────────────────────────────────────
+
+/** Подсказка у всего, что в обход дома не уходит (вложения, голос, GIF, стикеры, правка, реакции, пересылка): уходит только текст. */
+export const FED_VIA_TEXT_ONLY = 'Дом недоступен — пока только текст';
+
+/** Сервер объявил обходной путь Э5 (`fedm5`): долгая сессия на инстансе собеседника и отчёт задним числом. */
+export function serverFedVia(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_FEDM5);
+}
+
+/**
+ * Э5: нужна ли беседе долгая сессия на инстансе собеседника — 1:1 с человеком другого инстанса (`peerHome`), сервер с `fedm5`, связь
+ * не разорвана (архив, `fedLink: 'broken'`, пишется только на чтение). Местные беседы и сервер без `fedm5` — не нужна.
+ */
+export function fedViaWanted(peerHome: boolean, features: readonly string[] | null | undefined, summary: { fedLink?: unknown } | null | undefined): boolean {
+  return peerHome && serverFedVia(features) && summary?.fedLink !== 'broken';
+}
+
+/** Плашка над полем ввода, пока дом недоступен и текст уходит через инстанс собеседника. */
+export function fedViaBarText(self: string, peer: string): string {
+  return `Инстанс «${self || 'Мой'}» недоступен — пишем через «${peer || 'инстанс собеседника'}»`;
+}
+
+/**
+ * Э5: ошибка запроса к дому говорит «дома нет», а не «мне отказали»: запрос не дошёл (нет статуса: сбой сети, `TypeError`),
+ * сервер молчал дольше срока (`timeout`) или шлюз/прокси ответил 502/503/504. Прочие отказы (400/403/404/409/429, 500) — дом ЖИВ и
+ * решил сам: обходить его нельзя.
+ */
+export function isHomeDownError(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const x = e as { status?: number; switched?: boolean; aborted?: boolean; name?: string };
+  if (x.switched || x.aborted || x.name === 'AbortError') return false;
+  if (typeof x.status === 'number') return x.status === 502 || x.status === 503 || x.status === 504;
+  return true;
+}
+
+/**
+ * Э5: годится ли строка очереди для обхода дома — ТОЛЬКО текст и ответ (бэкенд принимает `clientId`, `content`, `replyToId`, `silent`,
+ * `noPreview`; остальное — 403 `federation.dm_via_limited`). Файлы, «как файлы», спойлер, подпись над медиа и цитата фрагмента — нет.
+ */
+export function viaSendable(it: {
+  content: string;
+  fileNames: readonly string[];
+  asFile?: unknown;
+  spoilers?: unknown;
+  captionAbove?: unknown;
+  replyQuote?: unknown;
+}): boolean {
+  return it.content.trim().length > 0 && it.fileNames.length === 0 && !it.asFile && !it.spoilers && !it.captionAbove && !it.replyQuote;
+}
+
+/**
+ * Э5: свести страницу истории, снятую у ИНСТАНСА СОБЕСЕДНИКА (дом лежит), с окном беседы. Номера свежести `pts` у чужого инстанса
+ * другие — их в окно НЕ пишем: добавляются только неизвестные сообщения (с `msgPts = 0`, любое событие дома их обновит), известные
+ * остаются как есть (кеш дома первичен), удалённые не воскрешаются. Окно не трогаем, кроме добавления в хвост; без окна — ничего.
+ */
+export function applyViaPage(
+  state: ConvState,
+  list: readonly ConvMessage[] | undefined,
+  convId: string,
+  messages: readonly ConvMessage[],
+): { state: ConvState; list: ConvMessage[] | undefined } {
+  const win = state.windows[convId];
+  // Окно не у хвоста (листают историю) — дописать в низ нельзя: между ними дыра.
+  if (!list || !win || win.hasMoreAfter) return { state, list: list ? [...list] : undefined };
+  const have = new Set(list.map((m) => m.id));
+  const fresh = messages.filter((m) => !have.has(m.id) && !state.gone[m.id]);
+  if (fresh.length === 0) return { state, list: [...list] };
+  const msgPts = { ...state.msgPts };
+  for (const m of fresh) msgPts[m.id] = msgPts[m.id] ?? 0;
+  return { state: { ...state, msgPts }, list: dedupe([...list, ...fresh].sort(compareConv)) };
+}
+
+/**
+ * «Кто может мне писать» (`msgpriv1`, 13.10): плашка вместо поля ввода, когда собеседник пускает только контакты
+ * (`UserLastSeen.canMessage === false`). tdesktop `lng_restricted_send_non_premium` / `lng_send_non_premium_message_toast`
+ * («{user} only accepts messages from contacts and Premium subscribers»; Premium у нас нет). Тот же текст без имени —
+ * `fedErrorText.messagePrivacyText` (модули не связаны: их проверки держат закрытые перечни зависимостей).
+ */
+export function messagePrivacyPlateText(name: string): string {
+  return `${name} принимает сообщения только от своих контактов.`;
 }

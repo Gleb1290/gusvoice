@@ -114,7 +114,7 @@ async function mountMedia(sendMenu: MediaSheetProps['sendMenu']) {
   await flush();
   const photo = document.body.querySelector<HTMLButtonElement>('.gal-cell[aria-label="Фото"]');
   assert.ok(photo, 'галерея отрисовала доступное тестовое фото');
-  await flush(() => photo!.click());
+  await flush(() => photo!.querySelector<HTMLElement>('.gal-check')!.click());
   return { sends, get closed() { return closed; } };
 }
 
@@ -181,7 +181,7 @@ before(async () => {
       { name: 'call-back-mutant', enforce: 'pre', transform(source, id) {
         if (!id.includes('/components/CallLayer.tsx?codex-back-mutant')) return;
         const from = "const minimizable = !!peer && expanded && !ended && (view === 'outgoing' || view === 'active');";
-        assert.ok(source.includes(from), 'найден гейт шага назад только для своего развёрнутого звонка');
+        assert.equal(source.split(from).length - 1, 1, 'найден единственный гейт шага назад только для своего развёрнутого звонка');
         return source.replace(from, 'const minimizable = !!peer && expanded && !ended;');
       } },
       { name: 'shared-voice-kind-mutant', enforce: 'pre', transform(source, id) {
@@ -210,17 +210,22 @@ before(async () => {
           .replace('pins={pins}', 'pins={((globalThis as any).__captureDmPins(pins), pins)}');
       } },
       { name: 'media-sheet-test-bridge', enforce: 'pre', resolveId(source, importer) {
-        if (!importer?.replaceAll('\\', '/').endsWith('/components/MediaSheet.tsx')) return;
+        if (!importer || !/\/components\/(MediaSheet|MediaPickViewer)\.tsx$/.test(importer.replaceAll('\\', '/'))) return;
         if (source === '../nativeMedia') return '\0media-sheet-test-native';
         if (source === '../cameraCapture') return '\0media-sheet-test-camera';
       }, load(id) {
         if (id === '\0media-sheet-test-native') return `
           export const cancelNativeFiles = () => {};
+          export const captureNative = async () => ({ files: [], skipped: [], cancelled: true });
+          export const captureErrorCode = () => 'failed';
+          export const cameraPermissionNative = async () => null;
+          export const galleryAlbums = async () => null;
           export const galleryFiles = async () => ({ files: [new File(['photo'], 'photo.jpg', { type: 'image/jpeg' })], skipped: [] });
           const mock = () => globalThis.__mediaSheetMock;
           export const galleryPage = async () => { mock().galleryPageCalls++; return { items: [{ id: 'photo-1', kind: 'image', mime: 'image/jpeg', size: 5, width: 10, height: 10, durationMs: 0, added: 1, name: 'photo.jpg', rot: 0 }], end: true }; };
           export const galleryPermission = async () => mock().permissionResult;
           export const galleryThumb = async () => null;
+          export const galleryOriginal = () => ({ done: Promise.resolve(null), cancel: () => {} });
           export const nativeMediaInfo = async () => ({ sdk: 35, perm: mock().perm, camera: mock().camera, canSave: true, asked: true });
           export const pickDocumentsNative = async () => [];
         `;
@@ -440,7 +445,7 @@ async function checkDockPickers(stickerComponent: typeof StickerPicker, gifCompo
   await mount(stickerComponent, { anchor: new DOMRect(100, 100, 20, 20), packs: [{ id: 'pack', name: 'pack', title: 'Набор', stickers: [sticker] }],
     docked: true, footer: createElement('div'), onPick: (value) => stickerPicks.push(value.id), onClose: () => { stickerCloses++; } });
   const stickerPop = host.querySelector<HTMLElement>('.sticker-pop.docked'); assert.ok(stickerPop);
-  assert.equal(host.querySelector('.emoji-backdrop'), null); assert.equal(stickerPop!.hasAttribute('style'), false);
+  assert.equal(host.querySelector('.emoji-backdrop') === null, true); assert.equal(stickerPop!.hasAttribute('style'), false);
   await flush(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
   assert.equal(stickerCloses, 0, 'Esc не закрывает закреплённый пикер стикеров');
   await flush(() => host.querySelector<HTMLButtonElement>('.sticker-cell')!.click());
@@ -454,9 +459,9 @@ async function checkDockPickers(stickerComponent: typeof StickerPicker, gifCompo
     onPick: (value) => gifPicks.push(value.gif.id), onClose: () => { gifCloses++; } });
   await flush();
   const gifPop = host.querySelector<HTMLElement>('.gif-pop.docked'); assert.ok(gifPop);
-  assert.equal(host.querySelector('.emoji-backdrop'), null); assert.equal(gifPop!.hasAttribute('style'), false);
+  assert.equal(host.querySelector('.emoji-backdrop') === null, true); assert.equal(gifPop!.hasAttribute('style'), false);
   const gifSearch = host.querySelector<HTMLInputElement>('.gif-pop .emoji-search input'); assert.ok(gifSearch, 'фикстура внешнего поиска показывает поле');
-  assert.notEqual(document.activeElement, gifSearch, 'поиск не забирает фокус у композера');
+  assert.equal(document.activeElement !== gifSearch, true, 'поиск не забирает фокус у композера');
   await flush(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
   assert.equal(gifCloses, 0, 'Esc не закрывает закреплённый GIF-пикер');
   await flush(() => host.querySelector<HTMLButtonElement>('.gif-cell')!.click());
@@ -538,7 +543,7 @@ it('Ctrl+W и Ctrl+F4 проходят через выбор закрытия о
     const f4 = new KeyboardEvent('keydown', { key: 'F4', code: 'F4', ctrlKey: true, bubbles: true, cancelable: true });
     await flush(() => window.dispatchEvent(f4)); await flush();
     assert.ok(calls.includes('gv_window_hide'), 'Ctrl+F4 выполняет сохранённый выбор «в трей»');
-    assert.equal(host.querySelector('.close-choice'), null, 'сохранённое решение не задаёт вопрос повторно');
+    assert.equal(host.querySelector('.close-choice') === null, true, 'сохранённое решение не задаёт вопрос повторно');
   } finally {
     await unmountMounted(); localStorage.removeItem('gv_close_behavior');
     if (internals) Object.defineProperty(window, '__TAURI_INTERNALS__', internals); else Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
@@ -552,7 +557,9 @@ it('Назад сворачивает свой развёрнутый звоно
   const { CallBar } = await server.ssrLoadModule('/src/components/CallLayer.tsx') as typeof import('./CallLayer');
   const { useCall, CALL_DEVICE } = await server.ssrLoadModule('/src/callStore.ts') as typeof import('../callStore');
   const { stepBack } = await server.ssrLoadModule('/src/androidBack.ts') as typeof import('../androidBack');
-  await flush(() => store.setState({ ...initial, user: { id: 'me' } as never, dms: [testDm], mobilePane: 'list' }));
+  let dmLoads = 0;
+  await flush(() => store.setState({ ...initial, user: { id: 'me' } as never, dms: [testDm], mobilePane: 'list',
+    view: 'server', currentServerId: null, serverListOpen: true, loadDms: async () => { dmLoads++; } }));
   const ringing: DmCall = { id: 'call-1', conversationId: testDm.id, callerId: 'me', calleeId: 'peer', phase: 'ringing', createdAt: new Date().toISOString(), callerDevice: CALL_DEVICE };
   const active: DmCall = { ...ringing, phase: 'active', answeredAt: new Date().toISOString() };
   const start = async (call: DmCall, component: typeof CallLayer = CallLayer) => {
@@ -564,6 +571,8 @@ it('Назад сворачивает свой развёрнутый звоно
   try {
     await start(ringing); assert.equal(await back(), true, 'исходящий вызов регистрирует шаг назад');
     await flush(); assert.equal(useCall.getState().expanded, false); assert.ok(host.querySelector('.call-bar'), 'свёрнутый звонок остаётся в полосе');
+    assert.equal(store.getState().view, 'server', 'сворачивание своего звонка не листает вкладку под ним');
+    assert.equal(dmLoads, 0);
     await unmountMounted();
 
     await start(active); assert.equal(await back(), true, 'разговор тоже можно свернуть');
@@ -571,8 +580,12 @@ it('Назад сворачивает свой развёрнутый звоно
     await unmountMounted();
 
     const incoming: DmCall = { ...ringing, callerId: 'peer', calleeId: 'me', callerDevice: 'peer-device' };
-    await start(incoming); assert.equal(await back(), false, 'входящий звонок не перехватывает Back');
+    await start(incoming); assert.equal(await back(), true, 'под входящим звонком корень серверов переходит на сообщения');
+    assert.equal(store.getState().view, 'dm');
+    assert.equal(store.getState().mobilePane, 'list');
+    assert.equal(dmLoads, 1, 'переход с корня серверов подгружает список бесед');
     assert.equal(useCall.getState().expanded, true); assert.ok(host.querySelector('.call-screen'));
+    assert.equal(await back(), false, 'входящий звонок не перехватывает Back с корня сообщений');
     await unmountMounted();
 
     await start(ringing); await flush(() => useCall.getState().setExpanded(false)); await unmountMounted();
@@ -592,7 +605,8 @@ it('Назад сворачивает свой развёрнутый звоно
       finally { await unmountMounted(); }
     };
     await incomingHasNoBack(CallLayer);
-    await assert.rejects(() => incomingHasNoBack(bad), assert.AssertionError, 'мутант добавляет Back входящему звонку');
+    await assert.rejects(() => incomingHasNoBack(bad), (e: unknown) => e instanceof assert.AssertionError &&
+      e.message.startsWith('входящий вызов не сворачивается Back') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
   } finally {
     await unmountMounted(); useCall.setState({ call: null, peer: null, ended: null, join: null, expanded: true });
   }
@@ -650,6 +664,7 @@ it('шапка при запрете звонка объясняет отказ,
   // В R96 трубка намеренно остаётся видна: проверяем реальный клик до API и ту же справку после серверного отказа.
   const { api } = await server.ssrLoadModule('/src/api.ts') as typeof import('../api');
   const { ConfirmHost } = await server.ssrLoadModule('/src/components/ConfirmHost.tsx') as typeof import('./ConfirmHost');
+  const { useConfirmDialog } = await server.ssrLoadModule('/src/confirm.ts') as typeof import('../confirm');
   const priorSeen = api.userLastSeen, priorStart = api.callStart;
   let canCall = false;
   let starts = 0;
@@ -670,7 +685,9 @@ it('шапка при запрете звонка объясняет отказ,
     const dialog = host.querySelector('[role="alertdialog"]');
     assert.ok(dialog, 'известный запрет и ответ 403 открывают окно вместо тоста');
     assert.equal(dialog.querySelector('h2')?.textContent, 'Позвонить нельзя');
-    assert.match(dialog.textContent ?? '', /Собеседник ограничил\(а\) звонки/);
+    assert.equal(dialog.querySelector('.confirm-body')?.textContent, 'Собеседник не принимает звонки.');
+    assert.equal(useConfirmDialog.getState().pending?.icon, 'ban', 'запрет и серверный 403 передают одинаковый значок ban');
+    assert.equal(dialog.querySelector('.confirm-keys'), null, 'справка о запрете не обещает отмену или подтверждение');
     await flush(() => dialog.querySelector<HTMLButtonElement>('.confirm-primary')!.click());
     await unmountMounted();
   };
@@ -861,26 +878,20 @@ it('DmChatView запрашивает закреп при каждом ново�
   } finally { api.convPins = oldPins; api.convPin = oldPin; api.convUnpin = oldUnpin; }
 });
 
-it('DmChatView не запрашивает закрепы без нового режима, conv7 или включённых пузырей', async () => {
-  // Старый путь ЛС и сервер без capability не должны стучаться в отсутствующий endpoint даже при открытом диалоге.
+it('DmChatView не запрашивает закрепы без conv7 и включает их при поддержке сервера', async () => {
+  // Открытая беседа не должна стучаться в неподдерживаемую ручку закрепов.
   const { api } = await server.ssrLoadModule('/src/api.ts') as typeof import('../api');
   const oldPins = api.convPins;
   const calls: string[] = [];
   api.convPins = async id => { calls.push(id); return { pts: 1, pins: [] }; };
   try {
-    localStorage.setItem('gv_dm_bubbles', '0');
-    store.setState({ ...initial, convActive: true, serverFeatures: ['conv7'], dmMessages: { 'pins-dm': [] }, readDmNow: () => {} });
-    await mount(Chat, { dm: testDm });
-    assert.ok(!chatPins, 'старая лента не получает callbacks закрепов');
-    assert.equal(calls.length, 0, 'явное старое значение не вызывает GET');
-    await unmountMounted();
     await mountPinEnabledDm({ serverFeatures: [] });
     assert.ok(!chatPins, 'отсутствие conv7 скрывает callbacks');
     assert.equal(calls.length, 0, 'без conv7 нет запроса неподдерживаемой ручки');
     await unmountMounted();
-    await mountPinEnabledDm({ convActive: false });
-    assert.ok(!chatPins, 'старый API ЛС не получает callbacks новых бесед');
-    assert.equal(calls.length, 0, 'вне режима бесед /pins не запрашивается');
+    await mountPinEnabledDm({ serverFeatures: ['conv1', 'conv2', 'conv7'] });
+    assert.ok(chatPins, 'сервер с conv7 даёт действия закрепов');
+    assert.deepEqual(calls, ['pins-dm'], 'поддерживаемая ручка вызывается ровно один раз');
   } finally { api.convPins = oldPins; }
 });
 
@@ -1693,17 +1704,32 @@ it('NotAllowedError камеры во время скрытия не запус�
   assert.equal(mediaMock.openCameraCalls, 2, 'явное нажатие на ячейку разрешает новую попытку');
 });
 
-it('кнопка «Выбрать ещё» перечитывает галерею при partial → partial', async () => {
-  // Android может вернуть тот же статус partial, но с новым набором выбранных фото; сетка должна обновиться без смены статуса.
+it('R151 Esc и стрелка просмотра закрывают просмотр прежде листа', async () => {
+  const state = await mountMedia(undefined);
+  const photo = document.body.querySelector<HTMLButtonElement>('.gal-cell')!;
+  await flush(() => photo.click());
+  assert.ok(document.querySelector('.pick-viewer'));
+  await flush(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  assert.equal(!!document.querySelector('.pick-viewer'), false);
+  assert.equal(state.closed, 0);
+  assert.ok(document.querySelector('.sheet[role="dialog"]'));
+  await flush(() => photo.click());
+  await flush(() => document.querySelector<HTMLButtonElement>('.pick-close')!.click());
+  assert.equal(!!document.querySelector('.pick-viewer'), false);
+  assert.equal(state.closed, 0);
+  await flush(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  assert.equal(state.closed, 1);
+});
+
+it('R150 частичный доступ читается как разрешённый без плашки «Выбрать ещё»', async () => {
   mediaMock.perm = 'partial';
   mediaMock.permissionResult = 'partial';
   await mountMedia(undefined);
   assert.equal(mediaMock.galleryPageCalls, 1, 'при первом частичном доступе загружена исходная порция');
   const chooseMore = [...document.body.querySelectorAll<HTMLButtonElement>('.gal-notice button')]
     .find(button => button.textContent?.trim() === 'Выбрать ещё');
-  assert.ok(chooseMore, 'частичный доступ предлагает выбрать дополнительные фото');
-  await flush(() => chooseMore!.click());
-  assert.equal(mediaMock.galleryPageCalls, 2, 'неизменившийся статус partial всё равно перезагрузил первую порцию');
+  assert.equal(!!chooseMore, false, 'системный набор не требует собственной плашки');
+  assert.equal(mediaMock.galleryPageCalls, 1, 'нет лишней перечитки');
 });
 
 it('MobileNav доступна по имени, переключает разделы и открывает профиль на вкладке телефона', async () => {
@@ -1715,7 +1741,8 @@ it('MobileNav доступна по имени, переключает разд�
   const nav = host.querySelector('nav.mobile-nav[aria-label="Разделы"]');
   assert.ok(nav, 'навигация имеет понятное доступное имя');
   const buttons = [...host.querySelectorAll<HTMLButtonElement>('button.mnav-tab')];
-  assert.deepEqual(buttons.map(button => button.textContent?.trim()), ['Серверы', 'Сообщения', 'Профиль']);
+  assert.deepEqual(buttons.map(button => button.querySelector('.mnav-label')?.textContent?.trim()), ['Серверы', 'Сообщения', 'Профиль']);
+  assert.equal(buttons[1].querySelector('.mnav-badge')?.textContent, '1', 'вкладка показывает число непрочитанных бесед');
   assert.equal(buttons.filter(button => button.getAttribute('aria-current') === 'page').length, 1,
     'ровно один обычный раздел отмечен текущим');
   const paths = buttons.map(button => [...button.querySelectorAll('svg path')].map(path => path.getAttribute('d')));

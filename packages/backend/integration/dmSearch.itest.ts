@@ -18,6 +18,178 @@ const published: { channel: string; message: string }[] = [];
 const counts = new Map<string, number>();
 const auth = (id: string) => ({ authorization: `Bearer ${tokenFor(id)}` });
 
+type SearchModule = typeof import('../src/conversations.js');
+const convSearchSource = readFileSync(new URL('../src/conversations.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const serializerSource = readFileSync(new URL('../src/serialize.ts', import.meta.url), 'utf8');
+function outside(name: string) {
+  return new Proxy({}, { get: (_target, key) => key === '__esModule' ? true : () => {
+    throw new Error(`неожиданная граница поиска ${name}.${String(key)}`);
+  } });
+}
+function whole<T>(source: string, deps: Record<string, unknown>): T {
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports, Date, Map, Set, Promise,
+    require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `явная граница ${id}`); return deps[id]; } });
+  return module.exports as T;
+}
+async function searchModule(raw = convSearchSource, race = false): Promise<SearchModule> {
+  const shared = await import('@gusvoice/shared'); const schema = await import('../src/db/schema.js');
+  const serialize = whole<typeof import('../src/serialize.js')>(serializerSource, {
+    '@gusvoice/shared': shared, './auth.js': outside('auth'), './superAdminRules.js': outside('superAdminRules'),
+    './env.js': { env: {} }, './federation/instanceLabels.js': outside('instanceLabels'),
+    './statusRules.js': outside('statusRules'), './shopRules.js': outside('shopRules'),
+    './callRules.js': outside('callRules'), './lastSeenRules.js': outside('lastSeenRules'),
+    './linkThreats.js': { dangerousLinksOf: () => [] },
+  });
+  let raced = false;
+  const db = race ? new Proxy(t.db, { get(target, key) {
+    if (key !== 'select') { const v = Reflect.get(target, key); return typeof v === 'function' ? v.bind(target) : v; }
+    return (...args: unknown[]) => {
+      const select = (target.select as (...a: unknown[]) => any)(...args);
+      return new Proxy(select, { get(builder, prop) {
+        if (prop !== 'from') { const v = Reflect.get(builder, prop); return typeof v === 'function' ? v.bind(builder) : v; }
+        return (table: unknown) => {
+          const from = builder.from(table);
+          if (table !== schema.conversationMessages || args.length !== 0 || raced) return from;
+          return new Proxy(from, { get(query, member) {
+            if (member !== 'where') { const v = Reflect.get(query, member); return typeof v === 'function' ? v.bind(query) : v; }
+            return async (condition: unknown) => {
+              raced = true;
+              // Реальная смена видимости между SQL-хитом и чтением detail, не подделка DTO.
+              await t.raw.exec("UPDATE conversation_messages SET hidden_for=ARRAY['a']::text[] WHERE id='race-file'");
+              return await query.where(condition);
+            };
+          } });
+        };
+      } });
+    };
+  } }) : t.db;
+  return whole<SearchModule>(raw, {
+    '@gusvoice/shared': shared, 'drizzle-orm': await import('drizzle-orm'), './convRules.js': await import('../src/convRules.js'),
+    './db/index.js': { db }, './db/schema.js': schema, './dmWriteBarrier.js': outside('dmWriteBarrier'),
+    './attachments.js': { attachmentLink: (id: string, viewer: string, gen: number) => `https://files.invalid/${viewer}/${gen}/${id}` },
+    './env.js': { env: {} }, './serialize.js': serialize, './util.js': outside('util'),
+  });
+}
+function searchChanged(anchor: string, replacement: string) {
+  assert.equal(convSearchSource.split(anchor).length - 1, 1, 'единственный якорь поиска');
+  return convSearchSource.replace(anchor, replacement);
+}
+async function searchFixture() {
+  await t.raw.exec(`INSERT INTO conversations(id,kind,direct_key,created_by) VALUES ('kind-main','direct','a:b','a');
+    INSERT INTO conversation_members(conversation_id,user_id) VALUES ('kind-main','a'),('kind-main','b');
+    UPDATE users SET token_generation=CASE WHEN id='a' THEN 7 ELSE 9 END WHERE id IN ('a','b');`);
+}
+async function searchMessage(id: string, key: number, patch: {
+  conv?: string; author?: string; content?: string; mime?: string; name?: string; deleted?: boolean; hidden?: boolean; withheld?: boolean;
+} = {}) {
+  const attachment = { id: `attachment-${id}`, name: patch.name ?? 'отчёт.pdf', contentType: patch.mime ?? 'application/pdf', size: 1 };
+  await t.raw.query(`INSERT INTO conversation_messages(id,conversation_id,author_id,sort_key,content,attachments,deleted_at,hidden_for,withheld)
+    VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::timestamptz,$8::text[],$9)`,
+  [id, patch.conv ?? 'kind-main', patch.author ?? 'b', key, patch.content ?? 'не совпадает', JSON.stringify([attachment]),
+    patch.deleted ? '2026-10-12T00:00:00Z' : null, patch.hidden ? '{a}' : '{}', patch.withheld ?? false]);
+}
+
+async function namesScenario(mod: SearchModule) {
+  const query = { pattern: '%отчёт%', kind: 'file' as const, names: true, limit: 30 };
+  const found = await mod.searchAllConversations('a', query);
+  assert.deepEqual(Array.from(found.hits, h => h.id), ['named-file'], 'имя файла не обходит AND вида');
+  assert.equal((await mod.searchAllConversations('a', { ...query, names: false })).hits.length, 0, 'без names ищется только текст');
+  assert.equal((await mod.searchAllConversations('a', { ...query, kind: undefined })).hits.length, 0, 'names без kind не меняет текстовый поиск');
+}
+test('R183 имя файла находится только при names и виде file, имя фотографии не обходит фильтр вида', async () => {
+  // Класс ошибки: OR по имени превращает файл-поиск в выдачу любых вложений.
+  await searchFixture(); await searchMessage('named-file', 1); await searchMessage('named-photo', 2, { mime: 'image/png' });
+  await namesScenario(await searchModule());
+});
+test('R183 full даёт настоящее сообщение со ссылками смотрящего, без full поля message нет', async () => {
+  // Класс ошибки: чужая подпись файла или новый обязательный DTO ломают приватность и старых клиентов.
+  await searchFixture(); await searchMessage('full-file', 1);
+  const mod = await searchModule(); const q = { pattern: '%отчёт%', names: true, kind: 'file' as const, limit: 30 };
+  const plain = await mod.searchAllConversations('a', q);
+  assert.equal(Object.hasOwn(plain.hits[0], 'message'), false);
+  for (const [viewer, gen] of [['a', 7], ['b', 9]] as const) {
+    const hit = (await mod.searchAllConversations(viewer, { ...q, full: true })).hits[0];
+    assert.equal(hit.id, 'full-file'); assert.equal(hit.message?.id, 'full-file');
+    assert.equal(hit.message?.conversationId, 'kind-main'); assert.equal(hit.message?.author.id, 'b');
+    assert.equal(hit.message?.content, 'не совпадает');
+    assert.equal(hit.message?.attachments[0]?.url, `https://files.invalid/${viewer}/${gen}/attachment-full-file`);
+  }
+});
+test('R183 HTTP поиск передаёт names и full как необязательные флаги и отвергает другие значения', async () => {
+  // Класс ошибки: схема ручки принимает флаги, но забывает передать их SQL-поиску либо меняет старый ответ.
+  await searchFixture(); await searchMessage('named-file', 1); await searchMessage('plain-text', 2, { content: 'needle' });
+  // HTTP-харнесс подписывает gen=0; поколения 7/9 нужны только отдельной VM-проверке ссылок смотрящего.
+  await t.raw.exec("UPDATE users SET token_generation=0 WHERE id IN ('a','b')");
+  await t.raw.exec("UPDATE conversation_messages SET attachments='[]'::jsonb WHERE id='plain-text'");
+  const path = `/conv/search?q=${encodeURIComponent('отчёт')}&kind=file`;
+  const named = await app.inject({ method: 'GET', url: path + '&names=1', headers: auth('a') });
+  assert.equal(named.statusCode, 200, named.body); assert.deepEqual(named.json().hits.map((h: { id: string }) => h.id), ['named-file']);
+  for (const url of [path, `/conv/search?q=${encodeURIComponent('отчёт')}&names=1`]) {
+    const res = await app.inject({ method: 'GET', url, headers: auth('a') });
+    assert.equal(res.statusCode, 200, res.body); assert.equal(res.json().hits.length, 0);
+  }
+  for (const full of ['', '&full=1']) {
+    const res = await app.inject({ method: 'GET', url: '/conv/search?q=needle' + full, headers: auth('a') });
+    assert.equal(res.statusCode, 200, res.body); assert.equal(res.json().hits[0].id, 'plain-text');
+    assert.equal(Object.hasOwn(res.json().hits[0], 'message'), !!full);
+  }
+  for (const flag of ['names=0', 'full=true'])
+    assert.equal((await app.inject({ method: 'GET', url: '/conv/search?q=needle&' + flag, headers: auth('a') })).statusCode, 400);
+});
+
+for (const mode of ['deleted', 'hidden', 'withheld', 'exited', 'unknown'] as const) test(`R183 ${mode === 'deleted' ? 'удалённое' : mode === 'hidden' ? 'спрятанное у смотрящего' : mode === 'withheld' ? 'чужое придержанное' : mode === 'exited' ? 'сообщение покинутой группы' : 'сообщение неизвестной беседы'} не раскрывается при names/full, своё придержанное видно`, async () => {
+  // Класс ошибки: расширение поискового DTO не должно расширять аудиторию сообщения.
+  await searchFixture();
+  if (mode === 'exited' || mode === 'unknown') {
+    await t.raw.exec(`INSERT INTO conversations(id,kind,created_by,title) VALUES ('kind-other','group','b','Другая группа');
+      INSERT INTO conversation_members(conversation_id,user_id,left_at) VALUES ('kind-other','b',NULL)`);
+    if (mode === 'exited') await t.raw.exec("INSERT INTO conversation_members(conversation_id,user_id,left_at) VALUES ('kind-other','a',now())");
+  }
+  await searchMessage('invisible', 2, { conv: mode === 'exited' || mode === 'unknown' ? 'kind-other' : undefined,
+    content: 'отчёт в тексте', deleted: mode === 'deleted', hidden: mode === 'hidden', withheld: mode === 'withheld' });
+  await searchMessage('own-withheld', 1, { author: 'a', withheld: true, content: 'отчёт в тексте' });
+  const mod = await searchModule();
+  for (const names of [false, true]) for (const full of [false, true]) {
+    const res = await mod.searchAllConversations('a', { pattern: '%отчёт%', kind: 'file', names, full, limit: 30 });
+    assert.deepEqual(Array.from(res.hits, h => h.id), ['own-withheld'], 'видимость ограничивает оба варианта ответа');
+    assert.equal(Object.hasOwn(res.hits[0], 'message'), full);
+  }
+});
+
+async function raceScenario(raw = convSearchSource) {
+  await t.raw.exec("UPDATE conversation_messages SET hidden_for='{}'::text[] WHERE id='race-file'");
+  const res = await (await searchModule(raw, true)).searchAllConversations('a', {
+    pattern: '%отчёт%', names: true, kind: 'file', full: true, limit: 30,
+  });
+  assert.deepEqual(Array.from(res.hits, h => h.id), ['race-file'], 'SQL-хит получен до смены видимости');
+  assert.equal(Object.hasOwn(res.hits[0], 'message'), false, 'full не прикладывает ставший скрытым detail');
+  const row = await t.raw.query<{ hidden: boolean }>("SELECT 'a'=ANY(hidden_for) AS hidden FROM conversation_messages WHERE id='race-file'");
+  assert.equal(row.rows[0]?.hidden, true, 'гонка действительно изменила базу');
+}
+test('R183 скрытие сообщения между SQL-поиском и detail-чтением оставляет хит без полного сообщения', async () => {
+  // Класс ошибки TOCTOU: найденный ранее id не разрешает отдавать содержимое после смены видимости.
+  await searchFixture(); await searchMessage('race-file', 1); await raceScenario();
+});
+test('R183 мутант OR имени вместо AND вида обнаруживается фотографией с именем файла', async () => {
+  // Whole-module original-first: настоящий SQL должен различать одинаковые имена разных видов.
+  await searchFixture(); await searchMessage('named-file', 1); await searchMessage('named-photo', 2, { mime: 'image/png' });
+  await namesScenario(await searchModule());
+  const raw = searchChanged('if (qy.kind) msgConds.push(sharedMediaCondAlias(qy.kind, sql`x`));',
+    "if (qy.kind) msgConds.push(or(sharedMediaCondAlias(qy.kind, sql`x`), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(x.attachments) AS a WHERE a->>'name' ILIKE ${qy.pattern})`)!)");
+  await assert.rejects(namesScenario(await searchModule(raw)), e => e instanceof assert.AssertionError && e.message.includes('имя файла не обходит'));
+});
+for (const [name, anchor, replacement] of [
+  ['message у gone', "return v && !('gone' in v) ? { ...h, message: v } : h;", 'return v ? { ...h, message: v } : h;'],
+  ['full игнорирует hidden_for', "const full = rows.filter((m) => messageView(m, viewerId) === 'full');", "const full = rows.filter((m) => messageView({ ...m, hiddenFor: [] }, viewerId) === 'full');"],
+] as const) test(`R183 мутант «${name}» обнаруживается реальной сменой видимости до detail`, async () => {
+  // Оригинал и мутант получают одинаковый SQL-хит и настоящий новый снимок PGlite, без поддельного gone DTO.
+  await searchFixture(); await searchMessage('race-file', 1); await raceScenario();
+  await assert.rejects(raceScenario(searchChanged(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes('full не прикладывает'));
+});
+
 before(async () => {
   t = await createTestDb();
   const jwt = await import('../src/auth.js');
@@ -25,7 +197,6 @@ before(async () => {
   tokenFor = (id) => jwt.signToken({ sub: id, username: id, gen: 0 });
   const { userRoutes } = await import('../src/routes/users.js');
   const { convRoutes } = await import('../src/routes/conv.js');
-  const { dmRoutes } = await import('../src/routes/dm.js');
   const { adminRoutes } = await import('../src/routes/admin.js');
   const { messageRoutes } = await import('../src/routes/messages.js');
   ({ redisPub } = await import('../src/realtime.js'));
@@ -43,7 +214,6 @@ before(async () => {
   });
   await app.register(userRoutes);
   await app.register(convRoutes);
-  await app.register(dmRoutes);
   await app.register(adminRoutes);
   await app.register(messageRoutes);
   await app.ready();
@@ -152,7 +322,7 @@ test('поиск проверяет ввод и гостевой доступ д
   assert.equal(counts.get('rl:usearch:a'), 31, 'лимит должен опираться на результат INCR, а не число вызовов в тесте');
 });
 
-test('пустая беседа скрыта в обоих списках и sync до открытия получателем, а revealDirect показывает её', async () => {
+test('пустая беседа скрыта в списке и sync до открытия получателем, а revealDirect показывает её', async () => {
   // Причина: при anyone нельзя раскрывать получателю пустой след чужого открытия; явное открытие обязано развернуть его.
   await t.raw.exec(`INSERT INTO instance_settings (key,value) VALUES ('dm_policy','{"policy":"anyone"}')`);
   const opened = await app.inject({ method: 'POST', url: '/conv/direct', headers: auth('a'), payload: { userId: 'b' } });
@@ -160,12 +330,9 @@ test('пустая беседа скрыта в обоих списках и syn
   const convId = opened.json().id as string;
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(published.some((p) => p.channel === 'gw:user:b'), false, 'пустое открытие не должно отправлять получателю событие');
-  for (const url of ['/conv', '/dm']) {
-    const list = await app.inject({ method: 'GET', url, headers: auth('b') });
-    assert.equal(list.statusCode, 200, list.body);
-    const items = url === '/conv' ? list.json().conversations : list.json();
-    assert.equal(items.some((x: { id: string }) => x.id === convId), false, `${url} не раскрывает pending`);
-  }
+  const list = await app.inject({ method: 'GET', url: '/conv', headers: auth('b') });
+  assert.equal(list.statusCode, 200, list.body);
+  assert.equal(list.json().conversations.some((x: { id: string }) => x.id === convId), false, 'список не раскрывает pending');
   const sync = await app.inject({ method: 'GET', url: '/conv/sync?pts=0', headers: auth('b') });
   assert.equal(sync.statusCode, 200, sync.body);
   assert.equal(sync.json().conversations.some((x: { id: string }) => x.id === convId), false);
@@ -216,29 +383,29 @@ test('придержанное сообщение и markRead автора не 
   const access = await import('../src/conversations.js');
   const loaded = await access.loadAccess(id, 'a');
   assert.ok(loaded, 'создатель должен оставаться участником для проверки markRead');
-  const key = await access.messageKey(id, msgId);
-  assert.ok(key, 'вставленное held-сообщение должно иметь ключ для markRead');
+  const key = sent.json().sortKey as number;
+  assert.ok(key > 0, 'ответ отправки содержит ключ для markRead');
   const senderPtsAfterHeld = Number((await t.raw.query<{ pts: number }>(`SELECT pts FROM user_sync WHERE user_id='b'`)).rows[0]?.pts ?? 0);
   published.length = 0;
-  const read = await app.inject({ method: 'POST', url: `/conv/${id}/read`, headers: auth('a'), payload: { key: key.sortKey } });
+  const read = await app.inject({ method: 'POST', url: `/conv/${id}/read`, headers: auth('a'), payload: { key } });
   assert.equal(read.statusCode, 200, read.body);
   assert.equal((await t.raw.query<{ n: number }>(`SELECT count(*)::int AS n FROM user_changes WHERE user_id='b' AND pts>$1`, [senderPtsAfterHeld])).rows[0]?.n, 0);
   assert.equal(published.some((p) => p.channel === 'gw:user:b'), false, 'markRead автора не должен уведомлять блокирующего');
 });
 
-test('POST /dm отдаёт машинную причину 403, реальный INCR даёт 429 на 11-й новой беседе', async () => {
+test('POST /conv/direct отдаёт машинную причину 403, реальный INCR даёт 429 на 11-й новой беседе', async () => {
   // Причина: клиенты ветвятся по reason, а Redis, а не локальный счётчик теста, задаёт границу десяти новых ЛС.
-  const forbidden = await app.inject({ method: 'POST', url: '/dm', headers: auth('b'), payload: { userId: 'c' } });
+  const forbidden = await app.inject({ method: 'POST', url: '/conv/direct', headers: auth('b'), payload: { userId: 'c' } });
   assert.equal(forbidden.statusCode, 403, forbidden.body);
   assert.equal(forbidden.json().reason, 'dm.no_shared_server');
   await t.raw.exec(`INSERT INTO instance_settings (key,value) VALUES ('dm_policy','{"policy":"anyone"}');
     INSERT INTO users (id,username,display_name,password_hash,verified,approved_at)
     SELECT 'stranger-'||n, 'stranger'||n, 'Stranger', 'hash', true, now() FROM generate_series(1,11) n;`);
   for (let i = 1; i <= 10; i++) {
-    const res = await app.inject({ method: 'POST', url: i % 2 ? '/dm' : '/conv/direct', headers: auth('b'), payload: { userId: `stranger-${i}` } });
-    assert.equal(res.statusCode, i % 2 ? 200 : 201, `новая беседа ${i}: ${res.body}`);
+    const res = await app.inject({ method: 'POST', url: '/conv/direct', headers: auth('b'), payload: { userId: `stranger-${i}` } });
+    assert.equal(res.statusCode, 201, `новая беседа ${i}: ${res.body}`);
   }
-  const limited = await app.inject({ method: 'POST', url: '/dm', headers: auth('b'), payload: { userId: 'stranger-11' } });
+  const limited = await app.inject({ method: 'POST', url: '/conv/direct', headers: auth('b'), payload: { userId: 'stranger-11' } });
   assert.equal(limited.statusCode, 429, limited.body);
   assert.equal(limited.json().reason, 'dm.new_limit');
   assert.equal(limited.headers['retry-after'], '60');

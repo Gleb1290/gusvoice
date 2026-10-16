@@ -11,16 +11,17 @@
  * входящее событие ради редкого случая.
  */
 
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, lt, sql } from 'drizzle-orm';
 import {
   judgeEvent,
   parseFedEvent,
   rememberEventId,
   serializeFedEvent,
+  trackMissingSeqs,
   type FedEvent,
 } from '@gusvoice/shared';
 import { db } from '../db/index.js';
-import { federationLinks } from '../db/schema.js';
+import { federationLinks, federationOutbox } from '../db/schema.js';
 import { federation } from './instance.js';
 import { postSignedToPeer } from './peerClient.js';
 import { canSendTo, shouldQueueFor, type LinkState } from './linkRules.js';
@@ -135,6 +136,15 @@ export async function sendEventTo(
   if (typeof queued === 'string') return queued;
   const { event, apiBase } = queued;
 
+  /**
+   * 🔴 Дыра доставки (Э0 ЛС между инстансами, `docs/dm/FEDERATION.md` §2.2). Раньше событие уходило сразу, даже если более
+   * раннее с этой связки ещё ждало повтора в очереди: сосед принимал «дыру», сдвигал последний номер — и раннее, доехав
+   * очередью, выбрасывал как повтор. Теперь сразу уходит только событие, раньше которого в очереди этой связки НИЧЕГО нет;
+   * иначе оно ждёт своей очереди и уедет ближайшим проходом строго после ранних (`runOutboxPass` идёт по номерам и встаёт
+   * на первом недоставленном). Цена — до одного прохода очереди задержки, и только когда сосед уже что-то не принял.
+   */
+  if (await hasEarlierQueued(instanceId, event.seq)) return 'queued';
+
   const key = federation.signingKey();
   if (!key) return 'unreachable';
   let host: string;
@@ -163,6 +173,16 @@ export async function sendEventTo(
   // Не дошло — событие осталось в очереди, его заберёт проход с повторами. Для вызывающего это
   // «отложено», а не «потеряно»: в этом и была вся цель очереди (#148).
   return 'queued';
+}
+
+/** Лежит ли в очереди этой связки событие с меньшим номером — тогда отправлять «сразу» значит обогнать его. */
+async function hasEarlierQueued(instanceId: string, seq: number): Promise<boolean> {
+  const [row] = await db
+    .select({ id: federationOutbox.id })
+    .from(federationOutbox)
+    .where(and(eq(federationOutbox.instanceId, instanceId), lt(federationOutbox.seq, seq)))
+    .limit(1);
+  return row !== undefined;
 }
 
 /** Разослать событие всем активным связкам — например, что мы сменили название инстанса. */
@@ -208,11 +228,14 @@ export async function receiveEvents(instanceId: string, rawEvents: unknown[]): P
     .sort((a, b) => a.seq - b.seq);
 
   let lastSeq = Number(link.lastEventSeq);
+  // Пропуски прошлых дыр (Э0): опоздавшее раннее событие из них принимается, а не выбрасывается повтором (`judgeEvent`).
+  const missingBefore = Array.isArray(link.missingEventSeqs) ? link.missingEventSeqs.filter(Number.isInteger) : [];
+  let missing: number[] = missingBefore;
   let recent = recentByLink.get(instanceId) ?? [];
   const result: ReceiveResult = { accepted: 0, duplicates: 0, gaps: 0 };
 
   for (const event of events) {
-    const verdict = judgeEvent(event, { lastSeq, recentIds: new Set(recent) });
+    const verdict = judgeEvent(event, { lastSeq, recentIds: new Set(recent), missing: new Set(missing) });
     if (!verdict.accept) {
       result.duplicates += 1;
       continue;
@@ -229,6 +252,9 @@ export async function receiveEvents(instanceId: string, rawEvents: unknown[]): P
       });
       console.warn(`[fed] пропуск в событиях от ${instanceId}: ждали ${lastSeq + 1}, пришло ${event.seq}`);
     }
+    if (verdict.late) {
+      console.warn(`[fed] опоздавшее событие от ${instanceId}: №${event.seq} после №${lastSeq} — принято`);
+    }
 
     const handler = handlers.get(event.kind);
     // 🔴 Неизвестный тип пропускается МОЛЧА и номер всё равно двигается: сосед новее нас, и это
@@ -240,16 +266,19 @@ export async function receiveEvents(instanceId: string, rawEvents: unknown[]): P
         console.warn(`[fed] обработчик ${event.kind} упал: ${err instanceof Error ? err.message : err}`);
       }
     }
-    lastSeq = event.seq;
+    missing = trackMissingSeqs(missing, lastSeq, event.seq);
+    // Опоздавшее последний номер не двигает: он уже впереди.
+    if (!verdict.late) lastSeq = event.seq;
     recent = rememberEventId(recent, event.eventId);
     result.accepted += 1;
   }
 
   recentByLink.set(instanceId, recent);
-  if (lastSeq !== Number(link.lastEventSeq)) {
+  const missingChanged = missing.length !== missingBefore.length || missing.some((n, i) => n !== missingBefore[i]);
+  if (lastSeq !== Number(link.lastEventSeq) || missingChanged) {
     await db
       .update(federationLinks)
-      .set({ lastEventSeq: lastSeq, lastSeenAt: new Date() })
+      .set({ lastEventSeq: lastSeq, missingEventSeqs: missing, lastSeenAt: new Date() })
       .where(eq(federationLinks.instanceId, instanceId));
   }
   return result;

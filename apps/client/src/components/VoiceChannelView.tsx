@@ -28,7 +28,7 @@ import {
   getCameraPreset,
   setCameraPreset,
 } from '../cameraSettings';
-import { useNameResolver } from '../memberName';
+import { useNameResolver, useVoiceName } from '../memberName';
 import { ensureEconomy } from '../economyClient';
 import { useStore } from '../store';
 import { MAX_STREAM_VOLUME, ownerOf } from '../streamAudioRules';
@@ -67,6 +67,14 @@ import {
 import { isWindowCovered } from '../windowCovered';
 import { reportBadPicture, useBadPictureAvailable } from '../badPicture';
 import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu';
+import { fitStageGrid, stageAvatarSize, STAGE_SCROLLBAR_PX, STAGE_GRID_HYSTERESIS_PX, type StageGridLayout } from '../stageGridRules';
+import { setHideNoVideo, useHideNoVideo } from '../stageViewPrefs';
+import { usePhoneLayout } from '../phoneLayout';
+import { stageHasVideo } from '../stageAutoShowRules';
+import { useStageAutoShow } from '../useStageAutoShow';
+import { applyStageOrder, isDefaultStageOrder, personTileKey, streamTileKey } from '../stageOrderRules';
+import { saveStageOrder, useStageOrder } from '../stageOrderPrefs';
+import { useStageDrag } from '../useStageDrag';
 
 // `ownerOf` живёт в `streamAudioRules` — там же, где правило громкости стрима. Держать здесь вторую
 // копию значило бы дать им разъехаться, а именно расхождение двух мест и дало баг #71.
@@ -154,6 +162,91 @@ function useFocusFullscreen() {
     else setPseudo(true);
   };
   return { ref, pseudo, toggle };
+}
+
+/**
+ * Кнопки поверх видео — только по наведению (10.10, как у Discord): показывает их CSS (`:hover` /
+ * `:focus-within` у `.screen-viewer`), а на касании, где наведения нет, — тап по кадру (`.ctl-on`).
+ * `hold` держит их открытыми, пока открыто окно громкости или меню качества: иначе ряд погас бы под
+ * открытым окном, стоит указателю уйти на него.
+ */
+function useControlsReveal(hold: boolean) {
+  const [tapped, setTapped] = useState(false);
+  const onClick = (e: React.MouseEvent) => {
+    if (!window.matchMedia?.('(hover: none)').matches) return;
+    if ((e.target as Element).closest('.screen-controls')) return;
+    setTapped((v) => !v);
+  };
+  return { revealClass: tapped || hold ? ' ctl-on' : '', onClick };
+}
+
+/**
+ * Окно громкости стрима (10.10): ползунок больше не стоит в ряду постоянно, а всплывает по клику на
+ * значок звука (как у Discord). Окно рисуется ВНУТРИ вьювера, а не порталом в `body`: при настоящем
+ * полноэкранном режиме видно только содержимое вьювера. Закрывается кликом мимо и Esc.
+ */
+function useStreamVolumePop() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', down, true);
+    document.addEventListener('keydown', key);
+    return () => {
+      document.removeEventListener('pointerdown', down, true);
+      document.removeEventListener('keydown', key);
+    };
+  }, [open]);
+  return { open, setOpen, ref };
+}
+
+/**
+ * Сетка сцены «под окно» (10.10): меряет контейнер (ResizeObserver) и раскладывает `count` плиток
+ * чистым `fitStageGrid` — все влезают без прокрутки. Зазор берём из стиля самой сетки, чтобы
+ * число в коде не разъехалось с CSS.
+ */
+function useFitGrid(count: number, enabled: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  const previous = useRef<{ count: number; cols: number } | null>(null);
+  const [box, setBox] = useState<{ w: number; h: number; gap: number } | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!enabled || !el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const cs = getComputedStyle(el);
+      const px = (value: string) => parseFloat(value) || 0;
+      const padX = px(cs.paddingLeft) + px(cs.paddingRight) + px(cs.borderLeftWidth) + px(cs.borderRightWidth);
+      const padY = px(cs.paddingTop) + px(cs.paddingBottom) + px(cs.borderTopWidth) + px(cs.borderBottomWidth);
+      const gap = parseFloat(cs.columnGap) || 0;
+      // clientWidth менялся вместе с полосой и замыкал ResizeObserver в петлю.
+      // Рамка с полосой стабильна; zoom переводит экранные px обратно в CSS px.
+      const rect = el.getBoundingClientRect();
+      const zoom = px(getComputedStyle(document.documentElement).zoom) || 1;
+      const w = Math.max(0, Math.floor(rect.width / zoom - padX - STAGE_SCROLLBAR_PX) - 1);
+      const h = Math.max(0, Math.floor(rect.height / zoom - padY) - 1);
+      setBox((b) => (b && b.w === w && b.h === h && b.gap === gap ? b : { w, h, gap }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [enabled]);
+  const layout: StageGridLayout | null = enabled && box ? fitStageGrid({
+    width: box.w, height: box.h, count, gap: box.gap,
+    prevCols: previous.current?.count === count ? previous.current.cols : undefined,
+    hysteresisPx: STAGE_GRID_HYSTERESIS_PX,
+  }) : null;
+  useEffect(() => {
+    previous.current = layout ? { count, cols: layout.cols } : null;
+  }, [enabled, count, layout?.cols]);
+  const fits = !!(layout && box && layout.rows * layout.tileH + Math.max(0, layout.rows - 1) * box.gap <= box.h);
+  return { ref, layout, fits };
 }
 
 /** Full viewer for a single screen-share: the video + fullscreen / audio-mute / close controls. */
@@ -295,14 +388,20 @@ function ScreenViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchSid]);
 
+  const volPop = useStreamVolumePop();
+  const reveal = useControlsReveal(volPop.open || !!qualityMenu);
+  const volPct = Math.round((audioMuted ? 0 : volume) * 100);
+  // Ползунок в ноль — звука так же нет, как при «заглушить»: значок перечёркнут и тут (12.10, владелец).
+  const silent = audioMuted || volPct === 0;
+
   return (
-    <div className={`screen-viewer${pseudo ? ' pseudo-fs' : ''}`} ref={ref}>
+    <div className={`screen-viewer${pseudo ? ' pseudo-fs' : ''}${reveal.revealClass}`} ref={ref} onClick={reveal.onClick}>
       <VideoTrack trackRef={track} className="screen-video" />
       {/* Подсказки «кто кого» — иначе при открытом стриме о типах в канале не узнать вовсе. */}
       <StreamTipFeed />
       <div className="screen-controls">
         <span className="screen-title">
-          <Icon name="screen-share" size={16} /> {name}
+          <Icon name="screen-share" size={16} /> <span className="screen-title-text">{name}</span>
         </span>
         {viewers.length > 0 && (
           <span className="screen-viewers" tabIndex={0} title={`Смотрят: ${viewers.map((v) => v.name).join(', ')}`}>
@@ -325,37 +424,62 @@ function ScreenViewer({
         )}
         <span className="screen-spacer" />
         {hasAudio && (
-          <span className="screen-audio">
+          <span className="screen-audio" ref={volPop.ref}>
             <button
               type="button"
-              className={`ctl ${audioMuted ? 'off' : ''}`}
-              title={audioMuted ? 'Включить звук стрима' : 'Заглушить звук стрима (только для вас)'}
-              onClick={onToggleAudio}
+              className={`ctl ${silent ? 'off' : ''}${volPop.open ? ' open' : ''}`}
+              title={audioMuted ? 'Звук стрима выключен — громкость' : `Громкость стрима: ${volPct}%`}
+              aria-haspopup="dialog"
+              aria-expanded={volPop.open}
+              onClick={() => volPop.setOpen((v) => !v)}
             >
-              <Icon name={audioMuted ? 'headphones-off' : 'volume'} size={18} />
+              <Icon name={audioMuted ? 'headphones-off' : silent ? 'volume-off' : 'volume'} size={18} />
             </button>
-            {/* Ползунок доходит до 200 % (#130): у показывающего бывает тихий источник, и 100 % —
-                это не наш выбор, а потолок громкости элемента воспроизведения. Выше единицы звук
-                идёт через узел усиления Web Audio (`webAudioMix` у комнаты). Заливка помечается
-                отдельным цветом от 100 % и выше: усиление слышно на плохом источнике, и человек
-                должен видеть, что он уже НЕ на обычной громкости. */}
-            <input
-              type="range"
-              className={`stream-vol${!audioMuted && volume > 1 ? ' boost' : ''}`}
-              min={0}
-              max={MAX_STREAM_VOLUME}
-              step={0.02}
-              value={audioMuted ? 0 : volume}
-              // ⚠️ `--p` — ДОЛЯ хода ползунка, а не громкость: заливка рисуется градиентом по ней.
-              // Забыть поделить на потолок значило бы, что заливка убегает вперёд ручки.
-              style={{ ['--p']: (audioMuted ? 0 : volume) / MAX_STREAM_VOLUME } as React.CSSProperties}
-              title={
-                volume > 1 && !audioMuted
-                  ? `Громкость стрима: ${Math.round(volume * 100)}% — усиление`
-                  : `Громкость стрима: ${Math.round((audioMuted ? 0 : volume) * 100)}%`
-              }
-              onChange={(e) => onVolume(Number(e.target.value))}
-            />
+            {volPop.open && (
+              <span className="stream-vol-pop" role="dialog" aria-label="Громкость стрима">
+                {/* Шапка — та же, что у громкости человека в его меню (`.ctx-vol2-*`, UserContextMenu). */}
+                <span className="ctx-vol2-head">
+                  <button
+                    type="button"
+                    className={`ctx-vol2-spk ${audioMuted ? 'on' : ''}`}
+                    title={audioMuted ? 'Включить звук стрима' : 'Заглушить звук стрима (только для вас)'}
+                    onClick={onToggleAudio}
+                  >
+                    <Icon name={silent ? 'volume-off' : 'volume'} size={16} />
+                  </button>
+                  <span className="ctx-vol2-label">Громкость</span>
+                  <span className={`ctx-vol2-pct ${audioMuted ? 'muted' : volPct > 100 ? 'boost' : ''}`}>
+                    {audioMuted ? 'выкл' : `${volPct}%`}
+                  </span>
+                </span>
+                {/* Ползунок доходит до 200 % (#130): у показывающего бывает тихий источник, и 100 % —
+                    это не наш выбор, а потолок громкости элемента воспроизведения. Выше единицы звук
+                    идёт через узел усиления Web Audio (`webAudioMix` у комнаты). Заливка помечается
+                    отдельным цветом от 100 % и выше: усиление слышно на плохом источнике, и человек
+                    должен видеть, что он уже НЕ на обычной громкости. */}
+                <input
+                  type="range"
+                  className={`stream-vol${!audioMuted && volume > 1 ? ' boost' : ''}`}
+                  min={0}
+                  max={MAX_STREAM_VOLUME}
+                  step={0.02}
+                  value={audioMuted ? 0 : volume}
+                  // ⚠️ `--p` — ДОЛЯ хода ползунка, а не громкость: заливка рисуется градиентом по ней.
+                  // Забыть поделить на потолок значило бы, что заливка убегает вперёд ручки.
+                  style={{ ['--p']: (audioMuted ? 0 : volume) / MAX_STREAM_VOLUME } as React.CSSProperties}
+                  title={
+                    volume > 1 && !audioMuted
+                      ? `Громкость стрима: ${Math.round(volume * 100)}% — усиление`
+                      : `Громкость стрима: ${volPct}%`
+                  }
+                  onChange={(e) => {
+                    // Двинул ползунок у заглушённого — значит, хочет слышать (как у громкости человека).
+                    if (audioMuted) onToggleAudio();
+                    onVolume(Number(e.target.value));
+                  }}
+                />
+              </span>
+            )}
           </span>
         )}
         {!track.participant.isLocal && (
@@ -427,7 +551,18 @@ function ScreenViewer({
 // Снимок с потока остаётся запасным путём (человек выключил отдачу превью), и тогда нижний слой
 // просим СРАЗУ после подписки. Сам заход (порядок «превью → поток») — `streamCardCycle` в
 // `streamCardRules.ts`; здесь только настоящие LiveKit, сеть и таймер.
-function StreamCard({ trackRef, name, onWatch }: { trackRef: TrackReference; name: string; onWatch: () => void }) {
+function StreamCard({
+  trackRef,
+  name,
+  onWatch,
+  stageKey,
+}: {
+  trackRef: TrackReference;
+  name: string;
+  onWatch: () => void;
+  /** Ключ в порядке сетки сцены (`streamTileKey`) — по нему плитку находит перетаскивание. */
+  stageKey?: string;
+}) {
   const pub = trackRef.publication as RemoteTrackPublication | undefined;
   const canSnapshot = canSnapshotStream(trackRef.participant.isLocal, pub);
   const [snapshot, setSnapshot] = useState<string | null>(null);
@@ -468,7 +603,13 @@ function StreamCard({ trackRef, name, onWatch }: { trackRef: TrackReference; nam
   }, [sid, canSnapshot, channelId, ownerId]);
 
   return (
-    <button type="button" className="stream-card" onClick={onWatch} title={`${name} — смотреть трансляцию`}>
+    <button
+      type="button"
+      className="stream-card"
+      data-stage-key={stageKey}
+      onClick={onWatch}
+      title={`${name} — смотреть трансляцию`}
+    >
       <span className="stream-card-preview">
         {canSnapshot ? (
           snapshot ? (
@@ -500,16 +641,17 @@ function StreamCard({ trackRef, name, onWatch }: { trackRef: TrackReference; nam
 // Reuses the screen-viewer chrome; fullscreen falls back to a CSS overlay on mobile (useFocusFullscreen).
 function CameraViewer({ track, onClose }: { track: TrackReference; onClose: () => void }) {
   const { ref, pseudo, toggle } = useFocusFullscreen();
-  const nameOf = useNameResolver();
-  const name = nameOf(track.participant.identity, track.participant.name || track.participant.identity);
+  const voiceNameOf = useVoiceName();
+  const name = voiceNameOf(track.participant);
+  const reveal = useControlsReveal(false);
   return (
-    <div className={`screen-viewer${pseudo ? ' pseudo-fs' : ''}`} ref={ref}>
+    <div className={`screen-viewer${pseudo ? ' pseudo-fs' : ''}${reveal.revealClass}`} ref={ref} onClick={reveal.onClick}>
       <VideoTrack trackRef={track} className="screen-video" />
       {/* Подсказки «кто кого» — иначе при открытом стриме о типах в канале не узнать вовсе. */}
       <StreamTipFeed />
       <div className="screen-controls">
         <span className="screen-title">
-          <Icon name="camera" size={16} /> {name}
+          <Icon name="camera" size={16} /> <span className="screen-title-text">{name}</span>
         </span>
         <span className="screen-spacer" />
         <button type="button" className="ctl" title="На весь экран" onClick={toggle}>
@@ -525,6 +667,30 @@ function CameraViewer({ track, onClose }: { track: TrackReference; onClose: () =
 
 // One participant on the stage: their camera if it's on, otherwise their avatar — with a
 // speaking ring, name and mic/deafen badges.
+/**
+ * Подсказка «Удерживайте» на плитках телефона — НЕ постоянная подпись, а разовое обучение (12.10). У Telegram и Discord на
+ * плитках подписей нет, но жест «удержать карточку — типнуть» скрыт и без намёка не находится. Поэтому надпись висит
+ * `TIP_HOLD_HINT_MS` один раз на устройство (первое появление чужих плиток при включённой экономике) и гаснет навсегда, когда
+ * человек сам типнул удержанием. Жест (`tipMode.ts`, `TIP_HOLD_MS`) и экономика не тронуты; пояснение остаётся в `title` плитки.
+ * Хранилище — здесь, а не в `tipMode.ts`: тест сцены подменяет тот модуль закрытым перечнем.
+ */
+const TIP_HOLD_HINT_KEY = 'gv_tip_hold_hint_seen';
+const TIP_HOLD_HINT_MS = 6000;
+function tipHoldHintPending(): boolean {
+  try {
+    return window.localStorage.getItem(TIP_HOLD_HINT_KEY) !== '1';
+  } catch {
+    return true;
+  }
+}
+function markTipHoldHintSeen(): void {
+  try {
+    window.localStorage.setItem(TIP_HOLD_HINT_KEY, '1');
+  } catch {
+    /* приватный режим — подсказка вернётся после перезагрузки, на работу жеста это не влияет */
+  }
+}
+
 function StageTile({
   p,
   camera,
@@ -532,10 +698,13 @@ function StageTile({
   openMenu,
   onExpand,
   tipMode,
+  holdHint,
   tipBusy,
   onTip,
   onTipHoldStart,
   onTipHoldEnd,
+  avatarSize = 92,
+  stageKey,
 }: {
   p: Participant;
   camera?: TrackReference;
@@ -543,10 +712,16 @@ function StageTile({
   openMenu: (e: React.MouseEvent, target: UserMenuTarget) => void;
   onExpand: () => void;
   tipMode: TipInteraction;
+  /** Разовая подсказка «Удерживайте» (`tipHoldHintPending`): телефон, первое появление плиток на устройстве. */
+  holdHint: boolean;
   tipBusy: boolean;
   onTip: () => void;
   onTipHoldStart: (e: React.PointerEvent<HTMLDivElement>) => void;
   onTipHoldEnd: () => void;
+  /** Размер аватарки без камеры; в сетке «под окно» — от высоты плитки (`stageAvatarSize`). */
+  avatarSize?: number;
+  /** Ключ в порядке сетки сцены (`personTileKey`) — по нему плитку находит перетаскивание. */
+  stageKey?: string;
 }) {
   const speaking = useLiveSpeaking(p.identity);
   const { micMuted, deafened, screenSharing } = useParticipantFlags(p);
@@ -554,14 +729,14 @@ function StageTile({
   const serverMuted = useStore(
     (s) => (channelId ? s.presence[channelId]?.find((x) => x.userId === p.identity)?.serverMuted : false) ?? false,
   );
-  const generalId = useStore((s) => s.bootstrap?.channels.find((c) => c.id === channelId)?.generalUserId);
+  const generalId = useStore((s) => s.bootstrap?.channels?.find((c) => c.id === channelId)?.generalUserId);
   // Плитка рисует ОДНОГО человека, поэтому здесь хук по месту уместен.
   const crownServerId = useStore((s) => s.bootstrap?.server.id);
   const crowned = useIsCrowned(p.identity, crownServerId);
   const animatedOf = useAnimatedAvatarUrl();
-  const nameOf = useNameResolver();
+  const voiceNameOf = useVoiceName();
   // Ник из ростера поверх имени в LiveKit-токене (оно вшито на 4 часа и смены ника не знает, #73).
-  const name = nameOf(p.identity, p.name || p.identity);
+  const name = voiceNameOf(p);
   const target: UserMenuTarget = {
     userId: p.identity,
     name,
@@ -574,6 +749,7 @@ function StageTile({
   return (
     <div
       className={`stage-tile ${speaking ? 'speaking' : ''} ${camera ? 'has-cam' : ''}`}
+      data-stage-key={stageKey}
       onContextMenu={p.isLocal ? undefined : (e) => openMenu(e, target)}
       onPointerDown={canTip && tipMode === 'hold' ? onTipHoldStart : undefined}
       onPointerUp={canTip && tipMode === 'hold' ? onTipHoldEnd : undefined}
@@ -588,7 +764,7 @@ function StageTile({
           url={avatarFromMetadata(p.metadata)}
           animatedUrl={animatedOf(p.identity)}
           name={name}
-          size={92}
+          size={avatarSize}
           fallback="icon"
         />
       )}
@@ -621,7 +797,7 @@ function StageTile({
           {tipBusy ? '…' : 'Тип'}
         </button>
       )}
-      {canTip && tipMode === 'hold' && <span className="stage-tip-hold" aria-hidden="true">Удерживайте</span>}
+      {canTip && tipMode === 'hold' && holdHint && <span className="stage-tip-hold" aria-hidden="true">Удерживайте</span>}
       <div className="stage-meta">
         {deafened ? (
           <Icon name="headphones-off" size={14} />
@@ -642,6 +818,15 @@ function StageTile({
       </div>
     </div>
   );
+}
+
+/** Плитки в порядке `order`; `keys[i]` — ключ плитки `nodes[i]`. Ключи React у плиток свои, стабильные. */
+function byStageKey(order: readonly string[], keys: readonly string[], nodes: readonly React.ReactNode[]): React.ReactNode[] {
+  const at = new Map(keys.map((k, i) => [k, i]));
+  return order.flatMap((k) => {
+    const i = at.get(k);
+    return i === undefined ? [] : [nodes[i]];
+  });
 }
 
 // Stage for the channel you're connected to. All media is SFU-forwarded (no P2P). Streams show as
@@ -692,6 +877,9 @@ function VoiceStage() {
     void sendTip(channelId, userId, name);
   };
 
+  /* Подсказка «Удерживайте» — разово на устройство, а не подпись на каждой плитке навсегда. */
+  const [holdHint, setHoldHint] = useState(false);
+
   const clearTipHold = () => {
     if (tipHoldTimer.current === null) return;
     window.clearTimeout(tipHoldTimer.current);
@@ -704,6 +892,8 @@ function VoiceStage() {
     clearTipHold();
     tipHoldTimer.current = window.setTimeout(() => {
       tipHoldTimer.current = null;
+      setHoldHint(false);
+      markTipHoldHintSeen();
       void tip(userId, name);
     }, TIP_HOLD_MS);
   };
@@ -854,10 +1044,140 @@ function VoiceStage() {
   const unwatchedScreens = screens.filter((s) => !watchedIds.includes(s.participant.identity));
   const camByIdentity = new Map(cameras.map((c) => [c.participant.identity, c]));
   const focusCam = focusCamId ? camByIdentity.get(focusCamId) : undefined;
+  const watching = watchedScreens.length > 0 || !!focusCam;
+
+  // «Скрыть участников без видео» (как у Discord): видео — это камера; показ экрана у человека без
+  // камеры остаётся своей карточкой, а его плитка с аватаркой прячется. Видовая настройка — локально.
+  const hideNoVideo = useHideNoVideo();
+  useStageAutoShow({ room, channelId, hideNoVideo, hasVideo: stageHasVideo(screens, cameras) });
+  // Спутники нативного показа ("<id>#screen") плиткой не рисуются — их видео идёт карточкой показа
+  // под именем владельца; аватаркой второй раз они появляться не должны.
+  const people = participants.filter(
+    (p) => !p.identity.endsWith('#screen') && (!hideNoVideo || camByIdentity.has(p.identity)),
+  );
+  const hiddenCount = participants.filter((p) => !p.identity.endsWith('#screen')).length - people.length;
+  // Срок разовой подсказки идёт, только пока на сцене есть чья-то плитка, на которой её видно (своя не типается).
+  const hasTipTargets = people.some((p) => !p.isLocal);
+  useEffect(() => {
+    if (activeTipMode !== 'hold' || !hasTipTargets || !tipHoldHintPending()) return;
+    setHoldHint(true);
+    const t = window.setTimeout(() => {
+      setHoldHint(false);
+      markTipHoldHintSeen();
+    }, TIP_HOLD_HINT_MS);
+    return () => {
+      window.clearTimeout(t);
+      setHoldHint(false);
+    };
+  }, [activeTipMode, hasTipTargets]);
+
+  // 🔴 Сетка «под окно» (10.10, жалоба «ничего не помещается»): без просмотра стрима все плитки —
+  // карточки показов, камеры и люди без видео — ОДНОЙ сеткой одного размера 16:9, и все влезают без
+  // прокрутки (`fitStageGrid`, как у Discord / Meet). При просмотре стрима или камеры в фокусе —
+  // прежняя раскладка (вьюверы сверху, полосы снизу), на телефоне — прежняя сетка в две колонки 3:4.
+  // ⚠️ «Телефон» — по ширине (`usePhoneLayout`, та же граница 760 px, что у мобильных стилей), а не
+  // `isMobile()`: тот истинен только в приложении, и браузер телефона / узкое окно получали бы сетку
+  // «под окно» внутри мобильных стилей, которые её перебивают (замерено на стенде: плитки 67×119 и 2×89).
+  const phoneLayout = usePhoneLayout();
+  const fit = !watching && !mobile && !phoneLayout;
+  const gridCount = unwatchedScreens.length + people.length;
+  const { ref: gridRef, layout, fits } = useFitGrid(gridCount, fit);
+  const gridStyle =
+    layout && layout.tileW > 0
+      ? ({ ['--tile-w']: `${layout.tileW}px`, ['--tile-h']: `${layout.tileH}px`, ['--tile-cols']: layout.cols, overflowY: fits ? 'hidden' : 'auto' } as React.CSSProperties)
+      : undefined;
+  const tileAvatar = layout && layout.tileH > 0 ? stageAvatarSize(layout.tileH) : 92;
+
+  // Ключи плиток для порядка, расставленного перетаскиванием (12.10). Два показа одного владельца
+  // (браузерный и нативный спутник) получили бы один ключ — второй тогда идёт под своим identity.
+  const streamKeys: string[] = [];
+  for (const s of unwatchedScreens) {
+    const k = streamTileKey(s.participant.identity);
+    streamKeys.push(streamKeys.includes(k) ? `s:${s.participant.identity}` : k);
+  }
+  const personKeys = people.map((p) => personTileKey(p.identity));
+  const defaultKeys = [...streamKeys, ...personKeys];
+  // Порядок свой у каждой ширины окна: ключ хранилища — канал + число колонок сетки.
+  const gridCols = layout?.cols ?? 0;
+  const savedOrder = useStageOrder(channelId, gridCols);
+  const appliedOrder = applyStageOrder(defaultKeys, savedOrder);
+  const drag = useStageDrag({
+    // Только сетка «под окно» на ПК и не в режиме чаевых: удержание там уже занято под тип.
+    enabled: fit && !!channelId && gridCols > 0 && activeTipMode === 'none',
+    gridRef,
+    order: appliedOrder,
+    onCommit: (order) => {
+      if (!channelId || gridCols <= 0) return;
+      // Ничего не меняли и раньше не запоминали — записи нет (и пункт «Сбросить» не появится зря).
+      if (!savedOrder && isDefaultStageOrder(defaultKeys, order)) return;
+      saveStageOrder(channelId, gridCols, order);
+    },
+  });
+  const shownOrder = drag.preview ? applyStageOrder(defaultKeys, drag.preview) : appliedOrder;
+
+  const streamCards = unwatchedScreens.map((s, i) => (
+    <StreamCard
+      key={s.publication?.trackSid}
+      stageKey={streamKeys[i]}
+      trackRef={s}
+      name={nameOf(ownerOf(s.participant.identity), s.participant.name || s.participant.identity)}
+      onWatch={() => watch(s.participant.identity)}
+    />
+  ));
+  const tiles = people.map((p, i) => (
+    <StageTile
+      key={p.sid || p.identity}
+      stageKey={personKeys[i]}
+      p={p}
+      camera={camByIdentity.get(p.identity)}
+      channelId={channelId}
+      openMenu={openUserMenu}
+      onExpand={() => setFocusCamId(p.identity)}
+      tipMode={activeTipMode}
+      holdHint={holdHint}
+      tipBusy={tipBusyId === p.identity}
+      onTip={() => void tip(p.identity, nameOf(p.identity, p.name || p.identity))}
+      onTipHoldStart={(e) => startTipHold(e, p.identity, nameOf(p.identity, p.name || p.identity))}
+      onTipHoldEnd={clearTipHold}
+      avatarSize={fit ? tileAvatar : 92}
+    />
+  ));
+  // Открытые показы и камера в фокусе — тоже видео (15.10: при двух открытых показах плашка писала «Видео ни у кого нет»):
+  // тогда только «Скрыто участников без видео».
+  const videoShown = watchedScreens.length > 0 || !!focusCam;
+  const emptyHint =
+    gridCount === 0 && hiddenCount > 0 ? (
+      <div className="stage-empty-hint">
+        {videoShown ? 'Скрыто участников без видео' : 'Видео ни у кого нет. Участников без видео'}: {hiddenCount}.{' '}
+        <button type="button" className="link" onClick={() => setHideNoVideo(false)}>
+          Показать
+        </button>
+      </div>
+    ) : null;
+
+  if (fit) {
+    return (
+      <div className="voice-stage fit">
+        {activeTipMode !== 'none' && economy && (
+          <span className="voice-tip-balance" aria-live="polite">
+            Тип · {economy.wallet.balance} {economy.currencyName}
+          </span>
+        )}
+        <div className="stage-grid" ref={gridRef} style={gridStyle} onPointerDown={drag.onPointerDown}>
+          {/* Гнездо — первым, чтобы соседи, переезжая, шли поверх него. */}
+          {drag.dragging && <div className="stage-drag-nest" ref={drag.nestRef} aria-hidden="true" />}
+          {byStageKey(shownOrder, defaultKeys, [...streamCards, ...tiles])}
+          {emptyHint}
+        </div>
+        {userMenu}
+      </div>
+    );
+  }
 
   return (
-    <div className={`voice-stage${watchedScreens.length > 0 || focusCam ? ' watching' : ''}`}>
-      {activeTipMode !== 'none' && economy && (
+    <div className={`voice-stage${watching ? ' watching' : ''}`}>
+      {/* Пилюля баланса — признак Alt-режима ПК; на телефоне режима нет (удержание карточки доступно всегда), постоянная пилюля лежала поверх плиток. */}
+      {activeTipMode === 'button' && economy && (
         <span className="voice-tip-balance" aria-live="polite">
           Тип · {economy.wallet.balance} {economy.currencyName}
         </span>
@@ -887,38 +1207,10 @@ function VoiceStage() {
           })}
         </div>
       )}
-      {unwatchedScreens.length > 0 && (
-        <div className="stage-streams">
-          {unwatchedScreens.map((s) => (
-            <StreamCard
-              key={s.publication?.trackSid}
-              trackRef={s}
-              name={nameOf(ownerOf(s.participant.identity), s.participant.name || s.participant.identity)}
-              onWatch={() => watch(s.participant.identity)}
-            />
-          ))}
-        </div>
-      )}
+      {unwatchedScreens.length > 0 && <div className="stage-streams">{streamCards}</div>}
       <div className="stage-people">
-        {/* Hide native screen-share companion participants ("<id>#screen") — their video is shown via
-            the screen grid above (labelled with the owner's name); they must not also show as avatars. */}
-        {participants
-          .filter((p) => !p.identity.endsWith('#screen'))
-          .map((p) => (
-            <StageTile
-              key={p.sid || p.identity}
-              p={p}
-              camera={camByIdentity.get(p.identity)}
-              channelId={channelId}
-              openMenu={openUserMenu}
-              onExpand={() => setFocusCamId(p.identity)}
-              tipMode={activeTipMode}
-              tipBusy={tipBusyId === p.identity}
-              onTip={() => void tip(p.identity, nameOf(p.identity, p.name || p.identity))}
-              onTipHoldStart={(e) => startTipHold(e, p.identity, nameOf(p.identity, p.name || p.identity))}
-              onTipHoldEnd={clearTipHold}
-            />
-          ))}
+        {tiles}
+        {emptyHint}
       </div>
       {userMenu}
     </div>
@@ -1002,7 +1294,7 @@ function MobileCallBar() {
     toggleCamera();
   };
   return (
-    <div className="call-bar">
+    <div className="voice-call-bar">
       <button
         type="button"
         className={`call-btn ${selfMuted ? 'off' : ''}`}
@@ -1061,6 +1353,33 @@ function MobileCallBar() {
   );
 }
 
+// Шапка голосового канала, в который вошли. Отдельным компонентом: видовая настройка сцены (её хуки)
+// нужна только подключённому — экран «не в канале» её не трогает.
+function ConnectedVoiceHeader({ channel }: { channel: Channel }) {
+  const hideNoVideo = useHideNoVideo();
+  const phoneLayout = usePhoneLayout();
+  return (
+    <div className="voice-header">
+      <ChannelGlyph c={channel} size={18} />
+      <span>{channel.name}</span>
+      {/* Видовая настройка сцены (10.10, как «Show Non-Video Participants» у Discord) — в шапке
+          голосового канала справа. На телефоне шапку справа занимает «участники» поверх неё. */}
+      {!isMobile() && !phoneLayout && (
+        <button
+          type="button"
+          className={`topbar-btn voice-header-tool${hideNoVideo ? ' active' : ''}`}
+          aria-pressed={hideNoVideo}
+          title={hideNoVideo ? 'Показать участников без видео' : 'Скрыть участников без видео'}
+          aria-label="Скрыть участников без видео"
+          onClick={() => setHideNoVideo(!hideNoVideo)}
+        >
+          <Icon name="camera-off" size={18} />
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function VoiceChannelView({ channel, connected }: { channel: Channel; connected?: boolean }) {
   const joinVoice = useStore((s) => s.joinVoice);
   const presenceMap = useStore((s) => s.presence);
@@ -1069,10 +1388,7 @@ export function VoiceChannelView({ channel, connected }: { channel: Channel; con
   if (connected) {
     return (
       <div className="voice-view connected">
-        <div className="voice-header">
-          <ChannelGlyph c={channel} size={18} />
-          <span>{channel.name}</span>
-        </div>
+        <ConnectedVoiceHeader channel={channel} />
         <VoiceStage />
         {/* The stage tiles (+ the channel sidebar's presence list) already show everyone in the call, so
             the desktop no longer renders a third redundant roster below the stage. Mobile still needs the
@@ -1084,19 +1400,26 @@ export function VoiceChannelView({ channel, connected }: { channel: Channel; con
 
   const voiceIsEmpty = participants.length === 0;
 
+  // B11: в канале, куда ещё не вошли (или после обрыва), шапка тоже несёт название — раньше она была пустой.
   return (
-    <div className="voice-view center">
-      <div className="empty-goose">
-        <Goose pose={voiceIsEmpty ? 'nap' : 'honk'} size={132} />
-        <div className="eg-title">{voiceIsEmpty ? 'В голосовом канале пока никого' : 'В голосовом канале уже есть люди'}</div>
-        <div className="eg-sub">
-          {!voiceIsEmpty
-            ? `${participants.length} уже на связи — присоединяйтесь.`
-            : 'Зайдите первым — разбудите гуся.'}
+    <div className="voice-view">
+      <div className="voice-header">
+        <ChannelGlyph c={channel} size={18} />
+        <span>{channel.name}</span>
+      </div>
+      <div className="voice-idle-body">
+        <div className="empty-goose">
+          <Goose pose={voiceIsEmpty ? 'nap' : 'honk'} size={132} />
+          <div className="eg-title">{voiceIsEmpty ? 'В голосовом канале пока никого' : 'В голосовом канале уже есть люди'}</div>
+          <div className="eg-sub">
+            {!voiceIsEmpty
+              ? `${participants.length} уже на связи — присоединяйтесь.`
+              : 'Зайдите первым — разбудите гуся.'}
+          </div>
+          <button className="join-voice" onClick={() => joinVoice(channel.id).catch((e: Error) => toastError(e))}>
+            Присоединиться к {channel.name}
+          </button>
         </div>
-        <button className="join-voice" onClick={() => joinVoice(channel.id).catch((e: Error) => toastError(e))}>
-          Присоединиться к {channel.name}
-        </button>
       </div>
     </div>
   );

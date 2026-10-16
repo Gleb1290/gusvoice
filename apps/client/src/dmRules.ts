@@ -1,5 +1,5 @@
-import { FEATURE_USERS1 } from '@gusvoice/shared';
-import type { User, UserSearchHit } from '@gusvoice/shared';
+import { CAP_CONV1, FEATURE_CONV2, FEATURE_FEDM1, FEATURE_FEDM4, FEATURE_USERS1, parseRemoteHandle } from '@gusvoice/shared';
+import type { RemoteUserHit, User, UserSearchHit } from '@gusvoice/shared';
 
 /**
  * Кому можно написать в личку, а кому — нет, пока личка не переживает падение инстанса (#141, §5.8).
@@ -24,10 +24,51 @@ type Home = User['homeInstance'] | null;
  * ⚠️ Возвращает готовую фразу, а не флаг: в трёх местах из четырёх её показывают как есть, и
  * собирать предложение заново в каждом значило бы получить три разных объяснения одному запрету.
  */
-export function dmBlockText(me: Home, target: Home): string | null {
+export function dmBlockText(me: Home, target: Home, fedDm = false): string | null {
   if (me) return 'Вы здесь гость с другого инстанса — личка отсюда пока не работает. Она появится позже.';
-  if (target) return 'Личка с людьми других инстансов появится позже.';
+  // Э1 (#141, `fedm1`): сервер открывает переписку с человеком связанного инстанса через его дом — отказ скажет он сам.
+  if (target) return fedDm ? null : 'Личка с людьми других инстансов появится позже.';
   return null;
+}
+
+/**
+ * Запрос поиска человека связанного инстанса (Э1, `fedm1`): `@имя@домен` уходит на сервер как есть; иначе `null` — ищем
+ * обычным `userSearchQuery`. Без признака `fedm1` — всегда `null`.
+ */
+export function dmRemoteQuery(raw: string, fedDm: boolean): string | null {
+  return fedDm && parseRemoteHandle(raw) ? raw.trim() : null;
+}
+
+/** Подпись человека связанного инстанса под именем: `@имя@домен`. */
+export function remoteHandle(u: Pick<RemoteUserHit, 'username' | 'instance'>): string {
+  return u.instance.domain ? `@${u.username}@${u.instance.domain}` : `@${u.username}`;
+}
+
+/** Сервер умеет «Написать» людям связанных инстансов (Э1, #141, `fedm1`). */
+export function serverFedDm(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_FEDM1);
+}
+
+/**
+ * Э4 (#141, `fedm4`): показывать ли статус собеседника в ЛС (карточка из ЛС). У человека другого инстанса (`peerHome`) — только если сервер
+ * объявил `fedm4`. Копия `peerPresenceShown` из `convSyncRules.ts` (шапка беседы): у проверок закрытые перечни зависимостей — модули
+ * друг друга они не пропускают; условие обязано совпадать.
+ */
+export function peerPresenceShown(peerHome: boolean, features: readonly string[] | null | undefined): boolean {
+  return !peerHome || !!features?.includes(FEATURE_FEDM4);
+}
+
+/**
+ * Э4 (#141): `homeInstance` человека другого инстанса из ЛС (теневой пользователь) — он лежит в записи беседы (`dms[].otherUser`),
+ * а в ростере серверов его нет, и `useGuestHome` вернул бы `null`: карточка и профиль, открытые из ЛС, не называли бы инстанс
+ * (в шапке беседы — только значок с подсказкой). Нужно только для строки «с инстанса …»; право писать и жаловаться он не меняет.
+ */
+export function dmPeerHome(
+  dms: readonly { group?: unknown; saved?: unknown; otherUser: { id: string; homeInstance?: Home } }[] | undefined,
+  userId: string | undefined,
+): Home | null {
+  if (!userId) return null;
+  return dms?.find((d) => !d.group && !d.saved && d.otherUser.id === userId)?.otherUser.homeInstance ?? null;
 }
 
 /** Подпись под пустым списком личек: гостю писать некому вовсе, и звать его в участников незачем. */
@@ -36,6 +77,19 @@ export function dmEmptyHint(me: Home): string {
     ? 'Гостю с другого инстанса личка пока недоступна — она появится позже.'
     : 'Откройте участников сервера и нажмите на человека, чтобы написать ему.';
 }
+
+/**
+ * Сервер без бесед ЛС (нет `conv1` + `conv2`: коробки ≤ 0.8.17, паблик 0.8.17) — у клиента там ЛС нет (решение владельца
+ * 09.10: старого пути `/api/dm*` у клиента больше нет). Список ЛС показывает заглушку `DM_SERVER_UPDATE_TEXT`; каналы и
+ * голос работают как раньше. Признаки ещё не пришли (`null`) — не заглушка: решение ждёт `/auth/me`.
+ */
+export function dmNeedsServerUpdate(features: readonly string[] | null | undefined): boolean {
+  if (!features) return false;
+  return !(features.includes(CAP_CONV1) && features.includes(FEATURE_CONV2));
+}
+
+/** Текст заглушки списка ЛС у сервера без бесед (`dmNeedsServerUpdate`). */
+export const DM_SERVER_UPDATE_TEXT = 'ЛС на этом сервере требуют обновления сервера';
 
 /** Человек в списке «Написать»: ровно то, что нужно строке выбора и проверке `dmBlockText` (у собеседника беседы дома нет). */
 export type DmCandidate = Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance'>;

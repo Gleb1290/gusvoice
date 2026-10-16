@@ -12,6 +12,18 @@ import { findGuestEntry, guestEntryRebound, homeEntry, usableGuestEntry } from '
 import { switchInstance } from './instanceSwitch';
 
 /**
+ * Гость уходит с устройства без ответа хоста (15.10) — `guestGone.ts`; выставлено и отсюда, из модуля «гость», чтобы рейл и
+ * «Где я гость» брали всё гостевое из одного места.
+ */
+export { dismissGuestGroup, dropGoneGuests, hostSilent, onGuestEntriesChanged, sweepOtherHomes } from './guestGone';
+
+/**
+ * Предел ожидания хоста (15.10): мёртвый сосед за «чёрной дырой» держал соединение минутами, и кнопки «Где я гость»
+ * висели вместе с ним. Запросы здесь короткие (JSON), 20 с хватает с запасом.
+ */
+const HOST_FETCH_TIMEOUT_MS = 20_000;
+
+/**
  * Вход гостем на сервер чужого инстанса (#139, F4, план §5.5).
  *
  * Порядок ровно такой и другим быть не может:
@@ -45,6 +57,9 @@ export class GuestJoinError extends Error {
 
 async function hostFetch(apiUrl: string, path: string, init: RequestInit & { token?: string }): Promise<unknown> {
   const res = await fetch(`${apiUrl}/api${path}`, {
+    ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? { signal: AbortSignal.timeout(HOST_FETCH_TIMEOUT_MS) }
+      : {}),
     ...init,
     headers: {
       ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),

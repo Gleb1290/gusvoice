@@ -45,8 +45,19 @@ it('визит снимает readKey раньше readDmNow и снимает �
 });
 it('пузыри ограничены ЛС: каналы не передают bubbles, хвост следует следующей строке и дню', () => {
   const s = src('components/MessagePane.tsx');
-  assert.match(src('components/DmChatView.tsx'), /useState\(dmBubblesSwitch\)/);
-  assert.doesNotMatch(src('components/ChatView.tsx'), /bubbles=/);
+  for (const [name, expected] of [['DmChatView', true], ['ChatView', false]] as const) {
+    const ast = ts.createSourceFile(`${name}.tsx`, src(`components/${name}.tsx`), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const panes: ts.JsxAttributes[] = [];
+    const visit = (node: ts.Node) => {
+      if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && node.tagName.getText(ast) === 'MessagePane') panes.push(node.attributes);
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    assert.equal(panes.length, 1, name);
+    const bubbles = panes[0].properties.find((p) => ts.isJsxAttribute(p) && p.name.getText(ast) === 'bubbles');
+    assert.equal(!!bubbles, expected, name);
+    if (bubbles && ts.isJsxAttribute(bubbles)) assert.equal(bubbles.initializer, undefined, 'ЛС всегда передают bubbles=true');
+  }
   assert.match(s, /const next = p\.messages\[i \+ 1\]/); assert.match(s, /!isGrouped\(/);
   assert.match(s, /tail=\{p\.bubbles && tail\}/);
   const bubble = src('components/MessageBubble.tsx');

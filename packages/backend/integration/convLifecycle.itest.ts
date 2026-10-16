@@ -130,7 +130,6 @@ before(async () => {
   await app.register(userRoutes);
   await app.register(callRoutes);
   await app.register(contactRoutes);
-  await app.register((await import('../src/routes/dm.js')).dmRoutes);
   await app.register((await import('../src/routes/channels.js')).channelRoutes);
   await app.ready();
 });
@@ -155,18 +154,97 @@ after(async () => {
   await t.close();
 });
 
-test('R125 тридцать минут принимаются, лишняя миллисекунда отвергается во всех трёх схемах отправки', async () => {
-  // Ловит расхождение нового потолка между новой беседой, старой личкой и каналом.
-  const { attachmentLink } = await import('../src/attachments.js');
+test('R159 сводка 1:1 передаёт причину, длительность и видео последней записи звонка обоим участникам', async () => {
+  // Запись в БД содержит запасной текст: именно service, а не текст, должен дать структурированное превью.
+  const marks = [
+    { reason: 'missed', duration: 0 },
+    { reason: 'busy', duration: 0 },
+    { reason: 'hangup', duration: 125, video: true },
+    { reason: 'hangup', duration: 0, video: false },
+  ];
+  for (const [index, mark] of marks.entries()) {
+    const id = `r159-call-${index}`;
+    await insertMessage(id, 'a', 100 + index);
+    await t.raw.query('UPDATE conversation_messages SET service=$1::jsonb WHERE id=$2',
+      [JSON.stringify({ kind: 'call', callId: `call-${index}`, ...mark }), id]);
+    for (const viewer of ['a', 'b']) {
+      const res = await app.inject({ method: 'GET', url: '/conv', headers: authHeader(viewer) });
+      assert.equal(res.statusCode, 200, res.body);
+      const last = res.json().conversations.find((c: { id: string }) => c.id === 'dm')?.lastMessage;
+      assert.ok(last, 'сводка содержит последнее сообщение');
+      assert.equal(last.id, id); assert.equal(last.authorId, 'a'); assert.equal(last.text, id);
+      assert.deepEqual(last.call, { reason: mark.reason, duration: mark.duration, ...(mark.video ? { video: true } : {}) },
+        'сводка сохраняет причину и длительность, признак видео только при true');
+      assert.equal(Object.hasOwn(last.call, 'callId'), false, 'идентификатор сессии не нужен превью');
+    }
+  }
+});
+
+async function seedR159GroupCall(): Promise<void> {
+  await t.raw.exec(`INSERT INTO conversations(id,kind,created_by,title) VALUES ('r159-group','group','a','Группа');
+    INSERT INTO conversation_members(conversation_id,user_id) VALUES ('r159-group','a'),('r159-group','b');`);
+  await insertMessage('r159-group-call', 'b', 200, [], 'r159-group');
+  await t.raw.query('UPDATE conversation_messages SET service=$1::jsonb WHERE id=$2',
+    [JSON.stringify({ kind: 'call', callId: 'group-call', reason: 'hangup', duration: 65, video: true }), 'r159-group-call']);
+}
+
+async function checkR159GroupCall(api: typeof import('../src/conversations.js')): Promise<void> {
+  const list = await api.listConversations('a', true);
+  const last = list.conversations.find(c => c.id === 'r159-group')?.lastMessage;
+  assert.ok(last, 'групповая сводка присутствует');
+  assert.equal(last.id, 'r159-group-call'); assert.equal(last.service, true);
+  assert.equal(Object.hasOwn(last, 'call'), false, 'группа не получает поле call для 1:1');
+}
+
+test('R159 групповая служебная запись не получает поле call даже с валидной меткой звонка', async () => {
+  await seedR159GroupCall();
+  await checkR159GroupCall(await import('../src/conversations.js'));
+  const res = await app.inject({ method: 'GET', url: '/conv?groups=1', headers: authHeader('a') });
+  assert.equal(res.statusCode, 200, res.body);
+  const last = res.json().conversations.find((c: { id: string }) => c.id === 'r159-group')?.lastMessage;
+  assert.ok(last); assert.equal(last.service, true);
+  assert.equal(Object.hasOwn(last, 'call'), false, 'HTTP тоже не выдаёт поле звонка группе');
+});
+
+test('R159 текст и незнакомые или неполные service не получают поле call в сводке 1:1', async () => {
+  for (const [index, service] of [null, { kind: 'future', reason: 'missed', callId: 'unknown' },
+    { kind: 'call', reason: 'missed' }].entries()) {
+    const id = `r159-no-call-${index}`;
+    await insertMessage(id, 'b', 300 + index);
+    await t.raw.query('UPDATE conversation_messages SET service=$1::jsonb WHERE id=$2',
+      [service === null ? null : JSON.stringify(service), id]);
+    const res = await app.inject({ method: 'GET', url: '/conv', headers: authHeader('a') });
+    assert.equal(res.statusCode, 200, res.body);
+    const last = res.json().conversations.find((c: { id: string }) => c.id === 'dm')?.lastMessage;
+    assert.ok(last); assert.equal(last.id, id); assert.equal(last.text, id);
+    assert.equal(Object.hasOwn(last, 'call'), false, 'обычный текст и чужая метка остаются без call');
+  }
+});
+
+test('R159 контрфакт без ограничения 1:1 ошибочно добавляет поле call группе', async () => {
+  await seedR159GroupCall();
+  const api = await import('../src/conversations.js');
+  await checkR159GroupCall(api);
+  const from = '...(!isGroup ? lastCallOf(r.lm_svc) : {}),';
+  const moduleSource = readFileSync(new URL('../src/conversations.ts', import.meta.url), 'utf8');
+  assert.equal(moduleSource.split(from).length - 1, 1, 'контрфакт меняет единственное ограничение звонка группой');
+  const wrong = await mutantModule<typeof api>(new URL('../src/conversations.ts', import.meta.url),
+    from, '...lastCallOf(r.lm_svc),');
+  await assert.rejects(checkR159GroupCall(wrong),
+    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('группа не получает поле call'));
+});
+
+test('R125 тридцать минут принимаются, лишняя миллисекунда отвергается в беседе и канале', async () => {
+  // Ловит расхождение нового потолка между беседой и каналом.
   const { env } = await import('../src/env.js');
   const publicUrl=env.minio.publicUrl;
   env.minio.publicUrl='https://media.example.test';
   try {
   await t.raw.exec(`INSERT INTO channels(id,server_id,name,type) VALUES ('duration-channel','presence-server','Чат','text')`);
-  for(const [i,path] of ['/conv/dm/messages','/dm/dm/messages','/channels/duration-channel/messages'].entries()) {
+  for(const [i,path] of ['/conv/dm/messages','/channels/duration-channel/messages'].entries()) {
     const id=`91000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`;
     await t.raw.query(`INSERT INTO attachments(id,conversation_id,owner_id,storage_key,name,content_type,size,state) VALUES ($1,'dm','a',$2,'voice.webm','audio/webm',1,'pending')`,[id,`duration-${i}`]);
-    const attachment=path.startsWith('/conv/') ? {id} : {url:path.startsWith('/dm/') ? attachmentLink(id,'a',0) : `${env.minio.publicUrl.replace(/\/+$/,'')}/${env.minio.bucket}/duration.webm`,name:'voice.webm',contentType:'audio/webm',size:1};
+    const attachment=path.startsWith('/conv/') ? {id} : {url:`${env.minio.publicUrl.replace(/\/+$/,'')}/${env.minio.bucket}/duration.webm`,name:'voice.webm',contentType:'audio/webm',size:1};
     const send=(durationMs:number)=>app.inject({method:'POST',url:path,headers:authHeader('a'),payload:{content:'',attachments:[{...attachment,durationMs}],...(path.startsWith('/conv/')?{clientId:`92000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`}:{})}});
     const rejected=await send(1_800_001);assert.equal(rejected.statusCode,400,rejected.body);assert.equal(rejected.json().error,'validation');
     const accepted=await send(1_800_000);assert.equal(accepted.statusCode,201,accepted.body);
@@ -1758,7 +1836,8 @@ test('очистка и удаление чата хоронят только д
   assert.ok(byId.get('peer')?.deleted_at, 'видимое чужое сообщение очищается у обоих');
   assert.equal(byId.get('peer-hidden')?.deleted_at, null, 'уже спрятанное мной чужое сообщение у собеседника сохраняется');
   assert.equal(byId.get('peer-withheld')?.deleted_at, null, 'придержанное чужое сообщение сохраняется');
-  assert.ok(published.some((e) => e.channel === 'gw:user:b' && JSON.parse(e.message).m?.t === 'dm.delete'), 'старый клиент получает legacy dm.delete');
+  assert.ok(published.some((e) => e.channel === 'gw:user:b' && JSON.parse(e.message).m?.t === 'conv.change' && JSON.parse(e.message).m?.message?.gone === true), 'собеседник получает надгробие через conv.change');
+  assert.equal(published.some((e) => /^dm\.|^read\.dm$/.test(JSON.parse(e.message).m?.t ?? '')), false, 'очистка не публикует удалённые события старого пути');
 
   const invalid = await app.inject({ method: 'POST', url: '/conv/dm/clear', headers: authHeader('a'), payload: { for: 'peer' } });
   assert.equal(invalid.statusCode, 400);

@@ -22,6 +22,12 @@ it('выделение, неотправленная строка, удален�
     let body = h.host.querySelector('.message-body')!;
     await act(async () => { h.touch(body, 'touchstart', 100); await h.delay(560); });
     await end();
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'удержание сначала открывает меню без выбора');
+    const choose = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(button => button.textContent?.trim() === 'Выбрать');
+    assert.ok(choose, 'меню удержанного сообщения предлагает Выбрать');
+    // Клик меню не должен попасть в подавитель синтетического click после долгого касания.
+    await act(async () => { await h.delay(450); choose.click(); await h.flush(); await h.delay(220); });
+    assert.equal(document.querySelector('.ctx-menu') === null, true, 'выбор закрывает портальное меню');
     assert.ok(h.host.querySelector('.sel-head'), 'для проверки уже открыто выделение');
     await move(body);
     assert.ok(!h.host.querySelector('.swiping'), 'выделение не разрешает свайп');
@@ -94,8 +100,8 @@ h.mutantTest('телефонное меню отправки показывае�
       const preview = document.querySelector<HTMLElement>('.send-preview'); assert.ok(preview, 'телефонный hold-якорь ставит будущий пузырь над меню');
       assert.equal(preview.getAttribute('aria-hidden'), 'true', 'декоративный предпросмотр не дублирует текст для экранного диктора');
       assert.equal(preview.querySelector('.message-body strong')?.textContent, 'важный ответ', 'форматирование совпадает с будущим сообщением');
-      assert.equal(preview.querySelector('button'), null, 'предпросмотр не перехватывает нажатие мимо меню');
-      assert.equal(document.querySelector('.ctx-menu')?.querySelector('.send-preview'), null, 'само меню остаётся отдельной карточкой');
+      assert.equal(preview.querySelector('button') === null, true, 'предпросмотр не перехватывает нажатие мимо меню');
+      assert.equal(document.querySelector('.ctx-menu')?.querySelector('.send-preview') === null, true, 'само меню остаётся отдельной карточкой');
     } finally {
       // Реальное касание всегда завершается: иначе глобальный guard удержания
       // переживает размонтирование и гасит contextmenu следующих сценариев.
@@ -275,15 +281,16 @@ it('живой обработчик выделения отдаёт touch/pen/Sh
   assert.ok(!h.host.querySelector('.sel-head'), 'канал не включает DM-выделение даже при случайном batch prop');
 });
 
-it('правый клик по фотографии открывает контекст строки только при режиме пузырей, ссылка остаётся своей', async () => {
-  // Клик по самой картинке — контекст сообщения, а обычная внешняя ссылка сохраняет своё меню браузера.
-  localStorage.setItem('gv_dm_bubbles', '0');
+it('правый клик фотографии открывает меню строки и в канале, ссылка получает команды открытия и копирования', async () => {
+  // Меню всегда новое: фото получает действия сообщения, внешняя ссылка — свои дополнительные команды.
   await h.mount({ bubbles: false, messages: [{ ...h.msg('link-context'), content: 'https://outside.example/path' }] });
   const external = h.host.querySelector<HTMLAnchorElement>('[data-mid="link-context"] a'); assert.ok(external, 'в тексте есть ссылка с внешним адресом');
   const linkContext = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
   await act(async () => { external!.dispatchEvent(linkContext); await h.flush(); });
-  assert.equal(linkContext.defaultPrevented, false, 'правый клик по обычной ссылке не подменяется меню сообщения');
-  assert.ok(!document.querySelector('.ctx-menu'), 'ссылка не открыла меню строки');
+  assert.equal(linkContext.defaultPrevented, true, 'правый клик ссылки перехвачен нашим меню');
+  const linkMenu = document.querySelector('.ctx-menu'); assert.ok(linkMenu, 'ссылка открыла наше меню');
+  assert.match(linkMenu.textContent ?? '', /Открыть ссылку/);
+  assert.match(linkMenu.textContent ?? '', /Скопировать ссылку/);
   h.unmount();
   h.round12();
   const photo = { ...h.msg('photo-context'), content: 'подпись', attachments: [{ url: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=', name: 'photo.gif', contentType: 'image/gif', size: 1, width: 1, height: 1 }] } as Message;
@@ -292,16 +299,15 @@ it('правый клик по фотографии открывает конт�
   const link = h.host.querySelector<HTMLElement>('[data-mid="photo-context"] .att-img-link'); assert.ok(link, 'фото — настоящая ссылка-предпросмотр');
   const context = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
   await act(async () => { link!.dispatchEvent(context); await h.flush(); });
-  assert.equal(context.defaultPrevented, true, 'переключатель пузырей разрешает специальный контекст фото');
+  assert.equal(context.defaultPrevented, true, 'фотография открывает специальный контекст');
   assert.ok(document.querySelector('.ctx-menu'), 'меню привязано к сообщению с фото');
   h.unmount();
-  localStorage.setItem('gv_dm_bubbles', '0');
   await h.mount({ bubbles: false, messages: [photo] });
-  const oldLink = h.host.querySelector<HTMLElement>('[data-mid="photo-context"] .att-img-link'); assert.ok(oldLink, 'фото есть и в старом режиме');
+  const oldLink = h.host.querySelector<HTMLElement>('[data-mid="photo-context"] .att-img-link'); assert.ok(oldLink, 'фото есть и в канале');
   const oldContext = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
   await act(async () => { oldLink!.dispatchEvent(oldContext); await h.flush(); });
-  assert.equal(oldContext.defaultPrevented, false, 'без режима пузырей фотография не крадёт нативное меню');
-  assert.ok(!document.querySelector('.ctx-menu'), 'старый режим не открывает меню пузыря');
+  assert.equal(oldContext.defaultPrevented, true, 'канальное фото тоже открывает наше меню');
+  assert.ok(document.querySelector('.ctx-menu'), 'отсутствие пузырей не отключает меню фото');
   h.unmount(); h.round12(); const restore = h.pointerLayout(true, 390); h.mobile();
   await h.mount({ bubbles: false, messages: [photo] });
   const channelPhoto = h.host.querySelector<HTMLElement>('[data-mid="photo-context"] .att-img-link'); assert.ok(channelPhoto, 'канальная фотография доступна касанию');
@@ -320,8 +326,7 @@ it('правый клик по фотографии открывает конт�
 it('ссылка в тексте получает своё меню и подтверждение на ПК, а удержание телефона не становится выделением строки', async () => {
   // Иначе общий обработчик строки крадёт адрес ссылки, либо мобильное удержание ошибочно запускает batch/text selection.
   h.round12(); h.desktop();
-  const href = 'https://outside.example/path?q=1';
-  localStorage.setItem('gv_link_warn', JSON.stringify({ off: false, trusted: [] }));
+  const href = 'https://user@outside.example/path?q=1';
   await h.mount({ messages: [{ ...h.msg('round13-link', 'peer'), content: href }] });
   const link = h.host.querySelector<HTMLAnchorElement>('[data-mid="round13-link"] a.msg-link');
   assert.ok(link, 'в тексте есть отдельная внешняя ссылка');
@@ -345,7 +350,7 @@ it('ссылка в тексте получает своё меню и подт�
     const openAgain = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(b => b.textContent?.includes('Открыть ссылку'));
     assert.ok(openAgain, 'открытие и копирование доступны независимыми действиями меню');
     await act(async () => { openAgain.click(); await h.flush(); });
-    assert.ok(document.querySelector('.link-confirm'), 'внешний адрес проходит через подтверждение, не открывается напрямую');
+    assert.ok(document.querySelector('.link-confirm'), 'подозрительный адрес проходит через подтверждение, как обычный клик');
     h.unmount(); h.mobile(); const restore = h.pointerLayout(true, 390);
     const batch = { forward: async () => {}, deleteMany: async () => {}, peerName: () => 'Peer', open: () => {} };
     await h.mount({ messages: [{ ...h.msg('round13-phone-link', 'peer'), content: href }], batch });
@@ -368,8 +373,38 @@ it('ссылка в тексте получает своё меню и подт�
   }
 });
 
+it('обычный клик и пункт «Открыть ссылку» одинаково открывают обычный адрес и спрашивают подозрительный', async () => {
+  h.round12(); h.desktop();
+  const savedOpen = window.open;
+  const opened: unknown[][] = [];
+  window.open = ((...args: unknown[]) => { opened.push(args); return null; }) as typeof window.open;
+  try {
+    for (const [url, warn] of [
+      ['https://outside.example/path', false],
+      ['https://user@outside.example/path', true],
+    ] as const) {
+      for (const viaMenu of [false, true]) {
+        opened.length = 0;
+        await h.mount({ messages: [{ ...h.msg('r143-link-parity', 'peer'), content: url }] });
+        const link = h.host.querySelector<HTMLAnchorElement>('a.msg-link'); assert.ok(link);
+        if (viaMenu) {
+          await act(async () => { link.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); await h.flush(); });
+          const open = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(b => b.textContent?.includes('Открыть ссылку'));
+          assert.ok(open, 'контекстное меню предлагает открытие адреса');
+          await act(async () => { open.click(); await h.flush(); });
+        } else {
+          await act(async () => { link.click(); await h.flush(); });
+        }
+        assert.equal(!!document.querySelector('.link-confirm'), warn, 'меню и клик принимают одинаковое решение');
+        assert.deepEqual(opened, warn ? [] : [[url, '_blank', 'noopener,noreferrer']], 'обычная ссылка открыта сразу; подозрительная ждёт решения');
+        h.unmount();
+      }
+    }
+  } finally { if (h.root) h.unmount(); window.open = savedOpen; }
+});
+
 async function checkLinkContextMenu(component: typeof h.Pane) {
-  h.round12(); h.desktop(); localStorage.setItem('gv_link_warn', JSON.stringify({ off: false, trusted: [] }));
+  h.round12(); h.desktop();
   const href = 'https://outside.example/mutant'; const messageCopies: string[] = [];
   try {
     await h.mount({ messages: [{ ...h.msg('link-mutant', 'peer'), content: href }], onCopyLink: m => messageCopies.push(m.id) }, component);

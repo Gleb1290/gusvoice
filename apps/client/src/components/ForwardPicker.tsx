@@ -18,7 +18,7 @@ import { useVisibleOnline } from '../dmOnline';
 import { BottomSheet } from './BottomSheet';
 import { createPortal } from 'react-dom';
 import { ContextMenu, MenuItem } from './ContextMenu';
-import { DmRow } from './DmSidebar';
+import { DmRow, ForwardAva, ForwardCell } from './DmSidebar';
 import { Icon } from './Icon';
 import { SchedPick } from './SchedPick';
 import { ShareChannelRow } from './ShareChannelRow';
@@ -47,6 +47,8 @@ export interface ForwardPickerProps {
   canHide?: boolean;
   /** В выборе есть сообщения с вложением и подписью — тогда есть и «Скрыть подписи» (при `canHide`). */
   hasCaptions?: boolean;
+  /** В выборе есть сообщения с файлами (Э2 часть Б, #141): беседы с людьми других инстансов файлы пока не примут — предупреждаем до отправки. */
+  hasFiles?: boolean;
   /** Закрыть окно: крестик, щелчок мимо, Esc, «назад» на телефоне и сразу после выбора. */
   onClose: () => void;
   /** Беседы, отмеченные при открытии (G76: сообщения брошены на строку списка); нет — окно пустое. */
@@ -152,6 +154,7 @@ export function ForwardPicker({
   canLater = false,
   canHide = false,
   hasCaptions = false,
+  hasFiles = false,
   onClose,
   initial,
   pickOne,
@@ -176,9 +179,10 @@ export function ForwardPicker({
   const currentDmId = useStore((s) => s.currentDmId);
   const unreadDms = useStore((s) => s.unreadDms);
   const meId = useStore((s) => s.user?.id);
-  // Режим бесед: сводки (превью, ✓ / ✓✓), черновики (Р7) и своя очередь отправки. На старом пути их нет.
-  const convActive = useStore((s) => s.convActive);
+  // Сводки (превью, ✓ / ✓✓), черновики (Р7) и своя очередь отправки — беседы есть только в режиме бесед.
   const summaries = useStore((s) => s.conv.summaries);
+  // Э3: сервер возит вложения между инстансами (`fedm3`, как `serverFedFiles` в `convSyncRules`; здесь строкой — модуль у тестов заглушён).
+  const fedFiles = useStore((s) => !!s.serverFeatures?.includes('fedm3'));
   const drafts = useStore((s) => s.drafts);
   const outbox = useStore((s) => s.outbox);
   const [query, setQuery] = useState('');
@@ -270,11 +274,17 @@ export function ForwardPicker({
   const pickedSet = useMemo(() => new Set(picked), [picked]);
   const q = query.trim();
   const nameOf = usePeerName();
+  // Выбранные беседы с людьми другого инстанса, куда файлы не уйдут (Э2 часть Б; с Э3 — только без `fedm3` у сервера или с `fedNoFiles` в сводке):
+  // при пересылке файлов — их имена в предупреждении.
+  const fedNoFiles = useMemo(
+    () => (hasFiles ? dms.filter((d) => pickedSet.has(d.id) && !d.group && !d.saved && !!d.otherUser.homeInstance && (!fedFiles || !!summaries[d.id]?.fedNoFiles)).map((d) => dmPeerLabel(d, nameOf)) : []),
+    [hasFiles, dms, pickedSet, nameOf, fedFiles, summaries],
+  );
   // Имя — по началу любого слова, «@логин» (и логин без «@») — по началу логина, как в «Найти беседу» списка ЛС (05.10).
   const shown = useMemo(
     () => {
-      // Бывшая группа (08.10, `groups3`) — только на чтение: переслать в неё нельзя.
-      const open = dms.filter((d) => !summaries[d.id]?.former && !(pickOne && !pickOne.keepCurrent && d.id === currentDmId));
+      // Бывшая группа (08.10, `groups3`) и архив разорванной связки с инстансом (Э2 часть Б) — только на чтение: переслать в них нельзя.
+      const open = dms.filter((d) => !summaries[d.id]?.former && (summaries[d.id] as { fedLink?: string } | undefined)?.fedLink !== 'broken' && !(pickOne && !pickOne.keepCurrent && d.id === currentDmId));
       // Подпись контакта и имя — оба (Telegram `data_peer.cpp` кладёт в индекс и то и другое, `peerName.ts`).
       return q
         ? open.filter(
@@ -321,11 +331,17 @@ export function ForwardPicker({
     setMenu({ x, y });
   };
 
+  // Сетка телефона (`ShareAlert`): нажатие ячейки переключает галочку (Telegram `ShareAlert` — выбор нескольких тапом); «одной
+  // беседой» остаются выбор одного адресата (`pickOne`) и режим «поделиться» (`share`: нажатие — одна беседа, принятое ложится в
+  // её поле, удержание — несколько).
+  const gridSelecting = !pickOne && (!share || n > 0);
+  const gridOpen = pickOne ? pickSingle : share ? choose : toggle;
+
   // Поле и список — в ОДНОЙ обёртке, как в макете (`FwdPick`): окно и лист кладут между своими детьми зазор (12 / 4 px), а
   // в макете список стоит вплотную к полю, и между ними остаётся только отступ самого `.sheet-search`. `.fwd-pick` —
   // сжимаемая колонка (порция 5, блок «Раунд 12» в `styles.css`): в низком окне список прокручивается внутри него.
   const picker = (
-    <div className="fwd-pick">
+    <div className={phone ? 'fwd-pick fwd-pick-grid' : 'fwd-pick'}>
       <input
         ref={inputRef}
         className="sheet-search"
@@ -340,6 +356,38 @@ export function ForwardPicker({
       ) : shown.length === 0 && shownCh.length === 0 ? (
         <div className="sheet-empty">По запросу «{q}» бесед нет</div>
       ) : (
+        phone ? (
+          // Телефон — сетка 4 в ряд, как `ShareAlert` Telegram (`ForwardCell`); заголовков «Беседы / Каналы» в ней нет, как и там.
+          <div className="fwd-grid">
+            {shown.map((d) => (
+              <ForwardCell
+                key={d.id}
+                id={d.id}
+                label={dmPeerLabel(d, nameOf)}
+                avatar={<ForwardAva saved={d.saved} name={dmPeerLabel(d, nameOf)} url={d.otherUser.avatarUrl} />}
+                online={onlineSet.has(d.otherUser.id)}
+                picked={pickedSet.has(d.id)}
+                selecting={gridSelecting}
+                holdable={!!share}
+                onOpen={gridOpen}
+                onPick={toggle}
+              />
+            ))}
+            {shownCh.map((c) => (
+              <ForwardCell
+                key={c.id}
+                id={c.id}
+                label={`# ${c.name}`}
+                avatar={<ForwardAva name={c.serverName} url={c.serverIconUrl} />}
+                picked={pickedSet.has(c.id)}
+                selecting={gridSelecting}
+                holdable
+                onOpen={gridOpen}
+                onPick={toggle}
+              />
+            ))}
+          </div>
+        ) : (
         <div className="dm-list fwd-list">
           {shown.length > 0 && shownCh.length > 0 && <div className="mp-head">Беседы</div>}
           {shown.map((d) => {
@@ -348,14 +396,14 @@ export function ForwardPicker({
               <DmRow
                 key={d.id}
                 dm={d}
-                summary={convActive ? summaries[d.id] : undefined}
+                summary={summaries[d.id]}
                 meId={meId}
                 online={onlineSet.has(d.otherUser.id)}
                 active={false}
                 unread={unread}
                 unreadN={unread ? (d.unread ?? 0) : 0}
-                draft={convActive ? drafts[d.id]?.text : undefined}
-                failed={convActive && !!outbox[d.id]?.some((x) => x.status === 'failed')}
+                draft={drafts[d.id]?.text}
+                failed={!!outbox[d.id]?.some((x) => x.status === 'failed')}
                 query={q}
                 // Аватар 40 и точка 12 и на телефоне (макет `FwdPick`, строка 56 px): `phone` у строки — это 48 / 14 для
                 // списка бесед на всю ширину экрана, в листе выбора их нет.
@@ -380,9 +428,16 @@ export function ForwardPicker({
             </>
           )}
         </div>
+        )
       )}
       {n > 0 && (
         <div className="fwd-foot">
+          {fedNoFiles.length > 0 && (
+            <div className="fwd-warn" role="note">
+              Файлы людям других инстансов пока не пересылаются — в {fedNoFiles.length === 1 ? 'беседу' : 'беседы'}{' '}
+              {fedNoFiles.join(', ')} такие сообщения не уйдут.
+            </div>
+          )}
           <input
             className="sheet-search fwd-comment"
             placeholder="Комментарий"
@@ -406,7 +461,8 @@ export function ForwardPicker({
           <div className="fwd-send-row">
             <button
               type="button"
-              className="fwd-send"
+              className={phone ? 'fwd-send round' : 'fwd-send'}
+              aria-label={phone ? `Отправить (${n})` : undefined}
               onClick={() => send({ silent: false, at: null })}
               onContextMenu={(e) => {
                 if (!canSilent && !canLater) return;
@@ -414,7 +470,14 @@ export function ForwardPicker({
                 openMenu(e.clientX, e.clientY);
               }}
             >
-              {`Отправить (${n})`}
+              {phone ? (
+                <>
+                  <Icon name="send" size={22} />
+                  <span className="fwd-send-n">{n}</span>
+                </>
+              ) : (
+                `Отправить (${n})`
+              )}
             </button>
             {(canSilent || canLater) && (
               <button

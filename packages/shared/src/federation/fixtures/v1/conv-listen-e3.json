@@ -1,0 +1,63 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "seq": 32,
+  "more": false,
+  "items": [
+    {
+      "seq": 31,
+      "kind": "msg",
+      "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+      "entity_id": "0199d2a1-7b3c-7d4e-8f5a-6b7c8d9e0f4a",
+      "entity": {
+        "id": "0199d2a1-7b3c-7d4e-8f5a-6b7c8d9e0f4a",
+        "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        "author": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" },
+        "client_id": "c-0199d2a1-7b4a",
+        "payload_hash": "b1c2d3e4f5a60718",
+        "created_at": 1760270460000,
+        "origin_sort_key": 1760270460000125,
+        "content": "",
+        "reply_to_id": null,
+        "forwarded_from": null,
+        "silent": false,
+        "no_preview": false,
+        "caption_above": false,
+        "reply_quote": null,
+        "sticker": null,
+        "service": null,
+        "attachments": [
+          {
+            "id": "0199d2a1-dddd-7d4e-8f5a-6b7c8d9e0f4a",
+            "name": "voice.ogg",
+            "content_type": "audio/ogg",
+            "size": 48213,
+            "width": null,
+            "height": null,
+            "duration_ms": 6200,
+            "waveform": [4, 18, 42, 77, 63, 30, 12, 5],
+            "as_file": false,
+            "spoiler": false,
+            "sha256": null,
+            "once": true
+          }
+        ],
+        "edit_version": 0,
+        "edited_at": null,
+        "deleted": false
+      }
+    },
+    {
+      "seq": 32,
+      "kind": "listen",
+      "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+      "entity_id": "0199d2a1-7b3c-7d4e-8f5a-6b7c8d9e0f1b",
+      "entity": {
+        "message_id": "0199d2a1-7b3c-7d4e-8f5a-6b7c8d9e0f1b",
+        "listeners": [
+          { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" }
+        ],
+        "spent": true
+      }
+    }
+  ]
+}

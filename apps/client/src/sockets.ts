@@ -13,6 +13,7 @@ import {
   type TypingAction,
   typingActionField,
   typingActionToServer,
+  FEATURE_FEDCALL1,
   FEATURE_TYPING2,
   voicePublishBits,
 } from '@gusvoice/shared';
@@ -25,6 +26,7 @@ import { useContacts } from './contacts';
 import { applyRemoteGifs } from './savedGifs';
 import { api, getToken } from './api';
 import { isFeedOnScreen } from './channelRules';
+import { applyServerMessageCreate, applyServerMessageUpdate, isServerLastMessage, serverLastFromMessage } from './serverRowRules';
 import { dmIncomingDecision, dmMuteOf, dmMutedDecision, dmSilentDecision, muteActive, muteSoundOff } from './dmListRules';
 import { feedCovered } from './readByView';
 import { notifyLevel } from './channelPrefs';
@@ -59,6 +61,7 @@ import {
   osNotify,
   osNotifyLevel,
   osNotifyRaw,
+  popupPreview,
   setNotifyPrefs,
   windowFocused,
 } from './notifications';
@@ -286,13 +289,16 @@ export function connectGateway(): void {
       return;
     }
     gatewayLastRecv = Date.now();
-    /* ЛС этап 2: режим бесед объявляет шлюзу `conv1` — и получает `conv.change` вместо `dm.*`. Режим решён в `bootstrap`
-       ДО подключения и посреди сессии не меняется, поэтому соединение никогда не остаётся без обеих форм событий. */
-    const caps = useStore.getState().convActive ? [CAP_CONV1] : undefined;
-    // `presence5` (D4, 08.10): получать `online.away` — «не в сети для ЛС» при открытом сокете. Тоже только режиму бесед.
+    /* ЛС этап 2: клиент объявляет шлюзу `conv1` всегда — получает `conv.change` вместо старых `dm.*` (их обработчиков у
+       клиента больше нет, 09.10). Сервер без бесед (`conv2`) `conv.change` шлёт, но стор его не применяет: ЛС там нет. */
+    // Тип с `undefined` — ради прежней формы `caps?.push` / `caps ? … : {}` (её читают проверки исходника).
+    const caps: string[] | undefined = [CAP_CONV1];
+    // `presence5` (D4, 08.10): получать `online.away` — «не в сети для ЛС» при открытом сокете.
     caps?.push(FEATURE_PRESENCE5);
     // `typing2` (09.10): получать вид действия `round` («записывает видеосообщение»); без него шлюз отдаёт прежнее `voice`.
     caps?.push(FEATURE_TYPING2);
+    // `fedcall1` (Э6, 12.10): получать `call.state` входящего звонка с другого инстанса (`DmCall.host`); без него шлюз такого не шлёт.
+    caps?.push(FEATURE_FEDCALL1);
     // `groups1` (07.10): события групп ЛС — только соединению с беседами, которое их понимает.
     // `presence4` (08.10): получать `online.dm` — «Невидимый» в сети для ЛС. `bigreact1` (08.10, G43): эффект `reaction.big`.
     socket.send(
@@ -415,15 +421,35 @@ export function connectGateway(): void {
               () => void useStore.getState().openChannel(msg.channelId),
               false,
               // Тег беседы (как tweb): новое сообщение канала заменяет прежнее; открытие канала их закрывает (`store.openChannel`).
-              { group: channelNoticeGroup(msg.channelId) },
+              {
+                group: channelNoticeGroup(msg.channelId),
+                // Своё окно ПК (G38, ND-07): заголовок — канал, строка — «Автор: текст», аватар автора.
+                popup: { title: where, author: authorName(msg.message), avatar: msg.message.author.avatarUrl, preview: popupPreview(msg.message) },
+              },
             );
           }
         }
+        /**
+         * Строка сервера в списке на телефоне (12.10, #218): последнее сообщение сервера — живьём, и своё тоже. Правило —
+         * `serverRowRules.applyServerMessageCreate`; сервер без поля (старый бэкенд) остаётся на счётчиках. Название канала
+         * клиент знает только у открытого сервера. Серверы чужих инстансов (`bgGateways`) сюда не попадают — у них счётчики.
+         */
+        {
+          const chName = store.bootstrap?.channels.find((c) => c.id === msg.channelId)?.name;
+          const servers = applyServerMessageCreate(store.servers, msg.serverId, serverLastFromMessage(msg.message, msg.channelId, chName));
+          if (servers !== store.servers) useStore.setState({ servers });
+        }
         return store.appendMessage(msg.channelId, msg.message);
       }
-      case 'message.update':
+      case 'message.update': {
+        // Поправили последнее сообщение сервера — поправить и строку списка (`serverRowRules.applyServerMessageUpdate`).
+        const servers = applyServerMessageUpdate(store.servers, serverLastFromMessage(msg.message, msg.channelId));
+        if (servers !== store.servers) useStore.setState({ servers });
         return store.updateMessage(msg.channelId, msg.message);
+      }
       case 'message.delete':
+        // Удалили последнее сообщение сервера — предыдущее знает только бэкенд: свежий список (`GET /servers`).
+        if (isServerLastMessage(store.servers, msg.messageId)) void store.loadServers();
         return store.removeMessage(msg.channelId, msg.messageId);
       case 'message.reaction':
         return store.applyReaction(msg.channelId, msg.messageId, msg.emoji, msg.userId, msg.op);
@@ -476,6 +502,11 @@ export function connectGateway(): void {
          * состояние целиком. Если она закрыта — просто растёт счётчик, и при открытии данные свежие.
          */
         store.bumpFederationRev();
+        return;
+      }
+      case 'federation.guest_links': {
+        // 15.10: связка дома с инстансом, где я гость, сменилась — рейл перечитает «Где я гость» (`RailGroups`, `guestGone.ts`).
+        store.bumpGuestLinksRev();
         return;
       }
       case 'server.access_closed': {
@@ -577,69 +608,10 @@ export function connectGateway(): void {
         toast('info', ch ? `Вас переместили в «${ch.name}»` : 'Вас переместили в другой канал');
         return;
       }
-      case 'dm.channel':
-        return store.upsertDm(msg.channel);
-      case 'dm.create': {
-        // Собеседник отправил — его «печатает…» гаснет сразу (06.10), как в `message.create`.
-        dropTyping(msg.channelId, msg.message.author.id);
-        // Что делать с входящим — целиком в `dmListRules.dmIncomingDecision` (#212: Б2 тихое
-        // «прочитано» из сервера, Б8 звук в открытой беседе, чтение только когда смотрят); «без звука» (С3) —
-        // `dmSilentDecision` поверх: всё как обычно (счётчик, тост, мигание), гасится только звук.
-        // Заглушена (07.10, G03) — без звука, тоста и мигания; счётчик как обычно (`dmMutedDecision`).
-        const oldDm = store.dms.find((x) => x.id === msg.channelId);
-        const base = dmSilentDecision(
-          dmIncomingDecision({
-            mine: msg.message.author.id === store.user?.id,
-            onScreen: isFeedOnScreen({
-              id: msg.channelId,
-              currentId: store.currentDmId,
-              mobile: isMobile(),
-              mobilePane: store.mobilePane,
-              kind: 'dm',
-              view: store.view,
-            }),
-            focused: windowFocused(),
-            dnd: store.user?.status === 'dnd',
-            covered: feedCovered(),
-          }),
-          msg.message,
-        );
-        const d = dmMutedDecision(
-          base,
-          muteActive(
-            dmMuteOf(
-              { muted: oldDm?.muted, otherUser: { id: oldDm?.otherUser.id ?? msg.message.author.id } },
-              store.pushMutedDmUsers,
-              store.pushMuteUntil,
-            ),
-            Date.now(),
-          ),
-        );
-        if (d.countUnread) store.markDmUnread(msg.channelId);
-        if (d.markRead) {
-          // До этого сообщения, а не до часов сервера: следующее могло прийти, пока шёл таймер.
-          const upTo = msg.message.id;
-          scheduleRead(`dm:${msg.channelId}`, () => void api.markDmRead(msg.channelId, upTo).catch(() => {}));
-        }
-        if (d.sound) playSound('dm');
-        if (d.osNotify) {
-          osNotify(
-            `${peerNameNow(msg.message.author.id, authorName(msg.message))} — личное сообщение`,
-            messagePreview(msg.message),
-            () => void useStore.getState().selectDm(msg.channelId),
-            false,
-            { silent: msg.message.silent === true, group: msg.channelId },
-          );
-          // Иконка в панели задач мигает, как у тыка (#212): тост уходит за 5 секунд, а человек в игре
-          // его мог не заметить. Фокус не забираем — решает `gv_flash_window`.
-          flashWindow();
-        }
-        return store.appendDmMessage(msg.channelId, msg.message);
-      }
       /**
        * ЛС этап 2: изменение в беседе с номером журнала. Звук, тост и счётчик — только для НОВОГО чужого (`created`),
-       * решает то же `dmIncomingDecision`, что и у старого `dm.create`; «без звука» (`m.silent`, С3) — тем же
-       * `dmSilentDecision`, что и там (гасит только звук; уведомление — без звука системы). Применение (с буфером
+       * решает `dmIncomingDecision`; «без звука» (`m.silent`, С3) — `dmSilentDecision` (гасит только звук; уведомление —
+       * без звука системы). Применение (с буфером
        * догонки) — в сторе.
        */
       case 'conv.change': {
@@ -687,7 +659,7 @@ export function connectGateway(): void {
             : null;
         store.convOnChange(msg, !!d?.countUnread);
         if (!d || !m) return;
-        // «Прочитано до» считается в момент отправки по ленте на экране — как у `markDmRead(upTo)`.
+        // «Прочитано до» считается в момент отправки по ленте на экране (`convReadNow`).
         if (d.markRead) scheduleRead(`dm:${convId}`, () => useStore.getState().convReadNow(convId));
         if (d.sound) playSound('dm');
         if (d.osNotify) {
@@ -698,20 +670,16 @@ export function connectGateway(): void {
             dmChat: sum?.kind !== 'group',
             group: convId,
             conv: convId,
+            // Своё окно ПК (G38, ND-07): как у Telegram — имя чата и аватар, в группе — название группы и «Автор: текст».
+            popup:
+              sum?.kind === 'group'
+                ? { title: sum.group?.title ?? authorName(m), author: peerNameNow(m.author.id, authorName(m)), avatar: sum.group?.avatarUrl ?? null, preview: popupPreview(m) }
+                : { title: peerNameNow(m.author.id, authorName(m)), avatar: m.author.avatarUrl, preview: popupPreview(m) },
           });
           flashWindow();
         }
         return;
       }
-      case 'dm.update':
-        return store.updateDmMessage(msg.channelId, msg.message);
-      case 'dm.delete':
-        return store.removeDmMessage(msg.channelId, msg.messageId, {
-          lastMessageAt: msg.lastMessageAt,
-          unread: msg.unread,
-        });
-      case 'dm.reaction':
-        return store.applyDmReaction(msg.channelId, msg.messageId, msg.emoji, msg.userId, msg.op);
       // «Большая» реакция собеседника (`bigreact1`, G43): только эффект — сама реакция приходит своим путём. Играть ли (беседа
       // открыта, сообщение на экране, движение не выключено), решает `BigReactionLayer`.
       case 'reaction.big':
@@ -720,8 +688,6 @@ export function connectGateway(): void {
       // Прочитал на другом своём устройстве — гасим здесь (событие адресное, приходит только своим).
       case 'read.channel':
         return store.applyRemoteRead({ channelId: msg.channelId, serverId: msg.serverId, at: msg.at });
-      case 'read.dm':
-        return store.applyRemoteRead({ dmId: msg.dmId, at: msg.at });
       case 'typing':
         if (msg.userId && msg.userId !== store.user?.id) noteTyping(msg.channelId ?? msg.dmId ?? '', msg.userId, parseTypingAction(msg.action));
         // G07: «печатает» в ЛС — собеседник «в сети» ещё 30 с (если время захода мне видно, `dmOnline.dotShown`).

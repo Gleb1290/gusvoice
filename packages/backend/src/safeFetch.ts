@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from 'node:dns';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
+import { isDevPeerHost } from './federation/devPeers.js';
 
 /**
  * HTTP-клиент для URL, которые прислал ПОЛЬЗОВАТЕЛЬ.
@@ -204,6 +205,11 @@ export type SafeResponse = {
    * последовательности превращается в символ замены — файл тихо портится, а размер даже растёт.
    */
   bytes?: Buffer;
+  /**
+   * Заголовок `retry-after` ответа 429 в секундах (исправления ревью ЛС 12.10, п. 1: забор журнала соседа ждёт столько,
+   * а не долбит предел). Нет заголовка или не число — поля нет.
+   */
+  retryAfter?: number;
 };
 
 /**
@@ -309,6 +315,7 @@ function once(
           body: opts.binary ? '' : Buffer.concat(chunks).toString('utf8'),
           ...(opts.binary ? { bytes: Buffer.concat(chunks) } : {}),
           location: typeof res.headers.location === 'string' ? res.headers.location : undefined,
+          ...retryAfterOf(res.headers['retry-after']),
           truncated,
         });
       res.on('end', finish);
@@ -370,6 +377,14 @@ export const PEER_MAX_BYTES = 1024 * 1024;
 export const PEER_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
 /**
+ * Э3 ЛС между инстансами (#141, Ф3): файл вложения соседа, который мы копируем к себе сразу при приёме, — до 25 МБ (порог
+ * гибрида; больше — по первому открытию, часть 2). Свой потолок и свой общий срок: 25 МБ по медленной связке — минуты.
+ * Включается только явным `attachment: true` запроса, общий `PEER_MAX_FILE_BYTES` для аватаров не меняется.
+ */
+export const PEER_MAX_ATT_BYTES = 25 * 1024 * 1024;
+export const ATT_DEADLINE_MS = 5 * 60_000;
+
+/**
  * Разрешён ли адрес соседа — до всякой сети.
  *
  * 🔴 **Список разрешённых хостов обязателен и сравнивается с `host` (имя + порт), а не с именем.**
@@ -414,6 +429,8 @@ export type PeerRequest = {
   maxBytes?: number;
   /** Общий срок на запрос; выше `FILE_DEADLINE_MS` не поднимается. Нужен проверкам, боевой код берёт умолчания. */
   deadlineMs?: number;
+  /** Э3: ответ — файл вложения ЛС (вместе с `binary`): потолок `PEER_MAX_ATT_BYTES`, срок `ATT_DEADLINE_MS`, любой тип. */
+  attachment?: boolean;
 };
 
 /**
@@ -427,7 +444,17 @@ export type PeerRequest = {
  * - тело запроса больше `PEER_MAX_BYTES` не отправляется.
  */
 export async function safePeerRequest(req: PeerRequest, testLookup?: TestLookup): Promise<SafeResponse> {
-  const url = assertPeerTarget(req.url, req.allowHosts, testLookup !== undefined);
+  /**
+   * Режим стенда (Ф13, `federation/devPeers.ts`): хосту из явного списка `FEDERATION_DEV_PEERS` можно `http` и loopback —
+   * резолвер без фильтра частных сетей. Остальные хосты проверяются как прежде; вне режима список пуст.
+   */
+  let dev = false;
+  try {
+    dev = isDevPeerHost(new URL(req.url).host);
+  } catch {
+    /* не URL — отобьёт assertPeerTarget */
+  }
+  const url = assertPeerTarget(req.url, req.allowHosts, testLookup !== undefined || dev);
   const body = req.method === 'POST' ? Buffer.from(req.body ?? '', 'utf8') : undefined;
   if (body && body.length > PEER_MAX_BYTES) throw new BlockedTargetError('тело запроса больше предела');
 
@@ -437,21 +464,54 @@ export async function safePeerRequest(req: PeerRequest, testLookup?: TestLookup)
     if (key === 'host' || key === 'content-length' || key === 'transfer-encoding') continue;
     headers[key] = v;
   }
-  headers.accept = req.binary ? 'image/*' : 'application/json';
+  headers.accept = req.binary ? (req.attachment ? '*/*' : 'image/*') : 'application/json';
   headers['user-agent'] = 'GusVoice federation';
   if (body) {
     headers['content-type'] = 'application/json';
     headers['content-length'] = String(body.length);
   }
 
-  const maxBytes = Math.min(req.maxBytes ?? PEER_MAX_BYTES, PEER_MAX_FILE_BYTES);
-  const res = await once(url, headers, testLookup ?? safeLookup, {
+  const att = req.binary === true && req.attachment === true;
+  const maxBytes = Math.min(req.maxBytes ?? PEER_MAX_BYTES, att ? PEER_MAX_ATT_BYTES : PEER_MAX_FILE_BYTES);
+  const deadlineCap = att ? ATT_DEADLINE_MS : FILE_DEADLINE_MS;
+  const res = await once(url, headers, testLookup ?? (dev ? dnsLookup : safeLookup), {
     method: req.method,
     body,
     maxBytes,
     binary: req.binary,
-    deadlineMs: Math.min(req.deadlineMs ?? (req.binary ? FILE_DEADLINE_MS : REQUEST_DEADLINE_MS), FILE_DEADLINE_MS),
+    deadlineMs: Math.min(req.deadlineMs ?? (req.binary ? deadlineCap : REQUEST_DEADLINE_MS), deadlineCap),
   });
   if (res.truncated) throw new BlockedTargetError('ответ соседа больше предела');
-  return { url: res.url, status: res.status, contentType: res.contentType, body: res.body, bytes: res.bytes };
+  return {
+    url: res.url,
+    status: res.status,
+    contentType: res.contentType,
+    body: res.body,
+    bytes: res.bytes,
+    ...(res.retryAfter !== undefined ? { retryAfter: res.retryAfter } : {}),
+  };
+}
+
+/** `retry-after` в секундах (форму с датой соседи не шлют): 0…1 сутки, иначе поля нет. */
+function retryAfterOf(raw: unknown): { retryAfter?: number } {
+  const v = typeof raw === 'string' && /^\d{1,6}$/.test(raw.trim()) ? Number(raw.trim()) : null;
+  return v !== null && v <= 86_400 ? { retryAfter: v } : {};
+}
+
+/**
+ * Э3 часть 2 (#141): адрес соседа для запроса ПОТОКОМ (`federation/peerStream.ts`) — те же проверки, что у `safePeerRequest`
+ * (список хостов, режим стенда, IP-литерал), и резолвер, которым подключаться. Сам поток живёт отдельным модулем: у этого
+ * файла закрытый перечень зависимостей в проверках.
+ */
+export function resolvePeerTarget(raw: string, allowHosts: ReadonlySet<string>, testLookup?: TestLookup): { url: URL; lookup: TestLookup } {
+  let dev = false;
+  try {
+    dev = isDevPeerHost(new URL(raw).host);
+  } catch {
+    /* не URL — отобьёт assertPeerTarget */
+  }
+  const url = assertPeerTarget(raw, allowHosts, testLookup !== undefined || dev);
+  const lookup = testLookup ?? (dev ? dnsLookup : safeLookup);
+  if (lookup === safeLookup) assertLiteralAllowed(url.hostname);
+  return { url, lookup };
 }

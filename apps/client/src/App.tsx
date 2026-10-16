@@ -27,22 +27,24 @@ import { Login } from './components/Login';
 import { InstanceUnreachable } from './components/InstanceUnreachable';
 import { ConfirmHost } from './components/ConfirmHost';
 import { MuteCustomHost } from './components/MuteCustomHost';
+import { RaiseToEarHost } from './components/RaiseToEarHost';
 import { StickerSetModal } from './components/StickerSetModal';
 import { ServerPicker } from './components/ServerPicker';
 import { SetupAdminWizard, SetupConfigureWizard } from './components/SetupWizard';
 import { MainLayout } from './components/MainLayout';
 import { ShareIncoming } from './components/ShareIncoming';
+import { KeyboardContentIncoming } from './components/KeyboardContentIncoming';
 import { onBgVoiceEvent, syncBgGateways } from './bgGateways';
 import { connectGateway, connectPresence } from './sockets';
 import { consumeDeepLink, startPushRegistration } from './nativeUnifiedPush';
 import { useStore, voiceIsHere } from './store';
 import { setNotifyAlwaysProbe } from './notifications';
-import { convClientSwitch } from './convStore';
 import { clearConvCacheWipe, deleteConvCache, finishConvCacheWipes, readConvCache } from './convCache';
 import { convCacheKey } from './convCacheRules';
 import { onConvCacheFlushed, startConvCacheWriter } from './convCacheWriter';
 import { initVoiceTray } from './voiceTray';
 import { initUnreadBadge } from './unreadBadge';
+import { initNotifyPopups } from './notifyPopupHost';
 import { initOverlay } from './overlay';
 import { initTipToast } from './tipToast';
 import { initAfk } from './afk';
@@ -179,8 +181,9 @@ export function App() {
    */
   /**
    * ЛС этап 2 (`docs/dm/STAGE2.md`): говорить ли с ЛС через беседы. Решается ДО подключения шлюза — от этого зависит
-   * `caps` в `identify`. После входа по паролю `loadMe` не звали, признаков нет — узнаём их здесь; не узнали — старый
-   * путь (он работает с любым сервером).
+   * `caps` в `identify`. После входа по паролю `loadMe` не звали, признаков нет — узнаём их здесь. Сервер без бесед
+   * (`conv1`+`conv2`: коробки ≤ 0.8.17) — ЛС нет, в списке заглушка «нужно обновить сервер» (решение владельца 09.10:
+   * старого пути `/api/dm*` у клиента больше нет); каналы и голос работают как раньше.
    */
   async function decideConvMode(stale: () => boolean = () => false): Promise<void> {
     const st = useStore.getState();
@@ -196,8 +199,8 @@ export function App() {
       if (stale()) return;
       if (features) st.setServerFeatures(features);
     }
-    // Оба признака: у сервера 0.8.17 есть `conv1`, но нет `created` и старой рассылки — там остаёмся на старом пути.
-    const active = !!features?.includes(CAP_CONV1) && !!features?.includes(FEATURE_CONV2) && convClientSwitch();
+    // Оба признака: у сервера 0.8.17 есть `conv1`, но нет `created` и старой рассылки — там ЛС недоступны.
+    const active = !!features?.includes(CAP_CONV1) && !!features?.includes(FEATURE_CONV2);
     st.setConvActive(active);
     const me = useStore.getState().user;
     if (!active || !me) return;
@@ -270,6 +273,8 @@ export function App() {
      * Само бы починилось только при следующем сворачивании-разворачивании приложения.
      */
     startPushRegistration();
+    // Трансляция геопозиции в ЛС (`geolive1`): идущие с прошлого запуска (в `localStorage`, пока не вышел срок) продолжаются.
+    void import('./geoLiveSharing').then((m) => m.resumeGeoLive(), () => {});
     // Reconnect-grace restore (#11): if we dropped from a voice channel within the grace window
     // (crash / quick restart), rejoin it now — mute/deafen come back from the persisted self state.
     void restoreVoiceSession();
@@ -394,6 +399,8 @@ export function App() {
     initVoiceTray();
     // Десктоп: число непрочитанных ЛС на значке панели задач и в трее (Р1, G39); снятие тостов прочитанной беседы.
     initUnreadBadge();
+    // Десктоп: свои всплывающие окна уведомлений, как у Telegram Desktop (G38, ND-07); веб и Android — без изменений.
+    initNotifyPopups();
     // Desktop in-game overlay controller — pushes the voice roster to the overlay window; no-op on web.
     initOverlay();
     // Контроллер всплывающей плашки «кто кого типнул» — второе оверлейное окно; в вебе выходит сразу.
@@ -614,6 +621,8 @@ export function App() {
       <MainLayout />
       {/* «Поделиться в GusVoice» (09.10, G79): окно выбора беседы для пришедшего из чужого приложения (только Android). */}
       <ShareIncoming />
+      {/* Картинки и GIF из клавиатуры (G50): встают вложением в поле открытой беседы (только Android). */}
+      <KeyboardContentIncoming />
     </>
   );
 
@@ -636,6 +645,8 @@ export function App() {
       <ConfirmHost />
       {/* «Свой срок…» у «Без звука» (`mute2`): выбор даты и времени; меню, из которого его открыли, уже закрыто. */}
       <MuteCustomHost />
+      {/* «Поднести к уху» (G67): датчик приближения, пока играет голосовое; только Android. */}
+      <RaiseToEarHost />
     </>
   );
 }

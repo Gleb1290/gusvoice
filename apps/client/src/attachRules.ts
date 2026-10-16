@@ -187,8 +187,13 @@ export const HOLD_TO_RECORD_MS = 300;
 /** Запись останавливается сама, не дойдя до предела сервера: запас на хвост контейнера и последнюю порцию данных. */
 export const VIDEO_SOFT_LIMIT = ATTACH_MAX_BYTES - 1024 * 1024;
 
-export function recordingFull(bytes: number): boolean {
-  return bytes >= VIDEO_SOFT_LIMIT;
+export function recordingFull(bytes: number, softLimit = VIDEO_SOFT_LIMIT): boolean {
+  return bytes >= softLimit;
+}
+
+/** Мягкий предел записи под предел файла `max` (в ЛС при `bigfile1` — `dmAttachMaxBytes()`, до 1 ГиБ; в каналах — 25 МБ). */
+export function videoSoftLimit(max = ATTACH_MAX_BYTES): number {
+  return Math.max(1024 * 1024, max - 1024 * 1024);
 }
 
 /** Сколько элементов галереи просить за раз (сетка 3 колонки — 20 строк). */
@@ -284,6 +289,8 @@ export interface RecentSource {
   contentType: string;
   size: number;
   waveform?: number[] | null;
+  /** Э3 (#141): `'copying'` — копия с инстанса автора ещё едет, файла у нас нет. */
+  fedState?: string;
 }
 
 export interface RecentFile<A extends RecentSource = RecentSource> {
@@ -293,7 +300,7 @@ export interface RecentFile<A extends RecentSource = RecentSource> {
 
 /**
  * «Недавние файлы» вкладки «Файл»: вложения из бесед, что уже в памяти (отправленные и полученные), новые сверху, без
- * повторов и без голосовых. Повтор — тот же id или ссылка, а также то же имя с тем же размером (один файл, отправленный
+ * повторов и без голосовых; вложение с `fedState: 'copying'` (Э3) не в счёт — файла у нас ещё нет. Повтор — тот же id или ссылка, а также то же имя с тем же размером (один файл, отправленный
  * дважды, — одна строка). Без ссылки (окно из кеша на диске, у закрытых файлов ссылок нет) — пропускаем: отправить такое
  * заново нечем.
  */
@@ -306,7 +313,7 @@ export function recentFilesOf<A extends RecentSource>(
     for (const m of list ?? []) {
       const at = Date.parse(m.createdAt) || 0;
       for (const a of m.attachments ?? []) {
-        if (!a?.url || (a.waveform && a.waveform.length)) continue;
+        if (!a?.url || a.fedState === 'copying' || (a.waveform && a.waveform.length)) continue;
         all.push({ att: a, at });
       }
     }
@@ -359,4 +366,86 @@ export function skippedText(
   if (big.length) parts.push(`Больше ${megabytes(max)} МБ — не отправить: ${big.join(', ')}`);
   if (bad.length) parts.push(`Не удалось прочитать: ${bad.join(', ')}`);
   return parts.join('. ');
+}
+
+// ——— Лист вложений Android, G50 (14.10): выбор мазком и поиск в «Файл» ———————————————————————————————————————————————
+/**
+ * Лист вложений Android, G50 (14.10) — чистые правила двух жестов/полей, без DOM.
+ *
+ * 1) Выбор МАЗКОМ по сетке галереи. Эталон — Telegram Android: долгое нажатие на миниатюру
+ *    (`ChatAttachAlertPhotoLayout.gridView.setOnItemLongClickListener` → `itemRangeSelector.setIsActive(view, true, position,
+ *    shouldSelect = !cell.isChecked())`), дальше палец ведёт по ячейкам (`RecyclerViewItemRangeSelector.onInterceptTouchEvent`,
+ *    `RecyclerListView.chekMultiselect` — выбор диапазоном от первой ячейки до текущей). Режим «выбрать / снять» задаёт
+ *    первая ячейка. Код Telegram не копировали. Наше уточнение (запрос владельца): обратный ход пальца возвращает ячейки,
+ *    вышедшие из диапазона, в то состояние, что было до мазка, — поэтому итог всегда считается ЗАНОВО от снимка `base`.
+ * 2) Поиск по названию во вкладке «Файл» (`ChatAttachAlertDocumentLayout`: поле поиска над списком файлов, список
+ *    сужается по имени).
+ */
+
+/** Сколько надо держать палец на миниатюре, чтобы начался мазок: `ViewConfiguration.getLongPressTimeout()` Android = 500 мс. */
+export const SWEEP_HOLD_MS = 500;
+
+/** Сдвиг пальца до срабатывания удержания, после которого это прокрутка, а не мазок (`touchSlop` ≈ 8 dp; берём 10 px). */
+export const SWEEP_SLOP_PX = 10;
+
+/** Полоса у верхнего/нижнего края списка, где мазок сам прокручивает сетку (`RecyclerViewItemRangeSelector.hotspotHeight` = 80 dp). */
+export const SWEEP_EDGE_PX = 64;
+
+/**
+ * Итог мазка. `base` — выбор до мазка (порядок нажатий), `ids` — id всех ячеек сетки сверху вниз, `anchor` — индекс ячейки,
+ * с которой начали, `cur` — индекс ячейки под пальцем, `select` — режим (ячейка-якорь не была выбрана → выбираем, иначе снимаем),
+ * `room` — сколько ещё можно выбрать (всего в выборе, не прибавка), `blocked` — ячейки, которые выбрать нельзя (больше предела сервера).
+ * Диапазон — от якоря к текущей в сторону движения: номера выбираются в порядке прохода пальца. Не влезло в `room` — `full`,
+ * остальные не берём (как `toggleSelected`). Снятие `blocked` не касается.
+ */
+export function sweepOrder(
+  base: readonly string[],
+  ids: readonly string[],
+  anchor: number,
+  cur: number,
+  select: boolean,
+  room: number,
+  blocked: (id: string) => boolean = () => false,
+): { order: string[]; full: boolean } {
+  if (anchor < 0 || cur < 0 || anchor >= ids.length || cur >= ids.length) return { order: [...base], full: false };
+  const step = cur >= anchor ? 1 : -1;
+  const range: string[] = [];
+  for (let i = anchor; i !== cur + step; i += step) range.push(ids[i]!);
+  if (!select) {
+    const gone = new Set(range);
+    return { order: base.filter((id) => !gone.has(id)), full: false };
+  }
+  const order = [...base];
+  let full = false;
+  for (const id of range) {
+    if (order.includes(id) || blocked(id)) continue;
+    if (order.length >= room) {
+      full = true;
+      break;
+    }
+    order.push(id);
+  }
+  return { order, full };
+}
+
+/** Скорость автопрокрутки у края (пикселей за миллисекунду): 0 в глубине списка, растёт к самому краю. `y` — относительно верха списка. */
+export function sweepScrollSpeed(y: number, height: number, edge = SWEEP_EDGE_PX, max = 1.1): number {
+  if (height <= edge * 2) return 0;
+  if (y < edge) return -max * Math.min(1, (edge - y) / edge);
+  if (y > height - edge) return max * Math.min(1, (y - (height - edge)) / edge);
+  return 0;
+}
+
+function fold(s: string): string {
+  return s.trim().toLowerCase().replace(/ё/g, 'е');
+}
+
+/**
+ * Файлы вкладки «Файл», подходящие под запрос: подстрока имени без учёта регистра и «ё/е». Пустой запрос — список как есть.
+ * Порядок сохраняется (новые сверху).
+ */
+export function filterFilesByName<T extends { att: { name: string } }>(list: readonly T[], query: string): T[] {
+  const q = fold(query);
+  if (!q) return [...list];
+  return list.filter((r) => fold(r.att.name).includes(q));
 }

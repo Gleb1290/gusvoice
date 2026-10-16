@@ -75,8 +75,9 @@ export function VoiceTopBar({ feedId, onJump }: { feedId: string | undefined; on
           <Icon name="skip-forward" size={16} />
         </button>
       )}
-      <button type="button" className="voice-topbar-main" onClick={open} aria-label="К голосовому сообщению">
-        <span className="voice-topbar-author">{src.author ?? 'Голосовое сообщение'}</span>
+      <button type="button" className="voice-topbar-main" onClick={open} aria-label={track.title ? 'К сообщению' : 'К голосовому сообщению'}>
+        {/* Аудиофайл (15.10): название трека, как у Telegram в полосе музыки; голосовое — автор. */}
+        <span className="voice-topbar-author">{track.title ?? src.author ?? 'Голосовое сообщение'}</span>
         {src.createdAt ? <span className="voice-topbar-when">{sentAtLabel(src.createdAt)}</span> : null}
       </button>
       <VoiceSpeedButton />

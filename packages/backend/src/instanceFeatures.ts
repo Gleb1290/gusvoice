@@ -27,6 +27,7 @@ import {
   FEATURE_LASTSEEN1,
   FEATURE_LASTSEEN2,
   FEATURE_LASTSEEN3,
+  FEATURE_READERS1,
   FEATURE_PRESENCE4,
   FEATURE_PINS2,
   FEATURE_LINKPREV1,
@@ -54,7 +55,24 @@ import {
   FEATURE_PINSET1,
   FEATURE_TYPING2,
   FEATURE_BIGFILE1,
+  FEATURE_MSGPRIV1,
+  FEATURE_LINKTHREATS1,
+  FEATURE_FEDM1,
+  FEATURE_FEDM2,
+  FEATURE_FEDM3,
+  FEATURE_FEDM4,
+  FEATURE_FEDM5,
+  FEATURE_FEDCALL1,
+  FEATURE_FEDM6,
+  fedDmEnabledFromEnv,
+  FEATURE_ALBUM1,
+  FEATURE_GEOCONTACT1,
+  FEATURE_CONVPOLL1,
+  FEATURE_GEOLIVE1,
+  FEATURE_YAMAP1,
+  FEATURE_OSMMAP1,
 } from '@gusvoice/shared';
+import { linkThreatsEnabled } from './linkThreatsRules.js';
 
 /**
  * Возможности инстанса, которые клиент включает только по объявлению — поле `features` в `GET /auth/me`
@@ -63,8 +81,9 @@ import {
  * 🔴 Строка появляется здесь, когда возможность РАБОТАЕТ целиком, а не когда появился её код. `conv1` (беседы
  * `/api/conv/*`) — только после шага 1б: в 1а новые таблицы пустые, а живые ЛС ещё пишутся в `dm_*`, и клиент,
  * поверивший объявлению раньше, увидел бы пустой список переписок. `conv2` (30.09) — `created` в `conv.change` и старая
- * рассылка из `/api/conv/*` (`dmLegacyEvents.ts`): без них клиент на беседах терял бы звук/счётчик новых ЛС, а старые
- * клиенты собеседника — живую доставку. `conv3` (01.10, Р7) — черновики между устройствами: `draft` в сводке,
+ * рассылка из `/api/conv/*` (снята 10.10, вывод старых ЛС шаг 5): без них клиент на беседах терял бы звук/счётчик
+ * новых ЛС. Признак остаётся навсегда: без него новый клиент ушёл бы на старый путь.
+ * `conv3` (01.10, Р7) — черновики между устройствами: `draft` в сводке,
  * `PUT /conv/:id/draft`. `conv4` (03.10, Р6) — «прочитано собеседником»: `peerReadKey` в сводке и `conv.change`
  * собеседнику при сдвиге моего «прочитано до»; клиенту признак нужен, чтобы отличить сводку из кеша, снятую до
  * обновления сервера, от сервера без ✓✓. `conv5` (04.10, действия с сообщением как в Telegram, шаг 1) — пересылка
@@ -96,6 +115,8 @@ import {
  * `groups1` (07.10, #211, С4) — групповые ЛС до 5 человек (`routes/convGroups.ts`, миграция 0099); группы — только клиенту,
  * который их просит (`?groups=1`, `identify.caps`).
  *
+ * `linkthreats1` (09.10, #218 п.5) — `Message.dangerousLinks`: хосты ссылок, найденные в локальном списке угроз сервера (`linkThreats.ts`, раз в сутки); только при `LINK_THREATS_ENABLED` (`FEATURE_LINKTHREATS1`).
+ *
  * `saved1` (08.10, #211, С6, G72) — «Избранное»: беседа с самим собой (`POST /conv/saved`, `ConvSummary.saved`, миграции нет); как группы, видна только клиенту с `groups1` (`FEATURE_SAVED1`).
  *
  * `fwd2` (07.10, #211, G71) — «скрыть имя отправителя» и «скрыть подписи» у пересылки (`FEATURE_FWD2`).
@@ -110,6 +131,8 @@ import {
  *
  * `presence4` (08.10, #211, решения владельца) — «в сети» в ЛС по факту (время прячет приватность, «Невидимый» — только серверы,
  *   событие `online.dm`), «Кто может звонить» (`callPrivacy`, `/users/me/call-exceptions`, `canCall`, миграция 0122, `FEATURE_PRESENCE4`).
+ *
+ * `msgpriv1` (13.10, #218) — «Кто может мне писать» (`messagePrivacy`, `/users/me/message-exceptions`, `canMessage`, 403 `message_privacy`, миграция 0146, `FEATURE_MSGPRIV1`).
  *
  * `media1` (08.10, #211, G29) — общие медиа беседы в профиле: `GET /conv/:id/media`, `GET /conv/:id/media/counts`, миграция 0108 (`FEATURE_MEDIA1`).
  *
@@ -179,6 +202,7 @@ export const INSTANCE_FEATURES: readonly string[] = [
   FEATURE_LASTSEEN1,
   FEATURE_LASTSEEN2,
   FEATURE_LASTSEEN3,
+  FEATURE_READERS1,
   FEATURE_PRESENCE4,
   FEATURE_PINS2,
   FEATURE_LINKPREV1,
@@ -206,4 +230,32 @@ export const INSTANCE_FEATURES: readonly string[] = [
   FEATURE_PINSET1,
   FEATURE_TYPING2,
   FEATURE_BIGFILE1,
+  FEATURE_ALBUM1,
+  // Геопозиция и карточка контакта в ЛС (14.10, G69): миграция 0145, `ConvMessage.media`.
+  FEATURE_GEOCONTACT1,
+  // Опрос в ЛС (14.10): миграция 0147, `ConvMessage.media` с `kind: 'poll'`, голос/закрытие/«кто голосовал».
+  FEATURE_CONVPOLL1,
+  // Геопозиция в реальном времени в ЛС (14.10): `ConvMessage.media` с `kind: 'geolive'`, ручки `…/live` и `…/live/stop`; миграции нет.
+  FEATURE_GEOLIVE1,
+  // Картинка карты в карточке геопозиции ЛС (14.10): только при заданном ключе Static API Яндекса (`YANDEX_MAPS_STATIC_KEY`).
+  ...(process.env.YANDEX_MAPS_STATIC_KEY?.trim() ? [FEATURE_YAMAP1] : []),
+  // Своя карта OpenStreetMap (14.10): только при заданном пути к файлу PMTiles (`MAP_PMTILES_PATH`, читаем окружение напрямую).
+  ...(process.env.MAP_PMTILES_PATH?.trim() ? [FEATURE_OSMMAP1] : []),
+  FEATURE_MSGPRIV1,
+  // Опасные ссылки (#218 п.5): объявляем, только пока проверка включена (`LINK_THREATS_ENABLED`).
+  ...(linkThreatsEnabled(process.env.LINK_THREATS_ENABLED) ? [FEATURE_LINKTHREATS1] : []),
+  // ЛС между инстансами, Э1 (#141): «Написать» людям связанных инстансов — только при `FEDERATION_DM_ENABLED`.
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM1] : []),
+  // Э2 (#141): переписка текстом с ними работает — клиент снимает плашку «появится в следующем обновлении».
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM2] : []),
+  // Э3 часть 1 (#141): файлы с ними — по `fedNoFiles` / `fedState` / `federation.att_pending`.
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM3] : []),
+  // Э4 (#141): «печатает» и «в сети / был(а)» собеседника с другого инстанса — прежними событиями (`fedm4`).
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM4] : []),
+  // Э5 часть 1 (#141): «мой дом лежит — пишу через инстанс собеседника» (`/conv/:id/fallback`, `/conv/via-claims`, `via`).
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM5] : []),
+  // Э6 (#141): звонки 1:1 с ними — входящий с `DmCall.host`, `fedNoCalls`, `GET /calls/active?fed=1`, `/conv/:id/fallback?for=call`.
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDCALL1] : []),
+  // Э7 часть 1 (#141): группы со смешанным составом — участники других инстансов (`homeInstance`), `ConvSummary.fedGroupHost`.
+  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM6] : []),
 ];

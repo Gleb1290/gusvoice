@@ -43,6 +43,7 @@ import { statusSeenBy } from '../statusRules.js';
 import { animatedAvatarFor } from '../shopRules.js';
 import { isSupportedImage, putMedia } from '../storage.js';
 import { telegramConfigured } from '../telegram.js';
+import { serverListExtras } from '../unread.js';
 import {
   catalogPackByName,
   catalogUploadedBy,
@@ -220,16 +221,29 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
 
   // List servers the user belongs to. The super-admin sees every server.
   app.get('/servers', async (req) => {
-    if (isSuperAdmin(asUserId(req.user!.sub))) {
-      const all = await db.select().from(servers);
-      return all.map(serializeServer);
+    const list = isSuperAdmin(asUserId(req.user!.sub))
+      ? (await db.select().from(servers)).map(serializeServer)
+      : (
+          await db
+            .select({ server: servers })
+            .from(serverMembers)
+            .innerJoin(servers, eq(serverMembers.serverId, servers.id))
+            .where(eq(serverMembers.userId, req.user!.sub))
+        ).map((r) => serializeServer(r.server));
+    /**
+     * Счётчики и последнее сообщение (12.10, #218; `unread.serverListExtras`) — ДОБАВЛЕНИЕМ полей (правило 11): старый
+     * клиент их не читает. Подсчёт упал — список отдаётся как раньше, без полей: строка сервера из-за этого не пропадает.
+     */
+    try {
+      const extras = await serverListExtras(req.user!.sub, list.map((x) => x.id));
+      return list.map((x) => {
+        const e = extras.get(x.id);
+        return e ? { ...x, unread: e.unread, mentions: e.mentions, lastMessage: e.lastMessage } : x;
+      });
+    } catch (err) {
+      req.log.warn({ err }, 'server list extras failed');
+      return list;
     }
-    const rows = await db
-      .select({ server: servers })
-      .from(serverMembers)
-      .innerJoin(servers, eq(serverMembers.serverId, servers.id))
-      .where(eq(serverMembers.userId, req.user!.sub));
-    return rows.map((r) => serializeServer(r.server));
   });
 
   // Create a server with default @everyone role, a category and starter channels.

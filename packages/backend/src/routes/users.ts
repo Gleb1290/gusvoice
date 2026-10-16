@@ -1,5 +1,5 @@
 import { FED_ERRORS, NOTIFY_REPEAT_MINUTES, checkAnimatedAvatar, isAnimatedImage } from '@gusvoice/shared';
-import type { UserSearchResponse } from '@gusvoice/shared';
+import { fedDmEnabledFromEnv, parseRemoteHandle, type UserSearchResponse } from '@gusvoice/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -13,16 +13,27 @@ import { searchLocalUsers } from '../db/userSearch.js';
 import { normalizeUserQuery, USER_SEARCH_RATE } from '../userSearchRules.js';
 import { broadcastUserProfile, broadcastUserStatus } from '../gateway.js';
 import { announceUser } from '../federation/directoryEvents.js';
+import { searchRemoteUsers } from '../federation/remoteUserSearch.js';
 import { getVisibleVoiceChannelIds } from '../permissions.js';
 import { publishToUser } from '../realtime.js';
 import { serializeUser } from '../serialize.js';
 import { LAST_SEEN_BATCH_MAX, lastSeenFor, lastSeenForMany, myLastSeenExceptions, setLastSeenExceptions } from '../lastSeen.js';
 import { LAST_SEEN_EXCEPTIONS_MAX } from '../lastSeenRules.js';
 import { callAllowedFor, myCallExceptions, setCallExceptions } from '../callPrivacy.js';
+import { messageAllowedFor, myMessageExceptions, setMessageExceptions } from '../contacts.js';
 import { isSupportedImage, uploadAvatar } from '../storage.js';
 import { avatarRentalActive } from '../shopRules.js';
 
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+
+/**
+ * «Кто может мне писать» (`msgpriv1`) сменилось (правило или «Всегда разрешать») — сказать домам собеседников с других инстансов
+ * (`federation/dmEphemeral.announceMessagePrivacy`). Задаёт `index.ts` при включённых ЛС между инстансами; нет — молчим.
+ */
+let messagePrivacyChanged: ((userId: string) => void) | null = null;
+export function configureMessagePrivacyChanged(fn: ((userId: string) => void) | null): void {
+  messagePrivacyChanged = fn;
+}
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
@@ -49,6 +60,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         hideReadTime: z.boolean().optional(),
         // «Кто может звонить» (`presence4`): та же тройка, что у «Времени захода».
         callPrivacy: z.enum(['everyone', 'peers', 'nobody']).optional(),
+        // «Кто может мне писать» (`msgpriv1`): все или мои контакты (Telegram «Мои контакты и Premium»).
+        messagePrivacy: z.enum(['everyone', 'contacts']).optional(),
         // Настройки уведомлений (G38, `push2`): «Показывать имя / текст» и «Уведомления из групп».
         notifyView: z.enum(['all', 'name', 'nothing']).optional(),
         notifyGroups: z.boolean().optional(),
@@ -71,6 +84,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       lastSeenPrivacy: string;
       hideReadTime: boolean;
       callPrivacy: string;
+      messagePrivacy: string;
       notifyView: string;
       notifyGroups: boolean;
       notifyDm: boolean;
@@ -82,6 +96,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (body.lastSeenPrivacy !== undefined) patch.lastSeenPrivacy = body.lastSeenPrivacy;
     if (body.hideReadTime !== undefined) patch.hideReadTime = body.hideReadTime;
     if (body.callPrivacy !== undefined) patch.callPrivacy = body.callPrivacy;
+    if (body.messagePrivacy !== undefined) patch.messagePrivacy = body.messagePrivacy;
     if (body.notifyView !== undefined) patch.notifyView = body.notifyView;
     if (body.notifyGroups !== undefined) patch.notifyGroups = body.notifyGroups;
     if (body.notifyDm !== undefined) patch.notifyDm = body.notifyDm;
@@ -96,6 +111,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     broadcastUserProfile(serialized.id, serialized.displayName, serialized.avatarUrl, serialized.animatedAvatarUrl);
     // Тем же ходом — соседям по федерации: имя и аватар человека видны и у них (F2, §5.2).
     await announceUser(serialized.id);
+    if (body.messagePrivacy !== undefined) messagePrivacyChanged?.(serialized.id);
     return serialized;
   });
 
@@ -207,7 +223,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (!view) return reply.code(404).send({ error: 'not found' });
     // «Кто может звонить» (`presence4`): трубку в шапке ЛС и «Позвонить» в профиле клиент прячет по этому полю. Себе — без поля.
     if (id === req.user!.sub) return view;
-    return { ...view, canCall: await callAllowedFor(req.user!.sub, id) };
+    // «Кто может мне писать» (`msgpriv1`): `false` — клиент вместо поля ввода показывает плашку отказа.
+    return { ...view, canCall: await callAllowedFor(req.user!.sub, id), canMessage: await messageAllowedFor(req.user!.sub, id) };
   });
 
   /**
@@ -250,6 +267,19 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
     return setCallExceptions(req.user!.sub, body.always, body.never);
   });
+  // «Кто может мне писать» (`msgpriv1`): только «Всегда разрешать» (`never` принимается и игнорируется — форма как у звонков).
+  app.get('/users/me/message-exceptions', { preHandler: requireLocalUser }, async (req, reply) => {
+    if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    return myMessageExceptions(req.user!.sub);
+  });
+  app.put('/users/me/message-exceptions', { preHandler: requireLocalUser }, async (req, reply) => {
+    const ids = z.array(z.string().min(1).max(64)).max(LAST_SEEN_EXCEPTIONS_MAX);
+    const body = z.object({ always: ids, never: ids.optional() }).parse(req.body);
+    if (await limitedLastSeenExceptions(req.user!.sub)) return reply.code(429).send({ error: 'too many requests' });
+    const saved = await setMessageExceptions(req.user!.sub, body.always);
+    messagePrivacyChanged?.(req.user!.sub);
+    return saved;
+  });
 
   app.get('/users/activities', async () => {
     return { activities: allActivities() };
@@ -265,11 +295,23 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.get('/users/search', { preHandler: requireLocalUser }, async (req, reply) => {
     const me = req.user!.sub;
     const { q: raw } = z.object({ q: z.string().max(100).optional() }).parse(req.query);
+    // Э1 ЛС между инстансами (`fedm1`): `@имя@домен` — человек связанного инстанса из кеша каталога, свои не ищутся.
+    const fedDm = fedDmEnabledFromEnv(process.env);
+    const handle = fedDm ? parseRemoteHandle(raw ?? '') : null;
+    if (handle) {
+      const wait = await rateHit(`usearch:${me}`, USER_SEARCH_RATE.max, USER_SEARCH_RATE.windowS);
+      if (wait) return reply.code(429).header('Retry-After', String(wait)).send({ error: retryMessage(wait) });
+      const res: UserSearchResponse = { users: [], remote: await searchRemoteUsers(handle) };
+      return res;
+    }
     const q = normalizeUserQuery(raw);
     if (!q) return reply.code(400).send({ error: 'Введите логин: от 3 до 32 знаков, латиница, цифры и . _ -' });
     const wait = await rateHit(`usearch:${me}`, USER_SEARCH_RATE.max, USER_SEARCH_RATE.windowS);
     if (wait) return reply.code(429).header('Retry-After', String(wait)).send({ error: retryMessage(wait) });
-    const res: UserSearchResponse = { users: await searchLocalUsers(me, q) };
+    const res: UserSearchResponse = {
+      users: await searchLocalUsers(me, q),
+      ...(fedDm ? { remote: await searchRemoteUsers({ prefix: q }) } : {}),
+    };
     return res;
   });
 

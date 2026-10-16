@@ -113,9 +113,17 @@ export function lastSeenView(input: {
   isPeer: boolean;
   connected: boolean;
   now: number;
+  /**
+   * F5 (приёмка 13.10): `subject` заблокировал `viewer` — как у Telegram, заблокированный видит «был(а) давно»: ни «в сети»,
+   * ни времени, ни «недавно» (Android `LocaleController.formatUserStatus` при пустом статусе — `ALongTimeAgo`). Нет поля — как раньше.
+   */
+  blockedViewer?: boolean;
 }): UserLastSeen {
   const { subject, viewer, isPeer, connected, now } = input;
   const self = subject.id === viewer.id;
+  if (input.blockedViewer && !self) {
+    return { userId: subject.id, online: false, at: null, approx: 'long', byMe: false, exact: false };
+  }
   // Зелёная точка: её видят свои и соседи (общий сервер, беседа), «Невидимый» — не в сети (кроме себя самого).
   const online = connected && (self || (isPeer && !subject.invisible));
   if (self) {
@@ -164,4 +172,36 @@ export function readAtView(input: {
   if (now - createdAt.getTime() >= READ_DATE_EXPIRE_MS) return { read: true, at: null, hidden: false };
   if (hidden) return { read: true, at: null, hidden: true };
   return { read: true, at: readAt ? readAt.toISOString() : null, hidden: false };
+}
+
+/** Участник группы глазами автора сообщения для «кто прочитал» (`readers1`). */
+export interface GroupReaderSide extends ReadTimeSide {
+  /** «Прочитано до» участника (`conversation_members.last_read_key`; у людей соседа — со слов их дома, `dmgroupmarks1`). */
+  lastReadKey: number;
+  deleted: boolean;
+  /** Блокировка между ним и автором в ЛЮБУЮ сторону: заблокированный ничего не узнаёт, заблокировавшего не показываем. */
+  blocked: boolean;
+  /** «Собеседник» автора для правила времени захода (`arePeers`). */
+  isPeer: boolean;
+}
+
+/**
+ * Кто прочитал СВОЁ сообщение автора `me` в группе (15.10, `readers1`; Telegram `messages.getMessageReadParticipants`,
+ * tdesktop `api_who_reacted.cpp` `WhoReadExists`: не старше `chat_read_mark_expire_period` = 7 суток). Прочитал — «прочитано
+ * до» не меньше ключа сообщения (то же `>=`, что у ✓✓ `readByPeer`). Без автора, удалённых, блокировок и тех, у кого время
+ * прочтения скрыто взаимным правилом 1:1 (`readTimeHidden`: скрыл он — его нет; скрыл я — не вижу и других). Порядок — входной.
+ */
+export function groupReaders(input: {
+  me: ReadTimeSide;
+  sortKey: number;
+  createdAt: Date;
+  now: number;
+  members: readonly GroupReaderSide[];
+}): { ids: string[]; expired: boolean } {
+  const { me, sortKey, createdAt, now, members } = input;
+  if (now - createdAt.getTime() >= READ_DATE_EXPIRE_MS) return { ids: [], expired: true };
+  const ids = members
+    .filter((m) => m.id !== me.id && !m.deleted && !m.blocked && m.lastReadKey >= sortKey && !readTimeHidden(me, m, m.isPeer))
+    .map((m) => m.id);
+  return { ids, expired: false };
 }

@@ -101,8 +101,11 @@ export function parseFedEvent(raw: unknown): FedEvent | null {
 }
 
 export type EventVerdict =
-  /** Принять и применить. */
-  | { accept: true; gap: boolean }
+  /**
+   * Принять и применить. `late: true` (Э0 ЛС между инстансами, 12.10) — опоздавшее: номер ниже последнего принятого, но
+   * он числится в пропусках (`missing`), то есть его не видели. Последний принятый номер такое событие НЕ двигает.
+   */
+  | { accept: true; gap: boolean; late?: true }
   /** Уже видели — тихо подтвердить, не применяя. Повтор это норма, а не повод для тревоги. */
   | { accept: false; reason: 'duplicate' };
 
@@ -118,11 +121,53 @@ export type EventVerdict =
  */
 export function judgeEvent(
   event: Pick<FedEvent, 'eventId' | 'seq'>,
-  state: { lastSeq: number; recentIds: ReadonlySet<string> },
+  state: {
+    lastSeq: number;
+    recentIds: ReadonlySet<string>;
+    /**
+     * Номера, перепрыгнутые прошлыми дырами и ещё не пришедшие (Э0, `federation_links.missing_event_seqs`). Необязательно:
+     * без него поведение прежнее — всё, что не выше последнего, считается повтором.
+     *
+     * 🔴 Зачем (дыра доставки, `docs/dm/FEDERATION.md` §2.2): сосед прошлой версии шлёт событие сразу, мимо своей очереди,
+     * пока более раннее ещё ждёт повтора. Мы принимали «дыру», сдвигали последний номер — и раннее, доехав очередью,
+     * выбрасывалось как повтор. Изменение пропадало без всякой ошибки.
+     */
+    missing?: ReadonlySet<number>;
+  },
 ): EventVerdict {
   if (state.recentIds.has(event.eventId)) return { accept: false, reason: 'duplicate' };
-  if (event.seq <= state.lastSeq) return { accept: false, reason: 'duplicate' };
+  if (event.seq <= state.lastSeq) {
+    if (state.missing?.has(event.seq)) return { accept: true, gap: false, late: true };
+    return { accept: false, reason: 'duplicate' };
+  }
   return { accept: true, gap: event.seq > state.lastSeq + 1 };
+}
+
+/**
+ * Сколько пропущенных номеров помним на связку. Больше — самые старые забываются: событие, опоздавшее на тысячу номеров,
+ * давно выброшено очередью отправителя (12 попыток / 3 суток), а для каталогов дыру и так закрывает полная сверка.
+ */
+export const MISSING_EVENT_SEQS_MAX = 1024;
+
+/**
+ * Обновить множество пропусков после принятого события (Э0): дыра `lastSeq+1 … seq-1` добавляется, опоздавшее — вычёркивается.
+ * Возвращает новый отсортированный список не длиннее `max` (выбрасываются самые старые номера).
+ */
+export function trackMissingSeqs(
+  missing: readonly number[],
+  lastSeq: number,
+  seq: number,
+  max = MISSING_EVENT_SEQS_MAX,
+): number[] {
+  const set = new Set(missing);
+  if (seq <= lastSeq) {
+    set.delete(seq);
+  } else {
+    // Дыра длиннее предела целиком не нужна: запомнится только её хвост.
+    for (let n = Math.max(lastSeq + 1, seq - max); n < seq; n += 1) set.add(n);
+  }
+  const out = [...set].sort((a, b) => a - b);
+  return out.length > max ? out.slice(out.length - max) : out;
 }
 
 /**

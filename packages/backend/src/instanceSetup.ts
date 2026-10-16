@@ -4,7 +4,7 @@
  *
  * ⚠️ Всё живёт в УЖЕ существующей `instance_settings` (ключ → JSON), рядом с `smtp` и `economy`.
  */
-import type { DmPolicy } from '@gusvoice/shared';
+import { parseFedDmPolicy, type DmPolicy, type FedDmPolicy } from '@gusvoice/shared';
 import { and, eq, isNull } from 'drizzle-orm';
 import { superAdminId } from './auth.js';
 import { db } from './db/index.js';
@@ -50,6 +50,21 @@ export async function dmPolicy(): Promise<DmPolicy> {
 
 export async function setDmPolicy(policy: DmPolicy): Promise<void> {
   await writeSetting(DM_POLICY_KEY, { policy });
+}
+
+/**
+ * ЛС между инстансами, Э1 (Ф6): кто из людей СВЯЗАННЫХ инстансов может первым написать нашим — `shared` (только с общим
+ * сервером, нет записи = так) или `anyone` (все, ≤ 10 новых переписок в час от одного человека соседа). Решает дом получателя
+ * (`federation/convOpen.ts acceptConvOpen`); своя `dmPolicy` (люди этого инстанса) — отдельно.
+ */
+const FED_DM_POLICY_KEY = 'fed_dm_policy';
+
+export async function fedDmPolicy(): Promise<FedDmPolicy> {
+  return parseFedDmPolicy(await readSetting(FED_DM_POLICY_KEY));
+}
+
+export async function setFedDmPolicy(policy: FedDmPolicy): Promise<void> {
+  await writeSetting(FED_DM_POLICY_KEY, { policy });
 }
 
 export async function instanceMeta(): Promise<{ name: string | null; iconUrl: string | null }> {

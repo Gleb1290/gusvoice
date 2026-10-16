@@ -117,8 +117,8 @@ export function viewerDate(iso: string, now: Date = new Date()): string {
   return `${day} в ${time}`;
 }
 
-/** Порядок пунктов меню «⋯» / ПКМ просмотрщика — как у tdesktop (`fillContextMenuActions`), «Поделиться» (браузер, G10) — после «Переслать», как у Android `PhotoViewer`; «Удалить» — последним (у нас опасное внизу). */
-export const VIEWER_MENU_ORDER = ['goto', 'copy', 'forward', 'share', 'save', 'delete'] as const;
+/** Порядок пунктов меню «⋯» / ПКМ просмотрщика — как у tdesktop (`fillContextMenuActions`), «Поделиться» (браузер, G10) — после «Переслать», как у Android `PhotoViewer`; «Показать в папке» (десктоп) — сразу после «Сохранить как…», как у tdesktop; «Удалить» — последним (у нас опасное внизу). */
+export const VIEWER_MENU_ORDER = ['goto', 'copy', 'forward', 'share', 'save', 'folder', 'delete'] as const;
 export type ViewerMenuId = (typeof VIEWER_MENU_ORDER)[number];
 
 /** Пункты в порядке `VIEWER_MENU_ORDER`; повтор одного и того же — первый. */

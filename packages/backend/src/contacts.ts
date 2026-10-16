@@ -1,4 +1,4 @@
-import type { ContactRow } from '@gusvoice/shared';
+import type { ContactRow, LastSeenExceptions } from '@gusvoice/shared';
 import { and, asc, count, eq, inArray, isNull } from 'drizzle-orm';
 import { cleanContactName } from './contactRules.js';
 import { db } from './db/index.js';
@@ -29,6 +29,19 @@ export async function listContacts(me: string): Promise<ContactRow[]> {
     .map((r) => ({ ...r, addedAt: r.addedAt.toISOString() }))
     .sort((a, b) => (a.name ?? a.displayName).localeCompare(b.name ?? b.displayName, 'ru'));
 }
+
+/**
+ * «Кто может мне писать» (`msgpriv1`): `routes/users.ts` берёт ручки отсюда — этот модуль уже в закрытом перечне проверок маршрута
+ * (`routes/conv.ts` получает проверку крючком `configureMessagePrivacy` из `index.ts`). Сама логика — `messagePrivacy.ts`.
+ * ⚠️ Модуль подгружается при ПЕРВОМ вызове (`import()`), а не реэкспортом: проверки опроса/групп (`convPoll`, `groupPolish`,
+ * `federationGroupPush`) грузят `contacts` закрытым перечнем без `./messagePrivacy.js` (CI 4c6b3d79).
+ */
+const privacy = () => import('./messagePrivacy.js');
+export const messageAllowedFor = async (senderId: string, recipientId: string): Promise<boolean> =>
+  (await privacy()).messageAllowedFor(senderId, recipientId);
+export const myMessageExceptions = async (me: string): Promise<LastSeenExceptions> => (await privacy()).myMessageExceptions(me);
+export const setMessageExceptions = async (me: string, always: readonly string[]): Promise<LastSeenExceptions> =>
+  (await privacy()).setMessageExceptions(me, always);
 
 export type ContactTargetError = 'self' | 'not-found' | 'guest';
 

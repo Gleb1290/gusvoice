@@ -1,8 +1,9 @@
-import { type Attachment, formatDuration } from '@gusvoice/shared';
-import { useEffect, useRef } from 'react';
+import { type Attachment, formatDuration, musicSubtitle, musicTitle } from '@gusvoice/shared';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { attachmentKey } from '../fileActions';
 import { useStore } from '../store';
-import { voiceHeardKey, voiceTrackKey, voiceUnheard, voiceWaveWidth } from '../voicePlayback';
+import { resampleWaveform, voiceBarCount, voiceHeardKey, voiceTrackKey, voiceUnheard, voiceWaveWidth } from '../voicePlayback';
+import { usePhoneLayout } from '../phoneLayout';
 import { VoiceSpeedButton } from './VoiceSpeedButton';
 import { releaseLocalVoice, rememberVoice, seekVoice, toggleVoice, useVoiceBubble, type VoiceSource, type VoiceTrack } from '../voicePlayer';
 import { Icon } from './Icon';
@@ -20,6 +21,134 @@ import { VOICE_TRIM_MIN_MS } from '../voiceTrim';
 
 /** Из какого сообщения голосовое (07.10, G12): по нему плеер сообщает «прослушал», рисует точку и подписывает полосу. */
 export type VoiceMeta = VoiceSource;
+
+// Музыкальная карточка стоит ВЫШЕ пузыря голосового: проверки R117 (`mediaSelection.test.ts`) берут последний
+// `onPointerDown` файла как обработчик волны голосового.
+
+/**
+ * Аудиофайл в ленте (15.10, приёмка 0.9.0) — музыкальная карточка вместо карточки файла: круглая кнопка ▶/⏸, название трека,
+ * «длительность · размер», пока играет — «прошло / всего» и полоса перемотки; справа «⬇» (то же скачивание, что у файла:
+ * ПК — с кольцом, Android — в «Музыку»). Как Telegram: Android `ChatMessageCell` (музыка — `DOCUMENT_ATTACH_TYPE_MUSIC`,
+ * кнопка, название, исполнитель, `durationText`, `SeekBar` под ними), Web K `audio.tsx`. Какие форматы — `isMusicFile` (`shared/voiceMessage.ts`).
+ *
+ * Играет общий плеер голосовых (`voicePlayer.ts`): одна дорожка на всё приложение, полоса под шапкой и системный плеер
+ * подписаны названием трека (`VoiceTrack.title`), «прослушано» у файла нет (`listened` не передаём).
+ * Длительности во вложении нет (её знает только голосовое) — читаем метаданные файла один раз и помним по адресу.
+ */
+
+/** Длительность по адресу файла, мс: карточка, вернувшаяся в ленту, не качает метаданные заново. */
+/** Лента в режиме выбора: нажатие уходит строке (выбор), а не перемотке — как у волны голосового. */
+const inSelectMode = (el: Element) => !!el.closest('.messages.sel-mode');
+
+const durations = new Map<string, number>();
+
+function useMusicDuration(url: string, known: number | null | undefined): number {
+  const [ms, setMs] = useState(() => (known && known > 0 ? known : (durations.get(url) ?? 0)));
+  useEffect(() => {
+    if (ms > 0 || typeof Audio === 'undefined') return;
+    // Только заголовок файла (`preload = metadata`): Chromium просит у сервера диапазон, весь файл не качается.
+    const probe = new Audio();
+    probe.preload = 'metadata';
+    const done = () => {
+      if (Number.isFinite(probe.duration) && probe.duration > 0) {
+        const v = Math.round(probe.duration * 1000);
+        durations.set(url, v);
+        setMs(v);
+      }
+      probe.removeAttribute('src');
+      probe.load();
+    };
+    probe.addEventListener('loadedmetadata', done, { once: true });
+    probe.src = url;
+    return () => {
+      probe.removeEventListener('loadedmetadata', done);
+      probe.removeAttribute('src');
+    };
+  }, [url]);
+  return ms;
+}
+
+export function MusicFileCard({ a, sizeLabel, meta, badge }: { a: Attachment; sizeLabel: string; meta?: VoiceMeta; /** «⬇» справа — `DownloadBadge` от `AttachmentView` (файл не тянет `FileCard`). */ badge?: ReactNode }) {
+  const att = attachmentKey(a);
+  const key = voiceTrackKey(meta?.messageId, att, a.url);
+  const view = useVoiceBubble(key, null);
+  // Пока играет общий плеер — длительность и из него (`durationchange`), до того — из метаданных файла.
+  const probed = useMusicDuration(a.url, a.durationMs);
+  const title = musicTitle(a.name);
+  const started = view.current || view.at > 0;
+  const total = probed;
+  const progress = total > 0 ? Math.min(1, view.at / total) : 0;
+  const dragRef = useRef(false);
+
+  const track: VoiceTrack = {
+    key,
+    url: a.url,
+    durationMs: total,
+    // «Прослушано» и «один раз» — только у голосовых: у файла источник без них (переход к сообщению из полосы плеера остаётся).
+    source: meta ? { ...meta, listened: undefined, once: undefined } : undefined,
+    title,
+  };
+  // Карточка без сообщения (предпросмотр) — дорожка «local:», уходит вместе с карточкой, как запись перед отправкой.
+  useEffect(() => () => releaseLocalVoice(key), [key]);
+
+  function toggle() {
+    const s = useStore.getState();
+    toggleVoice({ ...track, place: { view: s.view === 'dm' ? 'dm' : 'server', serverId: s.currentServerId } });
+  }
+
+  function seek(e: React.PointerEvent<HTMLDivElement>) {
+    if (total <= 0) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    seekVoice(key, (total / 1000) * ratio);
+  }
+
+  const label = view.playing ? 'Пауза' : 'Слушать';
+  return (
+    <div className="att-file att-audio" data-att={att} title={a.name}>
+      <button type="button" className="voice-play att-audio-play" title={label} aria-label={`${label}: ${title}`} onClick={toggle}>
+        <Icon name={view.playing ? 'pause' : 'play'} size={16} />
+      </button>
+      <span className="att-audio-text">
+        <span className="att-file-name att-audio-title">{title}</span>
+        <span className="att-file-size att-audio-sub">{musicSubtitle({ atMs: view.at, durationMs: total, started, sizeLabel })}</span>
+        {/* Полоса перемотки — место под неё держим всегда (`hidden`, пока не играли): иначе карточка на старте вырастает и лента прыгает. */}
+        {total > 0 ? (
+          <div
+            className={started ? 'att-audio-seek' : 'att-audio-seek hidden'}
+            aria-hidden={started ? undefined : true}
+            role="slider"
+            aria-label="Перемотка"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(progress * 100)}
+            onPointerDown={(e) => {
+              if (!started) return;
+              // Режим выбора: нажатие — выбор сообщения, не перемотка (как у голосового, D21).
+              if (inSelectMode(e.currentTarget)) return;
+              dragRef.current = true;
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              seek(e);
+            }}
+            onPointerMove={(e) => {
+              if (dragRef.current) seek(e);
+            }}
+            onPointerUp={() => {
+              dragRef.current = false;
+            }}
+            onPointerCancel={() => {
+              dragRef.current = false;
+            }}
+          >
+            <span className="att-audio-seek-fill" style={{ width: `${progress * 100}%` }} />
+          </div>
+        ) : null}
+      </span>
+      {badge}
+    </div>
+  );
+}
+
 
 export function VoiceMessage({ a, meta }: { a: Attachment; meta?: VoiceMeta }) {
   return (
@@ -61,7 +190,24 @@ export function VoicePlayer({
   const at = view.at;
   const heard = view.heard;
 
-  const bars = waveform;
+  /* Телефон, лента (#218, Telegram `SeekBarWaveform`): столбик на каждые 3 px ширины волны (2 + зазор 1), а не 48 тонких — число
+     считается по измеренной ширине. Запись перед отправкой (`trim`) и ПК остаются со своими 48. */
+  const phone = usePhoneLayout();
+  const waveRef = useRef<HTMLDivElement>(null);
+  const [waveW, setWaveW] = useState(0);
+  const tgBars = phone && !trim;
+  useLayoutEffect(() => {
+    const el = waveRef.current;
+    if (!tgBars || !el) return;
+    const measure = () => setWaveW(el.getBoundingClientRect().width);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tgBars]);
+  const barsN = tgBars ? voiceBarCount(waveW) : 0;
+  const bars = barsN > 0 ? resampleWaveform(waveform, barsN) : waveform;
   // Длительность из вложения — надёжнее, чем `audio.duration`: у WebM из MediaRecorder её в
   // заголовке нет, и браузер до конца воспроизведения честно отдаёт Infinity.
   const total = durationMs;
@@ -173,7 +319,8 @@ export function VoicePlayer({
       </button>
 
       <div
-        className="voice-wave"
+        ref={waveRef}
+        className={`voice-wave${tgBars && barsN > 0 ? ' tg-bars' : ''}`}
         role="presentation"
         // Перемотка и протяжкой (AD-02): палец/мышь захвачены полоской, пока зажаты.
         onPointerDown={(e) => {

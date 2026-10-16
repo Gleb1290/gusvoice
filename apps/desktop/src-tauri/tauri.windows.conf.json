@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "GusVoice",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 940,
+        "minHeight": 600,
+        "resizable": true,
+        "visible": false
+      },
+      {
+        "label": "splash",
+        "title": "GusVoice",
+        "url": "index.html?window=splash",
+        "width": 300,
+        "height": 340,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "shadow": true,
+        "center": true,
+        "focus": true,
+        "backgroundColor": "#1b1a20"
+      }
+    ]
+  }
+}

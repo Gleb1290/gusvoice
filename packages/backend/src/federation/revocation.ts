@@ -135,7 +135,7 @@ export async function revokeOwnKey(): Promise<RevokeOutcome | null> {
      */
     await db
       .update(federationLinks)
-      .set({ state: 'trust-lost', lastEventSeq: 0, outEventSeq: 0, updatedAt: new Date() })
+      .set({ state: 'trust-lost', lastEventSeq: 0, missingEventSeqs: [], outEventSeq: 0, updatedAt: new Date() })
       .where(eq(federationLinks.instanceId, link.instanceId));
     forgetEventWindow(link.instanceId);
     forgetPeerDocument(link.instanceId);
@@ -258,6 +258,7 @@ export async function rebindLink(fromInstanceId: string, to: {
       protocolVersion: to.protocolVersion,
       features: to.features,
       lastEventSeq: plan.resetEventCounters ? 0 : old.lastEventSeq,
+      missingEventSeqs: plan.resetEventCounters ? [] : old.missingEventSeqs,
       outEventSeq: plan.resetEventCounters ? 0 : old.outEventSeq,
       // Предел места, выставленный держателем, и занятое — это про ТЕХ ЖЕ людей и файлы (#196 п. 8):
       // без переноса предел молча становился умолчанием, а счётчик — нулём.

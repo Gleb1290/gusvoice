@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   judgeEvent,
+  MISSING_EVENT_SEQS_MAX,
   parseFedEvent,
   rememberEventId,
   serializeFedEvent,
   stateWins,
+  trackMissingSeqs,
   type FedEvent,
 } from './events.js';
 
@@ -33,6 +35,46 @@ describe('доставка федеративных событий', () => {
       accept: true,
       gap: false,
     });
+  });
+
+  it('опоздавший номер из списка пропусков принимается, не двигая последний номер', () => {
+    // Ловит потерю раннего события после того, как более позднее уже прошло мимо очереди.
+    const state = { lastSeq: 12, recentIds: new Set<string>(), missing: new Set([8, 10]) };
+    assert.deepEqual(judgeEvent({ eventId: 'late-8', seq: 8 }, state), { accept: true, gap: false, late: true });
+    assert.equal(state.lastSeq, 12);
+  });
+
+  it('номер вне пропусков и уже виденный id остаются повторами даже при наличии пропусков', () => {
+    // Ловит обход дедупликации через missing: он не должен оживлять обычный повтор или повторный id.
+    const state = { lastSeq: 12, recentIds: new Set(['seen-id']), missing: new Set([8]) };
+    assert.deepEqual(judgeEvent({ eventId: 'not-missing', seq: 7 }, state), { accept: false, reason: 'duplicate' });
+    assert.deepEqual(judgeEvent({ eventId: 'seen-id', seq: 8 }, state), { accept: false, reason: 'duplicate' });
+  });
+
+  it('учёт пропусков добавляет дыру, удаляет опоздавшее и ограничивает окно без изменения входа', () => {
+    // Ловит мутацию исходного списка, потерю границ окна и сохранение уже доставленного номера.
+    const original = [2, 5];
+    assert.deepEqual(trackMissingSeqs(original, 5, 8), [2, 5, 6, 7]);
+    assert.deepEqual(original, [2, 5]);
+    assert.deepEqual(trackMissingSeqs([3, 4, 5], 5, 4), [3, 5]);
+    assert.deepEqual(trackMissingSeqs([1, 2], 2, 3), [1, 2]);
+    assert.equal(MISSING_EVENT_SEQS_MAX, 1024);
+    const defaultLimit = trackMissingSeqs([], 0, 1025);
+    assert.equal(defaultLimit.length, 1024);
+    assert.equal(defaultLimit[0], 1);
+    assert.equal(defaultLimit.at(-1), 1024);
+    const atLimit = trackMissingSeqs([], 0, 1025, 1024);
+    assert.equal(atLimit.length, 1024);
+    assert.equal(atLimit[0], 1);
+    assert.equal(atLimit.at(-1), 1024);
+    const overLimit = trackMissingSeqs([1], 0, 1026, 1024);
+    assert.equal(overLimit.length, 1024);
+    assert.equal(overLimit[0], 2);
+    assert.equal(overLimit.at(-1), 1025);
+    const longGap = trackMissingSeqs([], 0, 1_000_000, 1024);
+    assert.equal(longGap.length, 1024);
+    assert.equal(longGap[0], 998_976);
+    assert.equal(longGap.at(-1), 999_999);
   });
 
   it('при равной версии выигрывает уже сохранённое состояние', () => {

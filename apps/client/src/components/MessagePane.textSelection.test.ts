@@ -106,7 +106,7 @@ h.textSelMutantTest('мутант пропускает touchstart из слоя 
 it('тап в ленте закрывает текстовый слой, а прокрутка больше 10 px его сохраняет', checkTextSelTapStopsAtLayer);
 
 it('удержание на метаданных не запускает выделение текста и сохраняет действие сообщения', async () => {
-  // Метаданные лежат рядом с текстом, но не являются его содержимым; старый long-press должен выбрать строку/открыть меню.
+  // Метаданные не содержимое текста: удержание открывает меню сообщения, а не панель выделения слова.
   h.mobile(); h.round12(); const restore = h.pointerLayout(true, 390);
   const batch = { forward: async () => {}, deleteMany: async () => {}, peerName: () => 'Собеседник', open: () => {} };
   const photo = { ...h.msg('meta-not-text'), content: '', attachments: [{ url: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
@@ -119,7 +119,14 @@ it('удержание на метаданных не запускает выд�
     Object.defineProperties(context, { pointerType: { value: 'touch' }, clientX: { value: 0 }, clientY: { value: 0 } });
     await act(async () => { meta.dispatchEvent(context); await h.flush(); });
     assert.ok(context.defaultPrevented, 'системное долгое касание времени перехвачено лентой');
-    assert.ok(h.host.querySelector('.sel-head'), 'метаданные сохраняют вход в выделение сообщения');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'метаданные не включают выбор самим удержанием');
+    assert.equal(document.querySelector('.ctx-menu') !== null, true, 'метаданные сохраняют меню сообщения');
     assert.ok(!document.querySelector('.tsel-bar'), 'время не становится текстом для отдельного выделения');
+    const choose = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(button => button.textContent?.trim() === 'Выбрать');
+    assert.ok(choose, 'метаданные дают доступ к выбору сообщения через меню');
+    await act(async () => { await h.delay(450); choose.click(); await h.flush(); await h.delay(220); });
+    assert.equal(h.host.querySelector('[data-mid="meta-not-text"]')?.classList.contains('picked'), true, 'Выбрать отмечает именно сообщение с метаданными');
+    assert.equal(document.querySelector('.ctx-menu') === null, true, 'после выбора меню закрыто');
+    assert.equal(document.querySelector('.tsel-bar') === null, true, 'выбор сообщения не открывает текстовый слой времени');
   } finally { if (h.root) h.unmount(); h.desktop(); restore(); }
 });

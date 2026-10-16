@@ -16,6 +16,64 @@ before(() => {
 });
 after(() => GlobalRegistrator.unregister());
 
+async function dropCheck(options: { drop?: boolean; x?: number; y?: number; count?: number; source?: string } = {}) {
+  const { drop = true, x = 330, y = 50, count = 3 } = options;
+  const fixture = layoutFixture(48, 1, 32);
+  fixture.property(window, 'matchMedia', { value: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }) });
+  fixture.property(HTMLElement.prototype, 'offsetWidth', { get: () => 196 });
+  fixture.property(HTMLElement.prototype, 'offsetHeight', { get() { return (this as HTMLElement).classList.contains('ctx-item') ? 20 : 100; } });
+  fixture.property(HTMLElement.prototype, 'offsetTop', { get() { return (this as HTMLElement).classList.contains('ctx-item') ? Array.from((this as HTMLElement).parentElement!.children).indexOf(this as HTMLElement) * 20 : 0; } });
+  class Observer { observe() {} disconnect() {} }
+  const raw = options.source ?? readFileSync(new URL('./ContextMenu.tsx', import.meta.url), 'utf8');
+  const Menu = evaluate(raw, {
+    react: React, 'react-dom': ReactDOM, 'react/jsx-runtime': jsx, '../popover': fixture.popover,
+    '../bigReaction': {}, '../imageViewer': { useImageViewerOpen: () => false },
+    './Icon': { Icon: () => null }, './StatusDot': { StatusDot: () => null },
+  }, { ...fixture.globals, HTMLElement, ResizeObserver: Observer, setTimeout, clearTimeout, Event }).ContextMenu as React.ComponentType<ContextMenuProps>;
+  const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
+  try {
+    const anchor = new DOMRect(x, y, 40, 20);
+    await React.act(async () => root.render(React.createElement(Menu, {
+      anchor, drop, align: 'end', width: 196, fit: true, onClose() {},
+      children: Array.from({ length: count }, (_, i) => React.createElement('button', { key: i, className: 'ctx-item' }, `Пункт ${i}`)),
+    })));
+    const stack = document.querySelector<HTMLElement>('.ctx-stack'); assert.ok(!!stack);
+    assert.equal(!!document.querySelector('.ctx-sheet-backdrop'), false, 'якорное меню телефона не становится листом');
+    assert.equal(stack!.classList.contains('drop'), drop, 'drop-класс принадлежит только выпадающей ветке');
+    // Здесь замер границ подставлен; clampAxis/placeByHalf и весь ContextMenu настоящие.
+    const expectedTop = drop ? Math.max(40, Math.min(y, 444)) : (fixture.popover.placeByHalf as Function)(anchor, 196, 100, 'end', 8, 8, { vw: 390, vh: 552, top: 32 }).top;
+    assert.equal(Number.parseFloat(stack!.style.top), expectedTop, 'верх dropdown совпадает с кнопкой с учётом вставок');
+    assert.equal(Number.parseFloat(stack!.style.left), Math.max(8, Math.min(x + 40 - 196, 186)), 'правый край у кнопки, за экран не выходит');
+    const card = stack!.querySelector<HTMLElement>('.ctx-menu'); assert.ok(!!card);
+    assert.equal(card!.style.getPropertyValue('--drop-ms'), drop ? `${150 + 16 * count}ms` : '', 'длительность растёт по числу пунктов');
+    const delays = Array.from(card!.children, child => (child as HTMLElement).style.getPropertyValue('--drop-at'));
+    assert.deepEqual(delays, drop ? Array.from({ length: count }, (_, i) => `${Math.round((150 + 16 * count) * Math.min(100, i * 20 + 10) / 100)}ms`) : Array.from({ length: count }, () => ''), 'задержки следуют положению пункта по высоте карточки');
+  } finally {
+    await React.act(async () => root.unmount()); host.remove(); fixture.restore();
+  }
+}
+it('R161 выпадающее меню телефона накрывает кнопку верхом и правым краем, не становится листом', () => dropCheck());
+it('R161 выпадающее меню прижимается у обоих краёв и системных вставок', async () => {
+  for (const [x, y] of [[0, 0], [380, 580]]) await dropCheck({ x, y });
+});
+it('R161 без drop сохраняется обычное размещение placeByHalf без задержек', () => dropCheck({ drop: false }));
+it('R161 ноль и несколько пунктов задают свою длительность и порядок задержек', async () => {
+  for (const count of [0, 1, 5]) await dropCheck({ count });
+});
+function dropMutant(from: string, to: string) {
+  const raw = readFileSync(new URL('./ContextMenu.tsx', import.meta.url), 'utf8');
+  assert.equal(raw.split(from).length - 1, 1, 'мутант меняет единственный якорь целого ContextMenu');
+  return raw.replace(from, to);
+}
+it('R161 игнорирование drop обнаруживается реальным размещением', async () => {
+  await dropCheck();
+  await assert.rejects(dropCheck({ source: dropMutant('if (anchor && drop) {', 'if (anchor && false) {') }), assert.AssertionError);
+});
+it('R161 потеря числа пунктов в длительности dropdown обнаруживается', async () => {
+  await dropCheck();
+  await assert.rejects(dropCheck({ source: dropMutant('150 + 16 * shown', '150') }), assert.AssertionError);
+});
+
 function evaluate(source: string, dependencies: Record<string, unknown>, globals: Record<string, unknown>) {
   const module = { exports: {} as Record<string, unknown> };
   runInNewContext(ts.transpileModule(source, { compilerOptions: {

@@ -1,0 +1,13 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "from": {
+    "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+    "username": "anna",
+    "display_name": "Аня",
+    "avatar_hash": null
+  },
+  "to_user_id": "0193f1a2-1111-7e8f-9a0b-1c2d3e4f5a6b",
+  "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "created_at": 1760270300000,
+  "shared_server_ids": ["0193f1a2-2222-7e8f-9a0b-1c2d3e4f5a6b"]
+}

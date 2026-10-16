@@ -22,3 +22,16 @@ export function nameFromRoster(
 ): string {
   return resolveName(roster.get(userId), fallback);
 }
+
+/**
+ * Участник голоса → (кого искать в ростере, как звать, если ростер не знает). Локальный участник LiveKit до подключения /
+ * после обрыва приходит с пустыми `identity` и `name` (B11, 10.10: своя плитка «(вы)» без имени) — тогда это я: подставляем
+ * мой id и моё имя. У чужого пустого имени подстановки нет (его имя — не моё).
+ */
+export function voiceNameSource(
+  p: { identity: string; name?: string | null; isLocal?: boolean },
+  me: { id: string; displayName: string } | null,
+): { id: string; fallback: string } {
+  const fallback = p.name || p.identity || (p.isLocal && me ? me.displayName : '');
+  return { id: p.identity || (p.isLocal && me ? me.id : ''), fallback };
+}

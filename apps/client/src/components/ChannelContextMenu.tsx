@@ -9,6 +9,8 @@ import {
   useChannelPrefsVersion,
 } from '../channelPrefs';
 import { useStore } from '../store';
+import { setHideNoVideo, useHideNoVideo } from '../stageViewPrefs';
+import { resetStageOrder, useHasStageOrder } from '../stageOrderPrefs';
 import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
 import { CategoryPermissionsEditor } from './CategoryPermissionsEditor';
@@ -58,6 +60,7 @@ export function useChannelContextMenu(): {
   const joinVoice = useStore((s) => s.joinVoice);
   const voice = useStore((s) => s.voice);
   useChannelPrefsVersion(); // re-render on mute/collapse toggles so labels/icons update live
+  const hideNoVideo = useHideNoVideo();
 
   const userId = useStore((s) => s.user?.id);
   const perms = permsFromString(bootstrap?.permissions);
@@ -126,9 +129,11 @@ export function useChannelContextMenu(): {
   // into the onClick closures below (it would not flow through `target?.kind === ...` alone).
   const c = target?.kind === 'channel' ? target.channel : null;
   const cat = target?.kind === 'category' ? target.category : null;
+  // Пункт «Сбросить раскладку плиток» — только когда есть что сбрасывать (как прочие пункты по условию).
+  const hasStageOrder = useHasStageOrder(c?.type === 'voice' ? c.id : null);
 
   const channelMenu = c && target?.kind === 'channel' && (
-    <ContextMenu pos={target.pos} onClose={close} width={232}>
+    <ContextMenu pos={target.pos} onClose={close} width={232} fit={c.type === 'voice'}>
       <MenuItem
         icon="chevron-right"
         label={c.type === 'voice' ? 'Войти в канал' : 'Открыть'}
@@ -137,6 +142,29 @@ export function useChannelContextMenu(): {
           close();
         }}
       />
+      {c.type === 'voice' && (
+        <MenuItem
+          icon={hideNoVideo ? 'check' : 'camera-off'}
+          label="Скрыть участников без видео"
+          sub="только для вас"
+          active={hideNoVideo}
+          onClick={() => {
+            setHideNoVideo(!hideNoVideo);
+            close();
+          }}
+        />
+      )}
+      {c.type === 'voice' && hasStageOrder && (
+        <MenuItem
+          icon="reset"
+          label="Сбросить раскладку плиток"
+          sub="при всех ширинах окна"
+          onClick={() => {
+            resetStageOrder(c.id);
+            close();
+          }}
+        />
+      )}
       {c.type === 'text' && (
         <MenuItem
           icon="check"

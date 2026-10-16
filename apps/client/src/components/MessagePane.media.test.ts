@@ -272,7 +272,8 @@ it('MediaSheet отправляет выбранное с подписью об�
     const pick = [...document.querySelectorAll<HTMLButtonElement>('.sheet-row')].find((b) => b.textContent?.includes('Фото или видео'));
     if (pick) await act(async () => { pick.click(); await h.delay(80); });
     const cell = document.querySelector<HTMLButtonElement>('.gal-cell'); assert.ok(cell, 'нативный bridge загрузил одну доступную фотографию');
-    await act(async () => { cell!.click(); await h.flush(); });
+    const check = cell!.querySelector<HTMLElement>('.gal-check'); assert.ok(check, 'выбор фото находится в кружке');
+    await act(async () => { check.click(); await h.flush(); });
     const caption = document.querySelector<HTMLTextAreaElement>('.gal-caption textarea'); assert.ok(caption, 'после выбора появляется поле подписи');
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
     assert.equal(caption!.value, 'подпись к фото', 'MediaSheet получает подпись, уже набранную в основном композере');
@@ -412,7 +413,8 @@ it('onMediaSend откладывает фото и по режиму online, и 
     const pick = [...document.querySelectorAll<HTMLButtonElement>('.sheet-row')].find(button => button.textContent?.includes('Фото или видео'));
     if (pick) await act(async () => { pick.click(); await h.delay(80); });
     const cell = document.querySelector<HTMLButtonElement>('.gal-cell'); assert.ok(cell, 'мост показал тестовую фотографию');
-    await act(async () => { cell!.click(); await h.flush(); });
+    const check = cell!.querySelector<HTMLElement>('.gal-check'); assert.ok(check, 'выбор фото находится в кружке');
+    await act(async () => { check.click(); await h.flush(); });
     assert.ok(document.querySelector('.gal-caption textarea'), 'фото готово к отправке с подписью');
   };
   const choose = async (label: string) => {
@@ -536,7 +538,7 @@ h.mutantTest('мутант без проверки принадлежности 
   // Портал предупреждения визуально поверх ленты, но его кнопки не являются точками начала drag сообщений.
   await h.rejectMutant((source) => source.replace('if (!list.contains(t)) return;', '/* mutant: portal is not a list target */'), async (component) => {
     h.round12(); const batch = { forward: async () => {}, deleteMany: async () => {}, peerName: () => 'Peer', open: () => {} };
-    await h.mount({ messages: [{ ...h.msg('portal-link'), content: 'https://outside.example/path' } as Message], batch }, component);
+    await h.mount({ messages: [{ ...h.msg('portal-link'), content: 'https://user@outside.example/path' } as Message], batch }, component);
     const link = h.host.querySelector<HTMLAnchorElement>('[data-mid="portal-link"] a'); assert.ok(link, 'в сообщении отрисована ссылка');
     await act(async () => { link!.click(); await h.flush(); });
     const dialog = document.querySelector<HTMLElement>('.link-confirm'); assert.ok(dialog, 'клик открыл предупреждение в портале');
@@ -551,8 +553,8 @@ h.mutantTest('мутант без проверки принадлежности 
   });
 });
 
-it('долгое touch contextmenu становится выделением, но мышиный contextmenu остаётся меню', async () => {
-  // Android WebView посылает contextmenu позже нашего long-press; это событие должно продолжить жест, а не открыть меню.
+it('долгое touch contextmenu открывает меню с выбором, мышиный contextmenu тоже остаётся меню', async () => {
+  // Android WebView может послать contextmenu до нашего таймера: путь должен открыть ту же карточку, без прежнего автовыбора.
   const restore = h.pointerLayout(true, 390);
   try {
     h.mobile(); h.round12();
@@ -563,16 +565,26 @@ it('долгое touch contextmenu становится выделением, н
     const context = new Event('contextmenu', { bubbles: true, cancelable: true });
     Object.defineProperty(context, 'pointerType', { value: 'touch' });
     await act(async () => { row!.dispatchEvent(context); await h.flush(); });
-    assert.ok(h.host.querySelector('.sel-head'), 'touch contextmenu на пороге 380 мс завершает переход к выделению');
-    assert.ok(!document.querySelector('.ctx-menu'), 'касательный contextmenu не заменяет жест карточкой');
+    assert.equal(h.host.querySelector('.sel-head') === null, true, 'touch contextmenu не включает прежний автовыбор');
+    assert.equal(document.querySelector('.ctx-menu') !== null, true, 'касательный contextmenu открывает карточку');
     await act(async () => { h.touch(row!, 'touchcancel', 40, 40); await h.flush(); });
-    assert.ok(h.host.querySelector('.sel-head'), 'отмена касания очищает жест, но сохраняет выбранное сообщение');
+    assert.equal(document.querySelector('.ctx-menu') !== null, true, 'отмена касания очищает жест, но сохраняет меню');
+    const select = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')].find(b => b.textContent?.trim() === 'Выбрать');
+    assert.ok(select, 'карточка предлагает выбрать сообщение');
+    await act(async () => { await h.delay(450); select.click(); await h.flush(); });
+    assert.equal(h.host.querySelector('.sel-head') !== null, true, 'команда меню включает выбор');
+    assert.equal(row.getAttribute('aria-checked'), 'true', 'выбрано сообщение, чей contextmenu открыт');
     h.unmount(); h.desktop();
     await h.mount({ messages: [h.msg('mouse-context')] });
     const mouseRow = h.host.querySelector<HTMLElement>('[data-mid="mouse-context"]'); assert.ok(mouseRow, 'мышиная строка доступна');
     await act(async () => { mouseRow!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); await h.flush(); });
     assert.ok(document.querySelector('.ctx-menu'), 'мышиный contextmenu по-прежнему открывает меню');
-  } finally { h.desktop(); restore(); }
+  } finally {
+    const row = h.host.querySelector('[data-mid="touch-context"]');
+    if (row) await act(async () => { h.touch(row, 'touchcancel', 40, 40); });
+    if (h.root) h.unmount();
+    h.desktop(); restore();
+  }
 });
 
 h.mutantTest('мутант переносит Array.from(FileList) в отложенное обновление', async () => {
@@ -652,6 +664,9 @@ it('после выбора файла курсор возвращается в 
   }
 });
 it('ПК-меню скрепки не отменяет активацию обоих системных полей выбора', async () => {
+  // Предыдущий сценарий мог оборваться с портальным меню или guard синтетического клика.
+  if (h.root) h.unmount();
+  await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await h.delay(450); });
   h.desktop(); h.round12(); await h.mount();
   const openFor = async (label: string, selector: string) => {
     const attach = h.host.querySelector<HTMLButtonElement>('.att-btn.attach'); assert.ok(attach, 'кнопка скрепки доступна');
@@ -669,7 +684,7 @@ it('ПК-меню скрепки не отменяет активацию обо
     assert.equal(clicks, 1, `«${label}» синхронно активировал системное поле`);
     assert.equal(delivered, 1, `click действительно дошёл до ${label} input`);
     assert.equal(events[0]?.defaultPrevented, false, `click по полю для «${label}» не отменён меню`);
-    assert.equal(document.querySelector('.ctx-menu'), null, 'выбор закрыл меню после активации');
+    assert.equal(!!document.querySelector('.ctx-menu'), false, 'выбор закрыл меню после активации');
   };
   await openFor('Фото или видео', 'input[accept="image/*,video/*"]');
   await openFor('Файл', '.composer input[type="file"]');
@@ -708,7 +723,7 @@ it('привязанное send-меню следует за кнопкой, н�
   } finally { h.desktop(); restore(); }
 });
 
-it('своё исходящее сбрасывает черту непрочитанного только в текущем визите round12', async () => {
+it('своё исходящее сбрасывает черту непрочитанного только в текущем визите', async () => {
   // Отправка и моё сообщение, пришедшее снизу, закрывают unread; другой scrollKey начинает визит заново.
   h.round12();
   const old = { ...h.msg('before-unread', 'peer', 30_000), createdAt: new Date(h.now - 30_000).toISOString() };
@@ -721,11 +736,6 @@ it('своё исходящее сбрасывает черту непрочит
   assert.ok(h.host.querySelector('.new-divider'), 'новый scrollKey снова показывает черту непрочитанного');
   await h.rerender({ messages: [old, unread, h.msg('mine-arrived', 'me', 0)], newSince: h.now - 15_000, scrollKey: 'visit-b' });
   assert.ok(!h.host.querySelector('.new-divider'), 'моё новое сообщение снизу тоже сбрасывает черту');
-  h.unmount(); localStorage.setItem('gv_dm_bubbles', '0');
-  await h.mount({ messages: [old, unread], newSince: h.now - 15_000, scrollKey: 'visit-a', draft: { text: 'отправка', replyToId: null } as never });
-  assert.ok(h.host.querySelector('.new-divider'), 'при выключенном round12 старое поведение оставляет границу');
-  await act(async () => { h.host.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await h.flush(); });
-  assert.ok(h.host.querySelector('.new-divider'), 'сброс непрочитанного не протекает в старый режим');
 });
 
 it('отказ отправки показывает неотправленную строку у низа ленты', async () => {

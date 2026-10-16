@@ -18,9 +18,9 @@ import { create } from 'zustand';
 import { api, apiFor, getToken, setToken, type Api, type BlockedUser, type PushMuteScope } from './api';
 import { activeInstanceId, config, instances, logoutFamily, rememberInstanceServers } from './config';
 import { convCacheKey } from './convCacheRules';
-import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads } from './channelRules';
-import { applyDmDelete, byRecent, mergeDmChannel, mergeDmUpdate, pinOrderStamps, seedDmList } from './dmListRules';
-import { createConvActions, feedWindowSwitch, type ConvActions, type ConvDeps } from './convStore';
+import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads, seedServerCounts } from './channelRules';
+import { pinOrderStamps } from './dmListRules';
+import { createConvActions, type ConvActions, type ConvDeps } from './convStore';
 import type { FeedPlace } from './feedWindowRules';
 import {
   emptyConvState,
@@ -45,7 +45,7 @@ import type { OutboxItem } from './outboxRules';
 import { clearConvCacheWipe, deleteConvCache, markConvCacheWipe } from './convCache';
 import { hasMoreOlder, mergeLatestPage, mergeOlderPage, olderCursor } from './historyPage';
 import { markChannelSeen } from './channelPrefs';
-import { rememberPlace } from './lastPlace';
+import { lastPlace, rememberPlace } from './lastPlace';
 import { onTabEvent, publishTabEvent } from './tabSync';
 import type { EconomyView } from './economy';
 import { isMobile } from './hotkeys';
@@ -154,6 +154,10 @@ interface State extends ConvActions {
    * списки смотрят лишь `onlineUsers`. Меняется только этими событиями: выход из сети совсем шлюз завершает `away: false`.
    */
   dmAwayUsers: string[];
+  /** Э7 ч.3 (D): счётчик «перезапросить время захода» (`lastSeenRefresh.ts`); хук `useLastSeen` читает его как зависимость. */
+  lastSeenEpoch: number;
+  /** Э7 ч.3 (D): название СВОЕГО инстанса (`GET /instance`, `selfInstanceName.ts`) — подпись «через «…»» у получателя. */
+  selfInstanceName: string;
   /** userId -> chosen presence state + custom status (from member rosters + user.status broadcasts). */
   userStatuses: Record<string, { status: PresenceStatus; customStatus: CustomStatus | null }>;
   /** userId -> game they're currently playing (#40; seeded from GET /users/activities + user.activity). */
@@ -221,6 +225,11 @@ interface State extends ConvActions {
    */
   federationRev: number;
   /**
+   * Счётчик «связка дома с инстансом, где я гость, сменилась» (15.10, событие `federation.guest_links`): рейл перечитывает
+   * «Где я гость» и убирает группы разорванных связок (`guestGone.ts`).
+   */
+  guestLinksRev: number;
+  /**
    * Поколение активного инстанса (§5.7). Растёт на каждом переходе между инстансами.
    *
    * 🔴 На него подписан `App`: переход больше не перезапускает приложение, поэтому кто-то обязан
@@ -245,6 +254,11 @@ interface State extends ConvActions {
    * без `features` (вход, статус, профиль) — внутри `user` признаки терялись (разведка 30.09). `null` — не узнавали.
    */
   serverFeatures: string[] | null;
+  /**
+   * Э5 (#141, `fedm5`): «мой дом лежит — пишу через инстанс собеседника» (ведёт `fedVia.ts`). `down` — дом недоступен; `self` — название
+   * нашего инстанса для плашки; `ready` — беседы с действующей долгой сессией у собеседника. Плашка и запрет вложений — `DmChatView`.
+   */
+  fedVia: { down: boolean; self: string; ready: string[] };
   /**
    * Режим бесед (ЛС этап 2, `docs/dm/STAGE2.md`): решается ОДИН раз в `bootstrap`, до подключения шлюза, — по нему
    * шлюзу уходит `caps: ['conv1']`, и старые события `dm.*` этому соединению больше не приходят. Посреди сессии не
@@ -287,6 +301,8 @@ interface State extends ConvActions {
   mentionRequest: { name: string; n: number } | null;
   /** Mobile-only: which pane is on screen (list of channels/DMs, or the open chat/voice). */
   mobilePane: 'list' | 'content';
+  /** Телефон, вкладка «Серверы»: показан СПИСОК серверов, а не каналы открытого (кнопка «Назад» в шапке каналов, #218). Сбрасывается при открытии сервера и канала. */
+  serverListOpen: boolean;
   /** Mobile-only: whether the members list is open as a slide-over drawer. */
   mobileMembersOpen: boolean;
   /** Mobile-only: whether the Профиль tab screen is showing (design-step8 D3). */
@@ -437,10 +453,15 @@ interface State extends ConvActions {
   setView: (view: AppView) => void;
   loadDms: () => Promise<void>;
   openDmWith: (userId: string) => Promise<void>;
+  /** Э1 (`fedm1`): «Написать» человеку связанного инстанса из поиска (`RemoteUserHit`) — как `openDmWith`. */
+  openDmRemote: (who: { instanceId: string; homeUserId: string }) => Promise<void>;
   /** «Избранное» (08.10, `saved1`): открыть беседу с самим собой, заведя её при первом разе (Ctrl+0, «Переслать» → «Избранное»). */
   openSaved: () => Promise<void>;
   requestMention: (name: string) => void;
   setMobilePane: (pane: 'list' | 'content') => void;
+  setServerListOpen: (open: boolean) => void;
+  /** Нажатие на вкладку «Серверы» (телефон, #218): последний сервер открывается сам; повторное нажатие на открытую вкладку — к списку серверов. */
+  openServersTab: (wasActive: boolean) => void;
   setMobileMembersOpen: (open: boolean) => void;
   setMobileProfileOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -482,18 +503,11 @@ interface State extends ConvActions {
   refreshDmHistory: (dmId: string) => Promise<void>;
   /** Подтянуть порцию более старых сообщений беседы; `false` — дно. */
   loadOlderDmMessages: (dmId: string) => Promise<boolean>;
-  upsertDm: (channel: DmChannel) => void;
-  appendDmMessage: (dmId: string, message: Message) => void;
-  updateDmMessage: (dmId: string, message: Message) => void;
-  /** `ev` — поля события `dm.delete` (#212): новое время беседы и новое непрочитанное, если сервер их прислал. */
-  removeDmMessage: (dmId: string, messageId: string, ev?: { lastMessageAt?: string | null; unread?: number }) => void;
-  markDmUnread: (dmId: string) => void;
 
   // socket-driven mutations
   appendMessage: (channelId: string, message: Message) => void;
   updateMessage: (channelId: string, message: Message) => void;
   applyReaction: (channelId: string, messageId: string, emoji: string, userId: string, op: 'add' | 'remove') => void;
-  applyDmReaction: (dmId: string, messageId: string, emoji: string, userId: string, op: 'add' | 'remove') => void;
   removeMessage: (channelId: string, messageId: string) => void;
   upsertChannel: (channel: Channel) => void;
   deleteChannel: (serverId: string, channelId: string) => void;
@@ -527,6 +541,8 @@ interface State extends ConvActions {
   clearAccessNotice: () => void;
   /** Связки изменились — разбудить вкладку «Федерация», если она открыта. */
   bumpFederationRev: () => void;
+  /** Связка с инстансом, где я гость, сменилась — рейлу перечитать «Где я гость». */
+  bumpGuestLinksRev: () => void;
   /**
    * Забыть всё, что принадлежало прежнему инстансу, и объявить новое поколение (§5.7).
    *
@@ -584,7 +600,7 @@ function browserConvDeps(): ConvDeps {
     },
     isMobile,
     markChannelSeen,
-    windowed: () => feedWindowSwitch(),
+    windowed: () => true,
     draftsOnServer: () => serverKeepsDrafts(useStore.getState().serverFeatures),
     // Метка устройства на эту загрузку страницы (Р7): своё эхо черновика не применяется. `crypto` в харнессе тестов нет.
     draftDevice: `d${Math.random().toString(36).slice(2, 12)}`,
@@ -609,6 +625,8 @@ export const useStore = create<State>((set, get) => ({
   onlineUsers: [],
   dmOnlineUsers: [],
   dmAwayUsers: [],
+  lastSeenEpoch: 0,
+  selfInstanceName: '',
   userStatuses: {},
   userActivities: {},
   unreadCounts: {},
@@ -630,11 +648,13 @@ export const useStore = create<State>((set, get) => ({
   closedServers: {},
   accessNotice: null,
   federationRev: 0,
+  guestLinksRev: 0,
   instanceEpoch: 0,
   switching: false,
 
   view: 'server',
   serverFeatures: null,
+  fedVia: { down: false, self: '', ready: [] },
   convActive: false,
   feedDownAsk: null,
   conv: emptyConvState(),
@@ -668,6 +688,7 @@ export const useStore = create<State>((set, get) => ({
   currentDmId: null,
   mentionRequest: null,
   mobilePane: 'list',
+  serverListOpen: false,
   mobileMembersOpen: false,
   mobileProfileOpen: false,
   settingsOpen: false,
@@ -716,6 +737,8 @@ export const useStore = create<State>((set, get) => ({
   logout: () => {
     // Android: drop this device's push registration while we still hold the token (before setToken(null)).
     stopPushRegistration();
+    // Идущие трансляции геопозиции гасим (`geolive1`): токен уйдёт, а служба Android держала бы его в памяти до срока.
+    void import('./geoLiveSharing').then((m) => m.stopAllGeoLiveLocal(), () => {});
     // Clear the persisted auth token + voice session, else App.tsx's boot effect
     // re-authenticates from the stored gv_token on the reload that follows logout()
     // (the button "did nothing" — it reloaded straight back into the app).
@@ -1036,7 +1059,14 @@ export const useStore = create<State>((set, get) => ({
 
   loadServers: async () => {
     const servers = await api.listServers();
-    set({ servers });
+    /**
+     * Счётчики серверов из того же ответа (12.10, #218, `channelRules.seedServerCounts`): холодный старт сразу со
+     * значками, а не после первого события шлюза. Старый бэкенд полей не шлёт — карты остаются как были.
+     */
+    set((s) => ({
+      servers,
+      ...seedServerCounts(servers, { unreadServers: s.unreadServers, mentionServers: s.mentionServers }, s.currentServerId),
+    }));
     /**
      * Снимок в реестр (§5.7): рейл обязан показывать серверы ЭТОГО инстанса и тогда, когда живой
      * шлюз открыт у другого. Пишется здесь, а не в рейле, потому что здесь единственное место, где
@@ -1068,11 +1098,16 @@ export const useStore = create<State>((set, get) => ({
            сервера, которая перечитывает его этим же вызовом), — и человек смотрел на пустое «Выбери канал», пока не
            нажмёт «назад». На ПК и в узком окне браузера ниже сразу откроется первый канал — `openChannel` вернёт `content`. */
         mobilePane: 'list',
+        serverListOpen: false,
         unreadServers,
         mentionServers,
         ...seedReads(s, bootstrap, null),
       };
     });
+    // Запоминаем сервер сразу (#218): на телефоне канал не открывается, и без этого «последний сервер» не переживал бы перезагрузку —
+    // вкладка «Серверы» снова вела бы к списку. Канал дописывает `openChannel`.
+    const inst0 = activeInstanceId();
+    if (inst0) rememberPlace({ instanceId: inst0, serverId });
     setCustomSounds(bootstrap.sounds);
     setChannelSounds(channelSoundMap(bootstrap.channels));
     void get().loadMembers(serverId);
@@ -1147,17 +1182,9 @@ export const useStore = create<State>((set, get) => ({
         /* keep the cached messages if the refetch fails */
       }
     }
-    // Режим бесед догоняет ЛС сам — по номеру журнала на `ready` шлюза (`convStore.convOnReady`), без перечитки.
-    if (!get().convActive) {
-      if (currentDmId) await get().refreshDmHistory(currentDmId);
-      // Список бесед тоже: пока спали, могли написать в другую беседу — значок и порядок догоняют здесь
-      // (#212, Б3: раньше перезапрашивалась только открытая беседа).
-      await get()
-        .loadDms()
-        .catch(() => {
-          /* значки догонят при следующем открытии списка */
-        });
-    }
+    // ЛС догоняет режим бесед сам — по номеру журнала на `ready` шлюза (`convStore.convOnReady`), без перечитки.
+    // Строки серверов (12.10, #218): счётчики и последнее сообщение пропущенного — из свежего `GET /servers`.
+    void get().loadServers().catch(() => {});
     if (currentServerId) {
       try {
         await get().refreshBootstrap(currentServerId);
@@ -1216,59 +1243,13 @@ export const useStore = create<State>((set, get) => ({
     return hasMoreOlder(older);
   },
 
-  /**
-   * 🔴 История ЛС глубже 50 (28.09, #212). Сервер отдавал её порциями с первого дня, но лента беседы
-   * не просила ни разу: переписка глубже одного экрана была недостижима. Каналы это починили 19.09;
-   * правила порций теперь общие (`historyPage.ts`).
-   */
-  loadOlderDmMessages: async (dmId) => {
-    if (get().convActive) return get().convLoadOlder(dmId);
-    const cursor = olderCursor(get().dmMessages[dmId] ?? []);
-    if (!cursor) return false;
-    const older = await api.listDmMessages(dmId, cursor);
-    if (older.length === 0) return false;
-    set((s) => ({ dmMessages: { ...s.dmMessages, [dmId]: mergeOlderPage(s.dmMessages[dmId] ?? [], older) } }));
-    return hasMoreOlder(older);
-  },
+  /** Порция старше загруженного — режим бесед (`convStore.convLoadOlder`); `false` — дно. */
+  loadOlderDmMessages: async (dmId) => (get().convActive ? get().convLoadOlder(dmId) : false),
 
-  /**
-   * Перечитать последнюю порцию беседы (#212, Б3 и Б5).
-   *
-   * - 🔴 Б3 (воспроизведено 28.09): кеш беседы считался истиной на всю сессию — повторное открытие не
-   *   ходило в сеть, и сообщение, пропущенное во сне, не появлялось до перезапуска. Теперь в сеть
-   *   ходим всегда (как каналы с #80), а порция СЛИВАЕТСЯ с кешем (`historyPage.mergeLatestPage`).
-   * - Кеш есть — показываем его сразу, ответ сольётся; кеша нет — ждём (`historyLoadPlan` каналов).
-   * - 🔴 Б5 (воспроизведено 28.09): сбой при пустом кеше оставлял вечные скелетоны. Теперь лента
-   *   попадает в `historyFailed` и показывает ошибку с кнопкой «Повторить».
-   * - «Прочитано» уходит ПОСЛЕ ответа и до последнего сообщения на экране (`api.markDmRead` c `upTo`),
-   *   а не до часов сервера — и только если беседа всё ещё на экране.
-   */
+  /** Открыть беседу: окно ленты, догонка, «прочитано» — режим бесед (`convStore.convOpen`). */
   refreshDmHistory: async (dmId) => {
+    // Сервер без бесед (`conv1`+`conv2`) — ЛС нет, вместо списка заглушка «нужно обновить сервер» (09.10).
     if (get().convActive) return get().convOpen(dmId);
-    const hadCache = !!get().dmMessages[dmId];
-    set((s) => (s.historyFailed.includes(dmId) ? { historyFailed: s.historyFailed.filter((x) => x !== dmId) } : s));
-    const load = api
-      .listDmMessages(dmId)
-      .then((page) => {
-        set((s) => ({ dmMessages: { ...s.dmMessages, [dmId]: mergeLatestPage(s.dmMessages[dmId], page) } }));
-      })
-      .catch(() => {
-        if (!get().dmMessages[dmId]) set((s) => ({ historyFailed: [...s.historyFailed, dmId] }));
-      })
-      .then(() => {
-        const s = get();
-        const onScreen = isFeedOnScreen({
-          id: dmId,
-          currentId: s.currentDmId,
-          mobile: isMobile(),
-          mobilePane: s.mobilePane,
-          kind: 'dm',
-          view: s.view,
-        });
-        const list = s.dmMessages[dmId];
-        if (onScreen && list) void api.markDmRead(dmId, list[list.length - 1]?.id).catch(() => {});
-      });
-    if (!hadCache) await load;
   },
 
   /**
@@ -1306,53 +1287,33 @@ export const useStore = create<State>((set, get) => ({
    * ⚠️ Только гасим. Рост счётчиков идёт от событий шлюза; дублировать его отметками значило бы
    * считать одно и то же дважды (тот же довод, что и у согласования вкладок).
    */
-  applyRemoteRead: ({ channelId, dmId, serverId, at }) => {
-    // Режим бесед: «прочитано» с другого устройства приходит сводкой в `conv.change` — `read.dm` не нужен.
-    if (dmId && !channelId && get().convActive) return;
+  applyRemoteRead: ({ channelId, serverId, at }) => {
+    // ЛС: «прочитано» с другого устройства приходит сводкой в `conv.change` (режим бесед) — `read.dm` не нужен.
+    if (!channelId) return;
     const s0 = get();
-    const id = channelId ?? dmId;
-    if (!id) return;
     const onScreen = isFeedOnScreen({
-      id,
-      currentId: channelId ? s0.currentChannelId : s0.currentDmId,
+      id: channelId,
+      currentId: s0.currentChannelId,
       mobile: isMobile(),
       mobilePane: s0.mobilePane,
-      kind: channelId ? 'channel' : 'dm',
+      kind: 'channel',
       view: s0.view,
     });
-    if (!onScreen) markChannelSeen(id, at ? Date.parse(at) : Date.now());
+    if (!onScreen) markChannelSeen(channelId, at ? Date.parse(at) : Date.now());
     set((s) => {
-      if (channelId) {
-        const { [channelId]: _m, ...mentionCounts } = s.mentionCounts;
-        const { [channelId]: _u, ...unreadCounts } = s.unreadCounts;
-        if (!serverId) return { mentionCounts, unreadCounts };
-        const { [serverId]: _sm, ...mentionServers } = s.mentionServers;
-        const { [serverId]: _su, ...unreadServers } = s.unreadServers;
-        return { mentionCounts, unreadCounts, mentionServers, unreadServers };
-      }
-      return {
-        unreadDms: s.unreadDms.filter((x) => x !== id),
-        dms: s.dms.map((d) => (d.id === id ? { ...d, unread: 0 } : d)),
-      };
+      const { [channelId]: _m, ...mentionCounts } = s.mentionCounts;
+      const { [channelId]: _u, ...unreadCounts } = s.unreadCounts;
+      if (!serverId) return { mentionCounts, unreadCounts };
+      const { [serverId]: _sm, ...mentionServers } = s.mentionServers;
+      const { [serverId]: _su, ...unreadServers } = s.unreadServers;
+      return { mentionCounts, unreadCounts, mentionServers, unreadServers };
     });
   },
 
   readDmNow: (dmId) => {
-    if (get().convActive) {
-      if (!get().unreadDms.includes(dmId) && !get().conv.summaries[dmId]?.unread) return;
-      get().convReadNow(dmId);
-      publishTabEvent({ kind: 'read-dm', dmId });
-      return;
-    }
-    const s0 = get();
-    if (!s0.unreadDms.includes(dmId) && !s0.dms.find((d) => d.id === dmId)?.unread) return;
-    set((s) => ({
-      unreadDms: s.unreadDms.filter((x) => x !== dmId),
-      dms: s.dms.map((d) => (d.id === dmId ? { ...d, unread: 0 } : d)),
-    }));
-    // До последнего показанного, а не до часов сервера (#212): разбор — `routes/dm.ts`, ручка `/read`.
-    const list = get().dmMessages[dmId];
-    void api.markDmRead(dmId, list?.[list.length - 1]?.id).catch(() => {});
+    if (!get().convActive) return;
+    if (!get().unreadDms.includes(dmId) && !get().conv.summaries[dmId]?.unread) return;
+    get().convReadNow(dmId);
     publishTabEvent({ kind: 'read-dm', dmId });
   },
 
@@ -1368,6 +1329,7 @@ export const useStore = create<State>((set, get) => ({
         unreadCounts,
         mentionCounts,
         mobilePane: 'content',
+        serverListOpen: false,
       };
     });
     // Persist the read mark (migration 0018) — fire-and-forget, unread must never block opening.
@@ -1582,30 +1544,28 @@ export const useStore = create<State>((set, get) => ({
     };
   },
 
+  // Сервер без бесед (`conv1`+`conv2`, коробки ≤ 0.8.17): ЛС нет — список показывает заглушку (`DmSidebar`, 09.10).
   loadDms: async () => {
     if (get().convActive) return get().convEnsureList();
-    const dms = await api.listDms();
-    // Непрочитанное с сервера (dm_reads); беседа НА ЭКРАНЕ не горит. Раньше «на экране» было просто
-    // `currentDmId`, и беседа, из которой ушли в сервер, теряла значок при загрузке списка (#212, Б2).
-    set((s) => {
-      const onScreen = s.currentDmId
-        ? isFeedOnScreen({
-            id: s.currentDmId,
-            currentId: s.currentDmId,
-            mobile: isMobile(),
-            mobilePane: s.mobilePane,
-            kind: 'dm',
-            view: s.view,
-          })
-        : false;
-      return seedDmList(dms, onScreen ? s.currentDmId : null);
-    });
   },
 
   requestMention: (name) =>
     set((s) => ({ mentionRequest: { name, n: (s.mentionRequest?.n ?? 0) + 1 } })),
 
   setMobilePane: (pane) => set({ mobilePane: pane, mobileMembersOpen: false }),
+  setServerListOpen: (open) => set({ serverListOpen: open }),
+  openServersTab: (wasActive) => {
+    const s0 = get();
+    // Повторное нажатие на открытую вкладку, пока смотришь каналы сервера, — к списку серверов (как у Telegram: нажатие на
+    // активную вкладку возвращает наверх). Любой другой приход — к каналам последнего сервера.
+    const toList = wasActive && s0.mobilePane === 'list' && !!s0.currentServerId && !s0.serverListOpen;
+    set({ view: 'server', mobileProfileOpen: false, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList });
+    if (!s0.currentServerId) {
+      // Сервера ещё нет (старт со вкладки «Сообщения», выход из сервера) — берём последний из «где я был» (`lastPlace.ts`), если он ещё в списке.
+      const id = lastPlace(activeInstanceId())?.serverId;
+      if (id && s0.servers.some((x) => x.id === id)) void get().openServer(id).catch(() => {});
+    }
+  },
   setMobileMembersOpen: (open) => set({ mobileMembersOpen: open }),
   setMobileProfileOpen: (open) => set({ mobileProfileOpen: open }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
@@ -1615,24 +1575,34 @@ export const useStore = create<State>((set, get) => ({
   setAdminOpen: (open, instanceId = null) => set(open ? { adminOpen: true, adminInstanceId: instanceId } : { adminOpen: false }),
   setSearchOpen: (open) => set({ searchOpen: open }),
 
+  openDmRemote: async (who) => {
+    if (!get().convActive) return;
+    let id: string;
+    try {
+      id = await get().convOpenWith(who);
+    } catch (e) {
+      if (e && typeof e === 'object') (e as { dmOpen?: boolean }).dmOpen = true;
+      throw e;
+    }
+    return get().selectDm(id);
+  },
+
   openDmWith: async (userId) => {
     if (get().convActive) {
-      const id = await get().convOpenWith(userId);
+      let id: string;
+      try {
+        id = await get().convOpenWith(userId);
+      } catch (e) {
+        // Э1 (`fedm1`): отказ дома собеседника другого инстанса — `toastError` скажет причину словами (`fedDmOpenText`).
+        if (e && typeof e === 'object') (e as { dmOpen?: boolean }).dmOpen = true;
+        throw e;
+      }
       return get().selectDm(id);
     }
-    const dm = await api.openDm(userId);
-    get().upsertDm(dm);
-    set((s) => ({
-      view: 'dm',
-      currentDmId: dm.id,
-      unreadDms: s.unreadDms.filter((x) => x !== dm.id),
-      // Гасим и счётчик: он теперь виден числом, а не точкой, и без этого остался бы висеть.
-      dms: s.dms.map((d) => (d.id === dm.id ? { ...d, unread: 0 } : d)),
-      mobilePane: 'content',
-    }));
-    // История и «прочитано» — в `refreshDmHistory` (всегда в сеть, слияние с кешем, сбой без скелетонов).
-    await get().refreshDmHistory(dm.id);
+    // Сервер без бесед: ведём в раздел ЛС, там заглушка «нужно обновить сервер» (`DmSidebar`, 09.10).
+    set({ view: 'dm', currentDmId: null, mobilePane: 'list' });
   },
+
 
   openSaved: async () => {
     if (!get().convActive) return;
@@ -1681,58 +1651,6 @@ export const useStore = create<State>((set, get) => ({
     }
     await get().refreshDmHistory(dmId);
   },
-
-  // `dm.channel` без поля `unread` больше не обнуляет счётчик (#212, Б1 — разбор в `dmListRules.ts`).
-  upsertDm: (channel) => set((s) => ({ dms: mergeDmChannel(s.dms, channel) })),
-
-  appendDmMessage: (dmId, message) =>
-    set((s) => {
-      const list = s.dmMessages[dmId];
-      const dmMessages =
-        list && !list.some((m) => m.id === message.id)
-          ? { ...s.dmMessages, [dmId]: [...list, message] }
-          : s.dmMessages;
-      // Bump the conversation's recency so the list re-sorts.
-      const dms = s.dms.map((d) => (d.id === dmId ? { ...d, lastMessageAt: message.createdAt } : d)).sort(byRecent);
-      return { dmMessages, dms };
-    }),
-
-  updateDmMessage: (dmId, message) =>
-    set((s) => {
-      const list = s.dmMessages[dmId];
-      if (!list) return s;
-      // Реакции не трогаем: `dm.update` несёт их глазами редактора (#212, Б4 — `dmListRules.mergeDmUpdate`).
-      return {
-        dmMessages: { ...s.dmMessages, [dmId]: list.map((m) => (m.id === message.id ? mergeDmUpdate(m, message) : m)) },
-      };
-    }),
-
-  removeDmMessage: (dmId, messageId, ev) =>
-    set((s) => {
-      const list = s.dmMessages[dmId];
-      const dmMessages = list ? { ...s.dmMessages, [dmId]: list.filter((m) => m.id !== messageId) } : s.dmMessages;
-      if (!ev) return { dmMessages };
-      const onScreen = isFeedOnScreen({
-        id: dmId,
-        currentId: s.currentDmId,
-        mobile: isMobile(),
-        mobilePane: s.mobilePane,
-        kind: 'dm',
-        view: s.view,
-      });
-      return { dmMessages, ...applyDmDelete(s.dms, s.unreadDms, dmId, ev, onScreen ? dmId : null) };
-    }),
-
-  /**
-   * Входящее сообщение в НЕ открытый диалог. Копим не только флаг, но и счётчик: список ЛС теперь
-   * показывает число, а не точку, и без инкремента он застывал бы на том значении, что приехало с
-   * сервера при загрузке списка («1» весь вечер, сколько бы ни написали).
-   */
-  markDmUnread: (dmId) =>
-    set((s) => ({
-      unreadDms: s.unreadDms.includes(dmId) ? s.unreadDms : [...s.unreadDms, dmId],
-      dms: s.dms.map((d) => (d.id === dmId ? { ...d, unread: (d.unread ?? 0) + 1 } : d)),
-    })),
 
   appendMessage: (channelId, message) =>
     set((s) => {
@@ -1791,45 +1709,6 @@ export const useStore = create<State>((set, get) => ({
                 const reactors = cur.reactors?.filter((x) => x.userId !== userId);
                 reactions[idx] = { ...cur, count, me: mine ? false : cur.me, ...(reactors ? { reactors } : {}) };
               }
-            }
-            return { ...m, reactions };
-          }),
-        },
-      };
-    }),
-
-  applyDmReaction: (dmId, messageId, emoji, userId, op) =>
-    set((s) => {
-      const list = s.dmMessages[dmId];
-      if (!list) return s;
-      const mine = userId === s.user?.id;
-      return {
-        dmMessages: {
-          ...s.dmMessages,
-          [dmId]: list.map((m) => {
-            if (m.id !== messageId) return m;
-            const reactions = [...(m.reactions ?? [])];
-            const idx = reactions.findIndex((r) => r.emoji === emoji);
-            /* «Кто поставил» (07.10, `reactors` — сервер бесед): старый путь событий (`dm.reaction`) несёт только дельту —
-               список ведём той же дельтой, момент — время прихода. Список разошёлся с числом — чип покажет число
-               (`chipFaces`). */
-            const at = new Date().toISOString();
-            if (op === 'add') {
-              if (idx === -1) reactions.push({ emoji, count: 1, me: mine, reactors: [{ userId, at }] });
-              else {
-                const r = reactions[idx];
-                const dup = r.reactors?.some((x) => x.userId === userId) || (mine && r.me);
-                if (!dup) {
-                  const reactors = r.reactors ? [...r.reactors, { userId, at }] : r.reactors;
-                  reactions[idx] = { ...r, count: r.count + 1, me: r.me || mine, ...(reactors ? { reactors } : {}) };
-                }
-              }
-            } else if (idx !== -1) {
-              const r = reactions[idx];
-              const count = r.count - 1;
-              const reactors = r.reactors?.filter((x) => x.userId !== userId);
-              if (count <= 0) reactions.splice(idx, 1);
-              else reactions[idx] = { ...r, count, me: mine ? false : r.me, ...(reactors ? { reactors } : {}) };
             }
             return { ...m, reactions };
           }),
@@ -2021,6 +1900,7 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({ closedServers: { ...s.closedServers, [n.serverId]: n }, accessNotice: n })),
   clearAccessNotice: () => set((s) => (s.accessNotice === null ? {} : { accessNotice: null })),
   bumpFederationRev: () => set((s) => ({ federationRev: s.federationRev + 1 })),
+  bumpGuestLinksRev: () => set((s) => ({ guestLinksRev: s.guestLinksRev + 1 })),
 
   switchedInstance: () => {
     // Звуки сервера — ссылки на файлы ПРЕЖНЕГО инстанса: оставь их, и новый сервер зазвучит чужими.

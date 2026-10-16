@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+import * as shared from '@gusvoice/shared';
 import {
   addOutgoing,
   outgoingFailed,
@@ -8,11 +12,29 @@ import {
   outgoingSent,
   sendErrorText,
 } from './outgoingRules.js';
+import { humanLengthError } from './longTextRules.js';
 
 const rows = [
   { key: 'a', content: 'A', files: [], replyToId: null, status: 'sending' as const, error: null, feedId: 'feed-a', afterId: '1' },
   { key: 'b', content: 'B', files: [], replyToId: null, status: 'sending' as const, error: null, feedId: 'feed-b', afterId: '2' },
 ];
+
+function compileWholeModule(source: string, dependencies: Record<string, unknown>): Record<string, unknown> {
+  const module = { exports: {} as Record<string, unknown> };
+  const output = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  runInNewContext(output, {
+    module,
+    exports: module.exports,
+    Error,
+    require: (id: string) => {
+      assert.ok(Object.hasOwn(dependencies, id), `неожиданный импорт ${id}`);
+      return dependencies[id];
+    },
+  });
+  return module.exports;
+}
 
 describe('сообщения, которые ещё отправляются', () => {
   it('добавление и успешная отправка не меняют чужие строки и их дополнительные поля', () => {
@@ -40,6 +62,42 @@ describe('сообщения, которые ещё отправляются', (
     assert.notEqual(sendErrorText(new Error('federation.guest_forbidden')), 'federation.guest_forbidden');
     assert.equal(sendErrorText(''), 'не удалось отправить');
     assert.equal(sendErrorText(new Error('обычная ошибка')), 'обычная ошибка');
+  });
+
+  it('ошибка вложений переводится и в «Не отправлено», а не только в тексте открытия ЛС', () => {
+    // Класс ошибки: старый переводчик только для открытия ЛС оставляет технический код в очереди отправки.
+    const code = 'federation.dm_attachments_later';
+    const expected = 'Файлы людям других инстансов можно будет отправлять в следующем обновлении. Текст доходит.';
+    assert.equal(sendErrorText(code), expected, 'исходный модуль переводит отказ для очереди отправки');
+    assert.equal(sendErrorText(new Error(code)), expected, 'ошибка Error с тем же кодом тоже переводится');
+
+    const outgoingSource = readFileSync(new URL('./outgoingRules.ts', import.meta.url), 'utf8');
+    const fedErrorSource = readFileSync(new URL('./fedErrorText.ts', import.meta.url), 'utf8');
+    const originalFedText = compileWholeModule(fedErrorSource, { '@gusvoice/shared': shared });
+    const originalOutgoing = compileWholeModule(outgoingSource, {
+      './fedErrorText': originalFedText,
+      './longTextRules': { humanLengthError },
+    }) as { sendErrorText: (value: unknown) => string | null };
+    assert.equal(originalOutgoing.sendErrorText(new Error(code)), expected,
+      'исходные целые fedErrorText и outgoingRules проходят тот же oracle в VM');
+
+    let source = readFileSync(new URL('./fedErrorText.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const movedCase = "    case FED_ERRORS.dmAttachmentsLater:\n      return 'Файлы людям других инстансов можно будет отправлять в следующем обновлении. Текст доходит.';\n";
+    assert.equal(source.split(movedCase).length - 1, 1, 'у мутанта один точный якорь ветки вложений');
+    source = source.replace(movedCase, '');
+    const openAnchor = '  switch (code) {\n    case FED_ERRORS.dmRefused:';
+    assert.equal(source.split(openAnchor).length - 1, 1, 'у мутанта один якорь switch открытия ЛС');
+    source = source.replace(openAnchor, `  switch (code) {\n${movedCase}    case FED_ERRORS.dmRefused:`);
+    const fedText = compileWholeModule(source, { '@gusvoice/shared': shared });
+    const outgoing = compileWholeModule(outgoingSource, {
+      './fedErrorText': fedText,
+      './longTextRules': { humanLengthError },
+    }) as { sendErrorText: (value: unknown) => string | null };
+    assert.throws(
+      () => assert.equal(outgoing.sendErrorText(new Error(code)), expected, 'очередь должна получать общий перевод ошибки'),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.includes('очередь должна получать общий перевод ошибки'),
+      'мутант оставляет в «Не отправлено» исходный код, даже если fedDmOpenText всё ещё его знает',
+    );
   });
 
   it('подпись вложений различает пустой, один и несколько файлов', () => {

@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "splash",
+  "description": "Launch splash window (splash.rs, tauri.windows.conf.json): checks, downloads and installs the update before the main window shows. Needs only the updater plugin; showing the main window and closing itself go through the app's own gv_splash_* commands. Desktop-only — the window exists only in the Windows build.",
+  "windows": ["splash"],
+  "platforms": ["windows", "linux", "macOS"],
+  "permissions": [
+    "core:default",
+    "updater:default"
+  ]
+}

@@ -28,8 +28,10 @@ import {
   type JumpCell,
   type SearchState,
 } from '../chatSearchRules';
+import { pushBackHandler } from '../androidBack';
 import { useDialogChrome } from '../dialogChrome';
 import { usePhoneLayout } from '../phoneLayout';
+import { useStore } from '../store';
 import { BottomSheet } from './BottomSheet';
 import { Icon } from './Icon';
 
@@ -220,7 +222,7 @@ export function useChatSearch(src: ChatSearchSource | undefined, go: (id: string
     [query, run, step],
   );
 
-  // Открыли — фокус в поле; «назад» телефона закрывает поиск.
+  // Открыли — фокус в поле; «назад» телефона (стрелка в шапке и системная) закрывает поиск; выход из беседы — тоже.
   useEffect(() => {
     if (!open) return;
     requestAnimationFrame(() => {
@@ -228,7 +230,27 @@ export function useChatSearch(src: ChatSearchSource | undefined, go: (id: string
       inputRef.current?.select();
     });
     setExit(close);
-    return () => setExit(null);
+    /* Системная «назад» Android (`__gvBack` → `stepBack`) — перехватчик, как у выделения и ответа: сначала поиск, потом беседа
+       (TG Android `ChatActivity.java:34667`, `onBackPressed`: `actionBar.isSearchFieldVisible()` → `closeSearchField()`).
+       Раньше её ловила только стрелка в шапке (`exitChatSearch`), а системная уводила в список (аудит S20+ 10.10, B2). Поверх
+       ленты окно — шаг не наш. */
+    const back = pushBackHandler(() => {
+      const s = useStore.getState();
+      if (s.adminOpen || s.settingsOpen || s.mobileProfileOpen || s.mobileMembersOpen || s.mobilePane !== 'content')
+        return false;
+      close();
+      return true;
+    });
+    /* Ушли из беседы к списку (свайп, вкладка, «назад» мимо поиска) — поиск закрыт: на телефоне лента остаётся смонтированной, и
+       следующий вход открывался бы прямо в поиске со старым запросом и без поля ввода (B2). */
+    const unsub = useStore.subscribe((s, prev) => {
+      if (prev.mobilePane === 'content' && s.mobilePane !== 'content') close();
+    });
+    return () => {
+      setExit(null);
+      back();
+      unsub();
+    };
   }, [open, close]);
 
   // Ctrl+F — открыть (и не дать браузеру свой поиск), F3 / Shift+F3 — по найденному, Esc вне поля — закрыть.

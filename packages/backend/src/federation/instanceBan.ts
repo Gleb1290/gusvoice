@@ -174,7 +174,8 @@ export type ReportResult =
 export async function sendReport(input: {
   instanceId: string;
   reportedUserId: string;
-  action: 'instance_ban' | 'server_ban';
+  /** `dm_report` (Э2 часть Б, #141) — жалоба из ЛС на человека этого соседа (`convLink.reportFedDmPeer`); добавление. */
+  action: 'instance_ban' | 'server_ban' | 'dm_report';
   serverName: string | null;
   reason: string | null;
   evidence: ReportEvidence[];

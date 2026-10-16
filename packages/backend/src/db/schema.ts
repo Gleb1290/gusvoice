@@ -1,4 +1,4 @@
-import type { Attachment, ConvServiceMark, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
+import type { Attachment, ConvMediaMark, ConvServiceMark, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -89,6 +89,11 @@ export const users = pgTable('users', {
    * `everyone` — как было до настройки). Исключения — `privacyExceptions` с ключом `calls`; правило — `callRules.callAllowed`.
    */
   callPrivacy: text('call_privacy').notNull().default('everyone'),
+  /**
+   * «Кто может мне писать» (миграция 0146, #218, `msgpriv1`): `everyone` | `contacts` (по умолчанию `everyone` — как было).
+   * Исключения «Всегда разрешать» — `privacyExceptions` с ключом `messages`; правило — `messagePrivacyRules.messageAllowed`.
+   */
+  messagePrivacy: text('message_privacy').notNull().default('everyone'),
   /**
    * Настройки уведомлений как у Telegram (G38, миграция 0111, `push2`): «Показывать имя / текст» (`all` | `name` |
    * `nothing`, `shared/notifyView.ts`) и «Уведомления из групп». Чтит пуш (`push.ts`, `convSendFanout.ts`) и клиент.
@@ -533,50 +538,6 @@ export const messageReactions = pgTable(
   (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }) }),
 );
 
-// 1:1 direct-message conversations. The pair is stored sorted (userA < userB) so a
-// unique (user_a, user_b) index guarantees exactly one conversation per pair.
-export const dmChannels = pgTable(
-  'dm_channels',
-  {
-    id: text('id').primaryKey(),
-    userA: text('user_a')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    userB: text('user_b')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
-  },
-  (t) => ({ pair: unique('dm_channels_pair_uniq').on(t.userA, t.userB) }),
-);
-
-export const dmMessages = pgTable('dm_messages', {
-  id: text('id').primaryKey(),
-  dmChannelId: text('dm_channel_id')
-    .notNull()
-    .references(() => dmChannels.id, { onDelete: 'cascade' }),
-  authorId: text('author_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  content: text('content').notNull(),
-  attachments: jsonb('attachments').$type<Attachment[]>().notNull().default([]),
-  // Self-reference; the FK is declared in the migration SQL (avoids a circular type here).
-  replyToId: text('reply_to_id'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  editedAt: timestamp('edited_at', { withTimezone: true }),
-  /**
-   * Написано, когда получатель уже заблокировал автора (миграция 0076, #212): автору видно как
-   * отправленное, получателю не показывается никогда (`blockRules.visibleToViewer`).
-   */
-  withheld: boolean('withheld').notNull().default(false),
-  /**
-   * Кто удалил сообщение «у себя» (миграция 0077, #212): у них его нет ни в истории, ни в непрочитанном, у
-   * остальных оно на месте. «У обоих» — по-прежнему удаление строки.
-   */
-  hiddenFor: text('hidden_for').array().notNull().default(sql`'{}'::text[]`),
-});
-
 /**
  * Жалоба на собеседника из ЛС (миграция 0107, 08.10, #211, С7, Р-10): держателю СВОЕГО инстанса (супер-админу). Жалоба на
  * гостя соседнего инстанса соседу пока не уходит: личка между инстансами выключена (`FED_ERRORS.dmUnavailable`, до #141).
@@ -684,7 +645,8 @@ export const privacyExceptions = pgTable(
     targetId: text('target_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    key: text('key', { enum: ['calls'] }).notNull(),
+    // 'messages' — «Кто может мне писать» (миграция 0146, `msgpriv1`; только «Всегда разрешать»).
+    key: text('key', { enum: ['calls', 'messages'] }).notNull(),
     kind: text('kind', { enum: ['always', 'never'] }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -695,7 +657,7 @@ export const privacyExceptions = pgTable(
 );
 
 /**
- * ЛС, этап 1 (#211, `docs/dm/STAGE1.md`, миграция 0078): беседы рядом со старыми `dm_*`. До шага 1б пустые.
+ * ЛС, этап 1 (#211, `docs/dm/STAGE1.md`, миграция 0078): беседы (старые `dm_*` сняты миграцией 0135).
  * Правила ключей, журнала и видимости — `convRules.ts`, запись и чтение — `conversations.ts`.
  */
 export const conversations = pgTable('conversations', {
@@ -712,6 +674,8 @@ export const conversations = pgTable('conversations', {
   /** Название и фото группы (миграция 0099, признак `groups1`); у беседы 1:1 — `null`. */
   title: text('title'),
   avatarUrl: text('avatar_url'),
+  /** Э7 часть 1 (#141, миграция 0142): версия состава у дома группы — +1 на каждое изменение состава, названия, фото. */
+  groupVersion: integer('group_version').notNull().default(0),
 });
 
 export const conversationMembers = pgTable(
@@ -804,6 +768,8 @@ export const conversationMessages = pgTable('conversation_messages', {
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   withheld: boolean('withheld').notNull().default(false),
   hiddenFor: text('hidden_for').array().notNull().default(sql`'{}'::text[]`),
+  /** G56 (0144, `album1`): элементы альбома, спрятанные «у меня», — `<смотрящий>:<id вложения>` (`convRules.attachmentsForViewer`). */
+  hiddenAttachments: text('hidden_attachments').array().notNull().default(sql`'{}'::text[]`),
   originInstanceId: text('origin_instance_id'),
   /** «Переслано от» (миграция 0082, признак `conv5`): автор оригинала, имя на момент пересылки, время оригинала. */
   forwardedFrom: jsonb('forwarded_from').$type<MessageForwardedFrom | null>(),
@@ -830,6 +796,30 @@ export const conversationMessages = pgTable('conversation_messages', {
    * в группе (07.10, `groups1`) — `{ kind: 'group', type, users?, title? }`. `null` — обычное сообщение.
    */
   service: jsonb('service').$type<ConvServiceMark | null>(),
+  /**
+   * Вид сообщения (миграция 0145, `geocontact1`, G69): геопозиция или карточка контакта (`shared/convMedia.ts`); `content` —
+   * запасная фраза. `null` — обычное сообщение.
+   */
+  media: jsonb('media').$type<ConvMediaMark | null>(),
+  /** Версия правки (миграция 0136, Э0 ЛС между инстансами): +1 на каждую правку; при слиянии копий побеждает бо́льшая. */
+  editVersion: integer('edit_version').notNull().default(0),
+  /**
+   * Ключ порядка на доме автора у КОПИИ чужого сообщения (миграция 0136, Э0); у своих — `null` (источник — свой `sort_key`).
+   * Порядок в ленте всегда по местному `sort_key`: опоздавшее встаёт по приходу (Ф9).
+   */
+  originSortKey: bigint('origin_sort_key', { mode: 'number' }),
+  /**
+   * Э5 часть 1 (миграция 0140): сообщение пришло «через» — у инстанса собеседника это id дома автора (тот лежал, автор писал
+   * по долгой сессии), у дома автора после сверки — id инстанса, через который оно прошло. `null` — обычное сообщение.
+   */
+  viaInstanceId: text('via_instance_id'),
+  /** Состояние «через» (`FedViaState`): `pending` — ждёт решения дома автора, `confirmed`, `unverified`. */
+  viaState: text('via_state'),
+  /**
+   * Э7 часть 1 (#141, миграция 0142): подпись дома автора (`FedMessageSig` в проводе, shared `federation/convGroup.ts`) у копии
+   * чужого сообщения в группе со смешанным составом — хост пересылает её дальше как есть. `null` — своё или 1:1.
+   */
+  originSig: jsonb('origin_sig').$type<Record<string, unknown>>(),
 });
 
 /**
@@ -849,6 +839,23 @@ export const conversationVoiceListens = pgTable(
     listenedAt: timestamp('listened_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId] }) }),
+);
+
+/**
+ * Голоса опросов ЛС (миграция 0147, `convpoll1`): строка — один отмеченный вариант одного человека. Определение опроса — в
+ * `conversation_messages.media` (`shared/convPoll.ts`); подсчёт — `convPollView`. Без FK на users — как «прослушано».
+ */
+export const convPollVotes = pgTable(
+  'conv_poll_votes',
+  {
+    messageId: text('message_id')
+      .notNull()
+      .references(() => conversationMessages.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
+    optionId: text('option_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId, t.optionId] }) }),
 );
 
 export const conversationMessageReactions = pgTable(
@@ -952,6 +959,82 @@ export const conversationScheduled = pgTable(
   }),
 );
 
+/**
+ * Журнал изменений на связку (миграция 0136, Э0 ЛС между инстансами, `docs/dm/FEDERATION.md` §3.3): `seq` — номер
+ * последней строки для этого соседа, `minSeq` — последний удалённый уборкой (сосед с курсором ниже получит `reset`).
+ */
+export const fedConvSync = pgTable('fed_conv_sync', {
+  instanceId: text('instance_id').primaryKey(),
+  seq: bigint('seq', { mode: 'number' }).notNull().default(0),
+  minSeq: bigint('min_seq', { mode: 'number' }).notNull().default(0),
+  /** Миграция 0141 (исправления ревью 12.10, п. 7): `since` последнего забора соседом — всё до него он забрал. */
+  ackedSeq: bigint('acked_seq', { mode: 'number' }).notNull().default(0),
+  /** Время последнего забора соседом (`GET /fed/v1/conv/changes`); `null` — не забирал после миграции. */
+  ackedAt: timestamp('acked_at', { withTimezone: true }),
+});
+
+/** Строка журнала на связку — указатель «запись беседы изменилась»; сама запись отдаётся в текущем виде. */
+export const fedConvChanges = pgTable(
+  'fed_conv_changes',
+  {
+    instanceId: text('instance_id')
+      .notNull()
+      .references(() => fedConvSync.instanceId, { onDelete: 'cascade' }),
+    seq: bigint('seq', { mode: 'number' }).notNull(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    /** `FED_CONV_CHANGE` (shared `federation/convWire.ts`): `msg` | `conv` | `pin` | `read`. */
+    kind: text('kind').notNull(),
+    entityId: text('entity_id'),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.instanceId, t.seq] }),
+    atIdx: index('fed_conv_changes_at_idx').on(t.at),
+  }),
+);
+
+/**
+ * Э5 часть 1 (миграция 0140), дом автора: «через»-сообщения наших людей, забранные у соседа и ждущие отчёта клиента.
+ * `entity` — копия соседа в проводе (`serializeConvMessageWire`); строка уходит, когда решение принято и отправлено.
+ */
+export const fedViaPending = pgTable('fed_via_pending', {
+  messageId: text('message_id').primaryKey(),
+  instanceId: text('instance_id').notNull(),
+  conversationId: text('conversation_id').notNull(),
+  authorId: text('author_id').notNull(),
+  clientId: text('client_id'),
+  entity: jsonb('entity').$type<Record<string, unknown>>().notNull(),
+  receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Э5 часть 1 (миграция 0140), дом автора: отчёт клиента «это я отправил в обход» (`POST /conv/via-claims`). */
+export const fedViaClaims = pgTable(
+  'fed_via_claims',
+  {
+    userId: text('user_id').notNull(),
+    clientId: text('client_id').notNull(),
+    conversationId: text('conversation_id').notNull(),
+    payloadHash: text('payload_hash').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.clientId] }) }),
+);
+
+/** Э5 часть 1 (миграция 0140), дом автора: последний отчёт клиента человека (`POST /conv/via-claims`). */
+export const fedViaReports = pgTable('fed_via_reports', {
+  userId: text('user_id').primaryKey(),
+  reportedAt: timestamp('reported_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Курсор приёма журнала соседа: до какого номера забрали (Э2 — забор по звонку в дверь и при восстановлении связи). */
+export const fedConvCursor = pgTable('fed_conv_cursor', {
+  instanceId: text('instance_id').primaryKey(),
+  since: bigint('since', { mode: 'number' }).notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /** Журнал изменений на человека (Р4): `pts` — номер последнего изменения, `minPts` — последний удалённый. */
 export const userSync = pgTable('user_sync', {
   userId: text('user_id')
@@ -1001,7 +1084,9 @@ export const attachments = pgTable(
     contentType: text('content_type').notNull(),
     size: bigint('size', { mode: 'number' }).notNull(),
     // `scheduled` (06.10, миграция 0087, `conv10`) — ждёт в отложенном сообщении (`scheduledId`), видит только владелец.
-    state: text('state', { enum: ['pending', 'attached', 'deleted', 'scheduled'] }).notNull().default('pending'),
+    // `remote` (12.10, миграция 0137, Э3 ЛС между инстансами): файл из копии сообщения соседа, ещё не скопированный к нам
+    // (`storage_key` — уже будущий ключ копии, объекта по нему нет); копия доехала — `attached` (`federation/convAtt.ts`).
+    state: text('state', { enum: ['pending', 'attached', 'deleted', 'scheduled', 'remote'] }).notNull().default('pending'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     /**
@@ -1010,6 +1095,8 @@ export const attachments = pgTable(
      * пока на неё ссылаются её файлы, — писатель в той же транзакции переводит их в `attached`/`deleted` (`scheduled.ts`).
      */
     scheduledId: text('scheduled_id').references(() => conversationScheduled.id),
+    /** Э3 (миграция 0137): дом файла у вложения из копии сообщения соседа; у своих файлов пусто. `remote` ⇒ задан (CHECK). */
+    originInstanceId: text('origin_instance_id'),
   },
   (t) => ({
     member: foreignKey({
@@ -1065,23 +1152,8 @@ export const attachmentUploadParts = pgTable(
   (t) => ({ pk: primaryKey({ columns: [t.uploadId, t.partNumber] }) }),
 );
 
-// Emoji reactions on DM messages. One row per (message, user, emoji) — mirrors messageReactions.
-export const dmMessageReactions = pgTable(
-  'dm_message_reactions',
-  {
-    messageId: text('message_id')
-      .notNull()
-      .references(() => dmMessages.id, { onDelete: 'cascade' }),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    emoji: text('emoji').notNull(),
-  },
-  (t) => ({ pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }) }),
-);
-
 // Persisted read state (migration 0018): unread/mention badges survive reloads.
-// last_read_at advances when the client opens the channel/DM (POST .../read).
+// last_read_at advances when the client opens the channel (POST .../read); у бесед своё прочитанное (conversation_members).
 export const channelReads = pgTable(
   'channel_reads',
   {
@@ -1094,20 +1166,6 @@ export const channelReads = pgTable(
     lastReadAt: timestamp('last_read_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ pk: primaryKey({ columns: [t.userId, t.channelId] }) }),
-);
-
-export const dmReads = pgTable(
-  'dm_reads',
-  {
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    dmChannelId: text('dm_channel_id')
-      .notNull()
-      .references(() => dmChannels.id, { onDelete: 'cascade' }),
-    lastReadAt: timestamp('last_read_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => ({ pk: primaryKey({ columns: [t.userId, t.dmChannelId] }) }),
 );
 
 // Server bans (BAN_MEMBERS). A banned user is removed from the server and blocked from re-joining
@@ -1704,6 +1762,11 @@ export const federationLinks = pgTable(
     clockSkewMs: integer('clock_skew_ms'),
     /** Последний принятый номер события соседа (дедуп) и наш счётчик исходящих. */
     lastEventSeq: bigint('last_event_seq', { mode: 'number' }).notNull().default(0),
+    /**
+     * Номера соседа, перепрыгнутые дырой и ещё не пришедшие (миграция 0136, Э0 ЛС между инстансами): опоздавшее раннее
+     * событие из этого списка принимается, а не выбрасывается повтором (`judgeEvent`, `trackMissingSeqs`).
+     */
+    missingEventSeqs: jsonb('missing_event_seqs').$type<number[]>().notNull().default([]),
     outEventSeq: bigint('out_event_seq', { mode: 'number' }).notNull().default(0),
     /**
      * Квота хранилища для файлов гостей этой связки и сколько занято (миграция 0068, §5.10).
@@ -1825,6 +1888,18 @@ export const federationPeerUsers = pgTable(
     byName: index('federation_peer_users_name_idx').on(t.instanceId, t.username),
   }),
 );
+
+/**
+ * Э7 часть 3 (миграция 0143): название и домен инстанса, с которым у нас НЕТ связки, — со слов дома группы (третий человек
+ * смешанной группы). Связка всегда старше (`instanceLabels.refreshInstanceLabels`); строка нужна только подписи значка.
+ */
+export const federationVouchedInstances = pgTable('federation_vouched_instances', {
+  instanceId: text('instance_id').primaryKey(),
+  name: text('name'),
+  domain: text('domain').notNull(),
+  vouchedBy: text('vouched_by').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** Серверы соседа, открытые для федеративного доступа (миграция 0066, §5.3) — только просмотр. */
 export const federationPeerServers = pgTable(

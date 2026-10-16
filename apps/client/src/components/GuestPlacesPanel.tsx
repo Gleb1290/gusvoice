@@ -1,6 +1,6 @@
 import type { GuestPlacesView } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
-import { endGuestSession, fetchGuestPlaces, leaveAllOn } from '../guestJoin';
+import { dismissGuestGroup, endGuestSession, fetchGuestPlaces, hostSilent, leaveAllOn } from '../guestJoin';
 import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
 import { Icon } from './Icon';
@@ -31,6 +31,8 @@ export function GuestPlacesPanel() {
   // и решил, что кнопка не сработала.
   const [leftIds, setLeftIds] = useState<string[]>([]);
   const [endedIds, setEndedIds] = useState<string[]>([]);
+  /** Убрано с этого устройства без ответа хоста (15.10). */
+  const [droppedIds, setDroppedIds] = useState<string[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -43,6 +45,30 @@ export function GuestPlacesPanel() {
       alive = false;
     };
   }, []);
+
+  /**
+   * Хост НЕ ОТВЕТИЛ на «выйти»/«завершить» (15.10): мёртвый сосед держал выход — кнопка падала ошибкой, и всё. Теперь
+   * предлагаем убрать его с устройства без хоста — тот же путь, что «Убрать из списка» в рейле (`dismissGuestGroup`).
+   * Отказ словами (хост ответил) — обычная ошибка, как раньше.
+   */
+  async function offerDrop(place: Place, e: unknown): Promise<void> {
+    if (!hostSilent(e)) {
+      toastError(e);
+      return;
+    }
+    const ok = await confirmAction({
+      title: `«${label(place)}» не отвечает`,
+      body:
+        'Убрать его серверы из списка на этом устройстве? Сессия там закончится сама по сроку, членства останутся — ' +
+        'вернуться можно по ссылке-приглашению.',
+      tone: 'danger',
+      confirmLabel: 'Убрать из списка',
+    });
+    if (!ok) return;
+    await dismissGuestGroup({ instanceId: null, place });
+    setDroppedIds((l) => [...l, place.instanceId]);
+    toast('info', 'Убрано с этого устройства');
+  }
 
   async function leaveAll(place: Place) {
     const ok = await confirmAction({
@@ -60,7 +86,7 @@ export function GuestPlacesPanel() {
       setLeftIds((l) => [...l, place.instanceId]);
       toast('info', 'Вы вышли со всех серверов этого инстанса');
     } catch (e) {
-      toastError(e);
+      await offerDrop(place, e);
     } finally {
       setBusy(null);
     }
@@ -79,7 +105,7 @@ export function GuestPlacesPanel() {
       setEndedIds((l) => [...l, place.instanceId]);
       toast('info', 'Сессия на этом инстансе завершена');
     } catch (e) {
-      toastError(e);
+      await offerDrop(place, e);
     } finally {
       setBusy(null);
     }
@@ -141,6 +167,9 @@ export function GuestPlacesPanel() {
               </ul>
             )}
             {ended && <div className="gp-done">Сессия завершена. Войти снова можно по ссылке-приглашению.</div>}
+            {droppedIds.includes(place.instanceId) && (
+              <div className="gp-done">Убрано с этого устройства. Членства там остались — вернуться можно по ссылке.</div>
+            )}
             {/* Обе кнопки — про то, что там ещё есть: выйти с серверов и погасить сессию. После
                 запрета нет ни того, ни другого, и кнопка, которая ничего не делает, только сбивает. */}
             {!banned(place) && (

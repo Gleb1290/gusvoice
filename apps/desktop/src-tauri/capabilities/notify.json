@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notify",
+  "description": "Own desktop notification popups (G38, ND-07, notify_popup.rs): the \"notify\" window receives cards from the main window (core events) and calls the app's gv_notify_popup_* / gv_os_idle_ms commands. No plugin permissions. Desktop-only — the window is never created on mobile.",
+  "windows": ["notify"],
+  "platforms": ["windows", "linux", "macOS"],
+  "permissions": [
+    "core:default"
+  ]
+}

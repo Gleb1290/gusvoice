@@ -15,21 +15,27 @@ import { isEditableTag, keepNativeMenu } from './contextMenuRules';
 import { effectiveUserSelect, shouldDropSelection } from './phoneSelectionRules';
 import { VoiceOverlay } from './components/VoiceOverlay';
 import { TipToast } from './components/TipToast';
+import { NotifyPopups } from './components/NotifyPopups';
+import { SplashScreen } from './components/SplashScreen';
+// Телефонный профиль собеседника (#218): подставляет экран в `UserContextMenu` (`providePhoneProfile`) — без него на телефоне карточка ПК.
+import './components/PhoneProfile';
 import './styles.css';
 import { applyTheme, getTheme } from './theme';
-import { applyUiPrefs } from './uiPrefs';
+import { applyUiPrefs, applyUiScale, getUiScale } from './uiPrefs';
 import { installAndroidBack } from './androidBack';
 import { installNativeSafeArea } from './nativeSafeArea';
 import { initPushRegistration } from './nativeUnifiedPush';
 import { ensureNotifyPermission } from './notifications';
-import { notifyIfJustUpdated, runDesktopUpdateCheck, startUpdatePolling } from './updater';
+import { notifyIfJustUpdated, runLaunchUpdate, startUpdatePolling } from './updater';
 import { watchWindowCovered } from './windowCovered';
 import { httpsUpgradeUrl } from './configRules';
 import { isTauri } from './hotkeys';
 import { installLivekitTweaks } from './livekitTweaks';
 import { applyLiteMode } from './liteMode';
-import { applyBubblesFromUrl } from './dmBubbles';
 import { bindUploadProgress } from './convStore';
+import { startFedVia } from './fedVia';
+import { startLastSeenRefresh } from './lastSeenRefresh';
+import { startSelfInstanceName } from './selfInstanceName';
 import { bindChunkedUpload } from './api';
 import { dmChunkedUploads } from './attachRules';
 import { CHUNK_FROM_BYTES, uploadInChunks } from './chunkedUpload';
@@ -72,16 +78,44 @@ if (httpsUrl) {
       <TipToast />
     </ErrorBoundary>,
   );
+} else if (gvWindow === 'notify') {
+  // Третье окно: свои всплывающие уведомления на ПК (G38, ND-07, `notify_popup.rs`). Тот же прозрачный фон — видны
+  // только карточки; ни приложения, ни апдейтера, ни пушей.
+  document.documentElement.classList.add('overlay-window');
+  // Тема и масштаб интерфейса сменились в главном окне (общий localStorage) — карточки следом, без перезапуска: окно живёт,
+  // пока живёт приложение. Перемерить стопку под новый масштаб — забота `NotifyPopups` (тот же `storage`).
+  window.addEventListener('storage', (e) => {
+    if (e.key === null || e.key === 'gv_theme') applyTheme(getTheme());
+    if (e.key === null || e.key === 'gv_ui_scale') applyUiScale(getUiScale());
+  });
+  root.render(
+    <ErrorBoundary silent>
+      <NotifyPopups />
+    </ErrorBoundary>,
+  );
+} else if (gvWindow === 'splash') {
+  // Заставка при запуске десктопа (15.10, `SplashScreen`, `splash.rs`): окно 300×340 БЕЗ приложения, пушей и
+  // опроса — проверяет и ставит обновление, потом показывает главное окно. Всегда тёмная (фон окна в
+  // `tauri.windows.conf.json` тот же `--bg`) и без масштаба интерфейса: окно фиксированного размера.
+  document.documentElement.classList.add('splash-window');
+  document.documentElement.removeAttribute('data-theme');
+  (document.documentElement.style as unknown as { zoom: string }).zoom = '';
+  root.render(
+    <ErrorBoundary silent>
+      <SplashScreen />
+    </ErrorBoundary>,
+  );
 } else {
-  // Ссылка-включатель пузырей `/?bubbles=1|0` (тестовым аккаунтам, у которых в настройках нет строки переключателя):
-  // записать и убрать из адреса ДО первой отрисовки — `MessagePane`/`DmChatView` читают переключатель при монтировании.
-  // ⚠️ Именно здесь, а не выше: после проверки на https (иначе значение легло бы в хранилище http-источника, а человека
-  // увело бы на https, где его нет) и только для главного окна (оверлеи грузятся по своему фиксированному адресу).
-  applyBubblesFromUrl(location, history);
   // Кольца загрузки у вложений строк «в пути» очереди ЛС (07.10): прогресс мимо стора, `convStore.bindUploadProgress`.
   bindUploadProgress({ progress: setUploadProgress, done: setUploadDone, clear: clearUploadProgress });
   // Файлы ЛС больше куска — кусками (`bigfile1`, 09.10): привязка в `api.ts`, предел и признак — `attachRules` из `/auth/me`.
   bindChunkedUpload({ use: (size) => dmChunkedUploads() && size > CHUNK_FROM_BYTES, run: uploadInChunks });
+  // ЛС между инстансами, Э5 (#141, `fedm5`): «мой дом лежит — пишу через инстанс собеседника» (`fedVia.ts`), привязка к стору бесед.
+  startFedVia();
+  // «Был(а)» не врёт после сна вкладки и обрыва шлюза (Э7 ч.3, D): перезапрос времени захода (`lastSeenRefresh.ts`).
+  startLastSeenRefresh();
+  // Название своего инстанса для подписи «через «…»» у получателя (Э7 ч.3, D; `selfInstanceName.ts`).
+  startSelfInstanceName();
   root.render(
     <ErrorBoundary>
       <App />
@@ -153,10 +187,11 @@ if (httpsUrl) {
 
   // Desktop only (no-op on web):
   //  1) if a previous session installed an update, show a persistent "обновлён до vX" toast (consumes marker);
-  //  2) on launch, silently auto-update to the latest signed build (then offers restart);
+  //  2) on launch, silently auto-update to the latest signed build (then offers restart) — unless the Windows
+  //     launch splash already did it (`runLaunchUpdate`, `SplashScreen`);
   //  3) every 30 min while open, NON-intrusively OFFER any newer build (a small "Обновить?" card, no auto-install).
   notifyIfJustUpdated();
-  void runDesktopUpdateCheck();
+  void runLaunchUpdate();
   startUpdatePolling();
   ensureNotifyPermission();
 

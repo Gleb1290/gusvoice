@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import Fastify from 'fastify';
@@ -85,4 +85,106 @@ it('R131 мутант возврата e.message для внутренней о�
   const mutant = source.replace("error: expose ? e.message : 'internal error'", 'error: e.message');
   assert.notEqual(mutant, source);
   await assert.rejects(check(mutant), assert.AssertionError);
+});
+
+async function routeStatuses(raw = source): Promise<number[]> {
+  const app = Fastify();
+  const deps: Record<string, unknown> = {};
+  const tree = ts.createSourceFile('index.ts', raw, ts.ScriptTarget.Latest, true);
+  for (const node of tree.statements) {
+    if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier) || !node.importClause) continue;
+    const exports: Record<string, unknown> = {};
+    if (node.importClause.name) exports.default = async () => {};
+    const binding = node.importClause.namedBindings;
+    if (binding && ts.isNamedImports(binding)) {
+      for (const item of binding.elements) exports[(item.propertyName ?? item.name).text] = async () => {};
+    }
+    deps[node.moduleSpecifier.text] = { __esModule: true, ...exports };
+  }
+  deps.fastify = { __esModule: true, default: () => ({
+    register: app.register.bind(app), get: app.get.bind(app), addHook: app.addHook.bind(app),
+    setErrorHandler: app.setErrorHandler.bind(app), addContentTypeParser: () => {},
+    listen: async () => {}, log: { info: () => {}, warn: () => {}, error: assert.fail },
+  }) };
+  deps.zod = { ZodError };
+  deps['./env.js'] = { env: { port: 0, federation: { enabled: false }, economyEnabled: false, diagEnabled: false } };
+  deps['./federation/instance.js'] = { federation: { start: async () => {} },
+    startFederationAlerts: () => {}, startFederationKeyRotation: () => {} };
+  // Маршруты — лёгкие маркеры регистрации. Проверяется настоящий index.ts и настоящий Fastify,
+  // а SQL/авторизация внутри conv отдельно покрыты интеграционными тестами.
+  deps['./routes/conv.js'] = { convRoutes: async (api: typeof app) => {
+    api.get('/conv', async () => ({ ok: true }));
+    api.post('/conv', async () => ({ ok: true }));
+    api.post('/conv/:id/messages', async () => ({ ok: true }));
+  } };
+  deps['./routes/dmFolders.js'] = { dmFolderRoutes: async (api: typeof app) => {
+    api.get('/dm-folders', async () => ({ ok: true }));
+  } };
+  deps['./routes/dm.js'] = { dmRoutes: async (api: typeof app) => {
+    for (const url of ['/dm', '/dm/:id/messages']) {
+      api.get(url, async () => ({ legacy: true }));
+      api.post(url, async () => ({ legacy: true }));
+    }
+  } };
+  const module = { exports: {} };
+  try {
+    await runInNewContext(`(async () => {\n${ts.transpileModule(raw, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+    } }).outputText}\n})()`, { module, exports: module.exports,
+      require: (id: string) => { assert.ok(id in deps, `неизвестная зависимость ${id}`); return deps[id]; },
+      process: { exit: assert.fail }, console });
+    const cases = [
+      ['GET', '/api/dm'], ['POST', '/api/dm'], ['GET', '/api/dm/c/messages'], ['POST', '/api/dm/c/messages'],
+      ['GET', '/api/conv'], ['POST', '/api/conv'], ['POST', '/api/conv/c/messages'],
+      ['GET', '/api/dm-folders'], ['GET', '/health'],
+    ] as const;
+    const statuses: number[] = [];
+    for (const [method, url] of cases) statuses.push((await app.inject({ method, url })).statusCode);
+    return statuses;
+  } finally { await app.close(); }
+}
+
+it('R137 старые ручки ЛС отвечают 404, беседы и папки остаются зарегистрированы', async () => {
+  // Универсальный 404 из пустого app не доказывает вывод старого API: новые пути обязаны работать.
+  assert.deepEqual(await routeStatuses(), [404, 404, 404, 404, 200, 200, 200, 200, 200]);
+});
+
+it('R137 возврат регистрации dmRoutes возвращает старые ручки и отвергается HTTP-проверкой', async () => {
+  // Доказательство проходит через ту же регистрацию index и inject, а не поиск названия импорта.
+  const verify = async (raw: string) => assert.deepEqual(await routeStatuses(raw),
+    [404, 404, 404, 404, 200, 200, 200, 200, 200]);
+  await verify(source);
+  const anchor = 'await api.register(convRoutes);';
+  assert.ok(source.includes(anchor));
+  const mutant = "import { dmRoutes } from './routes/dm.js';\n" +
+    source.replace(anchor, `${anchor}\n    await api.register(dmRoutes);`);
+  await assert.rejects(verify(mutant), assert.AssertionError);
+});
+
+function noLegacyTables(files: readonly { path: string; text: string }[]): void {
+  assert.ok(files.length > 0, 'проверены исходники, а не пустой список');
+  for (const file of files) {
+    assert.doesNotMatch(file.text, /\b(?:dm_messages|dm_channels|dm_reads|dm_message_reactions)\b/, file.path);
+  }
+}
+
+it('R137 сервер вне schema не обращается к старым таблицам ЛС, возвращённый SQL ловится', () => {
+  // После DROP даже забытая строка в редком фоне/удалении аккаунта уронит SQL в живой системе.
+  const root = new URL('./', import.meta.url);
+  const files: { path: string; text: string }[] = [];
+  const collect = (dir: URL, prefix = '') => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = prefix + entry.name;
+      if (entry.isDirectory()) collect(new URL(`${entry.name}/`, dir), `${path}/`);
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && path !== 'db/schema.ts') {
+        files.push({ path, text: readFileSync(new URL(entry.name, dir), 'utf8') });
+      }
+    }
+  };
+  collect(root);
+  noLegacyTables(files);
+  for (const table of ['dm_messages', 'dm_channels', 'dm_reads', 'dm_message_reactions']) {
+    assert.throws(() => noLegacyTables([...files, { path: 'regression.ts', text: `SELECT * FROM ${table}` }]),
+      assert.AssertionError);
+  }
 });

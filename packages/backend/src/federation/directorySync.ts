@@ -217,6 +217,23 @@ async function finishSync(
  */
 const capsCheckedAt = new Map<string, number>();
 const CAPS_RECHECK_MS = 60 * 60_000;
+/**
+ * Исправления ревью ЛС 12.10, п. 5 / п. 10: принудительное перечитывание (`force`) — сосед уже пользуется тем, чего нет в нашей
+ * строке связки (`dm1` / `dm2`). Свой предел — раз в минуту на связку; неудача обычного перечитывания — повтор через минуту,
+ * а не через час (раньше отметка ставилась ДО запроса, и сбой визитки оставлял старые признаки на час).
+ */
+const capsForcedAt = new Map<string, number>();
+const CAPS_FORCE_MS = 60_000;
+
+/**
+ * Признаки связки реально изменились (п. 12 ревью ЛС 12.10): поля сводки бесед, считаемые из `federation_links.features`
+ * (`ConvSummary.fedNoFiles`), меняются без нового номера `pts` — клиент с кешем бесед их не перечитал бы. Подключает `index.ts`
+ * (`convLink.announceConvs`: строка журнала `conv` и `conv.change` людям бесед с этим инстансом), а не импорт.
+ */
+let featuresChanged: ((instanceId: string) => void) | null = null;
+export function configureCapsChanged(fn: ((instanceId: string) => void) | null): void {
+  featuresChanged = fn;
+}
 
 /**
  * Перечитать возможности соседа.
@@ -224,27 +241,48 @@ const CAPS_RECHECK_MS = 60 * 60_000;
  * 🔴 Без этого связка, заведённая ДО того, как сосед научился каталогам, не начала бы синхронизацию
  * НИКОГДА: список `features` записывается в строку связки один раз, при подтверждении, и сам по себе
  * не обновляется. Сосед обновил приложение — а мы про это не знаем, потому что не спрашивали.
- * ⚠️ Спрашиваем не чаще раза в час и только у тех, кто каталог ещё не объявил: у остальных визитка и
- * так читается на каждый их входящий запрос.
+ * ⚠️ Спрашиваем не чаще раза в час (сверка каталога — у каждой связки, `conv.open` — у соседа без `dm1`): строка связки
+ * сама не обновляется, даже когда визитка соседа читается на его входящий запрос.
  */
-async function refreshCapabilities(
+export async function refreshCapabilities(
   link: { instanceId: string; apiBase: string; features: string[] },
   now: number,
+  opts: { force?: boolean } = {},
 ): Promise<string[]> {
-  const last = capsCheckedAt.get(link.instanceId) ?? 0;
-  if (now - last < CAPS_RECHECK_MS) return link.features;
-  capsCheckedAt.set(link.instanceId, now);
+  if (opts.force) {
+    if (now - (capsForcedAt.get(link.instanceId) ?? 0) < CAPS_FORCE_MS) return link.features;
+    capsForcedAt.set(link.instanceId, now);
+  } else {
+    const last = capsCheckedAt.get(link.instanceId) ?? 0;
+    if (now - last < CAPS_RECHECK_MS) return link.features;
+    // Пока идёт запрос — не дублировать; неудача ниже переставит отметку на «повтор через минуту».
+    capsCheckedAt.set(link.instanceId, now);
+  }
+  const failed = (): string[] => {
+    if (!opts.force) capsCheckedAt.set(link.instanceId, now - CAPS_RECHECK_MS + CAPS_FORCE_MS);
+    return link.features;
+  };
 
   let host: string;
   try {
     host = new URL(link.apiBase).host;
   } catch {
-    return link.features;
+    return failed();
   }
   const peer = await fetchPeerDocument({ apiBase: link.apiBase, allowHosts: new Set([host]), now });
   // Личность обязана совпасть: иначе это уже другой инстанс по тому же адресу, и его возможности
   // нам записывать некуда.
-  if (!peer.ok || peer.value.instanceId !== link.instanceId) return link.features;
+  if (!peer.ok || peer.value.instanceId !== link.instanceId) return failed();
+  capsCheckedAt.set(link.instanceId, now);
+  // Строка связки в базе могла уйти вперёд от переданной копии — сравниваем с тем, что лежит сейчас.
+  const [stored] = await db
+    .select({ features: federationLinks.features })
+    .from(federationLinks)
+    .where(eq(federationLinks.instanceId, link.instanceId))
+    .limit(1);
+  const before = new Set(stored?.features ?? link.features);
+  const nowFeatures = peer.value.doc.features;
+  const changed = before.size !== new Set(nowFeatures).size || nowFeatures.some((f) => !before.has(f));
 
   await db
     .update(federationLinks)
@@ -254,6 +292,7 @@ async function refreshCapabilities(
       updatedAt: new Date(),
     })
     .where(eq(federationLinks.instanceId, link.instanceId));
+  if (changed) featuresChanged?.(link.instanceId);
   return peer.value.doc.features;
 }
 
@@ -301,8 +340,9 @@ async function syncOneLink(
 ): Promise<true> {
   {
     let features = link.features;
-    // Сосед мог обновиться уже после того, как связка была подтверждена.
-    if (!features.includes(FED_FEATURES.directory)) features = await refreshCapabilities(link, now);
+    // Сосед мог обновиться уже после того, как связка была подтверждена. Перечитываем у ВСЕХ связок (не чаще раза в час):
+    // новые возможности (`dm1`, `dm2`, …) иначе не доезжали бы до строки связки никогда (живая проверка ЛС 12.10).
+    features = await refreshCapabilities(link, now);
     if (!features.includes(FED_FEATURES.directory)) {
       report.skipped += 1;
       return true;

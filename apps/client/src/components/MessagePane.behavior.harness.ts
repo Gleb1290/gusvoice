@@ -148,7 +148,6 @@ export function setupHarness(entrypoint: string) {
     before(async () => {
         // Таймеры HappyDOM убираются его abort/unregister; native watchdog не подменяем.
         GlobalRegistrator.register({ url: 'http://localhost/' });
-        localStorage.setItem('gv_dm_bubbles', '0');
         localStorage.removeItem('gv_dbl_action');
         localStorage.removeItem('gv_quick_reaction');
         originalUa = navigator.userAgent;
@@ -292,7 +291,6 @@ export function setupHarness(entrypoint: string) {
             finally {
                 resetStore = undefined;
                 rendered.length = 0;
-                localStorage.setItem('gv_dm_bubbles', '0');
                 localStorage.removeItem('gv_dbl_action');
                 localStorage.removeItem('gv_quick_reaction');
                 Object.defineProperty(navigator, 'userAgent', { configurable: true, value: originalUa });
@@ -356,7 +354,9 @@ export function setupHarness(entrypoint: string) {
         Object.defineProperty(navigator, 'userAgent', { configurable: true, value: originalUa });
         Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
     }
-    function round12() { localStorage.setItem('gv_dm_bubbles', '1'); }
+    // Историческое имя вызова в тематических сценариях: новый путь теперь безусловный.
+    // Оставляем совместимость харнесса без записи удалённого пользовательского переключателя.
+    function round12() { }
     function pin(id: string, authorId = 'me', forBoth = true) {
         return { message: { id, authorId, text: `Текст ${id}`, attachments: 0, sortKey: Number(id.replace(/\D/g, '')) || 1,
                 createdAt: new Date(now).toISOString() }, forBoth, pinnedBy: authorId, pinnedAt: new Date(now).toISOString() } as never;

@@ -18,6 +18,7 @@ import {
   type DmFolder,
   type DmFolderInput,
 } from '@gusvoice/shared';
+import { pushBackHandler } from '../androidBack';
 import { confirmAction } from '../confirm';
 import { serverGroups } from '../convSyncRules';
 import { dmMuteOf, muteActive } from '../dmListRules';
@@ -203,6 +204,17 @@ export function DmFolderSettings() {
 function FolderEditor({ editing, onDone }: { editing: Editing; onDone: () => void }) {
   const [d, setD] = useState<DmFolderInput>(editing.draft);
   const [picking, setPicking] = useState<'include' | 'exclude' | null>(null);
+  /* Системная «Назад» на телефоне (#218): из выбора бесед — в редактор папки, из редактора — к списку папок (тот же шаг, что стрелка
+     в шапке, черновик не сохраняется); без перехватчика жест закрывал раздел настроек целиком. */
+  useEffect(
+    () =>
+      pushBackHandler(() => {
+        if (picking) setPicking(null);
+        else onDone();
+        return true;
+      }),
+    [picking, onDone],
+  );
   const nameOf = usePeerName(); // подпись контакта вместо имени (`peerName.ts`)
   const [busy, setBusy] = useState(false);
   const [tried, setTried] = useState(false);

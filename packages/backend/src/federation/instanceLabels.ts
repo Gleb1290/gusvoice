@@ -1,5 +1,5 @@
 import { FED_FEATURES } from '@gusvoice/shared';
-import { listLinks } from './links.js';
+import { listLinks, listVouchedInstances, onVouchedChanged } from './links.js';
 import { linkDisplayNames } from './linkRules.js';
 import { readInstanceMeta } from './instanceMeta.js';
 
@@ -31,10 +31,15 @@ let filledAt = 0;
 let filling: Promise<void> | null = null;
 
 /** Перечитать связки, если кеш устарел. Зовётся из фона — ответа никто не ждёт. */
+/** Слова хоста о чужих инстансах (Э7 часть 3); ошибка чтения не должна ронять подписи по связкам. */
+function vouchedRows(): ReturnType<typeof listVouchedInstances> {
+  return typeof listVouchedInstances === 'function' ? listVouchedInstances().catch(() => []) : Promise.resolve([]);
+}
+
 export function refreshInstanceLabels(): Promise<void> {
   if (filling) return filling;
-  filling = Promise.all([listLinks(), readInstanceMeta()])
-    .then(([links, meta]) => {
+  filling = Promise.all([listLinks(), readInstanceMeta(), vouchedRows()])
+    .then(([links, meta, vouched]) => {
       // 🔴 Имя — через защиту от одноимённых (F-11): сосед, назвавшийся как мы или как другая связка,
       // получает в значке гостя имя с доменом, и подмена видна.
       const names = linkDisplayNames(links, meta.name);
@@ -49,6 +54,13 @@ export function refreshInstanceLabels(): Promise<void> {
           },
         ]),
       );
+      // Э7 часть 3 (D): инстансы без связки — со слов дома группы; связка старше. Имя, совпавшее с нашим или с именем связки, не берём.
+      const taken = new Set([...names.values(), meta.name ?? ''].map((n) => (n ?? '').trim().toLowerCase()).filter(Boolean));
+      for (const v of vouched) {
+        if (cache.has(v.instanceId)) continue;
+        const nm = v.name?.trim() ?? '';
+        cache.set(v.instanceId, { instanceId: v.instanceId, name: nm && !taken.has(nm.toLowerCase()) ? nm : null, domain: v.domain, reports: false });
+      }
       filledAt = Date.now();
     })
     .catch(() => {
@@ -82,4 +94,12 @@ export function instanceIdByDomain(domain: string): string | null {
     if (label.domain.toLowerCase() === want) return label.instanceId;
   }
   return null;
+}
+
+// Э7 часть 3 (D): дом группы назвал нам чужой инстанс (`links.saveVouchedInstance`) — подпись значка обновляется сразу, до сводки.
+if (typeof onVouchedChanged === 'function') {
+  onVouchedChanged(() => {
+    filledAt = 0;
+    return refreshInstanceLabels();
+  });
 }

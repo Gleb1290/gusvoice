@@ -107,6 +107,8 @@ it('Esc снимает пересылку после правки и до пус
   const p = { selecting: false, editing: false, draft: '', original: '', replying: true, recording: true, canClose: true, forwarding: true };
   const check = (api: typeof rules) => {
     assert.equal(api.chatEscape(p), 'forward');
+    assert.equal(api.chatEscape({ ...p, selecting: true, editing: true }), 'selection');
+    assert.equal(api.chatEscape({ ...p, canClose: false }), 'forward', 'слой пересылки снимается даже без права закрыть беседу');
     assert.equal(api.chatEscape({ ...p, editing: true }), 'edit');
     assert.equal(api.chatEscape({ ...p, editing: true, draft: 'изменено' }), 'ask-edit');
     assert.equal(api.chatEscape({ ...p, forwarding: false }), 'reply');

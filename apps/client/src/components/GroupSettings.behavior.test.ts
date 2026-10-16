@@ -47,6 +47,8 @@ function compilePeoplePicker(state: HarnessState, toasts: string[], change?: (so
     },
     '../groupChatRules': groupChatRules,
     '../phoneLayout': { usePhoneLayout: () => false },
+    '../dmOnline': { useVisibleOnline: () => new Set<string>() },
+    '../useContactSeen': { useContactSeen: () => new Map<string, string>() },
     '../peerName': { usePeerName: () => (id: string, fallback: string) => contactRules.personLabel(state.contacts, id, fallback) },
     '../contactRules': contactRules,
     '../contacts': { useContactList: (enabled: boolean) => enabled ? state.contacts : null },
@@ -87,54 +89,86 @@ async function mountPicker(Picker: ComponentType<PickerProps>, props: PickerProp
 }
 
 function extractFunction(source: string, declaration: string, nextComment: string): string {
-  const start = source.indexOf(declaration);
+  // По имени, а не сигнатуре: параметры с деструктуризацией не должны ломать границу функции.
+  const name = /^function (\w+)/.exec(declaration)?.[1]; assert.ok(name);
+  const ast = ts.createSourceFile('UserSettingsModal.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const functions = ast.statements.filter((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === name);
+  assert.equal(functions.length, 1, `единственная настоящая функция ${name}`);
+  const fn = functions[0]; const start = fn.getStart(ast);
   const end = source.indexOf(nextComment, start);
   assert.ok(start >= 0 && end > start, `найдена настоящая функция ${declaration}`);
-  const close = source.lastIndexOf('\n}', end);
-  assert.ok(close > start, `${declaration} имеет закрывающую скобку`);
-  return source.slice(start, close + 2);
+  assert.ok(fn.body && fn.end <= end, `${declaration} целиком завершается перед следующей границей`);
+  return source.slice(start, fn.end);
 }
 
 function compileSettingsText(source: string, mobile: () => boolean) {
   const module = { exports: {} as Record<string, unknown> };
-  const emoji = extractFunction(source, 'function EmojiSuggestSetting()', '\n\n/**\n * «Отправка по Enter');
-  const coin = extractFunction(source, 'function CoinNotifyPanel()', '\n\n/**\n * Доехать до группы настроек');
-  const joined = `${emoji}\n${coin}\nexports.EmojiSuggestSetting = EmojiSuggestSetting; exports.CoinNotifyPanel = CoinNotifyPanel;`;
-  const dependencies = {
-    useState,
-    emojiSuggestEnabled: true,
-    setEmojiSuggestEnabled: () => {},
-    Toggle: ({ label }: { label: string }) => createElement('button', null, label),
-    isMobile: mobile,
-    coinNotifyLevel: () => 'off',
+  // Структурные границы старого харнесса сохраняем, но исполняем теперь весь модуль, не фрагменты.
+  extractFunction(source, 'function EmojiSuggestSetting', '\n\n/**\n * «Отправка по Enter');
+  extractFunction(source, 'function CoinNotifyPanel', '\n\n/**\n * Доехать до группы настроек');
+  const joined = `${source}\nexport { EmojiSuggestSetting, CoinNotifyPanel };`;
+  const dependencies: Record<string, unknown> = {
+    react, 'react/jsx-runtime': jsxRuntime,
+    '../phoneLayout': { usePhoneUi: mobile },
+    '../hotkeys': { isMobile: mobile, isAndroid: mobile },
+    '../emojiSuggest': { emojiSuggestEnabled: () => true, setEmojiSuggestEnabled: () => {} },
+    './Toggle': { Toggle: ({ label }: { label: string }) => createElement('button', null, label) },
+    '../notifications': { coinNotifyLevel: () => 'off' },
   };
   const js = ts.transpileModule(joined, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
   runInNewContext(js, {
-    module, exports: module.exports, document, window, ...dependencies,
+    module, exports: module.exports, document, window,
     require: (id: string) => {
-      if (id === 'react') return { useState };
-      if (id === 'react/jsx-runtime') return jsxRuntime;
-      assert.ok(id in dependencies, `unexpected extracted setting dependency ${id}`);
-      return dependencies[id as keyof typeof dependencies];
+      return dependencies[id] ?? new Proxy({}, { get: (_target, key) => {
+        throw new Error(`Неописанная граница настроек ${id}.${String(key)}`);
+      } });
     },
   });
-  return module.exports as { EmojiSuggestSetting: ComponentType; CoinNotifyPanel: ComponentType };
+  return module.exports as { EmojiSuggestSetting: ComponentType; CoinNotifyPanel: ComponentType<{ phoneUi?: boolean }> };
 }
 
-async function renderSettingsText(components: ReturnType<typeof compileSettingsText>) {
+async function renderSettingsText(components: ReturnType<typeof compileSettingsText>, phoneUi?: boolean) {
   const host = document.createElement('div'); document.body.append(host);
   const root: Root = createRoot(host);
   await act(async () => {
-    root.render(createElement('div', null, createElement(components.EmojiSuggestSetting), createElement(components.CoinNotifyPanel)));
+    root.render(createElement('div', null, createElement(components.EmojiSuggestSetting), createElement(components.CoinNotifyPanel, { phoneUi })));
   });
   return { host, cleanup: async () => { await act(async () => root.unmount()); host.remove(); } };
 }
+
+async function phoneCaption(source: string) {
+  // isMobile намеренно всегда true: панель должна следовать пропу, а не угадывать оболочку сама.
+  for (const phoneUi of [true, false, undefined]) {
+    const view = await renderSettingsText(compileSettingsText(source, () => true), phoneUi);
+    try {
+      const text = view.host.textContent ?? '';
+      assert.equal(text.includes('GusVoice не на экране'), phoneUi === true, 'телефонная подпись определяется пропом');
+      assert.equal(text.includes('окно не в фокусе'), phoneUi !== true, 'false и умолчание сохраняют подпись ПК');
+      assert.equal(text.includes('полноэкранной игре Windows'), phoneUi !== true, 'предупреждение Windows только для ПК');
+    } finally { await view.cleanup(); }
+  }
+}
+it('R173 панель монет принимает телефонную подпись по phoneUi, false и умолчание сохраняют компьютерную', async () => {
+  // Старые вызовы без нового пропа не должны внезапно получить телефонную подпись.
+  const source = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  await phoneCaption(source);
+});
+it('R173 игнорирование phoneUi обнаруживается парной проверкой настоящей панели монет', async () => {
+  // Мутант исполняет целый модуль и обязан упасть на подписи, не на неизвестной VM-границе.
+  const source = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  await phoneCaption(source);
+  const anchor = 'function CoinNotifyPanel({ phoneUi = false }: { phoneUi?: boolean } = {}) {';
+  assert.equal(source.split(anchor).length - 1, 1, 'единственная сигнатура панели монет');
+  const mutant = source.replace(anchor, 'function CoinNotifyPanel(_props: { phoneUi?: boolean } = {}) { const phoneUi = false;');
+  await assert.rejects(() => phoneCaption(mutant), assert.AssertionError);
+});
 
 function compileAndroidInstallTab(hasDistributor: boolean, change?: (source: string) => string): ComponentType {
   const source = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   // Исполняем целиком настоящую внутреннюю вкладку, не копию её разметки. API не выдаёт
   // данных F-Droid: другой ordered list не должен маскировать отсутствие шагов ntfy.
-  let tab = extractFunction(source, 'function AndroidInstallTab()', '\n\n/**\n * ЛС этап 2');
+  let tab = extractFunction(source, 'function AndroidInstallTab()', '\n\nfunction DesktopTab');
   if (change) {
     const mutated = change(tab);
     assert.notEqual(mutated, tab, 'мутант действительно изменил настоящую вкладку Android');
@@ -261,7 +295,7 @@ it('выбор группы отделяет контакты и блокиру�
 
   const settingsSource = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const mobile = true;
-  const settings = await renderSettingsText(compileSettingsText(settingsSource, () => mobile));
+  const settings = await renderSettingsText(compileSettingsText(settingsSource, () => mobile), true);
   try {
     const text = settings.host.textContent ?? '';
     assert.equal(text.includes('Windows'), false, 'на телефоне нет подсказки про полноэкранную игру Windows');
@@ -275,11 +309,15 @@ it('выбор группы отделяет контакты и блокиру�
     assert.equal(text.includes('Tab или Enter'), true, 'клавиатурная подсказка сохранена на ПК');
   } finally { await desktop.cleanup(); }
 
+  for (const anchor of [
+    "{!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}",
+    "{phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}",
+  ]) assert.equal(settingsSource.split(anchor).length - 1, 1, 'каждый старый контрфакт меняет одну настоящую границу телефона');
   const noMobileGate = settingsSource
-    .replace("{!isMobile() && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}", "{' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}")
-    .replace("{isMobile() ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}", "{'←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}");
+    .replace("{!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}", "{' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}")
+    .replace("{phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}", "{'←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}");
   assert.notEqual(noMobileGate, settingsSource);
-  const ungated = await renderSettingsText(compileSettingsText(noMobileGate, () => true));
+  const ungated = await renderSettingsText(compileSettingsText(noMobileGate, () => true), true);
   try {
     const text = ungated.host.textContent ?? '';
     assert.throws(() => assert.equal(text.includes('Windows'), false), assert.AssertionError);

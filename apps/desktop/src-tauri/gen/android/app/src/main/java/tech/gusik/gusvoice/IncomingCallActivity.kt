@@ -40,6 +40,10 @@ class IncomingCallActivity : Activity() {
   private val gone: (String) -> Unit = { id -> if (id == callId) finish() }
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    // Same rule as MainActivity: phones portrait-only, tablets/TV rotate.
+    if (resources.configuration.smallestScreenWidthDp < 600) {
+      requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
     super.onCreate(savedInstanceState)
     showOverLock()
     if (!bind(intent)) return

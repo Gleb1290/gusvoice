@@ -11,7 +11,9 @@ import { requireAuth } from '../auth.js';
 import { clientIp, rateHit, retryMessage } from '../authGuard.js';
 import { attachmentHeaders, attPartsWellFormed, parseRange } from '../attachmentRules.js';
 import { attachmentStore, gifSigValid, privateAttachmentsReady } from '../attachments.js';
+import { loadAccess } from '../conversations.js';
 import { db } from '../db/index.js';
+import { fedFilesRefused } from './conv.js';
 import { users } from '../db/schema.js';
 import { env } from '../env.js';
 import { GIF_MAX_BYTES, GIFS_SAVED_MAX, gifMediaUrlAllowed, gifProviderOf, gifSearchUrl, parseGifSearch } from '../gifRules.js';
@@ -45,6 +47,12 @@ async function fetchCapped(url: string): Promise<{ bytes: Buffer; contentType: s
 }
 
 /** Файл «Моего GIF» по подписанной ссылке — без входа (как `/att/...`): `<video src>` заголовков не шлёт. */
+/** Беседа с человеком соседа, чей инстанс не умеет вложения (`dm2`): 400 отправлен — `true`. Чужая беседа — дальше, там 404. */
+async function gifToFedRefused(reply: FastifyReply, me: string, conversationId: string): Promise<boolean> {
+  const access = await loadAccess(conversationId, me);
+  return !!access && (await fedFilesRefused(reply, access.peerId));
+}
+
 export async function gifFileRoutes(app: FastifyInstance): Promise<void> {
   const path = '/gifs/:id/:viewer/:sig';
   const serve = async (req: FastifyRequest, reply: FastifyReply) => {
@@ -126,6 +134,8 @@ export async function gifRoutes(app: FastifyInstance): Promise<void> {
     const { id } = idParam.parse(req.params);
     const { conversationId } = z.object({ conversationId: z.string().min(1).max(64) }).parse(req.body);
     if (!privateAttachmentsReady()) return reply.code(503).send({ error: 'Файлы в личных сообщениях сейчас недоступны' });
+    // Э3 часть 1 (#141): GIF в беседу с человеком соседа без `dm2` — отказ, как у загрузки (`conv.fedFilesRefused`).
+    if (await gifToFedRefused(reply, me, conversationId)) return reply;
     const res = await attachSavedGif(me, id, conversationId);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     return reply.code(201).send(res);
@@ -163,6 +173,7 @@ export async function gifRoutes(app: FastifyInstance): Promise<void> {
       .parse(req.body);
     if (!gifMediaUrlAllowed(p, body.url)) return reply.code(400).send({ error: 'Чужой адрес' });
     if (!privateAttachmentsReady()) return reply.code(503).send({ error: 'Файлы в личных сообщениях сейчас недоступны' });
+    if (await gifToFedRefused(reply, me, body.conversationId)) return reply;
     const file = await fetchCapped(body.url).catch(() => null);
     if (!file) return reply.code(502).send({ error: 'GIF не скачался' });
     const attachmentId = await attachExternalBytes(me, body.conversationId, file.contentType, file.bytes);

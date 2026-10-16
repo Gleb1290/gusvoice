@@ -12,8 +12,8 @@ import { useStore } from './store';
  * поля), «Комментарий» окна — отдельным сообщением ПЕРЕД ним (как у Telegram: комментарий первым). Места идут по очереди,
  * сбой одного не останавливает остальные.
  *
- * Все три пути — те же ручки, что у поля ввода: беседы режима бесед (`convUpload` + `convSend`), ЛС старого пути
- * (`uploadDmAttachment` + `sendDmMessage`), каналы серверов (`uploadAttachment` + `sendMessage`).
+ * Оба пути — те же ручки, что у поля ввода: беседы (`convUpload` + `convSend`), каналы серверов (`uploadAttachment` +
+ * `sendMessage`). Старого пути ЛС (`/api/dm*`) у клиента нет с 09.10.
  */
 
 export type ShareTarget = { kind: 'conv' | 'channel'; id: string };
@@ -36,21 +36,17 @@ export interface ShareResult {
 /** Отправка в одно место по готовой раскладке (`sharePlan`); бросает при первом же сбое. */
 async function sendOne(t: ShareTarget, files: readonly File[], plan: Extract<SharePlan, { ok: true }>): Promise<void> {
   const st = useStore.getState();
-  // Одно сообщение: канал сервера / беседа режима бесед / ЛС старого пути; вложения грузятся перед отправкой.
+  // Одно сообщение: канал сервера / беседа; вложения грузятся перед отправкой.
   const sendText = async (content: string, upload: readonly File[]): Promise<void> => {
     if (t.kind === 'channel') {
       const atts: Attachment[] = [];
       for (const f of upload) atts.push(await api.uploadAttachment(t.id, f));
       st.appendMessage(t.id, await api.sendMessage(t.id, content, atts));
-    } else if (st.convActive) {
+    } else {
       const refs = [];
       for (const f of upload) refs.push(toOutboxRef(await api.convUpload(t.id, f)));
       const msg = await api.convSend(t.id, { clientId: newClientId(), content, attachments: refs });
       useStore.getState().convAfterSend(t.id, msg);
-    } else {
-      const atts: Attachment[] = [];
-      for (const f of upload) atts.push(await api.uploadDmAttachment(t.id, f));
-      st.appendDmMessage(t.id, await api.sendDmMessage(t.id, content, atts));
     }
   };
   // Порядок как у Telegram: комментарий (кусками) → файлы с подписью → остаток текста (кусками).

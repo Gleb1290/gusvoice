@@ -8,6 +8,8 @@ import { toast, toastError } from '../toast';
 import { useSidebarNarrow } from '../uiPrefs';
 import { ContextMenu, MenuItem, type MenuPos } from './ContextMenu';
 import { DM_ROW_AVA } from '../dmListView';
+/** Аватар строки на телефоне — как у бесед (`DmSidebar.tsx`, Telegram Android `DialogCell` 52). */
+const DM_ROW_AVA_PHONE = 52;
 import { Icon } from './Icon';
 
 /**
@@ -134,7 +136,7 @@ export function DmArchiveRow({
       />
     </ContextMenu>
   ) : null;
-  const side = collapsed ? 28 : phone ? 48 : DM_ROW_AVA;
+  const side = collapsed ? 28 : phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA;
   /* «Только аватары» (G34): подписи в строке нет — она в подсказке. */
   const narrowCol = useSidebarNarrow() && !phone;
   return (

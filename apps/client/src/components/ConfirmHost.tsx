@@ -230,14 +230,18 @@ export function ConfirmHost() {
           </button>
         </div>
 
-        <div className="confirm-keys">
-          <span>
-            <kbd>Esc</kbd> отмена
-          </span>
-          <span className={submitsOnEnter(pending, typed) ? undefined : 'off'}>
-            <kbd>Enter</kbd> {enterHintOf(pending, typed)}
-          </span>
-        </div>
+        {/* Подсказка клавиш — только у окна с выбором. У справки с одной кнопкой («Понятно», `alertDialog`) отменять нечего,
+            а «Enter подтвердить» обещает решение, которого нет (приёмка 15.10, I3; как Telegram `Ui::MakeInformBox` — без подсказок). */}
+        {hasCancel(pending) && (
+          <div className="confirm-keys">
+            <span>
+              <kbd>Esc</kbd> отмена
+            </span>
+            <span className={submitsOnEnter(pending, typed) ? undefined : 'off'}>
+              <kbd>Enter</kbd> {enterHintOf(pending, typed)}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

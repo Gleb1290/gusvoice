@@ -216,7 +216,7 @@ for (const [name, anchor, replacement, check, failure] of roundMutations) {
 }
 it('беззвучный кружок без slider, звук открывает доступную перемотку; касание полосы не всплывает', async () => {
   await roundCase(async ({ host, button, video }) => {
-    assert.equal(host.querySelector('[role=slider]'), null); assert.equal(video.muted, true);
+    assert.equal(host.querySelector('[role=slider]') === null, true); assert.equal(video.muted, true);
     await sound(button); assert.equal(video.muted, false);
     const slider = host.querySelector('[role=slider]')!;
     assert.equal(slider.getAttribute('aria-valuemin'), '0'); assert.equal(slider.getAttribute('aria-valuemax'), '20');

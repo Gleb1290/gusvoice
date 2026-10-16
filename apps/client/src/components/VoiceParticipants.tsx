@@ -2,7 +2,7 @@ import { useParticipants } from '@livekit/components-react';
 import { ParticipantEvent, type Participant } from 'livekit-client';
 import { useEffect, useState } from 'react';
 import { useUserAudio } from '../localUserAudio';
-import { useNameResolver } from '../memberName';
+import { useVoiceName } from '../memberName';
 import { useStore } from '../store';
 import { Avatar } from './Avatar';
 import { Icon } from './Icon';
@@ -75,10 +75,10 @@ function ParticipantRow({
   const serverMuted = useStore(
     (s) => (channelId ? s.presence[channelId]?.find((x) => x.userId === p.identity)?.serverMuted : false) ?? false,
   );
-  const nameOf = useNameResolver();
+  const voiceNameOf = useVoiceName();
 
   // Имя в токене LiveKit вшито на 4 часа, поэтому ник подставляем из ростера на отрисовке (#73).
-  const name = nameOf(p.identity, p.name || p.identity);
+  const name = voiceNameOf(p);
   const target: UserMenuTarget = {
     userId: p.identity,
     name,

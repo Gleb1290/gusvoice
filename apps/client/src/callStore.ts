@@ -7,7 +7,8 @@ import { CALL_BUSY_ERROR, CALL_PRIVACY_ERROR, type CallJoinResponse, type DmCall
 import type { LocalVideoTrack, RemoteTrack } from 'livekit-client';
 import { create } from 'zustand';
 import { api } from './api';
-import { callPrivacyNotice, callViewFor } from './callView';
+import { callApiFor } from './callFed';
+import { callPrivacyNotice, callViewFor, serverFedCalls } from './callView';
 import { alertDialog } from './confirm';
 import { peerNameNow } from './peerName';
 import { useStore } from './store';
@@ -17,7 +18,7 @@ import { toast, toastError } from './toast';
 /** Окно «<Имя> ограничил(а) звонки» (`callView.callPrivacyNotice`): трубка при `canCall === false` и 403 `call_privacy`. */
 export function explainCallPrivacy(name: string): void {
   const n = callPrivacyNotice(name);
-  void alertDialog(n.title, n.body);
+  void alertDialog(n.title, n.body, { icon: n.icon });
 }
 
 export const CALL_DEVICE: string =
@@ -55,6 +56,8 @@ interface CallState {
   answer: () => Promise<void>;
   decline: () => Promise<void>;
   hangup: () => Promise<void>;
+  /** Знак жизни звонка этого устройства; у звонка с другого инстанса (`DmCall.host`) — туда же, по сессии у звонящего. */
+  ping: (callId: string, video?: boolean) => Promise<void>;
   apply: (call: DmCall | null) => void;
   resync: () => Promise<void>;
   setMuted: (muted: boolean) => void;
@@ -77,6 +80,12 @@ function me(): string | undefined {
 function convPeerName(conversationId: string): string {
   const u = useStore.getState().dms.find((d) => d.id === conversationId)?.otherUser;
   return u ? peerNameNow(u.id, u.displayName) : '';
+}
+
+/** Как назвать инстанс собеседника-соседа в тексте отказа звонка: название от держателя или домен; свой человек — `null`. */
+function peerHomeName(conversationId: string): string | null {
+  const h = useStore.getState().dms.find((d) => d.id === conversationId)?.otherUser.homeInstance;
+  return h?.name?.trim() || h?.domain || null;
 }
 
 /** Собеседник звонка — из списка бесед (сводка ЛС несёт имя и аватар). */
@@ -116,7 +125,8 @@ export const useCall = create<CallState>((set, get) => ({
       // `presence4`: «Кто может звонить» собеседника (трубка была видна до смены его настройки). Текст — tdesktop
       // `lng_call_error_not_available`; то же окно, что на нажатие трубки при известном запрете (`explainCallPrivacy`).
       else if ((e as Error).message === CALL_PRIVACY_ERROR) explainCallPrivacy(convPeerName(conversationId));
-      else toastError(e, 'Не удалось позвонить');
+      // Э6 (`fedcall1`): отказ дома/инстанса собеседника-соседа (`federation.unsupported`, `federation.peer_unreachable`) — про звонок.
+      else toastError(Object.assign(e as object, { fedCall: true, fedWho: peerHomeName(conversationId) }), 'Не удалось позвонить');
     }
   },
 
@@ -126,11 +136,20 @@ export const useCall = create<CallState>((set, get) => ({
     // Р-9: «Выйти из канала и ответить».
     if (useStore.getState().voice) useStore.getState().leaveVoice();
     try {
-      const res = await api.callAnswer(call.id, CALL_DEVICE);
+      // Э6: звонок с другого инстанса (`call.host`) принимаем ТАМ (`callFed.callApiFor`): пропуск в его комнату, не в свой дом.
+      const res = await (await callApiFor(call)).callAnswer(call.id, CALL_DEVICE);
+      // Пока шёл ответ, звонок кончился у меня (отклонил, отменили): не воскрешаем его — а на стороне звонящего ответ уже принят, кладём трубку.
+      if (call.host && get().call?.id !== call.id) {
+        void callApiFor(call).then((a) => a.callHangup(call.id)).catch(() => {});
+        return;
+      }
       set({ join: { url: res.url, token: res.token, room: res.room }, muted: false, expanded: true, ...NO_VIDEO });
-      get().apply(res.call);
+      // Ответ хозяина несёт ЕГО номера людей; наш дом пришлёт `active` со своими. Пока — своя запись звонка, ставшая «идёт».
+      get().apply(
+        call.host ? { ...call, phase: 'active', calleeDevice: CALL_DEVICE, answeredAt: res.call.answeredAt ?? new Date().toISOString() } : res.call,
+      );
     } catch (e) {
-      toastError(e, 'Не удалось ответить');
+      toastError(Object.assign(e as object, { fedCall: true }), 'Не удалось ответить');
       get().apply(null);
     }
   },
@@ -139,14 +158,20 @@ export const useCall = create<CallState>((set, get) => ({
     const call = get().call;
     if (!call) return;
     get().apply({ ...call, phase: 'ended', reason: 'busy' });
-    await api.callDecline(call.id).catch(() => {});
+    await callApiFor(call).then((a) => a.callDecline(call.id)).catch(() => {});
   },
 
   hangup: async () => {
     const call = get().call;
     if (!call) return;
     get().apply({ ...call, phase: 'ended', reason: call.phase === 'ringing' ? 'missed' : 'hangup' });
-    await api.callHangup(call.id).catch(() => {});
+    await callApiFor(call).then((a) => a.callHangup(call.id)).catch(() => {});
+  },
+
+  ping: async (callId, video) => {
+    const call = get().call;
+    if (!call || call.id !== callId) return;
+    await (await callApiFor(call)).callPing(callId, video);
   },
 
   apply: (call) => {
@@ -171,7 +196,8 @@ export const useCall = create<CallState>((set, get) => ({
   /** После (пере)подключения шлюза или загрузки страницы — мой текущий звонок у сервера. */
   resync: async () => {
     try {
-      const { call } = await api.callActive();
+      // `fed` (Э6): и входящий с другого инстанса; без признака у сервера его нет — и спрашивать нечего.
+      const { call } = await api.callActive(serverFedCalls(useStore.getState().serverFeatures));
       const cur = get().call;
       if (!call) {
         if (cur) get().apply({ ...cur, phase: 'ended', reason: 'disconnect' });

@@ -51,28 +51,6 @@ export function attLink(apiBase: string, attId: string, viewerId: string, sig: s
   return `${apiBase}/api/att/${attId}/${viewerId}/${sig}`;
 }
 
-/**
- * Разобрать ссылку, которую старый клиент вернул при отправке (он шлёт `url`, а не id). Чужой хост, чужой путь,
- * лишние части → `null`. Подлинность подписи проверяет вызывающий (ему нужен id смотрящего и поколение токенов).
- */
-export function parseAttLink(url: string, apiBase: string): { id: string; viewerId: string; sig: string } | null {
-  let u: URL;
-  let base: URL;
-  try {
-    u = new URL(url);
-    base = new URL(apiBase);
-  } catch {
-    return null;
-  }
-  if (u.origin !== base.origin || u.search || u.hash) return null;
-  const prefix = `${base.pathname.replace(/\/+$/, '')}/api/att/`;
-  if (!u.pathname.startsWith(prefix)) return null;
-  const parts = u.pathname.slice(prefix.length).split('/');
-  if (parts.length !== 3) return null;
-  const [id, viewerId, sig] = parts;
-  return attPartsWellFormed(id, viewerId, sig) ? { id, viewerId, sig } : null;
-}
-
 const VIDEO_MIME = new Set(['video/mp4', 'video/webm']);
 
 function isMp4Box(b: Uint8Array): boolean {
@@ -235,14 +213,15 @@ export function policyGrantsPublic(policyJson: string): boolean {
  * по 10 файлов × 25 МиБ, чтобы вытеснение не задело загрузки ТЕКУЩЕЙ отправки.
  */
 export const PENDING_MAX_COUNT = 40;
-/** Предел объёма незавершённых и пересылки (`convRules.FORWARD_BYTES_MAX`, равны — держат тесты Codex): 6 ГиБ с 09.10 (`bigfile1`; было 600 МиБ). */
-export const PENDING_MAX_BYTES = 6 * 1024 * 1024 * 1024;
+/** Предел объёма незавершённых и пересылки (`convRules.FORWARD_BYTES_MAX`, равны — держат тесты Codex): 8 ГиБ с 10.10 = суточный
+ * `DM_DAILY_UPLOAD_BYTES` (больше не имеет смысла: пересылка считается в суточный, и предел выше квоты недостижим — 429 раньше; 6 ГиБ с 09.10, было 600 МиБ). */
+export const PENDING_MAX_BYTES = 8 * 1024 * 1024 * 1024;
 /**
- * Действующий предел объёма незавершённых с загрузкой кусками (`bigfile1`, 09.10; `attachments.insertPendingRow`) — 6 ГиБ:
- * альбом из 10 файлов по `BIGFILE_MAX_BYTES` (5 ГиБ) не должен вытеснять сам себя до отправки. Сверху объём держит суточный
- * предел `DM_DAILY_UPLOAD_BYTES`. С 09.10 `PENDING_MAX_BYTES` / `FORWARD_BYTES_MAX` подняты до того же числа (R127 п.5).
+ * Действующий предел объёма незавершённых с загрузкой кусками (`bigfile1`, 09.10; `attachments.insertPendingRow`) — 8 ГиБ (с 10.10,
+ * = суточный `DM_DAILY_UPLOAD_BYTES`; было 6 ГиБ при файле до 512 МиБ): всё, что можно загрузить за сутки, не вытесняет само себя до
+ * отправки (альбом из 8 файлов по `BIGFILE_MAX_BYTES`). `PENDING_MAX_BYTES` / `FORWARD_BYTES_MAX` — то же число (R127 п.5).
  */
-export const PENDING_MAX_BYTES_BIGFILE = 6 * 1024 * 1024 * 1024;
+export const PENDING_MAX_BYTES_BIGFILE = 8 * 1024 * 1024 * 1024;
 
 /**
  * Какие незавершённые загрузки вытеснить, чтобы новая (`newSize`) уложилась в предел. `existing` — от старых к новым.
@@ -268,19 +247,19 @@ export function pendingEvictions(
 export const PENDING_TTL_HOURS = 24;
 
 /*
- * Загрузка кусками (`bigfile1`, 09.10, решение владельца: файл в ЛС до 500 МБ+; у Telegram 2 ГБ). Куски идут через бэкенд
+ * Загрузка кусками (`bigfile1`, 09.10, решение владельца: файл в ЛС до 500 МБ+, с 10.10 — до 1 ГиБ; у Telegram 2 ГБ). Куски идут через бэкенд
  * (`routes/uploads.ts`) в S3 multipart закрытого бакета. Числа — здесь, чистые правила — здесь же (тестируемы без базы).
  */
 
 /** Предел одного файла ЛС при загрузке кусками, байт. Клиент узнаёт его из `/auth/me` (`dmFileMaxBytes`). */
-export const BIGFILE_MAX_BYTES = 512 * 1024 * 1024;
+export const BIGFILE_MAX_BYTES = 1024 * 1024 * 1024;
 /** Прежний предел одиночной загрузки (`@fastify/multipart` `limits.fileSize`) — у старых клиентов и путь без кусков. */
 export const SINGLE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 /** Размер куска (кроме последнего), байт. Не меньше 5 МиБ — нижняя граница S3 для всех кусков, кроме последнего. */
 export const BIGFILE_PART_BYTES = 8 * 1024 * 1024;
 /**
  * Суточный предел объёма загрузок ЛС на человека (скользящие 24 ч: файлы + начатые загрузки кусками). Антиспам хранилища:
- * 16 файлов по 512 МиБ в сутки. Сверх — 429 с понятным текстом. Решение за владельцем (у Telegram предела нет).
+ * 8 файлов по 1 ГиБ в сутки (владелец 10.10: предел не менять). Сверх — 429 с понятным текстом. Решение за владельцем (у Telegram предела нет).
  */
 export const DM_DAILY_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
 /** Сколько загрузок кусками человек держит открытыми разом (альбом — 10). Сверх — 429. */
@@ -289,8 +268,8 @@ export const UPLOADS_OPEN_MAX = 12;
 export const UPLOAD_TTL_HOURS = 24;
 
 /**
- * Срок одной копии файла в хранилище (пересылка, ревью `bigfile1` M2): минута + секунда на каждые 4 МиБ — файл в 512 МиБ
- * получает чуть больше трёх минут, мелкий — минуту, как раньше.
+ * Срок одной копии файла в хранилище (пересылка, ревью `bigfile1` M2): минута + секунда на каждые 4 МиБ — файл в 1 ГиБ
+ * получает чуть больше пяти минут, мелкий — минуту, как раньше.
  */
 export function copyTimeoutMs(size: number): number {
   return 60_000 + Math.ceil(Math.max(0, size) / (4 * 1024 * 1024)) * 1000;

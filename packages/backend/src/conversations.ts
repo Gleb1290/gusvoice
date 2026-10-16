@@ -1,10 +1,9 @@
-import { CAP_CONV1, FEATURE_GROUPS1, GROUP_MEMBER_LIMIT, GROUP_MUTE_PREFIX, groupMuteTarget, groupOfMuteTarget, isListenable, isRoundVideo, isVoiceMessage, ROUND_MAX_MS, ROUND_ONCE_SPENT_TEXT, VOICE_ONCE_SPENT_TEXT } from '@gusvoice/shared';
+import { callServiceMark, CAP_CONV1, convMediaPreview, convPollDraft, convPollView, geoLiveStart, geoLiveView, geoMedia, parseConvMedia, deliveredLate, FED_CONV_CHANGE, FED_CONV_CHANGE_E2, FED_FEATURES, FEATURE_GROUPS1, pairDirectKey, GROUP_MEMBER_LIMIT, GROUP_MUTE_PREFIX, groupMuteTarget, groupOfMuteTarget, isListenable, isRoundVideo, isVoiceMessage, ROUND_MAX_MS, ROUND_ONCE_SPENT_TEXT, VOICE_ONCE_SPENT_TEXT } from '@gusvoice/shared';
 import type {
   ConvServiceMark,
   ConvGroupMember,
   Attachment,
   ConvGone,
-  Message,
   ConvHistoryResponse,
   ConvSearchResponse,
   SharedMediaCounts,
@@ -28,6 +27,10 @@ import type {
   MessageForwardedFrom,
   MessageReplyPreview,
   MessageSticker,
+  ConvContactMedia,
+  ConvMediaInput,
+  ConvMediaMark,
+  FedConvMediaWire,
   ReactionGroup,
   ReactionReactor,
 } from '@gusvoice/shared';
@@ -43,7 +46,6 @@ import {
   convPinOrderPlan,
   convPinOrderStamps,
   deleteDecision,
-  directKey,
   entryPts,
   FORWARD_ATTACHMENTS_MAX,
   FORWARD_BYTES_MAX,
@@ -80,10 +82,14 @@ import {
   resolveReplyQuote,
   replyQuoteSnapshot,
   type ReplyQuoteMark,
+  albumItemDecision,
+  attachmentsForViewer,
+  hiddenAttachmentKey,
 } from './convRules.js';
 import { db } from './db/index.js';
 import * as schema from './db/schema.js';
 import { dmWriteBarrier } from './dmWriteBarrier.js';
+import type { FedConvChangeInput } from './federation/convChanges.js';
 import {
   attachmentLink,
   attachmentStore,
@@ -96,9 +102,11 @@ import {
 import { env } from './env.js';
 import {
   attachments,
+  federationLinks,
   conversationMembers,
   conversationMessageReactions,
   conversationVoiceListens,
+  convPollVotes,
   conversationMessages,
   conversationPins,
   conversations,
@@ -108,7 +116,7 @@ import {
   userSync,
   users,
 } from './db/schema.js';
-import { serializeMessage } from './serialize.js';
+import { homeInstanceOf, serializeMessage } from './serialize.js';
 import { uuidv7 } from './util.js';
 
 /**
@@ -122,7 +130,8 @@ import { uuidv7 } from './util.js';
  * 🔴 Чтение (список, история, догонка) — одна транзакция `REPEATABLE READ READ ONLY` (разбор Codex 30.09): иначе ответ
  * мог собрать старую ленту и уже новый `pts`, и клиент навсегда пропустил бы изменение между ними.
  *
- * Этот же слой в шаге 1б понесёт старые ручки `/api/dm*` — поэтому отправка без `client_id` здесь допустима.
+ * Отправка без `client_id` здесь допустима: так пишут свои вызовы сервера (служебные сообщения звонков и закрепа),
+ * не ручка клиента.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -213,7 +222,7 @@ export async function lockConversation(tx: Tx, conversationId: string): Promise<
 }
 
 /** Записать строки журнала; вернуть новый `pts` каждого затронутого человека. Замки — строго по `journalLockOrder`. */
-export async function journal(tx: Tx, entries: JournalEntry[]): Promise<Map<string, number>> {
+export async function journal(tx: Tx, entries: JournalEntry[], opts: { fed?: boolean } = {}): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   for (const userId of journalLockOrder(entries)) {
     const mine = entries.filter((e) => e.userId === userId);
@@ -234,10 +243,57 @@ export async function journal(tx: Tx, entries: JournalEntry[]): Promise<Map<stri
     );
     out.set(userId, last);
   }
+  // Журнал на связку (Э0 ЛС между инстансами): той же транзакцией; выключено (`FEDERATION_DM_ENABLED`) — ни одного запроса.
+  // Э2: `opts.fed = false` — запись приёма копии от соседа (`federation/convAccept.ts`), в журнал на связку не идёт (иначе эхо
+  // владельцу). Только сообщения и беседа: реакции, «прочитано до» и закреп «у обоих» пишут свои места явно (`fedRecord`) —
+  // у них владелец действующий, а не автор; отбор «только записи наших владельцев» — `recordFedConvChanges`.
+  if (fedHooks?.record && opts.fed !== false) {
+    await fedHooks.record(
+      tx,
+      entries.flatMap((e): FedConvChangeInput[] =>
+        e.kind === 'msg' && e.messageId
+          ? [{ conversationId: e.conversationId, kind: FED_CONV_CHANGE.msg, entityId: e.messageId }]
+          : e.kind === 'conv'
+            ? [{ conversationId: e.conversationId, kind: e.kind, entityId: null }]
+            : [],
+      ),
+    );
+  }
   return out;
 }
 
-function msgEntries(userIds: readonly string[], conversationId: string, messageId: string): JournalEntry[] {
+/** Э2: строка журнала на связку от действия НАШЕГО человека (реакция, «прочитано до», закреп «у обоих») — той же транзакцией. */
+async function fedRecord(tx: Tx, items: FedConvChangeInput[]): Promise<void> {
+  if (fedHooks?.record) await fedHooks.record(tx, items);
+}
+
+/**
+ * Э7 часть 1 (#141, §3.6): строка `conv` журнала на связку — состав, название, фото группы (`convGroups.insertService`), той же
+ * транзакцией и ДО служебной записи: дом участника сперва заводит группу, потом кладёт в неё запись. Пишет только хост
+ * (`federation/convChanges.recordFedConvChanges` отбрасывает `conv` группы чужого дома).
+ */
+export async function fedRecordGroup(tx: Tx, conversationId: string): Promise<void> {
+  await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE.conv, entityId: null }]);
+}
+
+/**
+ * Э7 часть 3 (#141, §3.6): хост группы со смешанным составом пересылает остальным домам принятое от дома участника —
+ * реакции, «прочитано до», закреп «для всех», «прослушано» (`federation/convAccept.ts`). Строка помечена `exceptHome`
+ * (дом автора действия): ему своё не возвращается. Отбор адресатов — `federation/convChanges.recordFedConvChanges`.
+ */
+export async function fedRecordRelay(tx: Tx, items: FedConvChangeInput[]): Promise<void> {
+  await fedRecord(tx, items);
+}
+
+/**
+ * Опрос (`dmpoll1`): голос / отмена голоса НАШЕГО человека — строка `pollvote` журнала на связку той же транзакцией (`convPolls.ts`).
+ * Строкой `msg` голос не ходит: сообщение автора не менялось, а копию чужого сосед от нас и не принял бы.
+ */
+export async function fedRecordPollVote(tx: Tx, conversationId: string, messageId: string): Promise<void> {
+  await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE_E2.vote, entityId: messageId }]);
+}
+
+export function msgEntries(userIds: readonly string[], conversationId: string, messageId: string): JournalEntry[] {
   return userIds.map((userId) => ({ userId, conversationId, kind: 'msg' as const, messageId }));
 }
 
@@ -405,13 +461,28 @@ export async function peerReadKeys(me: string, ids: readonly string[], q: Q = db
   return out;
 }
 
+/** Запись о звонке последнего сообщения 1:1 → поле `call` сводки (10.10, B3); не звонок / незнакомое — пусто. */
+function lastCallOf(service: unknown): { call?: NonNullable<ConvSummary['lastMessage']>['call'] } {
+  const mark = callServiceMark({ service });
+  return mark ? { call: { reason: mark.reason, duration: mark.duration, ...(mark.video ? { video: true as const } : {}) } } : {};
+}
+
+/**
+ * Текст превью с учётом вида сообщения (G69, `geocontact1`): у геопозиции и контакта — подпись «Геопозиция» / «Контакт: Имя»
+ * вместо запасной фразы с координатами и ссылкой (строка списка, закреп, цитата). Остальное — как было.
+ */
+function mediaAwareText(content: string, media: unknown): string {
+  const mark = media ? parseConvMedia(media) : null;
+  return mark ? convMediaPreview(mark) : content;
+}
+
 /** Первое вложение последнего сообщения строки списка, когда вид превью — фото (07.10, G34); иначе `null`. */
-function lastPhoto(r: Record<string, unknown>): { id?: unknown; url?: unknown; spoiler?: unknown } | null {
+function lastPhoto(r: Record<string, unknown>): { id?: unknown; url?: unknown; spoiler?: unknown; fedState?: unknown } | null {
   if (!r.lm_id || stickerOf(r.lm_sticker)) return null;
   const list = jsonList(r.lm_atts);
   if (lastAttachmentPreview(list)?.attachmentKind !== 'photo') return null;
   const first = list[0];
-  return first && typeof first === 'object' ? (first as { id?: unknown; url?: unknown; spoiler?: unknown }) : null;
+  return first && typeof first === 'object' ? (first as { id?: unknown; url?: unknown; spoiler?: unknown; fedState?: unknown }) : null;
 }
 
 /**
@@ -420,7 +491,9 @@ function lastPhoto(r: Record<string, unknown>): { id?: unknown; url?: unknown; s
  */
 function lastThumb(r: Record<string, unknown>, me: string, gen: number): { thumb?: string; thumbSpoiler?: true } {
   const first = lastPhoto(r);
-  if (!first) return {};
+  // ЛС между инстансами (исправления ревью 12.10, п. 11): копия файла ещё едет с инстанса автора (`fedState`) — ссылка
+  // ответила бы 503, клиент рисует значок вида вместо миниатюры.
+  if (!first || first.fedState !== undefined) return {};
   const spoiler = first.spoiler === true ? { thumbSpoiler: true as const } : {};
   if (typeof first.id === 'string' && first.id) return { thumb: attachmentLink(first.id, me, gen), ...spoiler };
   return typeof first.url === 'string' && first.url ? { thumb: first.url, ...spoiler } : {};
@@ -458,7 +531,15 @@ async function groupMembersByConv(
     .orderBy(sql`(${conversationMembers.role} = 'owner') DESC`, asc(conversationMembers.joinedAt), asc(conversationMembers.userId));
   for (const r of rows) {
     const list = out.get(r.cid) ?? [];
-    list.push({ id: r.u.id, username: r.u.username, displayName: r.u.displayName, avatarUrl: r.u.avatarUrl, role: r.role });
+    list.push({
+      id: r.u.id,
+      // Э7 часть 1 (#141): участник с другого инстанса — логин на его доме и значок инстанса (добавление).
+      username: r.u.homeUsername || r.u.username,
+      displayName: r.u.displayName,
+      avatarUrl: r.u.avatarUrl,
+      role: r.role,
+      ...(r.u.homeInstanceId ? { homeInstance: homeInstanceOf(r.u.homeInstanceId) ?? undefined } : {}),
+    });
     out.set(r.cid, list);
   }
   return out;
@@ -505,7 +586,7 @@ async function summariesFor(
   // «Избранное» (`saved1`) — тоже только тому, кто просит группы: старый клиент строил бы по ней строку «с самим собой».
   const kinds = groups ? sql`` : sql`AND c.kind = 'direct' AND NOT ${SAVED_CONV}`;
   const res = await q.execute(sql`
-    SELECT c.id, c.kind, c.created_at, c.title, c.avatar_url, m.last_read_key, m.left_at, ${SAVED_CONV} AS is_saved,
+    SELECT c.id, c.kind, c.created_at, c.last_message_at AS conv_last_at, c.title, c.avatar_url, c.origin_instance_id, m.last_read_key, m.left_at, ${SAVED_CONV} AS is_saved,
       ${hiddenFromMe(me, sql`m.pending`, sql`c.id`)} AS hidden_from_me,
       ${clearedFromMe(me, sql`m.hidden_key`, sql`c.id`)} AS cleared_by_me,
       ${formerClearedByMe(me, sql`m.hidden_key`, sql`m.left_at`, sql`c.id`)} AS former_cleared,
@@ -513,8 +594,8 @@ async function summariesFor(
       (SELECT p.user_id FROM conversation_members p
         WHERE p.conversation_id = c.id AND p.user_id <> ${me} ORDER BY p.joined_at, p.user_id LIMIT 1) AS peer_id,
       lm.id AS lm_id, lm.author_id AS lm_author, lm.content AS lm_content,
-      jsonb_array_length(lm.attachments) AS lm_att, lm.attachments AS lm_atts, lm.sticker AS lm_sticker, lm.forwarded_from IS NOT NULL AS lm_fwd, lm.sort_key AS lm_key, lm.created_at AS lm_at,
-      lm.service IS NOT NULL AS lm_service, (SELECT a.display_name FROM users a WHERE a.id = lm.author_id) AS lm_author_name,
+      jsonb_array_length(lm.attachments) AS lm_att, lm.attachments AS lm_atts, lm.sticker AS lm_sticker, lm.media AS lm_media, lm.forwarded_from IS NOT NULL AS lm_fwd, lm.sort_key AS lm_key, lm.created_at AS lm_at,
+      lm.service IS NOT NULL AS lm_service, lm.service AS lm_svc, (SELECT a.display_name FROM users a WHERE a.id = lm.author_id) AS lm_author_name,
       ${unreadSql(me, sql`m.last_read_key`)} AS unread,
       ${unreadReactionsSql(me)} AS react_n,
       CASE WHEN c.kind = 'group' THEN ${unreadMentionsSql(me, sql`m.last_read_key`)} ELSE 0 END AS mention_n,
@@ -542,7 +623,7 @@ async function summariesFor(
       LIMIT 1
     ) mu ON true
     LEFT JOIN LATERAL (
-      SELECT x.id, x.author_id, x.content, x.attachments, x.sticker, x.forwarded_from, x.service, x.sort_key, x.created_at FROM conversation_messages x
+      SELECT x.id, x.author_id, x.content, x.attachments, x.sticker, x.media, x.forwarded_from, x.service, x.sort_key, x.created_at FROM conversation_messages x
       WHERE x.conversation_id = c.id AND x.deleted_at IS NULL AND NOT (${me} = ANY(x.hidden_for))
         -- 08.10 (groups3): бывшему участнику — не позже его выхода (новое после выхода ему не видно).
         AND (m.left_at IS NULL OR x.created_at <= m.left_at)
@@ -559,10 +640,28 @@ async function summariesFor(
   const peerIds = [...new Set([...rows.map((r) => r.peer_id), ...(hasSaved ? [me] : [])].filter((x): x is string => typeof x === 'string'))];
   const peers = peerIds.length ? await q.select().from(users).where(inArray(users.id, peerIds)) : [];
   const peerById = new Map(peers.map((u) => [u.id, u]));
+  // Э2 часть Б (#141, Ф7): инстансы собеседников, связка с которыми не работает, — `fedLink: 'broken'` (крючок федерации).
+  const remoteHomes = [...new Set(peers.map((u) => u.homeInstanceId).filter((h): h is string => typeof h === 'string'))];
+  const brokenHomes = remoteHomes.length > 0 && fedHooks?.linkBroken ? await fedHooks.linkBroken(remoteHomes, q) : new Set<string>();
+  const noFilesHomes = remoteHomes.length > 0 && fedHooks?.noFiles ? await fedHooks.noFiles(remoteHomes, q) : new Set<string>();
+  const noCallsHomes = remoteHomes.length > 0 && fedHooks?.noCalls ? await fedHooks.noCalls(remoteHomes, q) : new Set<string>();
+  // Опрос (`dmpoll1`, `ConvSummary.fedPoll`): инстанс собеседника умеет опрос, и журнал на связку у нас пишется.
+  const pollHomes = remoteHomes.length > 0 && fedHooks?.record ? await homesWithPolls(q, remoteHomes) : new Set<string>();
+  // Исправления ревью 12.10, п. 7 (`ConvSummary.fedStale`): инстанс собеседника не забирает наши сообщения дольше 10 минут.
+  const staleHomes = remoteHomes.length > 0 && fedHooks?.linkStale ? await fedHooks.linkStale(remoteHomes, q) : new Set<string>();
+  // Хвост Э7 (14.10, `ConvSummary.fedPeerDown`): инстанс собеседника не отвечает нашему забору дольше 10 минут (как дом группы).
+  const downHomes = remoteHomes.length > 0 && fedHooks?.peerDown ? fedHooks.peerDown(remoteHomes) : new Set<string>();
+  // Э7 часть 1 (#141): дома групп со смешанным составом, связка с которыми не работает, — `fedGroupHost.down`.
+  const groupHosts = [...new Set(rows.filter((r) => r.kind === 'group' && typeof r.origin_instance_id === 'string').map((r) => String(r.origin_instance_id)))];
+  const groupHostsDown = groupHosts.length > 0 && fedHooks?.linkBroken ? await fedHooks.linkBroken(groupHosts, q) : new Set<string>();
+  // Э7 часть 3 (D): дом группы ещё и «молчит» дольше 10 минут (наш забор у него падает / он не забирает наше) — тоже `down`.
+  const groupHostsSilent = groupHosts.length > 0 && fedHooks?.groupHostSilent ? await fedHooks.groupHostSilent(groupHosts, q) : new Set<string>();
   const gone = (r: Record<string, unknown>) => !!r.left_at || r.cleared_by_me === true;
   // 08.10 (groups3): бывшая группа — вышел или удалили, а убрать её («Удалить чат») я не успел: сводка на момент выхода.
   const former = (r: Record<string, unknown>) => r.kind === 'group' && !!r.left_at && r.former_cleared !== true;
-  const peerReads = await peerReadKeys(me, rows.filter((r) => !gone(r)).map((r) => String(r.id)), q);
+  // G6 (приёмка 13.10): и бывшей группе — ✓✓ на моих сообщениях не откатываются в ✓, пока меня нет в группе (как Telegram: отметка
+  // прочтения диалога остаётся у исключённого).
+  const peerReads = await peerReadKeys(me, rows.filter((r) => !gone(r) || former(r)).map((r) => String(r.id)), q);
   // Поколение токенов смотрящего — в подписи ссылки мини-превью (G34); спрашиваем, только если такое фото есть.
   const gen = rows.some((r) => (!gone(r) || former(r)) && lastPhoto(r)) ? await tokenGenOf(me, q) : 0;
   const groupMembers = await groupMembersByConv(
@@ -581,7 +680,7 @@ async function summariesFor(
       ? {
           id: String(r.lm_id),
           authorId: String(r.lm_author),
-          ...stickerAwarePreview(String(r.lm_content ?? ''), r.lm_sticker),
+          ...stickerAwarePreview(mediaAwareText(String(r.lm_content ?? ''), r.lm_media), r.lm_sticker),
           attachments: toNum(r.lm_att ?? 0),
           // Раунд 11: вид вложений для превью в списке (фото, голосовое с длительностью, файл с именем) — только
           // добавлением: без вложений полей нет, старый клиент их не читает.
@@ -593,6 +692,8 @@ async function summariesFor(
           // Группа (`groups1`): «Имя: текст» в строке списка; у служебной записи — признак вместо имени.
           ...(isGroup && r.lm_service === true ? { service: true as const } : {}),
           ...(isGroup && r.lm_service !== true && typeof r.lm_author_name === 'string' ? { authorName: r.lm_author_name } : {}),
+          // 10.10 (B3): запись о звонке 1:1 — причина/длительность/видео; строка списка подписывает её, как лента.
+          ...(!isGroup ? lastCallOf(r.lm_svc) : {}),
           sortKey: toNum(r.lm_key),
           createdAt: iso(r.lm_at),
         }
@@ -612,13 +713,26 @@ async function summariesFor(
               members,
               limit: GROUP_MEMBER_LIMIT,
             },
+            // Э7 часть 1 (#141, `fedm6`): дом группы — другой инстанс (состав меняет он; связка не работает — `down`).
+            ...(typeof r.origin_instance_id === 'string'
+              ? { fedGroupHost: { instanceId: r.origin_instance_id, ...(groupHostsDown.has(r.origin_instance_id) || groupHostsSilent.has(r.origin_instance_id) ? { down: true as const } : {}) } }
+              : {}),
           }
         : {}),
       otherUser: peer
-        ? { id: peer.id, username: peer.username, displayName: peer.displayName, avatarUrl: peer.avatarUrl }
+        ? {
+            id: peer.id,
+            // Э1 (#141): собеседник с другого инстанса — его логин на доме и значок инстанса (поле только у него, добавление).
+            username: peer.homeUsername || peer.username,
+            displayName: peer.displayName,
+            avatarUrl: peer.avatarUrl,
+            ...(peer.homeInstanceId ? { homeInstance: homeInstanceOf(peer.homeInstanceId) } : {}),
+          }
         : null,
       createdAt: iso(r.created_at),
-      lastMessageAt: last ? last.createdAt : null,
+      // Э2 часть Б (Ф9 «по приходу»): у беседы с человеком соседа опоздавшая копия поднимает беседу моментом приёма — время
+      // беседы (`conversations.last_message_at`, приём ставит `now()`) позже времени отправки последнего сообщения.
+      lastMessageAt: last ? (peer?.homeInstanceId ? laterIso(last.createdAt, r.conv_last_at) : last.createdAt) : null,
       lastMessage: last,
       unread: toNum(r.unread ?? 0),
       lastReadKey: toNum(r.last_read_key ?? 0),
@@ -648,6 +762,18 @@ async function summariesFor(
       archived: !!r.archived_at,
       // 08.10 (`stranger1`, С7): плашка незнакомца — только в МОЕЙ сводке (поле есть, только когда она горит).
       ...(r.stranger === true ? { stranger: true as const } : {}),
+      // Э2 часть Б (`ConvSummary.fedLink`): связка с инстансом собеседника разорвана/на паузе — архив только для чтения.
+      ...(peer?.homeInstanceId && brokenHomes.has(peer.homeInstanceId) ? { fedLink: 'broken' as const } : {}),
+      // Э3 часть 1 (`ConvSummary.fedNoFiles`): инстанс собеседника не умеет вложения (`dm2`) — файлы туда не уходят.
+      ...(peer?.homeInstanceId && noFilesHomes.has(peer.homeInstanceId) ? { fedNoFiles: true as const } : {}),
+      // Э6 (`ConvSummary.fedNoCalls`): инстанс собеседника не умеет звонки (`dmcall1`) — кнопка звонка неактивна.
+      ...(peer?.homeInstanceId && noCallsHomes.has(peer.homeInstanceId) ? { fedNoCalls: true as const } : {}),
+      // Опрос (`ConvSummary.fedPoll`): 1:1 с человеком инстанса, объявившего `dmpoll1`, — пункт «Опрос» открыт.
+      ...(r.kind !== 'group' && peer?.homeInstanceId && pollHomes.has(peer.homeInstanceId) ? { fedPoll: true as const } : {}),
+      // Исправления ревью 12.10, п. 7: архив (`fedLink`) важнее — плашка «ждут» только у рабочей связки.
+      ...(peer?.homeInstanceId && staleHomes.has(peer.homeInstanceId) && !brokenHomes.has(peer.homeInstanceId) ? { fedStale: true as const } : {}),
+      // Хвост Э7 (14.10): дом собеседника молчит — плашка «Инстанс «X» недоступен»; архив (`fedLink`) важнее и её.
+      ...(peer?.homeInstanceId && downHomes.has(peer.homeInstanceId) && !brokenHomes.has(peer.homeInstanceId) ? { fedPeerDown: true as const } : {}),
       // 07.10 (`reactunread1`, G24): сколько моих сообщений с непрочитанными реакциями — только в МОЕЙ сводке.
       unreadReactions: toNum(r.react_n ?? 0),
       // 07.10 (`groups2`, G24): непрочитанные упоминания меня — только у группы и только когда есть.
@@ -754,7 +880,7 @@ async function messagesForViewer(rows: readonly MsgRow[], viewerId: string, q: Q
       replies.set(p.m.id, {
         id: p.m.id,
         authorName: p.u.displayName,
-        content: p.m.content,
+        content: mediaAwareText(p.m.content, p.m.media),
         // 05.10: вид вложений цитируемого — для цитаты на сообщение вне загруженного окна ленты (у клиента его нет).
         ...replyAttachments(p.m.attachments, viewer, !!p.m.sticker),
       });
@@ -803,6 +929,18 @@ async function messagesForViewer(rows: readonly MsgRow[], viewerId: string, q: Q
     }
   }
 
+  // Опросы (`convpoll1`): голоса только по опросам этой выдачи — одним запросом. Голоса заблокированных смотрящим НЕ прячем:
+  // итог опроса общий для всех (как у Telegram), иначе у двоих разные проценты одного опроса.
+  const pollIds = full.filter((m) => m.media?.kind === 'poll').map((m) => m.id);
+  const pollVotes = new Map<string, { userId: string; optionId: string }[]>();
+  if (pollIds.length > 0) {
+    const rows = await q
+      .select({ messageId: convPollVotes.messageId, userId: convPollVotes.userId, optionId: convPollVotes.optionId })
+      .from(convPollVotes)
+      .where(inArray(convPollVotes.messageId, pollIds));
+    for (const r of rows) pollVotes.set(r.messageId, [...(pollVotes.get(r.messageId) ?? []), r]);
+  }
+
   // Авторы и авторы оригиналов пересланного (`forwardedFrom`, `conv5`) — одним запросом.
   const authorIds = [
     ...new Set([...full.map((m) => m.authorId), ...full.flatMap((m) => (m.forwardedFrom ? [m.forwardedFrom.userId] : []))]),
@@ -826,6 +964,7 @@ async function messagesForViewer(rows: readonly MsgRow[], viewerId: string, q: Q
     if (m.authorId === viewerId && reactionRows.some((r) => r.messageId === m.id && r.seenAt === null && r.userId !== viewerId && !hidden.has(r.userId)))
       cm.reactionUnread = true;
     if (voiceIds.includes(m.id)) cm.voiceListened = voiceListenedFor(viewerId, m.authorId, listens.get(m.id) ?? new Set());
+    if (m.media?.kind === 'poll') cm.media = convPollView(m.media, pollVotes.get(m.id) ?? [], viewerId);
     out.set(m.id, cm);
   }
   return out;
@@ -906,12 +1045,14 @@ function toConvMessage(
       id: m.id,
       channelId: m.conversationId,
       content: m.content,
-      attachments: viewerAttachments(m.attachments, viewer),
+      // G56 (`album1`): элементы альбома, спрятанные смотрящим «у меня», ему не показываются.
+      attachments: viewerAttachments(attachmentsForViewer(m.attachments, m.hiddenAttachments, viewer.id), viewer),
       createdAt: m.createdAt,
       editedAt: m.editedAt,
       replyTo,
       reactions,
-      author,
+      // Э7 часть 1 (#141): автор с другого инстанса (теневая строка) — его логин на доме, как `otherUser`/участники группы.
+      author: author.homeInstanceId ? { ...author, username: author.homeUsername || author.username } : author,
       sticker: m.sticker ?? null,
     }),
     conversationId: m.conversationId,
@@ -920,7 +1061,7 @@ function toConvMessage(
     // Только у пересланных (`conv5`): у остальных сообщений DTO прежний, без нового поля.
     ...(forwardedFrom ? { forwardedFrom } : {}),
     // «Без звука» (С3, `conv8`) — тоже только у таких: обычное сообщение не получает ни ключа (DTO прежний). Отсюда поле
-    // едет везде, где есть вид сообщения: ответ, история, `conv.change`, догонка и старый `dm.create` (`toLegacyMessage`).
+    // едет везде, где есть вид сообщения: ответ, история, `conv.change`, догонка.
     ...(m.silent ? { silent: true as const } : {}),
     // «Без превью ссылки» (G19, `linkprev1`) — так же, только у таких.
     ...(m.noPreview ? { noPreview: true as const } : {}),
@@ -928,8 +1069,22 @@ function toConvMessage(
     ...(m.captionAbove ? { captionAbove: true as const } : {}),
     // Служебная строка (G28 `pins2` — закреп, `groups1` — действие в группе) — только у таких; у обычных DTO прежний.
     ...(m.service ? { service: m.service } : {}),
+    // Геопозиция / контакт (G69, `geocontact1`) — только у таких; у обычных DTO прежний.
+    ...(m.media ? { media: m.media } : {}),
+    // Опрос (`convpoll1`): хранимая форма несёт правильный ответ и пояснение — наружу только вид смотрящего без голосов; итоги
+    // подставляет построитель выдачи (голоса пачкой), до того — нули и ни одного секрета.
+    ...(m.media?.kind === 'poll' ? { media: convPollView(m.media, [], viewer.id) } : {}),
+    // Трансляция геопозиции (`geolive1`): истёкшая отдаётся остановленной — истечение на чтении, без таймеров.
+    ...(m.media?.kind === 'geolive' ? { media: geoLiveView(m.media, Date.now()) } : {}),
     // Одноразовое голосовое прослушано (`voice3`, G54) — только у таких; у остальных DTO прежний.
     ...(m.onceSpentAt ? { voiceOnceSpent: true as const } : {}),
+    // Э2 (#141, Ф9): копия с другого инстанса пришла позже отправки больше чем на 5 минут — момент прихода (местный ключ
+    // порядка — микросекунды часов базы при вставке). У своих сообщений `origin_sort_key` нет — поля нет.
+    ...(m.originSortKey !== null && deliveredLate(m.createdAt.getTime(), Math.floor(m.sortKey / 1000))
+      ? { deliveredAt: new Date(Math.floor(m.sortKey / 1000)).toISOString() }
+      : {}),
+    // Э5 часть 1 (#141, `fedm5`): «через» другой инстанс — только у таких; у обычных DTO прежний.
+    ...(m.viaInstanceId ? { via: { instance: m.viaInstanceId, confirmed: m.viaState === 'confirmed' } } : {}),
   };
 }
 
@@ -958,7 +1113,8 @@ async function pinsFor(me: string, conversationId: string, q: Q): Promise<ConvPi
     const kind = m.sticker ? { attachmentKind: 'sticker' as const } : lastAttachmentPreview(m.attachments);
     let thumb: string | undefined;
     const first = m.attachments[0];
-    if (kind?.attachmentKind === 'photo' && first) {
+    // Копия файла соседа ещё едет (`fedState`, исправления ревью 12.10, п. 11) — без миниатюры, как у строки списка.
+    if (kind?.attachmentKind === 'photo' && first && !first.fedState) {
       if (first.id) {
         if (tokenGen === null) {
           // Поколение токенов смотрящего входит в подпись ссылки (как у вложений в ленте, `messagesForViewer`).
@@ -972,7 +1128,7 @@ async function pinsFor(me: string, conversationId: string, q: Q): Promise<ConvPi
       message: {
         id: m.id,
         authorId: m.authorId,
-        text: previewText(m.content || (m.sticker?.emoji ?? '')),
+        text: previewText(mediaAwareText(m.content, m.media) || (m.sticker?.emoji ?? '')),
         attachments: m.attachments.length,
         ...kind,
         sortKey: m.sortKey,
@@ -1015,7 +1171,7 @@ function scheduledReply(
   return {
     id: parent.id,
     authorName: authorName ?? '',
-    content: parent.content,
+    content: mediaAwareText(parent.content, parent.media),
     ...replyAttachments(parent.attachments, viewer, !!parent.sticker),
   };
 }
@@ -1118,8 +1274,6 @@ export async function formerLeftAt(conversationId: string, me: string, q: Q = db
 
 export interface HistoryQuery {
   before?: ConvCursor;
-  /** Старый курсор `?before=<ISO>` (`GET /dm/:id/messages`, шаг 1б): строго раньше этого времени. */
-  beforeTime?: Date;
   after?: ConvCursor;
   /** id сообщения, вокруг которого открыть (ответ, уведомление, поиск). */
   around?: string;
@@ -1187,11 +1341,7 @@ export async function history(me: string, conversationId: string, qy: HistoryQue
     } else if (qy.after) {
       page = await tx.select().from(conversationMessages).where(and(vis, gt(key, qy.after.sortKey))).orderBy(asc(key)).limit(qy.limit);
     } else {
-      const where = qy.before
-        ? and(vis, lt(key, qy.before.sortKey))
-        : qy.beforeTime
-          ? and(vis, lt(conversationMessages.createdAt, qy.beforeTime))
-          : vis;
+      const where = qy.before ? and(vis, lt(key, qy.before.sortKey)) : vis;
       page = (await tx.select().from(conversationMessages).where(where).orderBy(desc(key)).limit(qy.limit)).reverse();
     }
 
@@ -1385,6 +1535,13 @@ export interface SearchAllQuery {
   kind?: SharedMediaKind;
   before?: ConvCursor;
   limit: number;
+  /**
+   * Вкладки поиска на телефоне (12.10, #218; Telegram Android `FilteredSearchView`): `names` — вместе с видом текст ищется и в
+   * именах вложений (файл «отчёт.pdf» по «отчёт»), `full` — у найденного целое сообщение (`ConvSearchAllHit.message`: вложения
+   * со ссылками смотрящего — для сетки медиа и строк файлов / голосовых). Оба — только добавления к прежнему запросу.
+   */
+  names?: boolean;
+  full?: boolean;
 }
 
 /** Окно «Частых»: старше моих сообщений не учитываем (вес за 90 дней при затухании в 28 суток — уже ~4 %). */
@@ -1484,7 +1641,11 @@ export async function searchAllConversations(me: string, qy: SearchAllQuery): Pr
     sql`(NOT x.withheld OR x.author_id = ${me})`,
     sql`x.service IS NULL`,
   ];
-  if (qy.pattern) msgConds.push(sql`x.content ILIKE ${qy.pattern}`);
+  if (qy.pattern && qy.names && qy.kind)
+    msgConds.push(
+      sql`(x.content ILIKE ${qy.pattern} OR EXISTS (SELECT 1 FROM jsonb_array_elements(x.attachments) AS a WHERE a->>'name' ILIKE ${qy.pattern}))`,
+    );
+  else if (qy.pattern) msgConds.push(sql`x.content ILIKE ${qy.pattern}`);
   if (qy.conversationId) memberConds.push(sql`c.id = ${qy.conversationId}`);
   if (qy.since) msgConds.push(sql`x.created_at >= ${qy.since.toISOString()}::timestamptz`);
   if (qy.until) msgConds.push(sql`x.created_at < ${qy.until.toISOString()}::timestamptz`);
@@ -1532,7 +1693,18 @@ export async function searchAllConversations(me: string, qy: SearchAllQuery): Pr
     content: String(r.content ?? ''),
   }));
   const last = hits[hits.length - 1];
-  return { hits, next: rows.length > qy.limit && last ? encodeCursor({ sortKey: last.sortKey, id: last.id }) : null };
+  const next = rows.length > qy.limit && last ? encodeCursor({ sortKey: last.sortKey, id: last.id }) : null;
+  if (!qy.full || hits.length === 0) return { hits, next };
+  // `full`: целые сообщения тем же видом, что лента (`messagesForViewer`: ссылки на закрытые вложения — свои у смотрящего).
+  const page = await db.select().from(conversationMessages).where(inArray(conversationMessages.id, hits.map((h) => h.id)));
+  const views = await messagesForViewer(page, me, db);
+  return {
+    hits: hits.map((h) => {
+      const v = views.get(h.id);
+      return v && !('gone' in v) ? { ...h, message: v } : h;
+    }),
+    next,
+  };
 }
 
 /** `GET /api/conv/sync?pts=N` — изменения после N (текущее состояние сущностей) или `reset`. */
@@ -1621,9 +1793,61 @@ export async function findDirect(one: string, two: string): Promise<{ id: string
   const [row] = await db
     .select({ id: conversations.id })
     .from(conversations)
-    .where(eq(conversations.directKey, directKey(one, two)))
+    .where(eq(conversations.directKey, await directKeyOf(db, one, two)))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * ЛС между инстансами (Э0): то, что этому модулю нужно от федерации, подключает `index.ts` (`configureFederatedConv`), а не
+ * импорт здесь — модуль компилируется проверками с явным перечнем зависимостей, и федерация (ключи, связки) ему не нужна.
+ * `record` — запись журнала на связку той же транзакцией (`federation/convChanges.recordFedConvChanges`), есть только при
+ * `FEDERATION_DM_ENABLED`; `selfInstanceId` — id нашего инстанса для глобального ключа пары.
+ */
+export interface FederatedConvHooks {
+  selfInstanceId(): string | null;
+  record: ((tx: Tx, items: FedConvChangeInput[]) => Promise<void>) | null;
+  /** Э2 часть Б: из этих инстансов — те, связка с которыми не работает (`federation/convLink.brokenHomes`); нет — поля нет. */
+  linkBroken?: ((homes: readonly string[], q: Q) => Promise<Set<string>>) | null;
+  /** Э3 часть 1: из этих инстансов — те, что не умеют вложения (`federation/convAtt.homesWithoutFiles`); нет — поля нет. */
+  noFiles?: ((homes: readonly string[], q: Q) => Promise<Set<string>>) | null;
+  /** Э6: из этих инстансов — те, что не умеют звонки (`federation/dmCalls.homesWithoutCalls`); нет — поля нет. */
+  noCalls?: ((homes: readonly string[], q: Q) => Promise<Set<string>>) | null;
+  /** Исправления ревью 12.10, п. 7: из этих инстансов — те, что не забирают наши сообщения (`federation/convLink.staleHomes`). */
+  linkStale?: ((homes: readonly string[], q: Q) => Promise<Set<string>>) | null;
+  /** Э7 часть 3 (D): из этих домов групп — те, что молчат дольше 10 минут (`federation/convLink.silentHomes`): `fedGroupHost.down`. */
+  groupHostSilent?: ((homes: readonly string[], q: Q) => Promise<Set<string>>) | null;
+  /** Хвост Э7 (14.10): из этих инстансов — те, что не отвечают нашему забору дольше 10 минут (`federation/convLink.downHomes`): `fedPeerDown`. */
+  peerDown?: ((homes: readonly string[]) => Set<string>) | null;
+}
+
+let fedHooks: FederatedConvHooks | null = null;
+
+export function configureFederatedConv(hooks: FederatedConvHooks | null): void {
+  fedHooks = hooks;
+}
+
+/**
+ * Ключ пары 1:1 (`pairDirectKey`, shared): местная пара — прежний формат, пара с теневым (Э0) — глобальный из
+ * `(instance_id, user_id)`; id своего инстанса спрашивается только при теневом участнике.
+ */
+/** `q` — тот же исполнитель, что у вызывающего: внутри транзакции запрос на `db` ждёт другое соединение (на одном соединении PGlite — вечно). */
+/** Более позднее из двух моментов (ISO); негодное второе — первое. */
+function laterIso(a: string, b: unknown): string {
+  const t = b instanceof Date ? b.getTime() : typeof b === 'string' ? Date.parse(b) : NaN;
+  return Number.isFinite(t) && t > Date.parse(a) ? new Date(t).toISOString() : a;
+}
+
+async function directKeyOf(q: Tx | typeof db, one: string, two: string): Promise<string> {
+  const rows = await q
+    .select({ id: users.id, homeInstanceId: users.homeInstanceId, homeUserId: users.homeUserId })
+    .from(users)
+    .where(inArray(users.id, one === two ? [one] : [one, two]));
+  const side = (id: string) => rows.find((r) => r.id === id) ?? { id, homeInstanceId: null, homeUserId: null };
+  const a = side(one);
+  const b = side(two);
+  const self = a.homeInstanceId !== null || b.homeInstanceId !== null ? (fedHooks?.selfInstanceId() ?? null) : null;
+  return pairDirectKey(a, b, self);
 }
 
 /**
@@ -1634,11 +1858,26 @@ export async function findDirect(one: string, two: string): Promise<{ id: string
  * меня) сразу видел пустую строку с моим именем; с политикой `anyone` так мог бы делать кто угодно на инстансе. Первое
  * сообщение запишет журнал обоим обычным путём (`sendMessage`) — беседа появится у получателя вместе с ним.
  */
-export async function createDirect(me: string, otherId: string): Promise<{ row: { id: string }; delivery: Delivery } | null> {
+export async function createDirect(
+  me: string,
+  otherId: string,
+  /**
+   * ЛС между инстансами (Э1, `federation/convOpen.ts`): беседа с человеком соседа заводится с ОДНИМ id на обоих инстансах —
+   * его выбирает дом инициатора; `originInstanceId` — инстанс инициатора. `me` — участник, чья строка видна сразу (на доме
+   * получателя это теневой инициатор), `otherId` — тот, кому беседа покажется с первым сообщением.
+   */
+  fed?: { id: string; originInstanceId: string },
+): Promise<{ row: { id: string }; delivery: Delivery } | null> {
   return db.transaction(async (tx) => {
     const [row] = await tx
       .insert(conversations)
-      .values({ id: uuidv7(), kind: 'direct', directKey: directKey(me, otherId), createdBy: me })
+      .values({
+        id: fed?.id ?? uuidv7(),
+        kind: 'direct',
+        directKey: await directKeyOf(tx, me, otherId),
+        createdBy: me,
+        ...(fed ? { originInstanceId: fed.originInstanceId } : {}),
+      })
       .onConflictDoNothing({ target: conversations.directKey })
       .returning({ id: conversations.id });
     if (!row) return null;
@@ -1804,7 +2043,7 @@ export interface SendInput {
   /**
    * «Без звука» (С3, `conv8`): флаг ложится в строку и едет в DTO. В отпечаток повтора (`payloadHash`) НЕ входит — почему,
    * там же: повтор с тем же id и другим флагом — 200 и сообщение как есть (с его настоящим `silent`), не 409.
-   * Нет поля — обычное сообщение (старая ручка `/api/dm*` его не передаёт).
+   * Нет поля — обычное сообщение.
    */
   silent?: boolean;
   /** «Без превью ссылки» (G19, `linkprev1`, миграция 0101): флаг ложится в строку и едет в DTO; в отпечаток повтора не входит. */
@@ -1821,6 +2060,19 @@ export interface SendInput {
   sticker?: MessageSticker | null;
   /** Служебная строка (0097, `pins2`, G28): «X закрепил(а) сообщение». Только из `pinMessage`; нет поля — обычное сообщение. */
   service?: ConvServiceMark | null;
+  /** Вид сообщения (0145, `geocontact1`, G69): геопозиция или снимок контакта — уже проверенный (`routes/conv.ts`). */
+  media?: ConvMediaMark | null;
+  /**
+   * Э5 часть 1 (#141, `federation/convVia.ts`): сообщение «через». У инстанса собеседника — автор человек соседа (теневая
+   * строка) по долгой сессии: `{ instanceId: дом автора, state: 'pending' }`. У дома автора после сверки — `{ instanceId:
+   * инстанс, через который прошло, state: 'confirmed' }` вместе с `id` и `createdAt` копии соседа (та же `id` у обоих — иначе
+   * у собеседника было бы два сообщения). Нет поля — обычное сообщение с новым id.
+   */
+  via?: { instanceId: string; state: 'pending' | 'confirmed' };
+  /** Э5: id сообщения задан (принятое домом «через»-сообщение); только вместе с `via`. */
+  id?: string;
+  /** Э5: момент отправки на самом деле (копия соседа); только вместе с `via`. */
+  createdAt?: Date;
 }
 
 export type SendResult =
@@ -1908,11 +2160,13 @@ export async function sendMessage(me: string, access: ConvAccess, input: SendInp
     const [row] = await tx
       .insert(conversationMessages)
       .values({
-        id: uuidv7(),
+        id: (input.via && input.id) || uuidv7(),
         conversationId,
         authorId: me,
         clientId: input.clientId,
         payloadHash: input.clientId ? hash : null,
+        ...(input.via ? { viaInstanceId: input.via.instanceId, viaState: input.via.state } : {}),
+        ...(input.via && input.createdAt ? { createdAt: input.createdAt } : {}),
         sortKey: lock.nextKey,
         content: input.content,
         attachments: stored,
@@ -1924,6 +2178,7 @@ export async function sendMessage(me: string, access: ConvAccess, input: SendInp
         captionAbove: input.captionAbove === true && input.content.trim() !== '' && stored.length > 0,
         sticker: input.sticker ?? null,
         service: input.service ?? null,
+        media: input.media ?? null,
       })
       // Тот же `client_id` параллельно в ДРУГОЙ беседе (в этой нас сериализует замок): ждём чужую фиксацию и отвечаем
       // по её строке — 200 или 409, а не 500 на уникальном ключе.
@@ -1983,7 +2238,7 @@ async function messageForUpdate(tx: Tx, conversationId: string, messageId: strin
 }
 
 /** Запереть беседу и взять сообщение этой беседы под замок. */
-async function lockMessage(tx: Tx, conversationId: string, messageId: string): Promise<MsgRow | null> {
+export async function lockMessage(tx: Tx, conversationId: string, messageId: string): Promise<MsgRow | null> {
   if (!(await lockConversation(tx, conversationId))) return null;
   return messageForUpdate(tx, conversationId, messageId);
 }
@@ -2005,6 +2260,8 @@ export async function editMessage(me: string, access: ConvAccess, messageId: str
     if (m.forwardedFrom) return { kind: 'forbidden' };
     // Стикер (`stickers2`) не правится — как у Telegram: подписи у стикера нет.
     if (m.sticker) return { kind: 'forbidden' };
+    // Геопозиция и контакт (G69) не правятся — подписи у них нет, текст в `content` запасной (как у Telegram).
+    if (m.media) return { kind: 'forbidden' };
     // Служебная строка «X закрепил(а) сообщение» (`pins2`) не правится — текст в ней запасной, настоящий строит клиент.
     if (m.service) return { kind: 'forbidden' };
     // Прослушанное одноразовое голосовое (`voice3`) — запасная фраза сервера, не текст автора: правке не подлежит.
@@ -2016,7 +2273,8 @@ export async function editMessage(me: string, access: ConvAccess, messageId: str
     if (content === m.content) return { kind: 'ok', row: m, delivery: null };
     const [row] = await tx
       .update(conversationMessages)
-      .set({ content, editedAt: new Date() })
+      // `edit_version` (Э0 ЛС между инстансами): +1 на правку — при слиянии копий у соседа побеждает бо́льшая.
+      .set({ content, editedAt: new Date(), editVersion: sql`${conversationMessages.editVersion} + 1` })
       .where(eq(conversationMessages.id, messageId))
       .returning();
     const audience = changeAudience({ action: 'edit', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor: new Set() });
@@ -2045,8 +2303,7 @@ export type DeleteResult =
 export interface DeleteOptions {
   /**
    * Удалить ЧУЖОЕ «у обоих», где вид беседы это допускает (`convRules.othersDeletableForBoth` — только 1:1; признак
-   * `conv6`). Дают новые ручки `/api/conv/*`, где `for` всегда явный. Старые `/api/dm*` — нет: их `both` по умолчанию
-   * остался от клиентов, которые удаляли только своё, и чужое «у обоих» по умолчанию стирать не должен.
+   * `conv6`). Дают ручки `/api/conv/*`, где `for` всегда явный; по умолчанию права на чужое нет.
    */
   othersForBoth?: boolean;
 }
@@ -2108,7 +2365,7 @@ async function deleteMessageTx(
     // Р19 «без следа»: и снимок «Переслано от» (`conv5`: имя автора оригинала) — надгробию он не нужен.
     await tx
       .update(conversationMessages)
-      .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null })
+      .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null, media: null })
       .where(eq(conversationMessages.id, messageId));
     await tx.delete(conversationMessageReactions).where(eq(conversationMessageReactions.messageId, messageId));
     // С2: удалённое у обоих снимает его закрепы у всех.
@@ -2117,7 +2374,8 @@ async function deleteMessageTx(
     const dead = await tx
       .update(attachments)
       .set({ state: 'deleted', deletedAt: new Date() })
-      .where(and(eq(attachments.messageId, messageId), eq(attachments.state, 'attached')))
+      // Э3: и не скопированные ещё файлы копии соседа (`remote`) — иначе копия доехала бы в надгробие.
+      .where(and(eq(attachments.messageId, messageId), inArray(attachments.state, ['attached', 'remote'])))
       .returning({ key: attachments.storageKey });
     onPurge(dead.map((d) => d.key));
     // Время беседы — по последнему ОСТАВШЕМУСЯ; придержанное беседу не поднимало и здесь не считается.
@@ -2151,6 +2409,92 @@ async function deleteMessageTx(
   });
 }
 
+export type AlbumItemResult =
+  | {
+      kind: 'ok';
+      /** `item` — убран один элемент (или повтор), `message` — элемент был последним видимым: сообщение удалено целиком. */
+      removed: 'item' | 'message';
+      delivery: Delivery | null;
+      /** Только при `message`: то же, что у `deleteMessage` (время беседы, придержанное, своё). */
+      whole?: Extract<DeleteResult, { kind: 'ok' }>;
+    }
+  | { kind: 'not-found' }
+  | { kind: 'forbidden' };
+
+/**
+ * Удалить ОДИН элемент альбома (G56, признак `album1`; решение — `convRules.albumItemDecision`). `both` — только своё
+ * сообщение: элемент уходит из списка вложений (правка без «изм.»: `edit_version` +1 — сосед по связке примет меньший
+ * список, `convAccept`), строка файла — `deleted` в той же транзакции, сам файл — после фиксации в фоне (как у
+ * `deleteMessage`). `me` — элемент спрятан только у меня (`hidden_attachments`), собеседник не узнаёт. Последний видимый
+ * элемент — удаление сообщения целиком (`deleteMessage` с теми же правами). Повтор — успех без изменений.
+ */
+export async function deleteAlbumItem(
+  me: string,
+  access: ConvAccess,
+  messageId: string,
+  attachmentId: string,
+  scope: 'me' | 'both',
+  opts: DeleteOptions = {},
+): Promise<AlbumItemResult> {
+  const conversationId = access.conversationId;
+  let purge: string[] = [];
+  const res = await db.transaction(async (tx): Promise<AlbumItemResult | 'whole'> => {
+    const m = await lockMessage(tx, conversationId, messageId);
+    if (!m || messageView(m, me) !== 'full') return { kind: 'not-found' };
+    const action = albumItemDecision({
+      list: m.attachments,
+      hidden: m.hiddenAttachments,
+      viewerId: me,
+      authorId: m.authorId,
+      attachmentId,
+      scope,
+    });
+    if (action === 'forbidden') return { kind: 'forbidden' };
+    if (action === 'repeat') return { kind: 'ok', removed: 'item', delivery: null };
+    if (action === 'whole') return 'whole';
+    if (action === 'hide') {
+      await tx
+        .update(conversationMessages)
+        .set({ hiddenAttachments: sql`array_append(${conversationMessages.hiddenAttachments}, ${hiddenAttachmentKey(me, attachmentId)})` })
+        .where(eq(conversationMessages.id, messageId));
+      const entries = msgEntries([me], conversationId, messageId);
+      const pts = await journal(tx, entries);
+      return { kind: 'ok', removed: 'item', delivery: { conversationId, messageId, pts } };
+    }
+    await tx
+      .update(conversationMessages)
+      .set({
+        attachments: m.attachments.filter((a) => a.id !== attachmentId),
+        editVersion: sql`${conversationMessages.editVersion} + 1`,
+      })
+      .where(eq(conversationMessages.id, messageId));
+    const dead = await tx
+      .update(attachments)
+      .set({ state: 'deleted', deletedAt: new Date() })
+      .where(
+        and(
+          eq(attachments.id, attachmentId),
+          eq(attachments.messageId, messageId),
+          inArray(attachments.state, ['attached', 'remote']),
+        ),
+      )
+      .returning({ key: attachments.storageKey });
+    purge = dead.map((d) => d.key);
+    // Аудитория и закрепы — как у правки (`editMessage`): у кого закреплено, у тех меняется миниатюра в полосе.
+    const audience = changeAudience({ action: 'edit', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor: new Set() });
+    const holders = (await pinHolders(tx, [messageId])).filter((id) => audience.includes(id));
+    const entries = [...msgEntries(audience, conversationId, messageId), ...pinEntries(holders, conversationId)];
+    const nums = entryPts(entries, await journal(tx, entries));
+    const [delivery] = withPinDeliveries(conversationId, [messageId], entries, nums);
+    return { kind: 'ok', removed: 'item', delivery };
+  });
+  if (purge.length > 0) void purgeDeleted(purge).catch(() => {});
+  if (res !== 'whole') return res;
+  const whole = await deleteMessage(me, access, messageId, scope, opts);
+  if (whole.kind !== 'ok') return whole;
+  return { kind: 'ok', removed: 'message', delivery: whole.delivery, whole };
+}
+
 export type ListenedResult = { kind: 'ok'; changed: boolean; delivery: Delivery | null } | { kind: 'not-found' };
 
 /**
@@ -2179,6 +2523,8 @@ export async function listenVoice(
     if (inserted.length === 0) return { kind: 'ok', changed: false, delivery: null };
     const audience = changeAudience({ action: 'react', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor });
     const pts = await journal(tx, msgEntries(audience, conversationId, messageId));
+    // Э3 часть 3: владелец «прослушано» — дом слушателя; соседу-автору уходит итог наших слушателей этого сообщения.
+    await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE_E2.listen, entityId: messageId }]);
     return { kind: 'ok', changed: true, delivery: { conversationId, messageId, pts } };
   });
 }
@@ -2214,10 +2560,12 @@ export async function spendVoiceOnce(me: string, access: ConvAccess, messageId: 
       .set({ onceSpentAt: new Date(), content: spentText, attachments: [] })
       .where(eq(conversationMessages.id, messageId));
     await tx.insert(conversationVoiceListens).values({ messageId, userId: me }).onConflictDoNothing();
+    // Э3 часть 3: копия файла соседа может быть ещё не скопирована (`remote`) — уходит так же; место квоты связки у
+    // скопированной вернёт триггер 0138 (переход из `attached`).
     const dead = await tx
       .update(attachments)
       .set({ state: 'deleted', deletedAt: new Date() })
-      .where(and(eq(attachments.messageId, messageId), eq(attachments.state, 'attached')))
+      .where(and(eq(attachments.messageId, messageId), inArray(attachments.state, ['attached', 'remote'])))
       .returning({ key: attachments.storageKey });
     purge = dead.map((d) => d.key);
     const audience = changeAudience({
@@ -2228,6 +2576,8 @@ export async function spendVoiceOnce(me: string, access: ConvAccess, messageId: 
       blockedActor: new Set(),
     });
     const pts = await journal(tx, msgEntries(audience, conversationId, messageId));
+    // Э3 часть 3: автор — человек соседа: «прослушано» уходит его дому, тот гасит оригинал у себя (`convAccept.applyListens`).
+    await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE_E2.listen, entityId: messageId }]);
     return { kind: 'ok', changed: true, delivery: { conversationId, messageId, pts } };
   });
   if (purge.length > 0) void purgeDeleted(purge).catch(() => {});
@@ -2273,6 +2623,8 @@ export async function reactMessage(
     const audience = changeAudience({ action: 'react', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor });
     if (changed.length === 0) return { kind: 'ok', changed: false, delivery: null, audience };
     const pts = await journal(tx, msgEntries(audience, conversationId, messageId));
+    // Э2: владелец реакции — дом поставившего; соседу уходит итог реакций наших людей на это сообщение.
+    await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE_E2.react, entityId: messageId }]);
     return { kind: 'ok', changed: true, delivery: { conversationId, messageId, pts }, audience };
   });
 }
@@ -2362,8 +2714,6 @@ export type ReadResult = { kind: 'ok'; lastReadKey: number; delivery: Delivery |
  * `bad-key`: иначе клиент мог бы «прочитать» будущее одним большим числом.
  * Отметка сдвинулась — строка журнала мне и собеседнику (Р6, ✓✓: его сводка несёт новый `peerReadKey`), кроме тех, кого
  * я держу в чёрном списке (`convRules.readAudience`). Повтор и движение назад — без журнала и без событий.
- * Старое `read.dm` собеседнику не шлётся НИКОГДА (`dmLegacyEvents.publishLegacyRead` — только мне): клиент 0.8.x принял
- * бы его за СВОЁ «прочитано» с другого устройства и погасил бы собственное непрочитанное.
  */
 export async function markRead(me: string, access: ConvAccess, key: number): Promise<ReadResult> {
   const conversationId = access.conversationId;
@@ -2429,6 +2779,8 @@ export async function markRead(me: string, access: ConvAccess, key: number): Pro
       tx,
       audience.map((userId) => ({ userId, conversationId, kind: 'read' as const, messageId: null })),
     );
+    // Э2: «прочитано до» шлёт дом читателя — сосед мапит id сообщения на свой ключ (✓✓ у автора там).
+    await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE.read, entityId: null }]);
     return { kind: 'ok', lastReadKey: key, delivery: { conversationId, messageId: null, pts } };
   });
 }
@@ -2674,10 +3026,9 @@ export async function unarchiveOnMessage(tx: Tx, conversationId: string, authorI
  * сообщения (`markRead`, те же ✓✓ собеседникам и те же события, что при открытии беседы) и без точки. Возвращает события
  * к рассылке и число затронутых бесед. Беседа с пометкой, но без единого сообщения, только теряет точку.
  */
-export async function markAllRead(me: string): Promise<{ deliveries: Delivery[]; count: number; legacy: { conversationId: string; lastReadKey: number }[] }> {
+export async function markAllRead(me: string): Promise<{ deliveries: Delivery[]; count: number }> {
   const all = await summariesFor(me, null, db);
   const deliveries: Delivery[] = [];
-  const legacy: { conversationId: string; lastReadKey: number }[] = [];
   let count = 0;
   for (const s of all) {
     if ('left' in s) continue;
@@ -2693,12 +3044,9 @@ export async function markAllRead(me: string): Promise<{ deliveries: Delivery[];
     }
     const r = await markRead(me, access, key);
     if (r.kind !== 'ok') continue;
-    if (r.delivery) {
-      deliveries.push(r.delivery);
-      legacy.push({ conversationId: s.id, lastReadKey: r.lastReadKey });
-    }
+    if (r.delivery) deliveries.push(r.delivery);
   }
-  return { deliveries, count, legacy };
+  return { deliveries, count };
 }
 
 /**
@@ -2734,7 +3082,7 @@ async function pinHolders(tx: Tx, messageIds: readonly string[]): Promise<string
 }
 
 /** Снять закрепы этих сообщений — у одного человека (`onlyUser`) или у всех (`null`); вернуть, у кого сняты. */
-async function removePins(tx: Tx, messageIds: readonly string[], onlyUser: string | null): Promise<string[]> {
+export async function removePins(tx: Tx, messageIds: readonly string[], onlyUser: string | null): Promise<string[]> {
   const byMessage = inArray(conversationPins.messageId, [...messageIds]);
   const rows = await tx
     .delete(conversationPins)
@@ -2758,7 +3106,7 @@ async function blockersOf(tx: Tx, me: string, memberIds: readonly string[]): Pro
 }
 
 /** Журнал «список закреплённого изменился» этим людям и событие только со списками (`pinPts`). */
-async function journalPins(tx: Tx, conversationId: string, userIds: readonly string[]): Promise<Delivery> {
+export async function journalPins(tx: Tx, conversationId: string, userIds: readonly string[]): Promise<Delivery> {
   const entries = pinEntries(userIds, conversationId);
   const nums = entryPts(entries, await journal(tx, entries));
   const [delivery] = withPinDeliveries(conversationId, [], entries, nums);
@@ -2789,7 +3137,14 @@ export type PinResult =
  * у него закреплено «для себя»). Повтор — успех без журнала и событий. Пуша и звука нет: закреп — не сообщение.
  * Ответ — мой список и `pts` из той же транзакции (после записи).
  */
-export async function pinMessage(me: string, access: ConvAccess, messageId: string, scope: PinScope): Promise<PinResult> {
+export async function pinMessage(
+  me: string,
+  access: ConvAccess,
+  messageId: string,
+  scope: PinScope,
+  /** G4: группа без «Уведомить всех участников» — строка закрепа «без звука» (соседи по ней будят тихо, как Telegram `silent`). */
+  opts?: { silent?: boolean },
+): Promise<PinResult> {
   const conversationId = access.conversationId;
   return db.transaction(async (tx): Promise<PinResult> => {
     const m = await lockMessage(tx, conversationId, messageId);
@@ -2846,6 +3201,8 @@ export async function pinMessage(me: string, access: ConvAccess, messageId: stri
     }
     const changed = [...insert, ...share];
     const delivery = changed.length > 0 ? await journalPins(tx, conversationId, changed) : null;
+    // Э2: закреп «у обоих» — владелец дом закрепившего; соседу — состояние закрепа этого сообщения.
+    if (scope === 'both' && changed.length > 0) await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE.pin, entityId: messageId }]);
     // G28 (`pins2`, как «X pinned a message» у Telegram): закреп стал виден собеседнику — в ленту встаёт служебная строка от меня.
     // Закреп «только у себя» и повтор её не рождают; заблокировавший меня собеседник строки закрепа не получает — и строки тоже.
     let service: Delivery | null = null;
@@ -2853,7 +3210,7 @@ export async function pinMessage(me: string, access: ConvAccess, messageId: stri
       const sent = await sendMessage(
         me,
         access,
-        { clientId: null, content: PIN_SERVICE_FALLBACK, attachments: [], replyToId: null, withheld: false, service: { kind: 'pin', messageId } },
+        { clientId: null, content: PIN_SERVICE_FALLBACK, attachments: [], replyToId: null, withheld: false, service: { kind: 'pin', messageId }, ...(opts?.silent ? { silent: true } : {}) },
         tx,
       );
       if (sent.kind === 'created') service = sent.delivery;
@@ -2897,6 +3254,7 @@ export async function unpinMessage(me: string, access: ConvAccess, messageId: st
       }
     }
     const delivery = changed.length > 0 ? await journalPins(tx, conversationId, changed) : null;
+    if (scope === 'both' && changed.length > 0) await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE.pin, entityId: messageId }]);
     return { kind: 'ok', delivery, list: await pinsListOf(me, conversationId, tx) };
   });
 }
@@ -2924,13 +3282,23 @@ async function forwardSources(
   fromConversationId: string,
   ids: readonly string[],
   q: Q,
+  only?: string,
 ): Promise<{ rows: MsgRow[]; files: AttachmentRow[] } | { missing: string[] }> {
-  const found = await q
+  const raw = await q
     .select()
     .from(conversationMessages)
     .where(and(inArray(conversationMessages.id, [...ids]), eq(conversationMessages.conversationId, fromConversationId)));
+  // G56 (`album1`): глазами пересылающего — без элементов альбома, спрятанных им «у меня»; `only` — один элемент альбома
+  // (Telegram пересылает элемент группы отдельным сообщением, tdesktop `AddForwardMessageAction` по `PointState::GroupPart`):
+  // новое сообщение — только с ним и без подписи (подпись у нас — всего альбома). Такого элемента нет — «нечего пересылать».
+  const found = raw.map((m) => {
+    const list = attachmentsForViewer(m.attachments, m.hiddenAttachments, me);
+    if (only === undefined) return list === m.attachments ? m : { ...m, attachments: list };
+    return { ...m, attachments: list.filter((a) => a.id === only), content: '', captionAbove: false };
+  });
   // Служебную строку («X закрепил(а) сообщение», `pins2`) не переслать — как у Telegram: её нет среди доступного для пересылки.
-  const rows = found.filter((m) => messageView(m, me) === 'full').filter((m) => !m.service);
+  // G56: один элемент — у сообщения он должен быть (и не спрятан мной), иначе «нечего пересылать».
+  const rows = found.filter((m) => messageView(m, me) === 'full').filter((m) => !m.service).filter((m) => only === undefined || m.attachments.length === 1);
   const ok = new Set(rows.map((m) => m.id));
   const missing = ids.filter((id) => !ok.has(id));
   if (missing.length > 0) return { missing };
@@ -2964,6 +3332,8 @@ export interface ForwardInput {
   hideSender?: boolean;
   /** «Скрыть подписи» (G71, `fwd2`; `NoNamesAndCaptions`): у сообщений с вложением текст-подпись не копируется. */
   hideCaptions?: boolean;
+  /** G56 (`album1`): переслать ОДИН элемент альбома (`messageIds` — ровно одно сообщение): новое сообщение с ним одним. */
+  attachmentId?: string;
 }
 
 export type ForwardResult =
@@ -2994,7 +3364,13 @@ export async function forwardMessages(me: string, access: ConvAccess, input: For
   const conversationId = access.conversationId;
   const expected = input.messageIds.map((_, index) => ({
     clientId: forwardClientId(input.clientId, index),
-    hash: forwardPayloadHash({ conversationId, fromConversationId: input.fromConversationId, messageIds: input.messageIds, index }),
+    // G56: один элемент — другая пачка, чем всё сообщение (тот же id отправки с другим элементом — 409).
+    hash: forwardPayloadHash({
+      conversationId,
+      fromConversationId: input.fromConversationId,
+      messageIds: input.attachmentId ? input.messageIds.map((id) => `${id}/${input.attachmentId}`) : input.messageIds,
+      index,
+    }),
   }));
   const clientIds = expected.map((x) => x.clientId);
   const already = (q: Q) =>
@@ -3012,11 +3388,16 @@ export async function forwardMessages(me: string, access: ConvAccess, input: For
 
   const early = decide(await already(db));
   if (early) return early;
-  const sources = await forwardSources(me, input.fromConversationId, input.messageIds, db);
+  const sources = await forwardSources(me, input.fromConversationId, input.messageIds, db, input.attachmentId);
   if ('missing' in sources) return { kind: 'source-missing', missing: sources.missing };
   // «Прослушать один раз» (`voice3`, G54) не пересылается: для пересылки такого сообщения нет (как у Telegram).
   const once = sources.rows.filter((m) => m.attachments.some((a) => a.once === true)).map((m) => m.id);
   if (once.length > 0) return { kind: 'source-missing', missing: once };
+  // Опрос (`convpoll1`) пересылается НОВЫМ открытым опросом (голоса — у каждой копии свои); в беседу с людьми других инстансов —
+  // опросом, если все их дома объявили `dmpoll1` (`convPollFederates`), иначе только запасным текстом (`convHasRemote`).
+  const pollRemote = sources.rows.some((m) => m.media?.kind === 'poll')
+    ? (await convHasRemote(db, conversationId)) && !(await convPollFederates(db, conversationId))
+    : false;
   const bytes = sources.files.reduce((sum, f) => sum + f.size, 0);
   if (sources.files.length > FORWARD_ATTACHMENTS_MAX || bytes > FORWARD_BYTES_MAX) return { kind: 'too-large' };
 
@@ -3029,7 +3410,7 @@ export async function forwardMessages(me: string, access: ConvAccess, input: For
       // Сверх суточного объёма (копии считаются в него, ревью `bigfile1` M2) — 429 с текстом, не «сбой хранилища».
       if (e instanceof DailyQuotaError) throw e;
       // Оригинал удалили, пока копировали (его файл уже убран), — это «нечего пересылать», а не сбой хранилища.
-      const again = await forwardSources(me, input.fromConversationId, input.messageIds, db);
+      const again = await forwardSources(me, input.fromConversationId, input.messageIds, db, input.attachmentId);
       return 'missing' in again ? { kind: 'source-missing', missing: again.missing } : { kind: 'storage' };
     }
   }
@@ -3043,7 +3424,7 @@ export async function forwardMessages(me: string, access: ConvAccess, input: For
       // Параллельный запрос с тем же id успел раньше: в этой беседе нас упорядочил замок.
       const raced = decide(await already(tx));
       if (raced) return raced;
-      const current = await forwardSources(me, input.fromConversationId, input.messageIds, tx);
+      const current = await forwardSources(me, input.fromConversationId, input.messageIds, tx, input.attachmentId);
       if ('missing' in current) return { kind: 'source-missing', missing: current.missing };
       if (copyIds.length > 0) {
         // Копии всё ещё незавершённые (их не вытеснила параллельная загрузка и не убрала уборка) — под замок строк.
@@ -3086,6 +3467,18 @@ export async function forwardMessages(me: string, access: ConvAccess, input: For
         replyToId: null,
         // Стикер (0092, `stickers2`) пересылается как есть — он и так копия, файл публичный.
         sticker: src.sticker ?? null,
+        // Геопозиция / контакт (G69) — тоже снимок, пересылается как есть вместе с запасным `content`.
+        // Трансляция (`geolive1`) пересылается обычной (статичной) геопозицией — как у Telegram: пересланная точка не движется.
+        media:
+          src.media?.kind === 'geolive'
+            ? { kind: 'geo' as const, lat: src.media.lat, lon: src.media.lon, accuracy: src.media.accuracy }
+            : src.media?.kind === 'poll'
+              ? pollRemote
+                ? null
+                : { ...src.media, closed: false }
+              : (src.media ?? null),
+        // Ссылка на карту в запасной фразе геопозиции — не повод для карточки превью (как при отправке, `routes/conv.ts`).
+        ...(src.media ? { noPreview: true } : {}),
         withheld: input.withheld,
         silent: input.silent === true, // своё, а не оригинала (`src.silent` не читается намеренно)
         // «Подпись над медиа» (G48, `media2`) — свойство самого сообщения, как подпись и вложения: пересылка его сохраняет.
@@ -3220,7 +3613,7 @@ export async function deleteMessages(
       // Надгробия — как у одиночного: текст, вложения и снимок «Переслано от» стираются (Р19 «без следа»).
       await tx
         .update(conversationMessages)
-        .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null })
+        .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null, media: null })
         .where(inArray(conversationMessages.id, todoIds));
       await tx.delete(conversationMessageReactions).where(inArray(conversationMessageReactions.messageId, todoIds));
       unpinned = (await removePins(tx, todoIds, null)).filter((id) => access.memberIds.includes(id));
@@ -3228,7 +3621,7 @@ export async function deleteMessages(
       const dead = await tx
         .update(attachments)
         .set({ state: 'deleted', deletedAt: new Date() })
-        .where(and(inArray(attachments.messageId, todoIds), eq(attachments.state, 'attached')))
+        .where(and(inArray(attachments.messageId, todoIds), inArray(attachments.state, ['attached', 'remote'])))
         .returning({ key: attachments.storageKey });
       purge = dead.map((d) => d.key);
       // Время беседы — по последнему ОСТАВШЕМУСЯ, один раз на пачку; придержанное беседу не поднимало и здесь не считается.
@@ -3442,13 +3835,13 @@ export async function journalForwardedFrom(userId: string): Promise<Delivery[]> 
   return out;
 }
 
-// ─── Для старых ручек `/api/dm*` (шаг 1б) ─────────────────────────────────────────────────────────────────────────
+// ─── Служебные выборки бесед ───────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Мои беседы (без вышедших и без ещё не показанных мне — `hiddenFromMe`, 05.10) — id, для сводки непрочитанного и
- * старого списка `GET /dm`: десктоп/APK 0.8.x тоже не видят пустую беседу, открытую другим, до первого сообщения.
+ * Мои беседы (без вышедших и без ещё не показанных мне — `hiddenFromMe`, 05.10) — id, для сводки непрочитанного
+ * (`unread.ts`): пустая беседа, открытая другим, до первого сообщения не считается.
  */
-export async function myConversationIds(me: string, directOnly = false): Promise<string[]> {
+export async function myConversationIds(me: string): Promise<string[]> {
   const rows = await db
     .select({ id: conversationMembers.conversationId })
     .from(conversationMembers)
@@ -3456,12 +3849,6 @@ export async function myConversationIds(me: string, directOnly = false): Promise
     .where(
       and(
         eq(conversationMembers.userId, me),
-        // Старый `GET /dm` (`directOnly`) строит строку по собеседнику — группы (`groups1`) ему не отдаём.
-        directOnly ? eq(conversations.kind, 'direct') : undefined,
-        // …и «Избранное» (`saved1`) — у него нет собеседника.
-        directOnly
-          ? sql`NOT EXISTS (SELECT 1 FROM conversation_members sv WHERE sv.conversation_id = ${conversations.id} AND ${conversations.directKey} = sv.user_id || ':' || sv.user_id)`
-          : undefined,
         isNull(conversationMembers.leftAt),
         sql`NOT ${hiddenFromMe(me, sql`${conversationMembers.pending}`, sql`${conversationMembers.conversationId}`)}`,
         sql`NOT ${clearedFromMe(me, sql`${conversationMembers.hiddenKey}`, sql`${conversationMembers.conversationId}`)}`,
@@ -3486,8 +3873,8 @@ export async function conversationShownTo(conversationId: string, userId: string
 }
 
 /**
- * Непрочитанное человека по беседам: `id → число` (нули не кладутся). ОДНО правило на все места — `GET /dm`,
- * сводка рейла (`unread.ts`), события удаления — и то же, что `unreadSql`/`convRules.countsAsUnread`.
+ * Непрочитанное человека по беседам: `id → число` (нули не кладутся). ОДНО правило на все места — сводка рейла
+ * (`unread.ts`), события удаления — и то же, что `unreadSql`/`convRules.countsAsUnread`.
  */
 export async function unreadCounts(me: string, ids: readonly string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
@@ -3501,52 +3888,6 @@ export async function unreadCounts(me: string, ids: readonly string[]): Promise<
     if (n > 0) out.set(r.id, n);
   }
   return out;
-}
-
-/** Общие поля бесед: время последнего сообщения, поднявшего беседу, и последний ключ (для «прочитано» без `upTo`). */
-export async function conversationRows(ids: readonly string[]): Promise<Map<string, typeof conversations.$inferSelect>> {
-  if (ids.length === 0) return new Map();
-  const rows = await db.select().from(conversations).where(inArray(conversations.id, [...ids]));
-  return new Map(rows.map((r) => [r.id, r]));
-}
-
-/** Ключ и время сообщения этой беседы — для старого `POST /dm/:id/read {upTo}`. */
-export async function messageKey(conversationId: string, messageId: string): Promise<{ sortKey: number; createdAt: Date } | null> {
-  const [row] = await db
-    .select({ sortKey: conversationMessages.sortKey, createdAt: conversationMessages.createdAt })
-    .from(conversationMessages)
-    .where(and(eq(conversationMessages.id, messageId), eq(conversationMessages.conversationId, conversationId)))
-    .limit(1);
-  return row ?? null;
-}
-
-/** Время сообщения по ключу беседы — `at` старого события `read.dm`. */
-export async function messageTimeByKey(conversationId: string, key: number): Promise<Date | null> {
-  const [row] = await db
-    .select({ createdAt: conversationMessages.createdAt })
-    .from(conversationMessages)
-    .where(and(eq(conversationMessages.conversationId, conversationId), eq(conversationMessages.sortKey, key)))
-    .limit(1);
-  return row?.createdAt ?? null;
-}
-
-/**
- * Сообщение беседы → DTO старых ручек: без полей бесед, а цитата удалённого у обоих — `null`, как было при удалении
- * строки (`ON DELETE SET NULL`): старый клиент не знает флага `deleted` и показал бы пустую цитату.
- */
-export function toLegacyMessage(m: ConvMessage): Message {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { conversationId, sortKey, clientId, ...rest } = m;
-  // «Кто поставил» (`ReactionGroup.reactors`, 07.10) — тоже поле бесед: старые ручки отдают реакции прежней формы.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const reactions = rest.reactions?.map(({ reactors, ...g }) => g);
-  return { ...rest, ...(reactions ? { reactions } : {}), replyTo: m.replyTo && !m.replyTo.deleted ? m.replyTo : null };
-}
-
-/** Сообщение глазами человека в старом DTO; `null` — ему его не видно. */
-export async function legacyMessageFor(messageId: string, viewerId: string): Promise<Message | null> {
-  const v = await messageFor(messageId, viewerId);
-  return v && !('gone' in v) ? toLegacyMessage(v) : null;
 }
 
 // ─── Рассылка ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -3694,4 +4035,160 @@ export async function deliverMany(list: readonly (Delivery | null)[]): Promise<v
       }
     }
   }
+}
+
+// ─── Геопозиция и контакт (14.10, G69, `geocontact1`; провод — `dmmedia1`) ──────────────────────────────────────────────
+// Правила вида и подписи — `shared/convMedia.ts`. Здесь — то, что ходит в базу: снимок карточки контакта и разбор провода.
+// Видимость контакта: человек есть и не удалён (кого ещё можно — решение за владельцем, G69).
+
+type MediaQ = typeof db | Tx;
+
+/** Как мы знаем инстанс соседа (домен и название по связке); связки нет — пусто. */
+async function mediaHomeLabel(q: MediaQ, instanceId: string): Promise<{ domain: string | null; name: string | null }> {
+  const [l] = await q
+    .select({ domain: federationLinks.domain, theirName: federationLinks.theirName, localName: federationLinks.localName })
+    .from(federationLinks)
+    .where(eq(federationLinks.instanceId, instanceId))
+    .limit(1);
+  return { domain: l?.domain ?? null, name: (l?.localName ?? l?.theirName ?? '').trim() || null };
+}
+
+const mediaUserCols = {
+  id: users.id,
+  username: users.username,
+  displayName: users.displayName,
+  avatarUrl: users.avatarUrl,
+  homeInstanceId: users.homeInstanceId,
+  homeUserId: users.homeUserId,
+  homeUsername: users.homeUsername,
+  deletedAt: users.deletedAt,
+};
+
+/** Снимок карточки контакта по строке человека (своей или теневой строке соседа). */
+async function contactSnapshot(
+  q: MediaQ,
+  u: { id: string; username: string; displayName: string; avatarUrl: string | null; homeInstanceId: string | null; homeUserId: string | null; homeUsername: string | null },
+): Promise<ConvContactMedia> {
+  const home = u.homeInstanceId ? { instanceId: u.homeInstanceId, userId: u.homeUserId ?? u.id, ...(await mediaHomeLabel(q, u.homeInstanceId)) } : null;
+  return {
+    kind: 'contact',
+    userId: u.id,
+    // Человек соседа — его логин на доме, как у собеседников между инстансами (`otherUser`).
+    username: (u.homeInstanceId ? u.homeUsername : null) || u.username,
+    displayName: u.displayName,
+    avatarUrl: u.avatarUrl,
+    ...(home ? { home } : {}),
+  };
+}
+
+/**
+ * Вид сообщения из тела отправки (`routes/conv.ts`): геопозиция — по диапазонам, контакт — СНИМКОМ из базы (клиенту не верим).
+ * `bad-geo` — координаты вне диапазона, `no-contact` — человека нет или он удалён.
+ */
+export async function resolveConvMedia(input: ConvMediaInput): Promise<ConvMediaMark | 'bad-geo' | 'no-contact' | { pollError: string }> {
+  if (input.kind === 'geo') return geoMedia(input.lat, input.lon, input.accuracy ?? null) ?? 'bad-geo';
+  // Трансляция геопозиции (`geolive1`): срок только из списка (15 мин / 1 ч / 8 ч), начало и конец ставит сервер.
+  if (input.kind === 'geolive') return geoLiveStart(input, Date.now()) ?? 'bad-geo';
+  // Опрос (`convpoll1`): черновик — общей проверкой формы и сервера (`shared/convPoll.ts`).
+  if (input.kind === 'poll') {
+    const d = convPollDraft(input);
+    return d.ok ? d.poll : { pollError: d.error };
+  }
+  const [u] = await db.select(mediaUserCols).from(users).where(eq(users.id, input.userId)).limit(1);
+  if (!u || u.deletedAt) return 'no-contact';
+  return contactSnapshot(db, u);
+}
+
+/**
+ * Провод соседа → вид сообщения копии (`federation/convAccept.ts`). Контакт ищется у нас: личность с нашим id — своя строка;
+ * человек другого инстанса — теневая строка с этим домом; не нашли — карточка без перехода (`userId: null`), подпись из провода.
+ */
+export async function convMediaFromWire(q: MediaQ, w: FedConvMediaWire, selfInstanceId: string): Promise<ConvMediaMark> {
+  if (w.kind === 'geo') return { kind: 'geo', lat: w.lat, lon: w.lon, accuracy: w.accuracy };
+  // Опрос (`dmpoll1`): хранимая форма, как у местного (`convPollDraft`): нулевые итоги, правильный ответ и пояснение викторины —
+  // голоса живут строками `conv_poll_votes` (свои и зеркало соседа), вид смотрящему считает выдача (`convPollView`).
+  if (w.kind === 'poll') {
+    return {
+      kind: 'poll',
+      question: w.question,
+      options: w.options.map((o) => ({ id: o.id, text: o.text, votes: 0 })),
+      anonymous: w.anonymous,
+      multi: w.multi,
+      quiz: w.quiz,
+      closed: w.closed,
+      voters: 0,
+      my: [],
+      revealed: false,
+      ...(w.quiz ? { correct: w.correct, solution: w.solution } : {}),
+    };
+  }
+  const ours = w.person.instanceId === selfInstanceId;
+  const [u] = await q
+    .select(mediaUserCols)
+    .from(users)
+    .where(
+      ours
+        ? and(eq(users.id, w.person.userId), isNull(users.homeInstanceId))
+        : and(eq(users.homeInstanceId, w.person.instanceId), eq(users.homeUserId, w.person.userId)),
+    )
+    .limit(1);
+  if (u && !u.deletedAt) return contactSnapshot(q, u);
+  return {
+    kind: 'contact',
+    userId: null,
+    username: w.username,
+    displayName: w.name,
+    avatarUrl: w.avatarUrl,
+    ...(ours ? {} : { home: { instanceId: w.person.instanceId, userId: w.person.userId, ...(await mediaHomeLabel(q, w.person.instanceId)) } }),
+  };
+}
+
+/**
+ * В беседе есть человек другого инстанса (14.10, опрос `convpoll1`): группа живёт у другого хоста (`origin_instance_id`) или среди
+ * участников (и бывших — их копии у соседа живут дальше) есть теневая строка. Опрос в такую беседу — только если все её чужие дома
+ * объявили `dmpoll1` (`convPollFederates`); иначе — 403 / пересылка запасным текстом.
+ */
+export async function convHasRemote(q: Q, conversationId: string): Promise<boolean> {
+  const [c] = await q.select({ origin: conversations.originInstanceId }).from(conversations).where(eq(conversations.id, conversationId)).limit(1);
+  if (c?.origin) return true;
+  const [m] = await q
+    .select({ id: users.id })
+    .from(conversationMembers)
+    .innerJoin(users, eq(users.id, conversationMembers.userId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), isNotNull(users.homeInstanceId)))
+    .limit(1);
+  return !!m;
+}
+
+/**
+ * Опрос в беседе с людьми других инстансов (`dmpoll1`, 14.10): можно, только если журнал на связку пишется (`FEDERATION_DM_ENABLED`,
+ * крючок `record`) и КАЖДЫЙ чужой дом беседы — хост группы и дома участников, включая бывших (их копии живут дальше), — объявил
+ * `dmpoll1` в своей визитке (`federation_links.features`). Хоть один дом без признака — его копия была бы текстом, а голоса его людей
+ * не доехали бы: опрос не создаётся (403 `conv_poll_federated`, как до признака) и пересылается запасным текстом.
+ */
+export async function convPollFederates(q: Q, conversationId: string): Promise<boolean> {
+  if (!fedHooks?.record) return false;
+  const [c] = await q.select({ origin: conversations.originInstanceId }).from(conversations).where(eq(conversations.id, conversationId)).limit(1);
+  const homes = new Set<string>(c?.origin ? [c.origin] : []);
+  const rows = await q
+    .selectDistinct({ home: users.homeInstanceId })
+    .from(conversationMembers)
+    .innerJoin(users, eq(users.id, conversationMembers.userId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), isNotNull(users.homeInstanceId)));
+  for (const r of rows) if (r.home) homes.add(r.home);
+  if (homes.size === 0) return true;
+  const links = await q
+    .select({ instanceId: federationLinks.instanceId, features: federationLinks.features })
+    .from(federationLinks)
+    .where(inArray(federationLinks.instanceId, [...homes]));
+  return [...homes].every((h) => links.some((l) => l.instanceId === h && l.features.includes(FED_FEATURES.dmpoll1)));
+}
+
+/** Опрос (`dmpoll1`): дома из списка, объявившие признак в визитке (`federation_links.features`) — для `ConvSummary.fedPoll`. */
+async function homesWithPolls(q: Q, homes: readonly string[]): Promise<Set<string>> {
+  const links = await q
+    .select({ instanceId: federationLinks.instanceId, features: federationLinks.features })
+    .from(federationLinks)
+    .where(inArray(federationLinks.instanceId, [...homes]));
+  return new Set(links.filter((l) => l.features.includes(FED_FEATURES.dmpoll1)).map((l) => l.instanceId));
 }

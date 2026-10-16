@@ -6,6 +6,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import ts from 'typescript';
 
 type VoicePlayback = typeof import('./voicePlayback');
+function replaceOnce(source: string, anchor: string, replacement: string) {
+  assert.equal(source.split(anchor).length - 1, 1, `единственный якорь ${anchor}`);
+  return source.replace(anchor, replacement);
+}
 function load(mutate?: (source: string) => string, storage?: Storage, doc?: Document): VoicePlayback {
   const module = { exports: {} };
   const source = readFileSync(new URL('./voicePlayback.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -17,6 +21,33 @@ function load(mutate?: (source: string) => string, storage?: Storage, doc?: Docu
 }
 
 describe('скорость, отметка прослушивания и следующий голосовой', () => {
+  it('R169 столбики занимают шаг три пикселя без последнего зазора и не появляются при нулевой ширине', () => {
+    // /2 переполняет волну, потеря +1 съедает последний столбик на точной границе.
+    const v = load();
+    for (const [width, count] of [[152, 51], [190, 63], [2, 1], [0.1, 1], [4.99, 1], [5, 2], [0, 0], [-1, 0], [NaN, 0], [Infinity, 0]]) {
+      assert.equal(v.voiceBarCount(width), count);
+    }
+    assert.equal(v.VOICE_BAR_PITCH, 3);
+    for (const change of [
+      (s: string) => replaceOnce(s, 'VOICE_BAR_PITCH = 3', 'VOICE_BAR_PITCH = 2'),
+      (s: string) => replaceOnce(s, '(widthPx + 1)', '(widthPx)'),
+    ]) {
+      const broken = load(change);
+      assert.throws(() => assert.equal(broken.voiceBarCount(152), 51), assert.AssertionError);
+    }
+  });
+  it('R169 сужение волны сохраняет пики, расширение повторяет ближайшие, равный размер возвращает копию', () => {
+    // Среднее теряет короткий пик речи; возврат исходного массива позволяет испортить вложение.
+    const v = load(); const wave = [2, 98, 4, 80];
+    assert.deepEqual(Array.from(v.resampleWaveform(wave, 2)), [98, 80]);
+    assert.deepEqual(Array.from(v.resampleWaveform([20, 80], 4)), [20, 20, 80, 80]);
+    const copy = v.resampleWaveform(wave, 4);
+    assert.notEqual(copy, wave); assert.deepEqual(Array.from(copy), wave);
+    assert.deepEqual(Array.from(v.resampleWaveform([], 4)), []);
+    for (const n of [0, -1]) assert.deepEqual(Array.from(v.resampleWaveform(wave, n)), []);
+    const broken = load(s => replaceOnce(s, 'out.push(m);', 'out.push(wave.slice(a, b + 1).reduce((sum, x) => sum + x, 0) / (b - a + 1));'));
+    assert.throws(() => assert.equal(broken.resampleWaveform(wave, 2)[0], 98), assert.AssertionError);
+  });
   it('ширина волны зажимает длительность и сохраняет разные границы телефона и ПК', () => {
     // Ловит перестановку min/max телефона и скачущую ширину для повреждённой длительности.
     const v = load();

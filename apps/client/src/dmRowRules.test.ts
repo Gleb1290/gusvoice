@@ -18,6 +18,59 @@ function loadDmRowRules(source: string): typeof rules {
   return module.exports;
 }
 
+const callLast = (call: NonNullable<shared.ConvLastMessage['call']>): shared.ConvLastMessage => ({
+  id: 'call', authorId: 'caller', sortKey: 1, createdAt: '2026-10-10T00:00:00Z', text: 'старый текст', attachments: 0, call,
+});
+function checkCallPreview(r = rules) {
+  assert.equal(r.dmRowPreview({ typing: false, last: callLast({ reason: 'missed', duration: 0 }), meId: 'caller' }).kind, 'text');
+  assert.deepEqual({ ...r.dmRowPreview({ typing: false, last: callLast({ reason: 'missed', duration: 0 }), meId: 'caller' }) }, { kind: 'text', text: 'Отменённый звонок' });
+  assert.deepEqual({ ...r.dmRowPreview({ typing: false, last: callLast({ reason: 'missed', duration: 0 }), meId: 'recipient' }) }, { kind: 'text', text: 'Пропущенный звонок' });
+}
+it('R159 пропущенный звонок имеет разные подписи у звонившего и принимающего', () => checkCallPreview());
+it('R159 занято у принимающего — отклонённый звонок, видео и длительность не теряются', () => {
+  // Сводка должна говорить то же, что лента, не превращать видеозвонок в аудио.
+  for (const [reason, duration, video, text] of [
+    ['busy', 0, false, 'Отклонённый звонок'], ['hangup', 61, true, 'Входящий видеозвонок, 1 мин'],
+    ['hangup', 1, false, 'Входящий звонок, 1 с'],
+  ] as const) assert.deepEqual(rules.dmRowPreview({ typing: false, last: callLast({ reason, duration, video }), meId: 'recipient' }), { kind: 'text', text });
+});
+it('R159 без моего id или поля звонка остаётся текст старого сервера', () => {
+  // Обновление клиента не должно прятать сводки из старого кеша.
+  const last = callLast({ reason: 'missed', duration: 0 });
+  for (const meId of [undefined, null, '']) assert.deepEqual(rules.dmRowPreview({ typing: false, last, meId }), { kind: 'text', text: 'старый текст' });
+  const { call: _call, ...legacy } = last;
+  assert.deepEqual(rules.dmRowPreview({ typing: false, last: legacy, meId: 'caller' }), { kind: 'text', text: 'старый текст' });
+});
+function checkCallPriority(r = rules) {
+  const last = { ...callLast({ reason: 'missed', duration: 0 }), attachments: 1, attachmentKind: 'photo' as const, text: '' };
+  assert.deepEqual({ ...r.dmRowPreview({ typing: false, last, meId: 'caller' }) }, { kind: 'attachment', icon: 'photo', label: 'Фото' });
+  assert.deepEqual({ ...r.dmRowPreview({ typing: true, last, meId: 'caller' }) }, { kind: 'typing' });
+  assert.deepEqual({ ...r.dmRowPreview({ typing: false, draft: 'черновик', last, meId: 'caller' }) }, { kind: 'draft', text: 'черновик' });
+}
+it('R159 запись звонка не перебивает вложение, черновик и печатает', () => checkCallPriority());
+function callMutant(from: string, to: string) {
+  const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
+  assert.equal(source.split(from).length - 1, 1, 'контрфакт меняет одно место целого модуля');
+  return loadDmRowRules(source.replace(from, to));
+}
+it('R159 инверсия направления звонка обнаруживается на обоих читателях', () => {
+  checkCallPreview();
+  assert.throws(() => checkCallPreview(callMutant('last.authorId === p.meId', 'last.authorId !== p.meId')), assert.AssertionError);
+});
+it('R159 потеря признака видео обнаруживается в превью', () => {
+  const check = (r = rules) => assert.deepEqual({ ...r.dmRowPreview({ typing: false, last: callLast({ reason: 'hangup', duration: 61, video: true }), meId: 'caller' }) }, { kind: 'text', text: 'Исходящий видеозвонок, 1 мин' });
+  check();
+  assert.throws(() => check(callMutant('callServiceText(last.call,', 'callServiceText({ ...last.call, video: false },')), assert.AssertionError);
+});
+it('R159 перенос звонка перед вложением обнаруживается', () => {
+  checkCallPriority();
+  const branch = "if (last.call && p.meId) return { kind: 'text', text: callServiceText(last.call, last.authorId === p.meId) };";
+  const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
+  assert.equal(source.split(branch).length - 1, 1);
+  const changed = source.replace(branch, '').replace('const att = dmAttachmentPreview(last);', `${branch}\n  const att = dmAttachmentPreview(last);`);
+  assert.throws(() => checkCallPriority(loadDmRowRules(changed)), assert.AssertionError);
+});
+
 it('строка сохраняет часы 19:59 назад, меняет их после 20 часов и отделяет неделю от года', () => {
   // Порог не календарная полночь: позднее вчерашнее сообщение ещё показывается часами.
   const now = new Date(2026,9,8,18).getTime(); const at = (ms:number)=>new Date(now-ms).toISOString();

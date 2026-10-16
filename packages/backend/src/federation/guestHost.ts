@@ -12,9 +12,19 @@
 
 import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
-import { FED_ERRORS, FED_IDENTITY_SKEW_MS, type FedErrorCode, type FedIdentityClaims } from '@gusvoice/shared';
+import {
+  FED_ERRORS,
+  FED_FIELD_LIMITS,
+  FED_IDENTITY_SKEW_MS,
+  fedDisplayText,
+  fedHash,
+  fedId,
+  fedUsername,
+  type FedErrorCode,
+  type FedIdentityClaims,
+} from '@gusvoice/shared';
 import { db } from '../db/index.js';
-import { users } from '../db/schema.js';
+import { federationPeerUsers, users } from '../db/schema.js';
 import { bumpTokenGeneration, hashPassword, signToken } from '../auth.js';
 import { TOKEN_TTL_S } from '../authRules.js';
 import { federation } from './instance.js';
@@ -370,4 +380,82 @@ export async function shadowUserFor(instanceId: string, homeUserId: string) {
     .where(and(eq(users.homeInstanceId, instanceId), eq(users.homeUserId, homeUserId)))
     .limit(1);
   return row ?? null;
+}
+
+/** Профиль человека соседа для теневой строки — из кеша каталога или из нагрузки события (`conv.open`, Э1). */
+export interface ShadowProfile {
+  username: string;
+  displayName: string;
+  avatarHash: string | null;
+}
+
+/**
+ * Найти или завести теневую строку человека соседа БЕЗ его входа гостем (Э0 ЛС между инстансами, `docs/dm/FEDERATION.md`
+ * §3.1): дом получателя заводит её при приёме копии беседы/сообщения.
+ *
+ * Профиль — из кеша каталога (`federation_peer_users`), иначе из `profile` нагрузки: скрытого от соседей человека каталог не
+ * отдаёт (Ф11), и его имя едет в самом событии. Нет ни того, ни другого — `null`: строку без имени показывать нечем.
+ *
+ * 🔴 Только при АКТИВНОЙ связке: замороженная или разорванная не вправе плодить у нас людей (у существующих строк заморозку
+ * ведёт `guestAccess.freezeGuestsOf`). Уже заведённую строку не перезаписываем — профиль обновляют `user.updated` и каталог.
+ * Гонка двух приёмов — `ON CONFLICT DO NOTHING` по уникальной паре дома и повторное чтение.
+ */
+export async function ensureShadowUser(
+  instanceId: string,
+  homeUserId: string,
+  profile?: ShadowProfile | null,
+  opts: { vouchedBy?: string } = {},
+): Promise<typeof users.$inferSelect | null> {
+  if (!fedId(instanceId) || !fedId(homeUserId)) return null;
+  const existing = await shadowUserFor(instanceId, homeUserId);
+  if (existing) return existing;
+
+  const link = await getLink(instanceId);
+  const linked = !!link && link.state === 'active';
+  /*
+   * Э7 часть 1 (#141, §3.6): участник группы со смешанным составом с инстанса, с которым у нас связки нет, — строку заводим со
+   * слов дома группы (`vouchedBy`, связка с ним рабочая) по профилю из его строки `conv`. Писать от имени такого человека
+   * дом группы всё равно не может: его сообщения проверяются подписью его дома (`federation/convGroup.ts`).
+   */
+  if (!linked) {
+    const voucher = opts.vouchedBy ? await getLink(opts.vouchedBy) : null;
+    if (!voucher || voucher.state !== 'active' || !profile) return null;
+  }
+
+  const [cached] = await db
+    .select()
+    .from(federationPeerUsers)
+    .where(and(eq(federationPeerUsers.instanceId, instanceId), eq(federationPeerUsers.userId, homeUserId)))
+    .limit(1);
+  // Нагрузку соседа проверяем теми же границами, что и запись каталога (`fieldRules.ts`): она ложится в нашу базу.
+  const username = fedUsername(cached?.username ?? profile?.username);
+  if (!username) return null;
+  const displayName = fedDisplayText(cached?.displayName ?? profile?.displayName, FED_FIELD_LIMITS.displayName, username);
+  const avatarHash = fedHash(cached ? cached.avatarHash : profile?.avatarHash);
+
+  const id = randomUUID();
+  // Пароля у теневого нет и быть не может (как у гостя): хеш от случайных байтов — проверка честно отвечает «не подходит».
+  const unusable = await hashPassword(randomUUID());
+  const [made] = await db
+    .insert(users)
+    .values({
+      id,
+      username: shadowUsername(instanceId, homeUserId),
+      email: null,
+      verified: true,
+      approvedAt: new Date(),
+      canCreateServers: false,
+      displayName,
+      passwordHash: unusable,
+      homeInstanceId: instanceId,
+      homeUserId,
+      homeUsername: username,
+      homeGen: 0,
+      homeAvatarHash: avatarHash,
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (!made) return shadowUserFor(instanceId, homeUserId);
+  if (linked) void refreshGuestAvatar({ shadowUserId: id, instanceId, homeUserId, avatarHash }).catch(() => {});
+  return made;
 }

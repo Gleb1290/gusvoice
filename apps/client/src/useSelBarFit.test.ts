@@ -173,7 +173,7 @@ it('R123 ResizeObserver следит за самой панелью и пере�
   // Ловит бесконечное перемеривание от изменения высоты после n/col и пропущенный поворот.
   const h = await mounted();
   try {
-    assert.equal(h.observers[0].watched[0], h.bar);
+    assert.ok(h.observers[0].watched[0] === h.bar, 'наблюдатель следит за настоящей панелью выбора');
     h.measurements.length = 0;
     h.observers[0].callback();
     assert.equal(h.measurements.length, 0);

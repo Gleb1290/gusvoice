@@ -1,0 +1,30 @@
+{
+  "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt",
+  "seq": 42,
+  "more": false,
+  "items": [
+    {
+      "seq": 41,
+      "kind": "pollvote",
+      "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+      "entity_id": "0199e3c4-8d5e-7f60-9a1b-2c3d4e5f6a7c",
+      "entity": {
+        "message_id": "0199e3c4-8d5e-7f60-9a1b-2c3d4e5f6a7c",
+        "voters": [
+          { "user": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" }, "options": ["0", "2"] },
+          { "user": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6c" }, "options": ["1"] }
+        ]
+      }
+    },
+    {
+      "seq": 42,
+      "kind": "pollvote",
+      "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+      "entity_id": "0199e3c4-8d5e-7f60-9a1b-2c3d4e5f6a7d",
+      "entity": {
+        "message_id": "0199e3c4-8d5e-7f60-9a1b-2c3d4e5f6a7d",
+        "voters": []
+      }
+    }
+  ]
+}

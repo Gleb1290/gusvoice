@@ -25,7 +25,18 @@ import { sendTestEmail } from '../mailer.js';
 import { serializeUser } from '../serialize.js';
 import { getSmtpConfig, isSmtpConfigured, setSmtpConfig, smtpSource, type SmtpConfig } from '../settings.js';
 import { DM_POLICIES } from '../dmRules.js';
-import { dmPolicy, instanceMeta, registrationPolicy, setDmPolicy, setInstanceMeta, setRegistrationPolicy } from '../instanceSetup.js';
+import { env } from '../env.js';
+import { FED_DM_POLICIES } from '@gusvoice/shared';
+import {
+  dmPolicy,
+  fedDmPolicy,
+  instanceMeta,
+  registrationPolicy,
+  setDmPolicy,
+  setFedDmPolicy,
+  setInstanceMeta,
+  setRegistrationPolicy,
+} from '../instanceSetup.js';
 import { instanceUpdateInfo, writeUpdateRequest } from '../instanceUpdate.js';
 import { closeDmReport, listDmReports } from '../dmReports.js';
 import { normalizeReleaseVersion } from '../instanceUpdateRules.js';
@@ -314,7 +325,9 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // и (05.10) кто может начать личную переписку — `dmPolicy` (`dmRules.ts`; нет записи = `shared`).
   app.get('/admin/instance', async (): Promise<AdminInstanceSettings> => {
     const [meta, policy, smtp, dm] = await Promise.all([instanceMeta(), registrationPolicy(), isSmtpConfigured(), dmPolicy()]);
-    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, smtpConfigured: smtp, dmPolicy: dm };
+    // Э1 ЛС между инстансами (Ф6): поле есть, только пока включён `FEDERATION_DM_ENABLED` — иначе выбора в панели нет.
+    const fedDm = env.federation.dmEnabled ? { fedDmPolicy: await fedDmPolicy() } : {};
+    return { name: meta.name, iconUrl: meta.iconUrl, registration: policy, smtpConfigured: smtp, dmPolicy: dm, ...fedDm };
   });
 
   app.put('/admin/instance', async (req, reply) => {
@@ -323,6 +336,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         name: z.string().max(200).nullable().optional(),
         registration: z.enum(REGISTRATION_POLICIES).optional(),
         dmPolicy: z.enum(DM_POLICIES).optional(),
+        fedDmPolicy: z.enum(FED_DM_POLICIES).optional(),
       })
       .parse(req.body ?? {});
     if (body.name !== undefined) {
@@ -332,6 +346,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
     if (body.registration) await setRegistrationPolicy(body.registration);
     if (body.dmPolicy) await setDmPolicy(body.dmPolicy);
+    if (body.fedDmPolicy && env.federation.dmEnabled) await setFedDmPolicy(body.fedDmPolicy);
     return reply.send({ ok: true });
   });
 

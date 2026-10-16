@@ -1,0 +1,33 @@
+{
+  "id": "0199d2b1-7b3c-7d4e-8f5a-6b7c8d9e0f1a",
+  "conversation_id": "0199d2b0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "author": { "instance_id": "q7m3xw2b5n8c4v6z1a9s0d2f4g6h8j0k", "user_id": "0193f1a2-1111-7e8f-9a0b-1c2d3e4f5a6b" },
+  "client_id": null,
+  "payload_hash": null,
+  "created_at": 1760280400000,
+  "origin_sort_key": 1760280400000123,
+  "content": "Привет всем из группы через хост.",
+  "reply_to_id": null,
+  "forwarded_from": null,
+  "silent": false,
+  "no_preview": false,
+  "caption_above": false,
+  "reply_quote": null,
+  "sticker": null,
+  "service": null,
+  "attachments": [],
+  "edit_version": 0,
+  "edited_at": null,
+  "deleted": false,
+  "sig": {
+    "root": "MCowBQYDK2VwAyEAq1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1c2v3b",
+    "key": {
+      "kid": "4Ecq0C1b5d-6LwNE",
+      "public_key": "MCowBQYDK2VwAyEAz9x8c7v6b5n4m3l2k1j0h9g8f7d6s5a4p3o2i1u0y9t8r7e",
+      "not_before": 1760000000000,
+      "not_after": 1762592000000,
+      "sig": "c2lnbmF0dXJlLW9mLWtleS1ieS1yb290LWtleS1maXh0dXJlLW9ubHktbm90LXJlYWw"
+    },
+    "value": "c2lnbmF0dXJlLW9mLW1lc3NhZ2UtYnktc2lnbmluZy1rZXktZml4dHVyZS1vbmx5"
+  }
+}

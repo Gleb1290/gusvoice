@@ -1,4 +1,4 @@
-import { maskNotice, notifyShowsText, stripFormatting, type NotifyView } from '@gusvoice/shared';
+import { callServiceText, convMediaPreview, maskNotice, notifyShowsName, notifyShowsText, parseConvMedia, stripFormatting, type ConvCallService, type NotifyView } from '@gusvoice/shared';
 import type { CoinNotifyLevel } from './coinNotifyRules';
 import { messageAttachmentLabel } from './dmRowRules';
 import { isDesktop, isTauri } from './hotkeys';
@@ -164,7 +164,7 @@ export function osNotify(
   body: string,
   onClick?: () => void,
   force = false,
-  opts: { silent?: boolean; group?: string; conv?: string; groupChat?: boolean; dmChat?: boolean } = {},
+  opts: { silent?: boolean; group?: string; conv?: string; groupChat?: boolean; dmChat?: boolean; popup?: PopupInfo } = {},
 ): void {
   if (!osNotifyEnabled() || (!force && windowFocused())) return;
   // «Уведомления из групп» выключены (G38, `push2`) — сообщение группы без всплывашки (звук и счётчик решают свои правила).
@@ -177,7 +177,47 @@ export function osNotify(
   // «Показывать имя / текст» (G38): как у Telegram, без текста нет и ответа из тоста (`hideReplyButton`/`hideMarkAsRead`).
   const n = maskNotice(notifyPrefs.view, { title, body });
   const conv = notifyShowsText(notifyPrefs.view) ? opts.conv : undefined;
-  deliver(n.title, n.body, onClick, opts.silent === true, opts.group, conv);
+  // Своё окно ПК (G38, ND-07): имя чата, автор и аватар — только если имя не скрыто (иначе — как у тоста, «GusVoice»).
+  // 🔴 Находка Codex R223: проверка `n.title === title` пропускала имя и аватар при «Ничего не показывать», если заголовок уже был
+  // «GusVoice» (маска его не меняла) — решает настройка, а не сравнение строк.
+  const named = opts.popup && notifyShowsName(notifyPrefs.view) ? opts.popup : undefined;
+  // Превью карточки (вид + подпись, `popupPreview` ниже) — только при показе текста; скрыт — строка маски, как у тоста.
+  const popup = named?.preview && !notifyShowsText(notifyPrefs.view) ? { ...named, preview: undefined } : named;
+  deliver(n.title, n.body, onClick, opts.silent === true, opts.group, conv, popup);
+}
+
+/** Что своему окну уведомлений ПК (G38, ND-07) нужно сверх заголовка и текста: имя чата, автор в группе, аватар. */
+export interface PopupInfo {
+  title: string;
+  author?: string;
+  avatar?: string | null;
+  /** Превью для карточки: вид вложения отдельно от подписи (`popupPreview` ниже, как Telegram Desktop); нет — строка тоста. */
+  preview?: PopupPreview;
+}
+
+/**
+ * Свои всплывающие окна уведомлений на ПК (G38, ND-07, как у Telegram Desktop). Приёмник ставит `notifyPopupHost.ts`
+ * (только десктоп, из `App.tsx`); нет приёмника (веб, Android, тесты) — всё как было. `show` вернул `false` — включены
+ * системные уведомления, идём прежним путём; `fallback` — окно не ответило (сборка без него), показать системный тост.
+ */
+export interface PopupSink {
+  show(d: {
+    tag: string;
+    title: string;
+    author?: string;
+    body: string;
+    /** Вид вложения перед текстом («Фото», «📊 вопрос») — своё окно выделяет его (`popupPreview`). */
+    kind?: string;
+    avatar: string | null;
+    conv?: string;
+    group?: string;
+    fallback: () => void;
+  }): boolean;
+  clear(group: string): void;
+}
+let popupSink: PopupSink | null = null;
+export function setNotifyPopupSink(sink: PopupSink | null): void {
+  popupSink = sink;
 }
 
 /**
@@ -246,6 +286,8 @@ const shownByGroup = new Map<string, Notification[]>();
  * десктопа и уведомления Android по одному снять пока нечем (плагин и `gv_notify_clickable` их не отдают) — остаются.
  */
 export function clearOsNotifications(group: string): void {
+  // Свои окна ПК (G38): карточки прочитанной беседы уходят сразу, как `unlinkHistory` у Telegram Desktop.
+  popupSink?.clear(group);
   const list = shownByGroup.get(group);
   if (!list) return;
   shownByGroup.delete(group);
@@ -324,9 +366,41 @@ function listenNotifyActions(ev: TauriEvent): void {
   });
 }
 
-function deliver(title: string, body: string, onClick?: () => void, silent = false, group?: string, conv?: string): void {
+function deliver(
+  title: string,
+  body: string,
+  onClick?: () => void,
+  silent = false,
+  group?: string,
+  conv?: string,
+  popup?: PopupInfo | null,
+): void {
   if (isTauri()) {
     const t = tauriGlobal();
+    // Свои окна ПК (G38, ND-07): карточку рисует окно `notify`, действия приходят тем же `gv://notify-action`, что у тоста
+    // беседы (`open` → обработчик клика по метке, `reply` → ответ). `popup === null` — путь отката, только системный тост.
+    if (popup !== null && popupSink && isDesktop() && t?.event) {
+      const tag = `n${++clickSeq}`;
+      if (onClick) clickHandlers.set(tag, onClick);
+      if (clickHandlers.size > 50) clickHandlers.delete(clickHandlers.keys().next().value as string);
+      listenNotifyActions(t.event);
+      const shown = popupSink.show({
+        tag,
+        title: popup?.title ?? title,
+        author: popup?.author,
+        body: popup?.preview ? popup.preview.text : body,
+        ...(popup?.preview?.kind ? { kind: popup.preview.kind } : {}),
+        avatar: popup?.avatar ?? null,
+        conv,
+        group,
+        fallback: () => {
+          clickHandlers.delete(tag);
+          deliver(title, body, onClick, silent, group, conv, null);
+        },
+      });
+      if (shown) return;
+      clickHandlers.delete(tag);
+    }
     if (onClick && isDesktop() && t?.core && t.event) {
       listenNotifyClicks(t.event);
       const core = t.core;
@@ -411,9 +485,65 @@ export function messagePreview(m: {
   content: string;
   attachments?: readonly unknown[] | null;
   sticker?: unknown;
+  media?: unknown;
 }): string {
+  // Геопозиция / контакт (G69): «Геопозиция» / «Контакт: Имя», как пуш сервера, а не запасная фраза со ссылкой.
+  const media = m.media ? parseConvMedia(m.media) : null;
+  if (media) return convMediaPreview(media);
   // Без маркеров формата (G51) — как пуш сервера (`pushRules.contentPreview`).
   const text = m.content ? stripFormatting(m.content).trim() : '';
   if (text) return text.length > 140 ? `${text.slice(0, 140)}…` : text;
   return messageAttachmentLabel(m) ?? 'Новое сообщение';
+}
+
+/**
+ * Текст карточки своего окна уведомлений ПК (G38, ND-07) — как у Telegram Desktop. Карточка рисует превью сообщения тем же
+ * правилом, что список чатов (`Notification::updateNotifyDisplay` → `HistoryItem::toPreview`): вид вложения в начале
+ * строки выделен (`WithCaptionNotificationText` в `data/data_media_types.cpp`: «Фото» без подписи, «Фото, подпись» — с ней,
+ * `lng_dialogs_text_media_wrapped` = «{media},»), опрос — «📊 вопрос» (`MediaPoll::notificationText`), звонок — подпись
+ * записи глазами получателя. Слова вида — наши, те же, что в строке списка и пуше (`messageAttachmentLabel`,
+ * `convMediaPreview`), чтобы одно и то же сообщение не называлось в двух местах по-разному. Системный тост берёт строку
+ * целиком (`messagePreview` выше) — здесь только своё окно.
+ */
+/** Превью для карточки: `kind` — вид вложения (выделяется, перед текстом через запятую), `text` — подпись или текст. */
+export interface PopupPreview {
+  kind?: string;
+  text: string;
+}
+
+/** Хватает на две строки карточки с запасом; дальше многоточие ставит вёрстка (`.nfp-body`, две строки, как у Telegram). */
+export const POPUP_TEXT_MAX = 300;
+
+function popupClip(s: string): string {
+  return s.length > POPUP_TEXT_MAX ? `${s.slice(0, POPUP_TEXT_MAX)}…` : s;
+}
+
+/**
+ * Превью сообщения для карточки. Поля — как у сообщения ЛС/канала (`content`, `attachments`, `sticker`, `media`,
+ * `service`); незнакомый вид (`media`/`service`) — как сообщения без него (правило 11): обычный текст.
+ */
+export function popupPreview(m: {
+  content: string;
+  attachments?: readonly unknown[] | null;
+  sticker?: unknown;
+  media?: unknown;
+  service?: unknown;
+}): PopupPreview {
+  const text = m.content ? popupClip(stripFormatting(m.content).replace(/\s+/g, ' ').trim()) : '';
+  // Запись о звонке (`calls1`): автор — звонивший, читатель уведомления — принимающий («Пропущенный звонок»).
+  const svc = m.service as { kind?: unknown; reason?: unknown; duration?: unknown; video?: unknown } | null | undefined;
+  if (svc && typeof svc === 'object' && svc.kind === 'call' && typeof svc.reason === 'string') {
+    const duration = typeof svc.duration === 'number' && Number.isFinite(svc.duration) ? svc.duration : 0;
+    return { kind: callServiceText({ reason: svc.reason as ConvCallService['reason'], duration, video: svc.video === true }, false), text: '' };
+  }
+  const media = m.media ? parseConvMedia(m.media) : null;
+  if (media) {
+    // Опрос/викторина — «📊 вопрос» (Telegram `MediaPoll::notificationText`), вопрос выделен.
+    if (media.kind === 'poll') return { kind: `📊 ${media.question}`, text: '' };
+    // Геопозиция, трансляция геопозиции, контакт — вид целиком, подписи у них нет (запасная фраза `content` — для старых).
+    return { kind: convMediaPreview(media), text: '' };
+  }
+  const label = messageAttachmentLabel(m);
+  if (label) return { kind: label, text };
+  return { text: text || 'Новое сообщение' };
 }

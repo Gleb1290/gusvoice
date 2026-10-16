@@ -1,10 +1,10 @@
-import type { HTMLAttributes, MouseEvent, ReactNode } from 'react';
+import { useState, type HTMLAttributes, type MouseEvent, type ReactNode } from 'react';
 import type { BubbleKind, ReplyKind } from '../bubbleRules';
 import { Icon, type IconName } from './Icon';
 
 /**
  * Пузыри личных сообщений «как в Telegram» (Р13) — детали дизайн-системы, из них же собрана лента ЛС
- * (`MessagePane.MessageRow` при включённых пузырях, `dmBubbles.ts`).
+ * (`MessagePane.MessageRow` с пропом `bubbles` — все ЛС с 09.10).
  *
  * Свои — справа, собеседника — слева; в беседе вдвоём ни аватара, ни имени: кто есть кто, видно по стороне.
  * Подряд идущие сообщения склеиваются в группу (углы со стороны автора почти острые), у последнего в группе —
@@ -180,6 +180,8 @@ export function ReplyQuote({
    */
   quote?: boolean;
 }) {
+  // Э3 (#141): миниатюру даёт сервер ссылкой, а вложение с соседнего инстанса может ещё копироваться (503) — вместо «битой» картинки значок.
+  const [badThumb, setBadThumb] = useState<string | null>(null);
   if (kind === 'deleted') {
     return (
       <div className="reply-quote deleted">
@@ -189,9 +191,9 @@ export function ReplyQuote({
   }
   const preview =
     kind === 'photo' || kind === 'sticker' ? (
-      thumb ? (
+      thumb && thumb !== badThumb ? (
         <span className={kind === 'sticker' ? 'rq-thumb sticker' : 'rq-thumb'}>
-          <img src={thumb} alt="" className={spoiler && kind === 'photo' ? 'spoiled-thumb' : undefined} />
+          <img src={thumb} alt="" className={spoiler && kind === 'photo' ? 'spoiled-thumb' : undefined} onError={() => setBadThumb(thumb)} />
         </span>
       ) : (
         // Картинки ещё нет (закрытый файл ЛС ждёт ссылку) — значок того же размера, цитата не прыгает.

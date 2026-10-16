@@ -194,6 +194,8 @@ export interface DateSource {
   createdAt: string;
   editedAt?: string | null;
   forwardedFrom?: { at: string } | null;
+  /** Э2 ЛС между инстансами (Ф9, `fedm2`): копия пришла позже отправки больше чем на 5 минут — момент прихода. */
+  deliveredAt?: string;
 }
 
 function validIso(iso: string | null | undefined): iso is string {
@@ -220,12 +222,40 @@ export function menuFootLines(m: DateSource, now: Date = new Date()): string[] {
  * пересланного) «Исходное: …», каждая со своей строки (`title` понимает перевод строки). Не разобрать дату отправки —
  * пустая строка (подсказки нет).
  */
-export function timeTooltip(m: DateSource): string {
+export function timeTooltip(m: DateSource, via?: string | null): string {
   if (!validIso(m.createdAt)) return '';
   const lines = [FULL_DATE.format(new Date(m.createdAt))];
   if (validIso(m.editedAt)) lines.push(`Изменено: ${FULL_DATE.format(new Date(m.editedAt))}`);
   if (validIso(m.forwardedFrom?.at)) lines.push(`Исходное: ${FULL_DATE.format(new Date(m.forwardedFrom!.at))}`);
+  if (validIso(m.deliveredAt)) lines.push(`Доставлено: ${FULL_DATE.format(new Date(m.deliveredAt))}`);
+  if (via) lines.push(via.charAt(0).toUpperCase() + via.slice(1));
   return lines.join('\n');
+}
+
+/**
+ * Время у пузыря (Ф9, решение владельца 12.10): сообщение человека другого инстанса, пришедшее позже отправки больше чем на
+ * 5 минут (`ConvMessage.deliveredAt`, порог решает сервер), стоит в ленте по приходу, а у времени — «отправлено в ЧЧ:ММ,
+ * доставлено позже»; момент прихода — в подсказке (`timeTooltip`). Обычное — просто время.
+ */
+export function bubbleTimeLabel(time: string, m: { createdAt: string; deliveredAt?: string }, via?: string | null): string {
+  const base = time && validIso(m.deliveredAt) ? `отправлено в ${time}, доставлено позже` : time;
+  return via ? (base ? `${base} · ${via}` : via) : base;
+}
+
+/**
+ * Э5 (#141, `fedm5`): мелкая подпись у времени сообщения, пришедшего «через» инстанс (дом автора лежал). «Не подтверждено» — пока дом
+ * автора не сверил его задним числом: «через «X», не подтверждено»; X — инстанс, через который оно прошло: у своего сообщения
+ * (`mine`) это инстанс собеседника (`names.peer`), у чужого — наш (`names.self`). Подтверждённое (`confirmed: true`) — без подписи:
+ * это уже обычное сообщение дома, как у Telegram нет отметки «доставлено» у дошедшего (отметка есть только у «изменено»).
+ */
+export function viaCaption(
+  via: { instance: string; confirmed: boolean } | undefined,
+  mine: boolean,
+  names?: { self?: string; peer?: string } | null,
+): string | null {
+  if (!via || via.confirmed) return null;
+  const name = (mine ? names?.peer : names?.self)?.trim();
+  return `через «${name || 'другой инстанс'}», не подтверждено`;
 }
 
 /** Сообщение ленты для «Скопировать» в режиме выделения: id, текст, имя автора (как его зовёт лента), время отправки. */

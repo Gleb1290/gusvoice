@@ -9,14 +9,14 @@ import {
 } from '../downloadList';
 import { cancelFileJob, progressRatio, progressText, sizeText } from '../fileActions';
 import { isDesktop, isMobile } from '../hotkeys';
-import { saveObjectUrl, startDownload } from '../pcDownloads';
+import { saveObjectUrl, showInFolder, showInFolderAvailable, startDownload } from '../pcDownloads';
 import { ProgressRing } from './FileCard';
 import { Icon } from './Icon';
 
 /**
  * Раздел «Загрузки» в «Данные и память» (G31, 08.10): что качали в этой вкладке — как tdesktop «Загрузки» (Настройки →
  * Продвинутые) и Android «Недавние загрузки» (`SearchDownloadsContainer`). Строка — разметка списка папок (`dmf-row`): кольцо с
- * отменой, пока качается; готовое — «Открыть» (браузер, то, что он покажет сам) и «Сохранить снова»; неудача и отмена —
+ * отменой, пока качается; готовое — «Открыть» (браузер, то, что он покажет сам), «Показать в папке» (десктоп, путь от оболочки) и «Сохранить снова»; неудача и отмена —
  * «Повторить»; «Убрать из списка». Внизу — «Очистить список загрузок».
  */
 
@@ -63,6 +63,12 @@ function DownloadRow({ e, canOpen }: { e: DownloadEntry; canOpen: boolean }) {
           onClick={() => window.open(e.href, '_blank', 'noopener')}
         >
           <Icon name="arrow-up-right" size={18} />
+        </button>
+      ) : null}
+      {/* «Показать в папке» (G31, tdesktop «Загрузки» → `File::ShowInFolder`): десктоп, оболочка сообщила путь файла. */}
+      {e.state === 'done' && e.path && showInFolderAvailable() ? (
+        <button type="button" className="head-icon" title="Показать в папке" aria-label="Показать в папке" onClick={() => e.path && showInFolder(e.path)}>
+          <Icon name="folder" size={18} />
         </button>
       ) : null}
       {e.state === 'done' && e.href ? (

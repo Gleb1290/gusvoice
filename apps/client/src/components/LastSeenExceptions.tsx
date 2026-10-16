@@ -118,7 +118,7 @@ function Shell({ title, onClose, children }: { title: string; onClose: () => voi
   );
 }
 
-function ExceptionsDialog({
+export function ExceptionsDialog({
   title,
   initial,
   onClose,

@@ -25,6 +25,10 @@ import { ATTACH_MAX, ATTACH_MAX_BYTES, baseMime, type GalleryPerm } from './atta
  *   с 06.10 — `open` (копия в кеше приложения + системное приложение по типу; ответ `{token}` или `error: 'no-app'`) и
  *   `download` («Загрузки», Download/GusVoice, Android 10+; ниже — `error: 'unsupported'`);
  * - `→ {op: 'reopen', id, token, mime}` → `← {id, ok}` / `error: 'missing' | 'no-app'` — открыть уже скачанное (06.10);
+ * - альбомы (10.10, #218): `→ {op: 'albums'}` → `← {id, ok, albums: [{id, name, count, only?, cover}]}`; у сборки старше —
+ *   `error: 'unknown-op'`, и списка альбомов нет. `page` понимает `bucket` (id папки) и `only: 'video'`; старая сборка их не
+ *   читает и отдаёт всю галерею — поэтому клиент шлёт их, только получив альбомы;
+ * - `open` с `view: true` (10.10) — оригинал для просмотра выбора в своей очереди натива, отправку он не задерживает;
  * - «Поделиться в GusVoice» (09.10): `→ {op: 'shared'}` → `← {id, ok, share: {token, text, subject, dropped, files} | null}`;
  *   `→ {op: 'sharedOpen', token}` → поток файлов, как у `docs`; `→ {op: 'sharedDrop', token}` → `← {id, ok}`.
  */
@@ -160,10 +164,19 @@ export interface NativeMediaInfo {
   canShare: boolean;
   /** «Поделиться в GusVoice» (09.10, G79): сборка принимает ACTION_SEND (`shared` / `sharedOpen` / `sharedDrop`). */
   canInbox: boolean;
+  /**
+   * Системная камера (10.10, #218): сборка отвечает на `capture` — ячейка камеры листа открывает камеру устройства (тап —
+   * фото, удержание — видео). Нет поля (сборка старше) — своя камера листа (`CameraScreen`, getUserMedia).
+   */
+  capture: boolean;
 }
 
+/**
+ * Состояние доступа из ответа моста. `partial` (READ_MEDIA_VISUAL_USER_SELECTED) с 10.10 мост не шлёт — разрешение не
+ * объявлено, как у Telegram Android (#218); пришло всё же — это тоже «можно читать»: MediaStore отдаёт видимое приложению.
+ */
 function asPerm(v: unknown): GalleryPerm {
-  return v === 'granted' || v === 'partial' || v === 'blocked' ? v : 'ask';
+  return v === 'granted' || v === 'partial' ? 'granted' : v === 'blocked' ? 'blocked' : 'ask';
 }
 
 export async function nativeMediaInfo(): Promise<NativeMediaInfo> {
@@ -177,22 +190,78 @@ export async function nativeMediaInfo(): Promise<NativeMediaInfo> {
     asked: m.asked === true,
     canShare: m.canShare === true,
     canInbox: m.canInbox === true,
+    capture: m.capture === true,
   };
 }
 
 /**
- * Доступ к фото и видео: `check` — узнать; `ask` — спросить окном системы (на Android 14 при частичном доступе то же окно
- * даёт выбрать ещё); `settings` — открыть настройки приложения (после «больше не спрашивать»), ответ — состояние сразу,
+ * Доступ к фото и видео: `check` — узнать; `ask` — спросить окном системы; `settings` — открыть настройки приложения (после «больше не спрашивать»), ответ — состояние сразу,
  * вернувшись, зовущий проверяет заново.
  */
+/**
+ * Разрешение камеры окном системы (кнопка «Разрешить доступ к камере» листа, как Telegram `VIEW_TYPE_CAMERA_PERMISSION_BUTTON`):
+ * `granted` / `denied` / `null` — сборка старше операции `camPerm` не знает (зовущий открывает камеру — она спросит сама).
+ */
+export async function cameraPermissionNative(): Promise<'granted' | 'denied' | null> {
+  const m = await call('camPerm', {});
+  if (m.ok === false) return m.error === 'unknown-op' ? null : 'denied';
+  return m.camera === true ? 'granted' : 'denied';
+}
+
 export async function galleryPermission(mode: 'check' | 'ask' | 'settings'): Promise<GalleryPerm> {
   const m = await call('perm', { ask: mode === 'check' ? '' : mode }, mode === 'ask' ? 0 : 8000);
   return asPerm(m.perm);
 }
 
-/** Порция галереи, новые сверху. `before` — последний элемент прошлой порции (курсор), без него — с начала. */
-export async function galleryPage(before: GalleryItem | null, limit: number): Promise<{ items: GalleryItem[]; end: boolean }> {
-  const m = await call('page', { limit, before: before ? { added: before.added, id: before.id } : null }, 20000);
+/**
+ * Альбом галереи (как Telegram Android `MediaController.AlbumEntry`): `id` — BUCKET_ID папки, `''` — вся галерея («Все медиа»
+ * и, с `only: 'video'`, «Все видео»). `cover` — самый новый элемент (для миниатюры хватает id, вида и поворота).
+ */
+export interface GalleryAlbum {
+  id: string;
+  name: string;
+  count: number;
+  only: 'video' | null;
+  cover: GalleryItem | null;
+}
+
+/** Альбомы галереи (`MediaBridge.albums`): у сборки без операции или при ошибке — `null`, и выбора альбома нет. */
+export async function galleryAlbums(): Promise<GalleryAlbum[] | null> {
+  let m: Msg;
+  try {
+    m = await call('albums', {}, 20000);
+  } catch {
+    return null;
+  }
+  if (m.ok === false || !Array.isArray(m.albums)) return null;
+  return (m.albums as Record<string, unknown>[]).map((r): GalleryAlbum => {
+    const c = r.cover && typeof r.cover === 'object' ? (r.cover as Record<string, unknown>) : null;
+    const cid = c ? String(c.id ?? '') : '';
+    return {
+      id: String(r.id ?? ''),
+      name: String(r.name ?? ''),
+      count: Number(r.count) || 0,
+      only: r.only === 'video' ? 'video' : null,
+      cover: cid
+        ? { id: cid, kind: c?.kind === 'video' ? 'video' : 'image', mime: '', size: 0, width: 0, height: 0, durationMs: 0, added: 0, name: '', rot: Number(c?.rot) || 0 }
+        : null,
+    };
+  });
+}
+
+/**
+ * Порция галереи, новые сверху. `before` — последний элемент прошлой порции (курсор), без него — с начала. `album` — только
+ * его элементы (папка или «Все видео»); без него и для «Все медиа» — вся галерея.
+ */
+export async function galleryPage(
+  before: GalleryItem | null,
+  limit: number,
+  album: GalleryAlbum | null = null,
+): Promise<{ items: GalleryItem[]; end: boolean }> {
+  const filter: Record<string, unknown> = {};
+  if (album?.id) filter.bucket = album.id;
+  if (album?.only) filter.only = album.only;
+  const m = await call('page', { limit, before: before ? { added: before.added, id: before.id } : null, ...filter }, 20000);
   if (m.ok === false) throw new Error(`native media: page ${m.error ?? ''}`);
   const raw = Array.isArray(m.items) ? (m.items as Record<string, unknown>[]) : [];
   const items = raw.map(
@@ -242,6 +311,8 @@ export interface NativeFilesResult {
   cancelled: boolean;
   /** Сколько выбранного не влезло в предел вложений (только `pickDocumentsNative`). */
   dropped: number;
+  /** Номер элемента запроса у каждого файла `files` (тот же порядок): пропущенные (`skipped`) номера не получают. */
+  indexes: number[];
 }
 
 export type FilesProgress = (doneFiles: number, totalFiles: number) => void;
@@ -250,11 +321,46 @@ export type FilesProgress = (doneFiles: number, totalFiles: number) => void;
 const streams = new Set<string>();
 
 /** Принять поток файлов запроса (`open`, `docs`) в `File`-ы. */
-function receiveFiles(op: string, args: Record<string, unknown>, total: number, onProgress?: FilesProgress): Promise<NativeFilesResult> {
+/**
+ * Каждые столько байт принятые части файла склеиваются в `Blob`, а массив частей отпускается. Предел файла ЛС — 1 ГиБ
+ * (`4c67b515`: `MediaBridge.SHARE_MAX` 1 ГиБ, `PUT_MAX` 1032 МБ): копить весь файл частями `ArrayBuffer` в куче JS, а потом
+ * `new File(части)` — пик около двух размеров файла (части + копия в `File`), 2 ГиБ роняют WebView телефона. Со склейкой в
+ * куче живёт не больше одной порции: прежний `Blob` уже у хранилища блобов браузера, `new Blob([прежний, ...части])` его
+ * не копирует в кучу.
+ */
+export const RECEIVE_FOLD_BYTES = 32 * 1024 * 1024;
+
+/** Принимаемый файл: склеенное (`blob`) + части после последней склейки (`chunks`, `pending` байт). */
+interface PartIn {
+  name: string;
+  mime: string;
+  blob: Blob | null;
+  chunks: ArrayBuffer[];
+  pending: number;
+}
+
+/** Склеить накопленные части в `Blob` и отпустить их (`RECEIVE_FOLD_BYTES`). */
+function foldPart(p: PartIn): void {
+  if (!p.chunks.length) return;
+  p.blob = new Blob(p.blob ? [p.blob, ...p.chunks] : p.chunks);
+  p.chunks = [];
+  p.pending = 0;
+}
+
+function receiveFiles(
+  op: string,
+  args: Record<string, unknown>,
+  total: number,
+  onProgress?: FilesProgress,
+  onStart?: (sid: string) => void,
+  onBytes?: (bytes: number) => void,
+): Promise<NativeFilesResult> {
   return new Promise<NativeFilesResult>((resolve, reject) => {
     const files: File[] = [];
+    const indexes: number[] = [];
+    let bytes = 0;
     const skipped: NativeFilesResult['skipped'] = [];
-    const parts = new Map<number, { name: string; mime: string; chunks: ArrayBuffer[] }>();
+    const parts = new Map<number, PartIn>();
     let finished = 0;
     let all = total;
     try {
@@ -269,12 +375,15 @@ function receiveFiles(op: string, args: Record<string, unknown>, total: number, 
           if (typeof m.file === 'number') {
             const i = m.file;
             if (typeof m.name === 'string' && m.end !== true && m.skip === undefined) {
-              parts.set(i, { name: m.name, mime: baseMime(String(m.mime ?? '')) || 'application/octet-stream', chunks: [] });
+              parts.set(i, { name: m.name, mime: baseMime(String(m.mime ?? '')) || 'application/octet-stream', blob: null, chunks: [], pending: 0 });
               return;
             }
             const p = parts.get(i);
             parts.delete(i);
-            if (m.end === true && p) files.push(new File(p.chunks, p.name, { type: p.mime }));
+            if (m.end === true && p) {
+              files.push(new File(p.blob ? [p.blob, ...p.chunks] : p.chunks, p.name, { type: p.mime }));
+              indexes.push(i);
+            }
             else skipped.push({ name: String(m.name ?? p?.name ?? 'файл'), reason: m.skip === 'too-big' ? 'too-big' : 'unreadable' });
             finished++;
             onProgress?.(finished, all);
@@ -283,15 +392,22 @@ function receiveFiles(op: string, args: Record<string, unknown>, total: number, 
           if (m.done === true) {
             waiters.delete(m.id);
             streams.delete(m.id);
-            resolve({ files, skipped, cancelled: m.cancelled === true, dropped: Number(m.dropped) || 0 });
+            resolve({ files, skipped, cancelled: m.cancelled === true, dropped: Number(m.dropped) || 0, indexes });
           }
         },
         onBin(head, buf) {
           const i = Number(head.bin?.file);
-          parts.get(i)?.chunks.push(buf);
+          const p = parts.get(i);
+          if (!p) return;
+          p.chunks.push(buf);
+          p.pending += buf.byteLength;
+          bytes += buf.byteLength;
+          onBytes?.(bytes);
+          if (p.pending >= RECEIVE_FOLD_BYTES) foldPart(p);
         },
       });
       streams.add(sid);
+      onStart?.(sid);
     } catch (e) {
       reject(e);
     }
@@ -309,6 +425,59 @@ export function galleryFiles(
 ): Promise<NativeFilesResult> {
   const list = items.map((i) => ({ id: i.id, kind: i.kind, name: i.name, mime: i.mime }));
   return receiveFiles('open', { items: list, compress: opts.compress, max: opts.maxBytes ?? ATTACH_MAX_BYTES }, list.length, opts.onProgress);
+}
+
+/**
+ * Один элемент галереи крупно — для просмотра выбора (как Telegram `PhotoViewer`: фото во весь экран, видео играет). Фото —
+ * тем же сжатием, что уходит при отправке (2560 px, JPEG 85, поворот по EXIF; HEIC так тоже показывается), GIF и видео —
+ * оригинал. Байты — уже существующим потоком `open` (в своей очереди натива, `view: true`): страница с `http://tauri.localhost`
+ * `content://` грузить не может, а перехват запросов WebView занят Tauri. `cancel` — остановить (пролистали дальше).
+ */
+export function galleryOriginal(
+  item: GalleryItem,
+  maxBytes = ATTACH_MAX_BYTES,
+  onBytes?: (bytes: number) => void,
+): { done: Promise<File | null>; cancel: () => void } {
+  let sid = '';
+  let stop = false;
+  const cancel = () => {
+    stop = true;
+    const ch = channel();
+    if (sid && ch && streams.has(sid)) ch.postMessage(JSON.stringify({ op: 'cancel', id: `${sid}-c`, target: sid }));
+  };
+  const list = [{ id: item.id, kind: item.kind, name: item.name, mime: item.mime }];
+  const done = receiveFiles(
+    'open',
+    { items: list, compress: item.kind === 'image', max: maxBytes, view: true },
+    1,
+    undefined,
+    (id) => {
+      sid = id;
+      if (stop) cancel();
+    },
+    onBytes,
+  ).then(
+    (r) => (stop ? null : (r.files[0] ?? null)),
+    () => null,
+  );
+  return { done, cancel };
+}
+
+/**
+ * Системная камера (10.10, #218; `NativeMediaInfo.capture`): `video` ложно — снимок (ACTION_IMAGE_CAPTURE), истинно — видео
+ * (ACTION_VIDEO_CAPTURE, камера останавливает запись на `maxBytes`). Файл приходит тем же потоком, что «Файлы»: фото уже сжато
+ * «как в Telegram» (2560 px, JPEG 85), видео — как есть. Закрыли камеру без снимка — `cancelled` и ни одного файла. Нет
+ * разрешения камеры и человек отказал в окне — ошибка, `captureErrorCode` даёт `camera-denied`.
+ */
+export function captureNative(opts: { video: boolean; maxBytes?: number }): Promise<NativeFilesResult> {
+  return receiveFiles('capture', { video: opts.video, max: opts.maxBytes ?? ATTACH_MAX_BYTES }, 1);
+}
+
+/** Код ошибки `captureNative` (`native media: capture <код>`): отказ в камере, камеры нет, уже открыта, прочее. */
+export function captureErrorCode(e: unknown): 'camera-denied' | 'no-camera' | 'busy' | 'failed' {
+  const m = /^native media: capture (\S+)/.exec(e instanceof Error ? e.message : '');
+  const code = m?.[1];
+  return code === 'camera-denied' || code === 'no-camera' || code === 'busy' ? code : 'failed';
 }
 
 /** Системное приложение «Файлы» (ACTION_OPEN_DOCUMENT, несколько). Закрыли без выбора — `cancelled`. */

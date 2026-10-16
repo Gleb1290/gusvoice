@@ -5,16 +5,21 @@ import { it } from 'node:test';
 import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
 import * as rules from './attachRules';
+import * as syncRules from './convSyncRules';
 import { shareFilesWithin } from './shareInbox';
 
-const large = 512 * 1024 ** 2;
+const large = 1024 * 1024 ** 2;
 const legacy = 25 * 1024 ** 2;
 function changed(from: string, to: string): typeof rules {
   const raw = readFileSync(new URL('./attachRules.ts', import.meta.url), 'utf8'); assert.ok(raw.includes(from));
   const module = { exports: {} };
   // Контрфакт полного чистого модуля, без извлечения исполняемых фрагментов.
   runInNewContext(ts.transpileModule(raw.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS,
-    target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return shared; } });
+    target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports, require: (id: string) => {
+      if (id === '@gusvoice/shared') return shared;
+      if (id === './convSyncRules') return syncRules;
+      throw new Error(`неожиданный импорт ${id}`);
+    } });
   return module.exports as typeof rules;
 }
 
@@ -24,13 +29,14 @@ it('R127 большой предел действует только с bigfile1
     for (const features of [undefined, null, [], ['conv10'], ['bigfile10']])
       assert.equal(JSON.stringify(api.dmFileLimitFrom(features, large)), JSON.stringify({ chunked: false, max: legacy }));
     assert.equal(JSON.stringify(api.dmFileLimitFrom(['bigfile1'], large)), JSON.stringify({ chunked: true, max: large }));
+    assert.equal(JSON.stringify(api.dmFileLimitFrom(['bigfile1'], 512 * 1024 ** 2)), JSON.stringify({ chunked: true, max: 512 * 1024 ** 2 }), 'прежний большой сервер тоже поддерживается');
     assert.equal(JSON.stringify(api.dmFileLimitFrom(['bigfile1'], legacy + 1)), JSON.stringify({ chunked: true, max: legacy + 1 }));
   };
   check(rules);
   assert.throws(() => check(changed('!!features?.includes(FEATURE_BIGFILE1) && ', 'true && ')), assert.AssertionError);
 });
 it('R127 признак без числа, нулевой размер и ровно 25 МиБ остаются на одиночной загрузке', () => {
-  // Новая возможность без корректного предела не должна обещать 512 МБ человеку.
+  // Новая возможность без корректного предела не должна обещать 1 ГиБ человеку.
   for (const max of [undefined, null, 0, -1, NaN, legacy - 1, legacy])
     assert.deepEqual(rules.dmFileLimitFrom(['bigfile1'], max), { chunked: false, max: legacy });
 });
@@ -45,7 +51,7 @@ it('R127 лимит активного инстанса сбрасывается
   } finally { rules.setDmFileLimit(null, null); }
 });
 it('R127 входящие файлы ровно до предела принимаются, плюс байт помечается без мутации', () => {
-  // Копирование Android до 512 МБ не означает, что старый сервер сможет принять всё скопированное.
+  // Копирование Android до 1 ГиБ не означает, что старый сервер сможет принять всё скопированное.
   for (const max of [legacy, large]) {
     const files = [{ name: 'small', size: max - 1 }, { name: 'edge', size: max }, { name: 'over', size: max + 1 },
       { name: 'unreadable', size: max + 1, skip: 'unreadable' as const }, { name: 'already', size: 1, skip: 'too-big' as const }];
@@ -57,10 +63,10 @@ it('R127 входящие файлы ровно до предела приним
   }
   assert.deepEqual(shareFilesWithin([], large), []);
 });
-it('R127 тост пропущенных файлов объясняет объявленные 512 МБ и сохраняет отдельную ошибку чтения', () => {
-  // Жёсткое «25 МБ» при серверном лимите 512 МБ ложно объясняло бы человеку причину отказа.
+it('R140 тост пропущенных файлов объясняет объявленные 1024 МБ и сохраняет отдельную ошибку чтения', () => {
+  // Жёсткое «25 МБ» при серверном лимите 1 ГиБ ложно объясняло бы человеку причину отказа.
   const skipped = [{ name: 'large.bin', reason: 'too-big' as const }, { name: 'broken.bin', reason: 'unreadable' as const }];
-  assert.equal(rules.skippedText(skipped, large), 'Больше 512 МБ — не отправить: large.bin. Не удалось прочитать: broken.bin');
+  assert.equal(rules.skippedText(skipped, large), 'Больше 1024 МБ — не отправить: large.bin. Не удалось прочитать: broken.bin');
   assert.equal(rules.skippedText(skipped), 'Больше 25 МБ — не отправить: large.bin. Не удалось прочитать: broken.bin');
   assert.equal(rules.skippedText([], large), null);
   assert.equal(rules.skippedText([skipped[1]!], large), 'Не удалось прочитать: broken.bin');

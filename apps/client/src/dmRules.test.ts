@@ -1,6 +1,79 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { dmBlockText, dmEmptyHint, dmComposeCandidates, DM_CANDIDATES_MAX, type DmCandidate, userSearchQuery, dmSearchHits, dmComposeHint, serverSearchesUsers, USER_SEARCH_DELAY_MS } from './dmRules.js';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+import * as shared from '@gusvoice/shared';
+import { dmNeedsServerUpdate, dmPeerHome, peerPresenceShown } from './dmRules';
+import { peerPresenceShown as syncPresenceShown } from './convSyncRules';
+import { dmBlockText, dmEmptyHint, dmComposeCandidates, DM_CANDIDATES_MAX, type DmCandidate, userSearchQuery, dmSearchHits, dmComposeHint, serverSearchesUsers, USER_SEARCH_DELAY_MS, dmRemoteQuery, remoteHandle, serverFedDm } from './dmRules.js';
+
+const compatibilityCases = [
+  ['признаки ещё не пришли (null)', null, false],
+  ['признаки ещё не пришли (undefined)', undefined, false],
+  ['сервер не объявил возможностей', [], true],
+  ['только conv1 без новой рассылки', ['conv1'], true],
+  ['только conv2 без бесед', ['conv2'], true],
+  ['беседы и новая рассылка доступны', ['conv1', 'conv2'], false],
+] as const;
+
+it('R197 обе копии правила профиля не скрывают местного при null и не выдумывают статус соседа без fedm4', () => {
+  for (const features of [null, undefined, [], ['fedm3'], ['fedm4'], ['FEDM4']] as const) for (const remote of [false, true]) {
+    const expected = !remote || !!features?.includes('fedm4' as never);
+    assert.equal(peerPresenceShown(remote, features), expected);
+    assert.equal(syncPresenceShown(remote, features), expected);
+  }
+});
+function homeContract(api: Pick<typeof import('./dmRules'), 'dmPeerHome'>) {
+  const home = { instanceId: 'neighbor', name: 'Сосед', domain: 'neighbor.example' };
+  const other = { instanceId: 'other', name: 'Другой', domain: 'other.example' };
+  const rows = [
+    { group: {}, otherUser: { id: 'peer', homeInstance: other } },
+    { saved: true, otherUser: { id: 'peer', homeInstance: other } },
+    { otherUser: { id: 'peer', homeInstance: home } },
+    { otherUser: { id: 'local' } },
+  ];
+  assert.equal(api.dmPeerHome(rows, 'peer'), home, 'только домашний инстанс личной беседы');
+  assert.equal(api.dmPeerHome(rows.slice(0, 2), 'peer'), null, 'группа и Избранное не задают дом человека');
+  for (const id of ['missing', undefined, '']) assert.equal(api.dmPeerHome(rows, id), null);
+  assert.equal(api.dmPeerHome(rows, 'local'), null); assert.equal(api.dmPeerHome(undefined, 'peer'), null);
+}
+it('R197 dmPeerHome берёт homeInstance из личной беседы без ростера, пропускает группы и Избранное', () => homeContract({ dmPeerHome }));
+function loadDmRules(raw: string): typeof import('./dmRules') {
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module, exports: module.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return shared; } });
+  return module.exports as typeof import('./dmRules');
+}
+for (const [name, anchor, replacement, check, target] of [
+  ['копия профиля рассинхронизирована', 'return !peerHome || !!features?.includes(FEATURE_FEDM4);', 'return true;',
+    (api: typeof import('./dmRules')) => assert.equal(api.peerPresenceShown(true, null), false, 'сосед без fedm4 не виден'), 'сосед без fedm4'],
+  ['группа или Избранное задают дом', '!d.group && !d.saved && d.otherUser.id === userId', 'd.otherUser.id === userId', homeContract, 'только домашний инстанс'],
+] as const) it(`R197 мутант «${name}» ломает целый модуль dmRules`, () => {
+  const original = readFileSync(new URL('./dmRules.ts', import.meta.url), 'utf8');
+  check(loadDmRules(original)); assert.equal(original.split(anchor).length - 1, 1, 'единственный якорь');
+  const mutant = loadDmRules(original.replace(anchor, replacement));
+  assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(target));
+});
+for (const [label, features, expected] of compatibilityCases) {
+  it(`ЛС требуют обновления сервера: ${label} → ${expected ? 'да' : 'нет'}`, () => {
+    assert.equal(dmNeedsServerUpdate(features), expected);
+  });
+}
+it('инверсия совместимости ЛС обнаруживается той же таблицей реального модуля', () => {
+  for (const [, features, expected] of compatibilityCases) assert.equal(dmNeedsServerUpdate(features), expected);
+  const original = readFileSync(new URL('./dmRules.ts', import.meta.url), 'utf8');
+  const changed = original.replace('return !(features.includes(CAP_CONV1)', 'return (features.includes(CAP_CONV1)');
+  assert.notEqual(changed, original);
+  const module = { exports: {} };
+  runInNewContext(ts.transpileModule(changed, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { module, exports: module.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return shared; } });
+  const bad = module.exports as typeof import('./dmRules');
+  assert.throws(() => {
+    for (const [, features, expected] of compatibilityCases) assert.equal(bad.dmNeedsServerUpdate(features), expected);
+  }, assert.AssertionError);
+});
 
 it('серверный поиск требует users1 и паузы 300 мс, старый сервер не получает ручку', () => {
   // Незнакомая capability не должна включить запрос к отсутствующему endpoint.
@@ -99,6 +172,34 @@ describe('кандидаты новой беседы', () => {
 });
 
 const guest = { id: 'home', name: 'Соседи' } as never;
+
+it('R189 fedm1 открывает ЛС с гостем-собеседником, но не отменяет запрет для самого гостя', () => {
+  // Класс ошибки: новый признак снимает двусторонний запрет без различения инициатора и собеседника.
+  assert.equal(dmBlockText(null, guest, true), null);
+  assert.equal(dmBlockText(null, null, true), null);
+  assert.match(dmBlockText(null, guest, false)!, /людьми других инстансов/);
+  for (const target of [null, guest]) for (const on of [false, true]) assert.match(dmBlockText(guest, target, on)!, /Вы здесь гость/);
+});
+it('R189 удалённый поиск сохраняет запрос как введён, только обрезая края, и требует fedm1', () => {
+  // Класс ошибки: сервер получает локально нормализованный запрос и теряет дом/регистр введённого адреса.
+  for (const value of ['@Peer@Neighbor.example', 'Peer@Neighbor.example:4300']) {
+    assert.equal(dmRemoteQuery(`  ${value}  `, true), value);
+    assert.equal(dmRemoteQuery(value, false), null);
+  }
+  for (const value of ['', '@peer', 'peer', '@@peer@neighbor.example', '@peer@', 'перо@neighbor.example', 'a'.repeat(33) + '@neighbor.example']) {
+    assert.equal(dmRemoteQuery(value, true), null);
+  }
+});
+it('R189 возможность удалённых ЛС включается только точным fedm1, до загрузки признаков не включается', () => {
+  // Класс ошибки: клиент открывает ещё не подключённый маршрут по похожему или следующему признаку.
+  assert.equal(serverFedDm(['fedm1']), true);
+  for (const features of [null, undefined, [], ['dm1'], ['fedm2'], ['FEDM1']]) assert.equal(serverFedDm(features), false);
+});
+it('R189 подпись удалённого человека содержит его домашний логин и дом, без домена не выводит undefined', () => {
+  // Класс ошибки: служебный id теневого или неизвестный дом выдаются человеку как адрес для поиска.
+  assert.equal(remoteHandle({ username: 'peer', instance: { name: 'Сосед', domain: 'neighbor.example' } }), '@peer@neighbor.example');
+  assert.equal(remoteHandle({ username: 'peer', instance: { name: null, domain: '' } }), '@peer');
+});
 
 describe('личка между инстансами', () => {
   it('двое местных могут открыть личку', () => {

@@ -174,6 +174,35 @@ export function voiceTimecode(ms: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
+/** Шаг столбика огибающей на телефоне, px: 2 столбик + 1 зазор — Telegram Android `SeekBarWaveform.java` (`width / dpf2(3)`). */
+export const VOICE_BAR_PITCH = 3;
+
+/** Сколько столбиков влезает в волну шириной `widthPx`: на каждые 3 px один; последний зазор не считается. */
+export function voiceBarCount(widthPx: number): number {
+  if (!Number.isFinite(widthPx) || widthPx <= 0) return 0;
+  return Math.max(1, Math.floor((widthPx + 1) / VOICE_BAR_PITCH));
+}
+
+/**
+ * Огибающая из вложения (обычно 48 значений 0…100) → `n` столбиков: на каждый — максимум по его отрезку записи (чаще, чем
+ * записей, — ближайшее значение). Как `SeekBarWaveform.calculateHeights`: форма речи сохраняется при любом числе столбиков.
+ */
+export function resampleWaveform(wave: readonly number[], n: number): number[] {
+  if (n <= 0 || wave.length === 0) return [];
+  if (wave.length === n) return [...wave];
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const from = (i * wave.length) / n;
+    const to = ((i + 1) * wave.length) / n;
+    const a = Math.floor(from);
+    const b = Math.max(a, Math.ceil(to) - 1);
+    let m = 0;
+    for (let k = a; k <= b && k < wave.length; k++) m = Math.max(m, wave[k] ?? 0);
+    out.push(m);
+  }
+  return out;
+}
+
 /**
  * Ширина огибающей голосового в пузыре ЛС, px — от длительности, как у Telegram Web (tweb `components/audio.tsx`
  * `createWaveformBars`: `clamp(duration / 60 * maxW, minW, maxW)`): минута и длиннее — во всю ширину, короткое — уже.

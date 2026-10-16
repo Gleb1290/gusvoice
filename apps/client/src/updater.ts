@@ -1,6 +1,7 @@
 import { isDesktop } from './hotkeys';
 import { toast } from './toast';
 import { useUpdate } from './updateStore';
+import { SPLASH_TIMING } from './splashFlow';
 
 /** localStorage marker: set to the installed version right after a successful update, consumed once
  *  on the next launch to show the "обновлён до vX" heads-up. */
@@ -52,34 +53,81 @@ async function relaunchLazily(): Promise<void> {
   await relaunch();
 }
 
+/** Поставить метку «обновлён до X» (её покажет следующий запуск, `notifyIfJustUpdated`). Ставится ДО
+ *  `install()`: на Windows установщик закрывает приложение изнутри `install()`, и строка после него не
+ *  выполнялась никогда — тост «обновлён до» на Windows не появлялся (найдено 15.10, заставка). */
+export function markJustUpdated(version: string): void {
+  try {
+    localStorage.setItem(UPDATED_KEY, version);
+  } catch {
+    /* localStorage unavailable — skip the marker, never block the update */
+  }
+}
+
+/** Снять метку, если установка сорвалась (приложение осталось на прежней версии). */
+export function unmarkJustUpdated(): void {
+  try {
+    localStorage.removeItem(UPDATED_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Сколько этапы карточки обновления держатся на экране минимум (15.10): скачивание проходило за доли
+ *  секунды, и карточку никто не видел. Те же числа, что у заставки (`SPLASH_TIMING`). */
+export const PANEL_DOWNLOAD_MIN_MS = SPLASH_TIMING.downloadMinMs;
+export const PANEL_INSTALL_MIN_MS = SPLASH_TIMING.installMinMs;
+
+/** Время и пауза — швы для тестов (по умолчанию настоящие). */
+export interface UpdatePace {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+const realPace: UpdatePace = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
+
 /** Download + install a known-available update with progress, then 'ready' (awaiting relaunch). Stamps
  *  the just-updated marker so the next launch shows the persistent heads-up. Throws on failure.
  *  Экспортирована с `stopShare` ради теста порядка (показ гасится ДО `install()`); приложение зовёт её
- *  с одним аргументом — остановка настоящая. */
+ *  с одним аргументом — остановка настоящая. `pace` — шов времени: этап «скачивание» держится на экране
+ *  не меньше `PANEL_DOWNLOAD_MIN_MS` (полосу плавно доводит `UpdatePanel`), «установка» —
+ *  `PANEL_INSTALL_MIN_MS` до запуска установщика. */
 export async function downloadAndInstall(
   update: Pick<UpdateHandle, 'download' | 'install' | 'version'>,
   stopShare: () => Promise<void> = stopNativeShareLazily,
+  pace: UpdatePace = realPace,
 ): Promise<void> {
   const { set } = useUpdate.getState();
-  set({ phase: 'downloading', downloaded: 0, total: 0 });
+  const t0 = pace.now();
+  set({ phase: 'downloading', version: update.version, downloaded: 0, total: 0, startedAt: Date.now(), dlDone: false });
   await update.download((e) => {
     const st = useUpdate.getState();
     if (e.event === 'Started') set({ total: e.data.contentLength ?? 0, downloaded: 0 });
     else if (e.event === 'Progress') set({ downloaded: st.downloaded + e.data.chunkLength });
     else if (e.event === 'Finished') set({ downloaded: st.total || st.downloaded });
   });
+  set({ downloaded: useUpdate.getState().total || useUpdate.getState().downloaded, dlDone: true });
+  const dlLeft = t0 + PANEL_DOWNLOAD_MIN_MS - pace.now();
+  if (dlLeft > 0) await pace.sleep(dlLeft);
+  const t1 = pace.now();
   set({ phase: 'installing' });
   // На Windows `install()` сам закрывает приложение — показ завершаем ДО него (см. выше).
   await endShareBeforeExit(stopShare);
-  await update.install();
+  const instLeft = t1 + PANEL_INSTALL_MIN_MS - pace.now();
+  if (instLeft > 0) await pace.sleep(instLeft);
+  // Метка — ДО `install()`: на Windows из него не возвращаются (см. `markJustUpdated`).
+  markJustUpdated(update.version);
+  try {
+    await update.install();
+  } catch (e) {
+    unmarkJustUpdated();
+    throw e;
+  }
   set({ phase: 'ready' });
   pendingUpdate = null;
   snoozedVersion = update.version; // already installed — don't let the 30-min poll re-offer it
-  try {
-    localStorage.setItem(UPDATED_KEY, update.version);
-  } catch {
-    /* localStorage unavailable — skip the marker, never block the update */
-  }
 }
 
 /**
@@ -115,6 +163,37 @@ export async function runDesktopUpdateCheck(): Promise<void> {
 }
 
 /**
+ * Проверка при запуске — с учётом заставки (15.10). В Windows-сборке её делает окно заставки
+ * (`SplashScreen`, `splash.rs` → `gv_launch_splash`), и главное окно второй раз не проверяет. Заставки
+ * нет (другая сборка, команда не ответила) — как раньше, `runDesktopUpdateCheck`. `hadSplash` — шов для тестов.
+ */
+export async function runLaunchUpdate(hadSplash: () => Promise<boolean> = launchHadSplash): Promise<void> {
+  if (!isDesktop()) return;
+  let splash = false;
+  try {
+    splash = await hadSplash();
+  } catch {
+    splash = false;
+  }
+  if (!splash) await runDesktopUpdateCheck();
+}
+
+/** `launchHadSplash` без исключений: команды нет / не Tauri — «заставки нет». */
+async function hadSplashSafe(): Promise<boolean> {
+  try {
+    return await launchHadSplash();
+  } catch {
+    return false;
+  }
+}
+
+async function launchHadSplash(): Promise<boolean> {
+  const core = (window as unknown as { __TAURI__?: { core?: { invoke: (c: string) => Promise<unknown> } } }).__TAURI__?.core;
+  if (!core) return false;
+  return (await core.invoke('gv_launch_splash')) === true;
+}
+
+/**
  * POLL path — non-intrusive OFFER. Runs every 30 min while open. If a newer build exists, park the
  * handle and flip the store to 'available' so UpdatePanel shows a small "Доступно обновление vX —
  * Обновить / Позже" card; it does NOT download or install on its own (the user accepts via
@@ -139,7 +218,7 @@ async function checkForUpdateOffer(): Promise<void> {
       return;
     }
     pendingUpdate = update;
-    set({ phase: 'available', version: update.version, notes: update.body ?? null });
+    set({ phase: 'available', version: update.version, notes: update.body ?? null, viaSplash: await hadSplashSafe() });
   } catch (e) {
     console.warn('[updater] background check failed:', e);
     set({ phase: 'idle' });
@@ -166,7 +245,7 @@ export async function manualUpdateCheck(): Promise<void> {
     }
     snoozedVersion = null; // the user explicitly asked — re-offer even a version they snoozed
     pendingUpdate = update;
-    set({ phase: 'available', version: update.version, notes: update.body ?? null });
+    set({ phase: 'available', version: update.version, notes: update.body ?? null, viaSplash: await hadSplashSafe() });
   } catch (e) {
     console.warn('[updater] manual check failed:', e);
     set({ phase: 'idle' });
@@ -178,8 +257,18 @@ export async function manualUpdateCheck(): Promise<void> {
  * Download + install the OFFERED update (UpdatePanel's "Обновить" button), then offer restart.
  * Fail-safe → 'error' phase (app keeps running). The launch path uses downloadAndInstall directly.
  */
-export async function applyPendingUpdate(): Promise<void> {
+export async function applyPendingUpdate(
+  hadSplash: () => Promise<boolean> = hadSplashSafe,
+  restart: () => Promise<void> = relaunchApp,
+): Promise<void> {
   if (!isDesktop() || !pendingUpdate) return;
+  // 16.10 (владелец: «всё в заставке», как Discord): в сборке с заставкой открытое приложение обновление
+  // только ПРЕДЛАГАЕТ, а качает и ставит его заставка после перезапуска — один показ на всё, с гусём-админом.
+  // Раньше карточка качала и ставила сама, а заставка новой версии потом «проверяла» впустую — два показа подряд.
+  if (await hadSplash()) {
+    await restart();
+    return;
+  }
   const update = pendingUpdate;
   try {
     await downloadAndInstall(update);

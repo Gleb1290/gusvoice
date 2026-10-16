@@ -72,7 +72,7 @@ export async function appVersion(): Promise<string | null> {
 }
 
 /** Native download lifecycle payload — mirrors DownloadInfo in the Tauri shell (lib.rs). */
-export type DownloadInfo = { name: string; dir: string; path: string };
+export type DownloadInfo = { name: string; dir: string; path: string; url?: string };
 
 /**
  * Shell asking where to put a file: emitted INSTEAD of downloading when no folder is configured

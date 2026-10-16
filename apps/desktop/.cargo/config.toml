@@ -1,0 +1,18 @@
+# Картинки и GIF из клавиатуры (G50, 14.10). wry генерирует Kotlin-класс WebView (`RustWebView`) при сборке; сюда вставляется
+# тело его `{{class-extension}}` (wry/build.rs читает `WRY_RUSTWEBVIEW_CLASS_EXTENSION`). Переопределение отдаёт подключение
+# поля ввода `KeyboardContent.wrap` (src-tauri/gen/android/.../KeyboardContent.kt): оно объявляет клавиатуре `image/*` и ловит
+# `commitContent`. Литеральная многострочная строка TOML (три апострофа): внутри ни апострофов, ни обратных косых.
+#
+# 🔴 Лежит ЗДЕСЬ, а не в src-tauri/.cargo (приёмка 14.10, Б2): cargo ищет config.toml от ТЕКУЩЕГО каталога вверх, а сборка
+# Android (`tauri android build` → gradle → `tauri android android-studio-script`) зовёт cargo не из src-tauri — раздел `[env]`
+# из src-tauri/.cargo/config.toml туда не доходил, и в APK у `RustWebView` не было `onCreateInputConnection`. Этот каталог —
+# предок и src-tauri, и apps/desktop, cargo находит его из обоих. Страж в CI: шаг «В APK у RustWebView есть подключение
+# клавиатуры» в .gitea/workflows/android.yaml (dexdump собранного APK).
+# Копия того же раздела — в src-tauri/.cargo/config.toml (по ней проверка Codex R218); держать дословно одинаковыми.
+# Env-раздел не трогает остальные цели: переменную читает только сборочный скрипт wry при генерации Kotlin для Android.
+[env]
+WRY_RUSTWEBVIEW_CLASS_EXTENSION = '''
+    override fun onCreateInputConnection(outAttrs: android.view.inputmethod.EditorInfo): android.view.inputmethod.InputConnection? {
+        return KeyboardContent.wrap(super.onCreateInputConnection(outAttrs), outAttrs)
+    }
+'''

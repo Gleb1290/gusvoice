@@ -1,0 +1,37 @@
+{
+  "id": "0199e3c4-8d5e-7f60-9a1b-2c3d4e5f6a7b",
+  "conversation_id": "0199d2a0-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "author": { "instance_id": "kn2djtbwr4u3rsjkpze2o45obli6aajt", "user_id": "0193f1a2-5c6d-7e8f-9a0b-1c2d3e4f5a6b" },
+  "client_id": "c-0199e3c4-8d5e",
+  "payload_hash": "c2d3e4f5a6071829",
+  "created_at": 1760450400000,
+  "origin_sort_key": 1760450400000123,
+  "content": "📊 Викторина: Сколько планет в Солнечной системе?\n— Семь\n— Восемь\n— Девять",
+  "reply_to_id": null,
+  "forwarded_from": null,
+  "silent": false,
+  "no_preview": true,
+  "caption_above": false,
+  "reply_quote": null,
+  "sticker": null,
+  "service": null,
+  "attachments": [],
+  "edit_version": 0,
+  "edited_at": null,
+  "deleted": false,
+  "media": {
+    "kind": "poll",
+    "question": "Сколько планет в Солнечной системе?",
+    "options": [
+      { "id": "0", "text": "Семь" },
+      { "id": "1", "text": "Восемь" },
+      { "id": "2", "text": "Девять" }
+    ],
+    "anonymous": false,
+    "multi": false,
+    "quiz": true,
+    "closed": true,
+    "correct": "1",
+    "solution": "Плутон с 2006 года — карликовая планета."
+  }
+}

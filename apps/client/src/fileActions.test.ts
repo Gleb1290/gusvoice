@@ -3,8 +3,25 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import * as toastRuntime from './toast';
 
 const att = { id: 'private-id', url: '/download/private-id', name: 'report.pdf', contentType: 'application/pdf; charset=binary', size: 4 };
+
+for (const [body, expected] of [
+  [{ error: 'federation.att_unavailable', instance: 'Гусь' }, 'Файл появится, когда «Гусь» снова будет на связи'],
+  [{ error: 'federation.att_unavailable' }, 'Файл появится, когда инстанс собеседника снова будет на связи'],
+  [undefined, 'Не удалось сохранить файл'],
+] as const) it(`R195 загрузка и report 503 ${body ? ('instance' in body ? 'с именем' : 'без имени') : 'без JSON'} дают человеческий текст`, async () => {
+  // Класс ошибки: JSON отказа файла теряется до общего report или выдается ложное ожидание для обычной 503.
+  const f = fixture(); f.setHttpStatus(503); f.setHttpBody(body);
+  await assert.rejects(f.api.fetchWithProgress('/fixture', () => {}), (e: unknown) => {
+    assert.equal(f.api.isFedFileError(e), !!body);
+    assert.equal((e as Error).message, body ? 'federation.att_unavailable' : 'HTTP 503'); return true;
+  });
+  f.api.saveAttachmentFile(att);
+  await until(() => f.toasts.length === 1, 'настоящий report закончил обработку отказа');
+  assert.equal(f.toasts[0][1], expected); assert.equal(f.saveCalls.length, 0);
+});
 type NativeErrorCode = 'missing' | 'no-app' | 'denied';
 class NativeFileError extends Error {
   constructor(readonly code: NativeErrorCode) { super(code); }
@@ -26,6 +43,7 @@ function fixture(mutate?: (source: string) => string) {
   let pending = false;
   let saveAvailable = true;
   let httpStatus = 200;
+  let httpBody: unknown = undefined;
   let chunks: Uint8Array[] | null = null;
   let openError: NativeErrorCode | null = null;
   let reopenError: NativeErrorCode | null = null;
@@ -49,6 +67,7 @@ function fixture(mutate?: (source: string) => string) {
       status: httpStatus,
       headers: { get: (name: string) => name === 'content-length' ? '4' : 'application/pdf' },
       body,
+      json: async () => { if (httpBody === undefined) throw new SyntaxError('не JSON'); return httpBody; },
       blob: async () => new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'application/pdf' }),
     });
   };
@@ -56,6 +75,7 @@ function fixture(mutate?: (source: string) => string) {
     module,
     exports: module.exports,
     Blob,
+    Error,
     AbortController,
     // Фиксированный clock не позволяет медленному CI случайно добавить лишнее обновление окна 100 мс.
     Date: { now: () => 1000 },
@@ -79,7 +99,11 @@ function fixture(mutate?: (source: string) => string) {
         saveMediaNative: async (...args: unknown[]) => { mediaCalls.push(args); },
         shareFileNative: async (...args: unknown[]) => { shareCalls.push(args); },
       };
-      if (id === './toast') return { toast: (...args: unknown[]) => toasts.push(args) };
+      if (id === './toast') return { toast: (...args: unknown[]) => toasts.push(args), toastError: (e: unknown) => {
+        const prior = toastRuntime.useToasts.getState();
+        try { toastRuntime.toastError(e); const last = toastRuntime.useToasts.getState().toasts.at(-1); toasts.push([last?.type, last?.title, last?.subtitle]); }
+        finally { toastRuntime.useToasts.setState(prior, true); }
+      } };
       throw new Error(`unexpected import ${id}`);
     },
   });
@@ -89,6 +113,7 @@ function fixture(mutate?: (source: string) => string) {
     setPending(value: boolean) { pending = value; },
     setSaveAvailable(value: boolean) { saveAvailable = value; },
     setHttpStatus(value: number) { httpStatus = value; },
+    setHttpBody(value: unknown) { httpBody = value; },
     setChunks(value: Uint8Array[] | null) { chunks = value; },
     setOpenError(value: NativeErrorCode | null) { openError = value; },
     setReopenError(value: NativeErrorCode | null) { reopenError = value; },
@@ -103,9 +128,9 @@ async function until(check: () => boolean, reason: string): Promise<void> {
 it('прогресс не делит на ноль, не выходит за 0…1 и показывает тип, ключ и способ сохранения', () => {
   // Нулевой Content-Length и повторяющиеся ссылки у закрытых файлов иначе ломают кольцо и отмену не того вложения.
   const { api } = fixture();
-  assert.equal(api.progressText(0, 0), '0 KB');
-  assert.equal(api.progressText(2048, 4096), '2 KB / 4 KB');
-  assert.equal(api.progressText(8192, 4096), '4 KB / 4 KB', 'текст не показывает загрузку сверх общего размера');
+  assert.equal(api.progressText(0, 0), '0 КБ');
+  assert.equal(api.progressText(2048, 4096), '2 КБ / 4 КБ');
+  assert.equal(api.progressText(8192, 4096), '4 КБ / 4 КБ', 'текст не показывает загрузку сверх общего размера');
   assert.equal(api.progressRatio(0, 0), 0);
   assert.equal(api.progressRatio(1, 0), 0);
   assert.equal(api.progressRatio(-1, 10), 0);
@@ -123,12 +148,31 @@ it('прогресс не делит на ноль, не выходит за 0�
 it('непустой малый файл не показывается нулевым, прогресс использует ту же шкалу размера', () => {
   // 46-байтный файл раньше выглядел пустым: округление веса и текущей загрузки должно совпадать.
   const { api } = fixture();
-  for (const [bytes, label] of [[0, '0 KB'], [1, '1 KB'], [46, '1 KB'], [1023, '1 KB'], [1024, '1 KB'], [1536, '2 KB'], [1048576, '1.0 MB']] as const) {
+  for (const [bytes, label] of [[0, '0 КБ'], [1, '1 КБ'], [46, '1 КБ'], [1023, '1 КБ'], [1024, '1 КБ'], [1536, '2 КБ'],
+    [1048575, '1024 КБ'], [1048576, '1,0 МБ'], [1048577, '1,0 МБ']] as const) {
     assert.equal(api.sizeText(bytes), label);
   }
-  assert.equal(api.progressText(300, 4096), '1 KB / 4 KB');
+  assert.equal(api.progressText(300, 4096), '1 КБ / 4 КБ');
+  assert.equal(api.progressText(1258291, 4718592), '1,2 МБ / 4,5 МБ');
+  assert.equal(api.progressText(1258291, 0), '1,2 МБ');
   const source = readFileSync(new URL('./components/AttachmentView.tsx', import.meta.url), 'utf8');
   assert.match(source, /export const kb = sizeText;/, 'карточка не заводит собственное расходящееся округление');
+});
+
+function checkRussianMegabytes(api: typeof import('./fileActions')) {
+  assert.equal(api.sizeText(1048576), '1,0 МБ', 'R232 размер мегабайтов использует русскую десятичную запятую');
+  assert.equal(api.progressText(1258291, 4718592), '1,2 МБ / 4,5 МБ', 'R232 прогресс использует ту же русскую шкалу');
+}
+it('R232 возврат десятичной точки в мегабайтах обнаруживается на настоящем форматтере', () => {
+  checkRussianMegabytes(fixture().api);
+  const anchor = ".toFixed(1).replace('.', ',')";
+  const mutant = fixture(source => {
+    assert.equal(source.split(anchor).length - 1, 1);
+    return source.replace(anchor, '.toFixed(1)');
+  });
+  assert.throws(() => checkRussianMegabytes(mutant.api), (e: unknown) => e instanceof assert.AssertionError &&
+    e.message.startsWith('R232 размер мегабайтов использует русскую десятичную запятую') &&
+    e.operator === 'strictEqual' && e.actual === '1.0 МБ' && e.expected === '1,0 МБ');
 });
 
 it('повторное нажатие отменяет открытую загрузку без системного тоста', async () => {

@@ -31,14 +31,14 @@ it('верхняя полоса резервирует место только �
         await React.act(async () => root.render(React.createElement(CallBar, { top: true })));
         assert.ok(host.querySelector('.call-bar.call-bar-top')); assert.ok(document.documentElement.classList.contains(CALLBAR_ROOT_CLASS));
         await React.act(async () => useCall.getState().setExpanded(true));
-        assert.equal(host.querySelector('.call-bar'), null); assert.equal(document.documentElement.classList.contains(CALLBAR_ROOT_CLASS), false, 'разворот снимает резерв места');
+        assert.equal(host.querySelector('.call-bar') === null, true); assert.equal(document.documentElement.classList.contains(CALLBAR_ROOT_CLASS), false, 'разворот снимает резерв места');
         await React.act(async () => useCall.getState().setExpanded(false));
         assert.ok(document.documentElement.classList.contains(CALLBAR_ROOT_CLASS));
         await React.act(async () => useCall.setState({ call: null, peer: null }));
         assert.equal(document.documentElement.classList.contains(CALLBAR_ROOT_CLASS), false, 'конец звонка снимает резерв места');
         await React.act(async () => useCall.setState({ call: {}, peer: { name: 'Друг' } }));
         await React.act(async () => root.render(React.createElement(CallBar, { top: false })));
-        assert.ok(host.querySelector('.call-bar')); assert.equal(host.querySelector('.call-bar-top'), null);
+        assert.ok(host.querySelector('.call-bar')); assert.equal(host.querySelector('.call-bar-top') === null, true);
         assert.equal(document.documentElement.classList.contains(CALLBAR_ROOT_CLASS), false, 'ПК не ставит класс');
         await React.act(async () => root.render(React.createElement(CallBar, { top: true })));
         await React.act(async () => root.unmount());

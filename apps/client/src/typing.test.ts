@@ -37,7 +37,7 @@ it('голос переходит в отправку сразу, слабые �
   }
 });
 
-it('сообщение гасит печать только своего автора, а gateway вызывает dropTyping во всех трёх путях', () => {
+it('сообщение гасит печать только своего автора, а gateway вызывает dropTyping в обоих живых путях', () => {
   // После отправки «печатает…» должно исчезнуть сразу у этого автора, но не у второго участника той же беседы.
   const source = readFileSync(new URL('./typing.ts', import.meta.url), 'utf8');
   let now = 100_000;
@@ -79,10 +79,8 @@ it('сообщение гасит печать только своего авт�
 
   const sockets = readFileSync(fileURLToPath(new URL('./sockets.ts', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
   const message = /case 'message\.create':\s*\{[\s\S]*?dropTyping\(msg\.channelId, msg\.message\.author\.id\)/;
-  const dm = /case 'dm\.create':\s*\{[\s\S]*?dropTyping\(msg\.channelId, msg\.message\.author\.id\)/;
   const conv = /case 'conv\.change':\s*\{[\s\S]*?if \(msg\.created && m\) dropTyping\(convId, m\.author\.id\)/;
   assert.match(sockets, message, 'канал сбрасывает печать автора сообщения');
-  assert.match(sockets, dm, 'старая ЛС сбрасывает печать автора сообщения');
   assert.match(sockets, conv, 'новая беседа сбрасывает печать только при created с живым сообщением');
 });
 

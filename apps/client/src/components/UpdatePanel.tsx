@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useUpdate } from '../updateStore';
-import { applyPendingUpdate, relaunchApp, runDesktopUpdateCheck, snoozeUpdate } from '../updater';
+import { applyPendingUpdate, PANEL_DOWNLOAD_MIN_MS, relaunchApp, runDesktopUpdateCheck, snoozeUpdate } from '../updater';
+import { shownDownloadFraction } from '../splashFlow';
+import { Goose } from './Goose';
 
 /**
  * Discord-style desktop auto-update card (round-7 design): a floating bottom-right card that tracks
@@ -11,14 +13,8 @@ function fmtMB(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
 }
 
-const GooseIcon = () => (
-  <svg width="30" height="24" viewBox="0 0 50 40" fill="none" aria-hidden="true">
-    <circle cx="19" cy="22" r="13" fill="#f3ecd9" />
-    <path d="M30 17 C40 16 48 19 49 22 C48 25 40 28 30 27 C28 24 28 20 30 17 Z" fill="#ef9d3a" />
-    <ellipse cx="23" cy="20" rx="2.4" ry="2.8" fill="#2b2630" />
-    <circle cx="23.9" cy="18.8" r="0.9" fill="#fff" />
-  </svg>
-);
+/** Значок карточки — голова маскота (16.10: был свой рисованный гусь старого образца, владелец: «старые все лого»). */
+const GooseIcon = () => <Goose pose="head" size={32} />;
 const CheckIcon = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M5 13 L10 18 L19 7" />
@@ -41,9 +37,24 @@ const CloseIcon = () => (
   </svg>
 );
 
+/** Процент на полосе скачивания (15.10): не больше настоящего и не быстрее `PANEL_DOWNLOAD_MIN_MS` от
+ *  начала — файл приходил за доли секунды, и полосу никто не успевал увидеть. Правило — `splashFlow`. */
+function usePacedPct(active: boolean, startedAt: number, downloaded: number, total: number, done: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 50);
+    return () => clearInterval(id);
+  }, [active]);
+  const real = total > 0 ? downloaded / total : null;
+  return Math.round(shownDownloadFraction(real, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done) * 100);
+}
+
 export function UpdatePanel() {
-  const { phase, version, notes, downloaded, total, error, set } = useUpdate();
+  const { phase, version, notes, downloaded, total, startedAt, dlDone, viaSplash, error, set } = useUpdate();
   const [showNotes, setShowNotes] = useState(false);
+  const pct = usePacedPct(phase === 'downloading', startedAt, downloaded, total, dlDone);
   if (phase === 'idle' || phase === 'checking') return null;
 
   const v = version ?? '';
@@ -58,20 +69,21 @@ export function UpdatePanel() {
     : isDownloading
       ? `Загрузка обновления ${v}`.trim()
       : isInstalling
-        ? 'Установка обновления…'
+        ? 'Устанавливаю…'
         : isReady
           ? `Обновление ${v} установлено`.trim()
           : 'Не удалось обновиться';
   const subtitle = isAvailable
-    ? 'обновить можно, когда удобно'
+    ? viaSplash
+      ? 'поставится при перезапуске'
+      : 'обновить можно, когда удобно'
     : isDownloading
       ? 'загрузка · GusVoice'
       : isInstalling
-        ? 'распаковка пакета'
+        ? 'приложение перезапустится само'
         : isReady
           ? 'нужен перезапуск'
           : error ?? 'проверьте соединение';
-  const pct = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
   const dismiss = () => set({ phase: 'idle', error: null });
 
   return (
@@ -129,7 +141,7 @@ export function UpdatePanel() {
         {isAvailable && (
           <div className="update-actions">
             <button className="update-btn-primary" onClick={(e) => { e.stopPropagation(); void applyPendingUpdate(); }}>
-              Обновить
+              {viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}
             </button>
             <button className="update-btn-ghost" onClick={(e) => { e.stopPropagation(); snoozeUpdate(); }}>
               Позже
@@ -189,7 +201,7 @@ export function UpdatePanel() {
               )}
               {isAvailable && (
                 <button className="update-btn-primary" onClick={() => { setShowNotes(false); void applyPendingUpdate(); }}>
-                  Обновить
+                  {viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}
                 </button>
               )}
             </div>

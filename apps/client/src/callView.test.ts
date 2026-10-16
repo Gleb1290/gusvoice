@@ -46,7 +46,11 @@ it('отказ приватности объясняет запрет и под�
   // Человек должен отличить запрет по настройкам от поломки связи, даже если имя не загрузилось.
   const named = rules.callPrivacyNotice('Алиса');
   assert.equal(named.title, 'Позвонить нельзя');
-  assert.match(named.body, /Алиса/);
-  assert.match(named.body, /ограничил\(а\) звонки/);
-  assert.equal(rules.callPrivacyNotice('  ').body.startsWith('Собеседник '), true);
+  assert.equal(named.body, 'Алиса не принимает звонки.');
+  assert.equal(named.icon, 'ban');
+  assert.equal(rules.callPrivacyNotice('  Алиса  ').body, named.body);
+  for (const name of ['', '  ']) {
+    assert.equal(rules.callPrivacyNotice(name).body, 'Собеседник не принимает звонки.');
+    assert.equal(rules.callPrivacyNotice(name).icon, 'ban');
+  }
 });

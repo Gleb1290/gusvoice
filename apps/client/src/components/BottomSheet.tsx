@@ -15,11 +15,14 @@ export function BottomSheet({
   title,
   subtitle,
   onClose,
+  onBack,
   children,
 }: {
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
   onClose: () => void;
+  /** Стрелка «Назад» слева в шапке (шаги мастера, например «Новая группа», шаг 2): закрывает не лист, а шаг. */
+  onBack?: () => void;
   children: React.ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
@@ -27,11 +30,13 @@ export function BottomSheet({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      /* Esc и системная «Назад» (`stepBack` шлёт Esc) на листе с шагами — шаг назад, как стрелка в шапке (#218, решение
+         владельца): на первом шаге — закрыть лист. */
+      if (e.key === 'Escape') (onBack ?? onClose)();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, onBack]);
 
   /* Ручка и шапка тянутся пальцем вниз: лист едет следом и закрывается, если утянуть его на треть
      высоты или бросить рывком. Жест живёт ТОЛЬКО на ручке — тело листа прокручивается, и на нём
@@ -97,6 +102,14 @@ export function BottomSheet({
         aria-modal="true"
         onClick={(e) => e.stopPropagation()}
       >
+        {onBack && (
+          // Вне зоны жеста `.sheet-drag`: захват указателя ручкой перехватил бы нажатие. Сторож нулевой высоты липнет к верху листа.
+          <div className="sheet-back-dock">
+            <button type="button" className="sheet-back" aria-label="Назад" title="Назад" onClick={onBack}>
+              <Icon name="chevron-left" size={24} />
+            </button>
+          </div>
+        )}
         <div
           className="sheet-drag"
           onPointerDown={onGrabDown}
@@ -106,7 +119,7 @@ export function BottomSheet({
         >
           <div className="sheet-grab" />
           {title != null && (
-            <div className="sheet-head">
+            <div className={onBack ? 'sheet-head with-back' : 'sheet-head'}>
               <div className="sheet-title">{title}</div>
               {subtitle != null && <div className="sheet-sub">{subtitle}</div>}
             </div>

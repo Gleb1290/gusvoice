@@ -4,6 +4,7 @@
 import type { StickerFormat } from './stickerRules';
 import type { NotifyView } from './notifyView';
 import type { ConvCallService } from './calls';
+import type { ConvMediaMark } from './convMedia';
 
 export type ChannelType = 'text' | 'voice';
 
@@ -146,6 +147,8 @@ export interface User {
   hideReadTime?: boolean;
   /** «Кто может звонить» (`presence4`, та же тройка, что у «Времени захода»). Только в СВОЁМ профиле. */
   callPrivacy?: LastSeenPrivacy;
+  /** «Кто может мне писать» (`msgpriv1`): все или только мои контакты (+ те, кому я писал первым). Только в СВОЁМ профиле. */
+  messagePrivacy?: MessagePrivacy;
   /** «Показывать имя / текст» в уведомлениях (G38, `push2`, `notifyView.ts`). Только в СВОЁМ профиле. */
   notifyView?: NotifyView;
   /** «Уведомления из групп» (G38, `push2`): `false` — пуш и всплывашки групп не приходят. Только в СВОЁМ профиле. */
@@ -163,6 +166,8 @@ export interface User {
  * Неизвестное значение читается как `peers`.
  */
 export type LastSeenPrivacy = 'everyone' | 'peers' | 'nobody';
+/** «Кто может мне писать» (`msgpriv1`): `contacts` — мои контакты и те, кому я сам писал (Telegram «Мои контакты и Premium»). */
+export type MessagePrivacy = 'everyone' | 'contacts';
 
 /** Человек в списке исключений «Времени захода» (G07, `lastseen3`). */
 export interface LastSeenExceptionUser {
@@ -205,6 +210,11 @@ export interface UserLastSeen {
    * Нет поля — сервер не знает настройки: трубку показываем, как раньше.
    */
   canCall?: boolean;
+  /**
+   * Могу ли я ему написать по его «Кто может мне писать» (`msgpriv1`; только в `GET /users/:id/last-seen`). Нет поля — как
+   * раньше: поле ввода есть. `false` — вместо поля ввода плашка «ограничил(а) круг…» (tdesktop `lng_restricted_send_non_premium`).
+   */
+  canMessage?: boolean;
 }
 
 /** Ответ `GET /conv/:id/messages/:mid/read-at` (С1, `lastseen1`) — подвал меню своего сообщения в ЛС. */
@@ -215,6 +225,24 @@ export interface ConvReadAt {
   at: string | null;
   /** Время скрыто приватностью (его или моей) — Telegram «прочитано» без времени. */
   hidden: boolean;
+}
+
+/** Прочитавший СВОЁ сообщение в группе (`readers1`; Telegram `ReadParticipantDate` без даты — времени у групп нет). */
+export interface ConvReader {
+  userId: string;
+  username: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+/**
+ * Ответ `GET /conv/:id/messages/:mid/readers` (15.10, `readers1`) — «N прочитали» в меню своего сообщения в группе
+ * (Telegram `messages.getMessageReadParticipants`). Порядок — порядок участников группы.
+ */
+export interface ConvReaders {
+  items: ConvReader[];
+  /** Сообщение старше 7 суток — список не отдаётся (Telegram `MESSAGE_TOO_OLD`, `chat_read_mark_expire_period`). */
+  expired?: true;
 }
 
 /** Row in the admin panel's user list. */
@@ -270,6 +298,46 @@ export interface Server {
   iconUrl: string | null;
   ownerId: string;
   createdAt: string;
+  /**
+   * Только в ответе `GET /servers` (12.10, #218; правило 11 — добавление): сколько у смотрящего непрочитанных сообщений на
+   * сервере и сколько из них упоминают его — то же правило, что `bootstrap.reads` и `GET /unread` (окно 14 дней, чужие
+   * сообщения, видимые каналы). Поля нет — старый сервер (или сосед на прошлом релизе): клиент берёт только живые счётчики.
+   */
+  unread?: number;
+  mentions?: number;
+  /**
+   * Последнее сообщение сервера среди каналов, которые смотрящий видит и может читать (`VIEW_CHANNEL` + `READ_HISTORY`), —
+   * вторая строка строки сервера в списке на телефоне. `null` — сообщений в таких каналах нет; поля нет — старый сервер.
+   */
+  lastMessage?: ServerLastMessage | null;
+}
+
+/**
+ * Последнее сообщение сервера для строки списка (12.10, #218): форма превью строки беседы (`ConvLastMessage`) без полей,
+ * которых у канала нет (✓✓, миниатюры, звонки), плюс канал. Вид вложений — то же правило, что у ЛС
+ * (`backend convRules.lastAttachmentPreview`); у стикера без текста `text` — его эмодзи, `attachmentKind: 'sticker'`.
+ */
+export interface ServerLastMessage
+  extends Pick<
+    ConvLastMessage,
+    | 'id'
+    | 'authorId'
+    | 'text'
+    | 'attachments'
+    | 'attachmentKind'
+    | 'attachmentDurationMs'
+    | 'attachmentName'
+    | 'attachmentVideo'
+    | 'attachmentGif'
+    | 'attachmentOnce'
+    | 'attachmentRound'
+    | 'createdAt'
+  > {
+  channelId: string;
+  /** Название канала; нет — неизвестно (запись, собранная клиентом из события шлюза чужого сервера). */
+  channelName?: string;
+  /** Отображаемое имя автора (`users.display_name`, как в ленте канала). */
+  authorName: string;
 }
 
 export interface Category {
@@ -550,6 +618,15 @@ export interface Attachment {
    * длительностью до минуты; старый клиент поле не знает и рисует обычное видео.
    */
   round?: true;
+  /**
+   * ЛС между инстансами, Э3 часть 1 (#141, `fedm3`): вложение из копии сообщения человека другого инстанса ещё не скопировано
+   * к нам — ссылка пока отвечает 503 `federation.att_pending`; клиент показывает «загружается». Копия доехала — поля нет, и
+   * сообщение приходит обновлённым (`conv.change`). Добавление.
+   * Э3 часть 2: `'remote'` — файл больше 25 МБ (или у связки кончилось место под копии) лежит только у дома автора: клиент
+   * рисует обычную карточку / плитку, ссылка отдаёт файл через наш бэкенд с инстанса автора (открытие чуть дольше), автор
+   * недоступен — 503 `federation.att_unavailable`. Старый клиент значение не знает — для него это обычное вложение.
+   */
+  fedState?: 'copying' | 'remote';
 }
 
 /** Сохранённый GIF человека («Мои GIF», `gifs1`). `url` — подписанная ссылка для этого смотрящего. */
@@ -741,6 +818,13 @@ export interface Message {
    * Сервер кладёт поле ТОЛЬКО у сообщения с подписью и вложением; старый клиент поля не знает и рисует подпись снизу.
    */
   captionAbove?: true;
+  /**
+   * Опасные ссылки (признак сервера `linkthreats1`, #218 п.5, как «Предупреждение» у Telegram): хосты ссылок текста,
+   * найденные в локальном списке угроз сервера. Считается при КАЖДОЙ отдаче сообщения (список обновляется раз в сутки —
+   * флаг в базе протух бы), поле есть ТОЛЬКО у сообщений с такой ссылкой. Отправку не блокирует: получатель видит плашку
+   * «Опасная ссылка», открыть можно после отдельного подтверждения. Старый клиент поля не знает.
+   */
+  dangerousLinks?: string[];
 }
 
 /**
@@ -782,7 +866,8 @@ export interface Invite {
 export interface DmChannel {
   id: string;
   /** The other participant (never the requesting user). */
-  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'>;
+  /** `homeInstance` (Э1, #141) — только у собеседника с другого инстанса: значок в шапке беседы. */
+  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance'>;
   createdAt: string;
   lastMessageAt: string | null;
   /** Messages from the other user newer than my last-read mark (14-day window). GET /dm only. */
@@ -833,6 +918,20 @@ export interface ConvMessage extends Message {
    */
   voiceOnceSpent?: true;
   /**
+   * ЛС между инстансами, Э2 (12.10, #141, Ф9, признак `fedm2`): копия сообщения человека другого инстанса пришла к нам
+   * позже отправки больше чем на 5 минут (`federation/convSync.deliveredLate`) — момент прихода (ISO). Лента ставит такое
+   * по приходу (внизу), у времени пузыря — «отправлено в ЧЧ:ММ, доставлено позже» (`createdAt` — время отправки на доме
+   * автора). Нет поля — не опоздало или сервер до Э2.
+   */
+  deliveredAt?: string;
+  /**
+   * ЛС между инстансами, Э5 часть 1 (12.10, #141, признак `fedm5`): сообщение пришло «через» другой инстанс — дом автора лежал,
+   * и он писал по долгой сессии на инстансе собеседника (`instance` — id того дома, через который пришло, у собеседника — дом
+   * автора). `confirmed: false` — дом автора ещё не подтвердил (или так и не подтвердил): «через «X», не подтверждено»;
+   * `true` — подтвердил. Нет поля — обычное сообщение.
+   */
+  via?: { instance: string; confirmed: boolean };
+  /**
    * На моё сообщение поставили реакцию, которую я ещё не видел (07.10, признак сервера `reactunread1`, G24): кладётся
    * ТОЛЬКО автору и только `true`. Клиент гасит её, показав сообщение на экране (`POST /conv/:id/reactions-read`), —
    * как `HistoryItem::markReactionsRead` у Telegram. Нет поля — непрочитанных реакций нет или сервер до `reactunread1`.
@@ -848,6 +947,12 @@ export interface ConvMessage extends Message {
    * `kind: 'call'` (`shared/calls.ts`): автор — звонивший, подпись строит читатель (`callServiceText`).
    */
   service?: ConvServiceMark;
+  /**
+   * Вид сообщения (14.10, G69, признак сервера `geocontact1`): геопозиция `{ kind: 'geo' }` или карточка контакта
+   * `{ kind: 'contact' }` (`shared/convMedia.ts`). `content` у такого — запасная фраза для клиента, который вид не знает; новый
+   * клиент рисует карточку. Незнакомый `kind` клиент считает отсутствием поля (правило 11). Нет поля — обычное сообщение.
+   */
+  media?: ConvMediaMark;
 }
 
 /** Метка служебной строки ленты ЛС (`ConvMessage.service`): общий дискриминатор `kind`. */
@@ -940,6 +1045,12 @@ export interface ConvLastMessage {
   authorName?: string;
   /** Последнее — служебная запись группы (`ConvMessage.service`): текст строки без «Имя:». */
   service?: true;
+  /**
+   * Последнее — запись о звонке в 1:1 (`calls1`, 10.10): причина, длительность, видео ли. Строка списка собирает из неё ту же
+   * подпись, что лента (`callServiceText`: звонивший, не дозвонившийся, — «Отменённый», принимающий — «Пропущенный»); без
+   * поля (старый сервер) — запасной текст `text` («Пропущенный звонок»). Поле только у таких (правило 11 — добавление).
+   */
+  call?: Pick<ConvCallService, 'reason' | 'duration' | 'video'>;
   sortKey: number;
   createdAt: string;
 }
@@ -961,7 +1072,8 @@ export interface ConvSummary {
    * Собеседник 1:1. `null` — строки человека нет (не бывает при обезличивании, но список не должен падать); у группы —
    * всегда `null` (участники — в `group`).
    */
-  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'> | null;
+  /** `homeInstance` (Э1, #141) — только у собеседника с другого инстанса (добавление). */
+  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance'> | null;
   createdAt: string;
   /** Время последнего видимого мне сообщения (не общее время беседы: придержанное у получателя её не поднимает). */
   lastMessageAt: string | null;
@@ -1016,6 +1128,49 @@ export interface ConvSummary {
    */
   stranger?: boolean;
   /**
+   * ЛС между инстансами, Э2 часть Б (#141, Ф7): только у беседы с человеком другого инстанса, когда связка с его инстансом
+   * разорвана, на паузе или доверие потеряно — архив только для чтения (запись — 403 `federation.dm_link_broken`).
+   * Поля нет — связка рабочая (или беседа местная). Добавление.
+   */
+  fedLink?: 'broken';
+  /**
+   * ЛС между инстансами, Э3 часть 1 (#141, `fedm3`): только у беседы 1:1 с человеком другого инстанса, чей инстанс не умеет
+   * вложения (признак `dm2`) — файлы туда не уходят (загрузка и пересылка — 400 `federation.dm_attachments_later`), клиент
+   * держит кнопки файлов закрытыми. Поля нет — файлы можно (или беседа местная). Добавление.
+   */
+  fedNoFiles?: true;
+  /**
+   * ЛС между инстансами, Э6 (#141, `fedcall1`): только у беседы 1:1 с человеком другого инстанса, чей инстанс не умеет звонки
+   * (признак `dmcall1`) — кнопка звонка неактивна, `POST /conv/:id/call` — 409 `federation.unsupported`. Добавление.
+   */
+  fedNoCalls?: true;
+  /**
+   * Опрос (14.10, признак связки `dmpoll1`): только у беседы 1:1 с человеком другого инстанса, чей инстанс умеет опрос, — пункт
+   * «Опрос» открыт (без поля у такой беседы — закрыт: копия у соседа была бы текстом, отправка — 403 `conv_poll_federated`).
+   * Добавление.
+   */
+  fedPoll?: true;
+  /**
+   * ЛС между инстансами, исправления ревью 12.10 (#141, п. 7): инстанс собеседника не забирает наши сообщения дольше 10 минут,
+   * хотя есть что забрать (лежит, не может достучаться, у него выключены ЛС) — плашка над полем «Сообщения ждут, пока «X» их
+   * заберёт»; писать можно, сообщения доедут, когда он заберёт. Отдельное поле, а не значение `fedLink`: старый клиент на
+   * любом `fedLink` показал бы архив без поля ввода. Поля нет — забирает (или беседа местная, или связка разорвана). Добавление.
+   */
+  fedStale?: true;
+  /**
+   * ЛС между инстансами, хвост Э7 (14.10, #141): только у 1:1 с человеком другого инстанса — его дом не отвечает нам дольше 10 минут
+   * (тот же признак, что у дома группы в `fedGroupHost.down`: сеть / таймаут / 5xx на забор журнала). Плашка над полем «Инстанс «X»
+   * недоступен — сообщения доедут, когда он вернётся»; писать можно. Важнее `fedStale` (одна плашка), архив `fedLink` важнее обеих.
+   * Поля нет — отвечает (или беседа местная, или связка разорвана). Старый клиент поле не знает и показывает прежнее. Добавление.
+   */
+  fedPeerDown?: true;
+  /**
+   * ЛС между инстансами, Э7 часть 1 (#141, `fedm6`): только у группы, чей дом (инстанс создателя) — другой инстанс. Состав,
+   * название и фото меняет только он: запросы уходят туда; лежит — 403 `federation.dm_group_host_down` (писать можно, доставка
+   * остальным — когда вернётся). Фото группы чужого дома отсюда не меняется — 403 `federation.dm_group_host_only`. Добавление.
+   */
+  fedGroupHost?: { instanceId: string; down?: true };
+  /**
    * Сколько МОИХ сообщений этой беседы с непрочитанными реакциями (07.10, `reactunread1`, G24): «♥ N» над «вниз» и значок ♥
    * в строке списка (Telegram: `unreadReactions().count`, считается по сообщениям, а не по реакциям). Реакции людей, которых
    * я заблокировал, и на удалённое/спрятанное мной не в счёте; своя реакция на своё сообщение — тоже. Поля нет вовсе —
@@ -1057,6 +1212,8 @@ export interface ConvGroupMember {
   displayName: string;
   avatarUrl: string | null;
   role: 'owner' | 'member';
+  /** Э7 часть 1 (#141, `fedm6`): только у участника с другого инстанса — значок инстанса (как `otherUser.homeInstance`). Добавление. */
+  homeInstance?: User['homeInstance'];
 }
 
 /** `POST /api/conv/group` (`groups1`): название обязательно, `userIds` — кроме себя, 1…`GROUP_MEMBER_LIMIT - 1`. */
@@ -1134,6 +1291,16 @@ export interface ConvForwardRequest {
   hideSender?: boolean;
   /** «Скрыть подписи» (G71, `fwd2`): у сообщений с вложением текст не копируется. Слать только при `fwd2`. */
   hideCaptions?: boolean;
+  /**
+   * Переслать ОДИН элемент альбома (G56, признак `album1`; `messageIds` — ровно одно сообщение, у элемента есть `id`): новое
+   * сообщение только с ним, без подписи альбома. Сервер без `album1` поле отбросит и перешлёт альбом целиком — слать только при признаке.
+   */
+  attachmentId?: string;
+}
+
+/** Ответ удаления одного элемента альбома (G56, `album1`): `item` — убран элемент (или повтор), `message` — сообщение целиком. */
+export interface ConvAlbumItemDeleteResponse {
+  removed: 'item' | 'message';
 }
 
 /** Ответ пересылки: новые сообщения по порядку (201), при повторе — они же в нынешнем виде (200, бывает `gone`). */
@@ -1201,6 +1368,11 @@ export interface ConvPinsResponse {
  */
 export interface ConvPinRequest {
   for: 'me' | 'both';
+  /**
+   * G4 (14.10): только группа и `for: 'both'` — галочка «Уведомить всех участников» окна закрепа (Telegram `PinNotify`): `true` —
+   * участникам пуш «закрепил(а) «…»», `false` — строка закрепа «без звука». Нет поля — как раньше (без пуша). 1:1 поле не читает.
+   */
+  notify?: boolean;
 }
 
 /**
@@ -1349,6 +1521,11 @@ export interface ConvSearchAllHit extends ConvSearchHit {
   conversationId: string;
   /** Текст сообщения (до 400 знаков — клиент вырезает кусок вокруг совпадения). */
   content: string;
+  /**
+   * Целое сообщение — только на запрос с `full=1` (12.10, вкладки поиска на телефоне: сетка медиа, строки файлов и голосовых).
+   * Старый сервер поля не шлёт — клиент показывает строку найденного, как раньше.
+   */
+  message?: ConvMessage;
 }
 
 /** Порция поиска по всем беседам: новые первыми; `next` — курсор следующей (более старой) порции, `null` — конец. */
@@ -1492,6 +1669,22 @@ export type UserSearchHit = Pick<User, 'id' | 'username' | 'displayName' | 'avat
 /** Ответ `GET /api/users/search?q=`: точное совпадение логина первым, затем по началу логина, до 8 строк. */
 export interface UserSearchResponse {
   users: UserSearchHit[];
+  /**
+   * ЛС между инстансами, Э1 (#141, `fedm1`): люди связанных инстансов из кеша каталога — по `@имя@домен` (точное имя) или по
+   * началу имени. Скрытых от соседей каталог не отдаёт (Ф11). Нет поля — сервер старше или ЛС между инстансами выключены.
+   */
+  remote?: RemoteUserHit[];
+}
+
+/** Человек связанного инстанса в поиске (`fedm1`): «Написать» — `POST /conv/direct { instanceId, homeUserId }`. */
+export interface RemoteUserHit {
+  instanceId: string;
+  homeUserId: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  /** Подпись инстанса для значка — как `User.homeInstance`. */
+  instance: { name: string | null; domain: string };
 }
 
 /**
@@ -1524,6 +1717,13 @@ export interface InstanceInfo {
    * пришлёт, и это честно читается как «выключена» (`docs/federation-compat.md`).
    */
   federation?: boolean;
+  /**
+   * Название инстанса ДЛЯ СОСЕДЕЙ — то, что в визитке федерации (`GET /fed/v1/instance` → `name`, вкладка «Федерация» →
+   * «Этот инстанс»); `name` выше — с вкладки «Инстанс», соседям не уходит (приёмка ЛС 13.10: у получателя подпись «через
+   * «voice.example.org»», хотя сосед видит название). Только при работающей федерации; нет названия — `null`.
+   * Необязательное: инстанс постарше поля не пришлёт.
+   */
+  fedName?: string | null;
 }
 
 /** `GET /api/setup/status` — нужен ли мастер первичной настройки. */
@@ -1542,6 +1742,11 @@ export interface AdminInstanceSettings extends InstanceInfo {
   smtpConfigured: boolean;
   /** Кто может начать личную переписку (05.10). Необязательное: бэкенд постарше поля не пришлёт — выбора нет. */
   dmPolicy?: DmPolicy;
+  /**
+   * ЛС между инстансами, Э1 (#141, Ф6): кто из людей связанных инстансов может первым написать нашим. Поле есть, только пока
+   * у инстанса включён `FEDERATION_DM_ENABLED`; нет поля — выбора в панели нет.
+   */
+  fedDmPolicy?: 'shared' | 'anyone';
 }
 
 /**

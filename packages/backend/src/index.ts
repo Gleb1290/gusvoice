@@ -9,19 +9,53 @@ import { startSteamPoller } from './steam.js';
 import { startVoiceActivityCollector } from './voiceActivity.js';
 import { runMigrations } from './db/index.js';
 import { env } from './env.js';
+import { configureDevPeers } from './federation/devPeers.js';
+import { configureFedConvDoorbell, configureFedGroupSigner, recordFedConvChanges } from './federation/convChanges.js';
+import { configureFedCallRecord, configureFedMessagePrivacy, configureFedConvAttachments, configureFedConvCaps, configureFedConvRow, configureFedGroupAccept, ringDoorbell, startConvPull } from './federation/convAccept.js';
+import { acceptGroupConvRow, applyGroupConv, groupInvitableHome, groupOpRemote, signOwnMessage, verifyMessageSig } from './federation/convGroup.js';
+import { fedGroupRoutes } from './routes/fedGroups.js';
+import { callRecordCopied, callRecordPlanFor, homesWithoutCalls, inviteRemote, sendCallState, startDmCalls } from './federation/dmCalls.js';
+import { fedCallRoutes } from './routes/fedCalls.js';
+import { fedAlbumAllowedFor, fedFilesAllowedFor, fedOnceAllowedFor, homesWithoutFiles, kickAttCopies, purgeCopiesNow, remoteAttachmentsFor, serveRemoteAttachment, startAttCopies } from './federation/convAtt.js';
+import {
+  announceConvs,
+  brokenHomes,
+  downHomes,
+  fedLinkBrokenFor,
+  notePeerPull,
+  onLinkRestored,
+  refreshFedLinks,
+  reportFedDmPeer,
+  silentHomes,
+  staleHomes,
+  startFedLinkWatch,
+} from './federation/convLink.js';
+import { onLinksChanged } from './federation/links.js';
+import { anonymizeShadow } from './federation/guestProfile.js';
+import { acceptConvRow, configureFedConvOpened, configureFedOpenPrivacy, openFederatedDirect } from './federation/convOpen.js';
+import { configureFederatedConv } from './conversations.js';
 import { registerGuestPushHandlers } from './federation/guestPush.js';
 import { federation, startFederationAlerts, startFederationKeyRotation } from './federation/instance.js';
 import { registerInstanceMetaHandler } from './federation/instanceMeta.js';
 import { startOutboxWorker } from './federation/outbox.js';
 import { registerDirectoryHandlers } from './federation/directoryEvents.js';
 import { registerMembershipHandlers } from './federation/guestMembership.js';
-import { registerRevocationHandlers } from './federation/guestRevocation.js';
+import { configureShadowGone, registerRevocationHandlers } from './federation/guestRevocation.js';
 import { registerReportHandlers } from './federation/instanceBan.js';
-import { startDirectorySyncWorker } from './federation/directorySync.js';
-import { federationRoutes } from './routes/federation.js';
-import { isUserActive, isUserDmPresent, registerGateway } from './gateway.js';
+import { configureCapsChanged, refreshCapabilities, startDirectorySyncWorker } from './federation/directorySync.js';
+import { configureFedConvPeerSeen, configureFedViaRoutes, federationRoutes } from './routes/federation.js';
+import { acceptClaims, fallbackFor, isShadowUser, pendingFor, startConvVia, viaGate } from './federation/convVia.js';
+import { fedAttRoutes } from './routes/fedAtt.js';
+import { configureGatewayFed, isUserActive, isUserDmPresent, registerGateway } from './gateway.js';
+import { configureRemoteLastSeen } from './lastSeen.js';
+import { announceMessagePrivacy, configureEphemeralStore, configureGroupTyping, configurePresenceMessagePrivacy, fedBlockChanged, fedPeerAdded, fedPresence, fedTyping, isKnownShadow, remoteLastSeenFor, remoteMessageRefusedFor, resendPresence, startDmEphemeral } from './federation/dmEphemeral.js';
+import { messageAllowedFor, wroteInDirect } from './messagePrivacy.js';
+import { acceptHostedTyping, fedGroupTyping, forwardGroupTyping } from './federation/dmGroupTyping.js';
+import { redisEphemeralStore } from './federation/dmEphemeralStore.js';
+import { fedEphemeralRoutes } from './routes/fedEphemeral.js';
 import { sendPushToUsers } from './push.js';
 import { setPushActivityProbe, startPushDeferWorker } from './pushDefer.js';
+import { startLinkThreatsWorker } from './linkThreats.js';
 import { startScheduledWorker } from './scheduled.js';
 import { verifyMailer } from './mailer.js';
 import { bindSuperAdmin, seedSuperAdmin } from './seed.js';
@@ -34,15 +68,14 @@ import { auditRoutes } from './routes/audit.js';
 import { authRoutes } from './routes/auth.js';
 import { setupRoutes } from './routes/setup.js';
 import { channelRoutes } from './routes/channels.js';
-import { dmRoutes } from './routes/dm.js';
-import { convRoutes } from './routes/conv.js';
+import { configureFedDirect, configureFedDmReport, configureMessagePrivacy, configureFedVia, configureFedFilesGuard, configureFedLinkGuard, configureFedOnceGuard, configureFedAlbumGuard, convRoutes } from './routes/conv.js';
 import { callRoutes } from './routes/calls.js';
-import { closeOrphanCalls } from './calls.js';
-import { convGroupRoutes } from './routes/convGroups.js';
+import { closeOrphanCalls, configureFedCalls } from './calls.js';
+import { configureFedGroups, convGroupRoutes } from './routes/convGroups.js';
 import { stickerRoutes } from './routes/stickers.js';
 import { dmFolderRoutes } from './routes/dmFolders.js';
 import { downloadRoutes } from './routes/download.js';
-import { attRoutes } from './routes/att.js';
+import { attRoutes, configureRemoteAttachments } from './routes/att.js';
 import { uploadRoutes } from './routes/uploads.js';
 import { gifFileRoutes, gifRoutes } from './routes/gifs.js';
 import { redactLogUrl } from './attachmentRules.js';
@@ -50,8 +83,11 @@ import { economyRoutes } from './routes/economy.js';
 import { diagRoutes } from './routes/diag.js';
 import { inviteRoutes } from './routes/invites.js';
 import { linkPreviewRoutes } from './routes/linkPreview.js';
+import { mapsStaticRoutes } from './routes/mapsStatic.js';
+import { mapsTilesRoutes } from './routes/mapsTiles.js';
 import { messageRoutes } from './routes/messages.js';
 import { pushRoutes } from './routes/push.js';
+import { onBlockChange } from './blocks.js';
 import { blockRoutes } from './routes/blocks.js';
 import { contactRoutes } from './routes/contacts.js';
 import { roleRoutes } from './routes/roles.js';
@@ -60,7 +96,7 @@ import { soundboardRoutes } from './routes/soundboard.js';
 import { soundRoutes } from './routes/sounds.js';
 import { steamRoutes } from './routes/steam.js';
 import { unreadRoutes } from './routes/unread.js';
-import { userRoutes } from './routes/users.js';
+import { configureMessagePrivacyChanged, userRoutes } from './routes/users.js';
 import { voiceRoutes } from './routes/voice.js';
 
 /**
@@ -140,7 +176,6 @@ await app.register(
     await api.register(serverRoutes);
     await api.register(channelRoutes);
     await api.register(messageRoutes);
-    await api.register(dmRoutes);
     // Беседы ЛС (этап 1): с шага 1б живые ЛС лежат в них, и `/auth/me` объявляет `features: ['conv1']`.
     await api.register(convRoutes);
     await api.register(convGroupRoutes);
@@ -179,7 +214,19 @@ await app.register(
     // Федерация (#139) — по тому же правилу, что диагностика и экономика: выключено => маршрутов НЕТ,
     // а не ветка в обработчике. Сосед получит честные 404 вместо «как бы федеративного» инстанса.
     if (env.federation.enabled) await api.register(federationRoutes);
+    // Э3 часть 1 (#141): файл вложения ЛС соседу `GET /fed/v1/att/:id` — только с ЛС между инстансами.
+    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedAttRoutes);
+    // Э4 (#141): мгновенное «печатает» / «в сети» от соседа `POST /fed/v1/ephemeral` — тоже только с ЛС между инстансами.
+    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedEphemeralRoutes);
+    // Э6 (#141, `dmcall1`): приглашение на звонок 1:1 от соседа — отдельный модуль, как `fedEphemeral.ts`.
+    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedCallRoutes);
+    // Э7 часть 1 (#141, `dmgroup1`): запрос участника хосту группы со смешанным составом — отдельный модуль, как `fedCalls.ts`.
+    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedGroupRoutes);
     await api.register(linkPreviewRoutes);
+    // Картинка карты для геопозиции в ЛС (`yamap1`): без ключа Яндекса маршрута НЕТ (как у diag/economy).
+    if (env.yandexMapsStaticKey) await api.register(mapsStaticRoutes);
+    // Своя карта OpenStreetMap (`osmmap1`): плитки из файла PMTiles; без `MAP_PMTILES_PATH` маршрутов нет.
+    if (env.mapPmtilesPath) await api.register(mapsTilesRoutes);
   },
   { prefix: '/api' },
 );
@@ -216,6 +263,102 @@ try {
   if (env.federation.enabled) registerReportHandlers();
   // Просьбы хостов разбудить наших людей, гостящих у них (F5, требование 33).
   if (env.federation.enabled) registerGuestPushHandlers();
+  // Режим стенда для локальных соседей (Ф13): список пуст везде, кроме стенда; проверен при старте (`env.ts`).
+  configureDevPeers(env.federation.devPeers);
+  // «Кто может мне писать» (`msgpriv1`, 13.10): проверка отправки в 1:1; пометки соседей (`noMessages`) — из `dmEphemeral` (без ЛС
+  // между инстансами там пусто). Вызов через `?.`: проверка запуска (`indexErrors.test.ts`) подменяет `routes/conv.js` одними
+  // маркерами регистрации, а этот крючок, в отличие от остальных крючков `conv.js`, ставится и без федерации.
+  configureMessagePrivacy?.({ allowed: messageAllowedFor, wrote: wroteInDirect, remoteRefused: remoteMessageRefusedFor });
+  // ЛС между инстансами (Э0): id инстанса для глобального ключа пары. Журнал на связку — ВСЕГДА при федерации (исправления
+  // ревью 12.10, п. 3): `FEDERATION_DM_ENABLED` выключили откатом — сообщения в открытые беседы с людьми соседа всё равно
+  // пишутся, и без строк журнала не доехали бы никогда; строки полежат (уборка 30 дней), флаг закрывает только маршруты и забор.
+  if (env.federation.enabled) {
+    configureFederatedConv({
+      selfInstanceId: () => federation.identity()?.instanceId ?? null,
+      record: recordFedConvChanges,
+      // Э2 часть Б: `ConvSummary.fedLink` — связка с инстансом собеседника не работает (архив только для чтения, Ф7).
+      linkBroken: env.federation.dmEnabled ? brokenHomes : null,
+      // Э3 часть 1: `ConvSummary.fedNoFiles` — инстанс собеседника не умеет вложения (`dm2`).
+      noFiles: env.federation.dmEnabled ? homesWithoutFiles : null,
+      // Э6: `ConvSummary.fedNoCalls` — инстанс собеседника не умеет звонки (`dmcall1`).
+      noCalls: env.federation.dmEnabled ? homesWithoutCalls : null,
+      // Исправления ревью 12.10, п. 7: `ConvSummary.fedStale` — инстанс собеседника не забирает наши сообщения дольше 10 минут.
+      linkStale: env.federation.dmEnabled ? staleHomes : null,
+      // Э7 часть 3 (D): `ConvSummary.fedGroupHost.down` и при молчащем доме группы (не только при разорванной связке).
+      groupHostSilent: env.federation.dmEnabled ? silentHomes : null,
+      // Хвост Э7 (14.10): `ConvSummary.fedPeerDown` — дом собеседника 1:1 не отвечает дольше 10 минут.
+      peerDown: env.federation.dmEnabled ? downHomes : null,
+    });
+  }
+  // ЛС между инстансами (Э1): «Написать» человеку соседа — только при `FEDERATION_DM_ENABLED`.
+  if (env.federation.dmEnabled) configureFedDirect(openFederatedDirect);
+  // ЛС между инстансами (Э2): звонок в дверь после записи журнала на связку и приём копий (звонок, старт, раз в 2 мин).
+  if (env.federation.enabled && env.federation.dmEnabled) {
+    configureFedConvDoorbell(ringDoorbell);
+    // Исправления ревью 12.10: строка `conv` журнала соседа заводит 1:1 (п. 2 (а)); визитка соседа без `dm1`/`dm2`, которыми он
+    // уже пользуется, перечитывается принудительно (п. 5, 10); признаки связки сменились — сводки бесед с ним заново (п. 12);
+    // сосед забрал журнал — подтверждённое для плашки «ждут» (п. 7) и перечитать визитку без `dm1` (п. 10).
+    // Э7 часть 1: строка `conv` группы дома соседа — заводит/обновляет группу; остальное — прежний разбор 1:1.
+    configureFedConvRow(async (peer, self, cid, entity) => (await acceptGroupConvRow(peer, self, cid, entity)) ?? acceptConvRow(peer, self, cid, entity));
+    configureFedConvCaps((link) => refreshCapabilities(link, Date.now(), { force: true }).catch(() => link.features));
+    configureCapsChanged((instanceId) => void announceConvs(instanceId).catch(() => {}));
+    configureFedConvPeerSeen((link, since) => {
+      if (since !== null) void notePeerPull(link.instanceId, since).catch(() => {});
+      if (!link.features.includes('dm1')) void refreshCapabilities(link, Date.now(), { force: true }).catch(() => {});
+    });
+    startConvPull();
+    // Э2 часть Б: разрыв/пауза связки → запись 403 и `fedLink` в сводках; жалоба из ЛС — и держателю дома собеседника.
+    configureFedLinkGuard(fedLinkBrokenFor);
+    // Э3 часть 1: файлы человеку соседа — только если его инстанс объявил `dm2` (загрузка, GIF, отправка, пересылка);
+    // вложения копий соседа — строки `remote` и копия к нам (при старте и раз в минуту; связка снова рабочая — сразу).
+    configureFedFilesGuard(fedFilesAllowedFor);
+    configureFedOnceGuard(fedOnceAllowedFor);
+    // G56: один элемент альбома «у обоих» — только если дома людей соседа в беседе объявили `dmalbum1`.
+    configureFedAlbumGuard(fedAlbumAllowedFor);
+    configureFedConvAttachments({ remoteFor: remoteAttachmentsFor, kick: (origin) => kickAttCopies(origin), purge: purgeCopiesNow });
+    onLinkRestored((instanceId) => kickAttCopies(instanceId, { fresh: true }));
+    configureRemoteAttachments(serveRemoteAttachment);
+    startAttCopies();
+    // Удалённый аккаунт собеседника по ЛС (`user.revoked` и журнал отзывов) — обезличить его теневую строку (Ф26).
+    configureShadowGone(anonymizeShadow);
+    configureFedDmReport(reportFedDmPeer);
+    onLinksChanged(() => void refreshFedLinks());
+    startFedLinkWatch();
+    // Э4: «печатает» и «в сети / был(а)» с людьми соседа (`dm3`) — крючки шлюза и «был(а)», «жив» раз в минуту, устаревание.
+    configureGatewayFed({ typing: fedTyping, presence: fedPresence, isRemote: isKnownShadow, groupTyping: fedGroupTyping });
+    // Э7 часть 3 (#141, `dmgroup2`): «печатает» в группах со смешанным составом.
+    configureGroupTyping({ accept: acceptHostedTyping, forward: forwardGroupTyping });
+    configureRemoteLastSeen(remoteLastSeenFor);
+    configureEphemeralStore(redisEphemeralStore); // копия принятого «был(а)» людей соседей — в Redis, переживает перезапуск
+    startDmEphemeral();
+    // Приёмка 15.10: новая беседа 1:1 с человеком соседа — «в сети / был(а)» нашего человека его дому сразу, а не через 10 минут.
+    configureFedConvOpened(fedPeerAdded);
+    // F5: блок человека соседа — его дому сразу «был(а) давно» вместо «в сети» (`fedBlockChanged`).
+    onBlockChange(fedBlockChanged);
+    // Перезапуск этого инстанса / связка снова рабочая: соседи не знают, кто из наших людей не в сети — один проход «жив» / «был(а)».
+    const resendTimer = setTimeout(() => void resendPresence().catch(() => {}), 20_000);
+    resendTimer.unref?.();
+    onLinkRestored((instanceId) => void resendPresence(instanceId).catch(() => {}));
+    // Э5 часть 1: «мой дом лежит — пишу через инстанс собеседника» — долгая сессия, приём «через», сверка задним числом.
+    configureFedVia({ gate: viaGate, isShadow: isShadowUser, fallback: (me, id, purpose) => fallbackFor(me, id, Date.now(), purpose), claims: acceptClaims });
+    configureFedViaRoutes(pendingFor);
+    startConvVia();
+    // Э6: звонки 1:1 с людьми соседа — приглашение и снимки фазы (`calls.ts`), копия записи о звонке (`convAccept`), приём `call.state`.
+    configureFedCalls({ invite: (call, home) => inviteRemote(call, home), state: sendCallState });
+    configureFedCallRecord({ plan: callRecordPlanFor, read: callRecordCopied });
+    // «Кто может мне писать» (`msgpriv1`, 13.10): отказ при `conv.open` (причина `privacy`), скрытое сообщение при приёме,
+    // пометка `noMessages` в присутствии соседу и заранее 403 `message_privacy` нашему отправителю по его пометке.
+    configureFedOpenPrivacy((sender, recipient) => messageAllowedFor(sender ?? '', recipient));
+    configureFedMessagePrivacy(messageAllowedFor);
+    configurePresenceMessagePrivacy(messageAllowedFor);
+    configureMessagePrivacyChanged(announceMessagePrivacy);
+    startDmCalls();
+    // Э7 часть 1: группы со смешанным составом — строка `conv` от хоста, подпись дома автора (своё — подписываем, чужое —
+    // проверяем), позвать человека соседа и действие с группой чужого дома (`routes/convGroups.ts`).
+    configureFedGroupAccept({ applyConv: applyGroupConv, verify: verifyMessageSig });
+    configureFedGroupSigner(signOwnMessage);
+    configureFedGroups({ invitable: (home) => groupInvitableHome(home), op: groupOpRemote });
+  }
   await app.listen({ host: '0.0.0.0', port: env.port });
   app.log.info(`backend listening on :${env.port}`);
   // Сменный ключ подписи истекает по сроку — проверять надо и на инстансе, который не перезапускали.
@@ -230,6 +373,8 @@ try {
   startDailyCleanup();
   // Файлы ЛС (шаг 1в): брошенные и вытесненные загрузки, недоудалённое после «удалить у обоих» — раз в час.
   startAttachmentSweeper();
+  // Опасные ссылки (#218 п.5): список угроз — раз в сутки (первый раз через 20 с); выключатель `LINK_THREATS_ENABLED`.
+  startLinkThreatsWorker();
   // Отложенные сообщения ЛС (С4, `conv9`): такт раз в 5 с — созревшие по времени и «Когда будет в сети» (в сети —
   // соединения шлюза этого процесса и статус не «невидимый»).
   startScheduledWorker({ isOnline: isUserDmPresent });

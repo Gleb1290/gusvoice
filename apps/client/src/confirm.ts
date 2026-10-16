@@ -88,7 +88,7 @@ export async function confirmWithOption(
   return remember && !!spec.option.remember && checked !== spec.option.checked ? { option: checked, remember: true } : { option: checked };
 }
 
-/** Сообщить и дождаться «Понятно» — замена `alert()`. */
-export function alertDialog(title: string, body?: string): Promise<boolean> {
-  return confirmAction({ title, body, tone: 'info' });
+/** Сообщить и дождаться «Понятно» — замена `alert()`. `icon` — свой значок вместо «сигнала» (запрет звонков — `ban`). */
+export function alertDialog(title: string, body?: string, opts?: { icon?: ConfirmSpec['icon'] }): Promise<boolean> {
+  return confirmAction({ title, body, tone: 'info', ...(opts?.icon ? { icon: opts.icon } : {}) });
 }

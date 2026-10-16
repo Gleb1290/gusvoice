@@ -69,7 +69,7 @@ import kotlin.math.roundToInt
  * Файлы из ленты (06.10): у WebView нет обработчика загрузок — ссылка с `download` молча ничего не делала. Теперь байты
  * качает страница (ссылка бэкенда с CORS) и отдаёт сюда тем же `put`: `then: open` — копия в кеше
  * (`cache/gv-media/open/<метка>/<имя>`) и ACTION_VIEW через FileProvider (системное приложение по типу файла),
- * `then: download` — MediaStore «Загрузки» (Download/GusVoice, Android 10+); `reopen` открывает уже скачанную копию.
+ * `then: download` — MediaStore «Загрузки» (Download/GusVoice, Android 10+; видео — Movies/GusVoice, музыка — Music/GusVoice, 14.10); `reopen` открывает уже скачанную копию.
  * `then: share` (07.10, «Поделиться» в меню сообщения) — копия в `cache/gv-media/share/<имя>` и системное окно
  * «Поделиться» (ACTION_SEND через FileProvider); клиент узнаёт про него по `canShare` в `info` (старая сборка — пункта нет).
  *
@@ -90,6 +90,12 @@ class MediaBridge(private val activity: MainActivity) {
   private val work: ExecutorService = Executors.newFixedThreadPool(3)
   private val io: ExecutorService = Executors.newSingleThreadExecutor()
 
+  /**
+   * Оригиналы для просмотра выбора (`open` с `view: true`, 10.10, #218): своя очередь, чтобы листание крупных видео в просмотре
+   * не держало отправку (`io`) и миниатюры (`work`).
+   */
+  private val viewIo: ExecutorService = Executors.newSingleThreadExecutor()
+
   /** Сколько частей оригинала ждут отправки на главном потоке: очередь в памяти ограничена (4 × 512 КБ). */
   private val inFlight = Semaphore(4)
 
@@ -98,11 +104,17 @@ class MediaBridge(private val activity: MainActivity) {
 
   private var permWaiter: Pair<JavaScriptReplyProxy, String>? = null
   private var docsWaiter: DocsRequest? = null
+  private var captureWaiter: CaptureRequest? = null
 
   /** Отправка «туда» (put): части `ArrayBuffer` не несут id, клиент шлёт отправки строго по одной. */
   private var put: PutRequest? = null
 
   private class DocsRequest(val proxy: JavaScriptReplyProxy, val id: String, val limit: Int, val max: Long)
+
+  /** Снимок / видео системной камерой (`capture`): куда камера пишет (`cache/gv-media/cam/<метка>.jpg|mp4`) и предел файла. */
+  private class CaptureRequest(val proxy: JavaScriptReplyProxy, val id: String, val video: Boolean, val max: Long, val file: File) {
+    var launched = false
+  }
 
   /**
    * «Поделиться в GusVoice» (09.10, G79): пришедшее из чужого приложения, уже скопированное в `cache/gv-media/inbox/<метка>/`.
@@ -240,6 +252,7 @@ class MediaBridge(private val activity: MainActivity) {
     shareCopy.shutdownNow()
     work.shutdownNow()
     io.shutdownNow()
+    viewIo.shutdownNow()
   }
 
   private fun onMessage(message: WebMessageCompat, proxy: JavaScriptReplyProxy) {
@@ -260,9 +273,12 @@ class MediaBridge(private val activity: MainActivity) {
       "info" -> reply(proxy, info(id))
       "perm" -> perm(proxy, id, req.optString("ask"))
       "page" -> work.execute { page(proxy, id, req) }
+      "albums" -> work.execute { albums(proxy, id) }
       "thumb" -> work.execute { thumb(proxy, id, req) }
-      "open" -> io.execute { open(proxy, id, req) }
+      "open" -> (if (req.optBoolean("view", false)) viewIo else io).execute { open(proxy, id, req) }
       "docs" -> docs(proxy, id, req)
+      "capture" -> capture(proxy, id, req)
+      "camPerm" -> camPerm(proxy, id)
       "cancel" -> cancelled.add(req.optString("target"))
       "put" -> startPut(id, req)
       "putEnd" -> {
@@ -316,13 +332,14 @@ class MediaBridge(private val activity: MainActivity) {
   private fun granted(p: String): Boolean =
     ContextCompat.checkSelfPermission(activity, p) == PackageManager.PERMISSION_GRANTED
 
-  /** Что просить: Android 14+ — с частичным доступом (окно «Выбрать фото и видео»), 13 — фото и видео, ниже — память. */
+  /**
+   * Что просить: Android 13+ — фото и видео, ниже — память. Как у Telegram Android (#218, 10.10): `READ_MEDIA_VISUAL_USER_SELECTED`
+   * не объявляем и не просим (манифест TMessagesProj `AndroidManifest.xml:38-40`, запрос `ChatAttachAlertPhotoLayout.java:931`
+   * и `:1514`). Android 14+ всё равно показывает в окне «Выбрать фото и видео»: без этого разрешения выбор работает в режиме
+   * совместимости — система ВРЕМЕННО выдаёт READ_MEDIA_IMAGES/VIDEO, а MediaStore отдаёт только выбранное; после ухода
+   * приложения в фон доступ снимается, и следующее открытие листа снова спрашивает окном.
+   */
   private fun mediaPermissions(): Array<String> = when {
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
-      Manifest.permission.READ_MEDIA_IMAGES,
-      Manifest.permission.READ_MEDIA_VIDEO,
-      Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
-    )
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
       Manifest.permission.READ_MEDIA_IMAGES,
       Manifest.permission.READ_MEDIA_VIDEO,
@@ -331,9 +348,11 @@ class MediaBridge(private val activity: MainActivity) {
   }
 
   /**
-   * `granted` / `partial` (Android 14: человек выбрал часть фото) / `ask` / `blocked`. «Больше не спрашивать» Android прямо
-   * не сообщает: спрашивали раньше (флаг в настройках) и объяснение показывать уже нельзя — значит, окно не появится, и
-   * клиент ведёт в настройки приложения.
+   * `granted` / `ask` / `blocked` (`partial` с 10.10 не бывает — см. [mediaPermissions]; клиент его ещё понимает). «Больше не
+   * спрашивать» Android прямо не сообщает: `blocked` — последнее окно разрешения кончилось отказом, а объяснение показывать
+   * уже нельзя (окно не появится, клиент ведёт в настройки приложения). Раньше хватало «спрашивали когда-то» (`perm_asked`), но
+   * временный доступ «Выбрать фото» (режим совместимости) система снимает через минуту в фоне вместе с флагами — объяснения
+   * нет, а окно появится; лист звал в настройки (эмулятор 10.10). Теперь итог окна запоминается (`perm_denied`).
    */
   private fun permState(): String {
     val full = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -342,12 +361,9 @@ class MediaBridge(private val activity: MainActivity) {
       granted(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
     if (full) return "granted"
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-      granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
-    ) return "partial"
-    val asked = prefs.getBoolean(KEY_ASKED, false)
+    val denied = prefs.getBoolean(KEY_DENIED, false)
     val rationale = mediaPermissions().any { activity.shouldShowRequestPermissionRationale(it) }
-    return if (asked && !rationale) "blocked" else "ask"
+    return if (denied && !rationale) "blocked" else "ask"
   }
 
   private fun info(id: String): JSONObject = ok(id)
@@ -364,10 +380,15 @@ class MediaBridge(private val activity: MainActivity) {
     .put("canShare", true)
     // «Поделиться в GusVoice» (09.10, G79): эта сборка принимает ACTION_SEND и отвечает на `shared` / `sharedOpen` / `sharedDrop`.
     .put("canInbox", true)
+    // Системная камера листа (10.10, #218): эта сборка отвечает на `capture` (тап — фото, удержание — видео). Нет поля — своя
+    // камера листа (getUserMedia), как раньше.
+    .put("capture", true)
 
   private fun perm(proxy: JavaScriptReplyProxy, id: String, ask: String) {
     when (ask) {
       "ask" -> {
+        // `blocked` — тоже спрашиваем, как Telegram (`ChatAttachAlertPhotoLayout.java:928-937` зовёт окно всегда): «больше не
+        // спрашивать» система ответит отказом сразу, без окна, и состояние останется `blocked`.
         val state = permState()
         if (state == "granted" || permWaiter != null) {
           reply(proxy, ok(id).put("perm", state))
@@ -399,6 +420,8 @@ class MediaBridge(private val activity: MainActivity) {
 
   /** Результат окна разрешений (`MainActivity.requestMediaPerms`). */
   fun onPermissionResult() {
+    // Итог окна — до ответа: отказ без права на объяснение = «больше не спрашивать» (`permState`).
+    prefs.edit().putBoolean(KEY_DENIED, permState() != "granted").apply()
     val w = permWaiter ?: return
     permWaiter = null
     reply(w.first, ok(w.second).put("perm", permState()))
@@ -420,8 +443,11 @@ class MediaBridge(private val activity: MainActivity) {
       val before = req.optJSONObject("before")
       val bAdded = before?.optLong("added", -1L) ?: -1L
       val bId = before?.optString("id")?.toLongOrNull() ?: -1L
-      val images = queryKind(false, limit, bAdded, bId)
-      val videos = queryKind(true, limit, bAdded, bId)
+      // Альбом (10.10, #218): `bucket` — BUCKET_ID папки, `only: video` — «Все видео»; без полей — вся галерея, как раньше.
+      val bucket = req.optString("bucket").toLongOrNull()
+      val onlyVideo = req.optString("only") == "video"
+      val images = if (onlyVideo) emptyList() else queryKind(false, limit, bAdded, bId, bucket)
+      val videos = queryKind(true, limit, bAdded, bId, bucket)
       val all = (images + videos).sortedWith(compareByDescending<Item> { it.added }.thenByDescending { it.id })
       val arr = JSONArray()
       for (it in all.take(limit)) arr.put(it.json())
@@ -435,7 +461,7 @@ class MediaBridge(private val activity: MainActivity) {
     }
   }
 
-  private fun queryKind(video: Boolean, limit: Int, bAdded: Long, bId: Long): List<Item> {
+  private fun queryKind(video: Boolean, limit: Int, bAdded: Long, bId: Long, bucket: Long? = null): List<Item> {
     val extra = if (video) MediaStore.Video.VideoColumns.DURATION else MediaStore.Images.ImageColumns.ORIENTATION
     val proj = arrayOf(
       BaseColumns._ID,
@@ -450,6 +476,10 @@ class MediaBridge(private val activity: MainActivity) {
     val added = MediaStore.MediaColumns.DATE_ADDED
     val sel = StringBuilder("${MediaStore.MediaColumns.SIZE} > 0")
     val args = ArrayList<String>()
+    if (bucket != null) {
+      sel.append(" AND ${MediaStore.MediaColumns.BUCKET_ID} = ?")
+      args.add(bucket.toString())
+    }
     if (bAdded >= 0 && bId >= 0) {
       sel.append(" AND ($added < ? OR ($added = ? AND ${BaseColumns._ID} < ?))")
       args.add(bAdded.toString())
@@ -498,6 +528,80 @@ class MediaBridge(private val activity: MainActivity) {
     return out
   }
 
+  /**
+   * Альбомы галереи — как Telegram Android `MediaController.loadGalleryPhotosAlbums` (tg-src MediaController.java, строки
+   * 6105-6318) и порядок выпадающего списка `ChatAttachAlertPhotoLayout.updateAlbumsDropDown` (строки 1879-1905): сначала
+   * «Все медиа» и «Все видео» (`bucketId 0`), потом папка камеры (DCIM/Camera), потом папки в порядке первой встречи —
+   * фото новые сверху, затем папки, где есть только видео. Число — фото и видео папки, обложка — самый новый элемент.
+   * Порядок «новые сверху» — по `date_added`, как у порций `page` (у TG — `date_modified`), чтобы обложка совпадала с первой
+   * ячейкой альбома. Ответ: `{albums: [{id, name, count, only?, cover: {id, kind, rot}}]}`; `id` `""` — вся галерея.
+   */
+  private fun albums(proxy: JavaScriptReplyProxy, id: String) {
+    class Album(val id: Long, val name: String, val cover: JSONObject) { var count = 0 }
+    try {
+      val byId = LinkedHashMap<Long, Album>()
+      var camera: Long? = null
+      var all: Album? = null
+      var allVideos: Album? = null
+      val camPath = Environment.DIRECTORY_DCIM + "/Camera/"
+      for (video in listOf(false, true)) {
+        val pathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.MediaColumns.RELATIVE_PATH else "_data"
+        val proj = arrayOf(
+          BaseColumns._ID,
+          MediaStore.MediaColumns.BUCKET_ID,
+          MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
+          pathCol,
+          if (video) MediaStore.MediaColumns.DATE_ADDED else MediaStore.Images.ImageColumns.ORIENTATION,
+        )
+        val order = "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${BaseColumns._ID} DESC"
+        cr.query(collection(video), proj, "${MediaStore.MediaColumns.SIZE} > 0", null, order)?.use { c ->
+          val iId = c.getColumnIndexOrThrow(BaseColumns._ID)
+          val iBucket = c.getColumnIndex(MediaStore.MediaColumns.BUCKET_ID)
+          val iName = c.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+          val iPath = c.getColumnIndex(pathCol)
+          val iRot = if (video) -1 else c.getColumnIndex(MediaStore.Images.ImageColumns.ORIENTATION)
+          while (c.moveToNext()) {
+            val mid = c.getLong(iId)
+            val cover = JSONObject()
+              .put("id", mid.toString())
+              .put("kind", if (video) "video" else "image")
+              .put("rot", if (iRot >= 0) c.getInt(iRot) else 0)
+            val a = all ?: Album(0, "", cover).also { all = it }
+            a.count++
+            if (video) {
+              val v = allVideos ?: Album(0, "", cover).also { allVideos = it }
+              v.count++
+            }
+            if (iBucket < 0 || c.isNull(iBucket)) continue
+            val bucket = c.getLong(iBucket)
+            val album = byId[bucket] ?: Album(bucket, (if (iName >= 0) c.getString(iName) else null) ?: "", cover).also {
+              byId[bucket] = it
+              val path = if (iPath >= 0) c.getString(iPath) ?: "" else ""
+              if (camera == null && (path.startsWith(camPath) || path.contains("/$camPath"))) camera = bucket
+            }
+            album.count++
+          }
+        }
+      }
+      val arr = JSONArray()
+      fun put(a: Album, only: String?) {
+        val o = JSONObject().put("id", if (a.id == 0L) "" else a.id.toString()).put("name", a.name).put("count", a.count).put("cover", a.cover)
+        if (only != null) o.put("only", only)
+        arr.put(o)
+      }
+      all?.let { put(it, null) }
+      allVideos?.let { put(it, "video") }
+      camera?.let { cam -> byId[cam]?.let { put(it, null) } }
+      for ((k, a) in byId) if (k != camera) put(a, null)
+      reply(proxy, ok(id).put("albums", arr))
+    } catch (e: SecurityException) {
+      reply(proxy, err(id, "denied"))
+    } catch (e: Exception) {
+      Log.w(TAG, "gallery albums failed", e)
+      reply(proxy, err(id, "query"))
+    }
+  }
+
   private fun thumb(proxy: JavaScriptReplyProxy, id: String, req: JSONObject) {
     val mid = req.optString("mid").toLongOrNull()
     if (mid == null) {
@@ -505,7 +609,7 @@ class MediaBridge(private val activity: MainActivity) {
       return
     }
     val video = req.optString("kind") == "video"
-    val px = req.optInt("px", 320).coerceIn(64, 640)
+    val px = req.optInt("px", 320).coerceIn(64, 1440)
     try {
       val bytes = thumbBytes(mid, video, px, req.optInt("rot", 0))
       if (bytes == null) reply(proxy, err(id, "no-thumb"))
@@ -753,6 +857,139 @@ class MediaBridge(private val activity: MainActivity) {
     }
   }
 
+  // ——— Системная камера (10.10, #218) ——————————————————————————————————————————————————————————————————————————————
+
+  /**
+   * Камера листа на Android — системная (решение владельца): `video` ложно — ACTION_IMAGE_CAPTURE, истинно —
+   * ACTION_VIDEO_CAPTURE с EXTRA_SIZE_LIMIT = `max` (предел файла ЛС). Пишет камера в наш файл через FileProvider
+   * (`EXTRA_OUTPUT`, `file_paths.xml` `gv_cam`); готовый файл уходит клиенту тем же потоком, что «Файлы» (`receiveFiles`):
+   * фото — сжатым «как в Telegram» (2560/JPEG 85, поворот по EXIF), видео — как есть. Отмена — `done` + `cancelled`, без
+   * файлов. CAMERA у нас объявлено (камера звонков), а при объявленном и не выданном разрешении эти намерения падают с
+   * SecurityException (документация `MediaStore.ACTION_IMAGE_CAPTURE`) — сначала окно разрешения, как у Telegram
+   * (`openCameraWithPermissionCheck` `ChatAttachAlertPhotoLayout.java:1522-1526`); отказ — ошибка `camera-denied`.
+   */
+  private fun capture(proxy: JavaScriptReplyProxy, id: String, req: JSONObject) {
+    if (captureWaiter != null) {
+      reply(proxy, err(id, "busy"))
+      return
+    }
+    val video = req.optBoolean("video", false)
+    val dir = File(root, CAMERA_DIR)
+    // Прошлые снимки (приложение убили, пока была открыта камера) — не копим.
+    dir.listFiles()?.forEach { it.delete() }
+    dir.mkdirs()
+    val file = File(dir, UUID.randomUUID().toString() + if (video) ".mp4" else ".jpg")
+    val w = CaptureRequest(proxy, id, video, req.optLong("max", DEFAULT_MAX), file)
+    captureWaiter = w
+    if (granted(Manifest.permission.CAMERA)) {
+      launchCapture(w)
+      return
+    }
+    try {
+      activity.launchCameraPermission()
+    } catch (e: Exception) {
+      Log.w(TAG, "camera permission request failed", e)
+      captureWaiter = null
+      reply(proxy, err(id, "camera-denied"))
+    }
+  }
+
+  /** Ждёт ответа окна камеры для `camPerm` (кнопка листа «Разрешить доступ к камере»). */
+  private var camPermWaiter: Pair<JavaScriptReplyProxy, String>? = null
+
+  /**
+   * Только разрешение камеры, без съёмки (10.10, #218 порция 4) — кнопка листа на месте камеры, как Telegram
+   * `VIEW_TYPE_CAMERA_PERMISSION_BUTTON` (tg-src ChatAttachAlertPhotoLayout.java, строки 920-927: `requestPermissions(CAMERA)`).
+   * Ответ `{camera: true|false}`; идёт съёмка (`captureWaiter`) — `busy`.
+   */
+  private fun camPerm(proxy: JavaScriptReplyProxy, id: String) {
+    if (granted(Manifest.permission.CAMERA)) {
+      reply(proxy, ok(id).put("camera", true))
+      return
+    }
+    if (captureWaiter != null || camPermWaiter != null) {
+      reply(proxy, err(id, "busy"))
+      return
+    }
+    camPermWaiter = proxy to id
+    try {
+      activity.launchCameraPermission()
+    } catch (e: Exception) {
+      Log.w(TAG, "camera permission request failed", e)
+      camPermWaiter = null
+      reply(proxy, ok(id).put("camera", false))
+    }
+  }
+
+  /** Ответ окна разрешения камеры (`MainActivity.requestCamera`). */
+  fun onCameraPermission(ok: Boolean) {
+    camPermWaiter?.let { (proxy, id) ->
+      camPermWaiter = null
+      reply(proxy, this.ok(id).put("camera", ok))
+      return
+    }
+    val w = captureWaiter ?: return
+    if (w.launched) return
+    if (!ok) {
+      captureWaiter = null
+      reply(w.proxy, err(w.id, "camera-denied"))
+      return
+    }
+    launchCapture(w)
+  }
+
+  private fun launchCapture(w: CaptureRequest) {
+    try {
+      val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", w.file)
+      val intent = Intent(if (w.video) MediaStore.ACTION_VIDEO_CAPTURE else MediaStore.ACTION_IMAGE_CAPTURE)
+        .putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      // Право записи по EXTRA_OUTPUT камера получает через ClipData (так его переносит и сам Intent; явно — надёжнее).
+      intent.clipData = ClipData.newRawUri("", uri)
+      if (w.video) intent.putExtra(MediaStore.EXTRA_SIZE_LIMIT, w.max)
+      w.launched = true
+      activity.launchCapture(intent)
+    } catch (e: ActivityNotFoundException) {
+      captureWaiter = null
+      reply(w.proxy, err(w.id, "no-camera"))
+    } catch (e: Exception) {
+      Log.w(TAG, "camera launch failed", e)
+      captureWaiter = null
+      reply(w.proxy, err(w.id, "no-camera"))
+    }
+  }
+
+  /** Камера закрылась (`MainActivity.capture`): снимок / запись — клиенту; отмена или пустой файл — `cancelled`. */
+  fun onCaptureResult(resultCode: Int, data: Intent?) {
+    val w = captureWaiter ?: return
+    captureWaiter = null
+    io.execute {
+      // Часть камер видео в EXTRA_OUTPUT не пишут, а отдают своё `content://` в `data` — берём его.
+      val own = w.file.isFile && w.file.length() > 0
+      val uri: Uri? = when {
+        resultCode != android.app.Activity.RESULT_OK -> null
+        own -> Uri.fromFile(w.file)
+        w.video -> data?.data
+        else -> null
+      }
+      if (uri == null) {
+        w.file.delete()
+        reply(w.proxy, ok(w.id).put("done", true).put("cancelled", true))
+        return@execute
+      }
+      reply(w.proxy, JSONObject().put("id", w.id).put("total", 1))
+      val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+      if (w.video) {
+        streamOne(w.proxy, w.id, 0, uri, "VID_$stamp.mp4", if (own) "video/mp4" else (cr.getType(uri) ?: "video/mp4"), w.max)
+      } else if (!streamCompressed(w.proxy, w.id, 0, uri, "IMG_$stamp.jpg")) {
+        streamOne(w.proxy, w.id, 0, uri, "IMG_$stamp.jpg", "image/jpeg", w.max)
+      }
+      w.file.delete()
+      cancelled.remove(w.id)
+      reply(w.proxy, ok(w.id).put("done", true))
+    }
+  }
+
   private fun docMeta(uri: Uri, signal: CancellationSignal? = null): Pair<String, String> {
     var name: String? = null
     try {
@@ -774,7 +1011,7 @@ class MediaBridge(private val activity: MainActivity) {
   /**
    * Намерение ACTION_SEND / ACTION_SEND_MULTIPLE (`MainActivity`: холодный старт и `onNewIntent`). Файлы копируются в кеш СРАЗУ:
    * право чтения чужого `content://` живёт, пока жива активность, а человек может выбирать беседу долго (или процесс убьют).
-   * Больше 512 МБ (`SHARE_MAX`, предел сервера с загрузкой кусками `bigfile1`) не копируем — `skip: too-big`, клиент назовёт
+   * Больше 1 ГиБ (`SHARE_MAX`, предел сервера с загрузкой кусками `bigfile1`) не копируем — `skip: too-big`, клиент назовёт
    * причину; предел ИМЕННО этого сервера (без `bigfile1` — 25 МБ) применяет клиент (`shareInbox.shareFilesWithin`). Готово — `__gvShare()`.
    */
   fun onShareIntent(intent: Intent?) {
@@ -812,6 +1049,53 @@ class MediaBridge(private val activity: MainActivity) {
       }
     } catch (e: Exception) {
       Log.w(TAG, "share copy rejected", e)
+    }
+  }
+
+  /**
+   * Картинка или GIF из клавиатуры (`KeyboardContent.commit`, G50, 14.10): тот же путь, что у «Поделиться» (копия в
+   * `inbox/<метка>/0/<имя>` через [copyShared] — те же проверки чужого адреса, собственного каталога, размера и срока; метка и
+   * `shared` общие: `shared` / `sharedOpen` / `sharedDrop` отдают файл клиенту), но готовность — `__gvKeyboardContent()`, а не
+   * окно выбора беседы: клиент кладёт файл вложением в поле ОТКРЫТОЙ беседы. Новое заменяет прежнее (как у «Поделиться»).
+   * [release] вызывается ровно один раз, когда копия готова или не удалась, — снять право на чтение у клавиатуры.
+   */
+  fun onKeyboardContent(uri: Uri, mimeType: String, release: () -> Unit) {
+    // Старый WebView: клиент файл не заберёт (нет `GusVoiceMedia`) — не копируем. Чужой/свой адрес — как в `ShareIntent.accepted`.
+    if (bridgeOff || !bridgeSupported() || !ShareIntent.accepted(uri, activity.packageName)) {
+      release()
+      return
+    }
+    val fallbackType = mimeType.takeIf { !it.contains('*') && it.contains('/') } ?: ""
+    val job = ShareJob(shareGen.incrementAndGet(), UUID.randomUUID().toString())
+    shareJob?.kill()
+    shareJob = job
+    io.execute {
+      shared?.let { File(root, "$INBOX/${it.token}").deleteRecursively() }
+      shared = null
+    }
+    main.postDelayed({ if (!job.dead) job.kill() }, SHARE_COPY_MS)
+    val ownDirs = ownDirs()
+    val dir = File(root, "$INBOX/${job.token}")
+    try {
+      shareCopy.execute {
+        try {
+          val deadline = SystemClock.elapsedRealtime() + SHARE_COPY_MS
+          val files = listOf(copyShared(uri, dir, 0, fallbackType, job, deadline, ownDirs))
+          io.execute publish@{
+            if (bridgeOff || shareGen.get() != job.gen) {
+              dir.deleteRecursively()
+              return@publish
+            }
+            shared = Shared(job.token, "", "", files, 0)
+            main.post { webViewRef?.evaluateJavascript("window.__gvKeyboardContent && window.__gvKeyboardContent()", null) }
+          }
+        } finally {
+          release()
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "keyboard content copy rejected", e)
+      release()
     }
   }
 
@@ -1056,11 +1340,26 @@ class MediaBridge(private val activity: MainActivity) {
    * «Скачать» (06.10): Android 10+ — коллекция «Загрузки» MediaStore, папка Download/GusVoice; файл виден в системных
    * «Файлах» и в «Загрузках». Разрешений не нужно (своя запись). Ниже 10 — `unsupported`: туда без WRITE_EXTERNAL_STORAGE
    * не написать, клиент тогда открывает файл (из приложения просмотра его можно сохранить).
+   *
+   * Видео — в Movies/GusVoice, музыка — в Music/GusVoice (14.10, G31 / G59; Telegram Android `MediaController.saveFile` /
+   * `saveFileInternal`: видео — `DIRECTORY_MOVIES`, музыка — `DIRECTORY_MUSIC` через `MediaStore.Audio`, остальное — «Загрузки»).
+   * Видео, отправленное файлом, и звуковой файл приходят сюда же (`then: download`) — раньше всё лежало в Download/GusVoice.
    */
   private fun saveToDownloads(src: File, name: String, mime: String): Uri {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) throw UnsupportedOperationException("needs Android 10")
-    val target = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-    return insertMedia(target, Environment.DIRECTORY_DOWNLOADS, src, name, mime)
+    val (target, dir) = downloadsTarget(mime)
+    return insertMedia(target, dir, src, name, mime)
+  }
+
+  /** Куда по типу файла: видео — коллекция Video + Movies, звук — Audio + Music, остальное — Downloads + Download. Android 10+. */
+  @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+  private fun downloadsTarget(mime: String): Pair<Uri, String> = when {
+    mime.startsWith("video/") ->
+      Pair(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_MOVIES)
+    mime.startsWith("audio/") ->
+      Pair(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_MUSIC)
+    else ->
+      Pair(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_DOWNLOADS)
   }
 
   /** Запись в коллекцию MediaStore через `IS_PENDING`: недописанный файл другие приложения не видят. Совпало имя — MediaStore сам допишет « (1)». */
@@ -1297,6 +1596,8 @@ class MediaBridge(private val activity: MainActivity) {
 
     private const val PREFS = "gusvoice_media"
     private const val KEY_ASKED = "perm_asked"
+    /** Последнее окно разрешения медиа кончилось отказом (`onPermissionResult`); вместе с отсутствием объяснения — `blocked`. */
+    private const val KEY_DENIED = "perm_denied"
 
     /** Часть файла в сообщении: 512 КБ — мелко для памяти WebView, крупно для числа сообщений. */
     private const val CHUNK = 512 * 1024
@@ -1305,17 +1606,17 @@ class MediaBridge(private val activity: MainActivity) {
     private const val DEFAULT_MAX = 25L * 1024 * 1024
 
     /**
-     * Предел копии «Поделиться в GusVoice» (09.10, `bigfile1`): сервер с загрузкой кусками берёт файл ЛС до 512 МБ
+     * Предел копии «Поделиться в GusVoice» (09.10, `bigfile1`): сервер с загрузкой кусками берёт файл ЛС до 1 ГиБ (с 10.10; было 512 МБ)
      * (`attachmentRules.BIGFILE_MAX_BYTES`). Копия делается до выбора беседы и сервера не знает — меньший предел сервера
      * без `bigfile1` (25 МБ) отсекает клиент.
      */
-    private const val SHARE_MAX = 512L * 1024 * 1024
+    private const val SHARE_MAX = 1024L * 1024 * 1024
 
     /**
-     * «Туда» (сохранить / копировать / открыть / скачать) — вложения из ленты; с запасом над пределом вложений. 520 МБ с
-     * `bigfile1` (09.10, файл ЛС до 512 МБ; было 64 МБ): иначе принятый крупный файл не сохранить и не открыть.
+     * «Туда» (сохранить / копировать / открыть / скачать) — вложения из ленты; с запасом над пределом вложений. 1032 МБ с
+     * `bigfile1` (10.10, файл ЛС до 1 ГиБ; 09.10 — 520 МБ, было 64 МБ): иначе принятый крупный файл не сохранить и не открыть.
      */
-    private const val PUT_MAX = 520L * 1024 * 1024
+    private const val PUT_MAX = 1032L * 1024 * 1024
 
     /** Папка кеша с открытыми файлами (`open/<метка>/<имя>`), их срок и общий предел. */
     private const val OPENED = "open"
@@ -1325,11 +1626,14 @@ class MediaBridge(private val activity: MainActivity) {
 
     /** Папка кеша с пришедшим через «Поделиться в GusVoice» (`inbox/<метка>/<n>/<имя>`), одно на приложение. */
     private const val INBOX = "inbox"
+
+    /** Папка кеша, куда пишет системная камера листа (`cam/<метка>.jpg|mp4`); файл стирается, как только ушёл клиенту. */
+    private const val CAMERA_DIR = "cam"
     /**
-     * Общий срок копирования одного «поделиться» (все файлы): медленный чужой поставщик дольше — `unreadable`. 180 с с
-     * `SHARE_MAX` 512 МБ (09.10; было 60 с при 25 МБ): облачный поставщик отдаёт крупный файл не мгновенно.
+     * Общий срок копирования одного «поделиться» (все файлы): медленный чужой поставщик дольше — `unreadable`. 360 с с
+     * `SHARE_MAX` 1 ГиБ (10.10; 180 с при 512 МБ, 60 с при 25 МБ): облачный поставщик отдаёт крупный файл не мгновенно.
      */
-    private const val SHARE_COPY_MS = 180_000L
+    private const val SHARE_COPY_MS = 360_000L
     private const val OPENED_TTL_MS = 24L * 60 * 60 * 1000
     private const val OPENED_MAX = 200L * 1024 * 1024
 

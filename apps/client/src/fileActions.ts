@@ -10,7 +10,7 @@ import {
   saveMediaNative,
   shareFileNative,
 } from './nativeMedia';
-import { toast } from './toast';
+import { toast, toastError } from './toast';
 
 /**
  * Файлы из ленты в приложении Android (06.10, как у Telegram). У WebView приложения нет обработчика загрузок: ссылка с
@@ -50,16 +50,17 @@ export function attachmentKey(a: Pick<Attachment, 'id' | 'url'>): string {
 }
 
 /**
- * Вес в подписи карточки — те же единицы, что у самой карточки в ленте (`AttachmentView.kb` — это она же): «12 KB»,
- * «1.5 MB». Непустой файл меньше полукилобайта — «1 KB», а не «0 KB» (приёмка 06.10: файл в 46 байт был подписан «0 KB»):
- * ноль — только у пустого.
+ * Вес в подписи карточки — те же единицы, что у самой карточки в ленте (`AttachmentView.kb` — это она же): «12 КБ», «1,5 МБ» —
+ * по-русски, с запятой, как Telegram на русском и как строка файла в листе вложений (`attachRules.fileSizeText`; приёмка S20 15.10:
+ * карточка писала «4.9 MB» рядом с «283,4 КБ»). Непустой файл меньше полукилобайта — «1 КБ», а не «0 КБ» (приёмка 06.10: файл в
+ * 46 байт был подписан «0 KB»): ноль — только у пустого.
  */
 export function sizeText(n: number): string {
-  if (n > 0 && n < 1024) return '1 KB';
-  return n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n > 0 && n < 1024) return '1 КБ';
+  return n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} КБ` : `${(n / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
 }
 
-/** Подпись идущей загрузки вместо веса: «1.2 MB / 4.5 MB»; всего неизвестно — сколько пришло. */
+/** Подпись идущей загрузки вместо веса: «1,2 МБ / 4,5 МБ»; всего неизвестно — сколько пришло. */
 export function progressText(loaded: number, total: number): string {
   return total > 0 ? `${sizeText(Math.min(loaded, total))} / ${sizeText(total)}` : sizeText(loaded);
 }
@@ -86,6 +87,15 @@ export function saveKind(): FileJobKind {
 
 export const SAVED_TO_DOWNLOADS = 'Сохранено в «Загрузки»';
 const SAVED_TO_GALLERY = 'Сохранено в галерею';
+/**
+ * Куда легло сохранённое в «Загрузки» на Android (14.10): видео — Movies/GusVoice, музыка — Music/GusVoice, остальное —
+ * Download/GusVoice (`MediaBridge.downloadsTarget`; Telegram Android `MediaController.saveFile`).
+ */
+export function savedToText(mime: string): string {
+  if (mime.startsWith('video/')) return 'Сохранено в «Фильмы»';
+  if (mime.startsWith('audio/')) return 'Сохранено в «Музыку»';
+  return SAVED_TO_DOWNLOADS;
+}
 
 // ——— Загрузки: состояние для карточек ——————————————————————————————————————————————————————————————————————————
 
@@ -119,6 +129,35 @@ export function subscribeFileJobs(fn: () => void): () => void {
  * Байты по ссылке с прогрессом (частями из `body`, отчёт не чаще раза в 100 мс и в конце). `expected` — размер, если
  * выдача не сказала `Content-Length`. Без CORS-ссылки (прямая ссылка хранилища) упадёт — зовущий даёт ссылку «Скачать».
  */
+/**
+ * Э3 (#141): 503 выдачи вложения с телом `{ error: 'federation.…', instance? }` (копии нет, инстанс автора не на связи; копия
+ * ещё едет) → ошибка с кодом и меткой `fedFile`; `fedWho` — как назвать инстанс. Словами её делает `toastError` (`fedErrorText`).
+ */
+async function fedRefusal(res: Response): Promise<Error | null> {
+  try {
+    const body = (await res.json()) as { error?: unknown; instance?: unknown };
+    const code = typeof body?.error === 'string' ? body.error : '';
+    if (!/^federation\.[a-z_]+$/.test(code)) return null;
+    return Object.assign(new Error(code), { fedFile: true, fedWho: typeof body.instance === 'string' ? body.instance : null });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Э3 (#141, `fedm3`): вложение с `fedState: 'copying'` (копия с инстанса автора едет) не запрашиваем — отдача ответила бы 503
+ * `federation.att_pending`. Тот же отказ строим сами: тост `fedErrorText('federation.att_pending')` — «Файл ещё загружается…».
+ * Имени инстанса у вложения нет — фраза «с инстанса собеседника» (сервер в 503 называет его, но запроса нет).
+ */
+function copyingRefusal(): Error {
+  return Object.assign(new Error('federation.att_pending'), { fedFile: true, fedWho: null });
+}
+
+/** Отказ выдачи кодом федерации (`fedRefusal`). */
+export function isFedFileError(e: unknown): boolean {
+  return (e as { fedFile?: boolean } | null)?.fedFile === true;
+}
+
 export async function fetchWithProgress(
   url: string,
   onProgress: (loaded: number, total: number) => void,
@@ -126,7 +165,7 @@ export async function fetchWithProgress(
   expected = 0,
 ): Promise<Blob> {
   const res = await fetch(url, { credentials: 'omit', signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw (res.status === 503 && (await fedRefusal(res))) || new Error(`HTTP ${res.status}`);
   const total = Number(res.headers.get('content-length')) || expected;
   const type = res.headers.get('content-type') ?? '';
   if (!res.body) {
@@ -155,6 +194,10 @@ export async function fetchWithProgress(
 }
 
 function report(kind: FileJobKind, e: unknown): void {
+  if (isFedFileError(e)) {
+    toastError(e);
+    return;
+  }
   const code = e instanceof NativeFileError ? e.code : '';
   if (kind === 'open' && code === 'no-app') {
     toast('info', 'Нет приложения, чтобы открыть этот файл', canSaveFileNative() ? 'Его можно сохранить в «Загрузки»: стрелка справа на карточке' : undefined);
@@ -168,6 +211,10 @@ function report(kind: FileJobKind, e: unknown): void {
 }
 
 async function run(a: Attachment, kind: FileJobKind): Promise<void> {
+  if (a.fedState === 'copying') {
+    report(kind, copyingRefusal());
+    return;
+  }
   const key = attachmentKey(a);
   const entry: Entry = { job: { kind, loaded: 0, total: a.size || 0 }, ctl: new AbortController() };
   jobs.set(key, entry);
@@ -196,7 +243,7 @@ async function run(a: Attachment, kind: FileJobKind): Promise<void> {
       await shareFileNative(blob, a.name, mime);
     } else {
       await saveFileNative(blob, a.name, mime);
-      toast('success', SAVED_TO_DOWNLOADS, a.name);
+      toast('success', savedToText(mime), a.name);
     }
   } catch (e) {
     // Отменили нажатием — молча.
@@ -270,7 +317,7 @@ export function downloadInApp(href: string, name: string, mime: string, note: (n
       );
       if (kind === 'save') {
         await saveFileNative(blob, name, mime);
-        note({ text: SAVED_TO_DOWNLOADS, final: true });
+        note({ text: savedToText(mime), final: true });
       } else {
         await openFileNative(blob, name, mime);
         note({ text: '', final: true });
