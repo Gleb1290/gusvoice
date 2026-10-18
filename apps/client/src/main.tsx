@@ -24,6 +24,7 @@ import { applyTheme, getTheme } from './theme';
 import { applyUiPrefs, applyUiScale, getUiScale } from './uiPrefs';
 import { installAndroidBack } from './androidBack';
 import { installNativeSafeArea } from './nativeSafeArea';
+import { installNativeMicActions } from './nativeMicActions';
 import { initPushRegistration } from './nativeUnifiedPush';
 import { ensureNotifyPermission } from './notifications';
 import { notifyIfJustUpdated, runLaunchUpdate, startUpdatePolling } from './updater';
@@ -50,6 +51,8 @@ applyLiteMode();
 installAndroidBack();
 // Android: системные панели в CSS-переменные — старый WebView не кладёт их в env(safe-area-inset-*) (nativeSafeArea.ts).
 installNativeSafeArea();
+// Android: кнопки микрофона в уведомлении голоса и состояние микрофона нативу (#156, nativeMicActions.ts).
+installNativeMicActions();
 
 const root = createRoot(document.getElementById('root')!);
 

@@ -40,6 +40,7 @@ async function render(component: string, phone: boolean, props: Record<string, u
     './DmListSwipe': { ChatSwipeSetting: () => React.createElement('b', { id: 'set-g-swipe' }) },
     './Icon': { Icon: ({ name }: { name: string }) => React.createElement('i', { 'data-icon': name }) },
     './Toggle': { Toggle: () => null }, './Select': { Select: () => null },
+    './MicBubbleSetting': { MicBubbleSetting: () => null },
     './StreamQualityPanel': { StreamQualityPanel: () => React.createElement('b', null, 'качество') },
   };
   try {

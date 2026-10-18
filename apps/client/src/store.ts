@@ -201,6 +201,10 @@ interface State extends ConvActions {
    *  Живёт в сторе, а не только в сцене: звучанием стрим-аудио заведует `VoiceConnection`, который
    *  смонтирован всегда, пока вы в голосе, — сцена размонтируется при уходе в текстовый канал (#71). */
   watchedStreams: string[];
+  /** Показы (identity стримеров) в окошке «картинка в картинке» (#222/#223): порядок добавления, без дублей,
+   *  не больше `PIP_MAX` (пятый вытесняет самый старый — `pipAdd`). Звук и слой у них — как у открытых на
+   *  сцене (`streamPipRules.streamsInView`), даже когда сцены нет. Пусто — окошка нет. */
+  pipStreams: string[];
   mutedStreams: string[];
   streamVolumes: Record<string, number>;
   /** Намерение «зайти в канал и открыть показ вот этого человека» — клик по кадру в карточке
@@ -535,6 +539,14 @@ interface State extends ConvActions {
   watchStream: (id: string) => void;
   unwatchStream: (id: string) => void;
   clearWatchedStreams: () => void;
+  /** Добавить показ в окошко (#223): в конец, без дублей, больше `max` (`streamPipRules.PIP_MAX`) — уходит самый
+   *  старый. Предел передаёт вызывающий: правила окошка стор не импортирует (тесты стора грузят его с точным
+   *  перечнем зависимостей). Тот же расчёт — `streamPipRules.pipAdd`. */
+  addPipStream: (id: string, max: number) => void;
+  /** Убрать показ из окошка. */
+  removePipStream: (id: string) => void;
+  /** Окошко закрыто — показов в нём нет. */
+  clearPipStreams: () => void;
   setPendingWatch: (p: PendingWatch) => void;
   /** Запомнить отказ и показать окно. Зовётся и по событию, и по отказу при открытии сервера. */
   noteAccessClosed: (n: AccessNotice) => void;
@@ -642,6 +654,7 @@ export const useStore = create<State>((set, get) => ({
   nativeSharing: false,
   incomingPoke: null,
   watchedStreams: [],
+  pipStreams: [],
   mutedStreams: [],
   streamVolumes: readStreamVolumes(),
   pendingWatch: null,
@@ -1421,7 +1434,8 @@ export const useStore = create<State>((set, get) => ({
   leaveVoice: (keepSession = false) => {
     const v = get().voice;
     if (!keepSession) clearVoiceSession(v ? v.instanceId : activeInstanceId());
-    set({ voice: null, liveVoice: {}, voiceState: 'disconnected' });
+    // Окошко показа (#222) без голоса не живёт: его закроет и `StreamPipHost`, но стор чистим сразу.
+    set({ voice: null, liveVoice: {}, voiceState: 'disconnected', pipStreams: [] });
   },
 
   /**
@@ -1895,6 +1909,19 @@ export const useStore = create<State>((set, get) => ({
   /** Сцена ушла с экрана или голос отключён — открытых стримов больше нет, а значит и звука. */
   clearWatchedStreams: () => set((s) => (s.watchedStreams.length === 0 ? {} : { watchedStreams: [] })),
 
+  addPipStream: (id, max) =>
+    set((s) => {
+      // Ничего не меняется — то же состояние (`s`), а не `{}`: пустой объект Zustand считает новым состоянием и будит всех
+      // подписчиков, комната заново применяла бы подписки/громкость/слой (нашёл Codex, R256).
+      if (!id || s.pipStreams.includes(id)) return s;
+      const next = [...s.pipStreams, id];
+      const keep = Math.max(1, Math.floor(max));
+      return { pipStreams: next.length > keep ? next.slice(next.length - keep) : next };
+    }),
+  removePipStream: (id) =>
+    set((s) => (s.pipStreams.includes(id) ? { pipStreams: s.pipStreams.filter((x) => x !== id) } : s)),
+  clearPipStreams: () => set((s) => (s.pipStreams.length === 0 ? s : { pipStreams: [] })),
+
   setPendingWatch: (pendingWatch) => set({ pendingWatch }),
   noteAccessClosed: (n) =>
     set((s) => ({ closedServers: { ...s.closedServers, [n.serverId]: n }, accessNotice: n })),
@@ -1939,6 +1966,7 @@ export const useStore = create<State>((set, get) => ({
       economy: {},
       incomingPoke: null,
       watchedStreams: [],
+      pipStreams: [],
       mutedStreams: [],
       // Громкости стримов лежат ПО ИНСТАНСУ — перечитываем под уже переключённую запись.
       streamVolumes: readStreamVolumes(),

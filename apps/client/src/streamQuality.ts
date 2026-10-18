@@ -49,9 +49,14 @@ export const STREAM_QUALITY_HINT: Record<StreamQualityPref, string> = {
  *   это не касается. Вернулось окно — вернулся выбор.
  * - Показ не открыт (превью-снимок раз в минуту) — нижний: снимку нужно 480 пикселей в ширину.
  * - Иначе — выбор человека, `auto` = верхний.
+ * - Показ в окошке «картинка в картинке» (`inPip`, #222) — выбор человека, даже когда главное окно не
+ *   видно: окошко висит поверх всего как раз для этого, и нижний слой в нём был бы мылом.
  */
-export function wantedLayer(pref: StreamQualityPref, ctx: { windowHidden: boolean; watched: boolean }): StreamLayer {
-  if (ctx.windowHidden || !ctx.watched) return 'low';
+export function wantedLayer(
+  pref: StreamQualityPref,
+  ctx: { windowHidden: boolean; watched: boolean; inPip?: boolean },
+): StreamLayer {
+  if (!ctx.inPip && (ctx.windowHidden || !ctx.watched)) return 'low';
   return pref === 'auto' ? 'high' : pref;
 }
 
@@ -123,6 +128,32 @@ export function shownPref(pref: StreamQualityPref, choices: readonly LayerChoice
   if (pref === 'auto' || choices.length === 0) return 'auto';
   if (choices.some((c) => c.pref === pref)) return pref;
   return pref === 'medium' ? 'high' : 'auto';
+}
+
+/**
+ * Пункты меню качества показа — то же, что собирает ⚙ на сцене (`ScreenViewer`): «Авто» + слои трека
+ * (`layerChoices`); слои есть, а описания нет — «Высокое» и «Экономное» без разрешения; слоёв нет —
+ * выбирать не из чего (`choices` пуст). Нужен окошку «картинка в картинке» (#223): там своё лёгкое меню,
+ * `ContextMenu` живёт в главном окне.
+ */
+export function streamQualityMenu(
+  pref: StreamQualityPref,
+  pub: { simulcasted?: boolean; trackInfo?: { layers?: readonly LayerInfo[]; codecs?: readonly { layers?: readonly LayerInfo[] }[] } } | undefined,
+): { checked: StreamQualityPref; choices: LayerChoice[]; items: { pref: StreamQualityPref; sub: string }[] } {
+  const described = layerChoices(pub?.trackInfo);
+  const choices: LayerChoice[] = described.length
+    ? described
+    : streamHasLayers(pub)
+      ? [
+          { pref: 'high', label: STREAM_QUALITY_HINT.high },
+          { pref: 'low', label: STREAM_QUALITY_HINT.low },
+        ]
+      : [];
+  return {
+    checked: shownPref(pref, choices),
+    choices,
+    items: [{ pref: 'auto', sub: STREAM_QUALITY_HINT.auto }, ...choices.map((c) => ({ pref: c.pref as StreamQualityPref, sub: c.label }))],
+  };
 }
 
 /**

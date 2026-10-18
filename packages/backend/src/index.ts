@@ -36,6 +36,9 @@ import { acceptConvRow, configureFedConvOpened, configureFedOpenPrivacy, openFed
 import { configureFederatedConv } from './conversations.js';
 import { registerGuestPushHandlers } from './federation/guestPush.js';
 import { federation, startFederationAlerts, startFederationKeyRotation } from './federation/instance.js';
+import { onFederationSwitch, startFederationSwitch } from './federation/switch.js';
+import { federationDmGate, federationGate } from './federation/gate.js';
+import { federationSwitchRoutes } from './routes/federationSwitch.js';
 import { registerInstanceMetaHandler } from './federation/instanceMeta.js';
 import { startOutboxWorker } from './federation/outbox.js';
 import { registerDirectoryHandlers } from './federation/directoryEvents.js';
@@ -211,17 +214,25 @@ await app.register(
     if (env.diagEnabled) await api.register(diagRoutes);
     // Экономика (#117) — по тому же правилу и по той же причине: выключено => маршрута НЕТ.
     if (env.economyEnabled) await api.register(economyRoutes);
-    // Федерация (#139) — по тому же правилу, что диагностика и экономика: выключено => маршрутов НЕТ,
-    // а не ветка в обработчике. Сосед получит честные 404 вместо «как бы федеративного» инстанса.
-    if (env.federation.enabled) await api.register(federationRoutes);
-    // Э3 часть 1 (#141): файл вложения ЛС соседу `GET /fed/v1/att/:id` — только с ЛС между инстансами.
-    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedAttRoutes);
-    // Э4 (#141): мгновенное «печатает» / «в сети» от соседа `POST /fed/v1/ephemeral` — тоже только с ЛС между инстансами.
-    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedEphemeralRoutes);
-    // Э6 (#141, `dmcall1`): приглашение на звонок 1:1 от соседа — отдельный модуль, как `fedEphemeral.ts`.
-    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedCallRoutes);
-    // Э7 часть 1 (#141, `dmgroup1`): запрос участника хосту группы со смешанным составом — отдельный модуль, как `fedCalls.ts`.
-    if (env.federation.enabled && env.federation.dmEnabled) await api.register(fedGroupRoutes);
+    // Федерация (#139). До #224 при выключенной федерации маршрутов не было вовсе (сосед получал честный 404); теперь её
+    // включают тумблером в админке без перезапуска, поэтому маршруты есть всегда, а крючок `federationGate` на КАЖДОМ запросе
+    // отвечает тем же 404 обработчика «не найдено», пока флаг выключен (`federation/gate.ts`). Снаружи — то же самое.
+    await api.register(async (fed) => {
+      fed.addHook('onRequest', federationGate);
+      await fed.register(federationRoutes);
+    });
+    // Тумблеры федерации во вкладке админки (#224) — отвечают и при выключенной федерации, иначе её нечем включить.
+    await api.register(federationSwitchRoutes);
+    // ЛС между инстансами (#141) — тем же приёмом, флаг `dmEnabled` (`federationDmGate`):
+    // Э3 часть 1 — файл вложения ЛС соседу `GET /fed/v1/att/:id`; Э4 — «печатает» / «в сети» от соседа `POST /fed/v1/ephemeral`;
+    // Э6 (`dmcall1`) — приглашение на звонок 1:1; Э7 часть 1 (`dmgroup1`) — запрос участника хосту группы со смешанным составом.
+    await api.register(async (dm) => {
+      dm.addHook('onRequest', federationDmGate);
+      await dm.register(fedAttRoutes);
+      await dm.register(fedEphemeralRoutes);
+      await dm.register(fedCallRoutes);
+      await dm.register(fedGroupRoutes);
+    });
     await api.register(linkPreviewRoutes);
     // Картинка карты для геопозиции в ЛС (`yamap1`): без ключа Яндекса маршрута НЕТ (как у diag/economy).
     if (env.yandexMapsStaticKey) await api.register(mapsStaticRoutes);
@@ -234,41 +245,70 @@ await app.register(
 // Realtime gateway (text + channel events) at /gateway.
 registerGateway(app);
 
-try {
-  await runMigrations();
-  // Источники связок для CORS — до первого запроса, иначе гость соседа после перезапуска получал бы отказ.
-  await refreshPeerOrigins();
-  // Строго до listen и строго в порядке «создать аккаунт → привязать права к его id» (#140);
-  // сам порядок живёт в bootstrapIdentity, чтобы его нельзя было переставить здесь по невнимательности.
-  await bootstrapIdentity({ seedSuperAdmin, bindSuperAdmin });
-  await verifyMailer();
-  await ensureMediaBucket();
-  // Закрытый бакет файлов ЛС: без политики; не вышло — загрузки в ЛС отвечают 503, а не уходят в открытый бакет.
-  await ensurePrivateBucket();
-  // Федерация поднимается ПОСЛЕ привязки личности и ДО listen: инстанс не должен успеть ответить
-  // соседу документом, пока не решено, есть ли у нас печать. Отказ здесь не бросает — он гасит
-  // только федерацию (`state.ts`), поэтому `await` без try: внутри уже всё поймано.
-  await federation.start();
-  // Обработчики событий соседей регистрируются до listen: иначе первая же пачка приехала бы в пустой
-  // реестр и была бы принята «вхолостую» — номер двинулся, а изменение не применилось.
-  if (env.federation.enabled) registerInstanceMetaHandler();
-  // Каталоги соседей (F2): те же события, тот же довод — обработчик должен стоять до первой пачки.
-  if (env.federation.enabled) registerDirectoryHandlers();
-  // Членства гостей (F3): хост сообщает нам, где состоят наши люди, — без этого обработчика «Где я
-  // гость» и адресаты отзыва сессий остались бы пустыми, а номера событий всё равно двигались бы.
-  if (env.federation.enabled) registerMembershipHandlers();
-  // Отзывы сессий и аккаунтов от домов наших гостей (F3, §5.6.1) — до первой пачки событий.
-  if (env.federation.enabled) registerRevocationHandlers();
-  // Жалобы соседей на наших людей (F3, §5.11) — держатель видит их во вкладке «Федерация».
-  if (env.federation.enabled) registerReportHandlers();
-  // Просьбы хостов разбудить наших людей, гостящих у них (F5, требование 33).
-  if (env.federation.enabled) registerGuestPushHandlers();
-  // Режим стенда для локальных соседей (Ф13): список пуст везде, кроме стенда; проверен при старте (`env.ts`).
-  configureDevPeers(env.federation.devPeers);
-  // «Кто может мне писать» (`msgpriv1`, 13.10): проверка отправки в 1:1; пометки соседей (`noMessages`) — из `dmEphemeral` (без ЛС
-  // между инстансами там пусто). Вызов через `?.`: проверка запуска (`indexErrors.test.ts`) подменяет `routes/conv.js` одними
-  // маркерами регистрации, а этот крючок, в отличие от остальных крючков `conv.js`, ставится и без федерации.
-  configureMessagePrivacy?.({ allowed: messageAllowedFor, wrote: wroteInDirect, remoteRefused: remoteMessageRefusedFor });
+/**
+ * Крючки федерации и ЛС между инстансами (#224): при старте (до `listen`) и при каждом переключении тумблера в админке
+ * (`federation/switch.ts` → `onFederationSwitch`). Обработчики событий и фоновые задачи заводятся ОДИН раз (их такты сами
+ * пропускают работу при выключенном флаге), крючки-сеттеры перевешиваются по текущим флагам, подписки ЛС снимаются при
+ * выключении — выключенное без перезапуска ведёт себя как выключенное при старте.
+ */
+let fedHandlersWired = false;
+let fedDmStarted = false;
+let fedDmSubs: Array<() => void> | null = null;
+
+/** ЛС выключили без перезапуска (#224): снять крючки и подписки — как при старте без `FEDERATION_DM_ENABLED`. */
+function unwireFederationDm(): void {
+  for (const off of fedDmSubs ?? []) off();
+  fedDmSubs = null;
+  configureFedDirect(null);
+  configureFedConvDoorbell(null);
+  configureFedConvRow(null);
+  configureFedConvCaps(null);
+  configureCapsChanged(null);
+  configureFedConvPeerSeen(null);
+  configureFedLinkGuard(null);
+  configureFedFilesGuard(null);
+  configureFedOnceGuard(null);
+  configureFedAlbumGuard(null);
+  configureFedConvAttachments(null);
+  configureRemoteAttachments(null);
+  configureShadowGone(null);
+  configureFedDmReport(null);
+  configureGatewayFed(null);
+  configureGroupTyping(null);
+  configureRemoteLastSeen(null);
+  configureEphemeralStore(null);
+  configureFedConvOpened(null);
+  configureFedVia(null);
+  configureFedViaRoutes(null);
+  configureFedCalls(null);
+  configureFedCallRecord(null);
+  configureFedOpenPrivacy(null);
+  configureFedMessagePrivacy(null);
+  configurePresenceMessagePrivacy(null);
+  configureMessagePrivacyChanged(null);
+  configureFedGroupAccept(null);
+  configureFedGroupSigner(null);
+  configureFedGroups(null);
+}
+
+function wireFederation(): void {
+  if (env.federation.enabled && !fedHandlersWired) {
+    fedHandlersWired = true;
+    // Обработчики событий соседей регистрируются до listen: иначе первая же пачка приехала бы в пустой
+    // реестр и была бы принята «вхолостую» — номер двинулся, а изменение не применилось.
+    registerInstanceMetaHandler();
+    // Каталоги соседей (F2): те же события, тот же довод — обработчик должен стоять до первой пачки.
+    registerDirectoryHandlers();
+    // Членства гостей (F3): хост сообщает нам, где состоят наши люди, — без этого обработчика «Где я
+    // гость» и адресаты отзыва сессий остались бы пустыми, а номера событий всё равно двигались бы.
+    registerMembershipHandlers();
+    // Отзывы сессий и аккаунтов от домов наших гостей (F3, §5.6.1) — до первой пачки событий.
+    registerRevocationHandlers();
+    // Жалобы соседей на наших людей (F3, §5.11) — держатель видит их во вкладке «Федерация».
+    registerReportHandlers();
+    // Просьбы хостов разбудить наших людей, гостящих у них (F5, требование 33).
+    registerGuestPushHandlers();
+  }
   // ЛС между инстансами (Э0): id инстанса для глобального ключа пары. Журнал на связку — ВСЕГДА при федерации (исправления
   // ревью 12.10, п. 3): `FEDERATION_DM_ENABLED` выключили откатом — сообщения в открытые беседы с людьми соседа всё равно
   // пишутся, и без строк журнала не доехали бы никогда; строки полежат (уборка 30 дней), флаг закрывает только маршруты и забор.
@@ -306,7 +346,7 @@ try {
       if (since !== null) void notePeerPull(link.instanceId, since).catch(() => {});
       if (!link.features.includes('dm1')) void refreshCapabilities(link, Date.now(), { force: true }).catch(() => {});
     });
-    startConvPull();
+    if (!fedDmStarted) startConvPull(() => env.federation.dmEnabled);
     // Э2 часть Б: разрыв/пауза связки → запись 403 и `fedLink` в сводках; жалоба из ЛС — и держателю дома собеседника.
     configureFedLinkGuard(fedLinkBrokenFor);
     // Э3 часть 1: файлы человеку соседа — только если его инстанс объявил `dm2` (загрузка, GIF, отправка, пересылка);
@@ -316,33 +356,37 @@ try {
     // G56: один элемент альбома «у обоих» — только если дома людей соседа в беседе объявили `dmalbum1`.
     configureFedAlbumGuard(fedAlbumAllowedFor);
     configureFedConvAttachments({ remoteFor: remoteAttachmentsFor, kick: (origin) => kickAttCopies(origin), purge: purgeCopiesNow });
-    onLinkRestored((instanceId) => kickAttCopies(instanceId, { fresh: true }));
+    // Подписки ЛС — по одной на включение: выключение их снимает (`unwireFederationDm`), включение вешает заново.
+    const subscribe = fedDmSubs === null;
+    fedDmSubs ??= [];
+    if (subscribe) fedDmSubs.push(onLinkRestored((instanceId) => kickAttCopies(instanceId, { fresh: true })));
     configureRemoteAttachments(serveRemoteAttachment);
-    startAttCopies();
+    startAttCopies(() => env.federation.dmEnabled);
     // Удалённый аккаунт собеседника по ЛС (`user.revoked` и журнал отзывов) — обезличить его теневую строку (Ф26).
     configureShadowGone(anonymizeShadow);
     configureFedDmReport(reportFedDmPeer);
-    onLinksChanged(() => void refreshFedLinks());
-    startFedLinkWatch();
+    if (subscribe) fedDmSubs.push(onLinksChanged(() => void refreshFedLinks()));
+    startFedLinkWatch(() => env.federation.dmEnabled);
     // Э4: «печатает» и «в сети / был(а)» с людьми соседа (`dm3`) — крючки шлюза и «был(а)», «жив» раз в минуту, устаревание.
     configureGatewayFed({ typing: fedTyping, presence: fedPresence, isRemote: isKnownShadow, groupTyping: fedGroupTyping });
     // Э7 часть 3 (#141, `dmgroup2`): «печатает» в группах со смешанным составом.
     configureGroupTyping({ accept: acceptHostedTyping, forward: forwardGroupTyping });
     configureRemoteLastSeen(remoteLastSeenFor);
     configureEphemeralStore(redisEphemeralStore); // копия принятого «был(а)» людей соседей — в Redis, переживает перезапуск
-    startDmEphemeral();
+    startDmEphemeral(() => env.federation.dmEnabled);
     // Приёмка 15.10: новая беседа 1:1 с человеком соседа — «в сети / был(а)» нашего человека его дому сразу, а не через 10 минут.
     configureFedConvOpened(fedPeerAdded);
     // F5: блок человека соседа — его дому сразу «был(а) давно» вместо «в сети» (`fedBlockChanged`).
-    onBlockChange(fedBlockChanged);
+    if (subscribe) fedDmSubs.push(onBlockChange(fedBlockChanged));
     // Перезапуск этого инстанса / связка снова рабочая: соседи не знают, кто из наших людей не в сети — один проход «жив» / «был(а)».
-    const resendTimer = setTimeout(() => void resendPresence().catch(() => {}), 20_000);
+    // Включили из админки (#224) — тот же проход сразу: соседи не знают, кто из наших в сети.
+    const resendTimer = setTimeout(() => void resendPresence().catch(() => {}), fedDmStarted ? 0 : 20_000);
     resendTimer.unref?.();
-    onLinkRestored((instanceId) => void resendPresence(instanceId).catch(() => {}));
+    if (subscribe) fedDmSubs.push(onLinkRestored((instanceId) => void resendPresence(instanceId).catch(() => {})));
     // Э5 часть 1: «мой дом лежит — пишу через инстанс собеседника» — долгая сессия, приём «через», сверка задним числом.
     configureFedVia({ gate: viaGate, isShadow: isShadowUser, fallback: (me, id, purpose) => fallbackFor(me, id, Date.now(), purpose), claims: acceptClaims });
     configureFedViaRoutes(pendingFor);
-    startConvVia();
+    if (!fedDmStarted) startConvVia(() => env.federation.dmEnabled);
     // Э6: звонки 1:1 с людьми соседа — приглашение и снимки фазы (`calls.ts`), копия записи о звонке (`convAccept`), приём `call.state`.
     configureFedCalls({ invite: (call, home) => inviteRemote(call, home), state: sendCallState });
     configureFedCallRecord({ plan: callRecordPlanFor, read: callRecordCopied });
@@ -352,23 +396,60 @@ try {
     configureFedMessagePrivacy(messageAllowedFor);
     configurePresenceMessagePrivacy(messageAllowedFor);
     configureMessagePrivacyChanged(announceMessagePrivacy);
-    startDmCalls();
+    if (!fedDmStarted) startDmCalls(() => env.federation.dmEnabled);
     // Э7 часть 1: группы со смешанным составом — строка `conv` от хоста, подпись дома автора (своё — подписываем, чужое —
     // проверяем), позвать человека соседа и действие с группой чужого дома (`routes/convGroups.ts`).
     configureFedGroupAccept({ applyConv: applyGroupConv, verify: verifyMessageSig });
     configureFedGroupSigner(signOwnMessage);
     configureFedGroups({ invitable: (home) => groupInvitableHome(home), op: groupOpRemote });
+    fedDmStarted = true;
+  } else if (fedDmSubs) {
+    unwireFederationDm();
   }
+}
+
+try {
+  await runMigrations();
+  // Источники связок для CORS — до первого запроса, иначе гость соседа после перезапуска получал бы отказ.
+  await refreshPeerOrigins();
+  // Строго до listen и строго в порядке «создать аккаунт → привязать права к его id» (#140);
+  // сам порядок живёт в bootstrapIdentity, чтобы его нельзя было переставить здесь по невнимательности.
+  await bootstrapIdentity({ seedSuperAdmin, bindSuperAdmin });
+  await verifyMailer();
+  await ensureMediaBucket();
+  // Закрытый бакет файлов ЛС: без политики; не вышло — загрузки в ЛС отвечают 503, а не уходят в открытый бакет.
+  await ensurePrivateBucket();
+  // Федерация поднимается ПОСЛЕ привязки личности и ДО listen: инстанс не должен успеть ответить
+  // соседу документом, пока не решено, есть ли у нас печать. Отказ здесь не бросает — он гасит
+  // только федерацию (`state.ts`), поэтому `await` без try: внутри уже всё поймано.
+  // Флаги из `.env` и тумблера в админке (#224) и подъём ключа — на месте прежнего `federation.start()`.
+  await startFederationSwitch();
+  // Режим стенда для локальных соседей (Ф13): список пуст везде, кроме стенда; проверен при старте (`env.ts`).
+  configureDevPeers(env.federation.devPeers);
+  // «Кто может мне писать» (`msgpriv1`, 13.10): проверка отправки в 1:1; пометки соседей (`noMessages`) — из `dmEphemeral` (без ЛС
+  // между инстансами там пусто). Вызов через `?.`: проверка запуска (`indexErrors.test.ts`) подменяет `routes/conv.js` одними
+  // маркерами регистрации, а этот крючок, в отличие от остальных крючков `conv.js`, ставится и без федерации.
+  configureMessagePrivacy?.({ allowed: messageAllowedFor, wrote: wroteInDirect, remoteRefused: remoteMessageRefusedFor });
+  wireFederation();
   await app.listen({ host: '0.0.0.0', port: env.port });
   app.log.info(`backend listening on :${env.port}`);
   // Сменный ключ подписи истекает по сроку — проверять надо и на инстансе, который не перезапускали.
   startFederationKeyRotation();
   // Очередь исходящих событий: недоступный сосед не должен приводить к потере изменения (#148).
-  if (env.federation.enabled) startOutboxWorker();
+  if (env.federation.enabled) startOutboxWorker(() => env.federation.enabled);
   // Оповещения держателю: связка легла, ключ истекает, всплеск отказов подписи (F5, §5.10).
   startFederationAlerts();
   // Синхронизация каталогов: дельта раз в 15 минут и полная сверка раз в сутки ночью (F2, §5.4).
-  if (env.federation.enabled) startDirectorySyncWorker();
+  if (env.federation.enabled) startDirectorySyncWorker(() => env.federation.enabled);
+  // Тумблер в админке (#224): перевесить крючки и завести фоновые задачи федерации, если их ещё нет (повторный запуск —
+  // пустой; при выключенном флаге их такты ничего не делают).
+  onFederationSwitch(() => {
+    wireFederation();
+    startFederationKeyRotation();
+    startFederationAlerts();
+    if (env.federation.enabled) startOutboxWorker(() => env.federation.enabled);
+    if (env.federation.enabled) startDirectorySyncWorker(() => env.federation.enabled);
+  });
   // Anti-bot: sweep abandoned unverified registrations (startup + daily).
   startDailyCleanup();
   // Файлы ЛС (шаг 1в): брошенные и вытесненные загрузки, недоудалённое после «удалить у обоих» — раз в час.

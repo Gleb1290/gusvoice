@@ -228,9 +228,18 @@ const BATCH_MAX = 50;
  */
 const PASS_INTERVAL_MS = 5_000;
 
-export function startOutboxWorker(): void {
+let outboxStarted = false;
+
+/**
+ * `active` (#224): федерация включена прямо сейчас — выключили тумблером в админке, такт пустой. Повторный вызов (включили
+ * снова) таймер второй раз не заводит.
+ */
+export function startOutboxWorker(active: () => boolean = () => true): void {
+  if (outboxStarted) return;
+  outboxStarted = true;
   let running = false;
   const timer = setInterval(() => {
+    if (!active()) return;
     // 🔴 Поверх незавершённого прохода новый не стартует (аудит 19.09, F-09): пока один сосед цедит
     // ответ, каждые пять секунд начинался ещё один проход и вис там же — за сутки тысячи сокетов.
     if (running) return;

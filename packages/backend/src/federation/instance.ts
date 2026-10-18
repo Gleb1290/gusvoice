@@ -25,15 +25,36 @@ export function domainFromOrigin(origin: string): string {
   }
 }
 
+/**
+ * Хранилище ключей с текущим паролем (#224). При старте — пароль из `.env`; включение из админки без пароля в `.env`
+ * подставляет пароль из базы (`switch.ts`). Файлы те же, меняется только пароль, которым их открывать.
+ */
+let keystore = createKeystore(env.federation.dataDir, env.federation.keyPassphrase);
+let passphraseSource: 'env' | 'base' = 'env';
+
+/** Пароль к ключу для следующего `federation.start()` (#224). 🔴 Сам пароль не логируется и наружу не уходит. */
+export function useFederationPassphrase(passphrase: string, source: 'env' | 'base'): void {
+  keystore = createKeystore(env.federation.dataDir, passphrase);
+  passphraseSource = source;
+}
+
 export const federation = createFederation({
-  enabled: env.federation.enabled,
-  keystore: createKeystore(env.federation.dataDir, env.federation.keyPassphrase),
+  // Геттеры, а не значения (#224): тумблер в админке меняет флаги без перезапуска.
+  get enabled() {
+    return env.federation.enabled;
+  },
+  get keystore() {
+    return keystore;
+  },
+  passphraseSource: () => passphraseSource,
   now: () => Date.now(),
   domain: domainFromOrigin(env.clientOrigin),
   clientOrigin: env.clientOrigin,
   apiBase: env.federation.apiBase,
   appVersion: process.env.GV_VERSION ?? null,
-  dmEnabled: env.federation.dmEnabled,
+  get dmEnabled() {
+    return env.federation.dmEnabled;
+  },
   async loadInstanceMeta() {
     const [row] = await db
       .select({ value: instanceSettings.value })
@@ -68,13 +89,20 @@ const ROTATION_CHECK_MS = 12 * 60 * 60 * 1000;
  */
 const ALERTS_CHECK_MS = 5 * 60 * 1000;
 
-/** Проверять поводы для оповещений держателю. Выключенная федерация — таймера нет вовсе. */
+let alertsStarted = false;
+let rotationStarted = false;
+
+/**
+ * Проверять поводы для оповещений держателю. Выключенная федерация — таймера нет вовсе; включили из админки (#224) —
+ * зовётся снова и заводит таймер один раз; выключили — такт ничего не делает.
+ */
 export function startFederationAlerts(): void {
-  if (!env.federation.enabled) return;
+  if (!env.federation.enabled || alertsStarted) return;
+  alertsStarted = true;
   let running = false;
   const run = (): void => {
     // Круг стучится к подозреваемым связкам по сети — поверх незавершённого новый не стартует (F-09).
-    if (running) return;
+    if (running || !env.federation.enabled) return;
     running = true;
     void import('./alerts.js')
       .then(({ runFederationAlerts }) => runFederationAlerts())
@@ -91,8 +119,11 @@ export function startFederationAlerts(): void {
 }
 
 export function startFederationKeyRotation(): void {
-  if (!env.federation.enabled) return;
+  if (!env.federation.enabled || rotationStarted) return;
+  rotationStarted = true;
   const timer = setInterval(() => {
+    // Выключили из админки (#224) — такт пустой: ни ключей, ни уборки, пока не включат снова.
+    if (!env.federation.enabled) return;
     void federation.ensureSigningKey().catch((err: unknown) => {
       console.warn(`[fed] не удалось выпустить сменный ключ: ${err instanceof Error ? err.message : String(err)}`);
     });

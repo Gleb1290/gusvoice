@@ -23,6 +23,7 @@ import androidx.core.graphics.Insets
 import androidx.core.location.LocationManagerCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import java.lang.ref.WeakReference
 
 /** Install-once flag for the renderer-gone guard: onCreate re-runs on activity recreation, but the
  *  uncaught-exception handler is process-wide — re-wrapping it would stack delegation layers. */
@@ -349,6 +350,7 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     webViewRef = webView
     webView.post { raiseBackCallback() }
+    liveWebView = WeakReference(webView) // для кнопок уведомления голоса (#156, companion ниже)
     webView.webChromeClient = object : WebChromeClient() {
       override fun onPermissionRequest(request: PermissionRequest) {
         runOnUiThread {
@@ -378,15 +380,23 @@ class MainActivity : TauriActivity() {
 
   override fun onResume() {
     super.onResume()
+    // Пузырь микрофона (#156, `MicBubble.kt`): GusVoice на экране — пузырь не нужен.
+    VoiceForegroundService.setAppForeground(true)
     // Android 14+: один раз предложить «Полноэкранные уведомления» (входящий звонок поверх блокировки).
     // Не посреди «Ответить» на звонок (приложение открыто принять его) — тогда не лезем с вопросом.
     if (intent?.hasExtra(CallNotifier.EXTRA_ANSWER) != true) FullScreenAsk.maybeAsk(this)
+  }
+
+  override fun onPause() {
+    VoiceForegroundService.setAppForeground(false)
+    super.onPause()
   }
 
   override fun onDestroy() {
     if (callAudioLazy.isInitialized()) callAudio.stop()
     if (raiseToEarLazy.isInitialized()) raiseToEar.shutdown()
     media.shutdown()
+    if (liveWebView?.get() === webViewRef) liveWebView = null
     super.onDestroy()
   }
 
@@ -409,6 +419,41 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun stopVoiceService() {
       VoiceForegroundService.stop(this@MainActivity)
+    }
+
+    // Состояние микрофона для уведомления голоса (#156, клиент — `nativeMicActions.ts`): JSON
+    // {inVoice, muted, deafened, ptt, speaking, channelName}; `{inVoice:false}` — вышли из голоса.
+    @JavascriptInterface
+    fun micState(json: String) {
+      VoiceForegroundService.updateMicState(this@MainActivity, json)
+    }
+
+    // Пузырь микрофона поверх других приложений (#156, порция 2, `MicBubble.kt`; клиент — тумблер «Кнопка поверх
+    // приложений», `nativeMicActions.ts`). Включение хранится в prefs пузыря; разрешение «Показ поверх других приложений»
+    // спрашивает страница своим окном, потом `openOverlaySettings`, а по возврату перепроверяет `canDrawOverlays`.
+    @JavascriptInterface
+    fun micBubbleSet(enabled: Boolean) {
+      VoiceForegroundService.setBubbleEnabled(this@MainActivity, enabled)
+    }
+
+    @JavascriptInterface
+    fun canDrawOverlays(): Boolean = MicBubble.canDraw(this@MainActivity)
+
+    @JavascriptInterface
+    fun openOverlaySettings(): Boolean {
+      runOnUiThread {
+        val pkg = Uri.parse("package:$packageName")
+        try {
+          startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkg))
+        } catch (_: ActivityNotFoundException) {
+          // Нет экрана «Показ поверх других приложений» (редкая прошивка) — хотя бы настройки приложения.
+          try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg))
+          } catch (_: ActivityNotFoundException) {
+          }
+        }
+      }
+      return true
     }
 
     // «Транслировать геопозицию» в ЛС (14.10, `geolive1`, `LiveLocationService.kt`, клиент — `geoLiveSharing.ts`). start: JSON
@@ -642,6 +687,22 @@ class MainActivity : TauriActivity() {
       val link = prefs.getString(UnifiedPushReceiver.KEY_DEEPLINK, "") ?: ""
       if (link.isNotEmpty()) prefs.edit().remove(UnifiedPushReceiver.KEY_DEEPLINK).apply()
       return link
+    }
+  }
+
+  companion object {
+    // Живой WebView страницы для действий из уведомления голоса (#156, `VoiceActionReceiver.kt`): приёмник живёт вне
+    // активности, а ей самой ссылка нужна только как `webViewRef`. Слабая — пересоздание активности не держит старую.
+    @Volatile private var liveWebView: WeakReference<WebView>? = null
+
+    /**
+     * Отдать странице действие микрофона (`window.__gvMicAction`, `nativeMicActions.ts`). [action] — только из перечня
+     * `VoiceActionReceiver`, в строку JS попадает как есть. false — страницы нет (процесс поднят без активности).
+     */
+    fun sendMicAction(action: String): Boolean {
+      val wv = liveWebView?.get() ?: return false
+      wv.post { wv.evaluateJavascript("window.__gvMicAction && window.__gvMicAction('$action')", null) }
+      return true
     }
   }
 }

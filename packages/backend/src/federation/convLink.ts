@@ -275,10 +275,13 @@ export async function announceConvs(instanceId: string): Promise<void> {
 let timer: ReturnType<typeof setInterval> | null = null;
 
 /** Включить сверку (зовёт `index.ts` при `FEDERATION_DM_ENABLED`): точка отсчёта сразу, дальше раз в `REFRESH_EVERY_MS`. */
-export function startFedLinkWatch(): void {
+/** `active` (#224): ЛС между инстансами включены прямо сейчас — выключили тумблером в админке, такты и приём пустые. */
+export function startFedLinkWatch(active: () => boolean = () => true): void {
   if (timer) return;
   void refreshFedLinks();
-  timer = setInterval(() => void refreshFedLinks(), REFRESH_EVERY_MS);
+  timer = setInterval(() => {
+    if (active()) void refreshFedLinks();
+  }, REFRESH_EVERY_MS);
   timer.unref?.();
 }
 

@@ -31,7 +31,8 @@ import {
 import { useNameResolver, useVoiceName } from '../memberName';
 import { ensureEconomy } from '../economyClient';
 import { useStore } from '../store';
-import { MAX_STREAM_VOLUME, ownerOf } from '../streamAudioRules';
+import { ownerOf } from '../streamAudioRules';
+import { isInPip, streamsInView } from '../streamPipRules';
 import { canSnapshotStream, streamCardCycle } from '../streamCardRules';
 import { toast, toastError } from '../toast';
 import { TIP_HOLD_MS, tipInteraction, type TipInteraction } from '../tipMode';
@@ -47,6 +48,8 @@ import { useUserMenu, type UserMenuTarget } from './UserContextMenu';
 import { avatarFromMetadata, useLiveSpeaking, useParticipantFlags } from './VoiceParticipants';
 import { useUserAudio } from '../localUserAudio';
 import { StreamTipFeed } from './StreamTipFeed';
+import { StreamVolumeControl, useStreamVolumePop } from './StreamVolumeControl';
+import { removeFromStreamPip, StreamPipButton, StreamPipStub } from './StreamPipView';
 import { PENDING_WATCH_TIMEOUT_MS, matchPendingWatch } from '../pendingWatch';
 import { STREAM_VIEW_GRACE_MS } from '../streamCue';
 import { createWatchGrace, type WatchGrace } from '../watchGrace';
@@ -182,32 +185,6 @@ function useControlsReveal(hold: boolean) {
     setTapped((v) => !v);
   };
   return { revealClass: tapped || hold ? ' ctl-on' : '', onClick };
-}
-
-/**
- * Окно громкости стрима (10.10): ползунок больше не стоит в ряду постоянно, а всплывает по клику на
- * значок звука (как у Discord). Окно рисуется ВНУТРИ вьювера, а не порталом в `body`: при настоящем
- * полноэкранном режиме видно только содержимое вьювера. Закрывается кликом мимо и Esc.
- */
-function useStreamVolumePop() {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLSpanElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const down = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('pointerdown', down, true);
-    document.addEventListener('keydown', key);
-    return () => {
-      document.removeEventListener('pointerdown', down, true);
-      document.removeEventListener('keydown', key);
-    };
-  }, [open]);
-  return { open, setOpen, ref };
 }
 
 /**
@@ -397,9 +374,9 @@ function ScreenViewer({
 
   const volPop = useStreamVolumePop();
   const reveal = useControlsReveal(volPop.open || !!qualityMenu);
-  const volPct = Math.round((audioMuted ? 0 : volume) * 100);
-  // Ползунок в ноль — звука так же нет, как при «заглушить»: значок перечёркнут и тут (12.10, владелец).
-  const silent = audioMuted || volPct === 0;
+  // Показ открыт в окошке «картинка в картинке» (#222/#223): здесь вместо кадра — заглушка с «Вернуть».
+  const pipStreams = useStore((s) => s.pipStreams);
+  const inPip = isInPip(track.participant.identity, pipStreams);
 
   return (
     <div
@@ -408,7 +385,7 @@ function ScreenViewer({
       data-stage-key={pseudo ? undefined : stageKey}
       onClick={reveal.onClick}
     >
-      <VideoTrack trackRef={track} className="screen-video" />
+      {inPip ? <StreamPipStub id={track.participant.identity} /> : <VideoTrack trackRef={track} className="screen-video" />}
       {/* Подсказки «кто кого» — иначе при открытом стриме о типах в канале не узнать вовсе. */}
       <StreamTipFeed />
       <div className="screen-controls">
@@ -436,63 +413,13 @@ function ScreenViewer({
         )}
         <span className="screen-spacer" />
         {hasAudio && (
-          <span className="screen-audio" ref={volPop.ref}>
-            <button
-              type="button"
-              className={`ctl ${silent ? 'off' : ''}${volPop.open ? ' open' : ''}`}
-              title={audioMuted ? 'Звук стрима выключен — громкость' : `Громкость стрима: ${volPct}%`}
-              aria-haspopup="dialog"
-              aria-expanded={volPop.open}
-              onClick={() => volPop.setOpen((v) => !v)}
-            >
-              <Icon name={audioMuted ? 'headphones-off' : silent ? 'volume-off' : 'volume'} size={18} />
-            </button>
-            {volPop.open && (
-              <span className="stream-vol-pop" role="dialog" aria-label="Громкость стрима">
-                {/* Шапка — та же, что у громкости человека в его меню (`.ctx-vol2-*`, UserContextMenu). */}
-                <span className="ctx-vol2-head">
-                  <button
-                    type="button"
-                    className={`ctx-vol2-spk ${audioMuted ? 'on' : ''}`}
-                    title={audioMuted ? 'Включить звук стрима' : 'Заглушить звук стрима (только для вас)'}
-                    onClick={onToggleAudio}
-                  >
-                    <Icon name={silent ? 'volume-off' : 'volume'} size={16} />
-                  </button>
-                  <span className="ctx-vol2-label">Громкость</span>
-                  <span className={`ctx-vol2-pct ${audioMuted ? 'muted' : volPct > 100 ? 'boost' : ''}`}>
-                    {audioMuted ? 'выкл' : `${volPct}%`}
-                  </span>
-                </span>
-                {/* Ползунок доходит до 200 % (#130): у показывающего бывает тихий источник, и 100 % —
-                    это не наш выбор, а потолок громкости элемента воспроизведения. Выше единицы звук
-                    идёт через узел усиления Web Audio (`webAudioMix` у комнаты). Заливка помечается
-                    отдельным цветом от 100 % и выше: усиление слышно на плохом источнике, и человек
-                    должен видеть, что он уже НЕ на обычной громкости. */}
-                <input
-                  type="range"
-                  className={`stream-vol${!audioMuted && volume > 1 ? ' boost' : ''}`}
-                  min={0}
-                  max={MAX_STREAM_VOLUME}
-                  step={0.02}
-                  value={audioMuted ? 0 : volume}
-                  // ⚠️ `--p` — ДОЛЯ хода ползунка, а не громкость: заливка рисуется градиентом по ней.
-                  // Забыть поделить на потолок значило бы, что заливка убегает вперёд ручки.
-                  style={{ ['--p']: (audioMuted ? 0 : volume) / MAX_STREAM_VOLUME } as React.CSSProperties}
-                  title={
-                    volume > 1 && !audioMuted
-                      ? `Громкость стрима: ${Math.round(volume * 100)}% — усиление`
-                      : `Громкость стрима: ${volPct}%`
-                  }
-                  onChange={(e) => {
-                    // Двинул ползунок у заглушённого — значит, хочет слышать (как у громкости человека).
-                    if (audioMuted) onToggleAudio();
-                    onVolume(Number(e.target.value));
-                  }}
-                />
-              </span>
-            )}
-          </span>
+          <StreamVolumeControl
+            pop={volPop}
+            muted={audioMuted}
+            volume={volume}
+            onToggleAudio={onToggleAudio}
+            onVolume={onVolume}
+          />
         )}
         {!track.participant.isLocal && (
           <button
@@ -508,10 +435,20 @@ function ScreenViewer({
             <Icon name="settings" size={18} />
           </button>
         )}
+        {!track.participant.isLocal && <StreamPipButton track={track} />}
         <button type="button" className="ctl" title="На весь экран" onClick={toggle}>
           <Icon name="maximize" size={18} />
         </button>
-        <button type="button" className="ctl" title="Закрыть стрим" onClick={onClose}>
+        <button
+          type="button"
+          className="ctl"
+          title="Закрыть стрим"
+          onClick={() => {
+            // Закрыл показ на сцене — он уходит и из окошка (последний — окошко закрывается): «закрыть» значит «не смотрю».
+            if (inPip) removeFromStreamPip(track.participant.identity);
+            onClose();
+          }}
+        >
           <Icon name="close" size={18} />
         </button>
       </div>
@@ -1086,7 +1023,11 @@ function VoiceStage() {
       .map((p) => ({ id: p.identity, name: nameOf(p.identity, p.name || p.identity), avatarUrl: avatarFromMetadata(p.metadata) }));
 
   const audioIds = new Set(screenAudios.map((a) => a.participant.identity));
-  const watchedScreens = watchedIds
+  // Показ в окошке «картинка в картинке» (#222) на сцене остаётся открытым — с заглушкой вместо кадра, а не
+  // карточкой: карточка раз в минуту переподписывается на снимок и гасила бы поток в окошке.
+  const pipStreams = useStore((s) => s.pipStreams);
+  const inViewIds = streamsInView(watchedIds, pipStreams);
+  const watchedScreens = inViewIds
     .map((id) => screens.find((s) => s.participant.identity === id))
     .filter((s): s is TrackReference => !!s);
   const camByIdentity = new Map(cameras.map((c) => [c.participant.identity, c]));
@@ -1117,10 +1058,10 @@ function VoiceStage() {
   }
   // «Фокус»/«Сбоку» без выбранного: крупно первый чужой показ (как у Meet презентация). Рисуем его сразу, не дожидаясь
   // эффекта, который запишет намерение «смотрю» в стор, — иначе кадр мигал бы сеткой.
-  const autoOpenId = stageAutoOpenStream(viewLayout, otherScreenIds, watchedIds, !!focusCam, seenRef.current);
+  const autoOpenId = stageAutoOpenStream(viewLayout, otherScreenIds, inViewIds, !!focusCam, seenRef.current);
   const autoOpenScreen = autoOpenId ? screens.find((s) => s.participant.identity === autoOpenId) : undefined;
   if (autoOpenScreen) watchedScreens.push(autoOpenScreen);
-  const unwatchedScreens = screens.filter((s) => !watchedIds.includes(s.participant.identity) && s !== autoOpenScreen);
+  const unwatchedScreens = screens.filter((s) => !inViewIds.includes(s.participant.identity) && s !== autoOpenScreen);
   const hasManual = watchedScreens.length > 0 || !!focusCam;
   // Нечего показать крупно (нет показов или все закрыты) — в режимах «один крупно» крупно тот, кто говорит; себя — никогда.
   const others = participants.filter((p) => !p.isLocal && !p.identity.endsWith('#screen')).map((p) => p.identity);

@@ -1605,17 +1605,23 @@ async function pullAll(): Promise<void> {
  * Включить приём (зовёт `index.ts` при `FEDERATION_DM_ENABLED`): обработчик звонка, забор при старте (сосед мог писать,
  * пока мы лежали) и раз в `PULL_EVERY_MS`.
  */
-export function startConvPull(): void {
+/** `active` (#224): ЛС между инстансами включены прямо сейчас — выключили тумблером в админке, такты и приём пустые. */
+export function startConvPull(active: () => boolean = () => true): void {
   onFedEvent(FED_CONV_CHANGED_EVENT, async ({ instanceId, event }) => {
+    if (!active()) return;
     schedulePull(instanceId, parseConvChangedPayload(event.payload)?.seq ?? 0);
   });
   // Э2 часть Б: связка снова рабочая — забрать пропущенное и позвонить соседу (он заберёт у нас и снимет свою отметку).
   onLinkRestored((instanceId) => {
+    if (!active()) return;
     schedulePull(instanceId);
     ringDoorbell(instanceId, 0);
   });
   if (timer) return;
-  setTimeout(() => void pullAll().catch(() => {}), 5_000).unref?.();
-  timer = setInterval(() => void pullAll().catch(() => {}), PULL_EVERY_MS);
+  const pass = () => {
+    if (active()) void pullAll().catch(() => {});
+  };
+  setTimeout(pass, 5_000).unref?.();
+  timer = setInterval(pass, PULL_EVERY_MS);
   timer.unref?.();
 }

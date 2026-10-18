@@ -19,6 +19,17 @@ if (placeholder) {
   throw new Error(`${placeholder} is a placeholder from .env.example — generate a real one: openssl rand -hex 32`);
 }
 
+/**
+ * Текущие флаги федерации (#224). При старте — из `.env`; дальше их меняет только `federation/switch.ts` (тумблер в админке),
+ * остальной код читает `env.federation.enabled` / `dmEnabled` как раньше.
+ */
+const fedRuntime = {
+  enabled: (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true',
+  dmEnabled:
+    (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true' &&
+    (process.env.FEDERATION_DM_ENABLED ?? '').toLowerCase() === 'true',
+};
+
 export const env = {
   port: Number(process.env.BACKEND_PORT ?? 4000),
   databaseUrl: required('DATABASE_URL'),
@@ -207,7 +218,18 @@ export const env = {
    * `domain` вычисляется из адреса клиента: людям он виден как адрес инстанса.
    */
   federation: {
-    enabled: (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true',
+    /**
+     * Включена ли федерация ПРЯМО СЕЙЧАС (#224): `FEDERATION_ENABLED=true` в `.env` ИЛИ тумблер в админке
+     * (`federation/switch.ts`). Читается на каждом запросе и в каждом такте фоновых задач — переключение без перезапуска.
+     */
+    get enabled(): boolean {
+      return fedRuntime.enabled;
+    },
+    set enabled(v: boolean) {
+      fedRuntime.enabled = v;
+    },
+    /** Только из `.env` — такое включение панель показывает «из .env» и выключить не даёт (#224). */
+    envEnabled: (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true',
     keyPassphrase: process.env.FEDERATION_KEY_PASSPHRASE ?? '',
     dataDir: process.env.FEDERATION_DATA_DIR ?? '/var/lib/gusvoice/federation',
     apiBase: (process.env.FEDERATION_API_BASE ?? process.env.VITE_API_URL ?? '').replace(/\/+$/, ''),
@@ -215,7 +237,14 @@ export const env = {
      * ЛС между инстансами (#141, `docs/dm/FEDERATION.md`). 🔴 Умолчание — ВЫКЛЮЧЕНО, и без федерации не включается: пока
      * держатель сам не включил, маршрут журнала `/fed/v1/conv/changes` не регистрируется и журнал на связку не пишется.
      */
-    dmEnabled:
+    get dmEnabled(): boolean {
+      return fedRuntime.enabled && fedRuntime.dmEnabled;
+    },
+    set dmEnabled(v: boolean) {
+      fedRuntime.dmEnabled = v;
+    },
+    /** `FEDERATION_ENABLED=true` и `FEDERATION_DM_ENABLED=true` в `.env` — как было до #224; панель выключить не даёт. */
+    envDmEnabled:
       (process.env.FEDERATION_ENABLED ?? '').toLowerCase() === 'true' &&
       (process.env.FEDERATION_DM_ENABLED ?? '').toLowerCase() === 'true',
     /** Режим стенда для локальных соседей (Ф13, `federation/devPeers.ts`): хосты, которым можно `http` и loopback. */

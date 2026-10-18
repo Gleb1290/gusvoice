@@ -32,6 +32,11 @@ export interface FederationDeps {
   appVersion: string | null;
   /** ЛС между инстансами (Э1, `FEDERATION_DM_ENABLED`): объявлять `dm1`. Нет поля — не объявлять (как до Э1). */
   dmEnabled?: boolean;
+  /**
+   * Откуда пароль к ключу (#224): `base` — сгенерирован бэкендом при включении из админки и лежит в базе. Нужен только для
+   * текста «не расшифрован»: держателю без `.env` бесполезно советовать переменную. Нет поля — как раньше (`.env`).
+   */
+  passphraseSource?(): 'env' | 'base';
   log(level: 'info' | 'warn' | 'error', message: string): void;
 }
 
@@ -41,6 +46,11 @@ export interface Federation {
   problem(): string | null;
   identity(): InstanceIdentity | null;
   start(): Promise<void>;
+  /**
+   * Выключить без перезапуска (#224, тумблер в админке): забыть ключи из памяти и встать в `off`. Файлы ключей, связки и
+   * пароль остаются — следующий `start()` прочитает тот же файл, личность та же.
+   */
+  stop(): void;
   /** Выпустить следующий сменный ключ, если подошёл срок. Зовётся при старте и по расписанию. */
   ensureSigningKey(): Promise<void>;
   document(): Promise<FedInstanceDocument | null>;
@@ -120,11 +130,21 @@ export function createFederation(deps: FederationDeps): Federation {
         keys = [];
         problem =
           err instanceof KeyPassphraseError
-            ? 'Ключ инстанса не расшифрован — проверьте FEDERATION_KEY_PASSPHRASE'
+            ? deps.passphraseSource?.() === 'base'
+              ? 'Ключ инстанса не расшифрован — пароль из базы не подходит к папке fed-keys (их переносили порознь?)'
+              : 'Ключ инстанса не расшифрован — проверьте FEDERATION_KEY_PASSPHRASE'
             : `Ключ инстанса недоступен: ${err instanceof Error ? err.message : String(err)}`;
         // 🔴 Именно warn, а не error: это не поломка инстанса, а выключенная подсистема.
         deps.log('warn', `федерация не поднялась — ${problem}`);
       }
+    },
+
+    stop() {
+      status = 'off';
+      problem = null;
+      identity = null;
+      keys = [];
+      deps.log('info', 'федерация выключена из админки');
     },
 
     ensureSigningKey,

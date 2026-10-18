@@ -29,6 +29,12 @@ export interface AudioSettings {
   vadThreshold: number;
   /** Keep the mic open this many ms after releasing the push-to-talk key (avoids clipped word ends). */
   pttReleaseMs: number;
+  /**
+   * Android: пузырь микрофона поверх других приложений (#156, `MicBubble.kt`) — тап мьютит, с рацией держишь и говоришь.
+   * Передаётся нативу `micBubbleSet` (`nativeMicActions.ts`); включается только при выданном «Показ поверх других приложений».
+   * Необязательное: старые сохранённые настройки и литералы без поля читаются как «выключено».
+   */
+  micBubble?: boolean;
 }
 
 const KEY = 'gv_audio';
@@ -52,6 +58,7 @@ export const AUDIO_DEFAULTS: AudioSettings = {
   inputGain: 1,
   vadThreshold: VAD_THRESHOLD_MIN,
   pttReleaseMs: 150,
+  micBubble: false,
 };
 
 let cache: AudioSettings | null = null;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { FederationOverview, FederationLinkRow } from '@gusvoice/shared';
+import type { FederationOverview, FederationLinkRow, FederationSwitchPatch, FederationSwitchView } from '@gusvoice/shared';
 import type { Api } from '../api';
 import { adminApi } from '../adminApi';
 import { useStore } from '../store';
@@ -10,7 +10,7 @@ import { count } from '../plural';
 import { formatBytes, gigabytesToBytes } from '../byteSize';
 import { toast, toastError } from '../toast';
 import { alertDialog, confirmAction } from '../confirm';
-import { neighborNameHint, overviewAfterError } from '../fedOverview';
+import { FED_BACKUP_NOTE, neighborNameHint, overviewAfterError, SWITCH_REFUSAL_TEXT, switchSourceHint } from '../fedOverview';
 
 /**
  * Вкладка «Федерация» в админ-панели (#139, F1, план §4.1.1).
@@ -71,6 +71,8 @@ const LINK_PROBLEM_TEXT: Record<string, string> = {
 
 export function FederationPanel() {
   const [data, setData] = useState<FederationOverview | null>(null);
+  // Тумблеры (#224). `null` — сервер старше тумблера (404): включается только в `.env`, вкладка говорит по-старому.
+  const [sw, setSw] = useState<FederationSwitchView | null>(null);
   const [loading, setLoading] = useState(true);
   const [code, setCode] = useState('');
   const [issued, setIssued] = useState<string | null>(null);
@@ -107,6 +109,11 @@ export function FederationPanel() {
    */
   async function load(quiet = false) {
     if (!quiet) setLoading(true);
+    // Тумблеры читаются рядом с обзором и отвечают и при выключенной федерации (#224); ошибка — просто без тумблеров.
+    const switchRead = Promise.resolve()
+      .then(() => adminApi().federationSwitch())
+      .then(setSw)
+      .catch(() => setSw(null));
     try {
       const next = await adminApi().federationOverview();
       setData(next);
@@ -117,7 +124,36 @@ export function FederationPanel() {
       if (off) setData(off);
       else if (!quiet) toastError(e instanceof Error ? e.message : 'Не удалось прочитать состояние федерации');
     } finally {
+      await switchRead;
       if (!quiet) setLoading(false);
+    }
+  }
+
+  /**
+   * Переключить федерацию или ЛС между инстансами (#224) — без перезапуска сервера. Выключение федерации спрашивает: соседи
+   * сразу перестают получать ответы, хотя связки, ключ и пароль остаются и повторное включение вернёт ту же личность.
+   */
+  async function flip(patch: FederationSwitchPatch) {
+    if (patch.enabled === false) {
+      const ok = await confirmAction({
+        title: 'Выключить федерацию?',
+        body:
+          'Соседи перестанут получать ответы от вашего инстанса, гости с других инстансов не смогут войти, переписка с ' +
+          'людьми соседей встанет. Связки, ключ и настройки сохранятся: включите снова — всё вернётся как было.',
+        tone: 'danger',
+        confirmLabel: 'Выключить',
+      });
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      setSw(await adminApi().federationSetSwitch(patch));
+      await load(true);
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : '';
+      toastError(SWITCH_REFUSAL_TEXT[raw] ?? (raw || 'Не получилось переключить'));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -187,9 +223,51 @@ export function FederationPanel() {
   }
 
   if (loading) return <div className="admin-body">Загружаем…</div>;
+
+  // Тумблеры (#224) — вверху вкладки в любом состоянии: и выключенной, и с ошибкой ключа, и рабочей.
+  const fedHint = sw ? switchSourceHint(sw.source) : null;
+  const dmHint = sw ? switchSourceHint(sw.dmSource) : null;
+  const switchBlock = sw && (
+    <section className="fed-switch">
+      <label className="fed-row">
+        <span>Федерация</span>
+        <Toggle
+          checked={sw.enabled}
+          disabled={busy || sw.source === 'env'}
+          onChange={(v) => void flip({ enabled: v })}
+          title="Связь с другими инстансами GusVoice"
+        />
+      </label>
+      {fedHint && <p className="muted">{fedHint}</p>}
+      <label className="fed-row">
+        <span>Личные сообщения с другими инстансами</span>
+        <Toggle
+          checked={sw.dmEnabled}
+          disabled={busy || !sw.enabled || sw.dmSource === 'env'}
+          onChange={(v) => void flip({ dmEnabled: v })}
+          title={sw.enabled ? 'Переписка с людьми на связанных инстансах' : 'Сначала включите федерацию'}
+        />
+      </label>
+      {dmHint && <p className="muted">{dmHint}</p>}
+      {!sw.enabled && <p className="muted">Переписка с людьми других инстансов включается после федерации.</p>}
+      <p className="muted">{FED_BACKUP_NOTE}</p>
+    </section>
+  );
   if (!data) return <div className="admin-body">Состояние федерации недоступно.</div>;
 
   // Федерация выключена целиком — объясняем, что это не поломка, и как включить.
+  if (data.status === 'off' && sw) {
+    return (
+      <div className="admin-body fed-panel">
+        <h3>Федерация выключена</h3>
+        <p className="muted">
+          Федерация связывает ваш инстанс с другими инстансами GusVoice: люди ходят в гости на серверы соседей и
+          переписываются. Пока она выключена, ваш инстанс не отдаёт наружу ничего и не принимает запросы соседей.
+        </p>
+        {switchBlock}
+      </div>
+    );
+  }
   if (data.status === 'off') {
     return (
       <div className="admin-body fed-panel">
@@ -214,11 +292,19 @@ export function FederationPanel() {
       <div className="admin-body fed-panel">
         <h3>Ключ инстанса не открылся</h3>
         <p className="error">{data.problem}</p>
-        <p className="muted">
-          Остальной GusVoice работает как обычно — не поднялась только федерация. Ключ лежит в каталоге{' '}
-          <code>fed-keys</code> рядом с <code>.env</code>, и открывается паролем оттуда же: файл и пароль — пара,
-          одно без другого бесполезно.
-        </p>
+        {sw?.source === 'panel' ? (
+          <p className="muted">
+            Остальной GusVoice работает как обычно — не поднялась только федерация. Ключ лежит в папке <code>fed-keys</code>,
+            пароль к нему — в базе: они пара, одно без другого бесполезно.
+          </p>
+        ) : (
+          <p className="muted">
+            Остальной GusVoice работает как обычно — не поднялась только федерация. Ключ лежит в каталоге{' '}
+            <code>fed-keys</code> рядом с <code>.env</code>, и открывается паролем оттуда же: файл и пароль — пара,
+            одно без другого бесполезно.
+          </p>
+        )}
+        {switchBlock}
       </div>
     );
   }
@@ -243,6 +329,7 @@ export function FederationPanel() {
           ))}
         </section>
       )}
+      {switchBlock}
       <section className="fed-self">
         <h3>Этот инстанс</h3>
         <label className="fed-row">

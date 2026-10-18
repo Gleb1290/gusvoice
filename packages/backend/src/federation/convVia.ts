@@ -502,11 +502,18 @@ export async function applyVerdict(instanceId: string, payload: unknown): Promis
 
 /** Подключение (зовёт `index.ts` при `FEDERATION_DM_ENABLED`): решения соседей, сверка при старте, по таймеру и по связке. */
 let timer: ReturnType<typeof setInterval> | null = null;
-export function startConvVia(): void {
-  onFedEvent(FED_VIA_VERDICT_EVENT, async ({ instanceId, event }) => applyVerdict(instanceId, event.payload));
-  onLinkRestored((instanceId) => void reconcileVia(instanceId).catch(() => {}));
+/** `active` (#224): ЛС между инстансами включены прямо сейчас — выключили тумблером в админке, такты и приём пустые. */
+export function startConvVia(active: () => boolean = () => true): void {
+  onFedEvent(FED_VIA_VERDICT_EVENT, async ({ instanceId, event }) => {
+    if (active()) await applyVerdict(instanceId, event.payload);
+  });
+  onLinkRestored((instanceId) => {
+    if (active()) void reconcileVia(instanceId).catch(() => {});
+  });
   if (timer) return;
-  const pass = () => void reconcileAll().catch((err) => console.warn('[fed-via] сверка:', err instanceof Error ? err.message : err));
+  const pass = () => {
+    if (active()) void reconcileAll().catch((err) => console.warn('[fed-via] сверка:', err instanceof Error ? err.message : err));
+  };
   setTimeout(pass, 8_000).unref?.();
   timer = setInterval(pass, RECONCILE_EVERY_MS);
   timer.unref?.();

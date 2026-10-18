@@ -12,12 +12,14 @@ import { stageHasVideo } from '../stageAutoShowRules';
 import * as stageOrderRules from '../stageOrderRules';
 import type { StageOrderLayout } from '../stageOrderPrefs';
 import * as stageLayoutRules from '../stageLayoutRules';
+import * as streamPipRules from '../streamPipRules';
 
 const source = readFileSync(new URL('./VoiceChannelView.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const volumeSource = readFileSync(new URL('./StreamVolumeControl.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 type Options = { phone?: boolean; mobile?: boolean; touch?: boolean; hide?: boolean; watched?: boolean;
   cameras?: boolean; streams?: boolean; connected?: boolean; muted?: boolean; mutedCamera?: boolean; companionScreen?: boolean; volume?: number;
   cols?: number; savedOrder?: string[]; dragPreview?: string[]; tip?: 'none' | 'button' | 'hold'; channelId?: string | null; bothStreams?: boolean; economy?: boolean;
-  noCameraPeople?: number; stageStreams?: string[]; watchedIds?: string[]; stageKey?: string;
+  noCameraPeople?: number; stageStreams?: string[]; watchedIds?: string[]; stageKey?: string; pipStreams?: string[]; localStream?: boolean;
   layout?: stageLayoutRules.StageLayout; speakerId?: string | null; selfId?: string; includeSelf?: boolean; stageAudio?: string[];
   savedModes?: Partial<Record<stageOrderRules.StageOrderMode, string[]>>;
   modePreviews?: Partial<Record<stageOrderRules.StageOrderMode, string[]>> };
@@ -36,8 +38,8 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
       orderReads: { channelId: string | null; cols: StageOrderLayout }[];
       orderWrites: { channelId: string; cols: StageOrderLayout; order: string[] }[];
       drags: DragInput[]; pointerDown: number; pointerInstances: number[];
-      clearWatched: number; watch: string[]; unwatch: string[]; layouts: stageLayoutRules.StageLayout[]; events: string[];
-      speaker: { ids: string[]; enabled: boolean }[] } }) => Promise<void>, raw = source) {
+      clearWatched: number; watch: string[]; unwatch: string[]; removePip: string[]; layouts: stageLayoutRules.StageLayout[]; events: string[];
+      speaker: { ids: string[]; enabled: boolean }[] } }) => Promise<void>, raw = source, rawVolume = volumeSource) {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -47,7 +49,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     orderReads: [] as { channelId: string | null; cols: StageOrderLayout }[],
     orderWrites: [] as { channelId: string; cols: StageOrderLayout; order: string[] }[],
     drags: [] as DragInput[], pointerDown: 0, pointerInstances: [] as number[],
-    clearWatched: 0, watch: [] as string[], unwatch: [] as string[], layouts: [] as stageLayoutRules.StageLayout[],
+    clearWatched: 0, watch: [] as string[], unwatch: [] as string[], removePip: [] as string[], layouts: [] as stageLayoutRules.StageLayout[],
     events: [] as string[], speaker: [] as { ids: string[]; enabled: boolean }[] };
   let nextDragInstance = 0;
   const unexpected: string[] = [];
@@ -73,7 +75,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     bootstrap: options.economy ? { server: { id: 'server' } } : null,
     economy: options.economy ? { server: { enabled: true, wallet: { balance: 123 }, currencyName: 'перья' } } : {},
     watchedStreams: options.watchedIds ?? (options.watched ? options.bothStreams ? ['peer', 'peer#screen'] : ['peer'] : []),
-    mutedStreams: [], streamVolumes: {}, pendingWatch: null,
+    mutedStreams: [], streamVolumes: {}, pendingWatch: null, pipStreams: options.pipStreams ?? [],
     clearWatchedStreams: () => { calls.clearWatched++; calls.events.push('clear');
       if (state.watchedStreams.length) { state.watchedStreams = []; changed(); } }, clearPendingWatch: noop,
     watchStream: (id: string) => { calls.watch.push(id); calls.events.push(`watch:${id}`);
@@ -141,6 +143,17 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     '../stageGridRules': { fitStageGrid: options.cols === undefined ? fitStageGrid : () => ({ cols: options.cols, rows: 1, tileW: 100, tileH: 60 }),
       stageAvatarSize, STAGE_SCROLLBAR_PX: 12, STAGE_GRID_HYSTERESIS_PX: 16 },
     '../streamAudioRules': { ownerOf: (id: string) => id.replace(/#screen$/, ''), MAX_STREAM_VOLUME: 2 },
+    '../streamPipRules': streamPipRules,
+    // Здесь проверяется только проводка сцены: API браузерного окна не вызываем.
+    './StreamPipView': {
+      StreamPipStub: ({ id }: { id: string }) => React.createElement('div', { 'data-pip-stub': id }),
+      StreamPipButton: ({ track }: { track: { participant: { identity: string } } }) =>
+        React.createElement('button', { 'data-pip-button': track.participant.identity }),
+      removeFromStreamPip: (id: string) => {
+        calls.removePip.push(id);
+        state.pipStreams = state.pipStreams.filter(x => x !== id); changed();
+      },
+    },
     '../streamCardRules': { canSnapshotStream: () => false },
     '../tipGesture': { useAltHeld: () => options.tip === 'button', useTip: () => ({ tip: noop, busyId: null }) },
     '../economyClient': { ensureEconomy: noop },
@@ -168,6 +181,18 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
   }
   window.matchMedia = ((query: string) => ({ matches: query === '(hover: none)' && !!options.touch })) as typeof window.matchMedia;
   try {
+    // Новый вынесенный контрол исполняется ЦЕЛИКОМ, а не копией JSX/вычислений из сцены.
+    // Его собственные границы перечислены отдельно: новый импорт нельзя молча подхватить из сцены.
+    const volumeDeps: Record<string, unknown> = { react: React, 'react/jsx-runtime': jsx,
+      '../streamAudioRules': deps['../streamAudioRules'], './Icon': deps['./Icon'] };
+    const volumeModule = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(rawVolume, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { module: volumeModule, exports: volumeModule.exports, document,
+      require: (id: string) => {
+        assert.equal(Object.hasOwn(volumeDeps, id), true, `Неописанный импорт контрола громкости ${id}`); return volumeDeps[id];
+      } });
+    deps['./StreamVolumeControl'] = volumeModule.exports;
     const module = { exports: {} as Record<string, React.ComponentType<any>> };
     // Исполняем целый модуль; export открывает только приватные компоненты для монтажа.
     runInNewContext(ts.transpileModule(raw + '\nexport { ScreenViewer, CameraViewer };', { compilerOptions: {
@@ -178,7 +203,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
         assert.equal(Object.hasOwn(deps, id), true, `Неописанный импорт сцены ${id}`); return deps[id];
       } });
     const props = component === 'VoiceChannelView' ? { channel: { id: 'channel', name: 'Гусиная', type: 'voice' }, connected: options.connected ?? true }
-      : { track: screen, hasAudio: true, audioMuted: !!options.muted, volume, viewers: [],
+      : { track: { ...screen, participant: { ...peer, isLocal: !!options.localStream } }, hasAudio: true, audioMuted: !!options.muted, volume, viewers: [],
         onToggleAudio: () => calls.toggles++, onVolume: (v: number) => { calls.volumes.push(v); volume = v; }, onClose: noop, stageKey: options.stageKey };
     const render = async () => { await React.act(async () => { root.render(React.createElement(module.exports[component],
       'volume' in props ? { ...props, volume } : props));
@@ -780,7 +805,7 @@ it('R163 ползунок заглушённого включает звук и 
   });
 });
 
-async function sliderIcons(raw = source) {
+async function sliderIcons(raw = source, rawVolume = volumeSource) {
   await fixture('ScreenViewer', { volume: 0.5 }, async ({ host, click, calls, render }) => {
     await click('.screen-audio > button');
     const assertIcon = (silent: boolean, pct: string) => {
@@ -802,7 +827,7 @@ async function sliderIcons(raw = source) {
     }
     assert.deepEqual(calls.volumes, [0, 0.5]);
     assert.equal(calls.toggles, 0, 'нулевая громкость не требует менять отдельный mute-флаг');
-  }, raw);
+  }, raw, rawVolume);
 }
 it('R168 ползунок стрима в ноль перечёркивает значки ряда и окна, 50 процентов возвращают обычный значок', () => sliderIcons());
 it('R168 заглушённый стрим сохраняет headphones-off в ряду и volume-off в окне при любой громкости', async () => {
@@ -824,10 +849,115 @@ it('R168 значок стрима соответствует отображае
   });
 });
 it('R168 мутант значка только по audioMuted не скрывается за правильным ползунком', async () => {
-  const anchor = 'const silent = audioMuted || volPct === 0;';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный расчёт тишины стрима');
+  const anchor = 'const silent = muted || volPct === 0;';
+  assert.equal(volumeSource.split(anchor).length - 1, 1, 'единственный расчёт тишины вынесенного контрола');
   await sliderIcons();
-  await assert.rejects(() => sliderIcons(source.replace(anchor, 'const silent = audioMuted;')), assert.AssertionError);
+  await assert.rejects(() => sliderIcons(source, volumeSource.replace(anchor, 'const silent = muted;')), (e: unknown) =>
+    e instanceof assert.AssertionError && e.message.startsWith('ряд показывает отсутствие звука')
+      && e.actual === false && e.expected === true);
+});
+
+async function pipScene(raw = source) {
+  // Класс ошибки: после ухода со сцены watched очищен, но PiP нельзя превратить в карточку-снимок.
+  // Спутник и основной показ одного человека остаются разными показами.
+  for (const id of ['peer', 'peer#screen']) for (const watchedIds of [[], [id]]) {
+    await fixture('VoiceChannelView', { streams: true, bothStreams: true, pipStreams: [id], watchedIds }, async ({ host }) => {
+      assert.equal(host.querySelectorAll('.stage-watch-grid [data-pip-stub]').length, 1, 'R254 PiP остаётся открытым без watched');
+      assert.equal(host.querySelector('[data-pip-stub]')?.getAttribute('data-pip-stub'), id, 'R254 заглушка принадлежит точному показу');
+      assert.equal(host.querySelectorAll('.stage-watch-grid .screen-video').length, 0, 'R254 PiP не декодируется вторым кадром сцены');
+      assert.equal(host.querySelectorAll('.stream-card').length, 1, 'R254 только другой показ остаётся карточкой');
+    }, raw);
+  }
+}
+it('R254 показ в PiP считается открытым без watched, сцена рисует заглушку вместо кадра и карточки', () => pipScene());
+it('R254 потеря PiP из открытых показов обнаруживается до проверки заглушки', async () => {
+  await pipScene();
+  const anchor = 'const inViewIds = streamsInView(watchedIds, pipStreams);';
+  assert.equal(source.split(anchor).length - 1, 1, 'R254 единственное объединение открытых показов сцены');
+  await assert.rejects(() => pipScene(source.replace(anchor, 'const inViewIds = watchedIds;')), (e: unknown) =>
+    e instanceof assert.AssertionError && e.message.startsWith('R254 PiP остаётся открытым')
+      && e.actual === 0 && e.expected === 1);
+});
+async function pipFrame(raw = source) {
+  // Класс ошибки: проверка только «есть обёртка viewer» пропускает второй VideoTrack поверх PiP.
+  for (const [pipStreams, inPip] of [[[], false], [['peer#screen'], false], [['peer'], true]] as const) {
+    await fixture('ScreenViewer', { pipStreams: [...pipStreams] }, async ({ host }) => {
+      assert.equal(host.querySelectorAll('[data-pip-stub]').length, inPip ? 1 : 0, 'R254 точное совпадение PiP заменяет кадр заглушкой');
+      assert.equal(host.querySelectorAll('.screen-video').length, inPip ? 0 : 1, 'R254 обычный просмотр сохраняет кадр');
+    }, raw);
+  }
+}
+it('R254 обычный просмотр сохраняет кадр, PiP другого показа не подменяет его заглушкой', () => pipFrame());
+it('R254 возврат видеокадра вместо заглушки обнаруживается на настоящем ScreenViewer', async () => {
+  await pipFrame();
+  const anchor = '{inPip ? <StreamPipStub id={track.participant.identity} /> : <VideoTrack trackRef={track} className="screen-video" />}';
+  assert.equal(source.split(anchor).length - 1, 1, 'R254 единственный выбор кадра или заглушки');
+  await assert.rejects(() => pipFrame(source.replace(anchor, '<VideoTrack trackRef={track} className="screen-video" />')), (e: unknown) =>
+    e instanceof assert.AssertionError && e.message.startsWith('R254 точное совпадение PiP')
+      && e.actual === 0 && e.expected === 1);
+});
+async function pipOwnButton(raw = source) {
+  // Класс ошибки: своё локальное видео нельзя отправить в путь PiP для чужой подписки.
+  for (const localStream of [false, true]) for (const pipStreams of [[], ['guest-0', 'peer#screen']]) {
+    await fixture('ScreenViewer', { localStream, pipStreams }, async ({ host }) => {
+      assert.equal(host.querySelectorAll('[data-pip-button]').length, localStream ? 0 : 1, 'R254 кнопка PiP доступна только чужому показу');
+    }, raw);
+  }
+}
+it('R254 кнопка PiP чужого показа подключена, у своего локального показа её нет', () => pipOwnButton());
+it('R254 снятие запрета PiP своего показа обнаруживается без зависимости от API браузера', async () => {
+  await pipOwnButton();
+  const anchor = '{!track.participant.isLocal && <StreamPipButton track={track} />}';
+  assert.equal(source.split(anchor).length - 1, 1, 'R254 единственная кнопка PiP в ряду сцены');
+  await assert.rejects(() => pipOwnButton(source.replace(anchor, '<StreamPipButton track={track} />')), (e: unknown) =>
+    e instanceof assert.AssertionError && e.message.startsWith('R254 кнопка PiP доступна только чужому')
+      && e.actual === 1 && e.expected === 0);
+});
+
+const severalPips = ['peer', 'peer#screen', 'guest-0#screen', 'guest-1'];
+const severalScreens = [...severalPips, 'guest-0', 'guest-2'];
+async function multiPipScene(raw = source) {
+  // Один владелец может показывать браузер и спутник; обычный кадр и закрытая карточка остаются отдельными.
+  for (const watchedIds of [['guest-0'], ['peer', 'guest-0']]) {
+    await fixture('VoiceChannelView', { stageStreams: severalScreens, pipStreams: severalPips, watchedIds }, async ({ host }) => {
+      const stubs = Array.from(host.querySelectorAll('.stage-watch-grid [data-pip-stub]'), n => n.getAttribute('data-pip-stub')).sort();
+      assert.deepEqual(stubs, [...severalPips].sort(), 'R256 сцена сохраняет все четыре точных показа PiP без дублей');
+      assert.deepEqual(Array.from(host.querySelectorAll('.stage-watch-grid .screen-video'), n => n.getAttribute('data-track-id')),
+        ['guest-0'], 'R256 обычный показ владельца PiP остаётся видеокадром, не заглушкой');
+      assert.equal(host.querySelectorAll('.stage-watch-grid .screen-viewer').length, 5, 'R256 каждый открытый показ имеет один viewer');
+      assert.deepEqual(Array.from(host.querySelectorAll('.stream-card'), n => n.getAttribute('data-stage-key')),
+        ['s:guest-2'], 'R256 только действительно закрытый показ остаётся карточкой');
+    }, raw);
+  }
+}
+it('R256 четыре PiP разных владельцев и двух показов одного владельца не теряют кадр и карточку сцены', () => multiPipScene());
+it('R256 объединение сцены только с первым PiP обнаруживается при сохранённом обычном просмотре', async () => {
+  await multiPipScene();
+  const anchor = 'const inViewIds = streamsInView(watchedIds, pipStreams);';
+  assert.equal(source.split(anchor).length - 1, 1, 'R256 единственное объединение показов сцены');
+  await assert.rejects(() => multiPipScene(source.replace(anchor, 'const inViewIds = streamsInView(watchedIds, pipStreams[0]);')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R256 сцена сохраняет все четыре'));
+});
+it('R256 заглушка только первого PiP обнаруживается даже при полном списке открытых показов', async () => {
+  await multiPipScene();
+  const anchor = 'const inPip = isInPip(track.participant.identity, pipStreams);';
+  assert.equal(source.split(anchor).length - 1, 1, 'R256 единственный выбор заглушки показа');
+  await assert.rejects(() => multiPipScene(source.replace(anchor, 'const inPip = isInPip(track.participant.identity, pipStreams[0]);')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R256 сцена сохраняет все четыре'));
+});
+it('R256 закрытие любого из четырёх PiP на сцене убирает только его, не показы соседа или спутника', async () => {
+  // Заглушка PiP не заменяет смысл «закрыть стрим»: снимаем оба намерения только выбранного identity.
+  for (const target of severalPips) await fixture('VoiceChannelView', {
+    stageStreams: severalScreens, pipStreams: severalPips, watchedIds: ['guest-0'],
+  }, async ({ host, click, calls, watched }) => {
+    await click(`.stage-watch-grid [data-stage-key="s:${target}"] [title="Закрыть стрим"]`);
+    assert.deepEqual(calls.removePip, [target], 'R256 закрытие передаёт в PiP точный identity');
+    assert.deepEqual(calls.unwatch, [target]); assert.deepEqual(watched(), ['guest-0']);
+    assert.deepEqual(Array.from(host.querySelectorAll('[data-pip-stub]'), n => n.getAttribute('data-pip-stub')).sort(),
+      severalPips.filter(id => id !== target).sort(), 'R256 остальные три PiP остаются заглушками');
+    assert.equal(host.querySelectorAll('.stage-watch-grid .screen-video').length, 1);
+    assert.equal(host.querySelectorAll('.stream-card').length, 2, 'R256 закрытый показ становится карточкой вместе с прежним закрытым');
+  });
 });
 for (const component of ['ScreenViewer', 'CameraViewer'] as const) {
   it(`R163 ${component}: касание кадра переключает ряд, касание кнопок ряда не переключает`, () => fixture(component, { touch: true }, async ({ host, click }) => {

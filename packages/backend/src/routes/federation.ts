@@ -299,12 +299,21 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
   /**
    * Журнал изменений бесед для соседа (Э0 ЛС между инстансами, `docs/dm/FEDERATION.md` §3.3): `?since=<seq>&limit=`.
    *
-   * 🔴 Регистрируется ТОЛЬКО при `FEDERATION_DM_ENABLED`: выключено — маршрута нет (честный 404, как у всей федерации).
+   * 🔴 Отвечает ТОЛЬКО при `FEDERATION_DM_ENABLED` (или втором тумблере в админке, #224): выключено — тот же 404, что без маршрута.
    * Подписанный GET связанного соседа; отдаются только строки, адресованные СПРАШИВАЮЩЕМУ, и только по беседам, где у него
    * сейчас есть участник (`changesForPeer`). Негодный `since` — отказ, а не «с начала» (тот же урок, что у курсора отзывов).
    */
-  if (env.federation.dmEnabled) {
-    app.get('/fed/v1/conv/changes', async (req, reply) => {
+  // #224: маршруты ЛС регистрируются всегда, а выключенный флаг на каждом запросе отвечает тем же 404 (`federationDmGate`).
+  // Тот же ответ, что `federationDmGate` (`federation/gate.ts`); здесь своей строкой — у модуля маршрутов нет лишних зависимостей.
+  const dmOnly = {
+    onRequest: async (_req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | void> => {
+      if (env.federation.dmEnabled) return;
+      reply.callNotFound();
+      return reply;
+    },
+  };
+  {
+    app.get('/fed/v1/conv/changes', dmOnly, async (req, reply) => {
       const q = req.query as Record<string, string | undefined>;
       const link = await admitPeer(req, reply, q.instance_id, 'convPull');
       if (!link) return;
@@ -321,7 +330,7 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
      * Э5 часть 1 (#141, `docs/dm/FEDERATION.md` §4 п. 1 (б)): «через»-сообщения людей СПРАШИВАЮЩЕГО, ждущие решения его дома
      * (`federation/convVia.pendingFor`, подключает `index.ts` крючком `configureFedViaRoutes`). Не подключено — 404.
      */
-    app.get('/fed/v1/conv/via', async (req, reply) => {
+    app.get('/fed/v1/conv/via', dmOnly, async (req, reply) => {
       const q = req.query as Record<string, string | undefined>;
       const link = await admitPeer(req, reply, q.instance_id, 'directory');
       if (!link) return;
@@ -336,7 +345,7 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
      * `?after=<message.id>` — курсор прошлой страницы. 1:1, где у спрашивающего есть участник (`exportForPeer`), или группа (Э7 часть 3, `exportGroupForPeer`);
      * чужая или незнакомая беседа — 404, как будто её нет.
      */
-    app.get('/fed/v1/conv/:id/export', async (req, reply) => {
+    app.get('/fed/v1/conv/:id/export', dmOnly, async (req, reply) => {
       const q = req.query as Record<string, string | undefined>;
       const link = await admitPeer(req, reply, q.instance_id, 'convPull');
       if (!link) return;
@@ -355,7 +364,7 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
      * Э7 часть 3: группы, чей хост — мы, где у спрашивающего есть люди (действующие или бывшие) — для его полного прохода
      * (`groupsForPeer`); сами группы — `GET /fed/v1/conv/:id/export`. Сосед без `dmgroup1` — 404, как до части 3.
      */
-    app.get(FED_CONV_GROUPS_PATH, async (req, reply) => {
+    app.get(FED_CONV_GROUPS_PATH, dmOnly, async (req, reply) => {
       const q = req.query as Record<string, string | undefined>;
       const link = await admitPeer(req, reply, q.instance_id, 'convPull');
       if (!link) return;
@@ -546,14 +555,14 @@ export async function federationRoutes(app: FastifyInstance): Promise<void> {
       }),
     );
 
-    if (env.federation.dmEnabled) {
+    {
       /**
        * Э1: сосед просит открыть беседу его человека с нашим (`docs/dm/FEDERATION.md` §1.2, провод `shared/federation/convOpen.ts`).
        * 🔴 В скоупе `proto`: подпись POST проверяется по сырому телу (`rawBody`), снаружи его нет — 401.
        * Связка обязана быть рабочей (`requireActive`). Решает наша настройка `fedDmPolicy` (Ф6) — `federation/convOpen.ts`.
        * ⚠️ Повтор подписи не отсекаем: запрос идемпотентен (второй раз — `exists`), а предел новых переписок считает и так.
        */
-      proto.post('/fed/v1/conv/open', async (req, reply) => {
+      proto.post('/fed/v1/conv/open', dmOnly, async (req, reply) => {
         const body = (req.body ?? {}) as Record<string, unknown>;
         const link = await admitPeer(req, reply, body.instance_id, 'events', { requireActive: true });
         if (!link) return;

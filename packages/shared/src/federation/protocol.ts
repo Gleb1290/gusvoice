@@ -478,6 +478,27 @@ export interface FederationAlertSettings {
   linkDownAfterMinutes: number;
 }
 
+/**
+ * Тумблеры «Федерация» и «Личные сообщения с другими инстансами» во вкладке админки (#224): `GET`/`PATCH
+ * /admin/federation/switch`. Отвечает ВСЕГДА, и при выключенной федерации (тогда `/admin/federation` — 404, как раньше).
+ * `source`: `env` — включено в `.env` (`FEDERATION_ENABLED` / `FEDERATION_DM_ENABLED`), из панели не выключается;
+ * `panel` — включено тумблером; `off` — выключено. 🔴 Пароля к ключу здесь нет и быть не должно.
+ */
+export interface FederationSwitchView {
+  enabled: boolean;
+  source: 'env' | 'panel' | 'off';
+  dmEnabled: boolean;
+  dmSource: 'env' | 'panel' | 'off';
+  status: 'off' | 'key-error' | 'ready';
+  problem: string | null;
+}
+
+/** Тело `PATCH /admin/federation/switch` — меняется только переданное. */
+export interface FederationSwitchPatch {
+  enabled?: boolean;
+  dmEnabled?: boolean;
+}
+
 export interface FederationOverview {
   status: 'off' | 'key-error' | 'ready';
   problem: string | null;

@@ -390,6 +390,9 @@ mod unread_badge;
 /// Заставка при запуске (15.10): страховка «главное окно всё равно покажется» и команды окна `splash`.
 #[cfg(desktop)]
 mod splash;
+/// Окно «картинка в картинке» для показа (#222): единственное новое окно, которое может открыть страница.
+#[cfg(desktop)]
+mod pip;
 #[cfg(desktop)]
 mod overlay;
 /// Нативная тряска ОКНА для МЕГА пока (#117). Десктоп целиком — двигать окно умеет любая из
@@ -1150,12 +1153,42 @@ fn sync_webview_visibility(window: &tauri::WebviewWindow) {
 #[cfg(target_os = "windows")]
 fn set_main_webview_shown(window: &tauri::WebviewWindow, shown: bool) {
     use std::sync::atomic::Ordering;
+    // Пока открыто окно картинки в картинке (#222), страницу не гасим: окошко ведёт её же скрипт, а у
+    // скрытой страницы `requestAnimationFrame` стоит и таймеры идут раз в секунду (замер 18.10, `pip.rs`).
+    let shown = shown || pip::any_open();
     if WEBVIEW_SHOWN.swap(shown, Ordering::Relaxed) == shown {
         return;
     }
     let _ = window.with_webview(move |webview| unsafe {
         let _ = webview.controller().SetIsVisible(shown);
     });
+}
+
+/// Создать главное окно: в обоих конфигах у него `"create": false` (#222).
+///
+/// 🔴 Зачем. Окну из конфига не задать обработчик новых окон, а без него WebView2 отказывает
+/// картинке в картинке (`pip.rs`). На десктопе окно строит `pip::build_main` с обработчиком; на
+/// телефоне — ровно то же, что сделал бы сам Tauri (`tauri` `app.rs` `setup`: `from_config` +
+/// `build` для каждого окна с `create`), только первой строкой нашего `setup`.
+/// ⚠️ Тронуто — пробная APK запуском на телефоне (правило 6 CLAUDE.md): без этого окна Android-сборка
+/// стартует в пустоту.
+fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    #[cfg(desktop)]
+    {
+        pip::build_main(app)
+    }
+    #[cfg(mobile)]
+    {
+        use tauri::Manager;
+        if app.get_webview_window("main").is_some() {
+            return Ok(());
+        }
+        let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() else {
+            return Ok(());
+        };
+        tauri::WebviewWindowBuilder::from_config(app, &cfg)?.build()?;
+        Ok(())
+    }
 }
 
 /// Идёт ли на переднем плане чужое окно на весь монитор, то есть игра (#207). Клиент по нему
@@ -1341,6 +1374,8 @@ pub fn run() {
             #[cfg(desktop)]
             splash::gv_launch_splash,
             #[cfg(desktop)]
+            pip::gv_pip_arm,
+            #[cfg(desktop)]
             splash::gv_update_test_mode,
             gv_open_external,
             gv_tray_set_state,
@@ -1372,6 +1407,8 @@ pub fn run() {
             gv_gpu_accel_set
         ])
         .setup(|_app| {
+            // Главное окно — первым и своим кодом, на всех платформах (`build_main_window`).
+            build_main_window(_app.handle())?;
             // System tray + close-to-tray: intercept the window's X, prevent the default close, and
             // let the web client decide (свернуть в трей / выйти / спросить) by handling `gv-close-requested`.
             #[cfg(desktop)]

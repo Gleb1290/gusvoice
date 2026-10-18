@@ -43,6 +43,10 @@
     <!-- G73: входящий звонок поверх экрана (`CallNotifier`, как у Telegram). Android 14+ даёт его не всем — проверка
          `canUseFullScreenIntent`, без него уведомление звонка всплывает обычным heads-up. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Пузырь микрофона поверх других приложений (#156, MicBubble.kt): окно TYPE_APPLICATION_OVERLAY. Особое разрешение —
+         выдаётся только в настройках системы; страница спрашивает своим окном в момент включения тумблера «Кнопка поверх
+         приложений» и ведёт в настройки (`openOverlaySettings`). Отказ уважаем: пузыря нет. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Своя галерея во вложениях (05.10, MediaBridge.kt): фото и видео устройства. Android 13+ — READ_MEDIA_IMAGES/VIDEO,
          ниже 13 — чтение памяти. READ_MEDIA_VISUAL_USER_SELECTED НЕ объявляем — как Telegram Android (TMessagesProj
          AndroidManifest.xml:38-40, #218 10.10): «Выбрать фото» в окне Android 14+ тогда даёт временный доступ к выбранному.
@@ -173,6 +177,12 @@
             android:theme="@style/Theme.gusvoice" />
         <receiver
             android:name=".CallActionReceiver"
+            android:exported="false" />
+
+        <!-- Кнопки уведомления голоса (#156): «Микрофон», «Не слышу», «Выйти» → страница (`window.__gvMicAction`). Только наши
+             PendingIntent. -->
+        <receiver
+            android:name=".VoiceActionReceiver"
             android:exported="false" />
 
         <!-- Restart the embedded push distributor after reboot (only if it was enabled). -->

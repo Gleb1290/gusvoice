@@ -358,6 +358,12 @@ export function connectGateway(): void {
         if (store.convActive) void store.convOnReady();
         // Звонки (С5, `calls1`): устройство подключилось посреди звонка — узнать, не звонят ли мне сейчас.
         if (serverCalls(store.serverFeatures)) void useCall.getState().resync();
+        // Экономика: пока сокета не было, мог выйти гусь — его пуш единственный, и без перечитки снимка
+        // гусь висел на сервере невидимым до перезапуска приложения (17.10). Вместе с ним догоняется баланс.
+        {
+          const sid = store.bootstrap?.server.id;
+          if (sid) ensureEconomy(sid, true);
+        }
         return;
       }
       /**

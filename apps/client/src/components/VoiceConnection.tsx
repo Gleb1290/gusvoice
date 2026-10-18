@@ -1,6 +1,7 @@
 import { voiceMaxBitrate } from '@gusvoice/shared';
 import { RoomAudioRenderer, RoomContext } from '@livekit/components-react';
 import {
+  createLocalAudioTrack,
   DisconnectReason,
   type LocalTrackPublication,
   type Participant,
@@ -14,13 +15,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { getAudioSettings, subscribeAudioSettings } from '../audioSettings';
 import { startDiag, stopDiagAndUpload } from '../diag';
 import { cameraCaptureOptions } from '../cameraSettings';
-import { isDesktop, isMobile, pttKeyVk } from '../hotkeys';
+import { isAndroid, isDesktop, isMobile, pttKeyVk } from '../hotkeys';
 import { createMicProcessor } from '../micProcessor';
 import { micChainNeeded, micChainSignature } from '../micProcessorRules';
 import { applyUserAudio, subscribeUserAudio } from '../localUserAudio';
 import { stopNativeShareIfActive } from '../nativeShareSession';
 import { onNativeKeyPtt, onNativePtt, setPttKey, setPttMouseButton } from '../nativeStreamAudio';
 import { startNativeVoiceService, stopNativeVoiceService } from '../nativeVoiceService';
+import { onMicPtt } from '../nativeMicActions';
+import { pttCanOpen } from '../micActionRules';
 import { playSound } from '../sounds';
 import { useStore, voiceApiOf, voiceIsHere, type LiveVoiceState, type VoiceState } from '../store';
 import { creditScreenOwners, ownerOf, streamAudioVolume } from '../streamAudioRules';
@@ -36,6 +39,8 @@ import { diagDecision, getDiagConsent } from '../diagConsent';
 import { diagVisible } from '../diagVisible';
 import { noteVadTick } from '../uiMeters';
 import { isWindowCovered, onWindowCovered } from '../windowCovered';
+import { isInPip, streamsInView } from '../streamPipRules';
+import { StreamPipHost } from './StreamPipView';
 import { DiagConsentDialog } from './DiagConsent';
 import { setSelfMuted } from '../voiceSelf';
 import { GRACE_MS, touchVoiceSession } from '../voiceSession';
@@ -393,8 +398,9 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         releaseTimer = null;
       }
     };
+    // Мьют сильнее рации, как в Discord (#156): заглушённый зажатием микрофон не открывает (`micActionRules.pttCanOpen`).
     const start = () => {
-      if (held || selfDeafened) return;
+      if (held || !pttCanOpen(selfMuted, selfDeafened)) return;
       held = true;
       clearRelease(); // re-pressed during the release tail → keep the mic open
       void room.localParticipant.setMicrophoneEnabled(true);
@@ -464,7 +470,32 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // that keyup/mouseup never reaches us → the mic would stick open. Force-release PTT on blur. NOT on
     // desktop — there the native hooks see the release globally, and blur-releasing would kill PTT the
     // instant you tab into a game (the whole point of unfocused PTT).
-    const onBlur = () => end();
+    //
+    // Android (#156): рация с уведомления/пузыря — `window.__gvMicAction('ptt-down'|'ptt-up')` (`nativeMicActions.ts`). Пока её
+    // держат оттуда, страница не в фокусе, и `blur` (шторка, чужое приложение поверх) не должен её отпускать — отпустит
+    // только `ptt-up` натива.
+    let nativeHeld = false;
+    const teardownMicPtt = isAndroid()
+      ? onMicPtt(
+          () => {
+            nativeHeld = true;
+            start();
+          },
+          () => {
+            // 🔴 Отпускание с пузыря закрывает микрофон СРАЗУ: задержку отпускания уже выждал натив (`MicBubble`, `pttReleaseMs`
+            // в состоянии). Свой `setTimeout` тут не годится — у свёрнутого приложения таймеры страницы стоят, и микрофон
+            // висел открытым до возврата в приложение (приёмка на S20, 17.10).
+            nativeHeld = false;
+            if (!held) return;
+            held = false;
+            clearRelease();
+            void room.localParticipant.setMicrophoneEnabled(false);
+          },
+        )
+      : null;
+    const onBlur = () => {
+      if (!nativeHeld) end();
+    };
     if (!isDesktop()) window.addEventListener('blur', onBlur);
 
     return () => {
@@ -476,12 +507,18 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       unsubNative?.();
       teardownNative?.();
       teardownNativeKey?.();
+      teardownMicPtt?.();
+      // Перезапуск эффекта посреди зажатия (заглушились или «Не слышу» с рацией в руке) обнуляет `held` — микрофон,
+      // открытый этим зажатием, закрываем здесь, иначе он остался бы открытым до следующего нажатия.
+      const opened = held || releaseTimer != null;
+      clearRelease();
+      if (opened) void room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
       if (isDesktop()) {
         setPttMouseButton(-1); // stop the global hooks from firing PTT while out of voice
         setPttKey(0);
       }
     };
-  }, [room, selfDeafened]);
+  }, [room, selfMuted, selfDeafened]);
 
   // Heartbeat the persisted voice session while connected so its timestamp reflects "last alive" — a
   // crash/restart within the grace window then auto-rejoins this exact channel on the next launch (#11).
@@ -522,8 +559,27 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         }
       });
     };
+    /**
+     * 🔴 Android + рация: микрофон заводим СРАЗУ, но заглушённым (#156, приёмка на S20 17.10). Пузырь жмут из свёрнутого
+     * приложения, а там `getUserMedia` WebView висит до возврата на экран — человек, вошедший в канал уже с рацией,
+     * оставался немым: первое зажатие не могло создать микрофон. Заглушённый трек открывается зажатием без захвата
+     * заново (`unmute`). Звук наружу не уходит: трек заглушён ДО публикации. Плата — значок микрофона Android в строке
+     * состояния горит всё время в голосе, как и без рации.
+     */
+    const armMutedMic = async () => {
+      if (lp.getTrackPublication(Track.Source.Microphone)) return;
+      const t = await createLocalAudioTrack(room.options.audioCaptureDefaults);
+      await t.mute();
+      // Пока ждали захват, микрофон мог завести кто-то ещё (зажали рацию на экране) — второй трек не нужен.
+      if (lp.getTrackPublication(Track.Source.Microphone)) {
+        t.stop();
+        return;
+      }
+      await lp.publishTrack(t, { source: Track.Source.Microphone });
+    };
     let ptt = getAudioSettings().pushToTalk;
     if (!ptt) applyOpenMic(); // в режиме рации микрофоном распоряжается клавиша, а не мы
+    else if (isAndroid()) void armMutedMic().catch((e) => console.warn('[voice] muted mic for PTT failed:', e));
     return subscribeAudioSettings(() => {
       const next = getAudioSettings().pushToTalk;
       if (next === ptt) return;
@@ -583,7 +639,9 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // `clearWatchedStreams` при размонтировании сцены гарантирует дефолт: не смотрю — не слышу.
   useEffect(() => {
     const apply = () => {
-      const { watchedStreams, mutedStreams, streamVolumes } = useStore.getState();
+      const { mutedStreams, streamVolumes, pipStreams } = useStore.getState();
+      // Показы в окошке «картинка в картинке» (#222/#223) звучат и без сцены — как открытые на ней.
+      const watchedStreams = streamsInView(useStore.getState().watchedStreams, pipStreams);
       for (const p of room.remoteParticipants.values()) {
         for (const pub of p.trackPublications.values()) {
           if (pub.source !== Track.Source.ScreenShareAudio) continue;
@@ -641,14 +699,17 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // превью подписывается раз в минуту заново, открытие показа — тоже новая подписка.
   useEffect(() => {
     const apply = () => {
-      const { watchedStreams } = useStore.getState();
+      const { pipStreams } = useStore.getState();
+      const watchedStreams = streamsInView(useStore.getState().watchedStreams, pipStreams);
       const windowHidden = isWindowCovered() || document.visibilityState === 'hidden';
       const pref = getStreamQuality();
       for (const p of room.remoteParticipants.values()) {
         for (const pub of p.trackPublications.values()) {
           if (pub.source !== Track.Source.ScreenShare || !pub.isSubscribed) continue;
           const watched = watchedStreams.some((w) => w === p.identity || ownerOf(w) === p.identity);
-          const layer = wantedLayer(pref, { windowHidden, watched });
+          // Окошко висит поверх всего — слой не опускаем, даже когда главное окно свёрнуто (#222).
+          const inPip = isInPip(p.identity, pipStreams) || pipStreams.some((x) => ownerOf(x) === p.identity);
+          const layer = wantedLayer(pref, { windowHidden, watched, inPip });
           try {
             (pub as { setVideoQuality?: (q: VideoQuality) => void }).setVideoQuality?.(LAYER_QUALITY[layer]);
           } catch {
@@ -1048,6 +1109,9 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         />
       )}
       {children}
+      {/* Окошко показа «картинка в картинке» (#222): здесь, а не на сцене — сцена размонтируется при уходе
+          в текстовый канал, а окошко живёт, пока мы в голосе. */}
+      <StreamPipHost />
     </RoomContext.Provider>
   );
 }

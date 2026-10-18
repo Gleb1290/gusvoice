@@ -69,6 +69,8 @@ import type {
   DmChannel,
   DmPolicy,
   FederationOverview,
+  FederationSwitchPatch,
+  FederationSwitchView,
   GameActivity,
   InstanceInfo,
   GuestPlacesView,
@@ -1549,6 +1551,10 @@ function makeApi(t: Transport) {
   // Федерация (#139). Все эти маршруты — только для супер-админа; выключенная федерация отвечает
   // сводкой со `status: 'off'`, а не ошибкой: вкладка должна уметь объяснить, почему пусто.
   federationOverview: () => req<FederationOverview>('GET', '/admin/federation'),
+  // Тумблеры «Федерация» и «Личные сообщения с другими инстансами» (#224): отвечают и при выключенной федерации;
+  // 404 — сервер старше тумблера (включается только в `.env`).
+  federationSwitch: () => req<FederationSwitchView>('GET', '/admin/federation/switch'),
+  federationSetSwitch: (patch: FederationSwitchPatch) => req<FederationSwitchView>('PATCH', '/admin/federation/switch', patch),
   federationSetName: (name: string) => req<{ name: string | null }>('PATCH', '/admin/federation/instance', { name }),
   federationPause: (paused: boolean) => req<{ paused: boolean }>('POST', '/admin/federation/pause', { paused }),
   // Оповещения держателю (§5.10): куда слать и с какого молчания считать связку упавшей.

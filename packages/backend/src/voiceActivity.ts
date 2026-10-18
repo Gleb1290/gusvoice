@@ -109,7 +109,17 @@ async function offerGoose(
      * теперь на самом предложении.
      */
     const took = await redisPub.set(gooseCurrentKey(serverId, userId), offerId, 'PX', gooseTokenTtlMs(), 'NX');
-    if (took !== 'OK') return;
+    if (took !== 'OK') {
+      /**
+       * 🔴 Гусь уже висит — ПОВТОРЯЕМ его пуш на каждом такте (17.10). Пуш был единственным: потерялся
+       * (сокет переподключался после выкатки бэкенда) — и гусь лежал на сервере невидимым, а нового
+       * не выйдет, пока не поймают этого. Так у человека не было гусей два часа, лечил перезапуск.
+       * ⚠️ Тот же идентификатор: клиент принимает его как уже известного, второго гуся не появится.
+       */
+      const hanging = await redisPub.get(gooseCurrentKey(serverId, userId));
+      if (hanging) await publishToUser(userId, { t: 'goose.offer', serverId, offerId: hanging });
+      return;
+    }
     await redisPub.set(gooseTokenKey(serverId, userId, offerId), '1', 'PX', gooseTokenTtlMs());
     await publishToUser(userId, { t: 'goose.offer', serverId, offerId });
   } catch (err) {

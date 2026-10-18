@@ -4556,6 +4556,80 @@ span.att-pending {
   object-fit: contain;
   background: #000;
 }
+/* Окошко «картинка в картинке» показа (#222, `StreamPipView`): свой документ, стили страницы скопированы
+   (`streamPip.ts`). Вьювер — на всё окошко, как у `.pseudo-fs`, без отступа и скругления; ряд кнопок — тот же. */
+html.gv-stream-pip-doc,
+html.gv-stream-pip-doc body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+}
+/* #223: в окошке до четырёх показов. `.stream-pip` — всё окно, плитки `.stream-pip-tile` стоят по долям окна
+   (`pipLayout`, проценты в `style`), чёрная рамка — зазор между ними. Ряд плитки — тот же `.screen-controls`
+   (по наведению на плитку), но плотнее: плитка в полосе «крупного» — четверть окошка по высоте. */
+.stream-pip {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+.screen-viewer.stream-pip-tile {
+  position: absolute;
+  margin: 0;
+  border: 1px solid #000;
+  border-radius: 0;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+.stream-pip-tile .screen-controls {
+  min-height: 0;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+}
+.stream-pip-tile .screen-controls .ctl {
+  cursor: pointer;
+}
+/* Кнопки уровня окна («Вернуться в приложение», «Закрыть окошко») — справа сверху по наведению на окно,
+   как у окошка Telegram Desktop; вид кнопок — как в ряду показа. */
+.stream-pip-top {
+  position: absolute;
+  top: var(--sp-1);
+  right: var(--sp-1);
+  display: none;
+  gap: var(--sp-1);
+  z-index: 1;
+}
+.stream-pip:focus-within .stream-pip-top {
+  display: flex;
+}
+@media (hover: hover) {
+  .stream-pip:hover .stream-pip-top {
+    display: flex;
+  }
+}
+.stream-pip-top .ctl {
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+.stream-pip-top .ctl:hover {
+  background: rgba(0, 0, 0, 0.65);
+}
+/* Меню качества в окошке: высота — по окошку, а не по `--vh-px` главного окна (атрибуты корня скопированы). */
+.ctx-menu.stream-pip-menu:not(.sheet) {
+  max-height: calc(100vh - 2 * var(--sp-2));
+}
+/* Заглушка на сцене вместо кадра, пока показ в окошке: значок, подпись, «Вернуть». */
+.screen-pip-stub {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  color: var(--muted);
+  text-align: center;
+}
 .screen-controls {
   position: absolute;
   left: 0;

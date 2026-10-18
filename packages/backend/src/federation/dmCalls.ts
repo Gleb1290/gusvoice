@@ -203,8 +203,10 @@ export async function homesWithoutCalls(homes: readonly string[], q: Q = db): Pr
 }
 
 /** Обработчик снимков фазы от соседей (`index.ts`, только при `FEDERATION_DM_ENABLED`). */
-export function startDmCalls(): void {
+/** `active` (#224): ЛС между инстансами включены прямо сейчас — выключили тумблером в админке, такты и приём пустые. */
+export function startDmCalls(active: () => boolean = () => true): void {
   onFedEvent(FED_CALL_STATE_EVENT, async ({ instanceId, event }) => {
+    if (!active()) return;
     const s = parseCallState(event.payload);
     if (s) await applyRemoteState(instanceId, s);
   });

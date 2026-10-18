@@ -536,10 +536,13 @@ export async function kickAllAttCopies(): Promise<void> {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
-export function startAttCopies(): void {
+/** `active` (#224): ЛС между инстансами включены прямо сейчас — выключили тумблером в админке, такты и приём пустые. */
+export function startAttCopies(active: () => boolean = () => true): void {
   if (timer) return;
   void kickAllAttCopies().catch(() => {});
-  timer = setInterval(() => void kickAllAttCopies().catch(() => {}), COPY_EVERY_MS);
+  timer = setInterval(() => {
+    if (active()) void kickAllAttCopies().catch(() => {});
+  }, COPY_EVERY_MS);
   timer.unref?.();
 }
 

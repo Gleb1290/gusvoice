@@ -10,6 +10,8 @@
  */
 
 let host: HTMLVideoElement | null = null;
+/** Кому сказать, что окошко живого потока закрыли (#222): показ в нём — `streamPip.ts`. */
+let onStreamLeave: (() => void) | null = null;
 
 /** Браузер умеет «картинку в картинке» для `<video>` и не запрещает её политикой. */
 export function pipSupported(): boolean {
@@ -31,7 +33,12 @@ function hostVideo(): HTMLVideoElement {
   v.addEventListener('leavepictureinpicture', () => {
     v.pause();
     v.removeAttribute('src');
+    // Живой поток (показ, #222) — отпускаем и его, иначе дорожка играла бы в невидимом элементе.
+    if ('srcObject' in v) v.srcObject = null;
     v.load();
+    const leave = onStreamLeave;
+    onStreamLeave = null;
+    leave?.();
   });
   document.body.appendChild(v);
   host = v;
@@ -64,6 +71,13 @@ function metadataOf(v: HTMLVideoElement): Promise<void> {
 export async function openPip(src: { url: string; at?: number; rate?: number; loop?: boolean }): Promise<void> {
   if (!pipSupported()) throw new Error('pip unsupported');
   const v = hostVideo();
+  // Был живой поток (показ в окошке) — он сильнее `src`, снимаем; окошко показа больше не его.
+  if ('srcObject' in v && v.srcObject) {
+    v.srcObject = null;
+    const leave = onStreamLeave;
+    onStreamLeave = null;
+    leave?.();
+  }
   if (v.getAttribute('src') !== src.url) v.setAttribute('src', src.url);
   v.loop = !!src.loop;
   v.muted = false;
@@ -74,4 +88,43 @@ export async function openPip(src: { url: string; at?: number; rate?: number; lo
   // Скорость сбрасывается сменой файла — ставим ещё раз после загрузки.
   v.playbackRate = src.rate && src.rate > 0 ? src.rate : 1;
   await v.play().catch(() => {});
+}
+
+/**
+ * Живой поток (чужой показ, #222) в окошке `<video>` — запасной путь, когда окна документа
+ * (`documentPictureInPicture`) нет или оно не открылось. Своих кнопок тут нет: окошко рисует браузер.
+ * Звук показа идёт своей дорожкой через комнату, поэтому элемент немой. `onLeave` — окошко закрыли
+ * (или его занял другой ролик). Звать из нажатия; не вышло — бросает.
+ */
+export async function openStreamVideoPip(stream: MediaStream, onLeave: () => void): Promise<void> {
+  if (!pipSupported()) throw new Error('pip unsupported');
+  const v = hostVideo();
+  const prev = onStreamLeave;
+  onStreamLeave = null;
+  if (prev) prev();
+  v.removeAttribute('src');
+  v.srcObject = stream;
+  v.loop = false;
+  v.muted = true;
+  v.playbackRate = 1;
+  try {
+    await v.play().catch(() => {});
+    await metadataOf(v);
+    if (document.pictureInPictureElement !== v) await v.requestPictureInPicture();
+  } catch (e) {
+    // Окошко не дали (нет жеста, политика) или кадр так и не пришёл — поток с элемента снимаем, иначе дорожка висела бы
+    // на скрытом видео (нашёл Codex, R254/R255).
+    v.pause();
+    v.srcObject = null;
+    throw e;
+  }
+  onStreamLeave = onLeave;
+}
+
+/** Закрыть окошко живого потока, если открыто оно (видео ЛС в том же элементе не трогаем). */
+export function closeStreamVideoPip(): void {
+  const v = host;
+  if (!v || !onStreamLeave) return;
+  if (document.pictureInPictureElement === v) void document.exitPictureInPicture().catch(() => {});
+  else v.dispatchEvent(new Event('leavepictureinpicture'));
 }

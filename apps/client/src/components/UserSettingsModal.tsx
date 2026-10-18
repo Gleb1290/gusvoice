@@ -106,6 +106,7 @@ import { NotifyPopupSetting } from './NotifyPopupSetting';
 import { SoundSettingsPanel } from './SoundSettingsPanel';
 import { StreamQualityPanel } from './StreamQualityPanel';
 import { getStreamSettings, setStreamSettings } from '../streamSettings';
+import { MicBubbleSetting } from './MicBubbleSetting';
 import { Toggle } from './Toggle';
 import { animatedAvatarsEnabled, setAnimatedAvatarsEnabled } from '../avatarAnimation';
 import { liteModeEnabled, setLiteModeEnabled } from '../liteMode';
@@ -761,9 +762,11 @@ function AudioVideoTab() {
           }}
         />
       </div>
+      {/* #156: пузырь микрофона поверх приложений (Android) и подсказка под рацией — `MicBubbleSetting`. */}
+      <MicBubbleSetting s={s} update={update} />
       {/* 🔴 Клавиша — только там, где есть клавиатура. На телефоне строка честно писала «Пробел»,
-          и это читалось как издевательство: нажать его не на чем. Кнопка поверх игр — отдельная
-          задача, до неё режим рации на телефоне живёт без назначения клавиши. */}
+          и это читалось как издевательство: нажать его не на чем. На телефоне рацию держат кнопкой
+          поверх приложений (пузырь, строка выше). */}
       {s.pushToTalk && !phoneUi && (
         <div className="settings-row">
           <span>Клавиша</span>

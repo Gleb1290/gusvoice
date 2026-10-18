@@ -512,7 +512,8 @@ export function isKnownShadow(userId: string): boolean {
 }
 
 /** Запустить «жив» (отправка) и устаревание (приём). Зовёт `index.ts` при `FEDERATION_DM_ENABLED`. */
-export function startDmEphemeral(): void {
+/** `active` (#224): ЛС между инстансами включены прямо сейчас — выключили тумблером в админке, такты и приём пустые. */
+export function startDmEphemeral(active: () => boolean = () => true): void {
   if (started) return;
   started = true;
   void refreshShadowIds().catch(() => {});
@@ -520,6 +521,7 @@ export function startDmEphemeral(): void {
   // Тот же минутный такт обновляет и id теневых строк (`FED_PRESENCE_ALIVE_MS` = минута).
   const alive = setInterval(() => {
     void refreshShadowIds().catch(() => {});
+    if (!active()) return; // id теней — своя база, дёшево; «жив» соседям — только при включённых ЛС
     for (const uid of [...reportedOnline]) {
       if (settleTimers.has(uid)) continue; // смена уже в пути
       void flushPresence(uid, true).catch(() => {});
@@ -527,6 +529,7 @@ export function startDmEphemeral(): void {
   }, FED_PRESENCE_ALIVE_MS);
   alive.unref?.();
   const stale = setInterval(() => {
+    if (!active()) return;
     const now = Date.now();
     for (const [id, st] of remote) {
       if (!st.online || now - st.receivedAt <= FED_PRESENCE_STALE_MS) continue;

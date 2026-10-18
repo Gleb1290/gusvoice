@@ -455,9 +455,18 @@ async function syncMemberships(link: { instanceId: string; apiBase: string }, no
  */
 const PASS_INTERVAL_MS = 60_000;
 
-export function startDirectorySyncWorker(): void {
+let syncStarted = false;
+
+/**
+ * `active` (#224): федерация включена прямо сейчас — выключили тумблером в админке, такт пустой. Повторный вызов (включили
+ * снова) таймер второй раз не заводит.
+ */
+export function startDirectorySyncWorker(active: () => boolean = () => true): void {
+  if (syncStarted) return;
+  syncStarted = true;
   let running = false;
   const timer = setInterval(() => {
+    if (!active()) return;
     // Поверх незавершённого прохода новый не стартует (F-09) — см. очередь исходящих.
     if (running) return;
     running = true;

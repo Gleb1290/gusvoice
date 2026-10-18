@@ -23,6 +23,7 @@ const dormantImports = [
   './Toggle', '../avatarAnimation', '../liteMode', './LinkPreview', '../sendMode', '../emojiSuggest', '../dmListView',
   './DmListSwipe', '../quickReaction', './ContextMenu', './EmojiPicker', './DiagConsent', '../lastSeenText',
   './LastSeenExceptions', './MessagePrivacySetting', '../lastSeenExceptionsRules', '../callView', '../convSyncRules',
+  './MicBubbleSetting',
 ];
 
 async function renderPanel(component: 'AndroidInstallTab' | 'AccountTab', android: boolean,
