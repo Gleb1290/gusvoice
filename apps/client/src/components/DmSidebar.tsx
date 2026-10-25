@@ -111,6 +111,8 @@ interface DmRowProps {
   summary: ConvSummary | undefined;
   meId: string | undefined;
   online: boolean;
+  /** Собеседник в «отошёл» (20.10): точка «нет на месте» вместо зелёной. Пропом, а не стором: `DmRow` рисуют SSR-тесты без стора. */
+  peerAway?: boolean;
   /** Открытая беседа (ПК) — подсветка строки (`.active`, `aria-current`). */
   active: boolean;
   unread: boolean;
@@ -197,6 +199,7 @@ export const DmRow = memo(function DmRow({
   summary,
   meId,
   online,
+  peerAway = false,
   active,
   unread,
   unreadN,
@@ -453,7 +456,7 @@ export const DmRow = memo(function DmRow({
           /* Обводка точки — цветом фона строки: `currentColor`, а `color` обёртки стили называют рядом с фоном в каждом
              состоянии строки (блок «Раунд 11» в `styles.css`; своей переменной под фон нет с 05.10). */
           <span className="mp-dot-wrap">
-            <StatusDot status="online" size={phone ? DM_ONLINE_DOT_PHONE : 12} ringColor="currentColor" />
+            <StatusDot status={peerAway ? 'away' : 'online'} size={phone ? DM_ONLINE_DOT_PHONE : 12} ringColor="currentColor" />
           </span>
         )}
         {/* Выбор (G01): галочка в углу аватара — Telegram Android `DialogCell.checkBox` (CheckBox2 справа внизу аватара). */}
@@ -624,10 +627,10 @@ function ComposeDialog({
 /**
  * «Написать» — кому написать: участники открытого сервера и собеседники существующих бесед (`dmComposeCandidates`: в сторе
  * ростер только открытого сервера, поэтому без бесед в сессии, где сервер не открывали, список был бы пуст). Телефон —
- * лист снизу, ПК — окно по центру (`ComposeDialog`), разметка одна. `initialQuery` — запрос из «ничего не нашлось».
- * С сервером `users1` (05.10) набранное @имя ищется ещё и среди всех людей инстанса (`api.searchUsers`: пауза
- * `USER_SEARCH_DELAY_MS`, опоздавший ответ отбрасывается по номеру запроса) — найденные блоком «На этом инстансе» под
- * своими; пустое окно учит «Введите @имя» (`dmComposeHint`).
+ * экран на всю высоту (`BottomSheet page`, #218; выбор контакта — лист), ПК — окно по центру (`ComposeDialog`), разметка
+ * одна. `initialQuery` — запрос из «ничего не нашлось». С сервером `users1` (05.10) набранное @имя ищется ещё и среди
+ * всех людей инстанса (`api.searchUsers`: пауза `USER_SEARCH_DELAY_MS`, опоздавший ответ отбрасывается по номеру
+ * запроса) — найденные блоком «На этом инстансе» под своими; пустое окно учит «Введите @имя» (`dmComposeHint`).
  */
 function NewDmSheet({ initialQuery, pick }: { initialQuery: string; pick?: ContactPick }) {
   const phone = usePhoneLayout();
@@ -875,8 +878,11 @@ function NewDmSheet({ initialQuery, pick }: { initialQuery: string; pick?: Conta
     </>
   );
 
+  /* Телефон (#218): «Новое сообщение» — экран на всю высоту, как `ContactsActivity` Telegram Android (`NewMessageTitle`, стрелка
+     «назад», поле поиска, «Новая группа», дальше люди); выбор контакта для карточки (G69) остаётся листом — у Telegram это
+     вкладка листа вложений (`ChatAttachAlertContactsLayout`). */
   return phone ? (
-    <BottomSheet title={pick?.title ?? 'Написать'} onClose={close}>
+    <BottomSheet page={!pick} title={pick?.title ?? 'Новое сообщение'} onClose={close}>
       {picker}
     </BottomSheet>
   ) : (
@@ -1286,6 +1292,7 @@ export function DmSidebar() {
   // Точка «в сети» у строки — только если время захода собеседника мне видно (Р-2, `lastseen2`): скрытый — «был(а) недавно».
   const peerIds = useMemo(() => dms.map((d) => d.otherUser.id), [dms]);
   const onlineSet = useVisibleOnline(peerIds);
+  const userStatuses = useStore((s) => s.userStatuses);
   const mobile = isMobile();
   /* 🔴 Число прячется у беседы, которую ВИДНО, а не у «текущей» (#212, 28.09, поймано на S25): на телефоне
      список и лента — разные экраны, и сообщение в беседу, из которой человек вышел в список, пропадало без
@@ -1711,6 +1718,7 @@ export function DmSidebar() {
               summary={summaries[d.id]}
               meId={meId}
               online={onlineSet.has(d.otherUser.id)}
+              peerAway={userStatuses?.[d.otherUser.id]?.status === 'away'}
               active={!phone && d.id === currentDmId}
               unread={unread}
               unreadN={unreadN}

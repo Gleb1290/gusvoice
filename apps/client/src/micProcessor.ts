@@ -1,6 +1,7 @@
 import type { AudioProcessorOptions, Track, TrackProcessor } from 'livekit-client';
 import { getAudioSettings, subscribeAudioSettings, type AudioSettings } from './audioSettings';
 import { createDeepFilterNode } from './deepFilterProcessor';
+import { setMicGateOpen } from './micGateState';
 import { createRnnoiseNode } from './noiseFilter';
 
 // `micChainNeeded` / `micChainSignature` живут в `micProcessorRules.ts` — чистые, тестируемые
@@ -32,6 +33,8 @@ export async function createMicProcessor(): Promise<TrackProcessor<Track.Kind.Au
     // Gate is off while push-to-talk handles transmission, or when the threshold is 0.
     const threshold = s.pushToTalk ? 0 : Math.max(0, Math.min(1, s.vadThreshold));
     gateNode?.port.postMessage({ threshold });
+    // Гейт выключен (рация / порог 0) — условия гейта для обводки нет; воркет подтвердит то же сообщением.
+    if (gateNode && threshold <= 0) setMicGateOpen(true);
   };
 
   const teardown = () => {
@@ -42,6 +45,7 @@ export async function createMicProcessor(): Promise<TrackProcessor<Track.Kind.Au
     gateNode?.disconnect();
     dest?.disconnect();
     source = inputGain = gateNode = dest = undefined;
+    setMicGateOpen(null); // цепи нет — обводка снова только по своему VAD (#215)
     filterTeardown = unsub = undefined;
     if (ownedCtx) {
       void ownedCtx.close().catch(() => {});
@@ -103,6 +107,10 @@ export async function createMicProcessor(): Promise<TrackProcessor<Track.Kind.Au
         // битрейт на каждого слушателя. Раздачей моно по обоим ушам занимается уже приёмная
         // сторона. (Сам воркер теперь заполняет все каналы выхода — см. gv-gate-worklet.js.)
         gateNode = new AudioWorkletNode(ctx, 'gv-gate', { outputChannelCount: [1] });
+        // #215: воркет шлёт {open} при смене состояния гейта → своя обводка гаснет, пока друзья нас не слышат.
+        gateNode.port.onmessage = (e: MessageEvent) => {
+          if (e.data && typeof e.data.open === 'boolean') setMicGateOpen(e.data.open);
+        };
         node.connect(gateNode);
         gateNode.connect(dest);
       } catch (e) {

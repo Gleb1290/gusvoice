@@ -1,4 +1,13 @@
-import type { AdminServer, AdminUser, FederationDirectoryView } from '@gusvoice/shared';
+import {
+  AVATAR_RENTAL_DAYS,
+  AVATAR_RENTAL_MAX_DAYS,
+  AVATAR_RENTAL_MAX_DAYS_LIMIT,
+  AVATAR_RENTAL_MAX_DAYS_MIN,
+  pluralDays,
+  type AdminServer,
+  type AdminUser,
+  type FederationDirectoryView,
+} from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
 import type { Api } from '../api';
 import { adminApi } from '../adminApi';
@@ -375,6 +384,7 @@ function SmtpTab() {
  */
 function EconomyTab() {
   const [minutes, setMinutes] = useState('');
+  const [rentalDays, setRentalDays] = useState(String(AVATAR_RENTAL_MAX_DAYS));
   const [data, setData] = useState<Awaited<ReturnType<Api['adminEconomy']>> | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -386,6 +396,7 @@ function EconomyTab() {
         if (!alive) return;
         setData(r);
         setMinutes(String(r.avatarPriceMinutes));
+        setRentalDays(String(r.avatarRentalMaxDays ?? AVATAR_RENTAL_MAX_DAYS));
       })
       .catch((e) => alive && toastError(e));
     return () => {
@@ -398,8 +409,28 @@ function EconomyTab() {
     if (!Number.isFinite(v) || v < 0) return toastError(new Error('цена — целое число минут, от нуля'));
     setBusy(true);
     try {
-      await adminApi().adminSetEconomy(v);
+      await adminApi().adminSetEconomy({ avatarPriceMinutes: v });
       toast('success', 'Цена сохранена');
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rentalMin = data?.rentalMaxDaysMin ?? AVATAR_RENTAL_MAX_DAYS_MIN;
+  const rentalLimit = data?.rentalMaxDaysLimit ?? AVATAR_RENTAL_MAX_DAYS_LIMIT;
+
+  /** Потолок аренды (#228). Границы проверяет и сервер; здесь — чтобы отказ был виден до отправки. */
+  async function saveRental() {
+    const v = Number(rentalDays);
+    if (!Number.isInteger(v) || v < rentalMin || v > rentalLimit) {
+      return toastError(new Error(`потолок аренды — целое число дней от ${rentalMin} до ${rentalLimit}`));
+    }
+    setBusy(true);
+    try {
+      await adminApi().adminSetEconomy({ avatarRentalMaxDays: v });
+      toast('success', 'Потолок аренды сохранён');
     } catch (e) {
       toastError(e);
     } finally {
@@ -485,6 +516,29 @@ function EconomyTab() {
           <button type="button" className="seg-mini" disabled={busy} onClick={() => void save()}>
             Сохранить
           </button>
+        </div>
+        <div className="sbp-add" style={{ marginTop: 14 }}>
+          <span style={{ fontSize: 13 }}>Аренда движущегося аватара: не больше</span>
+          <input
+            type="number"
+            className="sbp-price-input"
+            aria-label="Потолок аренды аватара, дней вперёд"
+            min={rentalMin}
+            max={rentalLimit}
+            value={rentalDays}
+            disabled={busy}
+            onChange={(e) => setRentalDays(e.target.value)}
+          />
+          <span style={{ fontSize: 13 }}>дней вперёд</span>
+          <button type="button" className="seg-mini" disabled={busy} onClick={() => void saveRental()}>
+            Сохранить
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+          Одна покупка даёт {pluralDays(AVATAR_RENTAL_DAYS)}. Это предел, на сколько вперёд человек может оплатить
+          аренду: докупить можно, пока оплачено не больше чем потолок минус {pluralDays(AVATAR_RENTAL_DAYS)}. От {rentalMin}
+          до {rentalLimit} дней, по умолчанию {AVATAR_RENTAL_MAX_DAYS}. Если уменьшить потолок, уже оплаченное не
+          пропадает — просто нельзя докупить, пока остаток не станет меньше.
         </div>
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
           ⚠️ Аренда — 30 дней с покупки, повторная покупка продлевает. Размер файла и число кадров

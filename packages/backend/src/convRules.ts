@@ -471,7 +471,9 @@ export function lastAttachmentPreview(list: readonly unknown[]): LastAttachmentP
       : { attachmentKind: 'voice', ...once };
   }
   const gif = atts.every((a) => a.gif === true) ? ({ attachmentGif: true } as const) : {};
-  if (atts.every((a) => type(a).startsWith('image/') && !isVoice(a))) return { attachmentKind: 'photo', ...gif };
+  // Одноразовое фото/видео (`ttlmedia1`, #226): «Одноразовое фото» / «Одноразовое видео» — по `attachmentOnce` (оно всегда одно).
+  const onceMedia = atts.length === 1 && first.once === true ? ({ attachmentOnce: true } as const) : {};
+  if (atts.every((a) => type(a).startsWith('image/') && !isVoice(a))) return { attachmentKind: 'photo', ...gif, ...onceMedia };
   const name = typeof first.name === 'string' ? previewText(first.name) : '';
   const file: LastAttachmentPreview = name
     ? { attachmentKind: 'file', attachmentName: name, ...gif }
@@ -485,8 +487,8 @@ export function lastAttachmentPreview(list: readonly unknown[]): LastAttachmentP
       : { ...file, attachmentVideo: true, attachmentRound: true, ...once };
   }
   return duration !== null
-    ? { ...file, attachmentVideo: true, attachmentDurationMs: duration }
-    : { ...file, attachmentVideo: true };
+    ? { ...file, attachmentVideo: true, attachmentDurationMs: duration, ...onceMedia }
+    : { ...file, attachmentVideo: true, ...onceMedia };
 }
 
 /** Поля вложений цитаты (`MessageReplyPreview`, 05.10) — без миниатюры: её ссылка — дело вызывающего. */

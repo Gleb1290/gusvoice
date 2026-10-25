@@ -104,7 +104,7 @@ export function zoomAt(p: {
   max: number;
 }): { zoom: number; pan: ZoomPoint } {
   const z0 = p.zoom0 > 0 ? p.zoom0 : 1;
-  return pinchStep({
+  const r = pinchStep({
     zoom0: z0,
     pan0: p.pan0,
     center: p.center,
@@ -115,6 +115,10 @@ export function zoomAt(p: {
     min: p.min,
     max: p.max,
   });
+  // `z0 * (zoom / z0)` даёт хвост плавающей точки (1.8100000000000003 вместо 1.81 шага колеса) — масштаб, который просили,
+  // возвращаем ровно им: иначе в `transform` уходило бы «scale(1.8100000000000003)» (нашёл тест Codex R276).
+  const want = Math.min(p.max, Math.max(p.min, p.zoom));
+  return Math.abs(r.zoom - want) < 1e-9 ? { zoom: want, pan: r.pan } : r;
 }
 
 /** Шаг Ctrl+колеса: вверх (`deltaY < 0`) — крупнее, на четверть, как кнопки; в пределах `min…max`. */

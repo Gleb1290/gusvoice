@@ -167,6 +167,8 @@ export function dmAttachmentPreview(last: LastAttachments): DmAttachmentPreview 
   const kind = ATTACHMENT_KINDS.includes(last.attachmentKind as ConvAttachmentKind) ? last.attachmentKind : undefined;
   switch (kind) {
     case 'photo':
+      // Одноразовое фото (`ttlmedia1`, #226): содержимое не раскрываем, как пуш.
+      if (last.attachmentOnce === true && n === 1) return { icon: 'photo', label: 'Одноразовое фото' };
       return { icon: 'photo', label: caption || (n === 1 ? 'Фото' : `${n} фото`) };
     case 'voice': {
       // «Один раз» (`voice3`, G54; tdesktop `lng_in_dlg_voice_message_ttl`). Решение владельца 08.10: как Telegram — «Голосовое сообщение» без длительности.
@@ -181,6 +183,7 @@ export function dmAttachmentPreview(last: LastAttachments): DmAttachmentPreview 
         if (last.attachmentOnce === true) return { icon: 'camera', label: 'Одноразовое видеосообщение' };
         return { icon: 'camera', label: attachmentWords({ kind: 'file', video: true, round: true }) };
       }
+      if (last.attachmentVideo === true && last.attachmentOnce === true && n === 1) return { icon: 'camera', label: 'Одноразовое видео' };
       if (last.attachmentVideo === true) {
         return { icon: 'camera', label: n === 1 ? attachmentWords({ kind: 'file', video: true }) : `${n} видео` };
       }

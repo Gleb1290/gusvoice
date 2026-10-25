@@ -68,6 +68,8 @@ export function useChannelContextMenu(): {
   const canManageSounds = has(perms, Permission.MANAGE_SOUNDS);
   // MANAGE_SERVER тоже открывает вкладку «Генерал» внутри настроек канала — значит и вход сюда.
   const canManageServer = has(perms, Permission.MANAGE_SERVER);
+  // Вебхуки (#24): раздел настроек текстового канала по своему праву — без MANAGE_CHANNELS нужен свой вход.
+  const canManageWebhooks = has(perms, Permission.MANAGE_WEBHOOKS);
   const close = () => setTarget(null);
 
   function openChannelMenu(e: React.MouseEvent, channel: Channel) {
@@ -244,6 +246,19 @@ export function useChannelContextMenu(): {
           <MenuItem
             icon="settings"
             label={canManageServer ? 'Настройки канала' : 'Звуки канала'}
+            onClick={() => {
+              setEditChannel({ channel: c, tab: 'main' });
+              close();
+            }}
+          />
+        </>
+      )}
+      {!canManage && c.type === 'text' && canManageWebhooks && (
+        <>
+          <MenuDivider />
+          <MenuItem
+            icon="link"
+            label="Вебхуки канала"
             onClick={() => {
               setEditChannel({ channel: c, tab: 'main' });
               close();

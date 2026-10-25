@@ -1,11 +1,20 @@
-import type { AdminInstanceSettings, AdminServer, AdminUser, InstanceUpdateInfo, SmtpSettings } from '@gusvoice/shared';
+import {
+  AVATAR_RENTAL_MAX_DAYS_LIMIT,
+  AVATAR_RENTAL_MAX_DAYS_MIN,
+  type AdminInstanceSettings, AdminServer, AdminUser, InstanceUpdateInfo, SmtpSettings } from '@gusvoice/shared';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { anonymizeAccount } from '../accountDelete.js';
 import { requireSuperAdmin } from '../auth.js';
 import { economyStats } from '../economyStats.js';
-import { avatarPriceMinutes, INSTANCE_PRICE_MAX_MINUTES, setAvatarPriceMinutes } from '../instanceSettings.js';
+import {
+  avatarPriceMinutes,
+  avatarRentalMaxDays,
+  INSTANCE_PRICE_MAX_MINUTES,
+  setAvatarPriceMinutes,
+  setAvatarRentalMaxDays,
+} from '../instanceSettings.js';
 import { db } from '../db/index.js';
 import {
   channels,
@@ -66,16 +75,36 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return {
       avatarPriceMinutes: await avatarPriceMinutes(),
       maxMinutes: INSTANCE_PRICE_MAX_MINUTES,
+      // #228: потолок аренды и его границы — добавлением, старый клиент поля просто не читает.
+      avatarRentalMaxDays: await avatarRentalMaxDays(),
+      rentalMaxDaysMin: AVATAR_RENTAL_MAX_DAYS_MIN,
+      rentalMaxDaysLimit: AVATAR_RENTAL_MAX_DAYS_LIMIT,
       stats: await economyStats(30),
     };
   });
 
   app.put('/admin/economy', async (req, reply) => {
+    // Оба поля необязательны (совместимость: старая панель шлёт только цену), но хотя бы одно нужно.
+    // Потолок аренды вне границ — 400, а не молчаливая подгонка: поле формы не должно «сохраниться» другим числом.
     const body = z
-      .object({ avatarPriceMinutes: z.number().int().min(0).max(INSTANCE_PRICE_MAX_MINUTES) })
+      .object({
+        avatarPriceMinutes: z.number().int().min(0).max(INSTANCE_PRICE_MAX_MINUTES).optional(),
+        avatarRentalMaxDays: z
+          .number()
+          .int()
+          .min(AVATAR_RENTAL_MAX_DAYS_MIN)
+          .max(AVATAR_RENTAL_MAX_DAYS_LIMIT)
+          .optional(),
+      })
+      .refine((b) => b.avatarPriceMinutes !== undefined || b.avatarRentalMaxDays !== undefined)
       .parse(req.body);
-    await setAvatarPriceMinutes(body.avatarPriceMinutes);
-    return reply.send({ ok: true, avatarPriceMinutes: body.avatarPriceMinutes });
+    if (body.avatarPriceMinutes !== undefined) await setAvatarPriceMinutes(body.avatarPriceMinutes);
+    if (body.avatarRentalMaxDays !== undefined) await setAvatarRentalMaxDays(body.avatarRentalMaxDays);
+    return reply.send({
+      ok: true,
+      avatarPriceMinutes: await avatarPriceMinutes(),
+      avatarRentalMaxDays: await avatarRentalMaxDays(),
+    });
   });
 
   app.get('/admin/users', async (req) => {
@@ -87,7 +116,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const rows = await db
       .select()
       .from(users)
-      .where(and(isNull(users.deletedAt), isNull(users.homeInstanceId)));
+      // Строки-авторы вебхуков (#24, `users.bot`) — тоже не люди: управлять ими отсюда нечем.
+      .where(and(isNull(users.deletedAt), isNull(users.homeInstanceId), eq(users.bot, false)));
 
     /**
      * «Скрыт от соседей, но виден» (§5.2.1) — отметка у СКРЫТЫХ людей.

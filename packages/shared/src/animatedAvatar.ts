@@ -254,3 +254,42 @@ export function avatarRentalExtendFrom(
   if (avatarRentalCanExtend(untilMs, nowMs, days, maxDays) || untilMs === null) return null;
   return untilMs - (maxDays - days) * DAY_MS;
 }
+
+/**
+ * Границы настройки «потолок аренды» (#228, решение владельца 19.10). Держатель инстанса задаёт, на сколько дней
+ * вперёд можно оплатить аренду; умолчание — `AVATAR_RENTAL_MAX_DAYS` (60).
+ * Нижняя граница — ровно один срок аренды (30): меньше нельзя, иначе одну покупку не оплатить вовсе (после неё срок
+ * ушёл бы дальше потолка) и фича умерла бы. Верхняя — 365: год вперёд; дальше «аренда» превращается в покупку
+ * навсегда за один заход, а цена в экономике инстанса считается в днях накопления, не в годах.
+ */
+export const AVATAR_RENTAL_MAX_DAYS_MIN = AVATAR_RENTAL_DAYS;
+export const AVATAR_RENTAL_MAX_DAYS_LIMIT = 365;
+
+/** Привести значение настройки к допустимому: мусор — умолчание, вне границ — ближайшая граница. */
+export function clampAvatarRentalMaxDays(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return AVATAR_RENTAL_MAX_DAYS;
+  return Math.min(AVATAR_RENTAL_MAX_DAYS_LIMIT, Math.max(AVATAR_RENTAL_MAX_DAYS_MIN, Math.floor(v)));
+}
+
+/** «1 день», «2 дня», «5 дней», «21 день». */
+export function pluralDays(n: number): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return `${n} день`;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return `${n} дня`;
+  return `${n} дней`;
+}
+
+/**
+ * Текст отказа `rental-full` с настоящими числами: потолок и остаток, при котором продлить снова можно
+ * (потолок − один срок аренды). При потолке в один срок продлить можно, только когда аренда закончилась.
+ */
+export function avatarRentalFullText(
+  maxDays: number = AVATAR_RENTAL_MAX_DAYS,
+  days: number = AVATAR_RENTAL_DAYS,
+): string {
+  const left = maxDays - days;
+  return left > 0
+    ? `Больше чем на ${pluralDays(maxDays)} вперёд не оплатить — продлить можно, когда останется ${pluralDays(left)} или меньше`
+    : `Больше чем на ${pluralDays(maxDays)} вперёд не оплатить — продлить можно, когда аренда закончится`;
+}

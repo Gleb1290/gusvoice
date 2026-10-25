@@ -11,8 +11,9 @@ import * as subs from './gatewaySubs';
 const source = readFileSync(new URL('./sockets.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const storeSource = readFileSync(new URL('./store.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const noop = () => {};
-function fixture(raw = source) {
+function fixture(raw = source, withMentions = false) {
   const sockets: Socket[] = [], appended: string[] = [], updated: string[] = [], removed: string[] = [];
+  const unread: Array<[string, boolean, string]> = [], sounds: string[] = [];
   let patches = 0, loads = 0, resyncs = 0;
   class Socket {
     static OPEN = 1; static CONNECTING = 0;
@@ -24,9 +25,14 @@ function fixture(raw = source) {
   const state = {
     user: { id: 'me', username: 'dmtest_a', status: 'online' }, serverFeatures: [], convActive: false,
     currentChannelId: null, currentServerId: null, mobilePane: 'list', view: 'dm',
-    bootstrap: { channels: [{ id: 'ch', name: 'general' }] },
+    // R266 читает сервер и роли своего участника из полного bootstrap, даже если открыта лента ЛС.
+    bootstrap: { server: { id: 'a' }, member: { roleIds: [] as string[] }, channels: [{ id: 'ch', name: 'general' }] },
     servers: [{ id: 'a', lastMessage: null }, { id: 'b', lastMessage: null }, { id: 'legacy' }] as Array<{ id: string; lastMessage?: shared.ServerLastMessage | null }>,
     appendMessage: (id: string, m: shared.Message) => { appended.push(`${id}:${m.id}`); },
+    markUnread: (id: string, mentioned: boolean, serverId: string) => {
+      assert.ok(withMentions, 'уведомления включаются только в своём сценарии');
+      unread.push([id, mentioned, serverId]);
+    },
     updateMessage: (id: string, m: shared.Message) => { updated.push(`${id}:${m.id}`); },
     removeMessage: (id: string, msgId: string) => { removed.push(`${id}:${msgId}`); },
     loadServers: async () => { loads++; }, resyncAfterReconnect: async () => { resyncs++; },
@@ -44,11 +50,13 @@ function fixture(raw = source) {
     './notifications': { setNotifyPrefs: noop, clearOsNotifications: noop, windowFocused: () => false,
       osNotifyLevel: () => 'none', authorName: forbidden('authorName'), channelNoticeGroup: forbidden('channelNoticeGroup'),
       coinNotifyLevel: forbidden('coinNotifyLevel'), messagePreview: forbidden('messagePreview'), osNotify: forbidden('osNotify'), osNotifyRaw: forbidden('osNotifyRaw') },
-    './channelPrefs': { notifyLevel: () => 'none' }, './hotkeys': { isMobile: () => false },
+    './channelPrefs': { notifyLevel: () => withMentions ? 'mentions' : 'none' }, './hotkeys': { isMobile: () => false },
     './notifyRules': { shouldOsNotify: () => false, passesThrottle: forbidden('passesThrottle') },
     './socketHealth': { CONNECT_TIMEOUT_MS: 15000, PING_MS: 25000, socketStale: () => false },
     './typing': { dropTyping: noop, noteTyping: forbidden('noteTyping') },
-    './sounds': { playSound: forbidden('playSound'), playClip: forbidden('playClip') },
+    './sounds': { playSound: (sound: string) => {
+      assert.ok(withMentions, 'звук разрешён только в сценарии упоминания'); sounds.push(sound);
+    }, playClip: forbidden('playClip') },
     './callStore': { useCall: forbidden('useCall') }, './callView': { serverCalls: () => false },
     './dmStickers': { useDmStickers: forbidden('useDmStickers') }, './dmFolders': { useDmFolders: forbidden('useDmFolders') },
     './peerName': { peerNameNow: forbidden('peerNameNow') }, './contacts': { useContacts: forbidden('useContacts') },
@@ -70,7 +78,8 @@ function fixture(raw = source) {
       setTimeout: () => ++timer, clearTimeout: noop, setInterval: () => ++timer, clearInterval: noop,
       require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `описана граница ${id}`); return deps[id]; } });
   module.exports.connectGateway();
-  return { module: module.exports, state, sockets, appended, updated, removed, patches: () => patches, loads: () => loads, resyncs: () => resyncs };
+  return { module: module.exports, state, sockets, appended, updated, removed, unread, sounds,
+    patches: () => patches, loads: () => loads, resyncs: () => resyncs };
 }
 function message(id = 'm', mine = true, createdAt = '2026-10-12T12:00:00Z'): shared.Message {
   return { id, channelId: 'ch', content: 'Текст', createdAt, editedAt: null, reactions: [], replyTo: null, attachments: [],
@@ -156,4 +165,48 @@ for (const [name, anchor, replacement, check, target] of [
   // Оригинал перед мутацией; ошибки импортов/VM не заменяют адресную проверку эффекта сообщения.
   check(); assert.equal(source.split(anchor).length - 1, 1);
   assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(target));
+});
+
+function broadcastFrame(content: string, flag: boolean | null | undefined, raw = source) {
+  const f = fixture(raw, true);
+  f.sockets[0].receive({ t: 'message.create', channelId: 'ch', serverId: 'a',
+    message: { ...message('broadcast', false), content, ...(flag === undefined ? {} : { mentionEveryone: flag }) } });
+  return f;
+}
+function silentBroadcast(raw = source) {
+  for (const content of ['@everyone', '@here']) {
+    const f = broadcastFrame(content, false, raw);
+    assert.deepEqual(f.sounds, [], 'R279 основной шлюз не звенит на запрещённый массовый пинг');
+    assert.deepEqual(f.unread, [], 'R279 режим mentions не ставит бейдж запрещённого массового пинга');
+    assert.equal(f.appended.join(','), 'ch:broadcast', 'текст сообщения остаётся в ленте');
+  }
+}
+it('R279 основной шлюз не звенит и не ставит бейдж массового упоминания при явном false', () => {
+  // Сервер сохранил текст everyone/here, но отметил отсутствие права автора; лента при этом не теряется.
+  silentBroadcast();
+});
+it('R279 основной шлюз сохраняет разрешённые и старые массовые пинги без поля или с null', () => {
+  // Отсутствие поля и SQL NULL совместимы со старым сервером и вебхуками, это не явный запрет.
+  for (const flag of [true, null, undefined]) for (const content of ['@everyone', '@here']) {
+    const f = broadcastFrame(content, flag);
+    assert.deepEqual(f.sounds, ['mention']);
+    assert.deepEqual(f.unread, [['ch', true, 'a']]);
+  }
+});
+it('R279 запрет массового пинга не глушит личный адрес и снимок роли, а DND глушит только звук', () => {
+  // false относится к everyone/here, не отменяет независимо разрешённый личный/ролевой адрес.
+  const personal = broadcastFrame('@everyone @dmtest_a', false);
+  assert.deepEqual(personal.sounds, ['mention']); assert.deepEqual(personal.unread, [['ch', true, 'a']]);
+  const f = fixture(source, true);
+  f.state.bootstrap.member.roleIds = ['role-a']; f.state.user.status = 'dnd';
+  f.sockets[0].receive({ t: 'message.create', channelId: 'ch', serverId: 'a',
+    message: { ...message('role-ping', false), content: '@everyone @Команда', mentionEveryone: false, mentionRoles: ['role-a'] } });
+  assert.deepEqual(f.sounds, []); assert.deepEqual(f.unread, [['ch', true, 'a']]);
+});
+it('R279 потеря серверного запрета массового пинга обнаруживается настоящим основным шлюзом', () => {
+  // Мутант сохраняет всё сообщение, но заставляет mentionsMe снова будить everyone вопреки серверу.
+  silentBroadcast(); const from = 'msg.message.mentionEveryone !== false';
+  assert.equal(source.split(from).length - 1, 1);
+  assert.throws(() => silentBroadcast(source.replace(from, 'true')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 основной шлюз не звенит'));
 });

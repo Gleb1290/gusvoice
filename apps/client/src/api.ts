@@ -38,6 +38,8 @@ import type {
   AuthResponse,
   BackupCodesResponse,
   BanInfo,
+  Webhook,
+  WebhookWithToken,
   AdminInstanceSettings,
   InstanceUpdateInfo,
   Channel,
@@ -967,6 +969,26 @@ function makeApi(t: Transport) {
     return data as Channel;
   },
 
+  // Входящие вебхуки канала (#24). Токен приходит ТОЛЬКО в ответе создания и «Сгенерировать заново» — в базе лежит хеш.
+  listWebhooks: (channelId: string) => req<Webhook[]>('GET', `/channels/${channelId}/webhooks`),
+  /** Все вебхуки сервера в каналах, где у меня `MANAGE_WEBHOOKS` (раздел «Интеграции» настроек сервера). */
+  listServerWebhooks: (serverId: string) => req<Webhook[]>('GET', `/servers/${serverId}/webhooks`),
+  createWebhook: (channelId: string, name: string) => req<WebhookWithToken>('POST', `/channels/${channelId}/webhooks`, { name }),
+  updateWebhook: (webhookId: string, body: { name?: string; channelId?: string; avatarUrl?: null }) =>
+    req<Webhook>('PATCH', `/webhooks/${webhookId}`, body),
+  regenerateWebhookToken: (webhookId: string) => req<WebhookWithToken>('POST', `/webhooks/${webhookId}/token`),
+  deleteWebhook: (webhookId: string) => req<void>('DELETE', `/webhooks/${webhookId}`),
+  uploadWebhookAvatar: async (webhookId: string, file: File): Promise<Webhook> => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await t.upload(`/webhooks/${webhookId}/avatar`, fd);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
+    return data as Webhook;
+  },
+  /** Адрес приёма, который вставляют во внешнюю программу (как у Discord): `<api>/api/webhooks/<id>/<token>`. */
+  webhookUrl: (webhookId: string, token: string) => `${t.base().replace(/\/+$/, '')}/api/webhooks/${webhookId}/${token}`,
+
   listRoles: (serverId: string) => req<Role[]>('GET', `/servers/${serverId}/roles`),
   createRole: (serverId: string, body: { name: string; color?: number; permissions?: string; mentionable?: boolean }) =>
     req<Role>('POST', `/servers/${serverId}/roles`, body),
@@ -1228,7 +1250,7 @@ function makeApi(t: Transport) {
     body: {
       clientId: string;
       content: string;
-      attachments: Array<Pick<Attachment, 'width' | 'height' | 'waveform' | 'durationMs' | 'asFile' | 'gif' | 'spoiler' | 'once' | 'round'> & { id: string }>;
+      attachments: Array<Pick<Attachment, 'width' | 'height' | 'waveform' | 'durationMs' | 'asFile' | 'gif' | 'spoiler' | 'once' | 'onceTtl' | 'round'> & { id: string }>;
       replyToId?: string | null;
       silent?: boolean;
       /** «Без превью ссылки» (G19, признак `linkprev1`): слать только при нём — старый сервер поле отбросит. */
@@ -1340,6 +1362,9 @@ function makeApi(t: Transport) {
   convListened: (convId: string, messageId: string) => req<void>('POST', `/conv/${convId}/messages/${messageId}/listened`),
   /** Одноразовое голосовое дослушано или закрыто (`voice3`, G54): сервер удаляет файл, у обоих — «прослушано». */
   convOnceSpent: (convId: string, messageId: string) => req<void>('POST', `/conv/${convId}/messages/${messageId}/once-spent`),
+  /** Одноразовое фото/видео открыто (`ttlmedia1`, #226): отметка первого открытия; 410 — уже сгорело. */
+  convOnceOpen: (convId: string, messageId: string) =>
+    req<{ openedAt: string; serverNow?: string }>('POST', `/conv/${convId}/messages/${messageId}/once-open`),
   /** «Прочитано до» — ключ сообщения (`sortKey`), сервер двигает только вперёд. */
   convRead: (convId: string, key: number) => req<{ lastReadKey: number }>('POST', `/conv/${convId}/read`, { key }),
   /** Черновик между моими устройствами (Р7, признак `conv3`); `keepalive` — запись при закрытии окна. */
@@ -1520,6 +1545,10 @@ function makeApi(t: Transport) {
     req<{
       avatarPriceMinutes: number;
       maxMinutes: number;
+      /** Потолок аренды аватара, дней вперёд (#228) и его границы; нет полей (старый сервер) — 60 / 30 / 365. */
+      avatarRentalMaxDays?: number;
+      rentalMaxDaysMin?: number;
+      rentalMaxDaysLimit?: number;
       stats: {
         windowDays: number;
         people: number;
@@ -1530,8 +1559,8 @@ function makeApi(t: Transport) {
         avgGooseMinutes: number;
       };
     }>('GET', '/admin/economy'),
-  adminSetEconomy: (avatarPriceMinutes: number) =>
-    req<{ ok: true; avatarPriceMinutes: number }>('PUT', '/admin/economy', { avatarPriceMinutes }),
+  adminSetEconomy: (patch: { avatarPriceMinutes?: number; avatarRentalMaxDays?: number }) =>
+    req<{ ok: true; avatarPriceMinutes: number; avatarRentalMaxDays?: number }>('PUT', '/admin/economy', patch),
   adminUsers: () => req<AdminUser[]>('GET', '/admin/users'),
   adminServers: () => req<AdminServer[]>('GET', '/admin/servers'),
   adminSetCreateServers: (userId: string, canCreateServers: boolean) =>

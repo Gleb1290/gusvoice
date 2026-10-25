@@ -1,4 +1,4 @@
-import { parseTypingAction, typingActionField, typingActionFor, type GatewayServerMessage } from '@gusvoice/shared';
+import { FEATURE_TYPING2, parseTypingAction, typingActionField, typingActionFor, type GatewayServerMessage } from '@gusvoice/shared';
 import { reachesPeer } from './blockRules.js';
 import { typingRoute } from './gatewayRules.js';
 
@@ -38,6 +38,13 @@ export interface TypingDeps<S> {
   connsOf(userId: string): Iterable<{ socket: S; caps?: ReadonlySet<string> }>;
   send(socket: S, msg: TypingMessage): void;
   /**
+   * #225: «печатает» в ЛС через Redis (`gw:user:<id>`, `realtime.publishToUser`) — доставит ВСЕМ процессам бэкенда, в том числе
+   * этому (подписчик шлюза разошлёт локальным соединениям), поэтому при заданной зависимости `send` в ЛС НЕ зовётся — иначе
+   * кадр удвоился бы. `route` — отбор соединений по возможностям (`cap`/`notCap`, как у `conv.change`): `round` уходит только
+   * `typing2`, остальным — `voice`. Нет зависимости — прежнее поведение: только соединения этого процесса (`connsOf` + `send`).
+   */
+  publishToUser?(userId: string, msg: TypingMessage, route?: { cap?: string; notCap?: string }): Promise<unknown>;
+  /**
    * ЛС между инстансами, Э4 (#141): у собеседника нет соединений здесь — если он человек другого инстанса, «печатает» уходит
    * его дому (решает и проверяет блокировку вызываемый). Нет зависимости — некому (как до Э4).
    */
@@ -62,6 +69,19 @@ export async function relayTyping<S>(
   // Вид действия (G21): чужое/неизвестное — «печатает»; «печатает» в кадр не пишется (кадр как до G21, правило 11).
   const extra = typingActionField(parseTypingAction(msg.action));
   // `round` («записывает видеосообщение», `typing2`) уходит только соединениям, что его понимают; остальным — `voice` (см. `typingActionFor`).
+  // Один кадр собеседнику через Redis (#225): `round` — двумя конвертами по возможности `typing2`, остальное — одним без отбора.
+  const publishTo = async (userId: string, dmId: string) => {
+    const publish = deps.publishToUser;
+    if (!publish) return;
+    if (extra.action === 'round') {
+      await Promise.all([
+        publish(userId, { t: 'typing', dmId, userId: uid, ...typingActionField(typingActionFor('round', new Set([FEATURE_TYPING2]))) }, { cap: FEATURE_TYPING2 }),
+        publish(userId, { t: 'typing', dmId, userId: uid, ...typingActionField(typingActionFor('round', undefined)) }, { notCap: FEATURE_TYPING2 }),
+      ]);
+      return;
+    }
+    await publish(userId, { t: 'typing', dmId, userId: uid, ...extra });
+  };
   const extraFor = (caps: ReadonlySet<string> | undefined) => (extra.action === 'round' ? typingActionField(typingActionFor('round', caps)) : extra);
   if (await deps.rateHit(`typing:${uid}`, 20, 10)) return; // честный клиент шлёт ≤1 / 2.5с
   const peerId = msg.dmId ? await deps.dmPeerOf(msg.dmId, uid) : null;
@@ -71,6 +91,13 @@ export async function relayTyping<S>(
     const peers = await deps.groupPeersOf(msg.dmId, uid);
     if (!peers) return;
     for (const p of peers) {
+      if (deps.publishToUser) {
+        // #225: в сети ли участник на другом процессе, отсюда не видно — публикуем всем, кроме людей других инстансов.
+        if (deps.isRemote?.(p)) continue;
+        if (!reachesPeer(await deps.isBlockedBy(p, uid))) continue;
+        await publishTo(p, msg.dmId);
+        continue;
+      }
       const conns = [...deps.connsOf(p)];
       if (conns.length === 0) continue;
       if (!reachesPeer(await deps.isBlockedBy(p, uid))) continue;
@@ -86,7 +113,13 @@ export async function relayTyping<S>(
     // в сети дольше 30 с (`api_send_progress.cpp: kSendTypingsToOfflineFor`) — у нас отсрочка не нужна: без соединения кадр
     // не доставить, а два запроса в базу (блок, показ беседы) экономим (07.10, G83).
     const conns = [...deps.connsOf(route.peerId)];
-    if (conns.length === 0 || deps.isRemote?.(route.peerId)) {
+    if (deps.publishToUser) {
+      // #225: нет соединений на ЭТОМ процессе ≠ собеседник не в сети (он может быть на другом) — выхода «слать некому» нет.
+      if (deps.isRemote?.(route.peerId)) {
+        deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');
+        return;
+      }
+    } else if (conns.length === 0 || deps.isRemote?.(route.peerId)) {
       deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');
       return;
     }
@@ -95,7 +128,8 @@ export async function relayTyping<S>(
     // Беседа собеседнику ещё не показана (её завёл я, до него не дошло ни одного сообщения) — «печатает» ему не шлём:
     // он узнал бы о беседе раньше первого сообщения (05.10).
     if (deps.shownTo && !(await deps.shownTo(route.dmId, route.peerId))) return;
-    for (const c of conns) deps.send(c.socket, { t: 'typing', dmId: route.dmId, userId: uid, ...extraFor(c.caps) });
+    if (deps.publishToUser) await publishTo(route.peerId, route.dmId);
+    else for (const c of conns) deps.send(c.socket, { t: 'typing', dmId: route.dmId, userId: uid, ...extraFor(c.caps) });
     return;
   }
   // Канал: аудитория считается по факту, и отправитель обязан в неё входить — иначе можно

@@ -18,6 +18,7 @@ import { ServerStickerPanel } from './ServerStickerPanel';
 import { EconomyPanel } from './EconomyPanel';
 import { ServerSoundboardPanel } from './ServerSoundboardPanel';
 import { ServerSoundsPanel } from './ServerSoundsPanel';
+import { ServerWebhooksPanel } from './ChannelWebhooksPanel';
 import { economyVisible } from '../economyVisible';
 import { confirmAction } from '../confirm';
 import { Select } from './Select';
@@ -353,6 +354,8 @@ export function ServerSettingsModal({
           <ServerSoundsPanel serverId={server.id} />
         ) : tab === 'soundboard' ? (
           <ServerSoundboardPanel serverId={server.id} />
+        ) : tab === 'integrations' ? (
+          <ServerWebhooksPanel serverId={server.id} />
         ) : tab === 'economy' ? (
           <EconomyPanel serverId={server.id} />
         ) : !canGeneral ? (

@@ -1,5 +1,6 @@
 import type {
   Poll,
+  Webhook,
   Attachment,
   Category,
   Channel,
@@ -8,6 +9,7 @@ import type {
   Invite,
   Message,
   MessageReplyPreview,
+  MessageEmbed,
   MessageSticker,
   PresenceStatus,
   ReactionGroup,
@@ -268,6 +270,17 @@ export function serializeMessage(m: {
   pinnedAt?: Date | null;
   poll?: Poll | null;
   sticker?: MessageSticker | null;
+  /** Роли, позванные сообщением (#76): кладём в DTO только непустой список. */
+  mentionRoles?: string[] | null;
+  /** `@everyone`/`@here` в тексте (#76): false — автору не хватило права, никого не зовёт. */
+  mentionEveryone?: boolean | null;
+  /** Пришло через вебхук (#24): его id и имя/аватар на момент отправки (`messages.webhook_*`). */
+  webhookId?: string | null;
+  webhookName?: string | null;
+  webhookAvatar?: string | null;
+  /** Карточки вебхука (#24, `messages.embeds`) и признак «`content` собран из них» (`messages.embeds_fallback`). */
+  embeds?: MessageEmbed[] | null;
+  embedsFallback?: boolean | null;
   author: UserRow;
 }): Message {
   const dangerous = dangerousLinksOf(m.content);
@@ -286,12 +299,47 @@ export function serializeMessage(m: {
     // Опасные ссылки (`linkthreats1`, #218 п.5): считается при каждой отдаче по локальному списку; поле — только у
     // сообщений с такой ссылкой, у остальных DTO прежний.
     ...(dangerous.length ? { dangerousLinks: dangerous } : {}),
+    // Упоминание роли (#76): поле только у сообщений, которые кого-то позвали ролью, у остальных DTO прежний.
+    ...(m.mentionRoles?.length ? { mentionRoles: m.mentionRoles } : {}),
+    // `@everyone`/`@here` (#76): поле только у сообщений, где такое обращение есть; false = без права, никого не зовёт.
+    ...(m.mentionEveryone === true || m.mentionEveryone === false ? { mentionEveryone: m.mentionEveryone } : {}),
+    // Вебхук (#24): поле только у его сообщений, у остальных DTO прежний. Имя и аватар — снятые при отправке, а не
+    // нынешние у строки-автора: переименование вебхука историю не переписывает (как у Discord).
+    ...(m.webhookId ? { webhookId: m.webhookId } : {}),
+    // Карточки (#24): поле только у сообщений с ними, у остальных DTO прежний.
+    ...(m.embeds?.length ? { embeds: m.embeds } : {}),
+    ...(m.embeds?.length && m.embedsFallback ? { embedsFallback: true as const } : {}),
     author: {
       id: m.author.id,
       username: m.author.username,
-      displayName: m.author.displayName,
-      avatarUrl: m.author.avatarUrl,
+      displayName: m.webhookId ? (m.webhookName ?? m.author.displayName) : m.author.displayName,
+      avatarUrl: m.webhookId ? (m.webhookAvatar ?? null) : m.author.avatarUrl,
     },
+  };
+}
+
+/** Вебхук для окна настроек канала (#24). Токена нет — он отдаётся только при создании и «Сгенерировать заново». */
+export function serializeWebhook(
+  w: {
+    id: string;
+    serverId: string;
+    channelId: string;
+    name: string;
+    avatarUrl: string | null;
+    createdAt: Date;
+    lastUsedAt: Date | null;
+  },
+  creator: { id: string; displayName: string } | null,
+): Webhook {
+  return {
+    id: w.id,
+    serverId: w.serverId,
+    channelId: w.channelId,
+    name: w.name,
+    avatarUrl: w.avatarUrl,
+    createdBy: creator ? { id: creator.id, displayName: creator.displayName } : null,
+    createdAt: w.createdAt.toISOString(),
+    lastUsedAt: w.lastUsedAt ? w.lastUsedAt.toISOString() : null,
   };
 }
 

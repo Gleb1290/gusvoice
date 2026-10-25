@@ -124,16 +124,25 @@ it('FederationPanel подсказывает по сохранённому ло�
   // Незаписанный текст не должен создавать впечатление, что соседи уже видят новое название.
   resetFixture({ localName: 'Сохранённое имя', neighborName: null });
   await mount(FederationPanel);
-  const hint = [...(host?.querySelectorAll('.fed-self p.muted') ?? [])].find((node) => node.textContent?.includes('Сейчас соседи'));
+  const hints = [...(host?.querySelectorAll('.fed-self p.muted') ?? [])].filter((node) => node.textContent?.includes('Пусто — соседи'));
+  assert.equal(hints.length, 1, 'R280 подсказка про пустое имя одна, статичная строка её не дублирует');
+  const hint = hints[0];
   assert.ok(hint?.textContent?.includes('Сохранённое имя'), 'подсказка использует имя из adminInstance');
-  assert.ok(hint?.textContent?.includes('с вкладки «Инстанс» к ним не уходит'), `объяснено расхождение двух названий: ${hint?.textContent}`);
+  assert.ok(hint?.textContent?.includes('Пусто — соседи видят название инстанса «Сохранённое имя»'),
+    `объяснено умолчание по сохранённому имени: ${hint?.textContent}`);
+  const description = [...(host?.querySelectorAll('.fed-self p.muted') ?? [])]
+    .filter(node => node.textContent?.startsWith('Название видят люди на других инстансах.'));
+  assert.equal(description.length, 1, 'R280 назначение отдельного имени объяснено независимо от динамической подсказки');
+  assert.ok(description[0].textContent?.includes('обычное название инстанса, а без него — домен'));
   const input = host?.querySelector<HTMLInputElement>('.fed-self .fed-row input');
   assert.ok(input, 'поле локального названия отрисовано');
   await flush(() => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Черновик');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  const updatedHint = [...(host?.querySelectorAll('.fed-self p.muted') ?? [])].find((node) => node.textContent?.includes('Сейчас соседи'));
+  const updatedHints = [...(host?.querySelectorAll('.fed-self p.muted') ?? [])].filter((node) => node.textContent?.includes('Пусто — соседи'));
+  assert.equal(updatedHints.length, 1, 'R280 редактирование не дублирует подсказку');
+  const updatedHint = updatedHints[0];
   assert.ok(updatedHint?.textContent?.includes('Сохранённое имя'), 'подсказка не переключается на черновик');
   assert.ok(!updatedHint?.textContent?.includes('Черновик'), 'несохранённое значение не считается видимым соседям');
   assert.deepEqual(fixture.federationSetNameCalls, [], 'при показе подсказки имя автоматически не записывается');
@@ -148,7 +157,7 @@ it('FederationPanel молчит, если название уже задано 
   ]) {
     resetFixture(values);
     await mount(FederationPanel);
-    assert.equal([...(host?.querySelectorAll('.fed-self p.muted') ?? [])].some((node) => node.textContent?.includes('Сейчас соседи видят только домен')), false,
+    assert.equal([...(host?.querySelectorAll('.fed-self p.muted') ?? [])].some((node) => node.textContent?.includes('Пусто — соседи видят название инстанса')), false,
       'без полезного предупреждения подсказка не показывается');
     await unmount();
   }

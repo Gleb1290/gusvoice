@@ -14,6 +14,7 @@ import {
   FEATURE_CONV13,
   FEATURE_ARCHIVE1,
   FEATURE_VOICE3,
+  FEATURE_TTL_MEDIA1,
   FEATURE_CIRCLES1,
   FEATURE_ALBUM1,
   FEATURE_QUOTE1,
@@ -702,6 +703,11 @@ export function serverArchive(features: readonly string[] | null | undefined): b
 /** Сервер умеет голосовое «Прослушать один раз» (`voice3`, G54): без признака кнопки «1» в панели записи нет. */
 export function serverVoiceOnce(features: readonly string[] | null | undefined): boolean {
   return !!features?.includes(FEATURE_VOICE3);
+}
+
+/** Сервер умеет одноразовые фото и видео (`ttlmedia1`, #226): без признака нет пункта «Таймер самоуничтожения». */
+export function serverOnceMedia(features: readonly string[] | null | undefined): boolean {
+  return !!features?.includes(FEATURE_TTL_MEDIA1);
 }
 
 /** G56 (13.10, `album1`): сервер умеет удалить/переслать одно фото альбома (`albumItemRules.serverAlbumItems` — то же для ленты). */

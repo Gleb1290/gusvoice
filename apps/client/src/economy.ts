@@ -164,6 +164,8 @@ export interface ShopEntry {
   floor?: { minutes: number; coins: number };
   /** Своя цена сервера на аватар; `null` — наценки нет, действует пол инстанса. */
   serverMinutes?: number | null;
+  /** Потолок аренды аватара в днях — настройка инстанса (#228); нет поля (старый сервер) — 60. */
+  rentalMaxDays?: number;
 }
 
 export interface EconomyView {

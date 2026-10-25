@@ -20,7 +20,7 @@ import { HotkeyCheatSheet } from './HotkeyCheatSheet';
 import { ChatSwitchHost } from './ChatSwitch';
 import { ContactEditHost } from './ContactEditModal';
 import { DesktopKeysHost } from './DesktopKeys';
-import { closeCheatSheet, toggleCheatSheet, useCheatSheetOpen } from '../cheatSheet';
+import { closeCheatSheet, openCheatSheet, toggleCheatSheet, useCheatSheetOpen } from '../cheatSheet';
 import { openDmCompose } from '../dmCompose';
 import { DM_SERVER_UPDATE_TEXT, dmEmptyHint, dmNeedsServerUpdate } from '../dmRules';
 import { exitSelection, useSelectionOpen } from '../dmSelection';
@@ -28,7 +28,7 @@ import { exitChatSearch } from './ChatSearch';
 import { backFromSchedView, useSchedViewOpen } from '../schedView';
 import { dmBackBadgeCount, dmBackBadgeLabel } from '../dmBackBadge';
 import { useSwipeBack } from '../useSwipeBack';
-import { usePhoneLayout } from '../phoneLayout';
+import { isPhoneUiNow, usePhoneLayout } from '../phoneLayout';
 import { Goose } from './Goose';
 import { Icon } from './Icon';
 import { ImageViewerHost } from './ImageViewerHost';
@@ -123,8 +123,14 @@ export function MainLayout() {
         }
         return;
       }
-      // `?` → toggle the cheat sheet (Shift+/), never while typing.
-      if (e.key === '?' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // `?` → toggle the cheat sheet (Shift+/), never while typing. Ctrl+/ (⌘/) — то же, как Keyboard Shortcuts в Discord,
+      // и из поля ввода: сочетание с Ctrl текст не печатает. На телефоне шпаргалки нет (`isPhoneUiNow`): там нет клавиатуры,
+      // а внешняя к планшету — не повод открывать окно для ПК (группа «Горячие клавиши» в настройках там тоже скрыта).
+      const cheatKey =
+        (e.key === '?' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) ||
+        ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'Slash');
+      if (cheatKey) {
+        if (isPhoneUiNow()) return;
         e.preventDefault();
         toggleCheatSheet();
         return;
@@ -332,7 +338,7 @@ export function MainLayout() {
       {(isMobile() || phone) && voice && mobilePane === 'list' && !mobileProfileOpen && <MobileCallChip />}
       {profileShown && <MobileProfile />}
       <MobileNav />
-      {settingsOpen && <UserSettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <UserSettingsModal onClose={() => setSettingsOpen(false)} onOpenCheatSheet={openCheatSheet} />}
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {cheatOpen && <HotkeyCheatSheet onClose={closeCheatSheet} />}
       <ChatSwitchHost />

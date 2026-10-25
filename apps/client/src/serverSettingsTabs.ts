@@ -25,6 +25,7 @@ export type ServerSettingsTab =
   | 'stickers'
   | 'sounds'
   | 'soundboard'
+  | 'integrations'
   | 'economy'
   | 'audit';
 
@@ -92,6 +93,15 @@ const TABS: TabDef[] = [
     sub: 'Сэмплы, которые включают в голосовом канале',
     icon: 'music',
     anyOf: [Permission.MANAGE_SOUNDBOARD],
+  },
+  // Все вебхуки сервера (#24, «Интеграции» у Discord). Право серверное; права каналов сервер учитывает сам при выдаче
+  // списка (`/servers/:id/webhooks`), так что запертые каналы в разделе не видны.
+  {
+    key: 'integrations',
+    label: 'Интеграции',
+    sub: 'Вебхуки: внешние программы пишут в каналы',
+    icon: 'link',
+    anyOf: [Permission.MANAGE_WEBHOOKS],
   },
   {
     key: 'economy',

@@ -410,7 +410,7 @@ function DeviceSelect({
   );
 }
 
-function AudioVideoTab() {
+function AudioVideoTab({ onOpenCheatSheet }: { onOpenCheatSheet?: () => void } = {}) {
   const phoneUi = usePhoneUi();
   const [s, setS] = useState<AudioSettings>(getAudioSettings());
   const [hk, setHk] = useState<Hotkeys>(getHotkeys());
@@ -824,6 +824,14 @@ function AudioVideoTab() {
           ? 'В десктоп-версии работают глобально — даже когда GusVoice не в фокусе (например, в игре). Демонстрацию экрана надёжнее запускать из окна приложения.'
           : 'Работают, пока вкладка GusVoice в фокусе и вы в голосовом канале. Глобальные хоткеи (поверх игр) — в десктоп-версии.'}
       </div>
+      {/* Дверь к шпаргалке (20.10): кнопку из шапки сервера убрали, а клавиши `?` и Ctrl+/ сами о себе не расскажут.
+          Шпаргалка открывается ПОВЕРХ настроек, Esc закрывает только её (`HotkeyCheatSheet.tsx`). Выключатель приходит
+          пропом от `MainLayout`, а не импортом `cheatSheet.ts`: окно настроек не тянет новую зависимость. */}
+      {onOpenCheatSheet && (
+        <button type="button" className="settings-action" style={{ marginTop: 8 }} onClick={onOpenCheatSheet}>
+          Все сочетания клавиш (Ctrl+/)
+        </button>
+      )}
         </>
       )}
 
@@ -1948,6 +1956,13 @@ function AndroidInstallTab() {
   const [hasDist, setHasDist] = useState(() => hasPushDistributor());
   // Внутри самого Android-приложения инструкция «как его установить» не к месту (приёмка 0.9.0) — остаётся только пуш.
   const inApp = isAndroid();
+  // Реальные адреса инстанса (#47) вместо «вашего сервера»; пусто → прежний общий текст.
+  // ntfy: явный ntfyServer, иначе база пушей pushGateway (на коробке VITE_NTFY_SERVER пуст, а это тот же ntfy);
+  // host: serverHost(apiUrl). Инлайн, а не отдельной функцией: тест гайда вырезает тело AndroidInstallTab из файла.
+  const addrs = {
+    ntfy: (config.ntfyServer || config.pushGateway || '').replace(/\/+$/, ''),
+    host: config.apiUrl ? serverHost(config.apiUrl) : '',
+  };
   useEffect(() => {
     if (inApp) return;
     api
@@ -1965,8 +1980,12 @@ function AndroidInstallTab() {
       )}
       {info === null && (
         <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
-          Скачайте приложение <b>GusVoice для Android</b> (APK) со страницы релизов вашего сервера или проекта и
-          установите — Android попросит разрешить установку из этого источника. Обновления придут внутри приложения.
+          Скачайте приложение <b>GusVoice для Android</b> (APK) со{' '}
+          <a href={RELEASES_URL} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
+            страницы релизов проекта
+          </a>{' '}
+          и установите — Android попросит разрешить установку из этого источника. При входе впишите адрес{' '}
+          {addrs.host ? <code>{addrs.host}</code> : 'этого сервера'}. Обновления придут внутри приложения.
         </div>
       )}
       {info && (
@@ -2054,9 +2073,9 @@ function AndroidInstallTab() {
       {isAndroid() && hasDist ? (
         <div style={{ color: 'var(--green)', fontSize: 13, fontWeight: 600 }}>
           ✓ Приёмник установлен — пуши включены.{' '}
-          {config.ntfyServer ? (
+          {addrs.ntfy ? (
             <>
-              Проверьте, что в ntfy указан сервер <code>{config.ntfyServer.replace(/^https?:\/\//, '')}</code>.
+              Проверьте, что в ntfy указан сервер <code>{addrs.ntfy.replace(/^https?:\/\//, '')}</code>.
             </>
           ) : (
             <>Проверьте, что в ntfy указан адрес ntfy вашего сервера.</>
@@ -2069,7 +2088,7 @@ function AndroidInstallTab() {
           </li>
           <li>
             <b>Откройте ntfy → Settings (Настройки) → «Default server» (Основной сервер)</b> и впишите{' '}
-            {config.ntfyServer ? <code>{config.ntfyServer}</code> : <b>адрес ntfy вашего сервера</b>}. Иначе
+            {addrs.ntfy ? <code>{addrs.ntfy}</code> : <b>адрес ntfy вашего сервера</b>}. Иначе
             приёмник уйдёт на публичный ntfy.sh. Логин и регистрация <b>не нужны</b>.
           </li>
           <li>
@@ -2601,7 +2620,8 @@ function scrollToAnchor(el: HTMLElement, box: HTMLElement | null) {
   }, 500);
 }
 
-export function UserSettingsModal({ onClose }: { onClose: () => void }) {
+/** `onOpenCheatSheet` — открыть шпаргалку горячих клавиш поверх окна (кнопка в группе «Горячие клавиши»); без него кнопки нет. */
+export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () => void; onOpenCheatSheet?: () => void }) {
   // Раздел «Федерация» появляется ТОЛЬКО на инстансе с федерацией (#139, §5.7): без неё он отвечал
   // бы на вопрос, которого у человека нет, и пугал бы словом «гость» на ровном месте.
   const fed = useFederationEnabled();
@@ -2999,7 +3019,7 @@ export function UserSettingsModal({ onClose }: { onClose: () => void }) {
         {/* Обёртка с ключом по разделу: на ней живёт появление содержимого. Анимировать сам
             блок прокрутки нельзя — его пересоздание рвало бы слежение за скроллом. */}
         <div className="set-pane-anim" key={section}>
-        {section === 'sound' && <AudioVideoTab />}
+        {section === 'sound' && <AudioVideoTab onOpenCheatSheet={onOpenCheatSheet} />}
         {section === 'notif' && (
           <div className="settings-pane">
             <NotifyPermissionRow />

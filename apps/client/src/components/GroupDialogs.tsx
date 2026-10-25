@@ -123,12 +123,13 @@ export function GroupDialogHost() {
   return d.kind === 'new' ? <NewGroupDialog /> : <GroupInfoDialog convId={d.convId} />;
 }
 
-function Shell({ title, onBack, children }: { title: string; onBack?: () => void; children: ReactNode }) {
+/** `page` — на телефоне экран на всю высоту, а не лист (#218: «Новая группа», как `GroupCreateActivity` Telegram Android). */
+function Shell({ title, onBack, page = false, children }: { title: string; onBack?: () => void; page?: boolean; children: ReactNode }) {
   const phone = usePhoneLayout();
   const ref = useDialogChrome<HTMLDivElement>(closeGroupDialog);
   if (phone)
     return (
-      <BottomSheet title={title} onClose={closeGroupDialog} onBack={onBack}>
+      <BottomSheet page={page} title={title} onClose={closeGroupDialog} onBack={onBack}>
         {children}
       </BottomSheet>
     );
@@ -412,7 +413,7 @@ function NewGroupDialog() {
   };
 
   return (
-    <Shell title="Новая группа" onBack={phone && step === 'name' ? () => setStep('people') : undefined}>
+    <Shell page title="Новая группа" onBack={phone && step === 'name' ? () => setStep('people') : undefined}>
       {step === 'people' ? (
         <>
           <PeoplePicker taken={me ? [me.id] : []} picked={picked} setPicked={setPicked} />

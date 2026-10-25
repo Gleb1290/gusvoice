@@ -181,6 +181,50 @@ it('R257 ЛС включаются и выключаются отдельным 
   }, { sw: { enabled: true, source: 'panel', status: 'ready' } });
 });
 
+const restartHint = 'У кого приложение уже открыто, переписка с соседями появится после перезапуска приложения или обновления страницы.';
+
+async function restartHintProbe(raw = source) {
+  await fixture(async (f) => {
+    const checkHint = (enabled: boolean, dmEnabled: boolean) => {
+      const [fed, dm] = switches(f.host);
+      assert.equal(fed.getAttribute('aria-checked'), String(enabled));
+      assert.equal(dm.getAttribute('aria-checked'), String(dmEnabled));
+      // Проверяем наличие сообщения в настоящем DOM, не геометрию: happy-dom layout не рассчитывает.
+      const hints = [...f.host.querySelectorAll('.fed-switch p')].filter(p => p.textContent === restartHint);
+      assert.equal(hints.length, enabled ? 1 : 0,
+        `R290 подсказка перезапуска: enabled=${enabled}, dmEnabled=${dmEnabled}`);
+    };
+    checkHint(false, false);
+    await f.click(switches(f.host)[0]);
+    checkHint(true, false);
+    await f.click(switches(f.host)[1]);
+    checkHint(true, true);
+    await f.click(switches(f.host)[1]);
+    checkHint(true, false);
+    await f.click(switches(f.host)[0]);
+    checkHint(false, false);
+    assert.deepEqual(f.patches, [{ enabled: true }, { dmEnabled: true }, { dmEnabled: false }, { enabled: false }]);
+    assert.deepEqual(f.errors, []);
+  }, {}, raw);
+}
+
+it('R290 подсказка перезапуска появляется и исчезает с федерацией, но не с тумблером ЛС в том же mount', async () => {
+  // Уже открытая админка должна объяснять повторный вход и при выключенных ЛС, и после их включения.
+  await restartHintProbe();
+});
+
+for (const [label, condition, message, actual, expected] of [
+  ['подсказка всегда', 'true', 'R290 подсказка перезапуска: enabled=false, dmEnabled=false', 1, 0],
+  ['подсказки никогда нет', 'false', 'R290 подсказка перезапуска: enabled=true, dmEnabled=false', 0, 1],
+] as const) it(`R290 контрфакт: ${label}`, async () => {
+  await restartHintProbe();
+  const anchor = `{sw.enabled && (\n        <p className="muted">${restartHint}</p>`;
+  const changed = mutate(source, anchor, `{${condition} && (\n        <p className="muted">${restartHint}</p>`);
+  await assert.rejects(() => restartHintProbe(changed), (e: unknown) =>
+    e instanceof assert.AssertionError && e.message.startsWith(message) &&
+    e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+});
+
 it('R257 незавершённый PATCH блокирует оба тумблера и не допускает второго запроса', async () => {
   let finish!: () => void;
   const wait = new Promise<void>((resolve) => { finish = resolve; });

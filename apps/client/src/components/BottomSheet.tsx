@@ -16,6 +16,7 @@ export function BottomSheet({
   subtitle,
   onClose,
   onBack,
+  page = false,
   children,
 }: {
   title?: React.ReactNode;
@@ -23,6 +24,11 @@ export function BottomSheet({
   onClose: () => void;
   /** Стрелка «Назад» слева в шапке (шаги мастера, например «Новая группа», шаг 2): закрывает не лист, а шаг. */
   onBack?: () => void;
+  /**
+   * Экран на всю высоту вместо листа снизу (#218, «Новое сообщение» как `ContactsActivity` Telegram Android: фрагмент поверх
+   * списка, полоса 56 со стрелкой «назад» и заголовком). Без ручки и жеста вниз; Esc и системная «Назад» — как у листа.
+   */
+  page?: boolean;
   children: React.ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
@@ -92,6 +98,22 @@ export function BottomSheet({
     }
     snapBack();
   };
+
+  if (page)
+    return createPortal(
+      <div className="sheet-scrim page">
+        <div className="sheet page" role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}>
+          <div className="sheet-page-bar">
+            <button type="button" className="sheet-back" aria-label="Назад" title="Назад" onClick={onBack ?? onClose}>
+              <Icon name="chevron-left" size={24} />
+            </button>
+            {title != null && <div className="sheet-page-title">{title}</div>}
+          </div>
+          <div className="sheet-body">{children}</div>
+        </div>
+      </div>,
+      document.body,
+    );
 
   return createPortal(
     <div className="sheet-scrim" onClick={onClose}>

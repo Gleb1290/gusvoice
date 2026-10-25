@@ -1,4 +1,4 @@
-import { checkCoinIcon, has, Permission } from '@gusvoice/shared';
+import { avatarRentalFullText, checkCoinIcon, has, Permission } from '@gusvoice/shared';
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -56,7 +56,7 @@ import {
   buyBlock,
   shopItem,
 } from '../shopRules.js';
-import { avatarPriceMinutes } from '../instanceSettings.js';
+import { avatarPriceMinutes, avatarRentalMaxDays } from '../instanceSettings.js';
 import { buyItem } from '../purchase.js';
 import { putMedia, storageConfigured } from '../storage.js';
 import { publishToServer, redisPub } from '../realtime.js';
@@ -218,6 +218,10 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
       .where(eq(users.id, req.user!.sub))
       .limit(1);
     const nowAt = new Date();
+    // Потолок аренды — настройка инстанса (#228): и проверка, и текст отказа берут настоящее число.
+    const rentalMaxDays = await avatarRentalMaxDays();
+    const blockText = (b: keyof typeof BUY_BLOCK_TEXT) =>
+      b === 'rental-full' ? avatarRentalFullText(rentalMaxDays) : BUY_BLOCK_TEXT[b];
 
     const block = buyBlock({
       item: spec,
@@ -239,11 +243,11 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
        */
       alreadyOwned: false,
       // …но не дальше 60 дней вперёд (решение 29.09): осталось 45 — ещё 30 не купишь.
-      rentalFull: spec.key === 'animated-avatar' && avatarRentalFull(me?.until ?? null, nowAt),
+      rentalFull: spec.key === 'animated-avatar' && avatarRentalFull(me?.until ?? null, nowAt, rentalMaxDays),
       balance: mine.balance,
       price: entry.priceCoins,
     });
-    if (block) return reply.code(403).send({ error: BUY_BLOCK_TEXT[block] });
+    if (block) return reply.code(403).send({ error: blockText(block) });
 
     /* 🔴 Двойное нажатие не должно проскочить потолок (29.09): оба запроса прочитали бы старый срок, оба прошли
        бы проверку, и за два списания срок ушёл бы на 90 дней. Захват атомарный — как у адресных наград в
@@ -276,7 +280,7 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
                 .where(eq(users.id, req.user!.sub))
                 .limit(1)
                 .for('update');
-              if (avatarRentalFull(row?.until ?? null, nowAt)) return 'rental-full';
+              if (avatarRentalFull(row?.until ?? null, nowAt, rentalMaxDays)) return 'rental-full';
               // Продлеваем от большего из «сейчас» и текущего срока: покупка за день до конца обязана
               // давать 31 день, иначе экономика наказывает за то, что человек продлил заранее.
               rental.until = avatarRentalUntil(row?.until ?? null, nowAt);
@@ -285,7 +289,7 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
             }
           : undefined,
     });
-    if (bought.block) return reply.code(403).send({ error: BUY_BLOCK_TEXT[bought.block] });
+    if (bought.block) return reply.code(403).send({ error: blockText(bought.block) });
 
     if (rental.until) {
       await pushWallet(serverId, req.user!.sub);

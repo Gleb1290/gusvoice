@@ -1,5 +1,5 @@
 import type { Attachment } from '@gusvoice/shared';
-import { FED_ERRORS, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
+import { FED_ERRORS, isOnceMedia, ONCE_TTL_MAX, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
 import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Readable } from 'node:stream';
@@ -54,13 +54,15 @@ const clientHints = {
   spoiler: z.literal(true).nullish(),
   /** «Прослушать один раз» (`voice3`, G54): сервер оставит пометку только у голосового беседы 1:1. */
   once: z.literal(true).nullish(),
+  /** Таймер одноразового фото/видео, с (`ttlmedia1`, #226): сервер оставит его только вместе с `once` у фото/видео. */
+  onceTtl: z.number().int().min(1).max(ONCE_TTL_MAX).nullish(),
   /** Кружок (`circles1`, G68): сервер оставит пометку только у квадратного видео до минуты. */
   round: z.literal(true).nullish(),
 };
 
 /** Вложения новой отправки `/api/conv/:id/messages`: id загрузки + подсказки клиента. */
 export const convAttachmentRefsSchema = z
-  .array(z.object({ id: z.string().uuid(), ...clientHints }))
+  .array(z.object({ id: z.guid(), ...clientHints }))
   .max(10)
   .optional()
   .default([]);
@@ -127,6 +129,19 @@ export function configureRemoteAttachments(fn: RemoteServe | null): void {
   remoteServe = fn;
 }
 
+/**
+ * Одноразовое фото/видео ещё не открыто смотрящим (#226): смотрящий — не автор, у сообщения есть такое вложение, отметки
+ * `once_opened_at` нет (или оно уже сгорело). Чистое правило — для маршрута выдачи файла.
+ */
+export function onceClosedFor(
+  viewerId: string,
+  message: { authorId: string; attachments: readonly Attachment[]; onceOpenedAt: Date | null; onceSpentAt: Date | null },
+): boolean {
+  if (message.authorId === viewerId) return false;
+  if (!message.attachments.some((a) => isOnceMedia(a))) return false;
+  return !message.onceOpenedAt || !!message.onceSpentAt;
+}
+
 export async function attRoutes(app: FastifyInstance): Promise<void> {
   /*
    * HEAD — свой маршрут, а не автоматический Fastify: тот зовёт этот же обработчик и дочитывает поток из хранилища
@@ -183,6 +198,10 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
       message: message ?? null,
     });
     if (!allowed) return deny();
+    // Одноразовое фото/видео (#226, `ttlmedia1`): получателю файл — только после его `once-open` (отметка `once_opened_at`)
+    // и до сгорания (после него строки файла нет — отказ выше). Автору — как всегда. Так же на доме соседа: его копия
+    // раздаётся его человеку этим же маршрутом с отметкой на его копии сообщения.
+    if (message && onceClosedFor(viewer, message)) return deny();
     // Э3 часть 1 (#141): файл из копии сообщения соседа ещё не скопирован к нам — 503 `federation.att_pending`
     // (в сообщении `fedState: 'copying'`); копия доедет — сообщение придёт обновлённым, ссылка та же.
     // Э3 часть 2: с крючком (`configureRemoteAttachments`, при `FEDERATION_DM_ENABLED`) такой файл отдаётся потоком с дома

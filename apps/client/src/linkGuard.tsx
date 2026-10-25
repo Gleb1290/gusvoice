@@ -158,13 +158,18 @@ export function LinkConfirmModal({ url, onClose }: { url: string; onClose: () =>
 }
 
 /** Ссылка в сообщении: обычная открывается сразу, подозрительная — через окно «Открыть ссылку?»; опасная (`linkthreats1`) — «Опасная ссылка». */
-export function MessageLink({ url, dangerous }: {
+export function MessageLink({ url, dangerous, text }: {
   url: string;
   /** `Message.dangerousLinks` (признак `linkthreats1`): ссылка с таким хостом — «Опасная ссылка» (`dangerousLink.tsx`). */
   dangerous?: readonly string[] | null;
+  /**
+   * Подпись вместо адреса (карточка вебхука, #24: заголовок, имя автора). Подписанная чужая ссылка ВСЕГДА спрашивает
+   * «Открыть ссылку?» с полным адресом — подпись может врать про адрес (так же делает Discord с маскированными ссылками).
+   */
+  text?: string;
 }) {
   const [ask, setAsk] = useState(false);
-  if (isDangerousLink(url, dangerous)) return <DangerousMessageLink url={url} text={display(url)} />;
+  if (isDangerousLink(url, dangerous)) return <DangerousMessageLink url={url} text={text ?? display(url)} />;
   return (
     <>
       <a
@@ -175,11 +180,11 @@ export function MessageLink({ url, dangerous }: {
         target="_blank"
         onClick={(e) => {
           e.preventDefault();
-          if (shouldWarnAboutLink(url)) setAsk(true);
+          if (text !== undefined ? !isOwnLink(url) : shouldWarnAboutLink(url)) setAsk(true);
           else openLink(url);
         }}
       >
-        {display(url)}
+        {text ?? display(url)}
       </a>
       {ask && <LinkConfirmModal url={url} onClose={() => setAsk(false)} />}
     </>

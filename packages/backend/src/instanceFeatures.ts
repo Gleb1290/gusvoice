@@ -13,6 +13,7 @@ import {
   FEATURE_VOICE1,
   FEATURE_VOICE3,
   FEATURE_CIRCLES1,
+  FEATURE_TTL_MEDIA1,
   FEATURE_CONV12,
   FEATURE_CONV13,
   FEATURE_USERS1,
@@ -64,7 +65,6 @@ import {
   FEATURE_FEDM5,
   FEATURE_FEDCALL1,
   FEATURE_FEDM6,
-  fedDmEnabledFromEnv,
   FEATURE_ALBUM1,
   FEATURE_GEOCONTACT1,
   FEATURE_CONVPOLL1,
@@ -188,6 +188,7 @@ export const INSTANCE_FEATURES: readonly string[] = [
   FEATURE_VOICE1,
   FEATURE_VOICE3,
   FEATURE_CIRCLES1,
+  FEATURE_TTL_MEDIA1,
   FEATURE_CONV12,
   FEATURE_CONV13,
   FEATURE_USERS1,
@@ -244,18 +245,31 @@ export const INSTANCE_FEATURES: readonly string[] = [
   FEATURE_MSGPRIV1,
   // Опасные ссылки (#218 п.5): объявляем, только пока проверка включена (`LINK_THREATS_ENABLED`).
   ...(linkThreatsEnabled(process.env.LINK_THREATS_ENABLED) ? [FEATURE_LINKTHREATS1] : []),
-  // ЛС между инстансами, Э1 (#141): «Написать» людям связанных инстансов — только при `FEDERATION_DM_ENABLED`.
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM1] : []),
-  // Э2 (#141): переписка текстом с ними работает — клиент снимает плашку «появится в следующем обновлении».
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM2] : []),
-  // Э3 часть 1 (#141): файлы с ними — по `fedNoFiles` / `fedState` / `federation.att_pending`.
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM3] : []),
-  // Э4 (#141): «печатает» и «в сети / был(а)» собеседника с другого инстанса — прежними событиями (`fedm4`).
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM4] : []),
-  // Э5 часть 1 (#141): «мой дом лежит — пишу через инстанс собеседника» (`/conv/:id/fallback`, `/conv/via-claims`, `via`).
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM5] : []),
-  // Э6 (#141): звонки 1:1 с ними — входящий с `DmCall.host`, `fedNoCalls`, `GET /calls/active?fed=1`, `/conv/:id/fallback?for=call`.
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDCALL1] : []),
-  // Э7 часть 1 (#141): группы со смешанным составом — участники других инстансов (`homeInstance`), `ConvSummary.fedGroupHost`.
-  ...(fedDmEnabledFromEnv(process.env) ? [FEATURE_FEDM6] : []),
 ];
+
+/**
+ * Признаки ЛС между инстансами (#141, Э1–Э7). 🔴 25.10: НЕ из `.env` при старте — ЛС включают и тумблером в админке без
+ * перезапуска (#224, `federation/switch.ts`). Раньше список собирался один раз из `FEDERATION_DM_ENABLED`: включил тумблером —
+ * сервер ЛС пускал, а клиент признаков не получал и писал «Личка с людьми других инстансов появится позже».
+ */
+export const FED_DM_FEATURES: readonly string[] = [
+  // ЛС между инстансами, Э1 (#141): «Написать» людям связанных инстансов.
+  FEATURE_FEDM1,
+  // Э2 (#141): переписка текстом с ними работает — клиент снимает плашку «появится в следующем обновлении».
+  FEATURE_FEDM2,
+  // Э3 часть 1 (#141): файлы с ними — по `fedNoFiles` / `fedState` / `federation.att_pending`.
+  FEATURE_FEDM3,
+  // Э4 (#141): «печатает» и «в сети / был(а)» собеседника с другого инстанса — прежними событиями (`fedm4`).
+  FEATURE_FEDM4,
+  // Э5 часть 1 (#141): «мой дом лежит — пишу через инстанс собеседника» (`/conv/:id/fallback`, `/conv/via-claims`, `via`).
+  FEATURE_FEDM5,
+  // Э6 (#141): звонки 1:1 с ними — входящий с `DmCall.host`, `fedNoCalls`, `GET /calls/active?fed=1`, `/conv/:id/fallback?for=call`.
+  FEATURE_FEDCALL1,
+  // Э7 часть 1 (#141): группы со смешанным составом — участники других инстансов (`homeInstance`), `ConvSummary.fedGroupHost`.
+  FEATURE_FEDM6,
+];
+
+/** Признаки инстанса для `/auth/me`: постоянные плюс ЛС между инстансами, если они включены СЕЙЧАС (`env.federation.dmEnabled`). */
+export function instanceFeatures(fedDmEnabled: boolean): string[] {
+  return fedDmEnabled ? [...INSTANCE_FEATURES, ...FED_DM_FEATURES] : [...INSTANCE_FEATURES];
+}

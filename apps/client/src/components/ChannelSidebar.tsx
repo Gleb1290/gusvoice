@@ -2,7 +2,6 @@ import type { Channel } from '@gusvoice/shared';
 import { has, Permission, permsFromString } from '@gusvoice/shared';
 import { Fragment, useRef, useState } from 'react';
 import { api } from '../api';
-import { openCheatSheet } from '../cheatSheet';
 import { toggleCategoryCollapse, useCollapsedCategories, useMutedChannels } from '../channelPrefs';
 import { isFeedOnScreen } from '../channelRules';
 import { useNameResolver } from '../memberName';
@@ -144,6 +143,8 @@ export function ChannelSidebar() {
   const canManageServer = has(perms, Permission.MANAGE_SERVER);
   // Оверрайды канала («Доступ») требуют MANAGE_ROLES — значит и вход в настройки канала.
   const canEditOverwrites = has(perms, Permission.MANAGE_ROLES);
+  // Вебхуки (#24) — раздел настроек ТЕКСТОВОГО канала по своему праву: значит и вход в настройки.
+  const canManageWebhooks = has(perms, Permission.MANAGE_WEBHOOKS);
   const canMoveMembers = has(perms, Permission.MOVE_MEMBERS);
   const canInvite = has(perms, Permission.CREATE_INVITE);
   // 🔴 Пункт «Настройки сервера» показываем, если доступна ХОТЬ ОДНА вкладка внутри, а не по
@@ -394,7 +395,10 @@ export function ChannelSidebar() {
           ) : (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== shownChannelId ? (
             <span className="ch-unread">{(unreadCounts[c.id] ?? 0) > 99 ? '99+' : unreadCounts[c.id]}</span>
           ) : null}
-          {(canManage || canEditOverwrites || (isVoice && (canManageServer || canManageSounds || c.generalUserId === user?.id))) && (
+          {(canManage ||
+            canEditOverwrites ||
+            (!isVoice && canManageWebhooks) ||
+            (isVoice && (canManageServer || canManageSounds || c.generalUserId === user?.id))) && (
             <button
               className="ch-edit"
               title="Настройки канала"
@@ -601,12 +605,8 @@ export function ChannelSidebar() {
           <button className="head-icon" title="Поиск" onClick={() => setShowSearch(true)}>
             <Icon name="search" size={18} />
           </button>
-          {/* 🔴 Шпаргалка сочетаний открывалась только клавишей «?», о которой написано лишь
-              внутри неё самой. Функция, о которой неоткуда узнать, всё равно что отсутствует —
-              поэтому к ней теперь есть видимая дверь. */}
-          <button className="head-icon" title="Горячие клавиши (?)" onClick={openCheatSheet}>
-            <Icon name="keyboard" size={18} />
-          </button>
+          {/* Кнопки шпаргалки в шапке сервера больше нет (20.10, решение владельца: «мусор в меню»). Дверь к ней — кнопка
+              «Все сочетания клавиш» в настройках (группа «Горячие клавиши»), клавиши `?` и Ctrl+/ (как в Discord). */}
           {canInvite && (
             <button className="head-icon" title="Пригласить" onClick={() => setShowInvite(true)}>
               <Icon name="user-plus" size={18} />

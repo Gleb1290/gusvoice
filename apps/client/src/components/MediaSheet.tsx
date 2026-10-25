@@ -53,7 +53,8 @@ import { Icon, type IconName } from './Icon';
 import { SchedPick } from './SchedPick';
 
 /** Как отправить выбранное: сразу, без звука, позже (время) или «когда будет в сети». */
-export type MediaSendHow = 'now' | 'silent' | 'online' | { at: Date };
+/** `{ once }` (#226): одноразовое фото/видео — 0 «просмотр один раз», иначе таймер, с; только один выбранный файл. */
+export type MediaSendHow = 'now' | 'silent' | 'online' | { at: Date } | { once: number };
 
 /** Пункты меню удержания кнопки отправки (как меню «Отправить» порции 8). */
 export interface MediaSendMenu {
@@ -79,6 +80,11 @@ export interface MediaSheetProps {
   /** Начальная подпись — текст из поля ввода (как у Telegram: набранное становится подписью). */
   caption: string;
   sendMenu?: MediaSendMenu;
+  /**
+   * «Таймер самоуничтожения» в меню удержания «Отправить» (#226, `ttlmedia1`, личка 1:1): при одном выбранном фото/видео.
+   * Пункты даёт зовущий (`OnceTimerItems`) — у листа закрытый перечень импортов. Нет — пункта нет.
+   */
+  onceItems?: (choose: (ttl: number | null) => void, back: () => void) => import('react').ReactNode;
   /** Отправить сразу сообщением: вложения и подпись — тем же путём, что обычная отправка с вложениями. */
   onSend: (files: File[], caption: string, how: MediaSendHow) => void;
   /** Положить в поле вложений без отправки (документы, недавние файлы). */
@@ -187,6 +193,7 @@ export function MediaSheet({
   maxBytes = ATTACH_MAX_BYTES,
   caption: initialCaption,
   sendMenu,
+  onceItems,
   onSend,
   onAttach,
   onSystemPick,
@@ -208,6 +215,8 @@ export function MediaSheet({
   const [busy, setBusy] = useState<{ done: number; total: number } | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [holdOpen, setHoldOpen] = useState(false);
+  // Меню удержания показывает пункты таймера самоуничтожения (#226) вместо своих.
+  const [onceTimerOpen, setOnceTimerOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [visible, setVisible] = useState(() => typeof document === 'undefined' || document.visibilityState === 'visible');
@@ -763,7 +772,9 @@ export function MediaSheet({
    * под пальцем). Глотаем клики, пока палец не отпущен и ещё 400 мс после — как у меню «Отправить» в поле.
    */
   const swallow = useRef(false);
-  const menuItems = !!sendMenu && (sendMenu.silent || sendMenu.later);
+  // #226: одно фото/видео (не GIF) — в меню удержания ещё и «Таймер самоуничтожения».
+  const onceOk = !!onceItems && chosen.length === 1 && chosen[0]!.mime !== 'image/gif';
+  const menuItems = (!!sendMenu && (sendMenu.silent || sendMenu.later)) || onceOk;
   const openHold = () => {
     held.current = true;
     swallow.current = true;
@@ -1195,7 +1206,22 @@ export function MediaSheet({
               </div>
               <div className="gal-hold-row">
                 <div className="gal-hold-menu" role="menu">
-                  {sendMenu?.later && (
+                  {/* Таймер самоуничтожения (#226; Telegram Android — кнопка таймера в просмотре выбранного фото): один файл. */}
+                  {onceOk &&
+                    onceTimerOpen &&
+                    onceItems!(
+                      (ttl) => {
+                        setOnceTimerOpen(false);
+                        setHoldOpen(false);
+                        if (ttl !== null) void sendSelected({ once: ttl });
+                        else void sendSelected('now');
+                      },
+                      () => setOnceTimerOpen(false),
+                    )}
+                  {onceOk && !onceTimerOpen && (
+                    <MenuItem icon="clock" label="Таймер самоуничтожения" submenu onClick={() => setOnceTimerOpen(true)} />
+                  )}
+                  {!onceTimerOpen && sendMenu?.later && (
                     <MenuItem
                       icon="calendar-time"
                       label="Отправить позже"
@@ -1207,7 +1233,7 @@ export function MediaSheet({
                       }}
                     />
                   )}
-                  {sendMenu?.silent && (
+                  {!onceTimerOpen && sendMenu?.silent && (
                     <MenuItem
                       icon="bell-off"
                       label="Отправить без звука"
@@ -1217,7 +1243,7 @@ export function MediaSheet({
                       }}
                     />
                   )}
-                  {sendMenu?.later && sendMenu.whenOnline !== false && (
+                  {!onceTimerOpen && sendMenu?.later && sendMenu.whenOnline !== false && (
                     <MenuItem
                       icon="alarm"
                       label="Когда будет в сети"

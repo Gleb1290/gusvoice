@@ -58,6 +58,32 @@ export function isRoundVideo(a: { round?: true; contentType: string }): boolean 
   return a.round === true && a.contentType.startsWith('video/');
 }
 
+/**
+ * Одноразовое фото или видео (19.10, #226, признак сервера `ttlmedia1`; Telegram `ttl_seconds` у фото и видео, tdesktop
+ * `send_files_box.cpp` «Self-Destruct Timer»): `once` у картинки или видео, показанных кадром (не «как файл», не GIF, не
+ * кружок). У получателя — закрытая размытая плитка; открыл — просмотр с отсчётом (`onceTtl`, с) или до закрытия, потом
+ * сгорает у обоих (та же ручка `once-spent`, что у голосового).
+ */
+export function isOnceMedia(a: { once?: true; contentType: string; asFile?: true; gif?: true; round?: true }): boolean {
+  if (a.once !== true || a.asFile || a.gif || a.round) return false;
+  return (a.contentType.startsWith('image/') && a.contentType !== 'image/gif') || a.contentType.startsWith('video/');
+}
+
+/** Потолок таймера одноразового фото/видео, с (tdesktop: свой выбор 1…60). */
+export const ONCE_TTL_MAX = 60;
+
+/** «Один раз», который можно потратить (`once-spent`): голосовое, кружок, фото или видео с пометкой `once`. */
+export function isOnceSpendable(a: {
+  once?: true;
+  waveform?: number[] | null;
+  contentType: string;
+  round?: true;
+  asFile?: true;
+  gif?: true;
+}): boolean {
+  return a.once === true && (isListenable(a) || isOnceMedia(a));
+}
+
 /** Вложение, у которого есть «прослушано» (`voice1`) и «один раз» (`voice3`): голосовое или кружок. */
 export function isListenable(a: { waveform?: number[] | null; contentType: string; round?: true }): boolean {
   return isVoiceMessage(a) || isRoundVideo(a);

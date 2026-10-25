@@ -79,6 +79,8 @@ export function attachmentWords(list: readonly unknown[]): string {
   if (p?.attachmentGif) return n === 1 ? 'GIF' : `${n} GIF`;
   switch (p?.attachmentKind) {
     case 'photo':
+      // Одноразовое фото (`ttlmedia1`, #226): Telegram `lng_ttl_photo_received` — содержимое в пуше не раскрываем.
+      if (p.attachmentOnce && n === 1) return 'Одноразовое фото';
       return n === 1 ? 'Фото' : `${n} фото`;
     case 'voice':
       // tdesktop `lng_in_dlg_voice_message_ttl` — «Одноразовое голосовое сообщение» (длительность у него не пишут).
@@ -87,6 +89,7 @@ export function attachmentWords(list: readonly unknown[]): string {
     case 'file':
       // Кружок (`circles1`): tdesktop `lng_in_dlg_video_message` / `lng_in_dlg_video_message_ttl`.
       if (p.attachmentRound && n === 1) return p.attachmentOnce ? 'Одноразовое видеосообщение' : 'Видеосообщение';
+      if (p.attachmentVideo && p.attachmentOnce && n === 1) return 'Одноразовое видео';
       if (p.attachmentVideo) return n === 1 ? 'Видео' : `${n} видео`;
       if (n > 1) return `${n} ${plural(n, 'файл', 'файла', 'файлов')}`;
       return p.attachmentName || 'Файл';

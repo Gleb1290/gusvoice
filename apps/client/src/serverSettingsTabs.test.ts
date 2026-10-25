@@ -27,6 +27,7 @@ describe('вкладки настроек сервера', () => {
       [Permission.MANAGE_STICKERS, 'stickers'],
       [Permission.MANAGE_SOUNDS, 'sounds'],
       [Permission.MANAGE_SOUNDBOARD, 'soundboard'],
+      [Permission.MANAGE_WEBHOOKS, 'integrations'],
       [Permission.VIEW_AUDIT_LOG, 'audit'],
     ];
     for (const [perm, tab] of пары) {
@@ -75,10 +76,10 @@ describe('вкладки настроек сервера', () => {
 
   it('администратор видит все вкладки', () => {
     // has() пропускает ADMINISTRATOR мимо любых битов — значит и здесь обязан.
-    // ⚠️ Число обновляется при КАЖДОЙ новой вкладке (последние — «Роли» и «Участники», 23.09: окно
-    // «Роли и участники» влилось в настройки сервера). Так и задумано: тест обязан падать, чтобы про
+    // ⚠️ Число обновляется при КАЖДОЙ новой вкладке (последняя — «Интеграции», R279: вебхуки).
+    // Так и задумано: тест обязан падать, чтобы про
     // вход в новую вкладку нельзя было забыть — ровно ради этого список вкладок и свели в один модуль.
-    assert.equal(keys(Permission.ADMINISTRATOR).length, 10);
+    assert.equal(keys(Permission.ADMINISTRATOR).length, 11);
   });
 
   it('первая вкладка — стартовая, и у неё есть подпись', () => {

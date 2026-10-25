@@ -8,6 +8,7 @@ import {
   DROP_SETTLE_MS,
   getStreamQuality,
   layerChoices,
+  needsLayerResend,
   resolutionText,
   shownPref,
   stepDrop,
@@ -43,6 +44,47 @@ function rejectMenuMutation(from: string, to: string, verify: (api: QualityRules
   assert.throws(() => verify(mutant),
     (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
 }
+
+describe('R278 повтор слоя после новой подписки', () => {
+  it('новый трек с уже выбранным экономным слоем требует повторной отправки серверу', () => {
+    // SFU забыл LOW при отписке, хотя библиотека всё ещё считает его установленным.
+    assert.equal(needsLayerResend('low', 'low', true), true);
+  });
+
+  it('тот же трек с тем же слоем не требует повторной отправки на каждом событии стора', () => {
+    // Без проверки свежести подписки любое обновление стора снова посылало бы запрос слоя.
+    assert.equal(needsLayerResend('low', 'low', false), false);
+  });
+
+  it('новый трек с другим запрошенным слоем оставляет смену качества обычному пути', () => {
+    // emitTrackUpdate повторяет старое качество: при смене HIGH на LOW нужен setVideoQuality.
+    assert.equal(needsLayerResend('high', 'low', true), false);
+  });
+
+  it('тот же трек с другим слоем не подменяет смену качества повтором старого', () => {
+    // Парный случай: ручной выбор слоя без переподписки тоже обязан пройти обычным путём.
+    assert.equal(needsLayerResend('high', 'low', false), false);
+  });
+
+  function verifyResend(api: QualityRules): void {
+    assert.equal(api.needsLayerResend('low', 'low', true), true, 'R278 свежая подписка повторяет равный слой');
+    assert.equal(api.needsLayerResend('low', 'low', false), false, 'R278 прежняя подписка не повторяет равный слой');
+    assert.equal(api.needsLayerResend('high', 'low', true), false, 'R278 новый слой меняется обычным путём');
+    assert.equal(api.needsLayerResend('high', 'low', false), false, 'R278 прежний трек меняет слой обычным путём');
+  }
+
+  it('игнорирование свежести подписки отвергается после проверки оригинала', () => {
+    // Отличает восстановление после отписки от лишних повторов на каждом apply.
+    rejectMenuMutation('return freshSubscription && requested === wanted;', 'return requested === wanted;',
+      verifyResend, 'R278 прежняя подписка не повторяет равный слой');
+  });
+
+  it('повтор старого качества при любом новом треке отвергается после проверки оригинала', () => {
+    // Одна свежесть недостаточна: иначе новый трек не получит изменённый человеком LOW.
+    rejectMenuMutation('return freshSubscription && requested === wanted;', 'return freshSubscription;',
+      verifyResend, 'R278 новый слой меняется обычным путём');
+  });
+});
 
 describe('меню качества в окошке показа', () => {
   it('три описанных слоя дают Авто и реальные разрешения сверху вниз с выбором человека', () => {

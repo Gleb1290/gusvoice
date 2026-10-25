@@ -31,7 +31,7 @@ import { uploadedAttachmentDto } from './att.js';
  */
 
 const params = z.object({ id: z.string().min(1).max(64) });
-const uploadParams = z.object({ id: z.string().min(1).max(64), uploadId: z.string().uuid() });
+const uploadParams = z.object({ id: z.string().min(1).max(64), uploadId: z.guid() });
 const partParams = uploadParams.extend({ n: z.coerce.number().int().min(1).max(10_000) });
 
 /** Кусков в минуту на человека: 300 × 8 МиБ ≈ 2,4 ГиБ — человеку с запасом, петле — потолок. */

@@ -179,6 +179,10 @@ import { ExprTabs, getExprTab, type ExprTab } from './ExprTabs';
 import { ATT_IMG_MAX_H, ATT_IMG_MAX_W, AttachmentView, isImage, isVideo, kb } from './AttachmentView';
 // Вложения «как в Telegram» (05.10): скрепка — «Фото или видео» / «Файл», лист с галереей и камерой на телефоне.
 import { MediaSheet, type MediaSendHow, type SystemPickKind } from './MediaSheet';
+import { isOnceMedia } from '@gusvoice/shared';
+import { onceDeadlineLocal, splitOncePlan } from '../onceMediaRules';
+import { OnceTimerItems } from './OnceTimerMenu';
+import { protectScreen } from '../screenGuard';
 import { ATTACH_MAX, ATTACH_MAX_BYTES, dmAttachMaxBytes, attachMode, attachRoom, droppedAttachText, fitAttachments, skippedText } from '../attachRules';
 import { cameraSupported } from '../cameraCapture';
 import { compressPhotos } from '../imageCompress';
@@ -219,6 +223,7 @@ import { dropVoiceDraft, loadVoiceDraft, saveVoiceDraft } from '../voiceDrafts';
 import { VOICE_DESKTOP, VOICE_HOLD, voiceCancelPath, voiceHoldProgress } from '../voiceHold';
 import { createVoiceHoldController, type VoiceHoldState } from '../voiceHoldController';
 import { ComposerLinkPreview, LinkPreviewCard, linkPreviewsEnabled, previewableLinks } from './LinkPreview';
+import { MessageEmbeds, attachmentsBesideEmbeds } from './MessageEmbeds';
 import { SendFilesBox, type SendFilesResult } from './SendFilesBox';
 import { PhotoEditor } from './PhotoEditor';
 import { useHoldReorder } from './useHoldReorder';
@@ -483,11 +488,15 @@ function renderContent(
   authorName: string,
   onEmoji?: EmojiResolver,
   dangerous?: readonly string[] | null,
+  roleNames?: readonly string[],
+  plainBroadcast?: boolean,
 ) {
   return renderMessageText(
     content,
     (url, key) => <MessageLink key={key} url={url} dangerous={dangerous} />,
     onEmoji,
+    roleNames,
+    plainBroadcast,
   );
 }
 
@@ -731,9 +740,21 @@ const MessageRow = memo(function MessageRow({
   // `noPreview` (G19, `linkprev1`): автор убрал превью крестиком над полем — карточку под сообщением не рисуем.
   // Опасные ссылки (#218 п.5, `linkthreats1`): хосты, найденные сервером в списке угроз; без признака сервера — пусто.
   const dangerous = useStore((s) => (serverLinkThreats(s.serverFeatures) ? m.dangerousLinks : undefined));
+  // Позванные ролью (#76, `@Модераторы`): названия ролей сообщения для подсветки. Строкой, чтобы селектор не отдавал новый массив
+  // на каждый вызов (zustand сравнивает по ссылке и перерисовывал бы каждую строку ленты).
+  const roleMentionKey = useStore((s) =>
+    m.mentionRoles?.length
+      ? (s.bootstrap?.roles ?? [])
+          .filter((r) => m.mentionRoles!.includes(r.id))
+          .map((r) => r.name)
+          .join('\u0001')
+      : '',
+  );
+  const roleMentionNames = useMemo(() => (roleMentionKey ? roleMentionKey.split('\u0001') : undefined), [roleMentionKey]);
   // Карточку по опасной ссылке не рисуем: сервер её и не собирает.
+  // Текст, собранный сервером из карточек вебхука для старых клиентов (`embedsFallback`, #24), не показывается и не превьюится.
   const previews =
-    m.content && !m.noPreview && linkPreviewsEnabled()
+    m.content && !m.embedsFallback && !m.noPreview && linkPreviewsEnabled()
       ? previewableLinks(m.content).filter((u) => !isDangerousLink(u, dangerous))
       : [];
   const hasReactions = !!m.reactions?.length;
@@ -848,7 +869,9 @@ const MessageRow = memo(function MessageRow({
     // «Прослушать один раз» (`voice3`, G54): значок «1», без «Сохранить как…»/пересылки, сервер удаляет после прослушивания.
     once: m.attachments?.some((a) => a.once === true) || undefined,
   };
-  const attachmentViews = m.attachments?.map((a, j) => <AttachmentView key={j} a={a} onOpen={act.openImage} voice={voiceMeta} />);
+  // Файл, уже показанный картинкой в карточке вебхука (`attachment://`), отдельно не рисуем — как у Discord (#24).
+  const shownAttachments = attachmentsBesideEmbeds(m.attachments, m.embeds);
+  const attachmentViews = shownAttachments.map((a, j) => <AttachmentView key={j} a={a} onOpen={act.openImage} voice={voiceMeta} />);
   /* Чипы по убыванию числа (`sortReactionChips`); аватарки — на всех чипах или ни на одном (`messageChipFaces`: в ЛС всегда, где
      список полный; в канале — пока поставивших на сообщении не больше трёх, G75). */
   const chipFacesOf = messageChipFaces(m.reactions, bubbles);
@@ -989,9 +1012,9 @@ const MessageRow = memo(function MessageRow({
           onClick={() => m.replyTo && openReplyTarget(m.replyTo, act.jumpTo)}
         />
       ) : null;
-    const body = m.content ? (
+    const body = m.content && !m.embedsFallback ? (
       <div className="message-body">
-        {renderContent(m.content, m.author.id, author, onEmoji, dangerous)}
+        {renderContent(m.content, m.author.id, author, onEmoji, dangerous, roleMentionNames, m.mentionEveryone === false)}
         {metaAt === 'body' ? meta : null}
       </div>
     ) : null;
@@ -1172,9 +1195,9 @@ const MessageRow = memo(function MessageRow({
           ) : (
             <span
               className="msg-ava"
-              // Нажатие — сразу карточка профиля, как у Telegram и Discord (#212); правый клик — меню.
-              onClick={(e) => act.userMenu(e, who, 'profile')}
-              onContextMenu={(e) => act.userMenu(e, who)}
+              // Нажатие — сразу карточка профиля, как у Telegram и Discord (#212); правый клик — меню. У вебхука (#24) — ничего.
+              onClick={m.webhookId ? undefined : (e) => act.userMenu(e, who, 'profile')}
+              onContextMenu={m.webhookId ? undefined : (e) => act.userMenu(e, who)}
             >
               <Avatar url={m.author.avatarUrl} animatedUrl={animatedUrl} name={author} size={38} />
               {crowned && <CrownMark size={13} />}
@@ -1187,11 +1210,17 @@ const MessageRow = memo(function MessageRow({
             <div className="message-head">
               <span
                 className={`author ${mine ? 'me' : ''}${crownGlow(crowned)}`}
-                onClick={(e) => act.userMenu(e, who, 'profile')}
-                onContextMenu={(e) => act.userMenu(e, who)}
+                // Вебхук (#24) — не человек: ни профиля, ни меню участника (как у Discord, там это карточка приложения).
+                onClick={m.webhookId ? undefined : (e) => act.userMenu(e, who, 'profile')}
+                onContextMenu={m.webhookId ? undefined : (e) => act.userMenu(e, who)}
               >
                 {author}
               </span>
+              {m.webhookId && (
+                <span className="msg-webhook-tag" title="Сообщение пришло через вебхук канала, а не от участника">
+                  ВЕБХУК
+                </span>
+              )}
               <GuestMark home={guestHome} size={11} />{' '}
               <span className="ts muted">{time}</span>
             </div>
@@ -1199,14 +1228,21 @@ const MessageRow = memo(function MessageRow({
           {(
             <>
               {pollAndSticker}
-              {m.content ? (
+              {m.content && !m.embedsFallback ? (
                 <div className="message-body">
-                  {renderContent(m.content, m.author.id, author, onEmoji, dangerous)}
+                  {renderContent(m.content, m.author.id, author, onEmoji, dangerous, roleMentionNames, m.mentionEveryone === false)}
                   {m.editedAt ? <span className="ts muted edited"> (изм.)</span> : null}
                 </div>
               ) : null}
+              {/* Карточки вебхука (#24) — под текстом, как у Discord; описание и поля — тем же рендером, что текст. */}
+              {m.embeds?.length ? (
+                <MessageEmbeds
+                  embeds={m.embeds}
+                  renderText={(t) => renderContent(t, m.author.id, author, onEmoji, dangerous, roleMentionNames)}
+                />
+              ) : null}
               {previewCards}
-              {m.attachments?.length ? <div className="attachments">{attachmentViews}</div> : null}
+              {shownAttachments.length ? <div className="attachments">{attachmentViews}</div> : null}
               {hasReactions ? <div className="reactions">{reactionChips}</div> : null}
             </>
           )}
@@ -1305,7 +1341,10 @@ function endsGroup(row: ListMessage, next: ListMessage | undefined): boolean {
  */
 /** Автор строки для склейки серий: у служебной строки (закреп, действие в группе) — своя метка, она не склеивается ни с кем. */
 function rowAuthor(m: Message): string {
-  return pinServiceMark(m as { service?: unknown }) || groupServiceMark(m as { service?: unknown }) ? `service:${m.id}` : m.author.id;
+  if (pinServiceMark(m as { service?: unknown }) || groupServiceMark(m as { service?: unknown })) return `service:${m.id}`;
+  // Вебхук (#24): у всех его сообщений одна строка-автор, а имя и аватар — свои у каждого. Склеиваем только подряд идущие
+  // с тем же именем и аватаром, иначе «CI» и «Мониторинг» через один вебхук слились бы под одним именем (как у Discord).
+  return m.webhookId ? `webhook:${m.webhookId}:${m.author.displayName}:${m.author.avatarUrl ?? ''}` : m.author.id;
 }
 
 /** Задержка въезда строки (`MessageRow.appear`): `undefined` — не въезжает (не новая или давно замечена). */
@@ -2020,6 +2059,7 @@ export function MessagePane({
   onStickerUsed,
   onSendVoice,
   voiceOnce: voiceOnceAllowed,
+  mediaOnce = false,
   roundOk,
   serverId,
   feedWindow,
@@ -2142,6 +2182,8 @@ export function MessagePane({
       noPreview?: boolean;
       /** Спойлер (индексы файлов) и «подпись над медиа» (G48): только при `mediaFlags`. */
       spoilers?: number[];
+      /** Одноразовое фото/видео (`ttlmedia1`, #226): 0 — «просмотр один раз», иначе таймер, с. Только у строки с одним файлом. */
+      onceTtl?: number;
       captionAbove?: boolean;
       /** Цитата фрагмента (G55, `quote1`): ставит сама лента — по полосе ответа (`replyExtra`). */
       replyQuote?: ReplyQuoteDraft | null;
@@ -2281,6 +2323,11 @@ export function MessagePane({
    * «Избранное», не канал). Нет — кнопки нет.
    */
   voiceOnce?: boolean;
+  /**
+   * «Таймер самоуничтожения» у фото и видео (19.10, #226, признак сервера `ttlmedia1`): только личка 1:1 с человеком. Нет —
+   * пункта нет ни в окне отправки (ПК), ни в меню удержания «Отправить» галереи (телефон).
+   */
+  mediaOnce?: boolean;
   /**
    * Последний шаг Esc — закрыть беседу (07.10, G15; Telegram Desktop `HistoryWidget::escape` → `_cancelRequests`). Даёт
    * беседа ЛС на ПК; нет — последний Esc ничего не делает (каналы сервера, телефон: там «назад» — свой жест).
@@ -2954,6 +3001,8 @@ export function MessagePane({
     if (m && !composerReplacement && !selecting) startReply(m);
   };
   const [lightbox, setLightbox] = useState<number | null>(null);
+  // Открытое одноразовое фото/видео (#226): свой просмотр, без ряда остальных медиа.
+  const [onceView, setOnceView] = useState<{ att: Attachment; msg: Message; deadline: number | null } | null>(null);
   // @mention / #channel autocomplete: the active trigger token + the highlighted suggestion.
   const [ac, setAc] = useState<AcToken | null>(null);
   const [acIndex, setAcIndex] = useState(0);
@@ -4409,6 +4458,8 @@ export function MessagePane({
       for (const a of m.attachments ?? []) {
         const video = isVideo(a.contentType);
         // Э3 (#141): вложение, чья копия с инстанса автора ещё едет, просмотру не показывается — файла у нас пока нет.
+        // Одноразовое фото/видео (#226) в общий просмотр не попадает — у него свой просмотр с отсчётом (`openOnce`).
+        if (isOnceMedia(a)) continue;
         if (!a.asFile && a.fedState !== 'copying' && (isImage(a.contentType) || video))
           list.push({
             url: a.url,
@@ -4430,8 +4481,31 @@ export function MessagePane({
     return list;
   }, [messages, mediaMore, nameOf]);
   function openImage(a: Attachment) {
+    if (isOnceMedia(a)) return void openOnce(a);
     const i = allImages.findIndex((x) => x.att === a);
     if (i >= 0) setLightbox(i);
+  }
+  /**
+   * Одноразовое фото/видео (19.10, #226): сервер ставит отметку открытия (`once-open`; от неё таймер) — только потом просмотр;
+   * закрыли или вышел таймер — `once-spent`, сообщение сгорает у обоих (событие `conv.change`). Уже сгорело (410) — молча.
+   */
+  async function openOnce(a: Attachment) {
+    const m = messages.find((x) => x.attachments?.includes(a));
+    if (!m || onceView) return;
+    try {
+      const r = await api.convOnceOpen(m.channelId, m.id);
+      // Срок — от МОМЕНТА ПОЛУЧЕНИЯ ответа по своим часам: серверные `openedAt`/`serverNow` дают только уже прошедшее (повторное
+      // открытие), с `Date.now()` устройства их не сравниваем — часы ПК бывают на секунды в стороне.
+      const receivedAt = Date.now();
+      setOnceView({ att: a, msg: m, deadline: onceDeadlineLocal(a, Date.parse(r.openedAt), Date.parse(r.serverNow ?? ''), receivedAt) });
+    } catch (e) {
+      if ((e as { status?: number }).status !== 410) toastError(e);
+    }
+  }
+  function closeOnce() {
+    const v = onceView;
+    setOnceView(null);
+    if (v) void api.convOnceSpent(v.msg.channelId, v.msg.id).catch(() => {});
   }
   // Удалили показанное (меню просмотрщика) — просмотр остаётся на соседнем файле, пусто — закрывается.
   useEffect(() => {
@@ -4788,8 +4862,12 @@ export function MessagePane({
     const noPreview = sendNoPreview(previewOff, previewLink, !!sendFlags && linkPreviewsEnabled());
     // Спойлер (G48, `media2`): индексы в списке окна → файлы после сжатия (порядок и число те же) → индексы в сообщении плана.
     const spoilered = new Set(mediaFlags ? spoilerIndexes(r.files, r.spoilers, r.way).map((i) => files[i]!) : []);
-    planSend(files, content, r.way).forEach((p, i) =>
+    // Одноразовые фото/видео (#226): индексы окна → файлы после сжатия; каждое уходит своим сообщением (`splitOncePlan`).
+    const onceFiles = new Map<File, number>();
+    if (mediaOnce && !r.way.asFile) r.once.forEach((ttl, i) => files[i] && onceFiles.set(files[i]!, ttl));
+    splitOncePlan(planSend(files, content, r.way), onceFiles).forEach((p, i) =>
       outbox.enqueue({
+        ...(p.onceTtl !== undefined ? { onceTtl: p.onceTtl } : {}),
         ...(spoilered.size && p.files.some((f) => spoilered.has(f))
           ? { spoilers: p.files.flatMap((f, k) => (spoilered.has(f) ? [k] : [])) }
           : {}),
@@ -4867,6 +4945,15 @@ export function MessagePane({
    * как и у «Отправить»), подпись — его текст (`scheduleDraft`). Без признака пункты в листе серые и сюда не приходят.
    */
   function onMediaSend(files: File[], caption: string, how: MediaSendHow) {
+    // Одноразовое фото/видео (#226, меню удержания «Отправить» галереи): одно сообщение с одним файлом, мимо поля ввода.
+    if (typeof how === 'object' && 'once' in how) {
+      if (!outbox || files.length !== 1) return;
+      dropUnreadLine();
+      outbox.enqueue({ key: newClientId(), content: caption.trim(), files, replyToId: replyingTo?.id ?? null, onceTtl: how.once });
+      setReplyingTo(null);
+      requestAnimationFrame(() => stickDown());
+      return;
+    }
     if (how !== 'now' && how !== 'silent') {
       if (!sendOn?.media) {
         toast('warn', 'Отложенные с вложениями этот сервер не принимает');
@@ -8545,6 +8632,9 @@ export function MessagePane({
           saved={box.saved}
           menu={{ silent: !!sendOn?.silent, later: !!sendOn?.later && !!sendOn.media }}
           media2={!!mediaFlags}
+          onceItems={
+            mediaOnce ? (current, choose, back) => <OnceTimerItems current={current} onChoose={choose} onBack={back} /> : undefined
+          }
           onFiles={(files) => patchBox((b) => ({ ...b, files }))}
           onAdd={() => fileRef.current?.click()}
           onCancel={closeBox}
@@ -10428,6 +10518,7 @@ export function MessagePane({
                 ]
               : undefined
           }
+          onceItems={mediaOnce && outbox ? (choose, back) => <OnceTimerItems current={null} onChoose={choose} onBack={back} /> : undefined}
           onSend={onMediaSend}
           onAttach={addFiles}
           onSystemPick={onSystemPick}
@@ -10443,6 +10534,25 @@ export function MessagePane({
           onNearEdge={loadMediaPage ? onMediaEdge : undefined}
           actions={lightboxActions}
           onAuthor={lightboxAuthor}
+        />
+      )}
+      {onceView && (
+        <Lightbox
+          images={[
+            {
+              url: onceView.att.url,
+              name: isVideo(onceView.att.contentType) ? 'Одноразовое видео' : 'Одноразовое фото',
+              type: onceView.att.contentType,
+              video: isVideo(onceView.att.contentType),
+              from: nameOf(onceView.msg.author.id, onceView.msg.author.displayName),
+              at: onceView.msg.createdAt,
+              caption: onceView.msg.content.trim() || undefined,
+            },
+          ]}
+          index={0}
+          onClose={closeOnce}
+          onIndex={() => {}}
+          once={{ deadline: onceView.deadline, protect: protectScreen }}
         />
       )}
       {userMenu}

@@ -203,6 +203,7 @@ export function mockEconomyView(currencyName = 'ГусКоины', crownUserId?:
         target: 'none',
         floor: { minutes: 1500, coins: 3000 },
         serverMinutes: null,
+        rentalMaxDays: 60,
       },
     ],
   };

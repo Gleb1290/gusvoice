@@ -1,4 +1,4 @@
-import { MENTION_LEFT_GUARD, MENTION_NAME_SRC } from '@gusvoice/shared';
+import { BROADCAST_MENTIONS, MENTION_LEFT_GUARD, MENTION_NAME_SRC, roleMentionPatternSrc } from '@gusvoice/shared';
 import { useState } from 'react';
 
 /**
@@ -25,9 +25,18 @@ import { useState } from 'react';
  * подсветить только `@vasya` значило бы разорвать его пополам прямо в тексте.
  */
 const MENTION_TEST = new RegExp(`^@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?$`);
+/** `@everyone`/`@here` без домена — общее обращение (`BROADCAST_MENTIONS`). */
+const BROADCAST_RE = new RegExp(`^@(?:${BROADCAST_MENTIONS.join('|')})$`, 'i');
 
-/** One pass over inline syntax. Order matters: code first (it swallows everything else inside). */
-const INLINE = new RegExp(
+/**
+ * One pass over inline syntax. Order matters: code first (it swallows everything else inside).
+ *
+ * Слот 10 — упоминание РОЛИ по названию (#76, `@Ночная смена`): названия бывают с пробелами и кириллицей, общее правило имён
+ * их не видит, поэтому роли, которые сообщение реально позвало, подставляются сюда списком. Без ролей слот — `(?!)`, то есть
+ * никогда не совпадает, и номера групп остаются одними и теми же.
+ */
+function buildInline(roleSrc: string | null): RegExp {
+  return new RegExp(
   [
     '(`[^`\\n]+`)', // 1 code
     '(\\|\\|[\\s\\S]+?\\|\\|)', // 2 spoiler
@@ -41,13 +50,30 @@ const INLINE = new RegExp(
     // 8 italic _ — with word boundaries, so snake_case_names and my_file_name.txt stay literal
     '((?<![\\p{L}\\p{N}])_[^_\\n]+_(?![\\p{L}\\p{N}]))',
     '(https?://[^\\s<>"]+)', // 9 link
-    `${MENTION_LEFT_GUARD}(@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?)`, // 10 mention (+ @домен у гостя)
-    // 11 кастомное эмодзи сервера `:name:` (#18). Перед двоеточием обязан идти НЕ буквенно-цифровой
+    `(${roleSrc ?? '(?!)'})`, // 10 роль по названию (#76)
+    `${MENTION_LEFT_GUARD}(@${MENTION_NAME_SRC}(?:@${MENTION_NAME_SRC})?)`, // 11 mention (+ @домен у гостя)
+    // 12 кастомное эмодзи сервера `:name:` (#18). Перед двоеточием обязан идти НЕ буквенно-цифровой
     // символ и не двоеточие — иначе `10:30:00` превращается в эмодзи `:30:`, а `host:8080:` в `:8080:`.
     '((?<![\\p{L}\\p{N}_:]):[a-z0-9_]{2,32}:)',
   ].join('|'),
   'gu',
-);
+  );
+}
+
+const INLINE = buildInline(null);
+const inlineByRoles = new Map<string, RegExp>();
+/** Регулярка разбора для набора названий позванных ролей; без ролей — общая. Кеш по набору: сообщений с ролями мало. */
+function inlineFor(roleNames: readonly string[] | undefined): RegExp {
+  const src = roleNames?.length ? roleMentionPatternSrc(roleNames) : null;
+  if (!src) return INLINE;
+  let re = inlineByRoles.get(src);
+  if (!re) {
+    if (inlineByRoles.size > 200) inlineByRoles.clear();
+    re = buildInline(src);
+    inlineByRoles.set(src, re);
+  }
+  return re;
+}
 
 /** Trailing punctuation shouldn't be swallowed by a bare URL: "см. https://a.com/x." */
 function splitTrailingPunct(url: string): [string, string] {
@@ -97,14 +123,16 @@ function inline(
   key: string,
   onLink: (url: string, key: string) => React.ReactNode,
   onEmoji?: EmojiResolver,
+  re: RegExp = INLINE,
+  plainBroadcast = false,
 ): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let last = 0;
   let i = 0;
-  for (const m of text.matchAll(INLINE)) {
+  for (const m of text.matchAll(re)) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const k = `${key}-${i++}`;
-    const [, code, spoiler, bold, strike, under, italDbl, ital1, ital2, link, mention, emoji] = m;
+    const [, code, spoiler, bold, strike, under, italDbl, ital1, ital2, link, role, mention, emoji] = m;
     if (code) {
       out.push(
         <code className="md-code" key={k}>
@@ -112,22 +140,32 @@ function inline(
         </code>,
       );
     } else if (spoiler) {
-      out.push(<Spoiler key={k}>{inline(spoiler.slice(2, -2), k, onLink, onEmoji)}</Spoiler>);
+      out.push(<Spoiler key={k}>{inline(spoiler.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)}</Spoiler>);
     } else if (bold) {
-      out.push(<strong key={k}>{inline(bold.slice(2, -2), k, onLink, onEmoji)}</strong>);
+      out.push(<strong key={k}>{inline(bold.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)}</strong>);
     } else if (strike) {
-      out.push(<s key={k}>{inline(strike.slice(2, -2), k, onLink, onEmoji)}</s>);
+      out.push(<s key={k}>{inline(strike.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)}</s>);
     } else if (under) {
-      out.push(<u key={k}>{inline(under.slice(3, -4), k, onLink, onEmoji)}</u>);
+      out.push(<u key={k}>{inline(under.slice(3, -4), k, onLink, onEmoji, re, plainBroadcast)}</u>);
     } else if (italDbl) {
-      out.push(<em key={k}>{inline(italDbl.slice(2, -2), k, onLink, onEmoji)}</em>);
+      out.push(<em key={k}>{inline(italDbl.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)}</em>);
     } else if (ital1 || ital2) {
       const raw = (ital1 ?? ital2) as string;
-      out.push(<em key={k}>{inline(raw.slice(1, -1), k, onLink, onEmoji)}</em>);
+      out.push(<em key={k}>{inline(raw.slice(1, -1), k, onLink, onEmoji, re, plainBroadcast)}</em>);
     } else if (link) {
       const [url, punct] = splitTrailingPunct(link);
       out.push(onLink(url, k));
       if (punct) out.push(punct);
+    } else if (role) {
+      // Роль, которую сообщение реально позвало (#76): подсвечивается как личное упоминание.
+      out.push(
+        <span className="mention" key={k}>
+          {role}
+        </span>,
+      );
+    } else if (mention && plainBroadcast && BROADCAST_RE.test(mention)) {
+      // Автору не хватило права «Упоминать @everyone, @here и все роли» (#76): никого не позвало — обычный текст, как у Discord.
+      out.push(mention);
     } else if (mention && MENTION_TEST.test(mention)) {
       out.push(
         <span className="mention" key={k}>
@@ -172,7 +210,12 @@ export function renderMessageText(
   content: string,
   onLink: (url: string, key: string) => React.ReactNode,
   onEmoji?: EmojiResolver,
+  /** Названия ролей, которые сообщение реально позвало (#76) — подсвечиваются в тексте как упоминание. */
+  roleNames?: readonly string[],
+  /** Сервер решил, что `@everyone`/`@here` никого не позвали (`Message.mentionEveryone === false`, #76) — без подсветки. */
+  plainBroadcast = false,
 ): React.ReactNode[] {
+  const re = inlineFor(roleNames);
   const out: React.ReactNode[] = [];
   // Split on fenced blocks first so nothing inside them is interpreted.
   const parts = content.split(/(```[\s\S]*?```)/g);
@@ -194,7 +237,7 @@ export function renderMessageText(
       const text = quote.join('\n');
       out.push(
         <blockquote className="md-quote" key={`q${pi}-${idx}`}>
-          {inline(text, `q${pi}-${idx}`, onLink, onEmoji)}
+          {inline(text, `q${pi}-${idx}`, onLink, onEmoji, re, plainBroadcast)}
         </blockquote>,
       );
       quote = [];
@@ -205,7 +248,7 @@ export function renderMessageText(
         return;
       }
       flushQuote(li);
-      out.push(...inline(line, `l${pi}-${li}`, onLink, onEmoji));
+      out.push(...inline(line, `l${pi}-${li}`, onLink, onEmoji, re, plainBroadcast));
       if (li < lines.length - 1) out.push('\n');
     });
     flushQuote(lines.length);

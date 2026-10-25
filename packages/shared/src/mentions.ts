@@ -1,3 +1,5 @@
+import { has, Permission } from './permissions';
+
 /**
  * Кого упоминает сообщение — ОДНО правило на всё приложение.
  *
@@ -137,9 +139,14 @@ export function mentionsMe(
   username?: string | null,
   /** Для ГОСТЯ: его домашний ник и домен его инстанса — по ним к нему и обращаются (§5.5). */
   home?: { username: string; domain: string } | null,
+  /**
+   * `false` — `@everyone`/`@here` в этом сообщении никого не зовут (автору не хватило `MENTION_EVERYONE`, #76; сервер кладёт
+   * это в `Message.mentionEveryone`). По умолчанию зовут: у сообщений без поля (старые, вебхуки, ЛС) правило прежнее.
+   */
+  broadcast = true,
 ): boolean {
   const handles = mentionedHandles(content);
-  if (handles.some((h) => h.domain === null && (BROADCAST_MENTIONS as readonly string[]).includes(h.name))) return true;
+  if (broadcast && handles.some((h) => h.domain === null && (BROADCAST_MENTIONS as readonly string[]).includes(h.name))) return true;
   if (home?.username && home.domain) {
     const name = home.username.toLowerCase();
     const domain = home.domain.toLowerCase();
@@ -165,13 +172,136 @@ function escapeName(name: string): string {
  *
  * Postgres понимает те же lookahead/lookbehind (ARE), что и JS.
  */
-export function mentionSqlPattern(username?: string | null, home?: { username: string; domain: string } | null): string {
-  const names = [...BROADCAST_MENTIONS, ...(username ? [escapeName(username)] : [])];
+export function mentionSqlPattern(
+  username?: string | null,
+  home?: { username: string; domain: string } | null,
+  /** `false` — только личные обращения, без `@everyone`/`@here` (их считает `broadcastSqlPattern` с учётом права автора). */
+  broadcast = true,
+): string {
+  const names = [...(broadcast ? BROADCAST_MENTIONS : []), ...(username ? [escapeName(username)] : [])];
   const tail = '(?![A-Za-z0-9_]|[.-]+[A-Za-z0-9_])';
-  const plain = `@(${names.join('|')})${tail}`;
+  const plain = names.length ? `@(${names.join('|')})${tail}` : '';
   // 🔴 Гостю нужен ВТОРОЙ вариант: к нему обращаются `@ник@домен`, а его собственный `username` в
   // базе — служебная строка `id@instance`, по которой в тексте никто не пишет (§5.5).
   const guest =
-    home?.username && home.domain ? `|@${escapeName(home.username)}@${escapeName(home.domain)}${tail}` : '';
-  return `${MENTION_LEFT_GUARD}(?:${plain}${guest})`;
+    home?.username && home.domain ? `@${escapeName(home.username)}@${escapeName(home.domain)}${tail}` : '';
+  const alts = [plain, guest].filter(Boolean);
+  // Нечего искать (нет ни имени, ни гостевого обращения) — шаблон, который не совпадает ни с чем.
+  if (alts.length === 0) return '(?!)';
+  return `${MENTION_LEFT_GUARD}(?:${alts.join('|')})`;
+}
+
+/**
+ * Шаблон для SQL «в тексте есть `@everyone` или `@here`» (#76). Считается ОТДЕЛЬНО от личных обращений: зовёт такое
+ * обращение только если автору хватило `MENTION_EVERYONE` — SQL сверяет с `messages.mention_everyone`
+ * (`IS DISTINCT FROM false`: пусто у старых сообщений и вебхуков = зовёт, как раньше).
+ */
+export function broadcastSqlPattern(): string {
+  // `@` после — доменное обращение `@everyone@сосед` (как `hasBroadcastMention`: не общее), иначе SQL насчитал бы бейдж.
+  const tail = '(?![A-Za-z0-9_@]|[.-]+[A-Za-z0-9_])';
+  return `${MENTION_LEFT_GUARD}@(${BROADCAST_MENTIONS.join('|')})${tail}`;
+}
+
+/** Есть ли в тексте `@everyone`/`@here` (без домена) — тогда при отправке нужно решать, вправе ли автор их звать. */
+export function hasBroadcastMention(content: string): boolean {
+  return mentionedHandles(content).some((h) => h.domain === null && (BROADCAST_MENTIONS as readonly string[]).includes(h.name));
+}
+
+/** Вправе ли автор звать `@everyone`/`@here` и любые роли (#76); администратор проходит через `has`. */
+export function canMentionEveryone(authorPerms: bigint): boolean {
+  return has(authorPerms, Permission.MENTION_EVERYONE);
+}
+
+/* ───────────────────────── Упоминание РОЛИ (#76) ─────────────────────────
+ *
+ * Роль зовут по её названию в тексте (`@Модераторы`, `@Ночная смена`): названия бывают с пробелами и
+ * кириллицей, поэтому общее правило имён (`MENTION_NAME_SRC`, только латиница без пробелов) тут не
+ * годится — роли ищутся по СПИСКУ ролей сервера, а не разбором текста.
+ *
+ * 🔴 Кого реально разбудило — решает СЕРВЕР в момент отправки и кладёт id ролей в сообщение
+ * (`Message.mentionRoles`, колонка `messages.mention_roles`), как `mention_roles` у Discord. Клиент и
+ * SQL-счётчик не пересчитывают текст: роль могли переименовать, право у автора могли отнять, а бейдж
+ * «вас упомянули» не должен ни появляться, ни пропадать задним числом.
+ */
+
+/** Роль для разбора упоминания: достаточно id и названия. */
+export interface MentionableRole {
+  id: string;
+  name: string;
+}
+
+/** Не часть названия: после `@Роль` не должна идти буква/цифра/подчёркивание (`@Мод` не зовёт `@Модераторы`). */
+const ROLE_RIGHT_GUARD = '(?![\\p{L}\\p{N}_])';
+
+function escapeRoleName(name: string): string {
+  return name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+}
+
+/** Названия по убыванию длины: `@Ночная смена` обязана съесться раньше, чем роль `Ночная`. */
+function rolesLongestFirst<T extends MentionableRole>(roles: readonly T[]): T[] {
+  return roles
+    .filter((r) => r.name.trim().length > 0)
+    .sort((a, b) => b.name.length - a.name.length);
+}
+
+/**
+ * Кусок регулярки (без групп захвата) «`@` + название одной из ролей» с теми же стражами, что у
+ * личных упоминаний. Нужен подсветке в тексте (`messageText.tsx`), чтобы звать роль ровно так же,
+ * как её находит сервер. `null` — ролей нет, подсвечивать нечего.
+ */
+export function roleMentionPatternSrc(names: readonly string[]): string | null {
+  const list = [...new Set(names.map((n) => n.trim()).filter(Boolean))].sort((a, b) => b.length - a.length);
+  if (list.length === 0) return null;
+  return `${MENTION_LEFT_GUARD}@(?:${list.map(caselessRoleName).join('|')})${ROLE_RIGHT_GUARD}`;
+}
+
+/**
+ * Название роли без учёта регистра ВНУТРИ шаблона: `Модераторы` → `[Мм][Оо]…`. Общий шаблон подсветки
+ * (`messageText.tsx` `buildInline`) собран с флагами `gu` — флаг `i` там сломал бы другие группы (эмодзи `:a-z:`),
+ * а пинг (`mentionedRoleIds`) регистр не различает: `@модераторы` звал роль, но не подсвечивался (нашёл Codex, R266).
+ */
+function caselessRoleName(name: string): string {
+  return Array.from(name)
+    .map((ch) => {
+      const lo = ch.toLowerCase();
+      const up = ch.toUpperCase();
+      if (lo === up || Array.from(lo).length !== 1 || Array.from(up).length !== 1) return escapeRoleName(ch);
+      return `[${lo}${up}]`;
+    })
+    .join('');
+}
+
+/**
+ * Роли, упомянутые в тексте по названию (регистр не важен), без повторов.
+ *
+ * Роли перебираются от длинного названия к короткому, а найденное место вырезается: так
+ * `@Ночная смена` зовёт ТОЛЬКО роль «Ночная смена», а не заодно и роль «Ночная».
+ * Кто из найденных ролей вправе быть позванным — решает `canMentionRole`, не эта функция.
+ */
+export function mentionedRoleIds(content: string, roles: readonly MentionableRole[]): string[] {
+  const out: string[] = [];
+  let rest = content;
+  for (const r of rolesLongestFirst(roles)) {
+    const re = new RegExp(`${MENTION_LEFT_GUARD}@${escapeRoleName(r.name.trim())}${ROLE_RIGHT_GUARD}`, 'giu');
+    if (!re.test(rest)) continue;
+    // Вырезаем найденное пробелом-«стеной» (`\u0000`): соседний текст не должен склеиться в новое имя.
+    rest = rest.replace(re, '\u0000');
+    out.push(r.id);
+  }
+  return out;
+}
+
+/**
+ * Вправе ли автор позвать эту роль — как в Discord: роль помечена «можно упоминать» (зовёт любой) либо у автора есть
+ * право «Упоминать @everyone, @here и все роли» (`MENTION_EVERYONE`, #76; администратор проходит через `has`). Раньше
+ * здесь стояло `MANAGE_ROLES`; миграция 0152 выдала новое право тем, у кого оно было.
+ */
+export function canMentionRole(role: { mentionable: boolean }, authorPerms: bigint): boolean {
+  return role.mentionable || canMentionEveryone(authorPerms);
+}
+
+/** Упомянута ли сообщением хоть одна из моих ролей (`Message.mentionRoles` ∩ мои роли сервера). */
+export function mentionsMyRole(mentionRoles: readonly string[] | null | undefined, myRoleIds: readonly string[] | null | undefined): boolean {
+  if (!mentionRoles?.length || !myRoleIds?.length) return false;
+  return mentionRoles.some((id) => myRoleIds.includes(id));
 }

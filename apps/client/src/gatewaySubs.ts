@@ -22,7 +22,9 @@
  * Правила ниже втроём закрывают три отдельные дыры:
  *   1. до `ready` не слать ничего — гонки больше нет;
  *   2. на каждый `ready` слать ВЕСЬ список заново — переподключение восстанавливает подписки;
- *   3. отказ сервера снимает отметку «отправлено» — иначе один отказ глушит навсегда.
+ *   3. отказ сервера снимает отметку «отправлено» — иначе один отказ глушит навсегда;
+ *   4. временный отказ повторяется САМ, с отсрочкой и потолком (#132) — на стабильном сокете
+ *      следующего `ready` можно ждать часами.
  */
 
 export interface SubsState {
@@ -32,10 +34,37 @@ export interface SubsState {
   sent: Set<string>;
   /** Пришёл ли `ready` — до него сервер не знает, кто мы. */
   ready: boolean;
+  /** Сколько повторов после отказа уже назначено на ТЕКУЩЕМ соединении — по серверу (#132). */
+  retries: Map<string, number>;
+  /**
+   * Поколение соединения: растёт на `ready`, обрыве и выходе. Повтор, назначенный на прошлом
+   * соединении, приходит со старым номером и ничего не шлёт — новый `ready` и так прислал весь список.
+   */
+  gen: number;
 }
 
 export function newSubsState(): SubsState {
-  return { want: new Set(), sent: new Set(), ready: false };
+  return { want: new Set(), sent: new Set(), ready: false, retries: new Map(), gen: 0 };
+}
+
+/**
+ * Повтор отклонённой подписки (#132): отсрочка 2 → 4 → 8 → 16 → 30 с, не больше 5 раз за соединение.
+ * Потолок — чтобы сбоящий сервер не получал стук от каждого клиента; дальше ждём следующего `ready`.
+ */
+export const SUB_RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 16_000, 30_000];
+
+/**
+ * Окончательные отказы — повторять бессмысленно до переподключения или нового желания (#132).
+ * «not a member» — ответ по праву доступа: человека нет на сервере, повтор его туда не добавит.
+ * Всё остальное («identify first» — гонка; «subscribe failed» — сбой базы; неизвестное от будущего
+ * сервера) считаем временным: ошибиться в сторону повтора с потолком дешевле, чем молча оглохнуть.
+ */
+const FINAL_REJECT_REASONS: ReadonlySet<string> = new Set(['not a member']);
+
+/** Назначенный повтор: через сколько и для какого поколения соединения. */
+export interface SubRetry {
+  delayMs: number;
+  gen: number;
 }
 
 /**
@@ -54,6 +83,8 @@ export function wantSub(s: SubsState, serverId: string): string[] {
 /** Сервер представился. Слать ВЕСЬ список заново — это и есть восстановление после обрыва. */
 export function onReady(s: SubsState): string[] {
   s.ready = true;
+  s.gen++;
+  s.retries.clear();
   s.sent = new Set(s.want);
   return [...s.want];
 }
@@ -61,7 +92,9 @@ export function onReady(s: SubsState): string[] {
 /** Соединение оборвалось: отправленное на нём больше не считается отправленным. */
 export function onDisconnect(s: SubsState): void {
   s.ready = false;
+  s.gen++;
   s.sent.clear();
+  s.retries.clear();
 }
 
 /**
@@ -69,15 +102,37 @@ export function onDisconnect(s: SubsState): void {
  *
  * ⚠️ Снимаем ТОЛЬКО отметку «отправлено», из `want` не убираем: отказ бывает временным (перезапуск
  * бэкенда, недоступная база), а выбывший из `want` сервер не вернётся уже никогда. Пере-попытка
- * произойдёт на следующем `ready`.
+ * произойдёт на следующем `ready` — и, если отказ временный, раньше: возвращается назначенный
+ * повтор (#132), который вызывающий отрабатывает таймером через `onRetryDue`. `null` — не повторять:
+ * отказ окончательный, сервер нам не нужен, соединения нет или потолок повторов исчерпан.
  */
-export function onSubRejected(s: SubsState, serverId: string): void {
+export function onSubRejected(s: SubsState, serverId: string, reason?: string): SubRetry | null {
   s.sent.delete(serverId);
+  if (!s.ready || !s.want.has(serverId)) return null;
+  if (reason !== undefined && FINAL_REJECT_REASONS.has(reason)) return null;
+  const done = s.retries.get(serverId) ?? 0;
+  if (done >= SUB_RETRY_DELAYS_MS.length) return null;
+  s.retries.set(serverId, done + 1);
+  return { delayMs: SUB_RETRY_DELAYS_MS[done], gen: s.gen };
+}
+
+/**
+ * Подошёл срок назначенного повтора. Возвращает то, что слать (пусто — уже не нужно).
+ *
+ * ⚠️ Дубля не бывает: если за отсрочку сервер уже ушёл заново (новое желание, новый `ready`), он
+ * отмечен «отправлено», а повтор с прошлого соединения узнаётся по устаревшему поколению.
+ */
+export function onRetryDue(s: SubsState, serverId: string, gen: number): string[] {
+  if (gen !== s.gen || !s.ready || !s.want.has(serverId) || s.sent.has(serverId)) return [];
+  s.sent.add(serverId);
+  return [serverId];
 }
 
 /** Выход из аккаунта: следующий вход подпишется на серверы СВОЕГО пользователя. */
 export function resetSubs(s: SubsState): void {
   s.want.clear();
   s.sent.clear();
+  s.retries.clear();
+  s.gen++;
   s.ready = false;
 }

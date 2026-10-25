@@ -17,6 +17,8 @@ import { VoiceOverlay } from './components/VoiceOverlay';
 import { TipToast } from './components/TipToast';
 import { NotifyPopups } from './components/NotifyPopups';
 import { SplashScreen } from './components/SplashScreen';
+import { WindowTitleBar } from './components/WindowTitleBar';
+import { hasOwnTitleBar } from './titleBar';
 // Телефонный профиль собеседника (#218): подставляет экран в `UserContextMenu` (`providePhoneProfile`) — без него на телефоне карточка ПК.
 import './components/PhoneProfile';
 import './styles.css';
@@ -25,6 +27,7 @@ import { applyUiPrefs, applyUiScale, getUiScale } from './uiPrefs';
 import { installAndroidBack } from './androidBack';
 import { installNativeSafeArea } from './nativeSafeArea';
 import { installNativeMicActions } from './nativeMicActions';
+import { installViewerRotation } from './viewerRotation';
 import { initPushRegistration } from './nativeUnifiedPush';
 import { ensureNotifyPermission } from './notifications';
 import { notifyIfJustUpdated, runLaunchUpdate, startUpdatePolling } from './updater';
@@ -53,6 +56,8 @@ installAndroidBack();
 installNativeSafeArea();
 // Android: кнопки микрофона в уведомлении голоса и состояние микрофона нативу (#156, nativeMicActions.ts).
 installNativeMicActions();
+// Android-телефон: поворот экрана только на время просмотра фото/видео, потом снова портрет (viewerRotation.ts).
+installViewerRotation();
 
 const root = createRoot(document.getElementById('root')!);
 
@@ -119,6 +124,19 @@ if (httpsUrl) {
   startLastSeenRefresh();
   // Название своего инстанса для подписи «через «…»» у получателя (Э7 ч.3, D; `selfInstanceName.ts`).
   startSelfInstanceName();
+  // Своя полоса окна десктопа (#219, `titleBar.ts`): системной у главного окна нет (`decorations: false`).
+  // Отдельный корень ДО `#root` и вне `App`: упадёт приложение — полоса с крестиком останется.
+  if (hasOwnTitleBar()) {
+    document.documentElement.classList.add('gv-frameless');
+    const bar = document.createElement('div');
+    bar.id = 'gv-titlebar-root';
+    document.body.insertBefore(bar, document.body.firstChild);
+    createRoot(bar).render(
+      <ErrorBoundary silent>
+        <WindowTitleBar />
+      </ErrorBoundary>,
+    );
+  }
   root.render(
     <ErrorBoundary>
       <App />

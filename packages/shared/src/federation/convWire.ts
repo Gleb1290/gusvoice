@@ -157,6 +157,11 @@ export interface FedConvAttachmentWire {
    * навсегда) — после прослушивания получатель стирает копию и шлёт `listen`, автор у себя гасит оригинал.
    */
   once?: boolean;
+  /**
+   * 19.10 (#226, признак связки `dm2ttl`): таймер одноразового фото/видео, с (1…60), только вместе с `once`. В проводе ключ
+   * `once_ttl` есть только у таких; старый сосед его не читает (такое ему и не уходит — `dm2ttl`).
+   */
+  onceTtl?: number;
 }
 
 export interface FedConvForwardWire {
@@ -354,6 +359,7 @@ export function serializeConvAttachmentWire(a: FedConvAttachmentWire): Record<st
     ...(a.gif ? { gif: true } : {}),
     ...(a.round ? { round: true } : {}),
     ...(a.once ? { once: true } : {}),
+    ...(a.once && a.onceTtl ? { once_ttl: a.onceTtl } : {}),
   };
 }
 
@@ -385,6 +391,9 @@ export function parseConvAttachmentWire(raw: unknown): FedConvAttachmentWire | n
     ...(r.gif === true ? { gif: true } : {}),
     ...(r.round === true ? { round: true } : {}),
     ...(r.once === true ? { once: true } : {}),
+    ...(r.once === true && typeof r.once_ttl === 'number' && Number.isInteger(r.once_ttl) && r.once_ttl >= 1 && r.once_ttl <= 60
+      ? { onceTtl: r.once_ttl }
+      : {}),
   };
 }
 

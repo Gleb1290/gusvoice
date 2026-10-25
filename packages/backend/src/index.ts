@@ -89,6 +89,7 @@ import { linkPreviewRoutes } from './routes/linkPreview.js';
 import { mapsStaticRoutes } from './routes/mapsStatic.js';
 import { mapsTilesRoutes } from './routes/mapsTiles.js';
 import { messageRoutes } from './routes/messages.js';
+import { webhookRoutes } from './routes/webhooks.js';
 import { pushRoutes } from './routes/push.js';
 import { onBlockChange } from './blocks.js';
 import { blockRoutes } from './routes/blocks.js';
@@ -149,8 +150,8 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body,
 app.setErrorHandler((err, req, reply) => {
   if (err instanceof ZodError) {
     // Surface the first issue so the client shows *what* to fix, not a bare "validation".
-    const first = err.errors[0];
-    return reply.code(400).send({ error: first?.message ?? 'Проверьте введённые данные', details: err.errors });
+    const first = err.issues[0];
+    return reply.code(400).send({ error: first?.message ?? 'Проверьте введённые данные', details: err.issues });
   }
   req.log.error(err);
   const e = err as { statusCode?: number; message?: string };
@@ -179,6 +180,8 @@ await app.register(
     await api.register(serverRoutes);
     await api.register(channelRoutes);
     await api.register(messageRoutes);
+    // Входящие вебхуки (#24): управление под входом + приём `POST /api/webhooks/:id/:token` без входа (`routes/webhooks.ts`).
+    await api.register(webhookRoutes);
     // Беседы ЛС (этап 1): с шага 1б живые ЛС лежат в них, и `/auth/me` объявляет `features: ['conv1']`.
     await api.register(convRoutes);
     await api.register(convGroupRoutes);

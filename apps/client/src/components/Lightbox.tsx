@@ -117,6 +117,7 @@ export function Lightbox({
   onNearEdge,
   actions,
   onAuthor,
+  once,
 }: {
   images: LightboxImage[];
   index: number;
@@ -131,6 +132,11 @@ export function Lightbox({
   actions?: (img: LightboxImage, index: number) => LightboxAction[];
   /** Нажали имя отправителя — профиль (G10, как у Telegram: просмотр закрывается, карточка у курсора). */
   onAuthor?: (index: number, e: React.MouseEvent) => void;
+  /**
+   * Одноразовое фото/видео (19.10, #226): один файл, без «Сохранить», меню, PiP и ПКМ; снимки экрана запрещены на время
+   * просмотра (`protect` — `screenGuard.protectScreen`, даёт лента: у просмотрщика закрытый перечень импортов); `deadline` — когда просмотр закроется сам (таймер), `null` — «просмотр один раз» до закрытия.
+   */
+  once?: { deadline: number | null; protect?: () => () => void };
 }) {
   const phone = usePhoneLayout();
   const [zoom, setZoom] = useState(1);
@@ -177,6 +183,23 @@ export function Lightbox({
   const [flip, setFlip] = useState({ h: false, v: false });
   /** Меню «⋯» / ПКМ (G10): где открыто. */
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Одноразовое (#226): защита от снимков на время просмотра и отсчёт; вышел — просмотр закрывается (лента жжёт сообщение).
+  const onceOn = !!once;
+  const onceDeadline = once?.deadline ?? null;
+  const [onceNow, setOnceNow] = useState(() => Date.now());
+  const onceProtect = once?.protect;
+  useEffect(() => (onceOn && onceProtect ? onceProtect() : undefined), [onceOn, onceProtect]);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    if (onceDeadline === null) return;
+    const t = window.setInterval(() => {
+      const now = Date.now();
+      setOnceNow(now);
+      if (now >= onceDeadline) onCloseRef.current();
+    }, 250);
+    return () => window.clearInterval(t);
+  }, [onceDeadline]);
   const menuOpen = useRef(false);
   menuOpen.current = !!menu;
   /** Отпущенное после перетаскивания фото доезжает по инерции — плавный переход длиннее обычного. */
@@ -512,6 +535,16 @@ export function Lightbox({
     baseZoom.current = z;
     setZoom(z);
   }, []);
+
+  // Поворот телефона (19.10, `viewerRotation.ts`): сцена сменила размеры — подогнать заново, если масштаб «по размеру»
+  // (человек не увеличивал и не поворачивал картинку), иначе подтянутый аватар вылез бы за новую высоту сцены.
+  useEffect(() => {
+    const onResize = () => {
+      if (rotRef.current === 0 && Math.abs(zoomRef.current - baseZoom.current) < 0.001) applyFit();
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [applyFit]);
 
   /**
    * Смена картинки: сбрасываем масштаб и сразу пробуем подогнать.
@@ -887,6 +920,11 @@ export function Lightbox({
         onClose();
       }}
       onContextMenu={(e) => {
+        // Одноразовое (#226): ни меню, ни родного «Сохранить как» браузера.
+        if (onceOn) {
+          e.preventDefault();
+          return;
+        }
         // ПКМ — то же меню, что «⋯» (G10, tdesktop). Долгое нажатие пальцем — нет: на телефоне меню у кнопки «⋯».
         if (lastTouch.current || menuItems.length === 0) return;
         if (e.target instanceof Element && e.target.closest('.lb-menu')) return;
@@ -937,7 +975,7 @@ export function Lightbox({
         </div>
         {/* Видео (G33): скорость 0,5–2,5× (кнопка голосовых со своей скоростью), «Зациклить», «картинка в картинке» (Р-3). */}
         {isVideo && <VoiceSpeedButton value={rate} onChange={applyRate} spedUp={videoSpedUp} />}
-        {isVideo && (
+        {isVideo && !onceOn && (
           <button
             type="button"
             className={loop ? 'lb-btn on' : 'lb-btn'}
@@ -948,7 +986,13 @@ export function Lightbox({
             <Icon name="repeat" size={18} />
           </button>
         )}
-        {isVideo && pipSupported() && (
+        {onceOn && (
+          <span className="lb-once" aria-live="polite" title={onceDeadline === null ? 'Просмотр один раз' : 'Исчезнет через'}>
+            <Icon name={onceDeadline === null ? 'flame' : 'clock'} size={16} />
+            {onceDeadline === null ? '1' : `${Math.max(0, Math.ceil((onceDeadline - onceNow) / 1000))} с`}
+          </span>
+        )}
+        {isVideo && !onceOn && pipSupported() && (
           <button type="button" className="lb-btn" title="Картинка в картинке" onClick={startPip}>
             <Icon name="pip" size={18} />
           </button>

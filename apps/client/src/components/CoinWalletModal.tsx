@@ -1,4 +1,4 @@
-import { AVATAR_RENTAL_MAX_DAYS, avatarRentalExtendFrom } from '@gusvoice/shared';
+import { AVATAR_RENTAL_MAX_DAYS, avatarRentalExtendFrom, pluralDays } from '@gusvoice/shared';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { isMockEconomy, mockLeaderboard } from '../benchMock';
@@ -102,11 +102,15 @@ function ShopSection({ view, serverId }: { view: EconomyView; serverId: string }
       ? Math.max(1, Math.ceil((new Date(animatedUntil).getTime() - Date.now()) / 86_400_000))
       : null;
   /**
-   * Потолок аренды — 60 дней вперёд (решение 29.09): осталось 45 — ещё 30 не купишь. Правило общее с сервером
+   * Потолок аренды — N дней вперёд (решение 29.09; с #228 N — настройка инстанса, приходит в записи магазина,
+   * 60 — только умолчание для старого сервера): осталось больше N−30 — ещё 30 не купишь. Правило общее с сервером
    * (`avatarRentalExtendFrom`); кнопка заранее говорит, С КАКОГО ЧИСЛА можно продлить, а не отдаёт отказ после нажатия.
    */
+  const rentalMaxDays = (view.shop ?? []).find((e) => e.item === 'animated-avatar')?.rentalMaxDays ?? AVATAR_RENTAL_MAX_DAYS;
   const extendFrom =
-    ownsAnimated && animatedUntil ? avatarRentalExtendFrom(new Date(animatedUntil).getTime(), Date.now()) : null;
+    ownsAnimated && animatedUntil
+      ? avatarRentalExtendFrom(new Date(animatedUntil).getTime(), Date.now(), undefined, rentalMaxDays)
+      : null;
 
   async function buy(item: string) {
     setBusy(item);
@@ -180,7 +184,7 @@ function ShopSection({ view, serverId }: { view: EconomyView; serverId: string }
                       disabled={busy !== null || short < 0 || extendFrom !== null}
                       title={
                         extendFrom !== null
-                          ? `Больше чем на ${AVATAR_RENTAL_MAX_DAYS} дней вперёд не оплатить`
+                          ? `Больше чем на ${pluralDays(rentalMaxDays)} вперёд не оплатить`
                           : undefined
                       }
                       onClick={() => void buy(e.item)}

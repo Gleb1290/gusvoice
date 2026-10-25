@@ -87,6 +87,8 @@ export function AttachmentView({
   // Real download goes through the backend (Content-Disposition: attachment) — the
   // <a download> attribute is ignored cross-origin, so a plain MinIO link just NAVIGATES.
   const dl = api.attachmentDownloadUrl(a);
+  // Одноразовое фото/видео (`ttlmedia1`, #226): закрытая плитка, кадр не показываем; открыть может только получатель.
+  if (onceMediaTile(a)) return <OnceMediaTile a={a} mine={!!voice?.mine} fill={fill} onOpen={onOpen} />;
   // Голосовое (#20) — плеер с полоской, а не карточка файла. Признак — огибающая на вложении;
   // просто скинутый mp3 остаётся файлом, полоски у него нет.
   if (isVoiceMessage(a)) return <VoiceMessage a={a} meta={voice} />;
@@ -280,5 +282,53 @@ function MediaStub({
         </span>
       </button>
     </div>
+  );
+}
+
+/**
+ * Одноразовое фото или видео в ленте (19.10, #226; Telegram Android — размытая плитка с огнём «1» или таймером, по нажатию —
+ * просмотр с отсчётом): заглушка БЕЗ загрузки файла (сервер отдаёт его получателю только после `once-open`), посередине —
+ * значок «1» / число секунд. Получатель нажимает —
+ * `onOpen` (лента ставит отметку `once-open` и открывает просмотр); у отправителя плитка не открывается — подсказка
+ * tdesktop `lng_ttl_photo_tooltip_out`.
+ */
+/** Как `isOnceMedia` в `shared` — здесь своими силами: у модуля закрытый перечень импортов (проверки R159/R230). */
+function onceMediaTile(a: Attachment): boolean {
+  if (a.once !== true || a.asFile || a.gif || isRoundVideo(a) || isVoiceMessage(a)) return false;
+  return (isImage(a.contentType) && a.contentType !== 'image/gif') || isVideo(a.contentType);
+}
+
+function OnceMediaTile({ a, mine, fill, onOpen }: { a: Attachment; mine: boolean; fill: boolean; onOpen?: (a: Attachment) => void }) {
+  const [tip, setTip] = useState(false);
+  const box = fill ? null : attachmentBox(a.width, a.height, ATT_IMG_MAX_W, ATT_IMG_MAX_H);
+  const video = isVideo(a.contentType);
+  const ttl = a.onceTtl ?? 0;
+  const what = video ? 'видео' : 'фото';
+  const hint = mine
+    ? 'Сообщение исчезнет после того, как собеседник его просмотрит'
+    : ttl
+      ? `Одноразовое ${what}: после открытия исчезнет через ${ttl} с`
+      : `Одноразовое ${what}: можно посмотреть один раз`;
+  return (
+    <button
+      type="button"
+      className={`att-once${mine ? ' mine' : ''}`}
+      title={hint}
+      aria-label={hint}
+      style={box ? { width: box.width, aspectRatio: `${box.width} / ${box.height}` } : undefined}
+      onContextMenu={(e) => e.preventDefault()}
+      onClick={() => {
+        if (!mine) return onOpen?.(a);
+        // Отправитель: подсказка поверх плитки на 3 с (tdesktop — всплывающая подсказка `lng_ttl_photo_tooltip_out`).
+        setTip(true);
+        window.setTimeout(() => setTip(false), 3000);
+      }}
+    >
+      <span className="att-once-mark" aria-hidden="true">
+        <Icon name={ttl ? 'clock' : 'flame'} size={22} />
+        <span className="att-once-num">{ttl ? String(ttl) : '1'}</span>
+      </span>
+      {tip && <span className="att-once-tip">{hint}</span>}
+    </button>
   );
 }

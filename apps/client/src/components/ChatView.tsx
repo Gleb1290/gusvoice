@@ -1,4 +1,4 @@
-import { type Channel, has, type Message, Permission, permsFromString, type Role } from '@gusvoice/shared';
+import { type Channel, canMentionEveryone, canMentionRole, has, type Message, Permission, permsFromString, type Role } from '@gusvoice/shared';
 import { useChannelVisit } from '../channelVisit';
 import { useMemo, useEffect, useState } from 'react';
 import { api } from '../api';
@@ -38,7 +38,8 @@ export function ChatView({ channel }: { channel: Channel }) {
   const appendMessage = useStore((s) => s.appendMessage);
   const updateMessage = useStore((s) => s.updateMessage);
   const removeMessage = useStore((s) => s.removeMessage);
-  const canModerate = has(permsFromString(perms), Permission.MANAGE_MESSAGES);
+  const permsBits = useMemo(() => permsFromString(perms), [perms]);
+  const canModerate = has(permsBits, Permission.MANAGE_MESSAGES);
 
   const nameOf = useNameResolver();
   // Эмодзи и ники — обе настройки СЕРВЕРНЫЕ, поэтому передаются только отсюда, не из ЛС (#18/#73).
@@ -81,13 +82,19 @@ export function ChatView({ channel }: { channel: Channel }) {
         avatarUrl: m.user.avatarUrl,
         online: onlineUsers.includes(m.user.id),
       })),
+      // Роль в подсказке — только та, что автор вправе позвать (#76): «можно упоминать» либо у него право `MENTION_EVERYONE`
+      // (`canMentionRole`, то же правило проверяет сервер при отправке).
       roles: roles
-        .filter((r) => !r.isEveryone && r.mentionable)
+        .filter((r) => !r.isEveryone && canMentionRole(r, permsBits))
         .map((r) => ({ id: r.id, name: r.name, mentionable: r.mentionable })),
       channels: channels.filter((c) => c.type === 'text').map((c) => ({ id: c.id, name: c.name })),
     }),
-    [members, onlineUsers, roles, channels],
+    [members, onlineUsers, roles, channels, permsBits],
   );
+  // `@everyone`/`@here` в подсказке — только с правом «Упоминать @everyone, @here и все роли» (#76); без него сервер текст
+  // оставит, но никого не позовёт, так что и предлагать нечего. Отдельно от `autocomplete`: ссылка меняется лишь со сменой права.
+  const noBroadcast = !canMentionEveryone(permsBits);
+  const autocompleteWithRights = useMemo(() => ({ ...autocomplete, noBroadcast }), [autocomplete, noBroadcast]);
 
   /* «Новые сообщения» divider (#15): метка визита замирает на входе и двигается вперёд на выходе —
      черта стоит там, где человек перестал читать, а не убегает за новыми сообщениями. Что считать
@@ -133,7 +140,7 @@ export function ChatView({ channel }: { channel: Channel }) {
       loading={messagesRaw === undefined && !failed}
       // Сбой при пустом кеше — ошибка с повтором, а не вечные скелетоны (#212, Б5).
       emptyState={failed ? <FeedLoadError onRetry={() => void openChannel(channel.id)} /> : undefined}
-      autocomplete={autocomplete}
+      autocomplete={autocompleteWithRights}
       // Ники действуют в пределах сервера — поэтому резолвер передаёт КАНАЛ, а ЛС не передают (#73).
       nameOf={nameOf}
       onEmoji={onEmoji}

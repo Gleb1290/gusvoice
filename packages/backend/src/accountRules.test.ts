@@ -92,6 +92,8 @@ const RETAINED_USER_FKS = [
   'server_soundboard.created_by',
   'sticker_packs.created_by',
   'voice_activity.user_id',
+  'webhooks.created_by',
+  'webhooks.user_id',
 ].sort();
 
 const CLEARED_NONSTANDARD_USER_FKS = [
@@ -159,7 +161,7 @@ describe('удаление аккаунта обезличивает, а не с
     // `homeInstanceId`/`homeUserId` сохраняются намеренно (F3, §5.6.2): значок инстанса остаётся у
     // обезличенного гостя, и по этой же паре действует запрет на инстанс.
     // Политики звонков и сообщений — не идентификаторы: удалённая учётка не может инициировать ни то ни другое.
-    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId', 'callPrivacy', 'messagePrivacy'];
+    const retained = ['id', 'createdAt', 'homeInstanceId', 'homeUserId', 'callPrivacy', 'messagePrivacy', 'bot'];
     const invalidatedAfterTransaction = ['tokenGeneration'];
     assert.deepEqual(schemaColumns, [...rowAnonymized, ...retained, ...invalidatedAfterTransaction].sort());
   });

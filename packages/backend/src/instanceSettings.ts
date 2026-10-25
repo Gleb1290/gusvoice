@@ -22,6 +22,7 @@
 import { eq } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { instanceSettings } from './db/schema.js';
+import { clampAvatarRentalMaxDays } from '@gusvoice/shared';
 import { SHOP_CATALOG } from './shopRules.js';
 
 /** Ключ в `instance_settings`. Рядом с `smtp`, формат тот же — JSON-значение. */
@@ -37,6 +38,8 @@ export const INSTANCE_PRICE_MAX_MINUTES = 100_000;
 type InstanceEconomy = Record<string, unknown> & {
   /** Цена анимированного аватара в минутах сидения. */
   avatarPriceMinutes?: number;
+  /** Потолок аренды анимированного аватара: на сколько дней вперёд можно оплатить (#228). */
+  avatarRentalMaxDays?: number;
 };
 
 async function read(): Promise<InstanceEconomy> {
@@ -65,6 +68,27 @@ export async function avatarPriceMinutes(): Promise<number> {
 /** Записать цену. Вызывать ТОЛЬКО из маршрута, закрытого супер-админом инстанса. */
 export async function setAvatarPriceMinutes(minutes: number): Promise<void> {
   const next: InstanceEconomy = { ...(await read()), avatarPriceMinutes: Math.floor(minutes) };
+  await db
+    .insert(instanceSettings)
+    .values({ key: ECONOMY_KEY, value: next, updatedAt: new Date() })
+    .onConflictDoUpdate({ target: instanceSettings.key, set: { value: next, updatedAt: new Date() } });
+}
+
+/**
+ * Потолок аренды анимированного аватара в днях (#228): «на сколько максимально можно купить/продлить».
+ *
+ * ⚠️ Значения нет или мусор — умолчание `AVATAR_RENTAL_MAX_DAYS` (60): свежий инстанс работает без настроек.
+ * Значение вне границ (30…365) приводится к границе — хранится то, что записали, а читается допустимое,
+ * поэтому правка границ позже не ломает старые записи. Хранение — в том же JSON `economy`, что и цена: миграции нет.
+ * Уменьшили потолок — уже оплаченные сроки остаются (правило проверяет только новую покупку, `shopRules.avatarRentalFull`).
+ */
+export async function avatarRentalMaxDays(): Promise<number> {
+  return clampAvatarRentalMaxDays((await read()).avatarRentalMaxDays);
+}
+
+/** Записать потолок. Вызывать ТОЛЬКО из маршрута, закрытого супер-админом инстанса; границы проверяет маршрут. */
+export async function setAvatarRentalMaxDays(days: number): Promise<void> {
+  const next: InstanceEconomy = { ...(await read()), avatarRentalMaxDays: Math.floor(days) };
   await db
     .insert(instanceSettings)
     .values({ key: ECONOMY_KEY, value: next, updatedAt: new Date() })

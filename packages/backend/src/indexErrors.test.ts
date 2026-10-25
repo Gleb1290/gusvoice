@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import Fastify from 'fastify';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import ts from 'typescript';
 
 const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -72,9 +72,66 @@ it('R131 ZodError отдаёт 400, первое объяснение и дет�
   // Глобальный отказ не должен превращать корректируемый ввод в 500 или потерять конкретное поле ошибки.
   const error = new ZodError([{ code: 'custom', path: ['size'], message: 'Размер не подходит' },
     { code: 'custom', path: ['name'], message: 'Имя не подходит' }]);
-  assert.deepEqual(await response(error), { status: 400, data: { error: 'Размер не подходит', details: error.errors } });
+  assert.deepEqual(await response(error), { status: 400, data: { error: 'Размер не подходит', details: error.issues } });
   assert.deepEqual(await response(new ZodError([])),
     { status: 400, data: { error: 'Проверьте введённые данные', details: [] } });
+});
+
+function validationError() {
+  // Настоящие issues v4 включают путь и код: не закрепляем придуманную копию DTO ошибки.
+  const result = z.object({ rows: z.array(z.object({
+    name: z.string().min(3, 'Имя должно быть длиннее'),
+    size: z.number().positive('Размер должен быть положительным'),
+  })) }).safeParse({ rows: [{ name: '', size: 0 }] });
+  assert.equal(result.success, false, 'фикстура действительно не проходит валидацию');
+  assert.ok(result.error instanceof ZodError);
+  assert.deepEqual(result.error.issues.map(issue => issue.path), [['rows', 0, 'name'], ['rows', 0, 'size']]);
+  assert.equal(result.error.issues.length, 2);
+  return result.error;
+}
+
+async function checkValidationReply(error: ZodError, raw = source) {
+  const expected = { status: 400, data: {
+    error: error.issues[0]?.message ?? 'Проверьте введённые данные', details: error.issues,
+  } };
+  assert.deepEqual(await response(error, raw), expected,
+    'R289-zod-response: HTTP 400 сохраняет первую проблему и все issues, включая пустой список');
+}
+
+function changeErrorHandler(from: string, to: string) {
+  assert.equal(source.split(from).length - 1, 1, 'контрфакт адресует одно действующее выражение обработчика');
+  return source.replace(from, to);
+}
+
+function zodResponseFailure(error: unknown) {
+  return error instanceof assert.AssertionError && error.operator === 'deepStrictEqual'
+    && error.message.startsWith('R289-zod-response:');
+}
+
+it('R289 настоящая ошибка схемы v4 отдаёт HTTP 400, первую причину и обе проблемы с вложенными путями', async () => {
+  // Терять остальные поля issues нельзя: клиенту нужен весь разбор, а не только общая строка.
+  await checkValidationReply(validationError());
+  await checkValidationReply(new ZodError([]));
+});
+
+it('R289 контрфакты старого errors и последней вместо первой причины отвергаются на HTTP-границе', async () => {
+  const error = validationError();
+  for (const [from, to] of [
+    ['const first = err.issues[0];', 'const first = err.errors[0];'],
+    ['details: err.issues', 'details: err.errors'],
+    ['const first = err.issues[0];', 'const first = err.issues[err.issues.length - 1];'],
+  ]) {
+    // original-first: неизвестный импорт или ошибка загрузки не считаются обнаружением мутанта.
+    await checkValidationReply(error);
+    await assert.rejects(checkValidationReply(error, changeErrorHandler(from, to)), zodResponseFailure);
+  }
+});
+
+it('R289 контрфакт потерянной подсказки при пустых issues не превращается в безымянную ошибку', async () => {
+  const error = new ZodError([]);
+  await checkValidationReply(error);
+  const mutant = changeErrorHandler("first?.message ?? 'Проверьте введённые данные'", "first?.message ?? ''");
+  await assert.rejects(checkValidationReply(error, mutant), zodResponseFailure);
 });
 
 it('R131 мутант возврата e.message для внутренней ошибки отвергается настоящим inject', async () => {

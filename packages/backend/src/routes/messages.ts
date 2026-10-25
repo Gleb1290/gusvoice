@@ -6,6 +6,8 @@ import {
   POLL_MAX_OPTIONS,
   SERVER_SEARCH_MIN_CHARS,
   VOICE_MAX_MS,
+  canMentionEveryone,
+  hasBroadcastMention,
   WAVEFORM_BUCKETS,
   type Attachment,
   type MessageReplyPreview,
@@ -31,7 +33,7 @@ import { pollsFor, vote, votersOf } from '../polls.js';
 import { MESSAGE_TEXT_MAX, replyAttachmentPreview, TEXT_TOO_LONG } from '../convRules.js';
 import { channelReads, channels, messageReactions, messages, polls, stickerPacks, stickers, users } from '../db/schema.js';
 import { getChannelPermissions, getServerChannelPermissions, searchableChannelIds } from '../permissions.js';
-import { contentPreview, resolveMentionedMembers, sendPushToUsers } from '../push.js';
+import { contentPreview, resolveMentionedMembers, resolveRoleMentions, sendPushToUsers } from '../push.js';
 import { publishToChannel, publishToUser } from '../realtime.js';
 import { serializeMessage, serializeUserBrief } from '../serialize.js';
 import { attachmentBlocked, isOwnMediaUrl, putAttachment, storageConfigured } from '../storage.js';
@@ -97,7 +99,8 @@ async function replyPreviewsFor(replyToIds: (string | null)[]): Promise<Map<stri
   for (const r of rows) {
     out.set(r.m.id, {
       id: r.m.id,
-      authorName: r.u.displayName,
+      // Вебхук (#24): имя, под которым пришло сообщение, а не служебной строки-автора.
+      authorName: r.m.webhookId ? (r.m.webhookName ?? r.u.displayName) : r.u.displayName,
       content: r.m.content,
       ...replyAttachmentPreview(r.m.attachments, !!r.m.sticker),
     });
@@ -378,16 +381,32 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const [author] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
+    // `@Роль` (#76): какие роли сообщение реально зовёт — решаем СЕЙЧАС, по праву автора, и кладём в сообщение.
+    const mentionRoleIds = await resolveRoleMentions(content, channel.serverId, perms.permissions);
+    // `@everyone`/`@here` (#76): зовут только с правом `MENTION_EVERYONE` (в канале — с учётом его переопределений); без
+    // права текст остаётся, но флаг `false` гасит звук, значок и пуш. Нет таких обращений — NULL.
+    const broadcastText = hasBroadcastMention(content);
+    const mentionEveryone = broadcastText ? canMentionEveryone(perms.permissions) : null;
     const [row] = await db
       .insert(messages)
-      .values({ id: id(), channelId, authorId: author.id, content, attachments: body.attachments, replyToId, sticker })
+      .values({
+        id: id(),
+        channelId,
+        authorId: author.id,
+        content,
+        attachments: body.attachments,
+        replyToId,
+        sticker,
+        mentionRoles: mentionRoleIds,
+        mentionEveryone,
+      })
       .returning();
 
     const replies = await replyPreviewsFor([replyToId]);
     const message = serializeMessage({ ...row, author, replyTo: replyToId ? (replies.get(replyToId) ?? null) : null });
     await publishToChannel(channel.serverId, channelId, { t: 'message.create', channelId, serverId: channel.serverId, message });
     // Wake offline @mentioned members (fire-and-forget; only fires when the content has an @mention).
-    void resolveMentionedMembers(content, channel.serverId, author.id, channelId).then(async (ids) => {
+    void resolveMentionedMembers(content, channel.serverId, author.id, channelId, mentionRoleIds, mentionEveryone !== false).then(async (ids) => {
       if (ids.length === 0) return;
       // Push-bomb debounce (#5, P1-3): at most one mention-push per recipient per channel per window,
       // so a burst of @mentions can't machine-gun someone's phone.

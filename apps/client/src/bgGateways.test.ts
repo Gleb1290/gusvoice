@@ -142,3 +142,41 @@ for (const mutant of [
   await assert.rejects(() => mutant.check(source.replace(mutant.from, mutant.to)), e => e instanceof assert.AssertionError
     && e.message.startsWith(mutant.prefix) && e.operator === 'strictEqual' && e.actual === mutant.actual && e.expected === mutant.expected);
 });
+
+async function backgroundBroadcast(flag: boolean | null | undefined, content = '@everyone', raw = source) {
+  const f = fixture(['ok'], raw);
+  try {
+    await f.start(); await f.ready();
+    const before = f.api.bgUnread().guest.servers.server;
+    f.sockets[0].onmessage!({ data: JSON.stringify({ t: 'message.create', serverId: 'server', channelId: 'ch',
+      message: { id: 'm', content, author: { id: 'other' }, ...(flag === undefined ? {} : { mentionEveryone: flag }) } }) });
+    return { before, after: f.api.bgUnread().guest.servers.server };
+  } finally { await f.close(); }
+}
+async function backgroundSilent(raw = source) {
+  for (const content of ['@everyone', '@here']) {
+    const { before, after } = await backgroundBroadcast(false, content, raw);
+    assert.equal(after.unread, before.unread + 1, 'сообщение учитывается непрочитанным и без массового пинга');
+    assert.equal(after.mentions, before.mentions, 'R279 фоновый шлюз не добавляет массовый пинг при false');
+  }
+}
+it('R279 фоновый шлюз сохраняет обычное непрочитанное, но не добавляет упоминание при false', () => {
+  // У фонового сервера счётчики независимы: запрет массового пинга не должен терять само сообщение.
+  return backgroundSilent();
+});
+it('R279 фоновый шлюз считает разрешённые и старые массовые пинги, личный адрес переживает false', async () => {
+  // Парные положительные случаи исключают заглушку всех уведомлений вместо поддержки нового поля.
+  for (const flag of [true, null, undefined]) for (const content of ['@everyone', '@here']) {
+    const { before, after } = await backgroundBroadcast(flag, content);
+    assert.equal(after.unread, before.unread + 1); assert.equal(after.mentions, before.mentions + 1);
+  }
+  const { before, after } = await backgroundBroadcast(false, '@everyone @friend');
+  assert.equal(after.mentions, before.mentions + 1);
+});
+it('R279 игнорирование серверного запрета обнаруживается настоящим фоновым шлюзом', async () => {
+  // Стенд передаёт кадр через onmessage всего модуля, а не повторяет формулу подсчёта.
+  await backgroundSilent(); const from = 'msg.message.mentionEveryone !== false';
+  assert.equal(source.split(from).length - 1, 1);
+  await assert.rejects(() => backgroundSilent(source.replace(from, 'true')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 фоновый шлюз не добавляет'));
+});

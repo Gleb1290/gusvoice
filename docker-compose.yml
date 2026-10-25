@@ -33,7 +33,7 @@ services:
   postgres:
     # Exact version + the digest already running in production (О5, 15.09): a floating `16-alpine` re-pulled a different
     # build on every update. Bump deliberately: change BOTH the tag and the digest.
-    image: postgres:16.14-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
+    image: postgres:16.15-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
     restart: unless-stopped
     # JIT off for the whole database (#211, owner decision 2026-10-08): our queries are short OLTP reads whose cost
     # ESTIMATE can still run into millions (DM list with thousands of conversations), and LLVM compilation then took
@@ -57,7 +57,7 @@ services:
   redis:
     # Exact version + digest, as for postgres. Redis 7.4+ is licensed RSALv2/SSPL (not OSI open source); the box does not
     # redistribute it — Docker pulls the official image — so it stays (decision 2026-09-16).
-    image: redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     restart: unless-stopped
     command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
     volumes:

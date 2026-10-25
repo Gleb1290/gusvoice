@@ -15,6 +15,8 @@
  * instead of synth when one is configured for the event).
  */
 
+import { sharedAudioContext } from './voiceKeepAlive';
+
 export type SoundEvent =
   | 'join'
   | 'leave'
@@ -265,7 +267,12 @@ export function playClip(url: string): void {
 let ctx: AudioContext | null = null;
 function audioCtx(): AudioContext | null {
   try {
-    if (!ctx) ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    // Android (#209): общий контекст приложения (`voiceKeepAlive.ts`) — свой молчащий контекст был ещё одним выводом,
+    // который HyperOS в фоне гасит за «60 с нулей». Вне Android — свой, как раньше.
+    if (!ctx)
+      ctx =
+        sharedAudioContext() ??
+        new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     // Autoplay policies suspend the context until a gesture; resume opportunistically.
     if (ctx.state === 'suspended') void ctx.resume();
     return ctx;

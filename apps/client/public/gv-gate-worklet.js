@@ -11,9 +11,18 @@ class GusGateProcessor extends AudioWorkletProcessor {
     this.threshold = 0; // 0 = gate disabled
     this.env = 0; // current gain envelope, 0..1
     this.hold = 0; // samples remaining to stay open after dropping below threshold
+    this.reported = null; // последнее сообщённое главному потоку «открыт/закрыт» (#215), null — ещё не говорили
     this.port.onmessage = (e) => {
       if (e.data && typeof e.data.threshold === 'number') this.threshold = e.data.threshold;
     };
+  }
+
+  // 🔴 #215: гейт сообщает своё состояние главному потоку ТОЛЬКО при смене — своя обводка «говорит» гасится,
+  // пока гейт закрыт (друзья в это время не слышат). Выключенный гейт (рация, порог 0) = «открыт».
+  report(isOpen) {
+    if (isOpen === this.reported) return;
+    this.reported = isOpen;
+    this.port.postMessage({ open: isOpen });
   }
 
   process(inputs, outputs) {
@@ -29,6 +38,7 @@ class GusGateProcessor extends AudioWorkletProcessor {
       // Gate off: straight passthrough (and keep the envelope open for a clean re-enable).
       for (let c = 0; c < output.length; c++) output[c].set(input[Math.min(c, input.length - 1)]);
       this.env = 1;
+      this.report(true);
       return true;
     }
 
@@ -44,6 +54,7 @@ class GusGateProcessor extends AudioWorkletProcessor {
     const level = Math.min(1, peak * 1.422);
     const open = level >= this.threshold;
     if (open) this.hold = sampleRate * 0.25; // 250ms hold-open so speech tails aren't chopped
+    this.report(this.hold > 0);
 
     // ⚠️ Огибающая считается ПО СЭМПЛАМ, а каналы — внутри. Раньше внешним был цикл по каналам,
     // и на стереовыходе `env` успевала обновиться дважды за сэмпл: атака и спад шли вдвое быстрее

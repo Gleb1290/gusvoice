@@ -272,7 +272,7 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
       }
       case 'message.create': {
         if (link.userId && msg.message.author.id === link.userId) return;
-        bump(link.instanceId, msg.serverId, mentionsMe(msg.message.content, link.me.username, link.me.home));
+        bump(link.instanceId, msg.serverId, mentionsMe(msg.message.content, link.me.username, link.me.home, msg.message.mentionEveryone !== false));
         return;
       }
       /* ЛС (вывод старых `dm.*`, шаг 3): шлюз с `caps: ['conv1']` получает `conv.change`. Точку на иконке инстанса даёт ТОЛЬКО

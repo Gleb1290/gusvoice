@@ -1,10 +1,11 @@
+import { pluralDays } from '@gusvoice/shared';
 import { and, eq, gte, sql } from 'drizzle-orm';
 import type { ServerEconomy } from './coins.js';
 import { dayStart } from './coinRules.js';
 import { db } from './db/index.js';
 import { coinPurchases, serverShop, serverSoundboard } from './db/schema.js';
 import { SHOP_CATALOG, SHOP_ITEMS, avatarMinutesFor, priceCoins, type ShopItem } from './shopRules.js';
-import { avatarPriceMinutes } from './instanceSettings.js';
+import { avatarPriceMinutes, avatarRentalMaxDays } from './instanceSettings.js';
 
 /**
  * Витрина магазина: каталог с ценами — хранилище и склейка с умолчаниями.
@@ -37,6 +38,8 @@ export interface ShopEntry {
    * ⚠️ Отдаётся и в монетах: панель показывает его владельцу, а пересчитывать на клиенте нельзя.
    */
   floor?: { minutes: number; coins: number };
+  /** Потолок аренды аватара в днях — настройка инстанса (#228), только у аватара. Добавлено полем: старые клиенты его не читают. */
+  rentalMaxDays?: number;
   /** Своя цена сервера, если владелец её назначил; `null` — действует пол инстанса. Только аватар. */
   serverMinutes?: number | null;
 }
@@ -63,6 +66,7 @@ export async function shopFor(economy: ServerEconomy | null): Promise<ShopEntry[
    * инстанса. Пол через `max` закрывает то же опасение, не отнимая права наценить.
    */
   const avatarFloorMinutes = await avatarPriceMinutes();
+  const rentalMaxDays = await avatarRentalMaxDays();
 
   /**
    * Цены КЛИПОВ саундборда — чтобы витрина показала разброс, а не одно общее число.
@@ -93,7 +97,8 @@ export async function shopFor(economy: ServerEconomy | null): Promise<ShopEntry[
     return {
       item: key,
       label: spec.label,
-      hint: spec.hint,
+      // Аватар: к подсказке каталога добавляем настоящий потолок инстанса (#228) — каталог о настройке не знает.
+      hint: isAvatar ? `${spec.hint} Вперёд — не больше чем на ${pluralDays(rentalMaxDays)}.` : spec.hint,
       priceMinutes,
       priceCoins: priceCoins(priceMinutes, rate),
       enabled: row?.enabled ?? true,
@@ -105,6 +110,7 @@ export async function shopFor(economy: ServerEconomy | null): Promise<ShopEntry[
         ? {
             floor: { minutes: avatarFloorMinutes, coins: priceCoins(avatarFloorMinutes, rate) },
             serverMinutes: row?.priceMinutes ?? null,
+            rentalMaxDays,
           }
         : {}),
     };

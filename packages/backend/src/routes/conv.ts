@@ -1,6 +1,7 @@
 import { CONV_GEOLIVE_FEDERATED_ERROR, CONV_POLL_FEDERATED_ERROR, CONV_POLL_LIMITS, FEATURE_BIGREACT1, FED_ERRORS, MESSAGE_PRIVACY_ERROR, REPLY_QUOTE_MAX, SHARED_MEDIA_PAGE, convMediaFallback, convMediaPreview } from '@gusvoice/shared';
 import type { ConvGone, ConvMessage } from '@gusvoice/shared';
 import { ALBUM_ITEM_PEER_OLD_ERROR, type ConvAlbumItemDeleteResponse } from '@gusvoice/shared';
+import { isOnceMedia, ONCE_MEDIA_REFUSED } from '@gusvoice/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -50,6 +51,7 @@ import {
   pinMessage,
   listenVoice,
   spendVoiceOnce,
+  openOnceMedia,
   reactMessage,
   reorderConversationPins,
   revealDirect,
@@ -106,7 +108,7 @@ import { publishToUser } from '../realtime.js';
 import { publishDmFolders } from './dmFolders.js';
 import { shareServer } from '../db/peerQueries.js';
 import { canScheduleUntilOnline, readAtFor, readersFor } from '../lastSeen.js';
-import { conversationMessages, users } from '../db/schema.js';
+import { attachments as attachmentRows, conversationMessages, users } from '../db/schema.js';
 import { canWriteDm, DM_NEW_LIMIT, DM_PEER_GONE_ERROR, dmOpenRefusal, openDm } from '../dmRules.js';
 import { dmPolicy } from '../instanceSetup.js';
 import { reachableUser } from '../userSearchRules.js';
@@ -276,8 +278,8 @@ export function configureFedAlbumGuard(guard: ((memberIds: readonly string[]) =>
   fedAlbumAllowed = guard;
 }
 
-let fedOnceAllowed: ((peerId: string) => Promise<boolean>) | null = null;
-export function configureFedOnceGuard(guard: ((peerId: string) => Promise<boolean>) | null): void {
+let fedOnceAllowed: ((peerId: string, media?: boolean) => Promise<boolean>) | null = null;
+export function configureFedOnceGuard(guard: ((peerId: string, media?: boolean) => Promise<boolean>) | null): void {
   fedOnceAllowed = guard;
 }
 
@@ -285,6 +287,32 @@ async function fedOnceRefused(peerId: string | null): Promise<boolean> {
   if (!(await isRemotePeer(peerId))) return false;
   return !(fedOnceAllowed && (await fedOnceAllowed(peerId!)));
 }
+
+/**
+ * Одноразовое фото/видео человеку соседа (19.10, #226): можно, если его дом объявил `dm2ttl` — тот же крючок
+ * `configureFedOnceGuard` со вторым аргументом (`federation/convAtt.fedOnceAllowedFor(peerId, true)`). Старый сосед (только
+ * `dm2once`) показал бы фото обычным навсегда — отказ `federation.dm_attachments_later`.
+ */
+async function fedOnceMediaRefused(peerId: string | null, refs: readonly { id: string; once?: true | null; asFile?: true | null; gif?: true | null; round?: true | null }[]): Promise<boolean> {
+  const ids = refs.filter((r) => r.once === true).map((r) => r.id);
+  if (ids.length === 0 || !(await isRemotePeer(peerId))) return false;
+  const rows = await db
+    .select({ id: attachmentRows.id, contentType: attachmentRows.contentType })
+    .from(attachmentRows)
+    .where(inArray(attachmentRows.id, ids));
+  const byId = new Map(refs.map((r) => [r.id, r]));
+  const media = rows.some((r) => {
+    const ref = byId.get(r.id);
+    return isOnceMedia({ once: true, contentType: r.contentType, asFile: ref?.asFile ?? undefined, gif: ref?.gif ?? undefined, round: ref?.round ?? undefined });
+  });
+  return media && !(fedOnceAllowed && (await fedOnceAllowed(peerId!, true)));
+}
+
+/** Одноразовое фото/видео не туда (группа, «Избранное», альбом, отложенное) — 400 с понятной фразой (`ONCE_MEDIA_REFUSED`). */
+const ONCE_REFUSED_BODY = {
+  error: 'Одноразовые фото и видео — только отдельным сообщением в личной переписке, без отложенной отправки',
+  reason: ONCE_MEDIA_REFUSED,
+};
 
 /**
  * Э2 часть Б (#141, Ф7): связка с инстансом собеседника разорвана, на паузе или доверие потеряно — беседа становится архивом
@@ -409,6 +437,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (userId === me) return reply.code(400).send({ error: 'cannot DM yourself' });
     const [other] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!other) return reply.code(404).send({ error: 'user not found' });
+    // Строка-автор вебхука (#24) — не человек: беседа с ней ушла бы в пустоту.
+    if (other.bot) return reply.code(403).send({ error: 'Это вебхук — ему нельзя написать' });
     const [meRow] = await db.select({ home: users.homeInstanceId }).from(users).where(eq(users.id, me)).limit(1);
     // Человек другого инстанса: с Э1 — через его дом (`fedDirect`), без флага — прежний отказ (§5.8).
     if (other.homeInstanceId !== null && other.homeUserId && !meRow?.home && fedDirect) {
@@ -684,7 +714,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const { id: conversationId } = convParams.parse(req.params);
     const body = z
       .object({
-        clientId: z.string().uuid(),
+        clientId: z.guid(),
         content: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG).optional().default(''),
         // Шаг 1в: вложения — id загрузок (`POST /conv/:id/attachments`) + подсказки клиента, не ссылки.
         attachments: convAttachmentRefsSchema,
@@ -769,6 +799,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ error: 'трансляция геопозиции в беседе с людьми других инстансов пока недоступна', reason: CONV_GEOLIVE_FEDERATED_ERROR });
     if (body.attachments.length > 0 && (await fedFilesRefused(reply, access.peerId))) return;
     if (onceRefs(body.attachments) && (await fedOnceRefused(access.peerId))) return reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });
+    if (await fedOnceMediaRefused(access.peerId, body.attachments)) return reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });
 
     // «Избранное»: получателя нет — придерживать и пушить некому (`saved1`).
     const plan = access.saved
@@ -795,6 +826,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (res.kind === 'bad-reply') return reply.code(400).send({ error: 'invalid reply target' });
     if (res.kind === 'bad-quote') return reply.code(400).send({ error: 'цитата не найдена в сообщении' });
     if (res.kind === 'bad-attachments') return reply.code(400).send({ error: 'вложение уже отправлено или не найдено' });
+    if (res.kind === 'once-refused') return reply.code(400).send(ONCE_REFUSED_BODY);
     if (res.kind === 'conflict') return reply.code(409).send({ error: 'client_id_conflict' });
     const view: ConvMessage | ConvGone | null = await messageFor(res.row.id, me);
     if (res.kind === 'replay') return reply.code(200).send(view);
@@ -933,7 +965,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const { id: conversationId } = convParams.parse(req.params);
     const body = z
       .object({
-        clientId: z.string().uuid(),
+        clientId: z.guid(),
         fromConversationId: z.string().min(1).max(64),
         messageIds: batchIds,
         silent: z.boolean().optional(),
@@ -1168,6 +1200,24 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
+   * Одноразовое фото/видео открыто (19.10, `ttlmedia1`, #226): отметка первого открытия — от неё таймер, и по ней сервер сам
+   * сожжёт сообщение (`sweepOpenedOnce`), если закрытие (`once-spent`) не придёт. Ответ — `{ openedAt, serverNow }` (ISO; `serverNow` — часы сервера в миг ответа); уже сгорело — 410;
+   * своё, не такое и невидимое — 404.
+   */
+  app.post('/conv/:id/messages/:mid/once-open', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id: conversationId, mid } = msgParams.parse(req.params);
+    if (await limited(reply, await rateHit(`conv-listen:${me}`, REACT_MAX, WINDOW_S))) return;
+    const access = await loadAccess(conversationId, me);
+    if (!access) return reply.code(404).send({ error: 'not found' });
+    const res = await openOnceMedia(me, access, mid);
+    if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
+    if (res.kind === 'spent') return reply.code(410).send({ error: 'gone' });
+    // `serverNow` (только добавлением) — часы сервера в этот миг: клиент считает остаток срока без сверки своих часов с серверными.
+    return reply.code(200).send({ openedAt: res.openedAt.toISOString(), serverNow: new Date().toISOString() });
+  });
+
+  /**
    * Закреплённые беседы (С2, признак `conv7`) — МОИ: «для меня» и «для обоих», от старых к новым по порядку ленты, с
    * превью (`ConvPinsResponse`). Не участник — 404.
    */
@@ -1259,7 +1309,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const { id: conversationId } = convParams.parse(req.params);
     const body = z
       .object({
-        clientId: z.string().uuid(),
+        clientId: z.guid(),
         content: z.string().max(SCHEDULED_TEXT_MAX, TEXT_TOO_LONG).optional().default(''),
         // `conv10`: те же ссылки на загрузки, что у отправки (`POST /conv/:id/attachments` → id + подсказки клиента).
         attachments: convAttachmentRefsSchema,
@@ -1303,6 +1353,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     });
     if (res.kind === 'bad-reply') return reply.code(400).send({ error: 'invalid reply target' });
     if (res.kind === 'bad-attachments') return reply.code(400).send({ error: 'вложение уже отправлено или не найдено' });
+    if (res.kind === 'once-refused') return reply.code(400).send(ONCE_REFUSED_BODY);
     if (res.kind === 'limit') return reply.code(409).send({ error: 'scheduled limit', scope: res.scope, max: res.max });
     if (res.kind === 'media-limit') return reply.code(409).send(scheduledMediaLimitBody(res));
     if (res.kind === 'conflict') return reply.code(409).send({ error: 'client_id_conflict' });

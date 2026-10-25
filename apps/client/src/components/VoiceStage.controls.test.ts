@@ -13,6 +13,7 @@ import * as stageOrderRules from '../stageOrderRules';
 import type { StageOrderLayout } from '../stageOrderPrefs';
 import * as stageLayoutRules from '../stageLayoutRules';
 import * as streamPipRules from '../streamPipRules';
+import * as pendingWatchRules from '../pendingWatch';
 
 const source = readFileSync(new URL('./VoiceChannelView.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const volumeSource = readFileSync(new URL('./StreamVolumeControl.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -21,6 +22,7 @@ type Options = { phone?: boolean; mobile?: boolean; touch?: boolean; hide?: bool
   cols?: number; savedOrder?: string[]; dragPreview?: string[]; tip?: 'none' | 'button' | 'hold'; channelId?: string | null; bothStreams?: boolean; economy?: boolean;
   noCameraPeople?: number; stageStreams?: string[]; watchedIds?: string[]; stageKey?: string; pipStreams?: string[]; localStream?: boolean;
   layout?: stageLayoutRules.StageLayout; speakerId?: string | null; selfId?: string; includeSelf?: boolean; stageAudio?: string[];
+  pendingWatch?: pendingWatchRules.PendingWatch;
   savedModes?: Partial<Record<stageOrderRules.StageOrderMode, string[]>>;
   modePreviews?: Partial<Record<stageOrderRules.StageOrderMode, string[]>> };
 type DragInput = { enabled: boolean; gridRef: React.RefObject<HTMLDivElement>; order: readonly string[]; onCommit(order: string[]): void };
@@ -38,7 +40,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
       orderReads: { channelId: string | null; cols: StageOrderLayout }[];
       orderWrites: { channelId: string; cols: StageOrderLayout; order: string[] }[];
       drags: DragInput[]; pointerDown: number; pointerInstances: number[];
-      clearWatched: number; watch: string[]; unwatch: string[]; removePip: string[]; layouts: stageLayoutRules.StageLayout[]; events: string[];
+      clearWatched: number; clearPending: number; watch: string[]; unwatch: string[]; removePip: string[]; layouts: stageLayoutRules.StageLayout[]; events: string[];
       speaker: { ids: string[]; enabled: boolean }[] } }) => Promise<void>, raw = source, rawVolume = volumeSource) {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
@@ -49,7 +51,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     orderReads: [] as { channelId: string | null; cols: StageOrderLayout }[],
     orderWrites: [] as { channelId: string; cols: StageOrderLayout; order: string[] }[],
     drags: [] as DragInput[], pointerDown: 0, pointerInstances: [] as number[],
-    clearWatched: 0, watch: [] as string[], unwatch: [] as string[], removePip: [] as string[], layouts: [] as stageLayoutRules.StageLayout[],
+    clearWatched: 0, clearPending: 0, watch: [] as string[], unwatch: [] as string[], removePip: [] as string[], layouts: [] as stageLayoutRules.StageLayout[],
     events: [] as string[], speaker: [] as { ids: string[]; enabled: boolean }[] };
   let nextDragInstance = 0;
   const unexpected: string[] = [];
@@ -75,9 +77,10 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     bootstrap: options.economy ? { server: { id: 'server' } } : null,
     economy: options.economy ? { server: { enabled: true, wallet: { balance: 123 }, currencyName: 'перья' } } : {},
     watchedStreams: options.watchedIds ?? (options.watched ? options.bothStreams ? ['peer', 'peer#screen'] : ['peer'] : []),
-    mutedStreams: [], streamVolumes: {}, pendingWatch: null, pipStreams: options.pipStreams ?? [],
+    mutedStreams: [], streamVolumes: {}, pendingWatch: options.pendingWatch ?? null, pipStreams: options.pipStreams ?? [],
     clearWatchedStreams: () => { calls.clearWatched++; calls.events.push('clear');
-      if (state.watchedStreams.length) { state.watchedStreams = []; changed(); } }, clearPendingWatch: noop,
+      if (state.watchedStreams.length) { state.watchedStreams = []; changed(); } },
+    clearPendingWatch: () => { calls.clearPending++; state.pendingWatch = null; changed(); },
     watchStream: (id: string) => { calls.watch.push(id); calls.events.push(`watch:${id}`);
       if (!state.watchedStreams.includes(id)) { state.watchedStreams = [...state.watchedStreams, id]; changed(); } },
     unwatchStream: (id: string) => { calls.unwatch.push(id); calls.events.push(`unwatch:${id}`);
@@ -144,6 +147,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
       stageAvatarSize, STAGE_SCROLLBAR_PX: 12, STAGE_GRID_HYSTERESIS_PX: 16 },
     '../streamAudioRules': { ownerOf: (id: string) => id.replace(/#screen$/, ''), MAX_STREAM_VOLUME: 2 },
     '../streamPipRules': streamPipRules,
+    '../pendingWatch': pendingWatchRules,
     // Здесь проверяется только проводка сцены: API браузерного окна не вызываем.
     './StreamPipView': {
       StreamPipStub: ({ id }: { id: string }) => React.createElement('div', { 'data-pip-stub': id }),
@@ -173,7 +177,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
   };
   // Эти импорты нужны целому модулю, но данные сценарии их ветки не открывают.
   // Если приложение проглотит бросок заглушки, журнал всё равно сделает тест красным.
-  for (const id of ['../api', '../toast', './BottomSheet', '../pendingWatch', '../windowCovered', './ContextMenu']) {
+  for (const id of ['../api', '../toast', './BottomSheet', '../windowCovered', './ContextMenu']) {
     deps[id] = new Proxy({}, { get: (_target, key) => {
       const boundary = `${id}.${String(key)}`; unexpected.push(boundary);
       throw new Error(`Неописанная граница ${boundary}`);
@@ -522,36 +526,44 @@ async function gridToFocus(raw = source) {
 }
 it('R248 клик по показу в Сетке сначала выбирает Фокус, потом смотрит выбранный показ без fullscreen', () => gridToFocus());
 
-async function autoOpenOther(raw = source) {
-  for (const layout of ['focus', 'side'] as const) await fixture('VoiceChannelView', {
-    layout, selfId: 'self', stageStreams: ['self', 'self#screen', 'peer', 'guest-0'], stageAudio: ['peer'],
-  }, async ({ host, calls, watched }) => {
-    assert.deepEqual(calls.watch, ['peer'], `R248 auto-other: ${layout} открывает первый чужой, не свой и не спутник`);
-    assert.deepEqual(watched(), ['peer']); assert.deepEqual(openStreamIds(host), ['peer']);
-    assert.equal(host.querySelectorAll('.stage-watch-grid .screen-audio').length, 1, 'автооткрытый показ получает управление своим звуком');
-    assert.equal(host.querySelectorAll('.stage-streams .stream-card').length, 3);
-  }, raw);
-  for (const layout of ['focus', 'side'] as const) await fixture('VoiceChannelView', {
-    layout, selfId: 'self', stageStreams: ['self', 'self#screen'],
-  }, async ({ host, calls, watched }) => {
-    assert.deepEqual(calls.watch, [], `R248 auto-other: ${layout} не подписывается, если показы только свои`);
-    assert.deepEqual(watched(), []); assert.deepEqual(openStreamIds(host), []);
-  }, raw);
+async function noAutomaticStreams(raw = source) {
+  // Класс ошибки: старое автооткрытие R248 подписывает на чужую презентацию без намерения зрителя.
+  for (const layout of stageLayoutRules.STAGE_LAYOUTS) {
+    const options: Options = { layout, selfId: 'self', stageStreams: ['self', 'self#screen', 'peer', 'guest-0'], stageAudio: ['peer'] };
+    await fixture('VoiceChannelView', options, async ({ host, calls, watched, render, setLayout }) => {
+      const closed = () => {
+        assert.deepEqual(calls.watch, [], 'R286 без намерения watch не вызывается');
+        assert.deepEqual(watched(), [], 'R286 без намерения список просмотра пуст');
+        assert.deepEqual(openStreamIds(host), [], 'R286 без намерения видеокадров нет');
+        assert.deepEqual(Array.from(host.querySelectorAll('.stream-card'), n => n.getAttribute('data-stage-key')).sort(),
+          options.stageStreams!.map(id => `s:${id}`).sort(), 'R286 все закрытые показы доступны карточками');
+      };
+      closed(); await render(); closed();
+      options.stageStreams = [...options.stageStreams!, 'guest-1']; await render(); closed();
+      for (const next of stageLayoutRules.STAGE_LAYOUTS) { await setLayout(next); closed(); }
+    }, raw);
+  }
 }
-it('R248 Фокус и Сбоку сами открывают первый чужой показ со звуком, но не свой и не собственного спутника', () => autoOpenOther());
+it('R248 отменено R286: Фокус и Сбоку, как остальные виды, не открывают сами свой или чужой показ', () => {
+  // Класс ошибки: бездействующий зритель автоматически получает видеопоток и звук новой презентации.
+  return noAutomaticStreams();
+});
 
-it('R248 закрытый автоматический показ и его прежние соседи не открываются снова, новый показ открывается', async () => {
-  // Класс ошибки: unwatch немедленно отменяется автоэффектом либо seen навсегда блокирует новые презентации.
-  for (const layout of ['focus', 'side'] as const) {
+it('R248 отменено R286: закрытый вручную показ, прежние соседи и новый показ не открываются сами', async () => {
+  // Класс ошибки: закрытие отменяется автоэффектом либо новый трек всё ещё запускает старую автоматику.
+  for (const layout of stageLayoutRules.STAGE_LAYOUTS) {
     const options: Options = { layout, stageStreams: ['peer', 'guest-0'] };
     await fixture('VoiceChannelView', options, async ({ host, calls, click, render, watched }) => {
+      assert.deepEqual(calls.watch, []);
+      await click('[data-stage-key="s:peer"].stream-card');
       assert.deepEqual(openStreamIds(host), ['peer']);
       await click('.stage-watch-grid [title="Закрыть стрим"]'); await render();
       assert.deepEqual(calls.unwatch, ['peer']); assert.deepEqual(watched(), []);
       assert.deepEqual(calls.watch, ['peer']); assert.deepEqual(openStreamIds(host), []);
       options.stageStreams = ['peer', 'guest-0', 'guest-1']; await render();
-      assert.deepEqual(calls.watch, ['peer', 'guest-1']); assert.deepEqual(watched(), ['guest-1']);
-      assert.deepEqual(openStreamIds(host), ['guest-1']);
+      assert.deepEqual(calls.watch, ['peer']); assert.deepEqual(watched(), []);
+      assert.deepEqual(openStreamIds(host), []);
+      assert.equal(host.querySelectorAll('.stream-card').length, 3);
     });
   }
 });
@@ -604,15 +616,15 @@ it('R248 хук говорящего получает только других 
   });
 });
 
-it('R248 вход в Говорящий закрывает автоматический показ, но оставляет ручной; закрытие возвращает говорящего', async () => {
-  // Класс ошибки: источник просмотра забывается, поэтому смена режима либо глушит ручной показ, либо удерживает автоматический.
+it('R248 отменено R286: вход в Говорящий не открывает закрытый показ и сохраняет открытый; закрытие возвращает говорящего', async () => {
+  // Класс ошибки: смена режима либо выдумывает просмотр, либо глушит явное намерение зрителя.
   for (const manual of [false, true]) await fixture('VoiceChannelView', {
-    layout: manual ? 'auto' : 'focus', stageStreams: ['peer'], watchedIds: manual ? ['peer'] : [], speakerId: 'peer',
+    layout: 'auto', stageStreams: ['peer'], watchedIds: manual ? ['peer'] : [], speakerId: 'peer',
   }, async ({ host, calls, setLayout, watched, click }) => {
-    assert.deepEqual(openStreamIds(host), ['peer']);
+    assert.deepEqual(openStreamIds(host), manual ? ['peer'] : []);
     await setLayout('speaker');
     assert.deepEqual(watched(), manual ? ['peer'] : []);
-    assert.deepEqual(calls.unwatch, manual ? [] : ['peer']);
+    assert.deepEqual(calls.unwatch, []); assert.deepEqual(calls.watch, []);
     assert.equal(!!host.querySelector('.stage-big-person'), !manual);
     if (manual) {
       await click('.stage-watch-grid [title="Закрыть стрим"]');
@@ -670,10 +682,151 @@ it('R248 контрфакт клика в Сетке без перехода в 
   const anchor = "setStageLayout('focus');\n    } else if (oneBig) {\n      for (const w of watchedIds) if (w !== id) unwatch(w);";
   return layoutMutant(anchor, anchor.replace("setStageLayout('focus');", '// Фокус не выбран'), gridToFocus, 'R248 grid-focus:');
 });
-it('R248 контрфакт автооткрытия своего показа обнаруживается при наличии чужих и только своих', () =>
-  layoutMutant('screenIds.filter((id) => ownerOf(id) !== selfId)', 'screenIds', autoOpenOther, 'R248 auto-other:'));
+it('R248 отменено R286: возврат эффекта автооткрытия обнаруживается в целом модуле сцены', async () => {
+  // Класс ошибки: правильные карточки не доказывают отсутствие побочного намерения смотреть/слушать.
+  await noAutomaticStreams();
+  const changed = restoreAutomaticEffect(source);
+  await assert.rejects(() => noAutomaticStreams(changed), exactAssertion('R286 без намерения watch не вызывается'));
+});
 it('R248 контрфакты ключей watch вместо side обнаруживаются отдельными чтениями и порядком DOM', async () => {
   for (const mode of ['cards', 'people']) await layoutMutant(`side ? 'side-${mode}' : 'watch-${mode}'`, `'watch-${mode}'`, sideOrders, 'R248 side-order:');
+});
+
+const exactAssertion = (message: string) => (error: unknown) =>
+  error instanceof assert.AssertionError && error.message.split('\n')[0] === message;
+function replaceOnce(raw: string, anchor: string, replacement: string) {
+  assert.equal(raw.split(anchor).length - 1, 1, 'R286 якорь контрфакта единственный');
+  return raw.replace(anchor, replacement);
+}
+function restoreAutomaticEffect(raw: string) {
+  const imported = replaceOnce(raw, 'effectiveStageLayout, isOneBigLayout, type StageLayout',
+    'effectiveStageLayout, isOneBigLayout, stageAutoOpenStream, type StageLayout');
+  const anchor = 'const oneBig = isOneBigLayout(viewLayout);';
+  return replaceOnce(imported, anchor, `${anchor}
+  const autoOpenId = stageAutoOpenStream(viewLayout,
+    screens.map(s => s.participant.identity).filter(id => ownerOf(id) !== room.localParticipant.identity),
+    watchedIds, !!focusCamId, new Set<string>());
+  useEffect(() => { if (autoOpenId !== null) watch(autoOpenId); }, [autoOpenId, watch]);`);
+}
+
+async function speakerKeepsFirst(raw = source) {
+  // Класс ошибки: переход в Говорящего гасит все показы, выбирает последний или сохраняет камеру вторым крупным.
+  for (const watchedIds of [['peer', 'guest-0'], ['guest-0', 'peer']]) {
+    await fixture('VoiceChannelView', { layout: 'auto', cameras: true, noCameraPeople: 2,
+      stageStreams: ['peer', 'guest-0'], watchedIds, speakerId: 'peer' }, async ({ host, calls, watched, click, setLayout }) => {
+      await click('.stage-people [data-stage-key="p:peer"] [title="Развернуть камеру"]');
+      assert.equal(host.querySelectorAll('.stage-watch-grid .screen-viewer').length, 3, 'R286 до перехода открыты два показа и камера');
+      await setLayout('speaker');
+      assert.deepEqual(watched(), watchedIds.slice(0, 1), 'R286 Говорящий сохраняет первый открытый показ');
+      assert.deepEqual(calls.unwatch, watchedIds.slice(1), 'R286 Говорящий закрывает только остальные показы');
+      // У камеры тот же .screen-video: сначала проверяем её сброс, чтобы контрфакт падал адресно, а не на дубле identity.
+      assert.equal(host.querySelectorAll('.stage-watch-grid [data-icon="camera"]').length, 0, 'R286 Говорящий сбрасывает фокус камеры при открытом показе');
+      assert.deepEqual(openStreamIds(host), watchedIds.slice(0, 1));
+      assert.equal(host.querySelectorAll('.stage-watch-grid .screen-viewer').length, 1);
+      assert.deepEqual(calls.watch, [], 'переход сохраняет прежнее намерение, а не открывает показ заново');
+    }, raw);
+  }
+}
+it('R286 Говорящий оставляет первый из двух открытых показов и сбрасывает развёрнутую камеру', () => {
+  // Класс ошибки: смена вида теряет первый выбранный показ либо оставляет конкурирующую камеру.
+  return speakerKeepsFirst();
+});
+it('R286 закрытие всех показов вместо хвоста обнаруживается по сохранённому первому', async () => {
+  // Класс ошибки: упрощённый цикл закрывает и первый показ, хотя зритель его не закрывал.
+  await speakerKeepsFirst();
+  const anchor = "} else if (viewLayout === 'speaker') {\n      // Открытое (кликом — других нет) остаётся крупно одно.\n      for (const w of watchedIds.slice(1)) unwatch(w);";
+  await assert.rejects(() => speakerKeepsFirst(replaceOnce(source, anchor, anchor.replace('watchedIds.slice(1)', 'watchedIds'))),
+    exactAssertion('R286 Говорящий сохраняет первый открытый показ'));
+});
+it('R286 сохранение фокуса камеры рядом с первым показом обнаруживается настоящим вьювером', async () => {
+  // Класс ошибки: ограничить watched недостаточно — отдельное состояние камеры оставляет два крупных кадра.
+  await speakerKeepsFirst();
+  await assert.rejects(() => speakerKeepsFirst(replaceOnce(source, 'if (watchedIds.length > 0) setFocusCamId(null);', '// фокус не сброшен')),
+    exactAssertion('R286 Говорящий сбрасывает фокус камеры при открытом показе'));
+});
+
+it('R286 явное намерение pendingWatch открывает браузерный и нативный показ во всех видах сцены', async () => {
+  // Класс ошибки: запрет автоматики ошибочно запрещает и запрос «зайти и смотреть» из карточки наведения.
+  for (const layout of stageLayoutRules.STAGE_LAYOUTS) for (const id of ['guest-0', 'guest-0#screen']) {
+    await fixture('VoiceChannelView', { layout, stageStreams: ['peer', id],
+      pendingWatch: { channelId: 'channel', userId: 'guest-0', at: Date.now() } }, async ({ host, calls, watched, render }) => {
+      assert.deepEqual(calls.watch, [id], 'R286 pendingWatch открывает только запрошенного человека');
+      assert.deepEqual(watched(), [id]); assert.deepEqual(openStreamIds(host), [id]);
+      assert.equal(calls.clearPending, 1, 'R286 исполненное намерение снимается');
+      assert.deepEqual(calls.layouts, layout === 'grid' ? ['focus'] : []);
+      await render(); assert.deepEqual(calls.watch, [id], 'снятое намерение не исполняется повторно');
+    });
+  }
+});
+it('R286 список карточек исключает все inViewIds, включая PiP, и сохраняет закрытые показы кликабельными', async () => {
+  // Класс ошибки: сравнение только с watched превращает PiP в карточку со своей подпиской на снимки.
+  for (const layout of stageLayoutRules.STAGE_LAYOUTS) await fixture('VoiceChannelView', {
+    layout: 'auto', stageStreams: ['peer', 'peer#screen', 'guest-0'], watchedIds: ['peer'], pipStreams: ['peer#screen'],
+  }, async ({ host, click, calls, watched, setLayout }) => {
+    assert.deepEqual(Array.from(host.querySelectorAll('.stream-card'), n => n.getAttribute('data-stage-key')), ['s:guest-0']);
+    assert.equal(host.querySelectorAll('[data-pip-stub="peer#screen"]').length, 1);
+    // В «Сетку» входят с закрытием watched. Начальный grid + watched:['peer'] обходил этот эффект:
+    // последующий Фокус сохранял старый peer и закономерно закрывал только что добавленный guest-0.
+    await setLayout(layout);
+    assert.deepEqual(watched(), layout === 'grid' ? [] : ['peer'], `R286 ${layout}: переход применяет правило просмотра`);
+    assert.equal(calls.clearWatched, layout === 'grid' ? 1 : 0, `R286 ${layout}: только Сетка закрывает просмотр целиком`);
+    assert.deepEqual(Array.from(host.querySelectorAll('.stream-card'), n => n.getAttribute('data-stage-key')),
+      layout === 'grid' ? ['s:peer', 's:guest-0'] : ['s:guest-0'], `R286 ${layout}: PiP не превращается в карточку`);
+    assert.deepEqual(calls.watch, []);
+    await click('.stream-card[data-stage-key="s:guest-0"]');
+    assert.deepEqual(calls.watch, ['guest-0'], 'R286 оставшаяся закрытая карточка открывается кликом');
+    assert.deepEqual(watched(), layout === 'auto' ? ['peer', 'guest-0'] : ['guest-0'],
+      `R286 ${layout}: выбранный показ остаётся открытым после клика`);
+    assert.equal(host.querySelector('.stream-card[data-stage-key="s:guest-0"]'), null);
+    assert.equal(host.querySelectorAll('[data-pip-stub="peer#screen"]').length, 1, `R286 ${layout}: клик сохраняет PiP`);
+    assert.deepEqual(calls.removePip, []);
+  });
+});
+
+function watchOnlyByIntent(raw = source) {
+  // Класс ошибки: поиск текста по комментариям не доказывает, в каком обработчике вызывается watch.
+  const file = ts.createSourceFile('VoiceChannelView.tsx', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const nodes: ts.Node[] = [];
+  const visit = (node: ts.Node) => { nodes.push(node); ts.forEachChild(node, visit); }; visit(file);
+  const forbidden = new Set(['stageAutoOpenStream', 'autoOpenId', 'autoOpenScreen', 'seenRef', 'keepSeenRef', 'autoOpenedRef']);
+  assert.deepEqual(nodes.filter(ts.isIdentifier).map(n => n.text).filter(n => forbidden.has(n)), [],
+    'R286 сцена не содержит исполняемой старой автоматики');
+  const stage = nodes.find((n): n is ts.FunctionDeclaration => ts.isFunctionDeclaration(n) && n.name?.text === 'VoiceStage');
+  assert.ok(stage?.body, 'R286 найдена настоящая функция сцены');
+  const within = (node: ts.Node, parent: ts.Node): boolean => { for (let p: ts.Node | undefined = node; p; p = p.parent) if (p === parent) return true; return false; };
+  const declarations = nodes.filter((n): n is ts.VariableDeclaration => ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'openStream' && within(n, stage));
+  assert.equal(declarations.length, 1, 'R286 найден единственный обработчик открытия');
+  const open = declarations[0].initializer;
+  assert.ok(open && ts.isArrowFunction(open), 'R286 открытие — обработчик, а не вызов при рендере');
+  const watches = nodes.filter((n): n is ts.CallExpression => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'watch');
+  assert.equal(watches.length, 1, 'R286 единственный прямой watch принадлежит открытию');
+  assert.equal(within(watches[0], open), true, 'R286 watch находится внутри openStream');
+  const calls = nodes.filter((n): n is ts.CallExpression => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'openStream');
+  assert.equal(calls.length, 2, 'R286 открытие вызывают только карточка и pendingWatch');
+  for (const call of calls) {
+    assert.equal(within(call, stage), true, 'R286 вызов открытия принадлежит сцене');
+    let owner: ts.Node | undefined = call.parent;
+    while (owner && !ts.isArrowFunction(owner)) owner = owner.parent;
+    assert.ok(owner && ts.isArrowFunction(owner), 'R286 вызов открытия внутри отложенного обработчика');
+    const handler = owner;
+    const pending = ts.isCallExpression(handler.parent) && ts.isIdentifier(handler.parent.expression) && handler.parent.expression.text === 'useEffect'
+      && handler.parent.arguments[0] === handler && nodes.some(n => ts.isIdentifier(n) && n.text === 'matchPendingWatch' && within(n, handler));
+    const clicked = ts.isJsxExpression(handler.parent) && ts.isJsxAttribute(handler.parent.parent)
+      && handler.parent.parent.name.getText(file) === 'onWatch';
+    assert.equal(pending || clicked, true, 'R286 открытие разрешено лишь кликом или pendingWatch');
+  }
+}
+it('R286 AST ограничивает watch обработчиком клика и эффектом pendingWatch без старых переменных', () => {
+  // Класс ошибки: третье место вызова watch возвращает автоматическую подписку вне явного намерения.
+  watchOnlyByIntent();
+});
+it('R286 страж обнаруживает возврат автоэффекта и посторонний watch, но игнорирует комментарий', () => {
+  // Класс ошибки: страж по имени пропустит безымянную автоматическую подписку, страж по тексту запретит историю решения.
+  watchOnlyByIntent(); watchOnlyByIntent(source + '\n// stageAutoOpenStream autoOpenId watch(autoOpenId)\n');
+  assert.throws(() => watchOnlyByIntent(restoreAutomaticEffect(source)), exactAssertion('R286 сцена не содержит исполняемой старой автоматики'));
+  const anchor = 'const oneBig = isOneBigLayout(viewLayout);';
+  assert.throws(() => watchOnlyByIntent(replaceOnce(source, anchor, `${anchor}\n  useEffect(() => { watch('peer'); }, [watch]);`)),
+    exactAssertion('R286 единственный прямой watch принадлежит открытию'));
 });
 
 it('R163 ПК без просмотра объединяет показ, камеру и людей одной сеткой, спутник не дублируется', () => fixture('VoiceChannelView', { streams: true, cameras: true }, async ({ host }) => {

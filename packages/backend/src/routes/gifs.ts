@@ -21,7 +21,7 @@ import { announceGifs, attachExternalBytes, attachSavedGif, deleteGif, gifOf, li
 
 const provider = () => gifProviderOf(env.gifProvider, env.gifApiKey);
 
-const idParam = z.object({ id: z.string().uuid() });
+const idParam = z.object({ id: z.guid() });
 
 async function limited(reply: FastifyReply, key: string, max: number, windowS: number): Promise<boolean> {
   const wait = await rateHit(key, max, windowS);
@@ -103,7 +103,7 @@ export async function gifRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, `gif-save:${me}`, 30, 60)) return reply;
     const body = z
       .object({
-        attachmentId: z.string().uuid(),
+        attachmentId: z.guid(),
         width: z.number().int().positive().max(20_000).nullish(),
         height: z.number().int().positive().max(20_000).nullish(),
         durationMs: z.number().int().positive().max(3_600_000).nullish(),

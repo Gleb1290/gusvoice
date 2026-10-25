@@ -73,7 +73,7 @@ import { ContextMenu, MenuItem, MenuSection, type MenuPos } from './ContextMenu'
 import { fitStageGrid, stageAvatarSize, STAGE_SCROLLBAR_PX, STAGE_GRID_HYSTERESIS_PX, type StageGridLayout } from '../stageGridRules';
 import { setHideNoVideo, useHideNoVideo } from '../stageViewPrefs';
 import { setStageLayout, useStageLayout } from '../stageLayoutPrefs';
-import { effectiveStageLayout, isOneBigLayout, stageAutoOpenStream, type StageLayout } from '../stageLayoutRules';
+import { effectiveStageLayout, isOneBigLayout, type StageLayout } from '../stageLayoutRules';
 import { useStageSpeaker } from '../useStageSpeaker';
 import { StageLayoutPicker } from './StageLayoutPicker';
 import { usePhoneLayout } from '../phoneLayout';
@@ -228,6 +228,103 @@ function useFitGrid(count: number, enabled: boolean) {
   }, [enabled, count, layout?.cols]);
   const fits = !!(layout && box && layout.rows * layout.tileH + Math.max(0, layout.rows - 1) * box.gap <= box.h);
   return { ref, layout, fits };
+}
+
+/** Нижняя граница ширины открытого показа в сетке просмотра, px (≈ 90 px высоты — ещё различимы картинка и подпись). */
+export const WATCH_TILE_MIN_W = 160;
+/** Колонок в сетке просмотра по умолчанию (прежнее поведение CSS: `.stage-watch-grid.count-2…4` и больше). */
+const WATCH_DEFAULT_COLS = 2;
+/** Другое число колонок берём, только если крупнее прежнего хотя бы на столько (не прыгать из-за пикселей). */
+const WATCH_GAIN = 1.1;
+
+export type StageWatchInput = {
+  /** Ширина и высота сетки открытых показов (рамка за вычетом отступов), px. */
+  width: number;
+  height: number;
+  /** Сколько показов открыто. */
+  count: number;
+  gap: number;
+  aspect?: number;
+  minTileW?: number;
+};
+
+export type StageWatchLayout = {
+  cols: number;
+  /** `true` — все показы не влезают даже в нижней границе: ряды фиксированной высоты `rowH`, сетка прокручивается. */
+  scroll: boolean;
+  /** Высота ряда при прокрутке, px. */
+  rowH: number;
+};
+
+/**
+ * Сетка ОТКРЫТЫХ показов (#217, узкое окно 760–1100 px и телефон): прежний CSS всегда делил на две колонки с рядами
+ * `1fr`, и при 5–7 показах под полосами карточек и людей ряды сжимались до лент 3:1. Здесь — тот же перебор колонок,
+ * что у `fitStageGrid` (берём самую крупную картинку 16:9, как у видеозвонков Telegram и Discord), но с мёртвой зоной:
+ * `null` = оставить прежние две колонки CSS (там, где они и так почти оптимальны — широкие окна не меняются).
+ * Живёт здесь, а не в `stageGridRules.ts`: сцену грузят тесты с описанным перечнем импортов. Источник идеи — Telegram Desktop `calls/group/calls_group_viewport.cpp` (перебор разбиений, выбор с наименьшими чёрными полями; код не копировался).
+ * Не влезают даже в `WATCH_TILE_MIN_W` — ряды фиксированной высоты и прокрутка вместо лент.
+ */
+export function fitWatchGrid(input: StageWatchInput): StageWatchLayout | null {
+  const n = Math.max(0, Math.floor(input.count));
+  const W = Math.max(0, input.width);
+  const H = Math.max(0, input.height);
+  if (n < 2 || W <= 0 || H <= 0) return null;
+  const aspect = input.aspect && input.aspect > 0 ? input.aspect : 16 / 9;
+  const minW = input.minTileW ?? WATCH_TILE_MIN_W;
+  const gap = Math.max(0, input.gap);
+  const score = (cols: number) => {
+    const rows = Math.ceil(n / cols);
+    const cellW = (W - gap * (cols - 1)) / cols;
+    const cellH = (H - gap * (rows - 1)) / rows;
+    return Math.min(cellW, cellH * aspect);
+  };
+  const dflt = Math.min(n, WATCH_DEFAULT_COLS);
+  let best = dflt;
+  for (let cols = 1; cols <= n; cols++) if (score(cols) > score(best)) best = cols;
+  const bestScore = score(best);
+  if (bestScore < minW) {
+    // Ни одна раскладка не даёт картинку минимальной ширины: колонок столько, сколько вмещает ширина, ряды — по 16:9, остальное — прокрутка.
+    const cols = Math.max(1, Math.min(n, Math.floor((W + gap) / (minW + gap))));
+    const cellW = (W - gap * (cols - 1)) / cols;
+    return { cols, scroll: true, rowH: Math.max(1, Math.floor(cellW / aspect)) };
+  }
+  if (best === dflt || bestScore < score(dflt) * WATCH_GAIN) return null;
+  return { cols: best, scroll: false, rowH: 0 };
+}
+
+/**
+ * Сетка открытых показов (#217): меряет `.stage-watch-grid` и просит у `fitWatchGrid` число колонок. `null` — оставить
+ * колонки CSS (широкие окна не меняются); иначе колонки/ряды ставятся переменными `--watch-cols` / `--watch-row`
+ * и атрибутом `data-fit` (`cols` — все влезают, `scroll` — ряды фиксированной высоты и прокрутка).
+ */
+function useWatchFit(ref: React.RefObject<HTMLDivElement>, count: number) {
+  const [box, setBox] = useState<{ w: number; h: number; gap: number } | null>(null);
+  const present = count > 1;
+  useEffect(() => {
+    const el = ref.current;
+    if (!present || !el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const cs = getComputedStyle(el);
+      const px = (value: string) => parseFloat(value) || 0;
+      const rect = el.getBoundingClientRect();
+      const unzoom = 1 / (px(getComputedStyle(document.documentElement).zoom) || 1);
+      // Рамка с полосой прокрутки стабильна — размер сетки от её содержимого не зависит.
+      const w = Math.max(0, Math.floor(rect.width * unzoom - px(cs.paddingLeft) - px(cs.paddingRight)));
+      const h = Math.max(0, Math.floor(rect.height * unzoom - px(cs.paddingTop) - px(cs.paddingBottom)));
+      const gap = parseFloat(cs.columnGap) || 0;
+      setBox((b) => (b && b.w === w && b.h === h && b.gap === gap ? b : { w, h, gap }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [present, ref]);
+  const layout: StageWatchLayout | null = present && box ? fitWatchGrid({ width: box.w, height: box.h, count, gap: box.gap }) : null;
+  if (!layout) return {};
+  return {
+    'data-fit': layout.scroll ? 'scroll' : 'cols',
+    style: { ['--watch-cols']: layout.cols, ['--watch-row']: `${layout.rowH}px` } as React.CSSProperties,
+  };
 }
 
 /** Full viewer for a single screen-share: the video + fullscreen / audio-mute / close controls. */
@@ -1040,28 +1137,9 @@ function VoiceStage() {
   const phoneLayout = usePhoneLayout();
   const viewLayout = effectiveStageLayout(useStageLayout(), mobile || phoneLayout);
   const oneBig = isOneBigLayout(viewLayout);
-  const selfId = room.localParticipant.identity;
-  const screenIds = screens.map((s) => s.participant.identity);
-  // Свой показ сам не открываем: смотреть себя — зеркальный коридор и лишняя подписка.
-  const otherScreenIds = screenIds.filter((id) => ownerOf(id) !== selfId);
-  // Показы, уже бывшие на сцене при прошлом автооткрытии или ручном выборе: закрытый автооткрытый не открывается снова.
-  // Сброс — при смене вида (вошёл в «Фокус» — снова откроется первый); пришёл в него, уже открыв что-то, — всё видено.
-  const seenRef = useRef(new Set<string>());
-  const seenLayoutRef = useRef(viewLayout);
-  const keepSeenRef = useRef(false);
-  // Открытые самим «Фокусом»/«Сбоку» (не кликом): уходя в «Говорящего», их закрываем — там крупно говорящий, а не показ.
-  const autoOpenedRef = useRef(new Set<string>());
-  if (seenLayoutRef.current !== viewLayout) {
-    seenLayoutRef.current = viewLayout;
-    seenRef.current = new Set(keepSeenRef.current || watchedIds.length > 0 || focusCam ? screenIds : []);
-    keepSeenRef.current = false;
-  }
-  // «Фокус»/«Сбоку» без выбранного: крупно первый чужой показ (как у Meet презентация). Рисуем его сразу, не дожидаясь
-  // эффекта, который запишет намерение «смотрю» в стор, — иначе кадр мигал бы сеткой.
-  const autoOpenId = stageAutoOpenStream(viewLayout, otherScreenIds, inViewIds, !!focusCam, seenRef.current);
-  const autoOpenScreen = autoOpenId ? screens.find((s) => s.participant.identity === autoOpenId) : undefined;
-  if (autoOpenScreen) watchedScreens.push(autoOpenScreen);
-  const unwatchedScreens = screens.filter((s) => !inViewIds.includes(s.participant.identity) && s !== autoOpenScreen);
+  // 🔴 Показы сами не открываются ни в одном виде (владелец 21.10, отменяет автооткрытие «Фокуса»/«Сбоку» как у Meet,
+  // R248): смотреть начинают только кликом — как в Discord. В «Фокусе»/«Сбоку» без выбранного крупно тот, кто говорит.
+  const unwatchedScreens = screens.filter((s) => !inViewIds.includes(s.participant.identity));
   const hasManual = watchedScreens.length > 0 || !!focusCam;
   // Нечего показать крупно (нет показов или все закрыты) — в режимах «один крупно» крупно тот, кто говорит; себя — никогда.
   const others = participants.filter((p) => !p.isLocal && !p.identity.endsWith('#screen')).map((p) => p.identity);
@@ -1072,10 +1150,7 @@ function VoiceStage() {
 
   /** Открыть показ: в «Сетке» — переход в «Фокус» на нём; в режимах «один крупно» он заменяет крупное. */
   const openStream = (id: string) => {
-    for (const sid of screenIds) seenRef.current.add(sid);
-    autoOpenedRef.current.delete(id);
     if (viewLayout === 'grid') {
-      keepSeenRef.current = true;
       setStageLayout('focus');
     } else if (oneBig) {
       for (const w of watchedIds) if (w !== id) unwatch(w);
@@ -1085,9 +1160,7 @@ function VoiceStage() {
   };
   /** Камера крупно (кнопка «развернуть» на плитке) — те же правила, что у показа. */
   const openCamera = (id: string) => {
-    for (const sid of screenIds) seenRef.current.add(sid);
     if (viewLayout === 'grid') {
-      keepSeenRef.current = true;
       setStageLayout('focus');
     } else if (oneBig) {
       for (const w of watchedIds) unwatch(w);
@@ -1105,26 +1178,15 @@ function VoiceStage() {
       clearWatched();
       setFocusCamId(null);
     } else if (viewLayout === 'speaker') {
-      // Открытое вручную остаётся крупно; открытое самим «Фокусом»/«Сбоку» — закрываем.
-      const manual = watchedIds.filter((w) => !autoOpenedRef.current.has(w));
-      for (const w of watchedIds) if (w !== manual[0]) unwatch(w);
-      if (manual.length > 0) setFocusCamId(null);
+      // Открытое (кликом — других нет) остаётся крупно одно.
+      for (const w of watchedIds.slice(1)) unwatch(w);
+      if (watchedIds.length > 0) setFocusCamId(null);
     } else if (isOneBigLayout(viewLayout) && watchedIds.length > 0) {
       for (const w of watchedIds.slice(1)) unwatch(w);
       setFocusCamId(null);
     }
-    autoOpenedRef.current.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewLayout]);
-
-  // Автооткрытие записываем в стор: звук показа и атрибут «смотрю» — как при клике по карточке.
-  useEffect(() => {
-    if (!autoOpenId) return;
-    for (const sid of otherScreenIds) seenRef.current.add(sid);
-    autoOpenedRef.current.add(autoOpenId);
-    watch(autoOpenId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoOpenId]);
 
   // «Скрыть участников без видео» (как у Discord): видео — это камера; показ экрана у человека без
   // камеры остаётся своей карточкой, а его плитка с аватаркой прячется. Видовая настройка — локально.
@@ -1185,6 +1247,7 @@ function VoiceStage() {
   // просмотра. Экземпляр жеста у полосы один на оба вида (меняется только ключ): контейнер тот же, порядок хуков стабилен.
   const side = viewLayout === 'side' && watching;
   const watchDnd = useStageModeDrag(channelId, 'watch-streams', watchKeys, watchDragOn, tipFree && watchedScreens.length > 1);
+  const watchFit = useWatchFit(watchDnd.ref, watchedScreens.length);
   const cardsDnd = useStageModeDrag(channelId, side ? 'side-cards' : 'watch-cards', streamKeys, watchDragOn, tipFree && unwatchedScreens.length > 1);
   const peopleDnd = useStageModeDrag(channelId, side ? 'side-people' : 'watch-people', personKeys, watchDragOn, tipFree && people.length > 1);
   const savedOrder = useStageOrder(channelId, gridCols);
@@ -1275,6 +1338,7 @@ function VoiceStage() {
           className={`stage-watch-grid${watchDragOn ? ' stage-dnd' : ''} count-${Math.min(watchedScreens.length, 4)}`}
           ref={watchDnd.ref}
           onPointerDown={watchDnd.drag.onPointerDown}
+          {...watchFit}
         >
           {watchDnd.drag.dragging && <div className="stage-drag-nest" ref={watchDnd.drag.nestRef} aria-hidden="true" />}
           {byStageKey(watchDnd.shown, watchKeys, watchedScreens.map((s, i) => {

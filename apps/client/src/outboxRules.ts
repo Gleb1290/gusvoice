@@ -46,6 +46,11 @@ export interface OutboxItem extends OutgoingMessage<File> {
    * со строкой, как `silent`.
    */
   spoilers?: number[];
+  /**
+   * Одноразовое фото/видео (`ttlmedia1`, #226): единственный файл строки уйдёт с `once` (и `onceTtl`, если не 0 — «просмотр
+   * один раз»). Поле только у таких; на диск — как `silent`.
+   */
+  onceTtl?: number;
   /** «Подпись над медиа» (G48, `media2`): уйдёт с `captionAbove: true`. Поле только у таких; на диск — как `silent`. */
   captionAbove?: true;
   /** Цитата фрагмента (G55, `quote1`): уйдёт `replyQuote` вместе с `replyToId`. Поле только у таких; на диск — как `silent`. */
@@ -88,6 +93,7 @@ export function newOutboxItem(
     asFile?: boolean;
     noPreview?: boolean;
     spoilers?: number[];
+    onceTtl?: number;
     captionAbove?: boolean;
     replyQuote?: { text: string; offset: number } | null;
   },
@@ -99,6 +105,7 @@ export function newOutboxItem(
     ...(input.asFile ? { asFile: true as const } : {}),
     ...(input.noPreview ? { noPreview: true as const } : {}),
     ...(input.spoilers?.length ? { spoilers: input.spoilers } : {}),
+    ...(input.onceTtl !== undefined && input.files.length === 1 ? { onceTtl: input.onceTtl } : {}),
     ...(input.captionAbove ? { captionAbove: true as const } : {}),
     key: input.key,
     convId,

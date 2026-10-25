@@ -1,4 +1,4 @@
-import { has, mentionSqlPattern, Permission, type ServerLastMessage, type UnreadSummary } from '@gusvoice/shared';
+import { broadcastSqlPattern, has, mentionSqlPattern, Permission, type ServerLastMessage, type UnreadSummary } from '@gusvoice/shared';
 import { eq, sql } from 'drizzle-orm';
 import { myConversationIds, unreadCounts } from './conversations.js';
 import { lastAttachmentPreview, stickerAwarePreview, stickerOf } from './convRules.js';
@@ -29,17 +29,23 @@ async function myMentionPattern(userId: string): Promise<string> {
     .limit(1);
   const meHome =
     me?.homeInstanceId && me.homeUsername ? { username: me.homeUsername, domain: instanceLabel(me.homeInstanceId).domain } : null;
-  return mentionSqlPattern(meHome ? null : me?.username, meHome);
+  return mentionSqlPattern(meHome ? null : me?.username, meHome, false);
 }
 
-/** Непрочитанное и упоминания по каналам ОДНИМ запросом — то же правило, что `bootstrap.reads`. */
+/**
+ * Непрочитанное и упоминания по каналам ОДНИМ запросом — то же правило, что `bootstrap.reads`.
+ * Упоминание роли (#76): `m.mention_roles` (кого сообщение позвало, решено при отправке) пересекается с моими ролями —
+ * `member_roles.role_id` уникален по всему инстансу, поэтому сервер в условии не нужен. Подзапрос без привязки к строке
+ * считается один раз на запрос.
+ */
 async function countUnreadByChannel(userId: string, chanIds: readonly string[]): Promise<{ id: string; unread: number; mentions: number }[]> {
   if (!chanIds.length) return [];
   const mentionRe = await myMentionPattern(userId);
+  const broadcastRe = broadcastSqlPattern();
   const res = await db.execute(sql`
     SELECT m.channel_id AS id,
            COUNT(*)::int AS unread,
-           (COUNT(*) FILTER (WHERE m.content ~* ${mentionRe}))::int AS mentions
+           (COUNT(*) FILTER (WHERE (m.content ~* ${mentionRe} OR (m.mention_everyone IS DISTINCT FROM false AND m.content ~* ${broadcastRe}) OR m.mention_roles && ARRAY(SELECT mr.role_id FROM member_roles mr WHERE mr.user_id = ${userId}))))::int AS mentions
     FROM messages m
     LEFT JOIN channel_reads r ON r.channel_id = m.channel_id AND r.user_id = ${userId}
     WHERE m.channel_id IN (${sql.join(chanIds.map((i) => sql`${i}`), sql`, `)})

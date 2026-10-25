@@ -64,6 +64,26 @@ export const Permission = {
    * монеты, а не право: иначе у одних саундборд есть, а у других нет, и это уже другая фича.
    */
   MANAGE_SOUNDBOARD: 1n << 27n,
+  /**
+   * Заводить, менять и удалять ВХОДЯЩИЕ ВЕБХУКИ канала (#24, как `MANAGE_WEBHOOKS` у Discord): адрес с токеном, по
+   * которому внешняя программа пишет в канал без входа.
+   *
+   * 🔴 Отдельным правом, а не под `MANAGE_CHANNELS`: адрес вебхука — это ключ, которым ЛЮБОЙ, кому его передали, пишет в
+   * канал от имени бота. Выдавать его заодно с переименованием каналов не стоит. Новый бит у старых ролей выключен —
+   * вебхуки получают владелец, администраторы и те, кому право выдали явно.
+   */
+  MANAGE_WEBHOOKS: 1n << 28n,
+  /**
+   * Упоминать `@everyone`, `@here` и ВСЕ роли (#76, как «Mention @everyone, @here, and All Roles» у Discord).
+   *
+   * 🔴 Без права текст `@everyone`/`@here` остаётся в сообщении, но никого не зовёт (ни звук, ни значок, ни пуш), а роль, не
+   * помеченная «можно упоминать», не зовётся. Роль с флагом «можно упоминать» зовёт любой. Вебхуки этим правом не
+   * ограничены (как у Discord) — у них своя политика `allowed_mentions`.
+   * Как у Discord, по умолчанию право есть у `@everyone` (и «Гостей» — их права копия `@everyone`): раньше `@everyone`
+   * звал любой, отбирать это молча нельзя; админ снимает галку у `@everyone`, если хочет закрыть. Миграция 0152 выдала его
+   * `@everyone`/«Гостям» и ролям с управлением ролями или администратором (раньше роли звали именно они).
+   */
+  MENTION_EVERYONE: 1n << 29n,
 } as const;
 
 export type PermissionName = keyof typeof Permission;
@@ -93,7 +113,9 @@ export const DEFAULT_EVERYONE_PERMISSIONS =
   Permission.CREATE_INVITE |
   // Тык — бытовое действие «эй, зайди в канал», а не модерация: по умолчанию доступен всем, и
   // право нужно как рубильник, которым админ может его отобрать у нарушителя.
-  Permission.POKE_MEMBERS;
+  Permission.POKE_MEMBERS |
+  // Как у Discord: «Упоминать @everyone, @here и все роли» у @everyone включено по умолчанию (#76).
+  Permission.MENTION_EVERYONE;
 
 /** Camera publish allowed if VIDEO (or the legacy STREAM umbrella) is granted. */
 export function canPublishCamera(perms: bigint): boolean {

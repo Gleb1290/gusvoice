@@ -87,6 +87,7 @@ zod:ZodError
 ./routes/mapsStatic.js:mapsStaticRoutes
 ./routes/mapsTiles.js:mapsTilesRoutes
 ./routes/messages.js:messageRoutes
+./routes/webhooks.js:webhookRoutes
 ./routes/push.js:pushRoutes
 ./blocks.js:onBlockChange
 ./routes/blocks.js:blockRoutes

@@ -65,6 +65,16 @@ export function describeAudit(e: AuditLogEntry): string {
     case 'channel.sound.clear':
       return `вернул в канале обычный звук «${soundEventName(s('event'))}»`;
 
+    // Входящие вебхуки (#24): запись целится в канал, имя вебхука — в `data.name`.
+    case 'webhook.create':
+      return `создал вебхук ${q('name', 'без имени')}`;
+    case 'webhook.update':
+      return `изменил вебхук ${q('name', 'без имени')}`;
+    case 'webhook.token':
+      return `сгенерировал новый адрес вебхука ${q('name', 'без имени')}`;
+    case 'webhook.delete':
+      return `удалил вебхук ${q('name', 'без имени')}`;
+
     case 'category.create':
       return `создал категорию «${s('name')}»`;
     case 'category.update':

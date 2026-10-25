@@ -1067,6 +1067,108 @@ textarea:focus {
   --sa-t: max(env(safe-area-inset-top), var(--gv-sat, 0px));
   --sa-b: max(env(safe-area-inset-bottom), var(--gv-sab, 0px));
 }
+/* Своя полоса окна десктопа (#219, `WindowTitleBar.tsx`, `titleBar.ts`): у главного окна Tauri нет системной
+   (`decorations: false`). Класс `gv-frameless` ставит `main.tsx` только в Tauri-десктопе — веб и Android не меняются.
+   Высота и кнопки — системные Windows 11: полоса 32, кнопка 46 × 32, значки 10 × 10 в 1 px. Фон — рельс, как полоса
+   Discord над списком серверов. Приложение ниже полосы: отступ у `body`, а слои во весь экран начинаются под ней
+   (иначе их верхние кнопки — «закрыть» лайтбокса, шапка редактора — уходят под кнопки окна). */
+html.gv-frameless {
+  --gv-titlebar-h: 32px;
+}
+html.gv-frameless body {
+  box-sizing: border-box;
+  padding-top: var(--gv-titlebar-h);
+}
+html.gv-frameless
+  :is(
+    .modal-overlay,
+    .lightbox,
+    .screen-viewer.pseudo-fs,
+    .cam-screen,
+    .photo-editor,
+    .pick-viewer,
+    .geo-full,
+    .tgp,
+    .gv-crash,
+    .update-notes-scrim,
+    .call-scrim,
+    .pins-backdrop,
+    .ctx-sheet-backdrop,
+    .gal-hold
+  ) {
+  top: var(--gv-titlebar-h);
+}
+.gv-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--gv-titlebar-h, 32px);
+  /* Над всем, включая экран сбоя (9999) и щипок/осыпание (10001): окно двигают и закрывают всегда. */
+  z-index: 10100;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  background: var(--rail);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.gv-titlebar-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-left: var(--sp-4);
+  min-width: 0;
+  pointer-events: none;
+}
+.gv-titlebar.is-blurred .gv-titlebar-title,
+.gv-titlebar.is-blurred .gv-titlebar-btn {
+  color: var(--muted-2);
+}
+.gv-titlebar-btns {
+  display: flex;
+  flex-shrink: 0;
+}
+.gv-titlebar-btn {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+}
+.gv-titlebar-btn svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+/* `is-hover` / `is-pressed` — у «Развернуть»: мышь над ней у нативного окна меню раскладок (`titlebar.rs`). */
+.gv-titlebar-btn:hover,
+.gv-titlebar-btn.is-hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.gv-titlebar-btn:active,
+.gv-titlebar-btn.is-pressed {
+  background: var(--bg-3);
+}
+.gv-titlebar .gv-titlebar-close:hover,
+.gv-titlebar .gv-titlebar-close:active {
+  background: var(--danger);
+  color: var(--media-meta-ink);
+}
+.gv-titlebar-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 /* App layout */
 .app {
   display: grid;
@@ -3971,6 +4073,18 @@ span.att-pending {
 .stage-watch-grid.count-3,
 .stage-watch-grid.count-4 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+/* 🔴 #217: узкое окно 760–1100 px и телефон — число колонок ставит `useWatchFit` (`fitWatchGrid` в `VoiceChannelView.tsx`),
+   когда две колонки CSS дают ленты вместо картинок (5–7 показов под полосами). `cols` — все влезают в 16:9 крупнее;
+   `scroll` — не влезают даже в нижней границе: ряды фиксированной высоты 16:9 и прокрутка вместо лент 3:1.
+   Без `data-fit` (широкие окна) правила выше не тронуты. */
+.stage-watch-grid[data-fit] {
+  grid-template-columns: repeat(var(--watch-cols, 2), minmax(0, 1fr));
+}
+.stage-watch-grid[data-fit='scroll'] {
+  grid-auto-rows: var(--watch-row, 90px);
+  align-content: start;
+  overflow-y: auto;
 }
 .stage-watch-grid .screen-viewer {
   flex: initial;
@@ -9387,6 +9501,17 @@ button.dms-scope.on::after {
   align-items: flex-end;
   pointer-events: none;
 }
+/* Короткий список и поля (19.10, приёмка dev): без этого сторож шёл сразу под строками (y≈314 из 915), а у Telegram кнопка прибита
+   к низу экрана (`GroupCreateActivity`, `FragmentFloatingButton`: 14 dp снизу + вставка). `.sheet-body` экрана — колонка во всю
+   высоту, `margin-top: auto` отдаёт сторожу остаток и прижимает его к низу; запас прокрутки 56 px (последняя строка не под
+   кнопкой) переехал в верхний отступ сторожа. Прилипание считается от поля тела (нижний отступ 8 px + вставка) → 14 − 8 = 6 px
+   (было −8: кнопка касалась нижнего края). Над клавиатурой — как весь экран: `.sheet-scrim` `position: fixed; inset: 0` сжимается
+   вместе с окном (adjustResize), нижний край — над клавиатурой. */
+.sheet.page .group-fab-dock {
+  bottom: 6px;
+  margin-top: auto;
+  padding-top: 56px;
+}
 .group-fab {
   pointer-events: auto;
   flex: none;
@@ -9905,6 +10030,11 @@ button.dms-scope.on::after {
     /* 🔴 Ряды — по высоте плитки 3:4 (#221, замерено на стенде 412: три человека и больше под крупным — плитки второго ряда
        наезжали на первый). Полоса `flex: 1` с прокруткой даёт сетке определённую высоту, и ряды `auto` ужимались до её доли. */
     grid-auto-rows: max-content;
+  }
+  /* #217: несколько открытых показов не влезли и листаются (`data-fit='scroll'`, `useWatchFit`) — им 3/4 площади, людям 1/4
+     (поровну на 412 px оставалось полтора ряда картинок). Один показ и «все влезли» — прежние доли. */
+  .app.m-content .voice-stage.watching .stage-watch-grid[data-fit='scroll'] {
+    flex-grow: 3;
   }
   /* Крупный говорящий (#221) — во всю площадь крупного, а не плитка 3:4 сетки телефона. */
   .app.m-content .stage-big-person > .stage-tile {
@@ -10903,13 +11033,16 @@ button.dms-scope.on::after {
     transform: translateY(calc((16px + var(--sp-1)) / 2));
   }
 
-  /* Profile tab (design-step8 D3): full-screen pane above the bottom nav. */
+  /* Profile tab (design-step8 D3): full-screen pane; стеклянная капсула вкладок (z 95) лежит поверх него.
+     🔴 24.10: экран идёт до САМОГО низа, а место под капсулой — внутренним отступом. С `bottom: var(--m-nav-h)` под ним
+     оставалась полоса, и сквозь стекло капсулы просвечивал список ЛС (`.app.m-dmlist` уходит под капсулу). */
   .mobile-profile {
     position: fixed;
     top: calc(max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
     left: var(--sa-l);
     right: var(--sa-r);
-    bottom: var(--m-nav-h);
+    bottom: 0;
+    padding-bottom: var(--m-nav-h);
     z-index: 93;
     background: var(--bg);
     overflow-y: auto;
@@ -11239,6 +11372,78 @@ button.dms-scope.on::after {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+}
+/* Экран на всю высоту (`BottomSheet page`, #218): «Новое сообщение» на телефоне — как `ContactsActivity` Telegram Android
+   (TA/ui/ContactsActivity.java: `NewMessageTitle`, фрагмент поверх списка, а не лист). Полоса 56 + системная строка + полоса
+   звонка, как у профиля (`.tgp-bar`): кнопка 48, заголовок 20 (ActionBar `setTitle`, 20 sp полужирный). Поле поиска — как у
+   списка бесед (`.app.m-list .dm-find`: поля 7 по бокам, высота 48 = `DialogsActivity.SEARCH_FIELD_HEIGHT`). Слой 1000 —
+   под полосой звонка (1001: она над любым экраном), как окна `.modal-overlay`. Въезд справа — как раздел настроек
+   (`settingsDetailIn`), без затемнения: экран кроет всё. */
+.sheet-scrim.page {
+  z-index: 1000;
+  align-items: stretch;
+  background: var(--bg);
+  animation: none;
+}
+.sheet.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+  padding: 0 var(--sa-r) 0 var(--sa-l);
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: none;
+  animation: sheetPageIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes sheetPageIn {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet.page {
+    animation: none;
+  }
+}
+.sheet-page-bar {
+  --sheet-page-bar: calc(56px + max(env(safe-area-inset-top), var(--gv-sat, 0px)) + var(--m-callbar-h, 0px));
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--sheet-page-bar);
+  box-sizing: border-box;
+  padding: calc(var(--sheet-page-bar) - 56px) 4px 0;
+}
+.sheet-page-bar .sheet-back {
+  position: static;
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+}
+.sheet-page-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+.sheet.page .sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 7px calc(var(--sp-3) + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+}
+.sheet.page input.sheet-search {
+  height: 48px;
+  margin: var(--sp-2) 0;
 }
 .sheet-row {
   display: flex;
@@ -12875,14 +13080,21 @@ button.cam-btn.send {
   height: 10px;
 }
 
-/* ===== Hotkey cheat sheet (round-7 P8) ===== */
+/* ===== Hotkey cheat sheet (round-7 P8; 20.10 — окно «как в Discord», `HotkeyCheatSheet.tsx`) =====
+   Высота — не больше экрана: оверлей в десктопе начинается под своей полосой окна (#219, `--gv-titlebar-h`), окно —
+   с полями `--sp-6` сверху и снизу. Шапка закреплена, листается только тело. Колонки — CSS `columns`: строка не рвётся
+   (`break-inside: avoid`), а секция перетекает в соседнюю колонку, поэтому колонки выходят ровными, без пустоты справа
+   внизу (было две сетки-колонки разной высоты). Узкое окно — одна колонка сама (ширина колонки от 300 px). */
 .modal.cheatsheet {
-  width: 660px;
-  max-width: calc(100vw - 32px);
+  width: 820px;
+  max-width: calc(100vw - 2 * var(--sp-6));
+  max-height: calc(100dvh - var(--gv-titlebar-h, 0px) - 2 * var(--sp-6));
   padding: 0;
+  gap: 0;
   overflow: hidden;
 }
 .cheat-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -12893,33 +13105,42 @@ button.cam-btn.send {
   color: var(--accent);
 }
 .cheat-title {
+  flex: 1;
+  margin: 0;
   font-weight: 800;
   font-size: 17px;
   color: var(--text);
 }
 .cheat-hint {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  color: var(--muted-2);
-  margin-right: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-right: var(--sp-2);
 }
-.cheat-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 var(--sp-6);
-  padding: var(--sp-5) var(--sp-6) var(--sp-6);
+.cheat-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sp-4) var(--sp-6) var(--sp-6);
+  columns: 2 300px;
+  column-gap: var(--sp-6);
 }
-.cheat-col-title {
+/* Между секциями — поле сверху; у секции в начале колонки браузер его срезает (поле на разрыве колонок). */
+.cheat-sec + .cheat-sec {
+  margin-top: var(--sp-6);
+}
+.cheat-sec-title {
+  margin: 0;
+  padding: var(--sp-2) 0 var(--sp-3);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted-2);
-  margin-bottom: 10px;
-}
-/* Второй раздел в той же колонке (07.10, G15: «Навигация» под «Голосом»). */
-.cheat-col-title.next {
-  margin-top: var(--sp-6);
+  /* Заголовок не остаётся один внизу колонки — уходит вместе с первой строкой. */
+  break-after: avoid;
+  break-inside: avoid;
 }
 .cheat-row {
   display: flex;
@@ -12927,36 +13148,44 @@ button.cam-btn.send {
   gap: var(--sp-3);
   padding: var(--sp-3) 0;
   border-bottom: 1px solid var(--border-soft, var(--border));
+  break-inside: avoid;
 }
 .cheat-label {
   flex: 1;
+  min-width: 0;
   font-size: 13.5px;
   color: var(--text);
 }
 .cheat-keys {
+  flex: none;
   display: flex;
+  align-items: center;
   gap: var(--sp-2);
 }
+.cheat-or {
+  font-size: 11.5px;
+  color: var(--muted-2);
+}
+/* Клавиша-капсула: моноширинный шрифт системы, нижняя кромка толще — «нажимаемая» клавиша, как в окне Discord. */
 kbd.cheat-key {
+  min-width: 24px;
+  box-sizing: border-box;
+  text-align: center;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text);
-  background: var(--bg-1, var(--bg));
+  background: var(--bg-3);
   border: 1px solid var(--border);
+  border-bottom-width: 2px;
   border-radius: var(--r-1);
   padding: var(--sp-1) var(--sp-3);
   line-height: 1.2;
+  white-space: nowrap;
 }
 kbd.cheat-key.unset {
   color: var(--muted-2);
   opacity: 0.7;
-}
-@media (max-width: 620px) {
-  .cheat-grid {
-    grid-template-columns: 1fr;
-    gap: 0;
-  }
 }
 
 /* ===== Подсказки «кто кого типнул» поверх стрима (04.09) =====================================
@@ -13354,6 +13583,68 @@ body:has(.lightbox) .confirm-overlay {
   }
   .lightbox .lb-nav {
     display: none;
+  }
+}
+/* Просмотр в альбомной ориентации телефона (19.10): на время просмотра приложение снимает закреп портрета
+   (`viewerRotation.ts`), раскладка остаётся телефонной (`setPhoneLayoutPin`), а окно шире 760 px — мобильные правила выше
+   не действуют. Как Telegram Android `PhotoViewer` в альбомной: снимок и видео вписаны во весь экран (поля сцены — только
+   системные вставки: вырез, панель навигации сбоку, строка состояния), панели лежат поверх, стрелок нет — листают пальцем;
+   шапка — та же телефонная (назад 56, имя 20 жирным). Без наведения (`hover: none`) — узкое окно ПК мышью сюда не попадает. */
+@media (orientation: landscape) and (max-height: 500px) and (hover: none) {
+  .lightbox .lb-stage,
+  .lightbox .lb-stage.has-caption,
+  .lightbox .lb-stage.video {
+    padding: var(--sa-t) var(--sa-r) var(--sa-b) var(--sa-l);
+  }
+  .lightbox .lb-img {
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .lightbox .lb-nav {
+    display: none;
+  }
+  .lightbox .lb-top {
+    padding-left: var(--sa-l);
+    background: rgb(0 0 0 / 0.5);
+  }
+  .lightbox .lb-back {
+    width: 56px;
+    height: 56px;
+    margin-right: calc(16px - var(--sp-4));
+    border-radius: 0;
+    background: none;
+  }
+  .lightbox .lb-name {
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .lightbox .lb-sub {
+    font-size: 14px;
+  }
+  .lightbox .lb-count {
+    position: absolute;
+    top: calc(56px + max(env(safe-area-inset-top), var(--gv-sat, 0px)) + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    height: 23px;
+    padding: 0 9px;
+    border-radius: var(--r-pill);
+    background: rgb(0 0 0 / 0.5);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 23px;
+    white-space: nowrap;
+    z-index: 3;
+  }
+  /* Просмотр галереи вложений: «Закрыть» и полоса подписи не уходят под вырез и боковую панель навигации. */
+  .pick-top {
+    padding-left: calc(12px + var(--sa-l));
+    padding-right: calc(12px + var(--sa-r));
+  }
+  .pick-bar {
+    padding-left: calc(10px + var(--sa-l));
+    padding-right: calc(10px + var(--sa-r));
   }
 }
 .lb-nav {
@@ -14345,6 +14636,61 @@ body:has(.lightbox) .confirm-overlay {
 }
 .ban-unban:hover {
   background: var(--bg-2);
+}
+
+/* Настройки канала → Вебхуки (#24, `ChannelWebhooksPanel`). Строка списка — кнопка-строка в раскладке `.ban-row`
+   (фон назван явно в покое и под курсором — иначе глобальный `button:hover` красит медовым), редактор — под ней. */
+.webhook-list {
+  max-height: none;
+}
+.webhook-item {
+  display: flex;
+  flex-direction: column;
+}
+.webhook-row {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.webhook-row:hover,
+.webhook-row[aria-expanded='true'] {
+  background: var(--row-hover);
+}
+.webhook-row .ban-name,
+.webhook-row .ban-sub {
+  display: block;
+}
+.webhook-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin: var(--sp-1) 0 var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+}
+.webhook-ava {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.webhook-ava-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.webhook-url {
+  display: flex;
+  gap: var(--sp-2);
+}
+.webhook-url input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 /* Invite management list (P3). */
@@ -15768,6 +16114,118 @@ body:has(.lightbox) .confirm-overlay {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Карточки сообщения вебхука (#24, `MessageEmbeds.tsx`, образец — Discord Embed Object: полоса 4px слева, ширина до
+   520px, поля inline по три в ряд, миниатюра 80px справа). Основа — `.lp-card`: тот же фон, рамка и скругление. */
+.embeds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 6px 0 2px;
+}
+.embed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: fit-content;
+  min-width: min(240px, 100%);
+  max-width: min(520px, 100%);
+  box-sizing: border-box;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: var(--r-1) var(--r-2) var(--r-2) var(--r-1);
+  overflow-wrap: anywhere;
+}
+.embed-grid {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+}
+.embed-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  flex: 1;
+}
+.embed-author {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+.embed-author-icon,
+.embed-footer-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-circle);
+  object-fit: cover;
+  flex: none;
+}
+.embed-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.embed-author .msg-link,
+.embed-title .msg-link {
+  color: var(--accent);
+}
+.embed-desc,
+.embed-field-value {
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+/* Поля: inline — по три в ряд, остальные во всю ширину (как у Discord). */
+.embed-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-1);
+}
+.embed-field {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.embed-field.inline {
+  grid-column: auto;
+}
+.embed-field-name {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.embed-thumb {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: var(--r-2);
+  flex: none;
+}
+.embed-image {
+  display: block;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  border-radius: var(--r-2);
+}
+.embed-links {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: 12px;
+}
+.embed-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 11px;
+  color: var(--muted-2);
 }
 
 /* Прикреплённые картинки ДО отправки: миниатюра вместо имени файла.
@@ -18054,6 +18512,23 @@ input[type='radio']:disabled {
   letter-spacing: 0.01em;
   line-height: 1.55;
   white-space: nowrap;
+}
+
+/* Пометка «ВЕБХУК» у имени автора (#24, как BOT/APP у Discord): сообщение пришло по адресу вебхука, а не от участника.
+   Та же плашка, что `.vp-general`, но без медового акцента — это пометка о происхождении, а не звание. */
+.msg-webhook-tag {
+  flex: 0 0 auto;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--bg-3);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.55;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 /* Сколько канал уже занят. Живёт у названия канала, идёт по ВСЕМ занятым каналам сразу.
@@ -25192,6 +25667,164 @@ body:has(.modal.sfb) > .ctx-sheet-backdrop {
 .att-img-wrap.spoiled .att-play,
 .att-img-wrap.spoiled .att-dur {
   display: none;
+}
+/* Одноразовые фото и видео ЛС (19.10, #226; Telegram Android — закрытая плитка с огнём «1» или таймером). Плитка по размеру
+   кадра (как `.att-img`), файл НЕ грузится (сервер закрыт до `once-open`) — заглушка градиентом, посередине — круг со значком
+   и числом. У отправителя — то же, без руки. */
+.att-once {
+  position: relative;
+  display: block;
+  min-width: 160px;
+  min-height: 120px;
+  max-width: min(360px, 100%);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #00000033;
+  border-radius: var(--r-2);
+  background: linear-gradient(160deg, #ffffff1f, #00000059), var(--bg-3);
+  cursor: pointer;
+}
+.att-once.mine {
+  cursor: default;
+}
+.att-once-mark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--r-pill);
+  background: #00000080;
+  color: #fff;
+  transform: translate(-50%, -50%);
+}
+.att-once-num {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+/* Подсказка отправителю поверх своей плитки (tdesktop `lng_ttl_photo_tooltip_out`). */
+.att-once-tip {
+  position: absolute;
+  right: var(--sp-3);
+  bottom: var(--sp-3);
+  left: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  background: #000000b3;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+}
+/* Отсчёт в шапке просмотра одноразового (`Lightbox` `once`). */
+.lb-once {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-pill);
+  background: #ffffff26;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/* Значок таймера на плитке окна отправки (`SendFilesBox`). */
+.sfb-once {
+  position: absolute;
+  left: var(--sp-2);
+  bottom: var(--sp-2);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  background: #00000099;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+}
+/* Подменю «Таймер самоуничтожения» (`OnceTimerMenu`): подсказка tdesktop `lng_ttl_period_hint` и своё время барабаном (ниже). */
+.once-hint {
+  max-width: 232px;
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+/* Барабан выбора `DrumPicker` (tdesktop `VerticalDrumPicker`: окно 200, строка 40, две линии вокруг выбранной) и кнопки
+   «Отмена» / «Готово» «Своего времени» таймера (`OnceTimerMenu`). Положение и вид строк — из JS (`drumMath.ts`). */
+.drum {
+  position: relative;
+  overflow: hidden;
+  margin: var(--sp-2) var(--sp-3);
+  outline: none;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.drum:active {
+  cursor: grabbing;
+}
+.drum:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--r-2);
+}
+.drum-row {
+  position: absolute;
+  inset: 0 0 auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+.drum-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.drum-line.top {
+  top: calc(50% - 20px - 1px);
+}
+.drum-line.bottom {
+  top: calc(50% + 20px - 1px);
+}
+.once-custom-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+.once-btn {
+  min-width: 84px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.once-btn.ghost {
+  background: none;
+  color: var(--muted);
+}
+.once-btn.ghost:hover {
+  background: var(--bg-3);
+  color: var(--text);
 }
 /* Счётчик «Выбрано N» встряхивается, когда 101-е сообщение не добавилось (предел выделения 100, как у Telegram Android). */
 .sel-count.shake {

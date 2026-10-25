@@ -25,7 +25,7 @@ import { registrationPolicy } from '../instanceSetup.js';
 import { isInviteSpent } from '../inviteRules.js';
 import { isSmtpConfigured } from '../settings.js';
 import { decideRegistration, loginGate, PENDING_APPROVAL_ERROR, type InviteCheck } from '../setupRules.js';
-import { INSTANCE_FEATURES } from '../instanceFeatures.js';
+import { instanceFeatures } from '../instanceFeatures.js';
 import { BIGFILE_MAX_BYTES } from '../attachmentRules.js';
 import { redisPub } from '../realtime.js';
 import { serializeUser } from '../serialize.js';
@@ -599,6 +599,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.get('/auth/me', { preHandler: requireAuth }, async (req, reply) => {
     const [row] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
     if (!row) return reply.code(404).send({ error: 'not found' });
-    return { ...serializeUser(row), features: [...INSTANCE_FEATURES], dmFileMaxBytes: BIGFILE_MAX_BYTES };
+    return { ...serializeUser(row), features: instanceFeatures(env.federation.dmEnabled), dmFileMaxBytes: BIGFILE_MAX_BYTES };
   });
 }

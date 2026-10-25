@@ -133,6 +133,23 @@ export const FEATURE_VOICE3 = 'voice3';
 export const VOICE_ONCE_SPENT_TEXT = 'Голосовое сообщение прослушано';
 
 /**
+ * Признак СЕРВЕРА (19.10, #226): одноразовые фото и видео в личке 1:1 с человеком (Telegram «Self-Destruct Timer»). У ссылки
+ * на вложение — `once: true` и, для таймера, `onceTtl` (1…60 с); сервер оставит пометку только у фото/видео кадром беседы
+ * 1:1 (не группа, не «Избранное»), отдельным сообщением (не альбом) и не отложенным — иначе 400 `ONCE_MEDIA_REFUSED`.
+ * `POST /api/conv/:id/messages/:mid/once-open` (204) — получатель открыл (отметка `once_opened_at`, миграция 0149; сервер сам
+ * сожжёт открытое, если клиент не сообщил закрытие); `once-spent` — закрыл или вышел таймер: файл удаляется, у обоих — запасная
+ * фраза `PHOTO_ONCE_SPENT_TEXT` / `VIDEO_ONCE_SPENT_TEXT` (`ConvMessage.voiceOnceSpent`). Без признака у клиента нет пункта
+ * «Таймер самоуничтожения» в окне отправки.
+ */
+export const FEATURE_TTL_MEDIA1 = 'ttlmedia1';
+/** Запасная фраза сгоревшего одноразового фото (`voiceOnceSpent`): её видит и старый клиент. */
+export const PHOTO_ONCE_SPENT_TEXT = 'Фото истекло';
+/** Запасная фраза сгоревшего одноразового видео (`voiceOnceSpent`). */
+export const VIDEO_ONCE_SPENT_TEXT = 'Видео истекло';
+/** Ошибка отправки (400): одноразовое фото/видео не в личке, в альбоме или отложенное (tdesktop `lng_ttl_no_schedule`). */
+export const ONCE_MEDIA_REFUSED = 'once_media_refused';
+
+/**
  * Признак СЕРВЕРА (08.10, #211, G68): видеосообщения-кружки в ЛС. У ссылки на вложение при отправке — `round: true`; сервер
  * оставит пометку (`Attachment.round`) только у видео с равными `width`/`height` и `durationMs` до `ROUND_MAX_MS`, иначе
  * снимет молча — придёт обычное видео. «Прослушано» (`voice1`) и «один раз» (`voice3`) у кружка — те же ручки, что у

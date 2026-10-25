@@ -70,6 +70,51 @@ function layerGuard(raw: string) {
   assert.ok(calls.some(n => compact(n).endsWith('.setVideoQuality?.(LAYER_QUALITY[layer])')),
     'R254 выбранный слой применяется к публикации');
 }
+function layerResendOrderGuard(raw: string) {
+  const { body, apply } = effect(raw, 'layer');
+  const maps = body.statements.filter(ts.isVariableStatement)
+    .flatMap(n => [...n.declarationList.declarations]).filter(n => n.name.getText() === 'sentFor');
+  assert.equal(maps.length, 1, 'R278 память отправленного слоя принадлежит эффекту, а не одному apply');
+  const init = maps[0].initializer;
+  assert.ok(init && ts.isNewExpression(init) && init.expression.getText() === 'WeakMap'
+    && (init.arguments?.length ?? 0) === 0, 'R278 трек хранится отдельно для каждой публикации');
+  const loops = descendants(apply, n => ts.isForOfStatement(n)
+    && compact(n.expression) === 'p.trackPublications.values()') as ts.ForOfStatement[];
+  assert.equal(loops.length, 1, 'R278 слой применяется внутри перебора публикаций');
+  const block = loops[0].statement;
+  assert.ok(ts.isBlock(block));
+  assert.equal(compact(variable(block, 'fresh')), 'sentFor.get(pub)!==pub.track',
+    'R278 свежесть определяется сменой трека той же публикации');
+  const reads = block.statements.filter(ts.isVariableStatement)
+    .filter(n => n.declarationList.declarations.some(d => d.name.getText() === 'fresh'));
+  const writes = block.statements.filter(n => ts.isExpressionStatement(n)
+    && compact(n.expression) === 'sentFor.set(pub,pub.track)');
+  assert.equal(reads.length, 1, 'R278 свежесть читается до отправки слоя текущей публикации');
+  assert.equal(writes.length, 1, 'R278 текущий трек запоминается для следующего apply');
+  assert.ok(block.statements.indexOf(reads[0]) < block.statements.indexOf(writes[0]),
+    'R278 get предыдущего трека идёт раньше set текущего');
+}
+function layerResendBranchGuard(raw: string) {
+  const { apply } = effect(raw, 'layer');
+  const branches = descendants(apply, n => ts.isIfStatement(n)
+    && compact(n.expression) === 'needsLayerResend(pub.videoQuality,LAYER_QUALITY[layer],fresh)') as ts.IfStatement[];
+  assert.equal(branches.length, 1, 'R278 повтор решает настоящее правило по качеству публикации и свежести трека');
+  function branchCall(branch: ts.Statement | undefined, method: string, args: string[], message: string) {
+    assert.ok(branch && ts.isBlock(branch) && branch.statements.length === 1, message);
+    const statement = branch.statements[0];
+    assert.ok(ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression), message);
+    const call = statement.expression;
+    assert.ok(ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === method, message);
+    let receiver: ts.Expression = call.expression.expression;
+    while (ts.isParenthesizedExpression(receiver) || ts.isAsExpression(receiver)) receiver = receiver.expression;
+    assert.equal(compact(receiver), 'pub', message);
+    assert.deepEqual(call.arguments.map(compact), args, message);
+  }
+  branchCall(branches[0].thenStatement, 'emitTrackUpdate', [],
+    'R278 равный слой новой подписки отправляется через emitTrackUpdate');
+  branchCall(branches[0].elseStatement, 'setVideoQuality', ['LAYER_QUALITY[layer]'],
+    'R278 в else остаётся обычная смена качества setVideoQuality');
+}
 function listenersGuard(raw: string) {
   for (const kind of ['audio', 'layer'] as const) {
     const { body, call } = effect(raw, kind);
@@ -178,4 +223,23 @@ it('R256 слой сохраняет владельцев всех спутни�
     'isInPip(p.identity, pipStreams)',
     'isInPip(p.identity, pipStreams) || ownerOf(pipStreams[0]) === p.identity',
   ]) rejects(voice, anchor, mutant, layerGuard, 'R254 признак PiP учитывает точный показ и его владельца');
+});
+it('R278 новая подписка определяется до сохранения трека, память переживает повторный apply', () => {
+  // Иначе после превью тот же LOW будет ошибочно считаться уже доведённым до сервера.
+  layerResendOrderGuard(voice);
+});
+it('R278 равный слой повторяется серверу, а новый выбор идёт через обычную смену качества', () => {
+  // Проверяем обе ветки: без else восстановление LOW ломало бы ручную смену качества.
+  layerResendBranchGuard(voice);
+});
+it('R278 запись текущего трека раньше чтения предыдущего обнаруживается после проверки оригинала', () => {
+  // Контрфакт делает fresh всегда false: библиотека опять промолчит после переподписки.
+  rejects(voice, 'const fresh = sentFor.get(pub) !== pub.track;\n          sentFor.set(pub, pub.track);',
+    'sentFor.set(pub, pub.track);\n          const fresh = sentFor.get(pub) !== pub.track;',
+    layerResendOrderGuard, 'R278 get предыдущего трека идёт раньше set текущего');
+});
+it('R278 потеря принудительной отправки слоя обнаруживается даже при сохранённом setVideoQuality', () => {
+  // Пустая then-ветка синтаксически корректна, но повторное открытие снова получит верхний слой.
+  rejects(voice, '(pub as { emitTrackUpdate?: () => void }).emitTrackUpdate?.();', '',
+    layerResendBranchGuard, 'R278 равный слой новой подписки отправляется через emitTrackUpdate');
 });

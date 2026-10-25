@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { createContext, Script } from 'node:vm';
+import { BROADCAST_MENTIONS, MENTION_LEFT_GUARD, MENTION_NAME_SRC, roleMentionPatternSrc, type Message } from '@gusvoice/shared';
 import { createElement, Fragment } from 'react';
+import * as ReactRuntime from 'react';
+import * as jsxRuntime from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
+import ts from 'typescript';
 import { renderMessageText } from './messageText.js';
 
 /**
@@ -56,6 +62,131 @@ describe('текст пользователя не становится разм
     const html = render('**<script>**');
     assert.ok(html.includes('<strong>'));
     assert.ok(!html.includes('<script'));
+  });
+});
+
+type MessageRenderer = typeof renderMessageText;
+type BroadcastDecision = Pick<Message, 'mentionEveryone'>;
+const mentioned = (text: string) => `<span class="mention">${text}</span>`;
+const broadcastText = '@everyone @here @EVERYONE';
+const broadcastRoles = ['Ночная смена'] as const;
+
+function renderDecision(content: string, message: BroadcastDecision, renderer: MessageRenderer = renderMessageText) {
+  // DTO и пятый аргумент имеют обратный смысл; эта обвязка не заменяет проверки настоящих call sites MessagePane.
+  return renderToStaticMarkup(createElement(Fragment, null, ...renderer(
+    content, (url, key) => createElement('a', { key, href: url }, url), undefined, broadcastRoles,
+    message.mentionEveryone === false,
+  )));
+}
+
+const nestedBroadcasts = [
+  { label: 'жирный (**…**)', wrap: (s: string) => `**${s}**`, tag: '<strong>',
+    anchor: 'inline(bold.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'спойлер (||…||)', wrap: (s: string) => `||${s}||`, tag: 'class="spoiler ',
+    anchor: 'inline(spoiler.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'цитата (> …)', wrap: (s: string) => `> ${s}`, tag: '<blockquote class="md-quote">',
+    anchor: 'inline(text, `q${pi}-${idx}`, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'зачёркнутый (~~…~~)', wrap: (s: string) => `~~${s}~~`, tag: '<s>',
+    anchor: 'inline(strike.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'подчёркнутый (<u>…</u>)', wrap: (s: string) => `<u>${s}</u>`, tag: '<u>',
+    anchor: 'inline(under.slice(3, -4), k, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'двойной курсив (__…__)', wrap: (s: string) => `__${s}__`, tag: '<em>',
+    anchor: 'inline(italDbl.slice(2, -2), k, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'курсив (*…*)', wrap: (s: string) => `*${s}*`, tag: '<em>',
+    anchor: 'inline(raw.slice(1, -1), k, onLink, onEmoji, re, plainBroadcast)' },
+  { label: 'курсив (_…_)', wrap: (s: string) => `_${s}_`, tag: '<em>',
+    anchor: 'inline(raw.slice(1, -1), k, onLink, onEmoji, re, plainBroadcast)' },
+] as const;
+type NestedBroadcast = (typeof nestedBroadcasts)[number];
+const nestedMarker = (fixture: NestedBroadcast, token: string) =>
+  `R282 вложенный inline / ${fixture.label} / ${token}: mentionEveryone=false оставляет broadcast текстом`;
+
+function nestedBroadcastContract(renderer: MessageRenderer, fixture: NestedBroadcast) {
+  const content = `${broadcastText} @reader @Ночная смена`;
+  const html = renderDecision(fixture.wrap(content), { mentionEveryone: false }, renderer);
+  assert.ok(html.includes(fixture.tag), `R282 ${fixture.label}: форматирование действительно распознано`);
+  for (const token of broadcastText.split(' ')) {
+    assert.equal(html.includes(mentioned(token)), false, nestedMarker(fixture, token));
+  }
+  assert.equal(html.replace(/<[^>]*>/g, ''), content, `R282 ${fixture.label}: текст всех обращений сохранён`);
+  for (const token of ['@reader', '@Ночная смена']) {
+    assert.ok(html.includes(mentioned(token)), `R282 ${fixture.label}: личное обращение и роль остаются плашками`);
+  }
+  const allowed = renderDecision(fixture.wrap(content), { mentionEveryone: true }, renderer);
+  for (const token of broadcastText.split(' ')) {
+    assert.ok(allowed.includes(mentioned(token)), `R282 ${fixture.label}: разрешённый ${token} остаётся плашкой`);
+  }
+}
+
+function loadMessageRenderer(source: string): MessageRenderer {
+  // Исполняется ВЕСЬ TSX, а не извлечённый inline: React, hook спойлера, JSX и правила shared настоящие.
+  const compiled = ts.transpileModule(source, { fileName: 'messageText.tsx', reportDiagnostics: true, compilerOptions: {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
+  } });
+  assert.equal((compiled.diagnostics ?? []).filter(d => d.category === ts.DiagnosticCategory.Error).length, 0,
+    'R282 полный messageText.tsx транспилируется без синтаксических ошибок');
+  const dependencies: Record<string, unknown> = {
+    react: ReactRuntime,
+    'react/jsx-runtime': jsxRuntime,
+    '@gusvoice/shared': { BROADCAST_MENTIONS, MENTION_LEFT_GUARD, MENTION_NAME_SRC, roleMentionPatternSrc },
+  };
+  const module = { exports: {} as Record<string, unknown> };
+  const context = createContext({ module, exports: module.exports, require: (id: string) => {
+    assert.ok(Object.hasOwn(dependencies, id), `R282 незаявленный runtime-импорт: ${id}`);
+    return dependencies[id];
+  } }, { codeGeneration: { strings: false, wasm: false } });
+  new Script(compiled.outputText, { filename: 'messageText.test.vm.cjs' }).runInContext(context, { timeout: 1000 });
+  assert.equal(typeof module.exports.renderMessageText, 'function', 'R282 полный модуль экспортирует настоящий renderer');
+  return module.exports.renderMessageText as MessageRenderer;
+}
+
+describe('R282 серверное решение о broadcast не подменяется визуальной плашкой', () => {
+  it('запрещённые @everyone, @here и вариант регистра видны буквами без плашки', () => {
+    // Иначе сообщение никого не зовёт, но визуально обещает всем пинг.
+    assert.equal(renderDecision(broadcastText, { mentionEveryone: false }), broadcastText);
+  });
+
+  it('разрешённые и старые сообщения, а также renderer по умолчанию сохраняют broadcast-плашки', () => {
+    // Отсутствующий флаг у старого DTO — не запрет; это парный положительный сценарий для false.
+    const expected = broadcastText.split(' ').map(mentioned).join(' ');
+    for (const message of [{}, { mentionEveryone: undefined }, { mentionEveryone: true }]) {
+      assert.equal(renderDecision(broadcastText, message), expected);
+    }
+    assert.equal(render(broadcastText), expected, 'R282 пропущенный пятый аргумент сохраняет прежнюю подсветку');
+  });
+
+  it('запрет broadcast не скрывает человека, роль, похожие имена и федеративные обращения', () => {
+    // Префикс everyone/here не делает другое имя или адрес гостя общим обращением.
+    const tokens = ['@reader', '@Ночная смена', '@everyoneElse', '@here-x', '@everyone.dev', '@everyone@friend.example', '@here@friend.example'];
+    assert.equal(renderDecision(`${broadcastText} ${tokens.join(' ')}`, { mentionEveryone: false }),
+      `${broadcastText} ${tokens.map(mentioned).join(' ')}`);
+    assert.equal(renderDecision('user@everyone.dev @Незваная роль', { mentionEveryone: false }),
+      'user@everyone.dev @Незваная роль', 'R282 почта и роль вне roleNames не становятся плашками');
+  });
+
+  it('жирный, спойлер, цитата и остальные рекурсивные форматы сохраняют решение сервера', () => {
+    // Каждый путь рекурсии обязан передать запрет, не выключая личные и ролевые обращения.
+    for (const fixture of nestedBroadcasts) nestedBroadcastContract(renderMessageText, fixture);
+  });
+
+  it('контрфакт потери запрета во вложенном inline возвращает ложную broadcast-плашку', () => {
+    // Отрицательный контроль принимает только адресную доменную AssertionError, не сбой TSX/импорта/VM.
+    const source = readFileSync(new URL('./messageText.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const original = loadMessageRenderer(source);
+    for (const fixture of nestedBroadcasts) nestedBroadcastContract(original, fixture);
+    const visited = new Set<string>();
+    for (const fixture of nestedBroadcasts) {
+      if (visited.has(fixture.anchor)) continue; // *…* и _…_ делят одну ветку raw.
+      visited.add(fixture.anchor);
+      assert.equal(source.split(fixture.anchor).length - 1, 1, `R282 однозначный якорь: ${fixture.anchor}`);
+      const mutant = loadMessageRenderer(source.replace(fixture.anchor, fixture.anchor.replace(', plainBroadcast)', ')')));
+      const marker = nestedMarker(fixture, '@everyone');
+      assert.throws(() => nestedBroadcastContract(mutant, fixture), (error: unknown) =>
+        error instanceof assert.AssertionError && error.message.split('\n')[0] === marker
+        && error.operator === 'strictEqual' && error.actual === true && error.expected === false,
+      `R282 потеря передачи: ${fixture.anchor}`);
+    }
+    assert.equal(visited.size, 7, 'R282 проверены шесть рекурсивных inline-веток и цитата');
   });
 });
 

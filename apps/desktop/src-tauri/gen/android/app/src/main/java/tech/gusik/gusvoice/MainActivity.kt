@@ -80,6 +80,38 @@ class MainActivity : TauriActivity() {
   // The WebView we hand the back gesture to. Captured in onWebViewCreate; null until the shell builds it.
   private var webViewRef: WebView? = null
 
+  // Приоритет рендерера до входа в голос (#209, механизм 2): (priority, waivedWhenNotVisible); null — голос не держит приоритет.
+  private var rendererPriorityBeforeVoice: Pair<Int, Boolean>? = null
+
+  /**
+   * Фоновый голос на Xiaomi/HyperOS (#209, механизм 2; клиент — `voiceKeepAlive.ts`). Свернули приложение — wry
+   * (`WryActivity.onPause`) зовёт `WebView.onPause()`, страница скрыта, и при политике «снять важность, когда не видно»
+   * рендерер уходит в фон: в живом разборе он получал ~20 мс процессора за 2 с, `SyncReader::Read timed out`, и Chromium
+   * останавливал все выводы звука. На время голоса держим RENDERER_PRIORITY_IMPORTANT без снятия в фоне; на выходе
+   * возвращаем то, что стояло. Главный поток. API 26+, ниже — ничего.
+   */
+  private fun applyVoiceRendererPriority(on: Boolean) {
+    val wv = webViewRef ?: return
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      try {
+        if (on) {
+          if (rendererPriorityBeforeVoice == null) {
+            rendererPriorityBeforeVoice = Pair(wv.rendererRequestedPriority, wv.rendererPriorityWaivedWhenNotVisible)
+          }
+          wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+          android.util.Log.i("GusVoice", "voice renderer priority: important, not waived (before: $rendererPriorityBeforeVoice)")
+        } else {
+          val before = rendererPriorityBeforeVoice ?: return
+          rendererPriorityBeforeVoice = null
+          wv.setRendererPriorityPolicy(before.first, before.second)
+          android.util.Log.i("GusVoice", "voice renderer priority: restored $before")
+        }
+      } catch (e: Exception) {
+        android.util.Log.w("GusVoice", "voice renderer priority failed", e)
+      }
+    }
+  }
+
   // Системная строка над выделенным текстом («Вставить / Копировать…») — пока она открыта, «назад» закрывает её.
   private var textActionMode: ActionMode? = null
 
@@ -421,6 +453,12 @@ class MainActivity : TauriActivity() {
       VoiceForegroundService.stop(this@MainActivity)
     }
 
+    // Приоритет рендерера на время голоса (#209, `applyVoiceRendererPriority`; клиент — `voiceKeepAlive.ts`): true — вход, false — выход.
+    @JavascriptInterface
+    fun voiceRendererPriority(on: Boolean) {
+      runOnUiThread { applyVoiceRendererPriority(on) }
+    }
+
     // Состояние микрофона для уведомления голоса (#156, клиент — `nativeMicActions.ts`): JSON
     // {inVoice, muted, deafened, ptt, speaking, channelName}; `{inVoice:false}` — вышли из голоса.
     @JavascriptInterface
@@ -537,6 +575,34 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun exitApp() {
       runOnUiThread { moveTaskToBack(true) }
+    }
+
+    // Одноразовые фото и видео ЛС (#226, 19.10; Telegram Android `PhotoViewer` ставит FLAG_SECURE на просмотр медиа с
+    // таймером): пока клиент показывает такое, окно не попадает в снимки экрана, запись и превью «Недавних». Клиент
+    // снимает флаг при закрытии просмотра (`screenGuard.ts`).
+    @JavascriptInterface
+    fun setSecure(on: Boolean) {
+      runOnUiThread {
+        if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+      }
+    }
+
+    // Поворот экрана в просмотре фото/видео (19.10, просьба владельца): телефон закреплён в портрете (`onCreate`), а на время
+    // полноэкранного просмотра клиент снимает закреп (`viewerRotation.ts`) — экран следует датчику с учётом системного
+    // «автоповорота», как окно Telegram Android (активность без фиксации; вернуть свободный поворот Telegram ставит
+    // `SCREEN_ORIENTATION_UNSPECIFIED`, `GroupCallActivity.java:1165`), закрыли просмотр — снова портрет. Планшет/TV
+    // (smallest width >= 600dp) не закреплён вовсе — не трогаем. Ответ — действует ли закреп: клиент тогда держит
+    // телефонную раскладку, пока экран в альбомной. Смена ориентации активность не пересоздаёт (`configChanges` манифеста).
+    @JavascriptInterface
+    fun setViewerRotation(on: Boolean): Boolean {
+      if (resources.configuration.smallestScreenWidthDp >= 600) return false
+      runOnUiThread {
+        this@MainActivity.requestedOrientation =
+          if (on) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+          else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+      }
+      return true
     }
 
     // Геопозиция в ленте ЛС (G69, 14.10): «открыть во внешних картах» — ACTION_VIEW по `geo:` (приложение карт, как

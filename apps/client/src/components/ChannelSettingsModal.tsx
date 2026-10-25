@@ -18,11 +18,12 @@ import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
 import { ChannelPermissionsEditor } from './ChannelPermissionsEditor';
 import { ChannelSoundsPanel } from './ChannelSoundsPanel';
+import { ChannelWebhooksPanel } from './ChannelWebhooksPanel';
 import { ChannelGlyph, Icon, isCustomIcon, type IconName } from './Icon';
 import { Select } from './Select';
 import { RailItem, SettingsHead, SettingsRail, SettingsWindow } from './SettingsShell';
 
-type ChannelTab = 'main' | 'access' | 'general';
+type ChannelTab = 'main' | 'access' | 'general' | 'webhooks';
 
 export function ChannelSettingsModal({
   channel,
@@ -43,6 +44,9 @@ export function ChannelSettingsModal({
   // Пока вкладка висела на MANAGE_CHANNELS, ломалось в обе стороны: у одного она была и отвечала
   // 403 на загрузку, у другого право было, а вкладки не было.
   const canEditOverwrites = has(serverPerms, Permission.MANAGE_ROLES);
+  // Вебхуки (#24) — только у текстового канала и по своему праву `MANAGE_WEBHOOKS` (не `MANAGE_CHANNELS`: адрес вебхука —
+  // ключ, которым любой пишет в канал). Сервер проверяет право с учётом прав канала; здесь — серверное, как у соседних дверей.
+  const canManageWebhooks = channel.type === 'text' && has(serverPerms, Permission.MANAGE_WEBHOOKS);
   const meId = useStore((s) => s.user?.id);
   const isGeneral = !!channel.generalUserId && channel.generalUserId === meId;
   // "Генерал"/channel-sounds are voice-only (all channel sounds are voice events) — a text channel
@@ -70,6 +74,9 @@ export function ChannelSettingsModal({
     ...(canEditOverwrites
       ? [{ key: 'access' as const, label: 'Доступ', sub: 'Кто видит канал и что в нём можно', icon: 'lock' as const }]
       : []),
+    ...(canManageWebhooks
+      ? [{ key: 'webhooks' as const, label: 'Вебхуки', sub: 'Адреса, по которым внешние программы пишут в канал', icon: 'link' as const }]
+      : []),
     ...(showGeneralTab
       ? [
           canManageServer
@@ -87,7 +94,9 @@ export function ChannelSettingsModal({
           ? 'main'
           : canEditOverwrites
             ? 'access'
-            : 'general',
+            : showGeneralTab || !canManageWebhooks
+              ? 'general'
+              : 'webhooks',
   );
   // Телефон: список разделов, потом раздел. Раздел один или его попросили явно («Доступ» из меню
   // канала) — список пропускаем, он был бы лишним касанием.
@@ -358,6 +367,8 @@ export function ChannelSettingsModal({
               </button>
             </div>
           </form>
+        ) : tab === 'webhooks' ? (
+          <ChannelWebhooksPanel channel={channel} />
         ) : tab === 'general' ? (
           <ChannelGeneralTab
             channel={channel}

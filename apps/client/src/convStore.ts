@@ -641,9 +641,12 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
           clientId: item.key,
           content: item.content,
           // «Как файлы» (G48) — подсказка `asFile` у каждого вложения; сервер оставит её только у картинок и видео.
-          attachments: (item.asFile === true ? (uploaded as OutboxRef[]).map((r) => ({ ...r, asFile: true as const })) : uploaded).map((r, i) =>
-            item.spoilers?.includes(i) && r ? { ...r, spoiler: true as const } : r,
-          ) as OutboxRef[],
+          attachments: (item.asFile === true ? (uploaded as OutboxRef[]).map((r) => ({ ...r, asFile: true as const })) : uploaded).map((r, i) => {
+            if (!r) return r;
+            const sp = item.spoilers?.includes(i) ? { ...r, spoiler: true as const } : r;
+            // Одноразовое фото/видео (`ttlmedia1`, #226): `once` и таймер — у единственного файла строки.
+            return item.onceTtl !== undefined ? { ...sp, once: true as const, ...(item.onceTtl > 0 ? { onceTtl: item.onceTtl } : {}) } : sp;
+          }) as OutboxRef[],
           replyToId: item.replyToId,
           // «Без звука» (С3) — поле только у таких: обычная отправка уходит прежним телом.
           ...(item.silent === true ? { silent: true } : {}),
@@ -1208,6 +1211,7 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
         asFile?: boolean;
         noPreview?: boolean;
         spoilers?: number[];
+        onceTtl?: number;
         captionAbove?: boolean;
         replyQuote?: { text: string; offset: number } | null;
       },

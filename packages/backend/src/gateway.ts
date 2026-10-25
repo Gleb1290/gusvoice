@@ -13,7 +13,7 @@ import { capAllows, parseCaps, parseEnvelope, shouldDeliver, statusBroadcastPlan
 import { relayTyping, type TypingDeps } from './gatewayTyping.js';
 import { getChannelAudience, getMemberContext } from './permissions.js';
 import { connActive } from './pushRules.js';
-import { publishToChannel } from './realtime.js';
+import { publishToChannel, publishToUser } from './realtime.js';
 import { createSessionVisibility, HIDDEN_OFFLINE_MS } from './sessionVisibility.js';
 import { createUserVisibilityHub } from './userVisibilityHub.js';
 
@@ -328,6 +328,8 @@ const typingDeps: TypingDeps<WsLike> = {
   groupPeersOf: async (dmId, senderId) => (await import('./convGroups.js')).groupPeersOf(dmId, senderId),
   connsOf: (userId) => hub.connsOf(userId),
   send,
+  // #225: «печатает» в ЛС — через Redis (`gw:user:<id>`), как остальные события беседы: доходит до собеседника на любом процессе.
+  publishToUser: (userId, msg, route) => publishToUser(userId, msg, route),
   getChannelAudience,
   publishToChannel: (serverId, channelId, msg, audience) => publishToChannel(serverId, channelId, msg, audience),
   // Э4 (#141): собеседник — человек соседа — «печатает» уходит его дому (`configureGatewayFed`).
@@ -530,7 +532,15 @@ export function registerGateway(app: FastifyInstance): void {
           return send(socket, { t: 'pong' });
         }
         case 'subscribe': {
-          const ctx = await getMemberContext(msg.serverId, conn.userId);
+          let ctx: Awaited<ReturnType<typeof getMemberContext>>;
+          try {
+            ctx = await getMemberContext(msg.serverId, conn.userId);
+          } catch {
+            // Сбой базы — отказ ВРЕМЕННЫЙ (#132): без ответа клиент считал бы подписку принятой и глох до
+            // переподключения; с ответом он повторит сам с отсрочкой. Форма кадра прежняя — старые клиенты
+            // поймут его как любой отказ (повтор на следующем `ready`).
+            return send(socket, { t: 'error', message: 'subscribe failed', serverId: msg.serverId });
+          }
           // ⚠️ `serverId` обязателен: без него клиент не может пометить сервер для повторной
           // попытки, а молча забытая подписка = человек без всех серверных событий (#126).
           if (!ctx) return send(socket, { t: 'error', message: 'not a member', serverId: msg.serverId });

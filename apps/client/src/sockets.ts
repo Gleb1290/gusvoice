@@ -7,6 +7,7 @@ import {
   type GatewayClientMessage,
   type GatewayServerMessage,
   mentionsMe,
+  mentionsMyRole,
   normalizeNotifyView,
   parseTypingAction,
   type PresenceServerMessage,
@@ -115,6 +116,7 @@ import {
   newSubsState,
   onDisconnect as subsDisconnect,
   onReady as subsReady,
+  onRetryDue,
   onSubRejected,
   resetSubs,
   wantSub,
@@ -370,10 +372,19 @@ export function connectGateway(): void {
        * Отказ гейтвея. Раньше клиент не слушал его вовсе — и отклонённая подписка выглядела как
        * успешная: человек молча лишался всех серверных событий.
        * ⚠️ Из ЖЕЛАЕМОГО сервер не выбывает: отказ бывает временным. Снимается только отметка
-       * «отправлено», повтор произойдёт на следующем `ready` — так отказ не превращается в цикл.
+       * «отправлено»; временный отказ повторяется сам с отсрочкой и потолком (#132), окончательный
+       * («not a member») — только на следующем `ready`. Правило — в `gatewaySubs.ts`, здесь таймер.
        */
       case 'error': {
-        if (msg.serverId) onSubRejected(subs, msg.serverId);
+        if (!msg.serverId) return;
+        const serverId = msg.serverId;
+        const retry = onSubRejected(subs, serverId, msg.message);
+        if (retry) {
+          // Таймер не снимаем при обрыве: повтор прошлого соединения узнаётся по поколению и не шлёт ничего.
+          setTimeout(() => {
+            for (const id of onRetryDue(subs, serverId, retry.gen)) sendSubscribe(id);
+          }, retry.delayMs);
+        }
         return;
       }
       case 'message.create': {
@@ -387,11 +398,21 @@ export function connectGateway(): void {
            * ему на чужое обращение нельзя. Поэтому у гостя обычное имя не передаём вовсе.
            */
           const home = store.user?.homeInstance ?? null;
-          const mentioned = mentionsMe(
-            msg.message.content,
-            home ? null : store.user?.username,
-            home && store.user ? { username: store.user.username, domain: home.domain } : null,
-          );
+          /**
+           * Упоминание РОЛИ (#76, `@Модераторы`): сервер при отправке положил в сообщение id позванных ролей
+           * (`mentionRoles`), я сверяю их со своими ролями сервера — совпало, это упоминание, как личное (звук, значок,
+           * «только упоминания»). Роли знаем только открытого сервера (`bootstrap`); про чужой сервер значок
+           * догонит перезагрузка (счётчик на сервере считает то же правило по базе).
+           */
+          const myRoleIds = store.bootstrap?.server.id === msg.serverId ? store.bootstrap.member.roleIds : undefined;
+          const mentioned =
+            mentionsMe(
+              msg.message.content,
+              home ? null : store.user?.username,
+              home && store.user ? { username: store.user.username, domain: home.domain } : null,
+              // Автору не хватило права «Упоминать @everyone…» (#76): сервер пометил сообщение `mentionEveryone: false`.
+              msg.message.mentionEveryone !== false,
+            ) || mentionsMyRole(msg.message.mentionRoles, myRoleIds);
           const notify = channelLevel === 'all' || (channelLevel === 'mentions' && mentioned);
           const dnd = store.user?.status === 'dnd';
           // «Смотрит ли человек эту ленту» — правило в `channelRules.isFeedOnScreen`: на телефоне

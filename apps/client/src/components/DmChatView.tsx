@@ -78,6 +78,7 @@ import {
   serverRounds,
   serverAlbumItemsOn,
   serverVoiceOnce,
+  serverOnceMedia,
   serverChatSearch,
   serverReactionsUnread,
   serverBigReactions,
@@ -272,6 +273,8 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   const archiveOn = useStore((s) => serverArchive(s.serverFeatures));
   // «Прослушать один раз» (`voice3`, G54) — только личка 1:1 с человеком: не группа и не «Избранное» (tdesktop `TTLButton`).
   const voiceOnceOn = useStore((s) => serverVoiceOnce(s.serverFeatures)) && !dm.group && !dm.saved;
+  // Одноразовые фото/видео (`ttlmedia1`, #226) — как «один раз» у голосового: только личка 1:1 с человеком.
+  const mediaOnceOn = useStore((s) => serverOnceMedia(s.serverFeatures)) && !dm.group && !dm.saved;
   /** Кружки (`circles1`, G68) — только режим бесед и сервер с признаком; без него у кнопки записи нет режима камеры. */
   const roundOn = useStore((s) => serverRounds(s.serverFeatures));
   const clearOn = useStore((s) => serverChatClear(s.serverFeatures));
@@ -652,6 +655,8 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   // «N прочитали» в меню своего сообщения группы (15.10, `readers1`); `read-at` — только 1:1 (группе он отвечает 404).
   const readersOn = useStore((s) => serverReaders(s.serverFeatures));
   const peerOnline = online && !conn;
+  // Собеседник в «отошёл» (20.10): точка «нет на месте» и строка «нет на месте» вместо «в сети».
+  const peerAway = useStore((s) => s.userStatuses?.[dm.otherUser.id]?.status === 'away');
   const peerTyping = typing && !conn;
   const phone = usePhoneLayout();
   /* Тесная шапка телефона (#218): «был(а) сегодня в 03:53» не влезает на 360 — показываем самую полную форму, что влезла (`lastSeenForms`, замер — `useStatusFit`). */
@@ -910,7 +915,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             {saved ? <SavedAvatar size={phone ? 42 : 28} /> : <Avatar url={dm.otherUser.avatarUrl} name={peerName} size={phone ? 42 : 28} />}
             {peerOnline && !phone && (
               <span className="mp-dot-wrap">
-                <StatusDot status="online" size={phone ? 12 : 10} ringColor="var(--bg)" />
+                <StatusDot status={peerAway ? 'away' : 'online'} size={phone ? 12 : 10} ringColor="var(--bg)" />
               </span>
             )}
           </span>
@@ -937,7 +942,9 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
                     : group
                       ? groupMembersLabel(group.members.length)
                       : online
-                        ? 'в сети'
+                        ? peerAway
+                          ? 'нет на месте'
+                          : 'в сети'
                         : shortForms
                           ? seenForms.map((f, i) => (
                               <span key={f} data-form hidden={i > 0}>
@@ -1395,6 +1402,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
         useStore.setState({ currentDmId: null });
       }}
       voiceOnce={voiceOnceOn}
+      mediaOnce={mediaOnceOn}
       roundOk={roundOn && !filesHint}
       onSendVoice={filesHint ? undefined : async (take, opts) => {
         // ЛС голосовые умеют: это не серверная настройка, в отличие от стикеров и ников (#20).

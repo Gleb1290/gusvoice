@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { canMentionRole } from '@gusvoice/shared';
 
 const read = (file: string) => readFileSync(new URL(file, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 function parsed(file: string, change?: (source: string) => string) {
@@ -108,7 +109,8 @@ it('серверный список участников оставляет away
 it('серверное автодополнение ChatView берёт onlineUsers, не ЛС-присутствие невидимых', () => {
   const node = declaration('./components/ChatView.tsx', 'autocomplete');
   const api = expression<{ users: { id: string; online: boolean }[] }>(node.slice(node.indexOf('=') + 1), {
-    useMemo: (fn: () => unknown) => fn(), onlineUsers: ['peer'], roles: [], channels: [],
+    // R266 добавил допуск ролей и права в memo; присутствие по-прежнему проверяем настоящим выражением.
+    useMemo: (fn: () => unknown) => fn(), onlineUsers: ['peer'], roles: [], channels: [], permsBits: 0n, canMentionRole,
     members: ['peer', 'invisible', 'offline'].map((id) => ({ user: { id, username: id, displayName: id, avatarUrl: null }, nickname: null })),
   });
   assert.deepEqual(api.users.map((u) => [u.id, u.online]), [['peer', true], ['invisible', false], ['offline', false]]);

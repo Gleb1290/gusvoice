@@ -345,6 +345,8 @@ export function toWireMessage(m: MessageRow, people: ReadonlyMap<string, UserRef
           ...(a.round === true ? { round: true } : {}),
           // Э3 часть 3 (`dm2once`): «один раз» — запись решает, кому такое можно (`routes/conv.fedOnceRefused`).
           ...(a.once === true ? { once: true } : {}),
+          // #226 (`dm2ttl`): таймер одноразового фото/видео — только вместе с `once`.
+          ...(a.once === true && a.onceTtl ? { onceTtl: a.onceTtl } : {}),
         }));
   const fwd = m.forwardedFrom;
   return {

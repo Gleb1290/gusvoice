@@ -14,6 +14,7 @@ export const PERM_LABELS: Partial<Record<PermissionName, string>> = {
   READ_HISTORY: 'Читать историю',
   SEND_MESSAGES: 'Писать сообщения',
   MANAGE_MESSAGES: 'Модерация сообщений',
+  MENTION_EVERYONE: 'Упоминать @everyone, @here и все роли',
   CONNECT: 'Подключаться',
   SPEAK: 'Говорить',
   VIDEO: 'Камера',
@@ -28,6 +29,7 @@ export const TEXT_PERMS: PermissionName[] = [
   'READ_HISTORY',
   'SEND_MESSAGES',
   'MANAGE_MESSAGES',
+  'MENTION_EVERYONE',
   'MANAGE_SOUNDS',
 ];
 export const VOICE_PERMS: PermissionName[] = [

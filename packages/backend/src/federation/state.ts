@@ -198,6 +198,8 @@ export function createFederation(deps: FederationDeps): Federation {
           ...(deps.dmEnabled ? [FED_FEATURES.dm2] : []),
           // `dm2once` (Э3 часть 3, #141): «один раз» у голосового/кружка между инстансами (пометка `once`, `listen`) — тем же флагом.
           ...(deps.dmEnabled ? [FED_FEATURES.dm2once] : []),
+          // `dm2ttl` (19.10, #226): одноразовые фото и видео (`once`/`once_ttl` у фото/видео, `listen` с `spent`) — тем же флагом.
+          ...(deps.dmEnabled ? [FED_FEATURES.dm2ttl] : []),
           // `dm3` (Э4, #141): мгновенное — `POST /fed/v1/ephemeral` («печатает», «в сети / был(а)») — тем же флагом.
           ...(deps.dmEnabled ? [FED_FEATURES.dm3] : []),
           // `dm4` (Э5 часть 1, #141): приём «через»-сообщений по долгой сессии и их сверка домом автора — тем же флагом.

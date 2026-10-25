@@ -22,6 +22,7 @@ import { applyUserAudio, subscribeUserAudio } from '../localUserAudio';
 import { stopNativeShareIfActive } from '../nativeShareSession';
 import { onNativeKeyPtt, onNativePtt, setPttKey, setPttMouseButton } from '../nativeStreamAudio';
 import { startNativeVoiceService, stopNativeVoiceService } from '../nativeVoiceService';
+import { sharedAudioContext, startVoiceKeepAlive, stopVoiceKeepAlive } from '../voiceKeepAlive';
 import { onMicPtt } from '../nativeMicActions';
 import { pttCanOpen } from '../micActionRules';
 import { playSound } from '../sounds';
@@ -33,7 +34,7 @@ import { createStreamCue } from '../streamCue';
 import { grabPreview } from '../streamPreviewGrab';
 import { createPreviewPublisher } from '../streamPreviewPublisher';
 import { getStreamSettings } from '../streamSettings';
-import { getStreamQuality, onStreamQuality, wantedLayer, type StreamLayer } from '../streamQuality';
+import { getStreamQuality, needsLayerResend, onStreamQuality, wantedLayer, type StreamLayer } from '../streamQuality';
 import { config } from '../config';
 import { diagDecision, getDiagConsent } from '../diagConsent';
 import { diagVisible } from '../diagVisible';
@@ -44,6 +45,7 @@ import { StreamPipHost } from './StreamPipView';
 import { DiagConsentDialog } from './DiagConsent';
 import { setSelfMuted } from '../voiceSelf';
 import { GRACE_MS, touchVoiceSession } from '../voiceSession';
+import { getMicGateOpen, ownRingSpeaking } from '../micGateState';
 import { vadFloor, vadInitial, vadOpenLevel, vadStep, type VadState } from '../speakingVad';
 
 /** Слой показа → качество в терминах LiveKit (#191). */
@@ -103,6 +105,10 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // компонент, а `useMemo` всё равно не пересчитается — вышло бы «настройка вроде читается, а не
     // применяется». Меняется битрейт только перезаходом в канал, и это честно написано в настройках.
     const joinedChannel = useStore.getState().bootstrap?.channels.find((c) => c.id === voice.channelId);
+    // Android (#209): микшер голосов — в ОБЩЕМ контексте приложения (`voiceKeepAlive.ts`: в его выход идёт неслышный шум,
+    // HyperOS не гасит его как «молчащий»). null (не Android / признак снят) — LiveKit заводит свой, как раньше.
+    // Свой контекст снаружи SDK при отключении не закрывает — общий живёт дальше.
+    const mixCtx = sharedAudioContext();
     return new Room({
       disconnectOnPageLeave: false,
       adaptiveStream: false,
@@ -113,7 +119,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       dynacast: true,
       // Route remote audio through a shared AudioContext so per-user volume can exceed 100%
       // (a GainNode, not the [0,1]-capped HTMLMediaElement.volume). See localUserAudio.
-      webAudioMix: true,
+      webAudioMix: mixCtx ? { audioContext: mixCtx } : true,
       // 🔴 #101 — ОБА параметра ниже развёрнуты обратно, и вот почему.
       //
       // Раньше здесь стояло `dtx: false` + потолок 128 кбит/с с комментарием «bandwidth cost is
@@ -176,10 +182,14 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // reconnect-grace window, so this starts once on join and stops on leave. No-op off the Android build.
   // 🔴 Смонтировались при скрытой странице (свернул до ответа с токеном, авто-возврат после обрыва) — сама служба
   // стартует при возврате на экран: с Android 14 её микрофон из фона ронял приложение (#210, `nativeVoiceService.ts`).
+  // #209 (Xiaomi/HyperOS): на время голоса ни один вывод звука не пишет чистые нули + важный приоритет рендерера.
+  // Только Android, без таймеров; выключатель — `localStorage['gv.voiceKeepAlive']='0'` (`voiceKeepAlive.ts`).
   useEffect(() => {
     startNativeVoiceService();
+    startVoiceKeepAlive();
     return () => {
       stopNativeVoiceService();
+      stopVoiceKeepAlive();
     };
   }, []);
 
@@ -697,7 +707,10 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // выше: окно просмотра размонтируется при уходе в текстовый канал, а поток продолжает идти.
   // ⚠️ `setVideoQuality` действует только на ПОДПИСАННОЙ публикации, поэтому повтор на каждой подписке:
   // превью подписывается раз в минуту заново, открытие показа — тоже новая подписка.
+  // 🔴 Новая подписка = сервер забыл прошлую просьбу, а библиотека нет и на равный слой молчит —
+  // тогда повторяем его сами (`needsLayerResend`). `sentFor` — для какого трека слой уже доведён.
   useEffect(() => {
+    const sentFor = new WeakMap<object, unknown>();
     const apply = () => {
       const { pipStreams } = useStore.getState();
       const watchedStreams = streamsInView(useStore.getState().watchedStreams, pipStreams);
@@ -710,8 +723,14 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
           // Окошко висит поверх всего — слой не опускаем, даже когда главное окно свёрнуто (#222).
           const inPip = isInPip(p.identity, pipStreams) || pipStreams.some((x) => ownerOf(x) === p.identity);
           const layer = wantedLayer(pref, { windowHidden, watched, inPip });
+          const fresh = sentFor.get(pub) !== pub.track;
+          sentFor.set(pub, pub.track);
           try {
-            (pub as { setVideoQuality?: (q: VideoQuality) => void }).setVideoQuality?.(LAYER_QUALITY[layer]);
+            if (needsLayerResend(pub.videoQuality, LAYER_QUALITY[layer], fresh)) {
+              (pub as { emitTrackUpdate?: () => void }).emitTrackUpdate?.();
+            } else {
+              (pub as { setVideoQuality?: (q: VideoQuality) => void }).setVideoQuality?.(LAYER_QUALITY[layer]);
+            }
           } catch {
             /* слой — пожелание серверу, не повод ронять дерево */
           }
@@ -871,8 +890,17 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     };
 
     let ctx: AudioContext | null = null;
+    // Android (#209): анализаторы — в общем контексте (`voiceKeepAlive.ts`), а не в своём: свой контекст без звука в
+    // `destination` писал нули, и HyperOS гасил ещё один вывод. Общий не закрываем на выходе.
+    let ownCtx = false;
     const getCtx = () => {
-      if (!ctx) ctx = new AudioContext();
+      if (!ctx) {
+        ctx = sharedAudioContext();
+        if (!ctx) {
+          ctx = new AudioContext();
+          ownCtx = true;
+        }
+      }
       if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
       return ctx;
     };
@@ -995,12 +1023,21 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       for (const p of [room.localParticipant, ...room.remoteParticipants.values()]) {
         const micOn = p.isMicrophoneEnabled;
         let speaking = false;
+        const isSelf = p === room.localParticipant;
+        // #215: у себя анализатор должен висеть на ПУБЛИКУЕМОМ (после цепи) треке. `sync()` по LocalTrackPublished
+        // срабатывает раньше `setProcessor` — привязка шла к сырому микрофону, и обводка не знала о гейте.
+        // `mediaStreamTrack` отдаёт processedTrack, как только процессор встал, — перепривязываем на лету.
+        if (isSelf && micOn) {
+          const cur = p.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack ?? null;
+          if (cur && mons.get(p.identity)?.track !== cur) attach(p.identity, cur, true);
+        }
         const m = mons.get(p.identity);
         if (micOn && m) {
           const lvl = levelOf(m);
           const step = vadStep(m.vad, lvl, now);
           m.vad = step.state;
-          speaking = step.speaking;
+          // Своя обводка = VAD И гейт открыт (рация: гейт «открыт» всегда → по нажатию). Чужие — как были.
+          speaking = isSelf ? ownRingSpeaking(step.speaking, getMicGateOpen()) : step.speaking;
           if (DEBUG) {
             const floor = vadFloor(m.vad) ?? 0;
             dbg[p.name || p.identity] = `${lvl.toFixed(3)} пол ${floor.toFixed(3)} порог ${vadOpenLevel(floor).toFixed(3)}${speaking ? ' ●' : ''}`;
@@ -1079,7 +1116,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         .off(RoomEvent.ParticipantDisconnected, onChange)
         .off(RoomEvent.ConnectionStateChanged, onChange);
       for (const id of [...mons.keys()]) detach(id);
-      ctx?.close().catch(() => {});
+      if (ownCtx) ctx?.close().catch(() => {});
       setLiveVoice({});
     };
   }, [room, setLiveVoice]);

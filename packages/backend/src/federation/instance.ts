@@ -13,6 +13,23 @@ import { createFederation } from './state.js';
 /** Ключ в `instance_settings` с названием и иконкой инстанса (задаёт держатель, §5.1.2). */
 export const FEDERATION_META_KEY = 'federation_meta';
 
+/** Ключ обычного названия инстанса в `instance_settings` (то же значение, что `INSTANCE_KEY` в `setupRules.ts`). */
+const LOCAL_INSTANCE_KEY = 'instance';
+
+/** Предел названия в визитке (`INSTANCE_NAME_MAX` в `instanceMeta.ts`). */
+const NEIGHBOR_NAME_MAX = 40;
+
+/**
+ * Название, под которым соседи видят НАШ инстанс (#204 п.4, решение владельца 19.10): «Федерация › Этот инстанс › Название»,
+ * а если оно пустое — обычное название инстанса («Админка › Инстанс»), обрезанное до предела визитки. Нет ни того, ни
+ * другого — `null` (сосед покажет домен). Форма протокола та же (поле `name` визитки), меняется только значение по умолчанию.
+ */
+export function neighborVisibleName(fedName: string | null | undefined, instanceName: string | null | undefined): string | null {
+  if (fedName && fedName.trim().length > 0) return fedName;
+  const own = instanceName?.trim() ?? '';
+  return own.length > 0 ? own.slice(0, NEIGHBOR_NAME_MAX) : null;
+}
+
 /**
  * Домен для визитки — хост адреса клиента: именно его человек видит как «инстанс друзей».
  * Кривой адрес не должен ронять старт, поэтому при неудаче отдаём строку как есть.
@@ -62,8 +79,20 @@ export const federation = createFederation({
       .where(eq(instanceSettings.key, FEDERATION_META_KEY))
       .limit(1);
     const meta = (row?.value ?? {}) as { name?: unknown; iconHash?: unknown };
+    const fedName = typeof meta.name === 'string' && meta.name.trim().length > 0 ? meta.name : null;
+    // Название «для соседей» пусто (#204 п.4) — соседям уходит обычное название инстанса, а не голый домен.
+    let localName: string | null = null;
+    if (!fedName) {
+      const [local] = await db
+        .select({ value: instanceSettings.value })
+        .from(instanceSettings)
+        .where(eq(instanceSettings.key, LOCAL_INSTANCE_KEY))
+        .limit(1);
+      const v = (local?.value ?? {}) as { name?: unknown };
+      localName = typeof v.name === 'string' ? v.name : null;
+    }
     return {
-      name: typeof meta.name === 'string' && meta.name.length > 0 ? meta.name : null,
+      name: neighborVisibleName(fedName, localName),
       iconHash: typeof meta.iconHash === 'string' && meta.iconHash.length > 0 ? meta.iconHash : null,
     };
   },

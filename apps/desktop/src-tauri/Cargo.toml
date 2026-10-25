@@ -1,6 +1,6 @@
 [package]
 name = "gusvoice"
-version = "0.9.7"
+version = "0.9.14"
 description = "GusVoice desktop client"
 license = "AGPL-3.0-only"
 edition = "2021"
@@ -81,6 +81,9 @@ windows = { version = "0.61", features = [
   "Win32_System_Diagnostics_ToolHelp",
   # Overlay app-picker: enumerate running windows + extract each exe's icon to a PNG.
   "Win32_UI_Shell",
+  # Своя полоса окна (#219, `titlebar.rs`): окно над кнопкой «Развернуть» — модуль для регистрации класса и DPI окна.
+  "Win32_System_LibraryLoader",
+  "Win32_UI_HiDpi",
   "Win32_Graphics_Gdi",
   "Win32_Storage_FileSystem",
   # Тост беседы с полем ответа (`notify_conv.rs`, Р1 G17): WinRT-уведомления напрямую. Те же фичи уже включает

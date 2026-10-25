@@ -1,4 +1,4 @@
-import { callServiceMark, CAP_CONV1, convMediaPreview, convPollDraft, convPollView, geoLiveStart, geoLiveView, geoMedia, parseConvMedia, deliveredLate, FED_CONV_CHANGE, FED_CONV_CHANGE_E2, FED_FEATURES, FEATURE_GROUPS1, pairDirectKey, GROUP_MEMBER_LIMIT, GROUP_MUTE_PREFIX, groupMuteTarget, groupOfMuteTarget, isListenable, isRoundVideo, isVoiceMessage, ROUND_MAX_MS, ROUND_ONCE_SPENT_TEXT, VOICE_ONCE_SPENT_TEXT } from '@gusvoice/shared';
+import { callServiceMark, CAP_CONV1, convMediaPreview, convPollDraft, convPollView, geoLiveStart, geoLiveView, geoMedia, parseConvMedia, deliveredLate, FED_CONV_CHANGE, FED_CONV_CHANGE_E2, FED_FEATURES, FEATURE_GROUPS1, pairDirectKey, GROUP_MEMBER_LIMIT, GROUP_MUTE_PREFIX, groupMuteTarget, groupOfMuteTarget, isListenable, isOnceMedia, isOnceSpendable, isVoiceMessage, ONCE_TTL_MAX, onceSpentText, ROUND_MAX_MS } from '@gusvoice/shared';
 import type {
   ConvServiceMark,
   ConvGroupMember,
@@ -482,6 +482,8 @@ function lastPhoto(r: Record<string, unknown>): { id?: unknown; url?: unknown; s
   const list = jsonList(r.lm_atts);
   if (lastAttachmentPreview(list)?.attachmentKind !== 'photo') return null;
   const first = list[0];
+  // Одноразовое фото (#226) — без миниатюры: файл не раздаётся получателю до открытия, и кадр в списке раскрыл бы его.
+  if (first && typeof first === 'object' && (first as { once?: unknown }).once === true) return null;
   return first && typeof first === 'object' ? (first as { id?: unknown; url?: unknown; spoiler?: unknown; fedState?: unknown }) : null;
 }
 
@@ -1026,7 +1028,8 @@ function replyAttachments(
   // Цитата на стикер (`stickers2`) — вид `sticker` без числа, как в каналах (`routes/messages.ts`).
   const fields: ReplyAttachmentView = replyAttachmentPreview(list, sticker);
   const first = list[0];
-  if (fields.attachmentKind !== 'photo' || !first) return fields;
+  // Одноразовое фото (#226) — цитата без миниатюры (файл закрыт до открытия получателем).
+  if (fields.attachmentKind !== 'photo' || !first || first.once === true) return fields;
   const thumb = first.id ? attachmentLink(first.id, viewer.id, viewer.tokenGen) : first.url;
   // Спойлер первого фото (`media2`): миниатюра уходит, но с признаком — клиент рисует её размытой.
   return thumb ? { ...fields, thumb, ...(first.spoiler === true ? { thumbSpoiler: true as const } : {}) } : fields;
@@ -1114,7 +1117,7 @@ async function pinsFor(me: string, conversationId: string, q: Q): Promise<ConvPi
     let thumb: string | undefined;
     const first = m.attachments[0];
     // Копия файла соседа ещё едет (`fedState`, исправления ревью 12.10, п. 11) — без миниатюры, как у строки списка.
-    if (kind?.attachmentKind === 'photo' && first && !first.fedState) {
+    if (kind?.attachmentKind === 'photo' && first && !first.fedState && first.once !== true) {
       if (first.id) {
         if (tokenGen === null) {
           // Поколение токенов смотрящего входит в подпись ссылки (как у вложений в ленте, `messagesForViewer`).
@@ -1969,6 +1972,8 @@ export interface AttachmentRef {
   once?: boolean | null;
   /** Кружок (`circles1`, G68): только квадратное видео до `ROUND_MAX_MS` с известными размером и длительностью. */
   round?: boolean | null;
+  /** Таймер одноразового фото/видео, с (`ttlmedia1`, #226): только вместе с `once`, 1…`ONCE_TTL_MAX`. */
+  onceTtl?: number | null;
 }
 
 type AttachmentRow = typeof attachments.$inferSelect;
@@ -2023,6 +2028,12 @@ export function storedAttachment(row: AttachmentRow, ref: AttachmentRef): Attach
     a.round = true;
   // «Один раз» (`voice3`) — только у голосового (аудио с огибающей) и кружка; у прочих DTO прежний.
   if (ref.once === true && ((row.contentType.startsWith('audio/') && a.waveform && a.waveform.length > 0) || a.round)) a.once = true;
+  // Одноразовое фото/видео (`ttlmedia1`, #226; tdesktop `send_files_box.cpp` `canSetTtl`: только фото и видео кадром) — не
+  // «как файл», не GIF, не кружок; таймер — только вместе с `once`, 1…60 с. Пускает ли беседа — решает `sendMessage`.
+  if (ref.once === true && !a.once && isOnceMedia({ once: true, contentType: row.contentType, asFile: a.asFile, gif: a.gif, round: a.round })) {
+    a.once = true;
+    if (ref.onceTtl && Number.isInteger(ref.onceTtl) && ref.onceTtl >= 1 && ref.onceTtl <= ONCE_TTL_MAX) a.onceTtl = ref.onceTtl;
+  }
   return a;
 }
 
@@ -2082,6 +2093,8 @@ export type SendResult =
   | { kind: 'bad-reply' }
   | { kind: 'bad-quote' }
   | { kind: 'bad-attachments' }
+  /** Одноразовое фото/видео (`ttlmedia1`) не в личке 1:1 с человеком или не отдельным сообщением (альбом). */
+  | { kind: 'once-refused' }
   | { kind: 'not-found' };
 
 /**
@@ -2155,6 +2168,10 @@ export async function sendMessage(me: string, access: ConvAccess, input: SendInp
       const byId = new Map(rows.map((r) => [r.id, r]));
       // «Один раз» (`voice3`, G54) — только в личке 1:1 с человеком: в группе и «Избранном» пометка молча снимается.
       const onceOk = lock.kind === 'direct' && !access.saved;
+      // Одноразовое фото/видео (`ttlmedia1`, #226) — не молча: отправитель уверен, что оно сгорит. Только личка 1:1 и только
+      // одним файлом (Telegram не собирает такие в альбом — tdesktop `send_files_box.cpp` `ttlSeconds` рвёт группу).
+      const onceMedia = input.attachments.some((ref) => ref.once === true && isOnceMedia(storedAttachment(byId.get(ref.id)!, ref)));
+      if (onceMedia && (!onceOk || input.attachments.length > 1)) return { kind: 'once-refused' };
       stored = input.attachments.map((ref) => storedAttachment(byId.get(ref.id)!, onceOk ? ref : { ...ref, once: null }));
     }
     const [row] = await tx
@@ -2552,9 +2569,9 @@ export async function spendVoiceOnce(me: string, access: ConvAccess, messageId: 
     const m = await lockMessage(tx, conversationId, messageId);
     if (!m || m.deletedAt || messageView(m, me) !== 'full' || m.authorId === me) return { kind: 'not-found' };
     if (m.onceSpentAt) return { kind: 'ok', changed: false, delivery: null };
-    if (!m.attachments.some((a) => a.once === true && isListenable(a))) return { kind: 'not-found' };
-    // Кружок (`circles1`) — своя запасная фраза: «Видеосообщение просмотрено».
-    const spentText = m.attachments.some(isRoundVideo) ? ROUND_ONCE_SPENT_TEXT : VOICE_ONCE_SPENT_TEXT;
+    if (!m.attachments.some(isOnceSpendable)) return { kind: 'not-found' };
+    // Кружок (`circles1`) — своя запасная фраза: «Видеосообщение просмотрено»; фото/видео (`ttlmedia1`) — «Фото/Видео истекло».
+    const spentText = onceSpentText(m.attachments);
     await tx
       .update(conversationMessages)
       .set({ onceSpentAt: new Date(), content: spentText, attachments: [] })
@@ -2582,6 +2599,97 @@ export async function spendVoiceOnce(me: string, access: ConvAccess, messageId: 
   });
   if (purge.length > 0) void purgeDeleted(purge).catch(() => {});
   return res;
+}
+
+/** Открытие одноразового фото/видео: `openedAt` — первое открытие (отсчёт таймера идёт от него), `spent` — уже сгорело. */
+export type OnceOpenResult = { kind: 'ok'; openedAt: Date } | { kind: 'spent' } | { kind: 'not-found' };
+
+/**
+ * Получатель открыл одноразовое фото/видео (19.10, `ttlmedia1`, #226; Telegram: отсчёт таймера — с открытия). Отметка
+ * `once_opened_at` ставится один раз; событий нет (отправитель в Telegram открытия не видит). Закрыл или вышел таймер — клиент
+ * зовёт `once-spent`; не позвал (закрыл приложение) — сожжёт сторож `sweepOpenedOnce`. Только получатель; своё, не такое и
+ * невидимое — `not-found`.
+ */
+export async function openOnceMedia(me: string, access: ConvAccess, messageId: string): Promise<OnceOpenResult> {
+  return db.transaction(async (tx): Promise<OnceOpenResult> => {
+    const m = await lockMessage(tx, access.conversationId, messageId);
+    if (!m || m.deletedAt || messageView(m, me) !== 'full' || m.authorId === me) return { kind: 'not-found' };
+    if (m.onceSpentAt) return { kind: 'spent' };
+    if (!m.attachments.some(isOnceMedia)) return { kind: 'not-found' };
+    if (m.onceOpenedAt) return { kind: 'ok', openedAt: m.onceOpenedAt };
+    const openedAt = new Date();
+    await tx.update(conversationMessages).set({ onceOpenedAt: openedAt }).where(eq(conversationMessages.id, messageId));
+    return { kind: 'ok', openedAt };
+  });
+}
+
+/**
+ * Сколько открытое одноразовое фото/видео живёт без сообщения о закрытии, мс: таймер (или длина видео, если она больше) и
+ * запас на сеть; «просмотр один раз» без таймера — длина видео и 5 минут (закрытия ждём от клиента).
+ */
+export function onceOpenLimitMs(a: { onceTtl?: number; durationMs?: number | null; contentType: string }): number {
+  const video = a.contentType.startsWith('video/') ? (a.durationMs ?? 0) : 0;
+  return a.onceTtl ? Math.max(a.onceTtl * 1000, video) + 15_000 : video + 5 * 60_000;
+}
+
+/**
+ * Сторож одноразовых фото/видео (`ttlmedia1`): открытое, у которого вышел срок `onceOpenLimitMs`, сгорает от имени
+ * получателя — как его `once-spent` (файл удаляется, событие обоим, соседу-автору — `listen` со `spent`).
+ */
+export async function sweepOpenedOnce(now = Date.now()): Promise<number> {
+  const rows = await db
+    .select({
+      id: conversationMessages.id,
+      conversationId: conversationMessages.conversationId,
+      authorId: conversationMessages.authorId,
+      attachments: conversationMessages.attachments,
+      openedAt: conversationMessages.onceOpenedAt,
+    })
+    .from(conversationMessages)
+    .where(
+      and(
+        isNotNull(conversationMessages.onceOpenedAt),
+        isNull(conversationMessages.onceSpentAt),
+        isNull(conversationMessages.deletedAt),
+        lt(conversationMessages.onceOpenedAt, new Date(now - 15_000)),
+      ),
+    )
+    .orderBy(asc(conversationMessages.onceOpenedAt))
+    .limit(100);
+  let n = 0;
+  for (const r of rows) {
+    const a = r.attachments.find(isOnceMedia);
+    if (!a || !r.openedAt || r.openedAt.getTime() + onceOpenLimitMs(a) > now) continue;
+    const [peer] = await db
+      .select({ userId: conversationMembers.userId })
+      .from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, r.conversationId), ne(conversationMembers.userId, r.authorId)))
+      .limit(1);
+    if (!peer) continue;
+    const access = await loadAccess(r.conversationId, peer.userId);
+    if (!access) continue;
+    const res = await spendVoiceOnce(peer.userId, access, r.id);
+    if (res.kind === 'ok' && res.changed) {
+      n++;
+      await deliver(res.delivery);
+    }
+  }
+  return n;
+}
+
+/** Запуск сторожа одноразовых фото/видео (раз в 10 с, как у Telegram — сервер, а не клиент, решает, что сгорело). */
+export function startOnceSweeper(): void {
+  let busy = false;
+  const timer = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    void sweepOpenedOnce()
+      .catch(() => {})
+      .finally(() => {
+        busy = false;
+      });
+  }, 10_000);
+  timer.unref?.();
 }
 
 /**

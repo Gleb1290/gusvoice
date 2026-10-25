@@ -74,8 +74,9 @@ export async function fedFilesAllowedFor(peerId: string): Promise<boolean> {
 }
 
 /** Крючок записи (`routes/conv.configureFedOnceGuard`, Э3 часть 3): «один раз» человеку `peerId` — его дом объявил `dm2once`. */
-export async function fedOnceAllowedFor(peerId: string): Promise<boolean> {
-  return peerHomeHas(peerId, FED_FEATURES.dm2once);
+export async function fedOnceAllowedFor(peerId: string, media = false): Promise<boolean> {
+  // #226: одноразовое фото/видео (`media`) — только дому с `dm2ttl` (старый с одним `dm2once` показал бы его обычным навсегда).
+  return peerHomeHas(peerId, media ? FED_FEATURES.dm2ttl : FED_FEATURES.dm2once);
 }
 
 /**
@@ -177,6 +178,8 @@ export async function remoteAttachmentsFor(
       round: w.round === true,
       // Э3 часть 3 (`dm2once`): «один раз» — после первого прослушивания копия стирается (`spendVoiceOnce`).
       once: w.once === true ? true : null,
+      // #226 (`dm2ttl`): таймер одноразового фото/видео.
+      onceTtl: w.once === true && w.onceTtl ? w.onceTtl : null,
     });
     // Больше порога копии — по первому открытию: обычная карточка/плитка, не «загружается» (часть 2).
     out.push({ ...stored, fedState: w.size > FED_ATT_COPY_MAX ? 'remote' : 'copying' });

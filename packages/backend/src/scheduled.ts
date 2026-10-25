@@ -1,4 +1,5 @@
 import type { Attachment, ConvScheduledResponse } from '@gusvoice/shared';
+import { isOnceMedia } from '@gusvoice/shared';
 import { and, asc, eq, inArray, isNotNull, isNull, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { purgeDeleted } from './attachments.js';
 import { dmDeliveryPlan, type DmDeliveryPlan } from './blockRules.js';
@@ -10,6 +11,7 @@ import {
   scheduledListOf,
   sendMessage,
   storedAttachment,
+  startOnceSweeper,
   type AttachmentRef,
   type ConvAccess,
   type Delivery,
@@ -133,6 +135,8 @@ export type ScheduleResult =
   | { kind: 'limit'; scope: 'conversation' | 'user'; max: number }
   | ({ kind: 'media-limit' } & ScheduledMediaLimit)
   | { kind: 'bad-attachments' }
+  /** Одноразовое фото/видео (`ttlmedia1`, #226): отложить нельзя. */
+  | { kind: 'once-refused' }
   | { kind: 'bad-reply' };
 
 /**
@@ -236,6 +240,8 @@ export async function createScheduled(me: string, access: ConvAccess, input: Sch
       });
       if (over) return { kind: 'media-limit', ...over };
       const byId = new Map(rows.map((r) => [r.id, r]));
+      // Одноразовое фото/видео (`ttlmedia1`, #226) отложить нельзя (tdesktop `lng_ttl_no_schedule`) — отказ, не молча.
+      if (refs.some((ref) => ref.once === true && isOnceMedia(storedAttachment(byId.get(ref.id)!, ref)))) return { kind: 'once-refused' };
       // «Один раз» (`voice3`) у отложенного не бывает — пометку снимаем.
       stored = refs.map((ref) => storedAttachment(byId.get(ref.id)!, { ...ref, once: null }));
     }
@@ -683,6 +689,9 @@ export async function runScheduledTick(deps: ScheduledTickDeps = {}): Promise<Sc
 
 /** Запустить такт раз в `SCHED_TICK_MS` (`index.ts`, после `listen`). Новый такт поверх незавершённого не стартует. */
 export function startScheduledWorker(deps: ScheduledTickDeps = {}): void {
+  // #226: сторож одноразовых фото/видео — свой такт рядом (`conversations.sweepOpenedOnce`): открытое, чьё закрытие не пришло,
+  // сгорает по сроку. Здесь, а не в `index.ts`: его перечень крючков и импортов закрыт проверкой.
+  startOnceSweeper();
   let running = false;
   const timer = setInterval(() => {
     if (running) return;

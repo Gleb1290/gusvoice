@@ -21,6 +21,9 @@ export function StickerCatalogPanel() {
   const [link, setLink] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // Состав «моих» сменился (загрузка в другой копии панели или с другого устройства — сервер шлёт «мои наборы изменились»):
+  // каталог и счётчик загрузок перечитываются, иначе «0 из 40» держалось до перезахода в беседу (приёмка 23.10).
+  const mineKey = (mine ?? []).map((p) => p.id).sort().join(',');
 
   useEffect(() => {
     let live = true;
@@ -36,7 +39,7 @@ export function StickerCatalogPanel() {
       live = false;
       window.clearTimeout(t);
     };
-  }, [query]);
+  }, [query, mineKey]);
 
   const mineIds = new Set((mine ?? []).map((p) => p.id));
   const parsed = parseStickerSetName(link);
@@ -172,7 +175,8 @@ export function StickerCatalogPanel() {
         {catalog?.importEnabled && !query && (
           <>
             <div className="sticker-catalog-head muted">
-              Загрузить из Telegram · ваших {catalog.uploaded} из {catalog.uploadLimit}
+              {/* «0 из 40 чего?» (приёмка 23.10): предел — наборы, которые человек сам привёз в каталог; добавленные из каталога не в счёт. */}
+              Загрузить из Telegram · вы загрузили {catalog.uploaded} из {catalog.uploadLimit} наборов
             </div>
             <div className="row-field">
               <input

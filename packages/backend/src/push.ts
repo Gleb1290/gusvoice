@@ -1,6 +1,8 @@
 import {
   BROADCAST_MENTIONS,
+  canMentionRole,
   mentionedHandles,
+  mentionedRoleIds,
   normalizeNotifyRepeat,
   normalizeNotifyView,
   notifyRepeatAllowed,
@@ -13,7 +15,7 @@ import { instanceIdByDomain } from './federation/instanceLabels.js';
 import { getChannelAudience } from './permissions.js';
 import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from './db/index.js';
-import { pushAlways, pushDevices, pushMutes, serverMembers, users } from './db/schema.js';
+import { memberRoles, pushAlways, pushDevices, pushMutes, roles, serverMembers, users } from './db/schema.js';
 import { env } from './env.js';
 import { encryptWebPush, type WebPushKeys } from './pushCrypto.js';
 import { deferPush, postponeRepeatPush, recipientActive, scheduleRepeatPush } from './pushDefer.js';
@@ -502,6 +504,23 @@ export async function sendReadSyncPush(userId: string, conversationId: string, k
 }
 
 /**
+ * Какие роли сообщение РЕАЛЬНО зовёт (#76, `@Модераторы`): названия ролей сервера в тексте, отфильтрованные по праву
+ * автора (`canMentionRole`: роль «можно упоминать» либо у автора право `MENTION_EVERYONE`). Результат кладётся в
+ * `messages.mention_roles` при отправке и дальше НЕ пересчитывается — бейдж и пуш не зависят от последующих правок
+ * роли и прав. `@everyone` — не роль, его разбирает `resolveMentionedMembers`.
+ */
+export async function resolveRoleMentions(content: string, serverId: string, authorPerms: bigint): Promise<string[]> {
+  if (!content.includes('@')) return [];
+  const rows = await db
+    .select({ id: roles.id, name: roles.name, mentionable: roles.mentionable })
+    .from(roles)
+    .where(and(eq(roles.serverId, serverId), eq(roles.isEveryone, false)));
+  if (rows.length === 0) return [];
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return mentionedRoleIds(content, rows).filter((rid) => canMentionRole(byId.get(rid)!, authorPerms));
+}
+
+/**
  * Resolve @username mentions in `content` to member userIds of `serverId` (excluding the author).
  *
  * ⚠️ Имена достаёт ОБЩЕЕ правило (`shared/mentions.ts`), то же самое, по которому клиент решает
@@ -515,9 +534,13 @@ export async function resolveMentionedMembers(
   authorId: string,
   /** Канал сообщения — по нему считается, кого будит `@everyone`. Без него `@everyone` пуш не шлёт. */
   channelId?: string,
+  /** Роли, которые сообщение позвало (`resolveRoleMentions`, #76): их участники, видящие канал, — тоже адресаты. */
+  mentionRoleIds: readonly string[] = [],
+  /** `false` — автору не хватило `MENTION_EVERYONE` (#76): `@everyone`/`@here` в тексте никого не будят. Вебхуки не передают (у них своя политика). */
+  allowBroadcast = true,
 ): Promise<string[]> {
   const handles = mentionedHandles(content);
-  if (handles.length === 0) return [];
+  if (handles.length === 0 && mentionRoleIds.length === 0) return [];
   const isBroadcast = (name: string) => (BROADCAST_MENTIONS as readonly string[]).includes(name);
   const names = handles.filter((h) => h.domain === null && !isBroadcast(h.name)).map((h) => h.name);
   const guests = handles.filter((h) => h.domain !== null);
@@ -533,7 +556,30 @@ export async function resolveMentionedMembers(
    * ⚠️ `@here` пуш не шлёт намеренно: он про тех, кто сейчас в приложении, а они получают звук и значок
    * живьём. Разбудить телефон спящему — ровно то, чем `@here` отличается от `@everyone`.
    */
-  if (channelId && handles.some((h) => h.domain === null && h.name === 'everyone')) {
+  const everyone = allowBroadcast && handles.some((h) => h.domain === null && h.name === 'everyone');
+  /**
+   * Роль (#76, `@Модераторы`): участники роли ∩ те, кто ВИДИТ канал (`getChannelAudience`) — человек без доступа к
+   * каналу не должен узнавать о сообщении. Тот же набор, что у `@everyone`; тех, кто назван и лично, и ролью, склеивает
+   * `Set` внизу — уведомление одно. Настройки «только упоминания» уже учтены у получателя: роль для него = упоминание.
+   */
+  if (channelId && mentionRoleIds.length > 0) {
+    const audience = await getChannelAudience(channelId);
+    if (audience && audience.serverId === serverId && audience.userIds.length > 0) {
+      const rows = await db
+        .select({ id: memberRoles.userId })
+        .from(memberRoles)
+        .innerJoin(serverMembers, and(eq(serverMembers.userId, memberRoles.userId), eq(serverMembers.serverId, serverId)))
+        .where(
+          and(
+            eq(memberRoles.serverId, serverId),
+            inArray(memberRoles.roleId, [...mentionRoleIds]),
+            inArray(memberRoles.userId, audience.userIds),
+          ),
+        );
+      found.push(...rows.map((r) => r.id));
+    }
+  }
+  if (channelId && everyone) {
     const audience = await getChannelAudience(channelId);
     if (audience && audience.serverId === serverId && audience.userIds.length > 0) {
       const rows = await db

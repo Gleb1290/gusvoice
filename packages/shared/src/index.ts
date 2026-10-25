@@ -36,6 +36,7 @@ export * from './typingAction';
 export * from './notifyView';
 export * from './types';
 export * from './voiceMessage';
+export * from './onceMedia';
 export * from './sharedMedia';
 export * from './voiceQuality';
 export * from './ws';

@@ -9,8 +9,23 @@ import { isMobile, isTauri } from './hotkeys';
  */
 export const PHONE_LAYOUT_QUERY = '(max-width: 760px)';
 
+/**
+ * Закреп телефонной раскладки (19.10): полноэкранный просмотр фото/видео в приложении на телефоне снимает закреп портрета
+ * (`viewerRotation.ts`), а в альбомной окно шире 760 px. Без закрепа раскладка под просмотром переключилась бы на
+ * компьютерную — другое дерево компонентов, и просмотр вместе с лентой размонтировался бы посреди поворота.
+ */
+let pinned = false;
+const pinWatchers = new Set<() => void>();
+
+/** Держать телефонную раскладку независимо от ширины окна (`true`) или снова следовать ширине (`false`). */
+export function setPhoneLayoutPin(on: boolean): void {
+  if (pinned === on) return;
+  pinned = on;
+  for (const watch of Array.from(pinWatchers)) watch();
+}
+
 function phoneNow(): boolean {
-  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(PHONE_LAYOUT_QUERY).matches;
+  return pinned || (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(PHONE_LAYOUT_QUERY).matches);
 }
 
 /** Сейчас раскладка телефона? Перерисовывает при смене ширины окна (поворот, окно уже 760 px). */
@@ -19,10 +34,14 @@ export function usePhoneLayout(): boolean {
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
     const mq = window.matchMedia(PHONE_LAYOUT_QUERY);
-    const on = () => setPhone(mq.matches);
+    const on = () => setPhone(pinned || mq.matches);
     on();
     mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
+    pinWatchers.add(on);
+    return () => {
+      mq.removeEventListener('change', on);
+      pinWatchers.delete(on);
+    };
   }, []);
   return phone;
 }

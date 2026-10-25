@@ -1403,6 +1403,16 @@ async function applyReads(peer: string, self: string, conversationId: string, en
  * «Один раз» (`once`), потраченное у слушателя (`spent`: его копия стёрта), — гасится у автора как местный `spendVoiceOnce`: запасная фраза без
  * вложений, `once_spent_at`, файл «удалён» (объект — после фиксации), событие обоим. Блокировка — как у реакций.
  */
+/**
+ * #226 (`dm2ttl`): одноразовое фото/видео — то же правило, что `isOnceMedia` и фразы `PHOTO_ONCE_SPENT_TEXT` /
+ * `VIDEO_ONCE_SPENT_TEXT` в `shared`; повторено здесь, потому что перечень импортов этого модуля закрыт проверкой (R257,
+ * `activeLoops.test.ts`).
+ */
+function onceMediaHere(a: { once?: true; contentType: string; asFile?: true; gif?: true; round?: true }): boolean {
+  if (a.once !== true || a.asFile || a.gif || a.round) return false;
+  return (a.contentType.startsWith('image/') && a.contentType !== 'image/gif') || a.contentType.startsWith('video/');
+}
+
 async function applyListens(peer: string, self: string, conversationId: string, entity: Record<string, unknown>): Promise<void> {
   const w = parseConvListenWire(entity);
   if (!w) return;
@@ -1431,7 +1441,7 @@ async function applyListens(peer: string, self: string, conversationId: string, 
     }
     // Только наше сообщение (автор — местный): «прослушано» на копии сообщения соседа владеет он сам.
     if (!m || m.deletedAt || !c.members.some((x) => x.home === null && x.id === m.authorId)) return;
-    if (!m.onceSpentAt && !m.attachments.some(isListenable)) return;
+    if (!m.onceSpentAt && !m.attachments.some(isListenable) && !m.attachments.some(onceMediaHere)) return;
     // Э7 часть 3: от хоста группы — слушатели всех домов, кроме нашего (`hostedRefs`).
     const fromHost = c.group?.host === false;
     const theirs = c.members.filter((x) => (fromHost ? x.home !== null : x.home === peer)).map((x) => x.id);
@@ -1458,9 +1468,18 @@ async function applyListens(peer: string, self: string, conversationId: string, 
     if (fresh.length > 0) {
       await tx.insert(conversationVoiceListens).values(fresh.map((userId) => ({ messageId: m.id, userId }))).onConflictDoNothing();
     }
-    const spend = !m.onceSpentAt && w.spent === true && want.size > 0 && m.attachments.some((a) => a.once === true && isListenable(a));
+    // #226 (`dm2ttl`): и одноразовое фото/видео — его «потрачено» приходит той же строкой `listen` со `spent`.
+    const spend =
+      !m.onceSpentAt && w.spent === true && want.size > 0 && m.attachments.some((a) => (a.once === true && isListenable(a)) || onceMediaHere(a));
     if (spend) {
-      const spentText = m.attachments.some(isRoundVideo) ? ROUND_ONCE_SPENT_TEXT : VOICE_ONCE_SPENT_TEXT;
+      const media = m.attachments.find(onceMediaHere);
+      const spentText = m.attachments.some(isRoundVideo)
+        ? ROUND_ONCE_SPENT_TEXT
+        : media
+          ? media.contentType.startsWith('video/')
+            ? 'Видео истекло'
+            : 'Фото истекло'
+          : VOICE_ONCE_SPENT_TEXT;
       await tx
         .update(conversationMessages)
         .set({ onceSpentAt: new Date(), content: spentText, attachments: [] })

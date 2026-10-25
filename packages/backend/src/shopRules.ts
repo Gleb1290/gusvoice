@@ -11,7 +11,12 @@
  * и назначают в минутах просмотра.
  */
 
-import { AVATAR_RENTAL_DAYS, avatarRentalCanExtend } from '@gusvoice/shared';
+import {
+  AVATAR_RENTAL_DAYS,
+  AVATAR_RENTAL_MAX_DAYS,
+  avatarRentalCanExtend,
+  avatarRentalFullText,
+} from '@gusvoice/shared';
 import { RATE_PERIOD_S } from './coinRules.js';
 
 /** Что вообще продаётся. ⚠️ Новый ключ добавлять СЮДА — дальше всё типизировано от него. */
@@ -294,9 +299,9 @@ export const BUY_BLOCK_TEXT: Record<Exclude<BuyBlock, null>, string> = {
   'target-full': 'Его сегодня уже нащипали вдоволь — попробуй завтра',
   cooldown: 'Слишком часто — подожди немного',
   'already-owned': 'Это у тебя уже есть',
-  // Числа — `AVATAR_RENTAL_MAX_DAYS` и остаток до продления (60 − 30); литералом, потому что этот словарь
-  // собирается раньше, чем модуль доходит до констант ниже.
-  'rental-full': 'Больше чем на 60 дней вперёд не оплатить — продлить можно, когда останется 30 дней или меньше',
+  // Умолчательный текст (потолок 60); настоящий потолок инстанса (#228) подставляет маршрут покупки через
+  // `avatarRentalFullText(maxDays)` — словарь о настройке не знает.
+  'rental-full': avatarRentalFullText(AVATAR_RENTAL_MAX_DAYS),
   poor: 'Не хватает монет',
 };
 
@@ -328,11 +333,13 @@ export const BUY_COOLDOWN_MS = 60_000;
 export { AVATAR_RENTAL_DAYS };
 
 /**
- * Упрётся ли покупка в потолок аренды (решение 29.09: не больше 60 дней вперёд). Правило общее с клиентом —
+ * Упрётся ли покупка в потолок аренды (решение 29.09: не больше 60 дней вперёд; с #228 потолок — настройка
+ * инстанса `instanceSettings.avatarRentalMaxDays`, 60 — только умолчание). Правило общее с клиентом —
  * `shared/animatedAvatar.avatarRentalCanExtend`, здесь только перевод дат.
+ * ⚠️ Потолок уменьшили — оплаченное не отнимается: проверка смотрит только на НОВУЮ покупку.
  */
-export function avatarRentalFull(current: Date | null, now: Date): boolean {
-  return !avatarRentalCanExtend(current ? current.getTime() : null, now.getTime());
+export function avatarRentalFull(current: Date | null, now: Date, maxDays: number = AVATAR_RENTAL_MAX_DAYS): boolean {
+  return !avatarRentalCanExtend(current ? current.getTime() : null, now.getTime(), AVATAR_RENTAL_DAYS, maxDays);
 }
 
 /**

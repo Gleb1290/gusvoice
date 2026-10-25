@@ -250,6 +250,10 @@ export function FederationPanel() {
       </label>
       {dmHint && <p className="muted">{dmHint}</p>}
       {!sw.enabled && <p className="muted">Переписка с людьми других инстансов включается после федерации.</p>}
+      {/* 25.10: признаки ЛС клиент получает при входе (`/auth/me`) — открытые окна узнают о переключении после перезапуска. */}
+      {sw.enabled && (
+        <p className="muted">У кого приложение уже открыто, переписка с соседями появится после перезапуска приложения или обновления страницы.</p>
+      )}
       <p className="muted">{FED_BACKUP_NOTE}</p>
     </section>
   );
@@ -343,7 +347,7 @@ export function FederationPanel() {
             Сохранить
           </button>
         </label>
-        <p className="muted">Пусто — соседи увидят домен. Название видят люди на других инстансах.</p>
+        <p className="muted">Название видят люди на других инстансах. Если его не задать, им видно обычное название инстанса, а без него — домен.</p>
         {nameHint && <p className="muted">{nameHint}</p>}
 
         <div className="fed-row">

@@ -7,6 +7,7 @@ import {
   FED_ERRORS,
   FED_FEATURES,
   FED_MEMBERSHIP_STATES,
+  broadcastSqlPattern,
   has,
   mentionSqlPattern,
   parseStickerSetName,
@@ -162,11 +163,12 @@ export async function buildBootstrap(serverId: string, userId: string): Promise<
     const meHome = me?.homeInstanceId && me.homeUsername
       ? { username: me.homeUsername, domain: instanceLabel(me.homeInstanceId).domain }
       : null;
-    const mentionRe = mentionSqlPattern(meHome ? null : me?.username, meHome);
+    const mentionRe = mentionSqlPattern(meHome ? null : me?.username, meHome, false);
+    const broadcastRe = broadcastSqlPattern();
     const res = await db.execute(sql`
       SELECT m.channel_id AS id,
              COUNT(*)::int AS unread,
-             (COUNT(*) FILTER (WHERE m.content ~* ${mentionRe}))::int AS mentions
+             (COUNT(*) FILTER (WHERE (m.content ~* ${mentionRe} OR (m.mention_everyone IS DISTINCT FROM false AND m.content ~* ${broadcastRe}) OR m.mention_roles && ARRAY(SELECT mr.role_id FROM member_roles mr WHERE mr.user_id = ${userId}))))::int AS mentions
       FROM messages m
       LEFT JOIN channel_reads r ON r.channel_id = m.channel_id AND r.user_id = ${userId}
       WHERE m.channel_id IN (${sql.join(textChanIds.map((i) => sql`${i}`), sql`, `)})

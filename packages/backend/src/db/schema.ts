@@ -1,4 +1,4 @@
-import type { Attachment, ConvMediaMark, ConvServiceMark, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
+import type { Attachment, ConvMediaMark, ConvServiceMark, MessageEmbed, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -124,6 +124,11 @@ export const users = pgTable('users', {
    * Убирает только из каталога: войти по ссылке скрытый может, и там он виден как обычный участник.
    */
   hiddenFromPeers: boolean('hidden_from_peers').notNull().default(false),
+  /**
+   * Служебная строка «автора» входящего вебхука (миграция 0151, #24): не человек. Неподтверждённая, без почты, с непригодным
+   * паролем и скрытая от соседей — не находится поиском, входом и каталогом; список людей админки отсекает её по флагу.
+   */
+  bot: boolean('bot').notNull().default(false),
   /**
    * Когда запись каталога менялась последний раз (миграция 0066) — по нему строится дельта соседу.
    * Пропущенное обновление не ломает федерацию навсегда: суточная полная сверка отдаёт состояние
@@ -515,10 +520,46 @@ export const messages = pgTable('messages', {
   sticker: jsonb('sticker').$type<MessageSticker | null>(),
   // Self-reference; the FK is declared in the migration SQL (avoids a circular type here).
   replyToId: text('reply_to_id'),
+  // Роли, которые сообщение реально позвало (#76, `@Модераторы`): решает сервер при отправке, текст заново не разбирается.
+  mentionRoles: text('mention_roles').array().notNull().default(sql`'{}'::text[]`),
+  // `@everyone`/`@here` в тексте (0152, #76): true — автору хватило права `MENTION_EVERYONE`, зовёт; false — не хватило, текст
+  // остался, но никого не зовёт; null — в тексте таких обращений нет, либо сообщение старое/вебхук (считается как «зовёт»).
+  mentionEveryone: boolean('mention_everyone'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   editedAt: timestamp('edited_at', { withTimezone: true }),
   // When pinned (MANAGE_MESSAGES); null = not pinned.
   pinnedAt: timestamp('pinned_at', { withTimezone: true }),
+  // Пришло через вебхук (0151, #24): его id и имя/аватар НА МОМЕНТ отправки. Без FK — удалённый вебхук сообщения не уносит.
+  webhookId: text('webhook_id'),
+  webhookName: text('webhook_name'),
+  webhookAvatar: text('webhook_avatar'),
+  // Карточки вебхука (0153, #24): уже проверенные сервером (`normalizeEmbeds`). `embedsFallback` — `content` собран из
+  // карточек для старых клиентов (у сообщения не было своего текста), новый клиент его не показывает.
+  embeds: jsonb('embeds').$type<MessageEmbed[] | null>(),
+  embedsFallback: boolean('embeds_fallback').notNull().default(false),
+});
+
+/**
+ * Входящий вебхук канала (миграция 0151, #24). `userId` — служебная строка-автор (`users.bot`), `tokenHash` — sha256 токена
+ * (сам токен не хранится). Удаление вебхука строку-автора не трогает: его сообщения остаются.
+ */
+export const webhooks = pgTable('webhooks', {
+  id: text('id').primaryKey(),
+  serverId: text('server_id')
+    .notNull()
+    .references(() => servers.id, { onDelete: 'cascade' }),
+  channelId: text('channel_id')
+    .notNull()
+    .references(() => channels.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  avatarUrl: text('avatar_url'),
+  tokenHash: text('token_hash').notNull(),
+  createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
 });
 
 // Emoji reactions on channel messages. One row per (message, user, emoji).
@@ -784,6 +825,8 @@ export const conversationMessages = pgTable('conversation_messages', {
   captionAbove: boolean('caption_above').notNull().default(false),
   /** Одноразовое голосовое прослушано (миграция 0115, `voice3`, G54): файл удалён, `ConvMessage.voiceOnceSpent`. */
   onceSpentAt: timestamp('once_spent_at', { withTimezone: true }),
+  /** Одноразовое фото/видео открыто получателем (миграция 0149, `ttlmedia1`, #226): сторож сожжёт, если закрытие не пришло. */
+  onceOpenedAt: timestamp('once_opened_at', { withTimezone: true }),
   /**
    * Цитата ответа (миграция 0117, `quote1`, G55): выбранный фрагмент цитируемого или снимок начала его текста у ответа на
    * сообщение ДРУГОЙ беседы (`convRules.ReplyQuoteMark`). `null` — обычный ответ.

@@ -20,6 +20,12 @@ import {
 } from '../sendFilesRules';
 import { photoEditable, renameTarget, replaceAt, type PhotoEdit } from '../photoEditRules';
 
+/** Таймер самоуничтожения (#226) — только фото и видео кадром, не GIF (как `onceMediaRules.canSetOnce`; свой перечень импортов закрыт). */
+function canSetOnce(file: { type: string }, asFile: boolean): boolean {
+  if (asFile || file.type === 'image/gif') return false;
+  return file.type.startsWith('image/') || file.type.startsWith('video/');
+}
+
 /** Как уходит сообщение из окна: сразу, без звука или позже (выбор времени — у зовущего). */
 export type SendBoxHow = 'now' | 'silent' | 'later';
 
@@ -34,6 +40,11 @@ export interface SendFilesResult {
   spoilers: ReadonlySet<number>;
   /** «Подпись над медиа» (G48, `media2`). */
   captionAbove: boolean;
+  /**
+   * Одноразовые (#226, `ttlmedia1`): индекс файла `files` → таймер, с (0 — «Просмотр один раз»). Пусто без пункта меню.
+   * Каждый такой файл зовущий шлёт отдельным сообщением.
+   */
+  once: ReadonlyMap<number, number>;
 }
 
 /**
@@ -61,6 +72,7 @@ export function SendFilesBox({
   saved,
   menu,
   media2,
+  onceItems,
   onFiles,
   onAdd,
   onCancel,
@@ -75,6 +87,11 @@ export function SendFilesBox({
   menu: { silent: boolean; later: boolean };
   /** Сервер с признаком `media2` (G48): «Высокое качество», спойлер и подпись над медиа. */
   media2: boolean;
+  /**
+   * «Таймер самоуничтожения» в меню фото/видео (#226, `ttlmedia1`, только личка 1:1 с человеком): пункты подменю даёт зовущий
+   * (`OnceTimerItems`) — у окна закрытый перечень импортов. Нет — пункта нет.
+   */
+  onceItems?: (current: number | null, choose: (ttl: number | null) => void, back: () => void) => import('react').ReactNode;
   /** Состав или порядок файлов изменился (крестик, перетаскивание). */
   onFiles: (files: File[]) => void;
   /** «Добавить» — открыть выбор файлов (результат вернётся в `files` через зовущего). */
@@ -92,7 +109,10 @@ export function SendFilesBox({
   // Спойлер (G48): по файлам, а не по номерам — порядок и состав списка меняются.
   const [marked, setMarked] = useState<ReadonlySet<File>>(() => new Set());
   const [captionAbove, setCaptionAbove] = useState(false);
-  const [tileMenu, setTileMenu] = useState<{ pos: { x: number; y: number }; file: File } | null>(null);
+  const [tileMenu, setTileMenu] = useState<{ pos: { x: number; y: number }; file: File; timer?: boolean } | null>(null);
+  // Таймер самоуничтожения (#226): по файлам, как спойлер; 0 — «Просмотр один раз».
+  const [ttls, setTtls] = useState<ReadonlyMap<File, number>>(() => new Map());
+  const onceMenu = !!onceItems;
   const [dims, setDims] = useState<ReadonlyMap<File, { w: number; h: number }>>(() => new Map());
   const capRef = useRef<HTMLTextAreaElement>(null);
   const captionNow = useRef(caption);
@@ -165,6 +185,8 @@ export function SendFilesBox({
     if (files.length === 0) return;
     const spoilers = new Set<number>();
     if (spoilerMenu) files.forEach((f, i) => marked.has(f) && spoilers.add(i));
+    const once = new Map<number, number>();
+    if (onceMenu) files.forEach((f, i) => ttls.has(f) && canSetOnce(f, way.asFile) && once.set(i, ttls.get(f)!));
     onSend({
       files,
       caption,
@@ -173,9 +195,11 @@ export function SendFilesBox({
       how,
       spoilers,
       captionAbove: capUp,
+      once,
     });
   };
   const asTiles = !way.asFile && files.some((f) => sendKind(f) !== 'file');
+  const onceOn = onceMenu && files.some((f) => ttls.has(f) && canSetOnce(f, way.asFile));
 
   /** Файл на месте `old` меняется на `next` (правка, замена, имя): спойлер и исходник правки переезжают с ним. */
   const swap = (old: File, next: File, origin?: { src: File; edit: PhotoEdit }) => {
@@ -296,6 +320,12 @@ export function SendFilesBox({
           </>
         )}
         {hidden && <SpoilerParticles />}
+        {onceMenu && ttls.has(f) && canSetOnce(f, way.asFile) && (
+          <span className="sfb-once" title={ttls.get(f) ? `Исчезнет через ${ttls.get(f)} с после открытия` : 'Просмотр один раз'}>
+            <Icon name={ttls.get(f) ? 'clock' : 'flame'} size={12} />
+            {ttls.get(f) ? String(ttls.get(f)) : '1'}
+          </span>
+        )}
         <button
           type="button"
           className="sfb-x"
@@ -445,6 +475,8 @@ export function SendFilesBox({
             <MenuItem
               icon="calendar-time"
               label="Отправить позже"
+              disabled={onceOn}
+              sub={onceOn ? 'Самоуничтожающиеся медиа нельзя отложить' : undefined}
               onClick={() => {
                 setMenuAt(null);
                 submit('later');
@@ -453,7 +485,25 @@ export function SendFilesBox({
           )}
         </ContextMenu>
       )}
-      {tileMenu && (
+      {tileMenu?.timer && (
+        <ContextMenu pos={tileMenu.pos} onClose={() => setTileMenu(null)} width={248}>
+          {onceItems!(
+            ttls.has(tileMenu.file) ? ttls.get(tileMenu.file)! : null,
+            (ttl) => {
+              const f = tileMenu.file;
+              setTileMenu(null);
+              setTtls((m) => {
+                const n = new Map(m);
+                if (ttl === null) n.delete(f);
+                else n.set(f, ttl);
+                return n;
+              });
+            },
+            () => setTileMenu({ ...tileMenu, timer: false }),
+          )}
+        </ContextMenu>
+      )}
+      {tileMenu && !tileMenu.timer && (
         <ContextMenu pos={tileMenu.pos} onClose={() => setTileMenu(null)} width={232}>
           {!way.asFile && sendKind(tileMenu.file) === 'photo' && photoEditable(tileMenu.file.type) && (
             <MenuItem
@@ -493,6 +543,15 @@ export function SendFilesBox({
                 setTileMenu(null);
                 toggleSpoilers([f], !marked.has(f));
               }}
+            />
+          )}
+          {/* Таймер самоуничтожения (#226; tdesktop `send_files_box.cpp` — пункт меню файла с подменю, только фото и видео). */}
+          {onceMenu && canSetOnce(tileMenu.file, way.asFile) && (
+            <MenuItem
+              icon="clock"
+              label="Таймер самоуничтожения"
+              submenu
+              onClick={() => setTileMenu({ ...tileMenu, timer: true })}
             />
           )}
           <MenuItem

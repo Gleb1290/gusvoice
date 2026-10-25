@@ -5,6 +5,106 @@ import ts from 'typescript';
 
 const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
+describe('R288 профиль телефона закрывает список под стеклянными вкладками', () => {
+  const phoneMedia = '@media (max-width: 760px)';
+  const phoneBlocks = (source: string) => guardScope(guardCssBlocks(source), phoneMedia);
+
+  function checkProfileBottom(source = css) {
+    const profile = guardDeclarations(phoneBlocks(source), '.mobile-profile');
+    assert.equal(profile.get('bottom'), '0', 'R288-profile-bottom: фон профиля доходит до низа экрана');
+    assert.equal(profile.get('padding-bottom'), 'var(--m-nav-h)',
+      'R288-profile-padding: последние строки профиля не скрываются под капсулой');
+  }
+
+  function checkProfileStack(source = css) {
+    const blocks = phoneBlocks(source);
+    const profile = guardDeclarations(blocks, '.mobile-profile').get('z-index');
+    const nav = guardDeclarations(blocks, '.mobile-nav').get('z-index');
+    assert.match(profile ?? '', /^\d+$/, 'R288-profile-layer: у профиля задан числовой слой');
+    assert.match(nav ?? '', /^\d+$/, 'R288-nav-layer: у капсулы задан числовой слой');
+    assert.ok(Number(profile) < Number(nav), 'R288-profile-under-nav: капсула остаётся поверх профиля');
+  }
+
+  function changePhoneDeclaration(selector: string, property: string, value: string | null) {
+    const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const blocks = phoneBlocks(clean).filter(block => splitCss(block.header, ',').includes(selector)
+      && guardDeclarations([block], selector).has(property));
+    assert.equal(blocks.length, 1, 'контрфакт меняет единственное телефонное объявление свойства');
+    const block = blocks[0];
+    const declaration = new RegExp(`(^|;)\\s*${property}\\s*:[^;]+(?=;|$)`, 'g');
+    assert.equal([...block.body.matchAll(declaration)].length, 1, 'в блоке ровно одно целевое свойство');
+    const changed = block.body.replace(declaration, (_match, before: string) =>
+      value === null ? before : `${before}\n    ${property}: ${value}`);
+    assert.notEqual(changed, block.body, 'контрфакт действительно изменяет правило');
+    assert.equal(clean.split(block.body).length - 1, 1, 'тело адресует только выбранный блок');
+    return clean.replace(block.body, changed);
+  }
+
+  it('R288 фон профиля доходит до низа, а содержимое сохраняет место под нижние вкладки', () => {
+    // Happy-dom не меряет раскладку: проверяем действующие объявления внутри телефонного media.
+    checkProfileBottom();
+    checkProfileBottom(css + '\n@media (min-width: 761px) { .mobile-profile { bottom: 50px; padding-bottom: 0; } }');
+  });
+
+  it('R288 капсула вкладок находится выше непрозрачного экрана профиля', () => {
+    // Сравнение, а не фиксация 93/95: допустима перенумерация слоёв с сохранением их порядка.
+    checkProfileStack();
+    checkProfileStack(css + '\n@media (min-width: 761px) { .mobile-profile { z-index: 999; } .mobile-nav { z-index: 1; } }');
+  });
+
+  it('R288 контрфакт старого bottom оставляет видимым список под капсулой и обнаруживается', () => {
+    checkProfileBottom();
+    const mutant = changePhoneDeclaration('.mobile-profile', 'bottom', 'var(--m-nav-h)')
+      + '\n/* .mobile-profile { bottom: 0; padding-bottom: var(--m-nav-h); } */';
+    assert.throws(() => checkProfileBottom(mutant), popupCssFailure('R288-profile-bottom:', 'var(--m-nav-h)', '0'));
+  });
+
+  it('R288 контрфакт без нижнего padding скрывает последние строки профиля и обнаруживается', () => {
+    checkProfileBottom();
+    const mutant = changePhoneDeclaration('.mobile-profile', 'padding-bottom', null)
+      + '\n.mobile-profile { padding-bottom: var(--m-nav-h); }';
+    // Правильное объявление вне media не должно подменить отсутствующий телефонный отступ.
+    assert.throws(() => checkProfileBottom(mutant), popupCssFailure('R288-profile-padding:', undefined, 'var(--m-nav-h)'));
+  });
+
+  it('R288 контрфакт профиля на уровне капсулы или выше нарушает порядок слоёв и обнаруживается', () => {
+    const nav = Number(guardDeclarations(phoneBlocks(css), '.mobile-nav').get('z-index'));
+    for (const layer of [nav, nav + 1]) {
+      checkProfileStack();
+      const mutant = changePhoneDeclaration('.mobile-profile', 'z-index', String(layer));
+      assert.throws(() => checkProfileStack(mutant), error => error instanceof assert.AssertionError
+        && error.message.startsWith('R288-profile-under-nav:') && error.actual === false && error.expected === true);
+    }
+  });
+});
+
+function groupPageDock(raw = css) {
+  // Happy-dom не меряет flex/layout: проверяем живое правило страницы, не общее правило модального окна.
+  const declarations = guardDeclarations(guardCssBlocks(raw), '.sheet.page .group-fab-dock');
+  assert.equal(declarations.get('bottom'), '6px', 'R269:стрелка-не-уходит-ниже-экрана');
+  assert.equal(declarations.get('margin-top'), 'auto', 'R269:короткий-список-прижимает-стрелку-к-низу');
+  assert.equal(declarations.get('padding-top'), '56px', 'R269:над-стрелкой-остаётся-место-списку');
+}
+
+it('R269 в полноэкранной группе короткий список оставляет стрелку внизу с положительным отступом', () => {
+  groupPageDock();
+  // Закомментированная правильная формула не должна маскировать неправильное действующее объявление.
+  groupPageDock(css + '\n/* .sheet.page .group-fab-dock { bottom: -8px; margin-top: 56px; } */');
+});
+for (const [from, to, marker] of [
+  ['bottom: 6px;', 'bottom: -8px;', 'R269:стрелка-не-уходит-ниже-экрана'],
+  ['margin-top: auto;', '', 'R269:короткий-список-прижимает-стрелку-к-низу'],
+] as const) it(`R269 контрфакт: ${from} в странице группы проверяется отдельно от базового dock`, () => {
+  groupPageDock();
+  const selector = '.sheet.page .group-fab-dock {';
+  assert.equal(css.split(selector).length - 1, 1);
+  const start = css.indexOf(selector), end = css.indexOf('}', start);
+  const block = css.slice(start, end);
+  assert.equal(block.split(from).length - 1, 1, 'единственная декларация в нужном селекторе');
+  const changed = css.slice(0, start) + block.replace(from, to) + css.slice(end);
+  assert.throws(() => groupPageDock(changed), error => error instanceof assert.AssertionError && error.message.includes(marker));
+});
+
 function popupCssFailure(prefix: string, actual: unknown, expected: unknown) {
   return (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(prefix) &&
     error.operator === 'strictEqual' && error.actual === actual && error.expected === expected;

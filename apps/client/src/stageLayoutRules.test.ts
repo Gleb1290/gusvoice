@@ -52,8 +52,8 @@ it('R248 только Фокус, Сбоку и Говорящий допуск�
   assert.equal(layoutRules.isOneBigLayout('speaker'), true);
 });
 
-// Класс ошибки: автооткрытие игнорирует режим, уже открытый показ, камеру, seen или порядок участников.
-it('R248 автооткрывается первый ещё не виденный чужой показ только в Фокусе/Сбоку без занятого фокуса', () => {
+// Историческая функция без вызовов: решение R248 отменено 21.10. Запрет автооткрытия проверяет настоящая сцена.
+it('R248 stageAutoOpenStream — функция без вызовов: сохранённое правило Фокуса/Сбоку, отменённое R286', () => {
   const screens = ['seen-first', 'new-second', 'new-third'];
   const seen = new Set(['seen-first']);
   assert.equal(layoutRules.stageAutoOpenStream('focus', screens, [], false, seen), 'new-second');

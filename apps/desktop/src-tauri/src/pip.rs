@@ -23,6 +23,12 @@
 //! новых окон не задать.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// Своя полоса окна (#219): меню раскладок Windows 11 над нашей кнопкой «Развернуть». Модуль подключён
+// отсюда, а не из `lib.rs`: строится он вместе с главным окном, а правка `lib.rs` требует пробной APK.
+#[cfg(windows)]
+#[path = "titlebar.rs"]
+mod titlebar;
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
@@ -103,9 +109,12 @@ pub fn build_main(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     };
     let h = app.clone();
-    WebviewWindowBuilder::from_config(app, &cfg)?
+    let _main = WebviewWindowBuilder::from_config(app, &cfg)?
         .on_new_window(move |url, features| on_new_window(&h, url, features))
         .build()?;
+    // Без системной рамки (`decorations: false`) меню раскладок Windows 11 даёт только своё окно над кнопкой.
+    #[cfg(windows)]
+    titlebar::attach(&_main);
     Ok(())
 }
 

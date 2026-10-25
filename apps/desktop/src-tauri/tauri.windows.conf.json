@@ -11,6 +11,9 @@
         "minWidth": 940,
         "minHeight": 600,
         "resizable": true,
+        "decorations": false,
+        "shadow": true,
+        "dragDropEnabled": false,
         "visible": false
       },
       {
