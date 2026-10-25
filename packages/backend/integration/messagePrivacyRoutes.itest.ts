@@ -72,7 +72,8 @@ async function fixture(edit?: Mutation, noHook = false) {
         require(id: string) { assert.ok(Object.hasOwn(deps, id), `закрытый импорт ${file}:${id}`); return deps[id]; } });
     return module.exports as T;
   }
-  const env = { jwtSecret: 'not-a-secret-used-only-by-integration-tests', ntfy: { baseUrl: null, token: null }, linkThreats: { enabled: false }, economyEnabled: false };
+  const env = { jwtSecret: 'not-a-secret-used-only-by-integration-tests', ntfy: { baseUrl: null, token: null },
+    linkThreats: { enabled: false }, economyEnabled: false, federation: { dmEnabled: false } };
   const common = { 'drizzle-orm': orm, '@gusvoice/shared': shared, './db/index.js': { db: t.db }, './db/schema.js': schema };
   const auth = load<typeof import('../src/auth.js')>('auth', { ...common, bcryptjs: bcrypt, jsonwebtoken: jwt, './authRules.js': authRules,
     './superAdminRules.js': superAdminRules, './env.js': { env } });
@@ -116,6 +117,7 @@ async function fixture(edit?: Mutation, noHook = false) {
     '../userSearchRules.js': searchRules, '../push.js': push, '../superAdminRules.js': superAdminRules });
   if (!noHook) convRoutes.configureMessagePrivacy({ allowed: privacy.messageAllowedFor, wrote: privacy.wroteInDirect });
   const usersRoutes = load<typeof import('../src/routes/users.js')>('routes/users', { ...routeCommon, '../activity.js': unused('activity'),
+    '../env.js': { env },
     '../auth.js': auth, '../authGuard.js': authGuard, '../guestGuard.js': guests, '../db/userSearch.js': unused('user search'),
     '../userSearchRules.js': searchRules, '../gateway.js': gateway, '../federation/directoryEvents.js': { announceUser: async () => {} },
     '../federation/remoteUserSearch.js': unused('remote search'), '../permissions.js': unused('voice visibility'), '../realtime.js': realtime,

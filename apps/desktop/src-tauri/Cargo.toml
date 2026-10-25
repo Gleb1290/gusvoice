@@ -1,6 +1,6 @@
 [package]
 name = "gusvoice"
-version = "0.9.14"
+version = "0.9.15"
 description = "GusVoice desktop client"
 license = "AGPL-3.0-only"
 edition = "2021"

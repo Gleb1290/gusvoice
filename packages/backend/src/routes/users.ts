@@ -1,5 +1,5 @@
 import { FED_ERRORS, NOTIFY_REPEAT_MINUTES, checkAnimatedAvatar, isAnimatedImage } from '@gusvoice/shared';
-import { fedDmEnabledFromEnv, parseRemoteHandle, type UserSearchResponse } from '@gusvoice/shared';
+import { parseRemoteHandle, type UserSearchResponse } from '@gusvoice/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -8,6 +8,7 @@ import { requireAuth } from '../auth.js';
 import { rateHit, retryMessage } from '../authGuard.js';
 import { isLocalUser, requireLocalUser } from '../guestGuard.js';
 import { db } from '../db/index.js';
+import { env } from '../env.js';
 import { users } from '../db/schema.js';
 import { searchLocalUsers } from '../db/userSearch.js';
 import { normalizeUserQuery, USER_SEARCH_RATE } from '../userSearchRules.js';
@@ -296,7 +297,9 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const me = req.user!.sub;
     const { q: raw } = z.object({ q: z.string().max(100).optional() }).parse(req.query);
     // Э1 ЛС между инстансами (`fedm1`): `@имя@домен` — человек связанного инстанса из кеша каталога, свои не ищутся.
-    const fedDm = fedDmEnabledFromEnv(process.env);
+    // 🔴 25.10: по ТЕКУЩЕМУ флагу (`.env` или тумблер в админке, #224), а не по `.env` при старте — иначе на инстансе, где ЛС
+    // включены тумблером, людей соседей не находил поиск «Новое сообщение».
+    const fedDm = env.federation.dmEnabled;
     const handle = fedDm ? parseRemoteHandle(raw ?? '') : null;
     if (handle) {
       const wait = await rateHit(`usearch:${me}`, USER_SEARCH_RATE.max, USER_SEARCH_RATE.windowS);
