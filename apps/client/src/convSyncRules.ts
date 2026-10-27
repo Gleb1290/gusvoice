@@ -1390,3 +1390,12 @@ export function applyViaPage(
 export function messagePrivacyPlateText(name: string): string {
   return `${name} принимает сообщения только от своих контактов.`;
 }
+
+/**
+ * Писать боту нельзя (решение владельца 26.10, A): плашка вместо поля ввода по `otherUser.botUnavailable` сводки беседы —
+ * `disabled` (бот выключен админом или все боты на сервере), `private` (бот не «Для всех», а я не владелец). Как плашка
+ * заблокированного / «только контакты». Незнакомая причина (сервер новее) — как `disabled`.
+ */
+export function botUnavailablePlateText(reason: string, name: string): string {
+  return reason === 'private' ? `${name} — приватный бот: писать ему может только его владелец.` : `${name} сейчас недоступен: бот выключен.`;
+}

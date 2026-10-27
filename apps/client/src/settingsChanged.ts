@@ -99,6 +99,7 @@ export const GROUP_ITEMS: Record<string, Item[]> = {
     (s) => s.hotkeys.screenShare,
     (s) => s.hotkeys.overlayToggle,
     (s) => s.hotkeys.diagMark,
+    (s) => s.hotkeys.focusShare ?? '',
   ],
   'set-g-stream': [
     (s) => s.stream.resolution,

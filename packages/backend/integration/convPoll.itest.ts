@@ -128,6 +128,9 @@ async function fixture(edit?: Mutation) {
   const fanout = load<typeof import('../src/convSendFanout.js')>('convSendFanout', { ...common, './conversations.js': c, './authGuard.js': guard,
     './contacts.js': contacts, './contactRules.js': contactRules, './groupRules.js': groupRules, './push.js': push });
   const att = load<typeof import('../src/routes/att.js')>('routes/att', { ...fed, zod: { z }, '../convRules.js': rules,
+    // R304: старые GET проверяют выдачу; новый POST links — отдельная авторизованная граница.
+    '../auth.js': { requireAuth: async () => {} },
+    '../conversations.js': { formerLeftAt: async () => null },
     '../attachmentRules.js': attachmentRules, '../attachments.js': attachmentIO, '../authGuard.js': guard, '../storage.js': unused('upload storage') });
   const routes = load<typeof import('../src/routes/conv.js')>('routes/conv', { ...fed, zod: { z }, '../auth.js': auth,
     '../authGuard.js': guard, '../guestGuard.js': unused('guest guard'), './att.js': att, '../stickerCatalog.js': unused('sticker catalog'),

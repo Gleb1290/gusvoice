@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "gusvoice"
-version = "0.9.15"
+version = "0.9.51"
 dependencies = [
  "base64 0.22.1",
  "livekit",

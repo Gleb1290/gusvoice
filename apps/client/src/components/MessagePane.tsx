@@ -1,4 +1,14 @@
 import { RecordCircle } from './RecordBlob';
+import { MessageKeyboard, linkBotCommands } from './MessageKeyboard';
+import { refreshBotCommands, refreshChannelBots, useBotCommands, useChannelBots } from '../botCommands';
+import {
+  botCommandFromMessage,
+  channelCommandInsert,
+  channelCommandList,
+  filterBotCommands,
+  filterChannelCommands,
+  onlyCommandInField,
+} from '../botKeyboardRules';
 import {
   BROADCAST_MENTIONS,
   customReactionId,
@@ -9,6 +19,7 @@ import {
   type Attachment,
   type ConvPin,
   type ConvReader,
+  type InlineKeyboard,
   type Message,
   type MessageReplyPreview,
   type ReactionGroup,
@@ -41,6 +52,7 @@ import { useExprDock } from '../exprDock';
 import {
   acExactAt,
   acTokenAt,
+  commandTokenAt,
   applyAc,
   dayLabel,
   DOUBLE_TAP_MS,
@@ -320,6 +332,7 @@ import { AutoDownloadSource } from '../autoDownload';
 import { quoteFromSelection, replyJumpTarget, replyQuoteFragment, type ReplyQuoteDraft } from '../replyQuoteRules';
 import { composerMaxPx } from '../composerSizeRules';
 import { rememberedKeyboardHeight, rootZoom, viewportSafe } from '../popover';
+import { resetKeyboardShift } from '../keyboardReset';
 import { canDragExpand, dragExtra, expandAfterDrag, expandedExtra, EXPAND_SLOP } from '../stickersExpand';
 
 /** Candidates for @-mention / #-channel autocomplete in the composer (channels only; DMs omit it). */
@@ -336,7 +349,17 @@ type AcItem =
   | { kind: 'broadcast'; id: string; insert: string; label: string; hint: string }
   | { kind: 'channel'; id: string; insert: string; label: string }
   | { kind: 'emoji'; id: string; insert: string; label: string; emoji: string }
-  | { kind: 'hashtag'; id: string; insert: string; label: string };
+  | { kind: 'hashtag'; id: string; insert: string; label: string }
+  /** Команда бота (#230): `insert` — `/cmd`, `hint` — описание от бота. */
+  | {
+      kind: 'command';
+      id: string;
+      insert: string;
+      label: string;
+      hint: string;
+      /** Канал (#231): чья команда — аватар 16 px и серым `@ник` в строке (tdesktop `field_autocomplete.cpp:722`). */
+      bot?: { username: string; displayName: string; avatarUrl: string | null };
+    };
 
 /* Быстрые реакции листа сообщения (design-step8 C2) и полосы меню (раунд 12) — один набор `QUICK_REACTIONS` из
    `ContextMenu.tsx`, своей копии у ленты нет. */
@@ -585,6 +608,8 @@ interface RowActions {
   aim(more: MenuMore): void;
   /** Раунд 12: правый клик по фото в сообщении — меню сообщения, а не браузера (замечание приёмки 05.10). */
   photoMenu(): boolean;
+  /** Тап по `/команде` в тексте сообщения бота (#230): отправить её в эту беседу (Telegram — сущность `bot_command`). */
+  botCommand?(cmd: string, botUsername?: string): void;
   /**
    * Нажатие по строке (раунд 12): на телефоне тап по пузырю открывает меню у него; иначе ничего. С 07.10 в ЛС меню ждёт
    * окно двойного тапа: второй тап — быстрая реакция (`doubleTapStep`).
@@ -638,6 +663,8 @@ interface MessageRowProps {
   canReact: boolean;
   /** Удержание реакции в полосе ставит «большую» (G43, `onReactBig` у ленты). */
   canBig: boolean;
+  /** Канал с ботами (#231): id канала — под сообщением бота его кнопки, `/команды` в тексте бота нажимаются. */
+  kbChannel?: string;
   /** Корзина видна: своё — всегда, чужое — только в ЛС («удалить у себя», #212). */
   canDelete: boolean;
   onEmoji: EmojiResolver | undefined;
@@ -716,6 +743,7 @@ const MessageRow = memo(function MessageRow({
   viaText,
   canReact,
   canBig,
+  kbChannel,
   canDelete,
   onEmoji,
   emojiById,
@@ -736,7 +764,7 @@ const MessageRow = memo(function MessageRow({
   ghost,
 }: MessageRowProps) {
   const time = TIME_FMT.format(new Date(m.createdAt));
-  const who: UserMenuTarget = { userId: m.author.id, name: author, avatarUrl: m.author.avatarUrl };
+  const who: UserMenuTarget = { userId: m.author.id, name: author, avatarUrl: m.author.avatarUrl, ...(m.author.bot ? { bot: true } : {}) };
   // `noPreview` (G19, `linkprev1`): автор убрал превью крестиком над полем — карточку под сообщением не рисуем.
   // Опасные ссылки (#218 п.5, `linkthreats1`): хосты, найденные сервером в списке угроз; без признака сервера — пусто.
   const dangerous = useStore((s) => (serverLinkThreats(s.serverFeatures) ? m.dangerousLinks : undefined));
@@ -986,7 +1014,7 @@ const MessageRow = memo(function MessageRow({
           : previews.length
             ? 'row'
             : 'body'
-        : look.kind === 'text' && m.content && !previews.length && !m.attachments?.length
+        : look.kind === 'text' && m.content && !previews.length && !m.attachments?.length && !m.embeds?.length
           ? 'body'
           : 'row';
     /* Отметка у своих (раунд 10, Р6): дошедшее — ✓ «отправлено», прочитанное собеседником — ✓✓ (`read` считает лента
@@ -1014,9 +1042,17 @@ const MessageRow = memo(function MessageRow({
       ) : null;
     const body = m.content && !m.embedsFallback ? (
       <div className="message-body">
-        {renderContent(m.content, m.author.id, author, onEmoji, dangerous, roleMentionNames, m.mentionEveryone === false)}
+        {linkBotCommands(
+          renderContent(m.content, m.author.id, author, onEmoji, dangerous, roleMentionNames, m.mentionEveryone === false),
+          m.author.bot && !mine ? act.botCommand : undefined,
+        )}
         {metaAt === 'body' ? meta : null}
       </div>
+    ) : null;
+    /* Карточки бота в ЛС (#229, 26.10) — под текстом пузыря, как у вебхука в канале (тот же `MessageEmbeds`). Время с ними —
+       отдельной строкой внизу (`metaAt` 'row'): в конце текста оно встало бы над карточками. */
+    const embedCards = m.embeds?.length ? (
+      <MessageEmbeds embeds={m.embeds} renderText={(t) => renderContent(t, m.author.id, author, onEmoji, dangerous, roleMentionNames)} />
     ) : null;
     // Альбом из 2–4 фото — сеткой (раунд 10): ячейки заполняют картинки, время поверх последнего фото.
     const attachments = m.attachments?.length ? (
@@ -1068,6 +1104,11 @@ const MessageRow = memo(function MessageRow({
     /* Свайп-ответ (раунд 12, HANDOFF §7): пока палец ведёт пузырь влево, у правого края строки — значок «ответить» в слоте
        `actions` (`.bub-slot.end`). Прозрачность и размер значка, сдвиг пузыря — переменные строки `--swipe-p` / `--swipe-x`,
        а взвод (`.armed`) — класс значка: их лента пишет прямо в DOM, строка перерисовывается только в начале жеста и в конце. */
+    /* Кнопки под сообщением бота (#230, `ConvMessage.keyboard`): только в пузыре ЛС (боты живут только в беседах 1:1), под
+       пузырём колонкой `.bub-stack`; у остальных сообщений разметка строки прежняя. */
+    const kbRows = !mine && !ghost ? (m as { keyboard?: InlineKeyboard }).keyboard : undefined;
+    const kbConv = (m as { conversationId?: string }).conversationId;
+    const kb = kbRows?.length && kbConv ? <MessageKeyboard convId={kbConv} messageId={m.id} keyboard={kbRows} /> : undefined;
     const swipeIcon = swiping ? (
       <span className="bub-slot end" aria-hidden="true">
         <span className="swipe-reply">
@@ -1115,6 +1156,7 @@ const MessageRow = memo(function MessageRow({
           onClickCapture={selecting ? (e) => act.pick(e, m) : undefined}
           onKeyDown={selecting ? (e) => act.pick(e, m) : undefined}
           avatar={avatar}
+          kb={kb}
           actions={
             selecting ? (
               <SelectCheck checked={picked} />
@@ -1141,6 +1183,7 @@ const MessageRow = memo(function MessageRow({
               capUp ? (
                 <>
                   {body}
+                  {embedCards}
                   {attachments}
                   {previewCards}
                   {reactions}
@@ -1149,6 +1192,7 @@ const MessageRow = memo(function MessageRow({
                 <>
                   {attachments}
                   {body}
+                  {embedCards}
                   {previewCards}
                   {reactions}
                 </>
@@ -1157,6 +1201,7 @@ const MessageRow = memo(function MessageRow({
               <>
                 {pollAndSticker}
                 {body}
+                {embedCards}
                 {previewCards}
                 {attachments}
                 {reactions}
@@ -1221,6 +1266,13 @@ const MessageRow = memo(function MessageRow({
                   ВЕБХУК
                 </span>
               )}
+              {/* Бот (#229): настоящий пользователь, поэтому имя кликается, в отличие от вебхука. Текст — `botRules.BOT_TAG_TEXT`
+                  (импорт сюда не тянем: харнессы ленты держат закрытый перечень импортов). */}
+              {m.author.bot && !m.webhookId && (
+                <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+                  БОТ
+                </span>
+              )}
               <GuestMark home={guestHome} size={11} />{' '}
               <span className="ts muted">{time}</span>
             </div>
@@ -1230,7 +1282,10 @@ const MessageRow = memo(function MessageRow({
               {pollAndSticker}
               {m.content && !m.embedsFallback ? (
                 <div className="message-body">
-                  {renderContent(m.content, m.author.id, author, onEmoji, dangerous, roleMentionNames, m.mentionEveryone === false)}
+                  {linkBotCommands(
+                    renderContent(m.content, m.author.id, author, onEmoji, dangerous, roleMentionNames, m.mentionEveryone === false),
+                    kbChannel && m.author.bot && !mine && !m.webhookId ? (cmd) => act.botCommand?.(cmd, m.author.username) : undefined,
+                  )}
                   {m.editedAt ? <span className="ts muted edited"> (изм.)</span> : null}
                 </div>
               ) : null}
@@ -1239,6 +1294,15 @@ const MessageRow = memo(function MessageRow({
                 <MessageEmbeds
                   embeds={m.embeds}
                   renderText={(t) => renderContent(t, m.author.id, author, onEmoji, dangerous, roleMentionNames)}
+                />
+              ) : null}
+              {/* Кнопки бота в канале (#231, ТЗ §4.4) — под карточками, ширина как у `.embed`; в ЛС они в пузыре (`kb`). */}
+              {/* ⚠️ Условия переставлены намеренно: выражение значка «БОТ» выше — якорь мутантов `DmChatView.botGate.test`, второй копии быть не должно. */}
+              {kbChannel && !m.webhookId && m.author.bot && (m as { keyboard?: InlineKeyboard }).keyboard?.length ? (
+                <MessageKeyboard
+                  target={{ kind: 'channel', id: kbChannel }}
+                  messageId={m.id}
+                  keyboard={(m as { keyboard?: InlineKeyboard }).keyboard!}
                 />
               ) : null}
               {previewCards}
@@ -1270,6 +1334,7 @@ interface MessageListProps {
   viaNames?: { self?: string; peer?: string } | null;
   crownId: string | undefined;
   canReact: boolean;
+  kbChannel?: string;
   canBig: boolean;
   canDeleteOthers: boolean;
   onEmoji: EmojiResolver | undefined;
@@ -1529,6 +1594,7 @@ const MessageList = memo(function MessageList(props: MessageListProps) {
             viaText={viaCaption((m as { via?: { instance: string; confirmed: boolean } }).via, mine, p.viaNames)}
             canReact={p.canReact}
             canBig={p.canBig}
+            kbChannel={p.kbChannel}
             canDelete={mine || p.canDeleteOthers}
             onEmoji={p.onEmoji}
             emojiById={p.emojiById}
@@ -2026,6 +2092,8 @@ export function MessagePane({
   onPin,
   loading,
   autocomplete,
+  botPeer,
+  botChannelId,
   newSince,
   scrollKey,
   feedId,
@@ -2249,6 +2317,16 @@ export function MessagePane({
   canModerate?: boolean;
   /** When provided, the message menu shows Закрепить/Открепить (channels, MANAGE_MESSAGES). */
   onPin?: (m: Message, pinned: boolean) => void;
+  /**
+   * Собеседник — бот (#230): его команды (`GET /conv/:id/bot` по `feedId`, кэш `botCommands.ts`) — список по «/» в начале
+   * поля, кнопка «Меню» у поля, `/команды` в его тексте нажимаются и уходят сообщением. Не бот — `/` как был.
+   */
+  botPeer?: boolean;
+  /**
+   * Канал сервера (#231): его id — подсказка команд ботов канала по «/» (`GET /channels/:id/bots`, кэш `botCommands.ts`),
+   * «Меню» у поля, кнопки под сообщениями ботов и нажимаемые `/команды` в их тексте. Не передан — ничего этого нет.
+   */
+  botChannelId?: string;
   /** @mention / #channel autocomplete candidates (server channels only). */
   autocomplete?: AutocompleteData;
   /**
@@ -2836,7 +2914,9 @@ export function MessagePane({
       if (b) setPicker({ kind: 'composer', anchor: b.getBoundingClientRect(), el: b });
     },
     close: () => setPicker(null),
-    panel: '.emoji-pop',
+    // Панель — та вкладка, что открыта последней: эмодзи `.emoji-pop`, стикеры и GIF `.sticker-pop` (у GIF ещё `.gif-pop`). Был только
+    // `.emoji-pop` — мышь на панели стикеров или GIF считалась «ушедшей», и открытая наведением панель закрывалась через 300 мс.
+    panel: '.emoji-pop, .sticker-pop',
     trigger: '.composer .att-btn.emoji',
   });
   const attachHover = useHoverPanel({
@@ -3008,6 +3088,18 @@ export function MessagePane({
   const [acIndex, setAcIndex] = useState(0);
   /* `#` в беседах (G36, Telegram `FieldAutocomplete` Hashtags): недавно писанные хэштеги; в канале сервера `#` — по-прежнему каналы. */
   const hashtagsOn = !autocomplete?.channels.length;
+  /** Команды бота беседы (#230): `undefined` — не бот или ещё не пришли; пустой список — у бота команд нет. */
+  const botCommands0 = useBotCommands(botPeer && feedId ? feedId : null);
+  /** Боты канала (#231) и их команды одним списком; в беседе — `undefined`. */
+  const channelBots = useChannelBots(!botPeer ? botChannelId : null);
+  const channelCmds = useMemo(() => (channelBots ? channelCommandList(channelBots) : undefined), [channelBots]);
+  // Дальше лента зовёт «команды» одним именем: беседа — команды бота, канал — команды всех его ботов.
+  const botCommands = botCommands0 ?? channelCmds;
+  // Список команд длиннее окна подсказок (до 100) — выбранная стрелками строка остаётся видимой.
+  useEffect(() => {
+    if (ac?.trigger !== '/') return;
+    document.querySelector('.composer .ac-pop .ac-item.active')?.scrollIntoView({ block: 'nearest' });
+  }, [ac, acIndex]);
   /** Таймер показа подсказки «слово целиком» (G53, `refreshAc`). */
   const acExactTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(acExactTimer.current), []);
@@ -3250,6 +3342,8 @@ export function MessagePane({
       menuAim.current = more;
     },
     photoMenu: () => true,
+    // Канал (#231): `/cmd` из текста бота уходит ЭТОМУ боту — с `@ником`, если ту же команду знает другой бот канала.
+    botCommand: (cmd, botUsername) => sendBotCommand(channelCmds ? botCommandFromMessage(cmd, botUsername, channelCmds) : cmd),
     tap: (e, m) => onRowTap(e, m),
     press: (e, m) => onRowPress(e, m),
     dbl: (e, m) => onRowDouble(e, m),
@@ -3274,6 +3368,7 @@ export function MessagePane({
       menu: (m, x, y, touch, photo) => rowActsRef.current.menu(m, x, y, touch, photo),
       aim: (more) => rowActsRef.current.aim(more),
       photoMenu: () => rowActsRef.current.photoMenu(),
+      botCommand: (cmd, botUsername) => rowActsRef.current.botCommand?.(cmd, botUsername),
       tap: (e, m) => rowActsRef.current.tap(e, m),
       press: (e, m) => rowActsRef.current.press(e, m),
       dbl: (e, m) => rowActsRef.current.dbl(e, m),
@@ -4573,6 +4668,26 @@ export function MessagePane({
   const acItems = useMemo<AcItem[]>(() => {
     if (!ac) return [];
     const q = ac.query.toLowerCase();
+    // Команды бота (#230): по началу имени, все (у бота их до 100 — список прокручивается), как tdesktop `field_autocomplete.cpp`.
+    if (ac.trigger === '/' && channelCmds) {
+      return filterChannelCommands(channelCmds, ac.query).map((c) => ({
+        kind: 'command' as const,
+        id: `${c.bot.id}:${c.command}`,
+        insert: channelCommandInsert(c, channelCmds),
+        label: `/${c.command}`,
+        hint: c.description,
+        bot: c.bot,
+      }));
+    }
+    if (ac.trigger === '/') {
+      return filterBotCommands(botCommands ?? [], ac.query).map((c) => ({
+        kind: 'command' as const,
+        id: c.command,
+        insert: `/${c.command}`,
+        label: `/${c.command}`,
+        hint: c.description,
+      }));
+    }
     // Emoji works everywhere, including DMs — it needs no server-provided candidates, unlike @ and #.
     if (ac.trigger === ':') {
       // «Слово целиком» (G53): только точные совпадения, подпись — первый код эмодзи.
@@ -4623,13 +4738,29 @@ export function MessagePane({
       .filter((c) => c.name.toLowerCase().includes(q))
       .slice(0, 8)
       .map((c) => ({ kind: 'channel', id: c.id, insert: `#${c.name}`, label: c.name }));
-  }, [ac, autocomplete, hashtagsOn]);
+  }, [ac, autocomplete, hashtagsOn, botCommands, channelCmds]);
 
   // Recompute the active trigger token from the input value + caret position.
   function refreshAc(value: string, caret: number | null) {
     if (acExactTimer.current) window.clearTimeout(acExactTimer.current);
     acExactTimer.current = 0;
     // «Подсказывать эмодзи» выключено (G53) — ни `:слова`, ни слова целиком; `@` и `#` — как были.
+    // Беседа с ботом (#230): «/» первым символом поля — его команды; старый список тихо перезапрашивается (кэш 60 с).
+    const cmd = botPeer && feedId && botCommands?.length ? commandTokenAt(value, caret) : null;
+    // Канал с ботами (#231): то же, `/cmd@ник` — тоже команда.
+    const chCmd = !cmd && botChannelId && channelCmds?.length ? commandTokenAt(value, caret, true) : null;
+    if (chCmd) {
+      refreshChannelBots(botChannelId!);
+      setAc(chCmd);
+      setAcIndex(0);
+      return;
+    }
+    if (cmd) {
+      refreshBotCommands(feedId!);
+      setAc(cmd);
+      setAcIndex(0);
+      return;
+    }
     const suggest = emojiSuggestEnabled();
     const found = acTokenAt(value, caret, !!autocomplete, hashtagsOn);
     const token = found && found.trigger === ':' && !suggest ? null : found;
@@ -4651,8 +4782,23 @@ export function MessagePane({
     acExactTimer.current = window.setTimeout(show, EXACT_SUGGEST_DELAY_MS);
   }
 
-  function acceptAc(item: AcItem) {
+  /**
+   * Выбор подсказки. Команда бота (#230) из списка — щелчок или Enter — уходит СРАЗУ, если в поле только она (как Telegram:
+   * tdesktop шлёт команду по выбору); `insert` (Tab, →) — только подставить в поле, дописать аргументы.
+   */
+  function acceptAc(item: AcItem, insert = false) {
     if (!ac) return;
+    if (
+      (item.kind === 'command' && !insert && onlyCommandInField(text)) ||
+      // Канал (#231): `/cmd@ник` тоже «одна команда в поле».
+      (item.kind === 'command' && !insert && !!channelCmds && onlyCommandInField(text, true))
+    ) {
+      if (inputRef.current) inputRef.current.value = '';
+      setText('');
+      setAc(null);
+      sendBotCommand(item.insert);
+      return;
+    }
     const { text: next, caret: pos } = applyAc(text, ac, item.insert);
     setText(next);
     setAc(null);
@@ -5031,6 +5177,10 @@ export function MessagePane({
        сообщения уедут одним слипшимся. Поймано живой проверкой: «очередь 2очередь 3». */
     if (inputRef.current) inputRef.current.value = '';
     setText('');
+    // Полоса подсказок (эмодзи по слову, @, #) уходит вместе с текстом — иначе на телефоне висела над пустым полем (приёмка 25.10).
+    setAc(null);
+    // Caps Lock экранной клавиатуры сбрасывается после отправки, как в Telegram (`keyboardReset.ts`).
+    resetKeyboardShift(inputRef.current);
     setPending([]);
     setReplyingTo(null);
     /* 🔴 Сообщение встаёт в ленту СРАЗУ бледной строкой «отправляется» (#194) и сменяется настоящим по
@@ -5072,6 +5222,56 @@ export function MessagePane({
       enqueueSend(item);
     }
     if (fwd) void sendFwdDraft(fwd, items.map((x) => x.key), false);
+  }
+
+  /**
+   * Отправить команду боту одним сообщением (#230): выбор из списка «/», кнопка-команда в тексте бота. Поле, ответ и вложения не
+   * трогает (кроме случая выбора из списка — там поле чистит `acceptAc`); строка «в пути» — как у обычной отправки.
+   */
+  function sendBotCommand(cmd: string) {
+    const content = cmd.trim();
+    if (!content || !(botPeer || botChannelId)) return;
+    dropUnreadLine();
+    requestAnimationFrame(() => stickDown());
+    if (fwRef.current?.hasNewer) void goLatest();
+    const key = newClientId();
+    if (outbox) {
+      outbox.enqueue({ key, content, files: [], replyToId: null });
+      return;
+    }
+    const item = {
+      key,
+      content,
+      files: [] as File[],
+      replyToId: null,
+      status: 'sending' as const,
+      error: null,
+      feedId,
+      afterId: messages[messages.length - 1]?.id,
+      createdAt: Date.now(),
+    };
+    setOutgoing((o) => addOutgoing(o, item));
+    enqueueSend(item);
+  }
+
+  /** Кнопка «Меню» у поля в беседе с ботом (#230, tdesktop `_botCommandStart` — кладёт «/» в поле): «/» и список его команд. */
+  function openBotMenu() {
+    // Повторное нажатие — закрыть список (набранное остаётся).
+    if (ac?.trigger === '/') return setAc(null);
+    const el = inputRef.current;
+    if (el) el.value = '/';
+    setText('/');
+    setAc({ trigger: '/', query: '', start: 0 });
+    setAcIndex(0);
+    if (botChannelId && channelCmds) refreshChannelBots(botChannelId);
+    else if (feedId) refreshBotCommands(feedId);
+    requestAnimationFrame(() => {
+      const f = inputRef.current;
+      if (f) {
+        f.focus();
+        f.setSelectionRange(1, 1);
+      }
+    });
   }
 
   /** Снять черновик пересылки этой беседы и вернуть его (отправка); нет черновика или пачки — `null`. */
@@ -8880,6 +9080,7 @@ export function MessagePane({
             crownId={crownId}
             canReact={!!onReact}
             canBig={!!onReact && !!onReactBig}
+            kbChannel={botChannelId}
             canDeleteOthers={deletePeerName !== undefined}
             onEmoji={onEmoji}
             emojiById={emojiById}
@@ -9763,14 +9964,22 @@ export function MessagePane({
           // Эмодзи (G53) — полоса в строку, как у Telegram Desktop (`EmojiSuggestions`): ←/→ выбирают, Tab и Enter подставляют, Esc закрывает.
           <div className={ac.trigger === ':' ? 'ac-pop ac-strip' : 'ac-pop'} data-testid={ac.trigger === ':' ? 'emoji-suggest' : undefined}>
             {ac.trigger !== ':' && (
-              <div className="ac-head">{ac.trigger === '#' ? `${hashtagsOn ? 'Хэштеги' : 'Каналы'} · #${ac.query}` : `Участники · @${ac.query}`}</div>
+              <div className="ac-head">
+                {ac.trigger === '/'
+                  ? channelBots && channelBots.length > 1
+                    ? 'Команды ботов'
+                    : 'Команды бота'
+                  : ac.trigger === '#'
+                    ? `${hashtagsOn ? 'Хэштеги' : 'Каналы'} · #${ac.query}`
+                    : `Участники · @${ac.query}`}
+              </div>
             )}
             {acItems.map((it, i) => (
               <button
                 type="button"
                 key={`${it.kind}:${it.id}`}
                 title={it.kind === 'emoji' ? it.label : undefined}
-                className={`ac-item ${i === acIndex ? 'active' : ''}`}
+                className={`ac-item${it.kind === 'command' ? ' ac-cmd' : ''} ${i === acIndex ? 'active' : ''}`}
                 onMouseDown={(e) => {
                   e.preventDefault();
                   acceptAc(it);
@@ -9784,9 +9993,14 @@ export function MessagePane({
                   </span>
                 ) : it.kind === 'emoji' ? (
                   <span className="ac-emoji">{it.emoji}</span>
+                ) : it.kind === 'command' && it.bot ? (
+                  // Канал (#231): чья команда — аватар бота (tdesktop `field_autocomplete.cpp:722` `userpic`).
+                  <span className="ac-role-ico">
+                    <Avatar url={it.bot.avatarUrl} name={it.bot.displayName || it.bot.username} size={16} />
+                  </span>
                 ) : (
                   <span className="ac-role-ico">
-                    <Icon name={it.kind === 'role' || it.kind === 'broadcast' ? 'users' : 'hash'} size={15} />
+                    <Icon name={it.kind === 'command' ? 'bot' : it.kind === 'role' || it.kind === 'broadcast' ? 'users' : 'hash'} size={15} />
                   </span>
                 )}
                 {it.kind === 'emoji' ? null : <span className="ac-name">{it.label}</span>}
@@ -9794,9 +10008,10 @@ export function MessagePane({
                   <span className="ac-handle">{it.handle}</span>
                 ) : it.kind === 'role' ? (
                   <span className="ac-handle">роль</span>
-                ) : it.kind === 'broadcast' ? (
+                ) : it.kind === 'broadcast' || it.kind === 'command' ? (
                   <span className="ac-handle">{it.hint}</span>
                 ) : null}
+                {it.kind === 'command' && it.bot ? <span className="ac-bot">@{it.bot.username}</span> : null}
               </button>
             ))}
           </div>
@@ -9806,6 +10021,13 @@ export function MessagePane({
             есть в разметке всегда, а показывает её только мобильная раскладка (styles.css) — она
             же прячет четыре кнопки ниже. На компьютере строка остаётся прежней. */}
         {/* Правка меняет только текст: вложения, голосовое и опрос к ней не относятся (#212). */}
+        {/* Беседа с ботом (#230): кнопка «Меню» слева от поля. ПК — пока поле пусто или в нём команда (tdesktop `_botCommandStart`,
+            `history_widget.cpp:7093`); телефон — всегда, как Telegram Android (владелец 26.10: «делай как тг»). */}
+        {botCommands?.length && !composerEdit && (isMobile() || !text || text.startsWith('/')) ? (
+          <button type="button" className="att-btn botcmd" title="Команды бота" aria-label="Команды бота" aria-haspopup="listbox" onClick={openBotMenu}>
+            <Icon name="list" size={20} />
+          </button>
+        ) : null}
         {!composerEdit && !filesBlocked && (
         <button
           type="button"
@@ -10006,6 +10228,12 @@ export function MessagePane({
                 return;
               }
               // Enter забирает только выбранная подсказка («слово целиком» не выбрано — Enter отправляет, как у Telegram); Tab выбирает первую.
+              // Команды бота (#230): Tab и → подставляют команду в поле (дописать аргументы), Enter — отправляет её.
+              if (ac.trigger === '/' && (e.key === 'Tab' || e.key === 'ArrowRight')) {
+                e.preventDefault();
+                acceptAc(acItems[Math.max(acIndex, 0)], true);
+                return;
+              }
               if (e.key === 'Tab' || (e.key === 'Enter' && acIndex >= 0)) {
                 e.preventDefault();
                 acceptAc(acItems[Math.max(acIndex, 0)]);

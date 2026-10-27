@@ -36,7 +36,7 @@ class Clock {
 type Fixture = {
   clock: Clock; renders: (string | null)[]; speaker(): string | null;
   voice(next: Voice): Promise<void>; advance(ms: number): Promise<void>;
-  render(next: { present?: string[]; enabled?: boolean }): Promise<void>;
+  render(next: { present?: string[]; enabled?: boolean; bots?: ReadonlySet<string> }): Promise<void>;
   queued(id: number): Promise<void>; unmount(): Promise<void>;
 };
 async function fixture(work: (f: Fixture) => Promise<void>, raw = source) {
@@ -48,7 +48,8 @@ async function fixture(work: (f: Fixture) => Promise<void>, raw = source) {
   const useStore = create<{ liveVoice: Voice }>(() => ({ liveVoice: {} }));
   const module = { exports: {} as { useStageSpeaker: typeof useStageSpeaker } };
   const deps: Record<string, unknown> = { react: React, './store': { useStore }, './stageLayoutRules': rules };
-  let props = { present: ['a', 'b', 'c'], enabled: true }; let current: string | null = null; let mounted = true;
+  let props: { present: string[]; enabled: boolean; bots?: ReadonlySet<string> } = { present: ['a', 'b', 'c'], enabled: true };
+  let current: string | null = null; let mounted = true;
   const renders: (string | null)[] = [];
   const unmount = async () => { if (mounted) { await React.act(async () => root.unmount()); mounted = false; } };
   try {
@@ -60,7 +61,7 @@ async function fixture(work: (f: Fixture) => Promise<void>, raw = source) {
       require(id: string) { assert.ok(Object.hasOwn(deps, id), `неописанный импорт ${id}`); return deps[id]; },
     });
     function Probe() {
-      current = module.exports.useStageSpeaker(props.present, props.enabled); renders.push(current);
+      current = module.exports.useStageSpeaker(props.present, props.enabled, props.bots); renders.push(current);
       return React.createElement('output', null, current ?? 'none');
     }
     const render = async (next: Partial<typeof props>) => {
@@ -189,3 +190,42 @@ it('R248 контрфакты несброшенной речи, неотмен�
   await mutant('return speaker && present.includes(speaker) ? speaker : (present[0] ?? null);',
     'return speaker ?? (present[0] ?? null);', departure, 'R248 speaker-gone:');
 });
+
+async function botExcluded(raw = source) {
+  await fixture(async f => {
+    const mark = f.renders.length;
+    await f.render({ present: ['music', 'a', 'b'], bots: new Set(['music']) });
+    assert.equal(f.renders.slice(mark).includes('music'), false, 'R306_HOOK_BOT: бот не крупный даже в первом кадре');
+    assert.equal(f.speaker(), 'a', 'R306_HOOK_BOT: fallback пропускает бота в начале present');
+    await f.voice({ music: { speaking: true } });
+    assert.equal(f.clock.pending.size, 0, 'R306_HOOK_BOT: один VAD бота не запускает таймер');
+    await f.advance(5000); assert.equal(f.speaker(), 'a', 'R306_HOOK_BOT: музыка не захватывает сцену');
+    await f.voice({ music: { speaking: true }, b: { speaking: true } });
+    await f.advance(619); assert.equal(f.speaker(), 'a');
+    await f.advance(1); assert.equal(f.speaker(), 'b', 'человек рядом с ботом остаётся полноценным кандидатом');
+  }, raw);
+}
+
+it('R306 настоящий хук исключает бота из present и VAD, но выбирает человека таймером', () => botExcluded());
+
+it('R306 только боты на сцене дают null, а смена метки бота обновляет fallback без устаревшего кадра', () => fixture(async f => {
+  await f.render({ present: ['a', 'b'], bots: new Set(['a', 'b']) });
+  assert.equal(f.speaker(), null); assert.equal(f.clock.pending.size, 0);
+  await f.voice({ a: { speaking: true }, b: { speaking: true } });
+  await f.advance(5000); assert.equal(f.speaker(), null); assert.equal(f.clock.pending.size, 0);
+  await f.render({ bots: new Set(['a']) });
+  assert.equal(f.speaker(), 'b', 'человек после снятия метки вновь участвует');
+  const mark = f.renders.length;
+  await f.render({ bots: new Set(['b']) });
+  assert.equal(f.renders.slice(mark).includes('b'), false, 'новая метка не ждёт эффекта для удаления крупного');
+  assert.equal(f.speaker(), 'a');
+}));
+
+it('R306 пустой набор ботов не меняет прежний fallback и выбор человека', () => fixture(async f => {
+  await f.render({ bots: new Set() }); assert.equal(f.speaker(), 'a');
+  await f.voice({ b: { speaking: true } }); await f.advance(620); assert.equal(f.speaker(), 'b');
+}));
+
+it('R306 контрфакт нефильтрованного present отвергается настоящим хуком', () =>
+  mutant('bots && bots.size > 0 ? presentAll.filter((id) => !bots.has(id)) : presentAll',
+    'presentAll', botExcluded, 'R306_HOOK_BOT:'));

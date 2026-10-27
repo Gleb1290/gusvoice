@@ -20,7 +20,6 @@ describe('вкладки настроек сервера', () => {
 
   it('каждое право в одиночку открывает свою вкладку И пункт меню', () => {
     const пары: [bigint, string][] = [
-      [Permission.MANAGE_SERVER, 'general'],
       [Permission.MANAGE_CHANNELS, 'general'],
       [Permission.BAN_MEMBERS, 'bans'],
       [Permission.MANAGE_EMOJIS, 'emoji'],
@@ -66,12 +65,12 @@ describe('вкладки настроек сервера', () => {
   });
 
   it('оба права на «Основное» не двоят вкладку', () => {
-    assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_CHANNELS), ['general']);
+    assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_CHANNELS), ['general', 'integrations']);
   });
 
   it('несколько прав дают несколько вкладок в объявленном порядке', () => {
     assert.deepEqual(keys(Permission.MANAGE_SOUNDS | Permission.MANAGE_EMOJIS), ['emoji', 'sounds']);
-    assert.deepEqual(keys(Permission.VIEW_AUDIT_LOG | Permission.MANAGE_SERVER), ['general', 'audit']);
+    assert.deepEqual(keys(Permission.VIEW_AUDIT_LOG | Permission.MANAGE_SERVER), ['general', 'integrations', 'audit']);
   });
 
   it('администратор видит все вкладки', () => {
@@ -113,4 +112,12 @@ describe('вкладки настроек сервера', () => {
     assert.equal(canOpenServerSettings(Permission.MANAGE_ECONOMY, features), false);
     assert.equal(serverSettingsHas(Permission.MANAGE_ECONOMY, 'economy', features), false);
   });
+});
+
+it('R303 управление сервером открывает Интеграции без права вебхуков, оба права не дублируют дверь', () => {
+  assert.deepEqual(keys(Permission.MANAGE_SERVER), ['general', 'integrations']);
+  assert.equal(serverSettingsHas(Permission.MANAGE_SERVER, 'integrations'), true);
+  assert.deepEqual(keys(Permission.MANAGE_WEBHOOKS), ['integrations']);
+  assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_WEBHOOKS), ['general', 'integrations']);
+  assert.equal(serverSettingsHas(Permission.MANAGE_CHANNELS, 'integrations'), false);
 });

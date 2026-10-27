@@ -5,7 +5,8 @@ import { describe, it } from 'node:test';
 import ts from 'typescript';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { runSplashFlow, shownDownloadFraction, SPLASH_TIMING, type SplashDeps, type SplashUpdate, type SplashView } from './splashFlow.js';
+import { runSplashFlow, shownDownloadFraction, SPLASH_TIMING, splashIntent, initialSplashView, RELAUNCH_UPDATE_TTL_MS,
+  type SplashDeps, type SplashUpdate, type SplashView } from './splashFlow.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(resolve(HERE, 'splashFlow.ts'), 'utf8').replace(/\r\n/g, '\n');
@@ -78,10 +79,7 @@ function loadWholeModule(source: string) {
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} as Record<string, unknown> };
   runInNewContext(js, { module, exports: module.exports, console: { warn: () => undefined } });
-  return module.exports as {
-    runSplashFlow: typeof runSplashFlow;
-    shownDownloadFraction: typeof shownDownloadFraction;
-  };
+  return module.exports as typeof import('./splashFlow.js');
 }
 
 function replaceOnce(source: string, from: string, to: string): string {
@@ -429,5 +427,247 @@ describe('контрфакты: поведенческие сценарии ло
     await assert.rejects(scenario(mutant), (e: unknown) => e instanceof assert.AssertionError
       && e.message.startsWith('ошибка обновления всё равно открывает главное окно')
       && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  });
+});
+
+const r295Now = 1_000_000;
+const r295Current = '1.0.0';
+const r295Target = '2.0.0';
+const r295Marker = (version: unknown = r295Target, age = 0) => JSON.stringify({ version, at: r295Now - age });
+const r295Direct = { splashIntent, initialSplashView, runSplashFlow };
+type R295Api = typeof r295Direct;
+
+const r295RelaunchCases: Array<{ label: string; raw: string | null; current?: string | null; update: boolean }> = [
+  { label: 'метки нет', raw: null, update: false },
+  { label: 'пустая метка', raw: '', update: false },
+  { label: 'только что', raw: r295Marker(), update: true },
+  { label: 'за миллисекунду до TTL', raw: r295Marker(r295Target, RELAUNCH_UPDATE_TTL_MS - 1), update: true },
+  { label: 'ровно TTL', raw: r295Marker(r295Target, RELAUNCH_UPDATE_TTL_MS), update: true },
+  { label: 'TTL плюс миллисекунда', raw: r295Marker(r295Target, RELAUNCH_UPDATE_TTL_MS + 1), update: false },
+  { label: 'время из будущего', raw: r295Marker(r295Target, -1), update: false },
+  { label: 'целевая версия уже запущена', raw: r295Marker(r295Current), update: false },
+  { label: 'текущая версия не определилась', raw: r295Marker(), current: null, update: true },
+  { label: 'битый JSON', raw: '{', update: false },
+  { label: 'JSON null', raw: 'null', update: false },
+  { label: 'JSON массив', raw: '[]', update: false },
+  { label: 'JSON число', raw: '42', update: false },
+  { label: 'без version', raw: JSON.stringify({ at: r295Now }), update: false },
+  { label: 'без at', raw: JSON.stringify({ version: r295Target }), update: false },
+  { label: 'пустая version', raw: r295Marker(''), update: false },
+  { label: 'version не строка', raw: r295Marker(2), update: false },
+  { label: 'at строкой', raw: JSON.stringify({ version: r295Target, at: String(r295Now) }), update: false },
+  { label: 'at null', raw: JSON.stringify({ version: r295Target, at: null }), update: false },
+];
+
+describe('R295 метки единственного прохода заставки', () => {
+  it('установка отключает проверку только при совпадении установленной и текущей версий', () => {
+    for (const [installed, current, expected] of [
+      [r295Target, r295Target, { kind: 'justUpdated', version: r295Target }],
+      [r295Target, r295Current, { kind: 'normal' }],
+      [r295Target, null, { kind: 'normal' }],
+      ['', r295Current, { kind: 'normal' }],
+      [null, r295Current, { kind: 'normal' }],
+    ] as const) {
+      assert.deepEqual(splashIntent({ installed, relaunch: null }, current, r295Now), expected,
+        `installed=${installed}, current=${current}`);
+    }
+  });
+
+  it('перезапуск принимает свежую чужую версию, но отсекает оба края времени, свою версию и повреждённые поля', () => {
+    assert.equal(RELAUNCH_UPDATE_TTL_MS, 120_000, 'метка живёт именно две минуты');
+    for (const row of r295RelaunchCases) {
+      const current = row.current === undefined ? r295Current : row.current;
+      assert.deepEqual(splashIntent({ installed: null, relaunch: row.raw }, current, r295Now),
+        row.update ? { kind: 'update', version: r295Target } : { kind: 'normal' }, row.label);
+    }
+  });
+
+  it('собственная установленная версия сильнее метки перезапуска, чужая установка не подавляет свежий update', () => {
+    const markers = { installed: r295Current, relaunch: r295Marker() };
+    assert.deepEqual(splashIntent(markers, r295Current, r295Now), { kind: 'justUpdated', version: r295Current });
+    assert.deepEqual(splashIntent({ ...markers, installed: '0.9.0' }, r295Current, r295Now), { kind: 'update', version: r295Target });
+  });
+
+  it('первый кадр сразу starting для установки, downloading для свежего перезапуска, иначе checking', () => {
+    const starting = { stage: 'starting', version: null, progress: null };
+    assert.deepEqual(initialSplashView({ installed: r295Target, relaunch: null }, r295Now), starting);
+    assert.deepEqual(initialSplashView({ installed: r295Current, relaunch: r295Marker() }, r295Now), starting);
+    for (const row of r295RelaunchCases) {
+      // До appVersion() даже версия, уже равная текущей, даёт только предварительный downloading.
+      const fresh = row.update || row.label === 'целевая версия уже запущена';
+      const version = row.label === 'целевая версия уже запущена' ? r295Current : r295Target;
+      assert.deepEqual(initialSplashView({ installed: null, relaunch: row.raw }, r295Now),
+        fresh ? { stage: 'downloading', version, progress: 0 } : { stage: 'checking', version: null, progress: null }, row.label);
+    }
+  });
+});
+
+async function r295Complete(api: Pick<R295Api, 'runSplashFlow'>, clock: FakeClock, h: ReturnType<typeof basicDeps>) {
+  let outcome: { value: 'started' | 'installing' } | { error: unknown } | undefined;
+  const flow = api.runSplashFlow(h.deps).then(value => { outcome = { value }; }, error => { outcome = { error }; });
+  await driveUntil(clock, () => outcome !== undefined);
+  await flow;
+  assert.ok(outcome);
+  if ('error' in outcome) throw outcome.error;
+  return outcome.value;
+}
+
+async function r295JustUpdated(api: Pick<R295Api, 'runSplashFlow'>) {
+  const clock = new FakeClock();
+  let checks = 0;
+  const h = basicDeps(clock, async () => { checks++; return null; },
+    { intent: () => ({ kind: 'justUpdated', version: r295Target }) });
+  assert.equal(await r295Complete(api, clock, h), 'started');
+  assert.equal(checks, 0, 'R295-justUpdated-без-check');
+  assert.deepEqual(h.views.map(x => x.view.stage), ['starting']);
+  assert.equal(h.views[0].at, 0, 'Запускаю начинается сразу');
+  assert.equal(h.calls.find(x => x.name === 'done')?.at, fastTiming.startMinMs);
+  assert.equal(h.doneCount, 1);
+  assert.equal(h.calls.some(x => x.name === 'beforeInstall' || x.name === 'installFailed'), false);
+}
+
+async function r295Update(api: Pick<R295Api, 'runSplashFlow'>, feedDelay = 0) {
+  const clock = new FakeClock();
+  let checks = 0;
+  const downloads: number[] = [];
+  const installs: number[] = [];
+  const viewsAtCheck: SplashView[] = [];
+  const update: SplashUpdate = {
+    version: '2.0.1',
+    download: async emit => { downloads.push(clock.now()); emit({ event: 'Finished' }); },
+    install: async () => { installs.push(clock.now()); },
+  };
+  const h = basicDeps(clock, async () => {
+    checks++;
+    if (h.views[0]) viewsAtCheck.push({ ...h.views[0].view });
+    if (feedDelay) await clock.sleep(feedDelay);
+    return update;
+  }, { intent: () => ({ kind: 'update', version: r295Target }) });
+  assert.equal(await r295Complete(api, clock, h), 'installing');
+  assert.equal(h.views.filter(x => x.view.stage === 'checking').length, 0, 'R295-update-без-checking');
+  assert.equal(h.views[0].at, 0);
+  assert.equal(h.views[0].view.progress, 0);
+  assert.equal(checks, 1);
+  assert.equal(viewsAtCheck[0]?.stage, 'downloading', 'R295-update-проверка-уже-под-downloading');
+  assert.equal(viewsAtCheck[0]?.version, r295Target, 'до ответа фида показана версия метки');
+  assert.equal(downloads[0], feedDelay, 'R295-update-без-checkMin');
+  assert.equal(downloads.length, 1);
+  assert.equal(h.views.find(x => x.view.stage === 'installing')?.view.version, update.version, 'после фида используется реальная версия');
+  assert.deepEqual(installs, [feedDelay + fastTiming.downloadMinMs + fastTiming.installMinMs]);
+  assert.equal(h.calls.find(x => x.name === 'beforeInstall')?.version, update.version);
+  assert.equal(h.doneCount, 1);
+}
+
+function r295Assertion(error: unknown, marker: string, actual: unknown, expected: unknown): boolean {
+  return error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION'
+    && error.message.split(/\r?\n/, 1)[0] === marker && error.operator === 'strictEqual'
+    && error.actual === actual && error.expected === expected;
+}
+
+describe('R295 заставка без повторной видимой проверки', () => {
+  it('только что установленная версия показывает только Запускаю, не проверяет фид и завершает заставку', async () => {
+    await r295JustUpdated(r295Direct);
+  });
+
+  it('update сразу показывает версию метки, проверяет фид один раз и скачивает без checkMin', async () => {
+    await r295Update(r295Direct);
+  });
+
+  it('медленный фид идёт под downloading, не добавляет checking и не добирает старый минимум проверки', async () => {
+    await r295Update(r295Direct, 3);
+  });
+
+  for (const mode of ['нет обновления', 'ошибка', 'таймаут'] as const) {
+    it(`update: ${mode} молча переводит downloading в starting и открывает приложение`, async () => {
+      const clock = new FakeClock();
+      let checks = 0;
+      const h = basicDeps(clock, async () => {
+        checks++;
+        if (mode === 'ошибка') throw new Error('offline');
+        if (mode === 'таймаут') return new Promise<SplashUpdate | null>(() => undefined);
+        return null;
+      }, { intent: () => ({ kind: 'update', version: r295Target }) });
+      assert.equal(await r295Complete(r295Direct, clock, h), 'started');
+      assert.deepEqual(h.views.map(x => x.view.stage), ['downloading', 'starting']);
+      assert.equal(h.views[0].view.version, r295Target);
+      assert.equal(h.views[0].view.progress, 0);
+      assert.equal(checks, 1);
+      const startAt = mode === 'таймаут' ? fastTiming.checkTimeoutMs : 0;
+      assert.equal(h.views[1].at, startAt);
+      assert.equal(h.calls.find(x => x.name === 'done')?.at, startAt + fastTiming.startMinMs);
+      assert.equal(h.doneCount, 1);
+      assert.equal(h.calls.some(x => x.name === 'beforeInstall' || x.name === 'installFailed'), false);
+    });
+  }
+
+  it('отсутствующий intent, синхронный бросок и rejected intent сохраняют обычные checking и минимум', async () => {
+    for (const intent of [undefined, () => { throw new Error('storage'); }, () => Promise.reject(new Error('version'))]) {
+      const clock = new FakeClock();
+      let checks = 0;
+      const h = basicDeps(clock, async () => { checks++; return null; }, { intent });
+      assert.equal(await r295Complete(r295Direct, clock, h), 'started');
+      assert.deepEqual(h.views.map(x => x.view.stage), ['checking', 'starting']);
+      assert.equal(h.views[0].at, 0);
+      assert.equal(h.views[1].at, fastTiming.checkMinMs);
+      assert.equal(h.calls.find(x => x.name === 'done')?.at, fastTiming.checkMinMs + fastTiming.startMinMs);
+      assert.equal(checks, 1);
+      assert.equal(h.doneCount, 1);
+    }
+  });
+});
+
+describe('R295 адресные контрфакты полного модуля', () => {
+  it('удаление раннего justUpdated даёт лишний check, а оригинал запускается без него', async () => {
+    await r295JustUpdated(loadWholeModule(SOURCE));
+    const mutant = replaceOnce(SOURCE, "if (intent.kind === 'justUpdated') return start();", '/* ранний выход удалён */');
+    await assert.rejects(r295JustUpdated(loadWholeModule(mutant)),
+      error => r295Assertion(error, 'R295-justUpdated-без-check', 1, 0));
+  });
+
+  it('checking в ветке update ловится лишним видимым этапом, а не ошибкой загрузки модуля', async () => {
+    await r295Update(loadWholeModule(SOURCE));
+    const mutant = replaceOnce(SOURCE,
+      "deps.show({ stage: 'downloading', version: intent.version, progress: 0 });",
+      "deps.show({ stage: 'checking', version: intent.version, progress: 0 });");
+    // В check только записываем наблюдение: бросок assert внутри него был бы проглочен checkFeed.
+    await assert.rejects(r295Update(loadWholeModule(mutant)),
+      error => r295Assertion(error, 'R295-update-без-checking', 1, 0));
+  });
+
+  it('возврат checkMin в update ловится лишней задержкой до реального скачивания', async () => {
+    await r295Update(loadWholeModule(SOURCE));
+    const timed = replaceOnce(SOURCE, "if (intent.kind === 'update') {", "if (intent.kind === 'update') {\n    const t0 = deps.now();");
+    const mutant = replaceOnce(timed, 'update = await checkFeed();\n  } else {',
+      'update = await checkFeed();\n    await holdUntil(t0 + t.checkMinMs);\n  } else {');
+    await assert.rejects(r295Update(loadWholeModule(mutant)),
+      error => r295Assertion(error, 'R295-update-без-checkMin', fastTiming.checkMinMs, 0));
+  });
+
+  it('без сравнения installed с current чужая установка ошибочно отключает проверку', () => {
+    const scenario = (api: R295Api) => assert.equal(api.splashIntent({ installed: r295Target, relaunch: null }, r295Current, r295Now).kind,
+      'normal', 'R295-installed-должна-совпасть');
+    scenario(loadWholeModule(SOURCE));
+    const mutant = replaceOnce(SOURCE, ' && m.installed === current', '');
+    assert.throws(() => scenario(loadWholeModule(mutant)),
+      error => r295Assertion(error, 'R295-installed-должна-совпасть', 'justUpdated', 'normal'));
+  });
+
+  it('без TTL застрявшая метка снова начинает скачивание, оригинал идёт обычным запуском', () => {
+    const scenario = (api: R295Api) => assert.equal(api.splashIntent({ installed: null,
+      relaunch: r295Marker(r295Target, RELAUNCH_UPDATE_TTL_MS + 1) }, r295Current, r295Now).kind,
+    'normal', 'R295-просроченная-метка-игнорируется');
+    scenario(loadWholeModule(SOURCE));
+    const mutant = replaceOnce(SOURCE, 'age >= 0 && age <= RELAUNCH_UPDATE_TTL_MS', 'age >= 0');
+    assert.throws(() => scenario(loadWholeModule(mutant)),
+      error => r295Assertion(error, 'R295-просроченная-метка-игнорируется', 'update', 'normal'));
+  });
+
+  it('без сравнения relaunch с current уже установленная версия начинает update заново', () => {
+    const scenario = (api: R295Api) => assert.equal(api.splashIntent({ installed: null,
+      relaunch: r295Marker(r295Current) }, r295Current, r295Now).kind, 'normal', 'R295-свою-версию-не-качать');
+    scenario(loadWholeModule(SOURCE));
+    const mutant = replaceOnce(SOURCE, 'relaunch && relaunch !== current', 'relaunch');
+    assert.throws(() => scenario(loadWholeModule(mutant)),
+      error => r295Assertion(error, 'R295-свою-версию-не-качать', 'update', 'normal'));
   });
 });

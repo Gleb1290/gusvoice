@@ -10602,6 +10602,10 @@ button.dms-scope.on::after {
   .app.m-content .composer .att-btn.emoji {
     order: 1;
   }
+  /* «Меню» беседы с ботом (#230) остаётся в строке, первой — левее эмодзи (Telegram Android: кнопка меню бота слева у поля). */
+  .app.m-content .composer .att-btn.botcmd {
+    order: 0;
+  }
   .app.m-content .composer .send-btn {
     order: 4;
     width: 44px;
@@ -13866,6 +13870,30 @@ body:has(.lightbox) .confirm-overlay {
   color: var(--muted-2);
   flex-shrink: 0;
 }
+/* Команды бота (#230): имя целиком, за ним описание — обычным шрифтом, режется многоточием (как список команд Telegram). */
+.ac-cmd .ac-name {
+  flex: 0 0 auto;
+  max-width: 50%;
+}
+.ac-cmd .ac-handle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: inherit;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Канал с ботами (#231): чья команда — серым `@ник` справа (tdesktop `field_autocomplete.cpp:722`). */
+.ac-cmd .ac-bot {
+  flex: 0 0 auto;
+  max-width: 30%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ===== Pinned-messages popover (round-7 P4) ===== */
 .pins {
@@ -14989,6 +15017,20 @@ body:has(.lightbox) .confirm-overlay {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+/* «Сейчас» (#237): метка текущего источника в окне смены. Слева сверху — справа уже галочка выбора. */
+.ss-card-now {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--green);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  pointer-events: none;
 }
 .ss-card-name {
   margin-top: 7px;
@@ -18531,6 +18573,162 @@ input[type='radio']:disabled {
   vertical-align: middle;
 }
 
+/* Значок «БОТ» (#229, `botRules.BOT_TAG_TEXT`) — у имени автора в ленте, в шапке беседы, карточке профиля, поиске людей и
+   «Моих ботах». Та же плашка, что «ВЕБХУК» (`.msg-webhook-tag`): пометка о том, кто пишет, а не звание. */
+.bot-tag {
+  display: inline-block;
+  flex: 0 0 auto;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--bg-3);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.55;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Раздел настроек «Мои боты» (#229): строки — те же `.dmf-row`, что у «Папок». */
+.bot-state {
+  font-size: 12px;
+  color: var(--muted);
+}
+.bot-state.warn,
+.bot-state.off {
+  color: var(--danger);
+}
+.bot-hint {
+  font-size: 12px;
+}
+.bot-block {
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+}
+.bot-ava-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.bot-ava-side .link {
+  padding-left: 0;
+}
+.bot-editor .field textarea {
+  resize: vertical;
+}
+.bot-toggle-row,
+.admin-bot-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.bot-toggle-row {
+  font-size: 14px;
+}
+.admin-bot-toggle-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.admin-bot-toggle-text .muted {
+  font-size: 12px;
+}
+.bot-actions {
+  flex-wrap: wrap;
+}
+/* Ссылки «Как написать своего бота» и «Справка для нейронки» (26.10) — в строку, на узком переносятся. */
+.bot-docs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-4);
+  margin-top: var(--sp-3);
+  font-size: 13px;
+}
+/* Цвет — как у остальных ссылок наружу в настройках (`UserSettingsModal`: `var(--accent)`), без подчёркивания до наведения. */
+.bot-docs a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.bot-docs a:hover {
+  text-decoration: underline;
+}
+/* «Доставка событий» в карточке бота (26.10): подпись слева, значение справа; длинная ошибка переносится. */
+.bot-delivery {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0;
+  font-size: 13px;
+}
+.bot-delivery-row {
+  display: contents;
+}
+.bot-delivery dt {
+  font-size: 12px;
+}
+.bot-delivery dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+/* «Что умеет этот бот?» в пустой беседе с ботом (26.10, Telegram `MessageListAccountInfo`): описание многострочное, длинное
+   переносится; абзацы — как набрал владелец. */
+.empty-goose .bot-start-desc {
+  max-width: 360px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Список команд читается слева направо, как в карточке «Что умеет этот бот?» Telegram, а не строками по центру. */
+  text-align: start;
+  color: var(--text);
+}
+.empty-goose .bot-start-what {
+  margin-bottom: var(--sp-1);
+  font-weight: 700;
+}
+.bot-token-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-3);
+  background: var(--danger-soft);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.bot-token-warn svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--danger);
+}
+.admin-bot-owner {
+  font-size: 12px;
+}
+.admin-bots-title {
+  margin-top: var(--sp-5);
+}
+/* Главный тумблер «Боты на этом сервере» (26.10): заголовок строки крупнее остальных настроек раздела. Пока выключено —
+   настройки ниже видны, но приглушены и неактивны (как приглушённые строки ЛС с соседями у федерации). */
+.admin-bots-main-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.admin-bots-rest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.admin-bots-off {
+  opacity: 0.55;
+}
+
 /* Сколько канал уже занят. Живёт у названия канала, идёт по ВСЕМ занятым каналам сразу.
    ⚠️ Моноширинный и с табличными цифрами: без них строка дёргается на каждой секунде, потому что
    единица уже единицы. Приглушённый — это украшение, а не то, ради чего смотрят на список. */
@@ -21477,6 +21675,137 @@ input[type='radio']:disabled {
   .message.bub.bub-out,
   .message.bub.bub-out > .bubble {
     animation: none;
+  }
+}
+/* ── Кнопки под сообщением бота (#230, `MessageKeyboard.tsx`) ── Вид tdesktop `ui/chat/chat.style:279` (`msgBotKbButton`:
+   высота 36, зазор 2, поля 10, полужирный): пузырь и кнопки — колонка `.bub-stack` той же предельной ширины, что пузырь,
+   кнопки ровно по ширине пузыря (шире кнопки — шире и пузырь), в ряду поровну. Фон кнопки — фон пузыря собеседника
+   (как плашка даты: у Telegram кнопки — служебный фон поверх обоев). Телефон — Telegram Android `ChatMessageCell`: 44 и зазор 4.
+   Строки без кнопок `.bub-stack` не получают — их разметка и правила ниже не меняются. */
+.message.bub .bub-stack {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  max-width: min(78%, var(--bubble-max-w));
+}
+.message.bub .bub-stack > .bubble {
+  max-width: 100%;
+}
+.message.bub .bub-stack ~ .msg-actions {
+  margin-left: calc(30px + var(--sp-3));
+}
+.message.bub.bub-in > .bub-stack {
+  transform-origin: left bottom;
+  animation: bub-in var(--t-slow) ease-out;
+  animation-delay: var(--bub-in-delay, 0ms);
+}
+.message.bub.swiping > .bub-stack {
+  transform: translateX(var(--swipe-x, 0px));
+  transition: none;
+}
+.messages.sel-mode .message.bub.theirs > .bub-stack {
+  transform: translateX(var(--sel-col));
+}
+.bot-kb,
+.bot-kb-row {
+  display: flex;
+  gap: var(--sp-1);
+}
+.bot-kb {
+  flex-direction: column;
+}
+.bot-kb-btn {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-bubble-near);
+  background: var(--bubble-in);
+  box-shadow: var(--sh-bubble);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter var(--t-fast) ease;
+}
+.bot-kb-row:last-child > .bot-kb-btn:first-child {
+  border-bottom-left-radius: var(--r-bubble);
+}
+.bot-kb-row:last-child > .bot-kb-btn:last-child {
+  border-bottom-right-radius: var(--r-bubble);
+}
+.bot-kb-btn:hover {
+  filter: brightness(1.12);
+}
+.bot-kb-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.bot-kb-btn.loading {
+  cursor: progress;
+}
+.bot-kb-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Значок в правом верхнем углу (tdesktop `msgBotKbIconPadding` 4): стрелка у ссылки, часики — пока бот не ответил. */
+.bot-kb-ico {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  display: inline-flex;
+  color: var(--muted);
+}
+.bot-kb-ico.confirm-spin {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+  border-color: var(--border);
+  border-top-color: var(--accent);
+}
+/* Канал (#231, ТЗ §4.4): кнопки бота под текстом и карточками плоской строки — ширина как у карточки `.embed` (до 520). */
+.message-main > .bot-kb {
+  max-width: min(520px, 100%);
+  margin-top: var(--sp-1);
+}
+/* `/команда` в тексте бота — нажимается и уходит сообщением (Telegram), цветом ссылки. */
+.bot-cmd {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.bot-cmd:hover {
+  text-decoration: underline;
+}
+@media (max-width: 600px) {
+  .message.bub .bub-stack {
+    max-width: calc(100% - 2 * var(--sp-5));
+  }
+  .message.bub .bub-stack,
+  .bot-kb,
+  .bot-kb-row {
+    gap: var(--sp-2);
+  }
+  .bot-kb-btn {
+    height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message.bub.bub-in > .bub-stack {
+    animation: none;
+  }
+  .bot-kb-btn {
+    transition: none;
   }
 }
 /* С сообщением работают (меню, пикер, правка) — обводка пузыря вместо подсветки всей строки. */

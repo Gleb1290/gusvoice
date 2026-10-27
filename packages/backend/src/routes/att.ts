@@ -1,12 +1,13 @@
 import type { Attachment } from '@gusvoice/shared';
 import { FED_ERRORS, isOnceMedia, ONCE_TTL_MAX, VOICE_MAX_MS, WAVEFORM_BUCKETS } from '@gusvoice/shared';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Readable } from 'node:stream';
 import { z } from 'zod';
 import {
   attachmentHeaders,
   attPartsWellFormed,
+  isAttId,
   parseRange,
   resolveAttachmentMime,
   sanitizeFilename,
@@ -19,8 +20,10 @@ import {
   DailyQuotaError,
   privateAttachmentsReady,
 } from '../attachments.js';
+import { requireAuth } from '../auth.js';
 import { attachmentUploadBlock, clientIp, rateHit, retryMessage } from '../authGuard.js';
 import { attachmentAccess } from '../convRules.js';
+import { formerLeftAt } from '../conversations.js';
 import { db } from '../db/index.js';
 import { attachments, conversationMembers, conversationMessages, users } from '../db/schema.js';
 import { attachmentBlocked } from '../storage.js';
@@ -183,7 +186,7 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
     if (!user || !attachmentSigValid(id, viewer, user.gen, sig)) return deny();
     if (await limited(`att-v:${viewer}`, 900)) return reply;
     const [member] = await db
-      .select({ leftAt: conversationMembers.leftAt })
+      .select({ leftAt: conversationMembers.leftAt, historyFromKey: conversationMembers.historyFromKey })
       .from(conversationMembers)
       .where(and(eq(conversationMembers.conversationId, att.conversationId), eq(conversationMembers.userId, viewer)))
       .limit(1);
@@ -194,7 +197,7 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
       viewerId: viewer,
       viewerDeleted: !!user.deletedAt,
       att: { ownerId: att.ownerId, conversationId: att.conversationId, state: att.state, messageId: att.messageId },
-      member: member ?? null,
+      member: member ? { ...member, formerUntil: member.leftAt ? await formerLeftAt(att.conversationId, viewer) : null } : null,
       message: message ?? null,
     });
     if (!allowed) return deny();
@@ -210,10 +213,11 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(503).headers({ 'Retry-After': '5', 'Cache-Control': 'no-store' }).send({ error: FED_ERRORS.attPending });
     }
 
-    const headers = attachmentHeaders(att.contentType, att.name, att.id);
-    // Условный запрос: доступ уже проверен, файл по id не меняется — 304 без тела.
+    const once = !!message?.attachments.some((a) => a.id === att.id && isOnceMedia(a));
+    const headers = attachmentHeaders(att.contentType, att.name, att.id, once);
+    // Условный запрос: доступ уже проверен, файл по id не меняется — 304 без тела (одноразовому — нет: в кеше его нет).
     const inm = req.headers['if-none-match'];
-    if (inm && inm.split(',').some((t) => t.trim() === headers.ETag)) {
+    if (!once && inm && inm.split(',').some((t) => t.trim() === headers.ETag)) {
       return reply.code(304).headers({ ETag: headers.ETag, 'Cache-Control': headers['Cache-Control'] }).send();
     }
     const st = att.state === 'remote' ? { size: att.size } : await attachmentStore.stat(att.storageKey);
@@ -250,4 +254,52 @@ export async function attRoutes(app: FastifyInstance): Promise<void> {
   };
   app.get(path, { exposeHeadRoute: false }, serve);
   app.head(path, serve);
+
+  /**
+   * Свежие ссылки на файлы ЛС (аудит ЛС #236, п.6): у ссылки теперь срок (`attachmentRules.attLinkExpiry`), и клиент, у
+   * которого картинка, видео, голосовое или скачивание получили 404, просит новую по id вложения и пробует снова. Отдаёт
+   * только то, что выдача (`serve`) отдала бы этому человеку (`attachmentAccess`); прочие id молча пропускаются.
+   */
+  app.post('/att/links', { preHandler: requireAuth }, async (req, reply) => {
+    const me = req.user!.sub;
+    const { ids } = z.object({ ids: z.array(z.string().min(1).max(64)).min(1).max(100) }).parse(req.body);
+    const wait = await rateHit(`att-links:${me}`, 120, 60);
+    if (wait) return reply.code(429).header('Retry-After', String(wait)).send({ error: retryMessage(wait) });
+    const want = [...new Set(ids)].filter(isAttId);
+    const links: Record<string, string> = {};
+    if (want.length === 0) return reply.send({ links });
+    const [user] = await db
+      .select({ gen: users.tokenGeneration, deletedAt: users.deletedAt })
+      .from(users)
+      .where(eq(users.id, me))
+      .limit(1);
+    if (!user) return reply.send({ links });
+    const rows = await db.select().from(attachments).where(inArray(attachments.id, want));
+    const convIds = [...new Set(rows.map((a) => a.conversationId))];
+    const msgIds = [...new Set(rows.flatMap((a) => (a.messageId ? [a.messageId] : [])))];
+    const members = convIds.length
+      ? await db
+          .select({ conversationId: conversationMembers.conversationId, leftAt: conversationMembers.leftAt, historyFromKey: conversationMembers.historyFromKey })
+          .from(conversationMembers)
+          .where(and(eq(conversationMembers.userId, me), inArray(conversationMembers.conversationId, convIds)))
+      : [];
+    const messages = msgIds.length ? await db.select().from(conversationMessages).where(inArray(conversationMessages.id, msgIds)) : [];
+    const memberOf = new Map(members.map((m) => [m.conversationId, m]));
+    const messageOf = new Map(messages.map((m) => [m.id, m]));
+    const formerOf = new Map<string, Date | null>();
+    for (const a of rows) {
+      const member = memberOf.get(a.conversationId);
+      if (member?.leftAt && !formerOf.has(a.conversationId)) formerOf.set(a.conversationId, await formerLeftAt(a.conversationId, me));
+      const message = a.messageId ? (messageOf.get(a.messageId) ?? null) : null;
+      const allowed = attachmentAccess({
+        viewerId: me,
+        viewerDeleted: !!user.deletedAt,
+        att: { ownerId: a.ownerId, conversationId: a.conversationId, state: a.state, messageId: a.messageId },
+        member: member ? { ...member, formerUntil: formerOf.get(a.conversationId) ?? null } : null,
+        message,
+      });
+      if (allowed && !(message && onceClosedFor(me, message))) links[a.id] = attachmentLink(a.id, me, user.gen);
+    }
+    return reply.send({ links });
+  });
 }

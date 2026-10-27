@@ -7,6 +7,7 @@ import type {
   ChannelType,
   CustomStatus,
   Invite,
+  InlineKeyboard,
   Message,
   MessageReplyPreview,
   MessageEmbed,
@@ -78,6 +79,14 @@ export { statusFieldsOf } from './statusRules.js';
  * `viewerId` — кто смотрит, если не сам человек (админ-панель): тогда «Невидимый» уходит как `online` (`statusSeenBy`).
  * Без него — свой профиль, статус настоящий.
  */
+/**
+ * Настоящий бот (#229), а не строка-автор вебхука (#24): у обоих `users.bot`, но вебхук заводится неподтверждённым, а бот —
+ * подтверждённым (`routes/bots.ts`). Так отличаем без похода в `bots` — сериализация синхронная.
+ */
+export function isRealBot(u: { bot?: boolean | null; verified?: boolean | null }): boolean {
+  return u.bot === true && u.verified === true;
+}
+
 export function serializeUser(u: UserRow, viewerId?: string): User {
   const st = statusFieldsOf(u, Date.now());
   return {
@@ -95,6 +104,8 @@ export function serializeUser(u: UserRow, viewerId?: string): User {
     verified: u.verified ?? false,
     // Только если строку выбирали целиком: у урезанных выборок (автор сообщения) поля нет — и не врём «не одобрен».
     approved: u.approvedAt === undefined ? undefined : !!u.approvedAt,
+    // Бот (#229): поле только у ботов — у людей DTO прежний (правило 11).
+    ...(isRealBot(u) ? { bot: true as const } : {}),
     superAdmin: isSuperAdmin(asUserId(u.id)),
     canCreateServers: u.canCreateServers ?? false,
     displayName: u.displayName,
@@ -240,6 +251,7 @@ export function serializeRole(r: {
   isGuests?: boolean;
   mentionable?: boolean;
   membersCanAssign?: boolean;
+  managedBotId?: string | null;
 }): Role {
   return {
     id: r.id,
@@ -255,7 +267,19 @@ export function serializeRole(r: {
     isGuests: r.isGuests ?? false,
     mentionable: r.mentionable ?? false,
     membersCanAssign: r.membersCanAssign ?? false,
+    // Роль бота (#231): поле только у управляемых ролей (правило 11).
+    ...(r.managedBotId ? { managedBotId: r.managedBotId } : {}),
   };
+}
+
+/**
+ * Кнопки в порядке полей провода (`text`, затем `callback_data` или `url`): jsonb хранит ключи отсортированными, а клиенту
+ * и боту отдаём форму Bot API (как `keyboardView` бесед в `conversations.ts`). Лишнего не пропускает.
+ */
+export function keyboardOut(k: InlineKeyboard): InlineKeyboard {
+  return k.map((row) =>
+    row.map((b) => ({ text: b.text, ...(b.callback_data !== undefined ? { callback_data: b.callback_data } : { url: b.url ?? '' }) })),
+  );
 }
 
 export function serializeMessage(m: {
@@ -281,6 +305,8 @@ export function serializeMessage(m: {
   /** Карточки вебхука (#24, `messages.embeds`) и признак «`content` собран из них» (`messages.embeds_fallback`). */
   embeds?: MessageEmbed[] | null;
   embedsFallback?: boolean | null;
+  /** Кнопки бота (#231, `messages.keyboard`). */
+  keyboard?: InlineKeyboard | null;
   author: UserRow;
 }): Message {
   const dangerous = dangerousLinksOf(m.content);
@@ -309,11 +335,15 @@ export function serializeMessage(m: {
     // Карточки (#24): поле только у сообщений с ними, у остальных DTO прежний.
     ...(m.embeds?.length ? { embeds: m.embeds } : {}),
     ...(m.embeds?.length && m.embedsFallback ? { embedsFallback: true as const } : {}),
+    // Кнопки бота (#231): поле только у сообщений с ними, у остальных DTO прежний.
+    ...(m.keyboard?.length ? { keyboard: keyboardOut(m.keyboard) } : {}),
     author: {
       id: m.author.id,
       username: m.author.username,
       displayName: m.webhookId ? (m.webhookName ?? m.author.displayName) : m.author.displayName,
       avatarUrl: m.webhookId ? (m.webhookAvatar ?? null) : m.author.avatarUrl,
+      // Бот (#229): поле только у настоящего бота (у людей и вебхуков его нет — DTO прежний, правило 11).
+      ...(isRealBot(m.author) && !m.webhookId ? { bot: true as const } : {}),
     },
   };
 }

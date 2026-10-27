@@ -70,6 +70,7 @@ function harness(opts: {
   fetch?: () => Promise<{ ok: true; value: PeerDocument } | { ok: false; problem: 'unreachable' }>;
   markTrustLost?: (instanceId: string, reason: string) => Promise<unknown>;
   paused?: () => Promise<boolean>;
+  seenSignature?: (key: string, ttlS: number) => Promise<boolean>;
 } = {}) {
   let now = opts.now ?? 1_000_000;
   let fetches = 0;
@@ -85,9 +86,50 @@ function harness(opts: {
     markTrustLost: opts.markTrustLost ?? (async () => {}),
     noteSignatureFailure: () => { storms += 1; },
     paused: opts.paused ?? (async () => false),
+    seenSignature: opts.seenSignature,
   });
   return { auth, get now() { return now; }, set now(value: number) { now = value; }, get fetches() { return fetches; }, get storms() { return storms; } };
 }
+
+describe('R304 повтор подписи меняющего запроса', () => {
+  it('одинаковый POST по умолчанию проходит один раз, дубль expired не портит связку и не поднимает тревогу', async () => {
+    const signer = keyPair();
+    const seen = new Set<string>();
+    const calls: [string, number][] = [];
+    const h = harness({ fetch: async () => ({ ok: true, value: document(signer) }),
+      seenSignature: async (key, ttl) => { calls.push([key, ttl]); const exists = seen.has(key); seen.add(key); return exists; } });
+    const req = signedRequest(signer, h.now, '{}');
+    assert.equal((await h.auth.authenticateLinkedPeer(req, 'peer-id')).ok, true);
+    assert.deepEqual(await h.auth.authenticateLinkedPeer(req, 'peer-id'), { ok: false, status: 401, error: 'expired' });
+    assert.equal(calls.length, 2); assert.equal(calls[0][0], calls[1][0]);
+    assert.match(calls[0][0], /^peer-id:[\w-]+$/); assert.ok(calls[0][1] > 0);
+    assert.equal(h.storms, 0);
+  });
+  it('replayGuard false пропускает оба POST и вообще не обращается к хранилищу подписи', async () => {
+    const signer = keyPair(); let calls = 0;
+    const h = harness({ fetch: async () => ({ ok: true, value: document(signer) }),
+      seenSignature: async () => { calls++; return true; } });
+    const req = signedRequest(signer, h.now);
+    for (let n = 0; n < 2; n++) assert.equal((await h.auth.authenticateLinkedPeer(req, 'peer-id', { replayGuard: false })).ok, true);
+    assert.equal(calls, 0); assert.equal(h.storms, 0);
+  });
+  for (const method of ['GET', 'HEAD']) {
+    it(`${method} допускает повтор и не ставит отметку подписи`, async () => {
+      const signer = keyPair(); let calls = 0;
+      const h = harness({ fetch: async () => ({ ok: true, value: document(signer) }),
+        seenSignature: async () => { calls++; return true; } });
+      const req = { method, url: '/fed/v1/events', headers: signRequest({ method, targetUri: TARGET,
+        body: '', keyid: signer.kid, privateKeyDer: signer.privateKey, nowS: Math.floor(h.now / 1000) }) };
+      for (let n = 0; n < 2; n++) assert.equal((await h.auth.authenticateLinkedPeer(req, 'peer-id')).ok, true);
+      assert.equal(calls, 0);
+    });
+  }
+  it('без seenSignature сохраняет прежний контракт двух успешных POST', async () => {
+    const signer = keyPair(); const h = harness({ fetch: async () => ({ ok: true, value: document(signer) }) });
+    const req = signedRequest(signer, h.now);
+    for (let n = 0; n < 2; n++) assert.equal((await h.auth.authenticateLinkedPeer(req, 'peer-id')).ok, true);
+  });
+});
 
 describe('проверка федеративного соседа', () => {
   it('два незнакомых ключа за полминуты вызывают только одно принудительное перечитывание визитки', async () => {

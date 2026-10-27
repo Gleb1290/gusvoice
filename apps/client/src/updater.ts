@@ -1,11 +1,18 @@
 import { isDesktop } from './hotkeys';
 import { toast } from './toast';
 import { useUpdate } from './updateStore';
-import { SPLASH_TIMING } from './splashFlow';
+import { SPLASH_TIMING, type SplashMarkers } from './splashFlow';
 
 /** localStorage marker: set to the installed version right after a successful update, consumed once
  *  on the next launch to show the "обновлён до vX" heads-up. */
 const UPDATED_KEY = 'gv:just-updated';
+/** Копия версии для ЗАСТАВКИ (26.10, «в один проход»): первый запуск этой версии идёт без проверки обновлений.
+ *  Отдельно от `UPDATED_KEY`, потому что тот съедает главное окно (`notifyIfJustUpdated`), а оно строится и
+ *  грузится РАНЬШЕ заставки (`lib.rs` `build_main_window` → `splash::start`): на общей метке была бы гонка. */
+const INSTALLED_KEY = 'gv:installed-update';
+/** «Обновить» перезапустило приложение ради обновления (26.10): JSON `{ version, at }`, читает и снимает заставка
+ *  (`splashFlow.ts` `splashIntent`; старше `RELAUNCH_UPDATE_TTL_MS` — не в счёт). */
+const RELAUNCH_KEY = 'gv:update-on-relaunch';
 
 /** How often to re-check for a newer build while the app stays open. */
 const POLL_MS = 30 * 60 * 1000; // 30 minutes
@@ -59,6 +66,7 @@ async function relaunchLazily(): Promise<void> {
 export function markJustUpdated(version: string): void {
   try {
     localStorage.setItem(UPDATED_KEY, version);
+    localStorage.setItem(INSTALLED_KEY, version);
   } catch {
     /* localStorage unavailable — skip the marker, never block the update */
   }
@@ -68,9 +76,52 @@ export function markJustUpdated(version: string): void {
 export function unmarkJustUpdated(): void {
   try {
     localStorage.removeItem(UPDATED_KEY);
+    localStorage.removeItem(INSTALLED_KEY);
   } catch {
     /* ignore */
   }
+}
+
+/** Метки разметки запуска для заставки — без снятия (первый кадр, `initialSplashView`). Своей метки нет —
+ *  смотрим `gv:just-updated` (её не снимаем: это тост главного окна): так первый запуск версии, поставленной
+ *  сборкой ДО этой правки, тоже обходится без проверки, если главное окно не успело съесть метку. */
+export function peekSplashMarkers(): SplashMarkers {
+  try {
+    return {
+      relaunch: localStorage.getItem(RELAUNCH_KEY),
+      installed: localStorage.getItem(INSTALLED_KEY) ?? localStorage.getItem(UPDATED_KEY),
+    };
+  } catch {
+    return { relaunch: null, installed: null };
+  }
+}
+
+/** Прочитать и снять метки разметки запуска (заставка, один раз на запуск): застрять им негде. */
+export function takeSplashMarkers(): SplashMarkers {
+  const m = peekSplashMarkers();
+  clearSplashMarkers();
+  return m;
+}
+
+function clearSplashMarkers(): void {
+  try {
+    localStorage.removeItem(RELAUNCH_KEY);
+    localStorage.removeItem(INSTALLED_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** «Обновить» в сборке с заставкой (26.10): пометить запуск «ради обновления vX» и перезапуститься — заставка
+ *  нового запуска сразу качает, без этапа «Проверяю обновления…». */
+async function relaunchForSplashUpdate(): Promise<void> {
+  const version = pendingUpdate?.version;
+  try {
+    if (version) localStorage.setItem(RELAUNCH_KEY, JSON.stringify({ version, at: Date.now() }));
+  } catch {
+    /* без метки заставка просто проверит обновления сама */
+  }
+  await relaunchApp();
 }
 
 /** Сколько этапы карточки обновления держатся на экране минимум (15.10): скачивание проходило за доли
@@ -175,6 +226,8 @@ export async function runLaunchUpdate(hadSplash: () => Promise<boolean> = launch
   } catch {
     splash = false;
   }
+  // Заставки не было — метки для неё никто не съест (сборка без заставки / заставка не открылась).
+  if (!splash) clearSplashMarkers();
   if (!splash) await runDesktopUpdateCheck();
 }
 
@@ -259,12 +312,14 @@ export async function manualUpdateCheck(): Promise<void> {
  */
 export async function applyPendingUpdate(
   hadSplash: () => Promise<boolean> = hadSplashSafe,
-  restart: () => Promise<void> = relaunchApp,
+  restart: () => Promise<void> = relaunchForSplashUpdate,
 ): Promise<void> {
   if (!isDesktop() || !pendingUpdate) return;
   // 16.10 (владелец: «всё в заставке», как Discord): в сборке с заставкой открытое приложение обновление
   // только ПРЕДЛАГАЕТ, а качает и ставит его заставка после перезапуска — один показ на всё, с гусём-админом.
   // Раньше карточка качала и ставила сама, а заставка новой версии потом «проверяла» впустую — два показа подряд.
+  // 26.10: перезапуск помечен «ради обновления» (`relaunchForSplashUpdate`) — заставка сразу качает, без второй
+  // проверки, а первый запуск новой версии идёт без проверки вовсе (`gv:installed-update`): один проход.
   if (await hadSplash()) {
     await restart();
     return;

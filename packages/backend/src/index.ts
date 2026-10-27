@@ -90,6 +90,11 @@ import { mapsStaticRoutes } from './routes/mapsStatic.js';
 import { mapsTilesRoutes } from './routes/mapsTiles.js';
 import { messageRoutes } from './routes/messages.js';
 import { webhookRoutes } from './routes/webhooks.js';
+import { botRoutes } from './routes/bots.js';
+import { botApiRoutes } from './routes/botApi.js';
+import { botDocsRoutes } from './bots/botDocs.js';
+import { botOpenApiRoutes } from './bots/botOpenApiRoute.js';
+import { botPressRoutes } from './routes/botPress.js';
 import { pushRoutes } from './routes/push.js';
 import { onBlockChange } from './blocks.js';
 import { blockRoutes } from './routes/blocks.js';
@@ -182,6 +187,15 @@ await app.register(
     await api.register(messageRoutes);
     // Входящие вебхуки (#24): управление под входом + приём `POST /api/webhooks/:id/:token` без входа (`routes/webhooks.ts`).
     await api.register(webhookRoutes);
+    // Боты (#229): «Мои боты» + админка и Bot API v1 (`/api/bot/v1/*`, свой вход `Authorization: Bot …`; фон — по `onListen`).
+    await api.register(botRoutes);
+    await api.register(botApiRoutes);
+    // Справка для нейронки `GET /api/bot/v1/llms.txt` без токена (`bots/botDocs.ts`, план §6).
+    await api.register(botDocsRoutes);
+    // Схема OpenAPI 3.1 `GET /api/bot/v1/openapi.json` без токена — из реестра `bots/botSpec.ts` (этап 5, #233).
+    await api.register(botOpenApiRoutes);
+    // Боты, этап 2 (#230): нажатие кнопки под сообщением бота и карточка бота беседы (команды для «/»).
+    await api.register(botPressRoutes);
     // Беседы ЛС (этап 1): с шага 1б живые ЛС лежат в них, и `/auth/me` объявляет `features: ['conv1']`.
     await api.register(convRoutes);
     await api.register(convGroupRoutes);

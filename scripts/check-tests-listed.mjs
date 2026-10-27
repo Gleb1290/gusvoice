@@ -19,7 +19,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const PACKAGES = ['packages/shared', 'packages/presence', 'packages/backend', 'apps/client'];
+const PACKAGES = ['packages/shared', 'packages/presence', 'packages/backend', 'packages/bot-sdk', 'packages/bot-voice', 'apps/client'];
 // Tests outside `src/` still run through an owning package's explicit Node-20-compatible test list.
 const EXTERNAL_TESTS = [
   { file: 'scripts/check-codemap.test.ts', pkg: 'apps/client', entry: '../../scripts/check-codemap.test.ts' },

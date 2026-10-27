@@ -35,6 +35,7 @@ import { usePhoneLayout } from '../phoneLayout';
 import type { DropHint } from '../channelSidebarRules';
 import { computeReorder, dropHintForRow, rowClickOpensCard } from '../channelSidebarRules';
 import { economyVisible } from '../economyVisible';
+import { botAcceptsSocial, botsAfterHumans, showDeafened, showMicOff } from '../voiceRules';
 
 export function ChannelSidebar() {
   const bootstrap = useStore((s) => s.bootstrap);
@@ -325,7 +326,8 @@ export function ChannelSidebar() {
   }
 
   const renderChannel = (c: Channel) => {
-    const here = presence[c.id] ?? [];
+    // Боты (#232) — в общем списке ПОСЛЕ людей (решение владельца 27.10); сам presence порядка не меняет.
+    const here = botsAfterHumans(presence[c.id] ?? [], (v) => v.bot === true);
     const isVoice = c.type === 'voice';
     return (
       <div
@@ -422,6 +424,7 @@ export function ChannelSidebar() {
               // Presence приходит от отдельного сервиса и про ники не знает — подставляем из
               // ростера здесь же, иначе сайдбар остаётся с обычным именем (#73).
               const pname = nameOf(p.userId, p.displayName);
+              const isBot = p.bot === true;
               const speaking = live?.speaking ?? false;
               const muted = isMe ? selfMuted : live ? live.muted : p.muted;
               const deafened = isMe ? selfDeafened : live ? live.deafened : p.deafened;
@@ -429,7 +432,7 @@ export function ChannelSidebar() {
               // 🔴 Рамку даём только тем, кого ДЕЙСТВИТЕЛЬНО можно типнуть: сервер требует, чтобы
               // оба сидели в ЭТОМ канале (`tipRules`), поэтому обводка на человеке из соседнего
               // канала или на себе была бы обещанием отказа. Рамка = «сюда попадёшь».
-              const canTip = canTipRow(tipAlt, isMe, voice?.channelId ?? null, c.id);
+              const canTip = botAcceptsSocial(isBot) && canTipRow(tipAlt, isMe, voice?.channelId ?? null, c.id);
               return (
                 <li
                   key={p.userId}
@@ -445,6 +448,7 @@ export function ChannelSidebar() {
                       voiceChannelId: c.id,
                       micMuted: muted,
                       serverMuted: p.serverMuted,
+                      bot: isBot || undefined,
                     })
                   }
                   onPointerDown={(e) => onPpDown(e, p.userId, pname, c.id)}
@@ -508,6 +512,12 @@ export function ChannelSidebar() {
                       pname
                     )}
                     <GuestMark home={guestHomeOf(p.userId)} size={10} />
+                    {/* Текст значка — как `botRules.BOT_TAG_TEXT` (импорт не тянем: проверка держит закрытый перечень импортов). */}
+                    {isBot && (
+                      <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+                        БОТ
+                      </span>
+                    )}
                   </span>
                   {/* 🔴 Слот нулевой ширины СРАЗУ после ника: `.pname` растягивается, поэтому слот
                       всегда стоит там, где ник кончается и начинаются значки — «справа от ника, до
@@ -537,11 +547,11 @@ export function ChannelSidebar() {
                       <Icon name="screen-share" size={14} />
                     </span>
                   ) : null}
-                  {deafened ? (
+                  {showDeafened(isBot, deafened) ? (
                     <span className="vp-flag off" title="Звук выключен (деафен)">
                       <Icon name="headphones-off" size={14} />
                     </span>
-                  ) : muted ? (
+                  ) : showMicOff(isBot, muted, p.serverMuted) ? (
                     <span className="vp-flag off" title="Микрофон выключен">
                       <Icon name="mic-off" size={14} />
                     </span>

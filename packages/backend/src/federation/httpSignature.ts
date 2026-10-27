@@ -28,7 +28,7 @@ export const CLOCK_SKEW_TOLERANCE_S = 60;
 export type VerifyFailure = 'malformed' | 'unknown-key' | 'bad-signature' | 'clock-skew' | 'expired';
 
 export type VerifyOutcome =
-  | { ok: true; keyid: string }
+  | { ok: true; keyid: string; /** Срок подписи, с эпохи (аудит ЛС #236, п.15: столько держится отметка от повтора). */ expires?: number }
   | { ok: false; reason: VerifyFailure; skewS?: number };
 
 export interface SignedHeaders {
@@ -190,5 +190,5 @@ export function verifyRequest(input: {
     // Просрочка больше допуска: либо ушедшие часы, либо запрос пролежал у кого-то в кармане.
     return { ok: false, reason: 'expired', skewS: input.nowS - parsed.expires };
   }
-  return { ok: true, keyid: parsed.keyid };
+  return { ok: true, keyid: parsed.keyid, expires: parsed.expires };
 }

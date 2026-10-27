@@ -1,6 +1,8 @@
-import { callServiceMark, CAP_CONV1, convMediaPreview, convPollDraft, convPollView, geoLiveStart, geoLiveView, geoMedia, parseConvMedia, deliveredLate, FED_CONV_CHANGE, FED_CONV_CHANGE_E2, FED_FEATURES, FEATURE_GROUPS1, pairDirectKey, GROUP_MEMBER_LIMIT, GROUP_MUTE_PREFIX, groupMuteTarget, groupOfMuteTarget, isListenable, isOnceMedia, isOnceSpendable, isVoiceMessage, ONCE_TTL_MAX, onceSpentText, ROUND_MAX_MS } from '@gusvoice/shared';
+import { callServiceMark, CAP_CONV1, DELETED_BOT_NAME, botUnavailableFor, convMediaPreview, convPollDraft, convPollView, geoLiveStart, geoLiveView, geoMedia, parseConvMedia, deliveredLate, FED_CONV_CHANGE, FED_CONV_CHANGE_E2, FED_FEATURES, FEATURE_GROUPS1, pairDirectKey, GROUP_MEMBER_LIMIT, GROUP_MUTE_PREFIX, groupMuteTarget, groupOfMuteTarget, isListenable, isOnceMedia, isOnceSpendable, isVoiceMessage, ONCE_TTL_MAX, onceSpentText, REACTIONS_PER_USER_MAX, ROUND_MAX_MS, customReactionId, isReactionEmoji } from '@gusvoice/shared';
 import type {
   ConvServiceMark,
+  InlineKeyboard,
+  MessageEmbed,
   ConvGroupMember,
   Attachment,
   ConvGone,
@@ -111,6 +113,7 @@ import {
   conversationPins,
   conversations,
   conversationScheduled,
+  serverEmojis,
   userBlocks,
   userChanges,
   userSync,
@@ -314,6 +317,12 @@ export interface Delivery {
    * `conv.change` со сводкой и списком целиком (`scheduled`) под ЭТИМ номером журнала (строка `'sched'`).
    */
   schedPts?: Map<string, number>;
+  /** Правка текста (`editMessage`) — боту уходит `edited_message`, а не молчание (#229). Наружу не едет. */
+  edited?: true;
+  /** Кто сделал (бот через Bot API) — ему самому событие о своём действии не пишется (#229). Наружу не едет. */
+  actor?: string;
+  /** Реакция (#231): userId, emoji, add/remove — боту уходит message_reaction. Наружу не едет. */
+  reaction?: { userId: string; emoji: string; op: 'add' | 'remove' };
 }
 
 /**
@@ -588,7 +597,7 @@ async function summariesFor(
   // «Избранное» (`saved1`) — тоже только тому, кто просит группы: старый клиент строил бы по ней строку «с самим собой».
   const kinds = groups ? sql`` : sql`AND c.kind = 'direct' AND NOT ${SAVED_CONV}`;
   const res = await q.execute(sql`
-    SELECT c.id, c.kind, c.created_at, c.last_message_at AS conv_last_at, c.title, c.avatar_url, c.origin_instance_id, m.last_read_key, m.left_at, ${SAVED_CONV} AS is_saved,
+    SELECT c.id, c.kind, c.created_at, c.last_message_at AS conv_last_at, c.title, c.avatar_url, c.history_for_new, c.origin_instance_id, m.last_read_key, m.left_at, ${SAVED_CONV} AS is_saved,
       ${hiddenFromMe(me, sql`m.pending`, sql`c.id`)} AS hidden_from_me,
       ${clearedFromMe(me, sql`m.hidden_key`, sql`c.id`)} AS cleared_by_me,
       ${formerClearedByMe(me, sql`m.hidden_key`, sql`m.left_at`, sql`c.id`)} AS former_cleared,
@@ -642,6 +651,20 @@ async function summariesFor(
   const peerIds = [...new Set([...rows.map((r) => r.peer_id), ...(hasSaved ? [me] : [])].filter((x): x is string => typeof x === 'string'))];
   const peers = peerIds.length ? await q.select().from(users).where(inArray(users.id, peerIds)) : [];
   const peerById = new Map(peers.map((u) => [u.id, u]));
+  // Боты-собеседники (#229, 26.10): описание («что умеет этот бот» в пустой беседе) и подпись удалённого бота — одной выборкой
+  // по `bots` и только для строк с `bot` (у людей запроса нет). Строка `bots` удалённого бота остаётся — по ней и узнаём.
+  const botPeerIds = peers.filter((u) => u.bot).map((u) => u.id);
+  const botRows = botPeerIds.length
+    ? await q
+        .select({ id: schema.bots.userId, description: schema.bots.description, disabledAt: schema.bots.disabledAt, public: schema.bots.public, ownerId: schema.bots.ownerId })
+        .from(schema.bots)
+        .where(inArray(schema.bots.userId, botPeerIds))
+    : [];
+  const botDescById = new Map(botRows.map((b) => [b.id, b.description]));
+  // Решение A (26.10): писать боту нельзя (выключен / приватный, а я не владелец) — `otherUser.botUnavailable` (добавление),
+  // клиент вместо поля ввода рисует плашку. Нет крючков ботов (тесты) — боты считаются включёнными, как в `routes/conv.ts`.
+  const botsOn = botRows.length ? (await botConvHooks?.enabled(q)) !== false : true;
+  const botUnavailById = new Map(botRows.map((b) => [b.id, botUnavailableFor(b, botsOn, me)]));
   // Э2 часть Б (#141, Ф7): инстансы собеседников, связка с которыми не работает, — `fedLink: 'broken'` (крючок федерации).
   const remoteHomes = [...new Set(peers.map((u) => u.homeInstanceId).filter((h): h is string => typeof h === 'string'))];
   const brokenHomes = remoteHomes.length > 0 && fedHooks?.linkBroken ? await fedHooks.linkBroken(remoteHomes, q) : new Set<string>();
@@ -714,6 +737,8 @@ async function summariesFor(
               ownerId: members.find((x) => x.role === 'owner')?.id ?? null,
               members,
               limit: GROUP_MEMBER_LIMIT,
+              // «История для новых» (аудит ЛС #236, п.8) — добавлением: старый клиент поле не знает.
+              historyForNew: r.history_for_new === true,
             },
             // Э7 часть 1 (#141, `fedm6`): дом группы — другой инстанс (состав меняет он; связка не работает — `down`).
             ...(typeof r.origin_instance_id === 'string'
@@ -726,9 +751,17 @@ async function summariesFor(
             id: peer.id,
             // Э1 (#141): собеседник с другого инстанса — его логин на доме и значок инстанса (поле только у него, добавление).
             username: peer.homeUsername || peer.username,
-            displayName: peer.displayName,
+            // Удалённый бот (#229, 26.10) — «Удалённый бот», а не «Удалённый пользователь»; и у удалённых до этой правки.
+            displayName: peer.deletedAt && botDescById.has(peer.id) ? DELETED_BOT_NAME : peer.displayName,
             avatarUrl: peer.avatarUrl,
             ...(peer.homeInstanceId ? { homeInstance: homeInstanceOf(peer.homeInstanceId) } : {}),
+            // Бот (#229): значок «БОТ» в списке и шапке беседы — поле только у бота (добавление).
+            // Настоящий бот, а не автор вебхука — тот же признак, что `serialize.isRealBot` (подтверждён); здесь без импорта.
+            ...(peer.bot && peer.verified ? { bot: true as const } : {}),
+            // Описание бота для пустой беседы (Telegram «Что умеет этот бот?») — только у живого бота с непустым (добавление).
+            ...(peer.bot && peer.verified && botDescById.get(peer.id) ? { botDescription: botDescById.get(peer.id) } : {}),
+            // Писать боту нельзя (решение A, 26.10): `private` / `disabled` — клиент рисует плашку вместо поля ввода (добавление).
+            ...(peer.bot && peer.verified && !peer.deletedAt && botUnavailById.get(peer.id) ? { botUnavailable: botUnavailById.get(peer.id)! } : {}),
           }
         : null,
       createdAt: iso(r.created_at),
@@ -832,7 +865,10 @@ function replyPreviewFor(
 async function messagesForViewer(rows: readonly MsgRow[], viewerId: string, q: Q): Promise<Map<string, ConvMessage | ConvGone>> {
   const out = new Map<string, ConvMessage | ConvGone>();
   if (rows.length === 0) return out;
-  const full = rows.filter((m) => messageView(m, viewerId) === 'full');
+  // «История для новых» (аудит ЛС #236, п.8): сообщение до добавления смотрящего — для него `gone`, как спрятанное.
+  const floors = await historyFloors(viewerId, [...new Set(rows.map((m) => m.conversationId))], q);
+  const beforeJoin = (m: { conversationId: string; sortKey: number }) => m.sortKey < (floors.get(m.conversationId) ?? 0);
+  const full = rows.filter((m) => messageView(m, viewerId) === 'full' && !beforeJoin(m));
   for (const m of rows) if (!full.includes(m)) out.set(m.id, { id: m.id, conversationId: m.conversationId, gone: true });
   if (full.length === 0) return out;
 
@@ -875,7 +911,11 @@ async function messagesForViewer(rows: readonly MsgRow[], viewerId: string, q: Q
         ).map((r) => r.c)
       : [],
   );
+  // Цитата на сообщение до добавления смотрящего («История для новых», аудит #236, п.8) — как спрятанное: цитаты нет.
+  const parentConvs = [...new Set(parents.map((p) => p.m.conversationId))].filter((c) => !floors.has(c));
+  const pFloors = new Map([...floors, ...(await historyFloors(viewerId, parentConvs, q))]);
   for (const p of parents) {
+    if (p.m.sortKey < (pFloors.get(p.m.conversationId) ?? 0)) continue;
     // Удалённое у обоих — цитата «сообщение удалено»; спрятанное мной и чужое придержанное — цитаты нет вовсе.
     if (p.m.deletedAt) replies.set(p.m.id, { id: p.m.id, authorName: p.u.displayName, content: '', deleted: true });
     else if (messageView(p.m, viewerId) === 'full')
@@ -992,6 +1032,7 @@ function forwardView(f: MessageForwardedFrom | null, people: ReadonlyMap<string,
     displayName: u?.deletedAt ? u.displayName : f.displayName,
     at: f.at,
     ...(deleted ? { deleted: true as const } : {}),
+    ...(f.unverified === true ? { unverified: true as const } : {}),
   };
 }
 
@@ -1057,6 +1098,9 @@ function toConvMessage(
       // Э7 часть 1 (#141): автор с другого инстанса (теневая строка) — его логин на доме, как `otherUser`/участники группы.
       author: author.homeInstanceId ? { ...author, username: author.homeUsername || author.username } : author,
       sticker: m.sticker ?? null,
+      // Карточки бота (#229): поле только у таких сообщений, у остальных DTO прежний (`serializeMessage`).
+      embeds: m.embeds,
+      embedsFallback: m.embedsFallback,
     }),
     conversationId: m.conversationId,
     sortKey: m.sortKey,
@@ -1088,7 +1132,20 @@ function toConvMessage(
       : {}),
     // Э5 часть 1 (#141, `fedm5`): «через» другой инстанс — только у таких; у обычных DTO прежний.
     ...(m.viaInstanceId ? { via: { instance: m.viaInstanceId, confirmed: m.viaState === 'confirmed' } } : {}),
+    // Кнопки под сообщением бота (#230) — только у таких; у остальных DTO прежний. Только здесь, не в `serializeMessage`
+    // (он общий с каналами), и не в федеративном проводе (беседа с ботом всегда местная).
+    ...(m.keyboard?.length ? { keyboard: keyboardView(m.keyboard) } : {}),
   };
+}
+
+/**
+ * Кнопки в порядке полей провода (`text`, затем `callback_data` или `url`): jsonb хранит ключи объекта отсортированными
+ * (`url` раньше `text`), а клиенту и боту отдаём форму Bot API как есть. Лишнего не пропускает.
+ */
+function keyboardView(k: InlineKeyboard): InlineKeyboard {
+  return k.map((row) =>
+    row.map((b) => ({ text: b.text, ...(b.callback_data !== undefined ? { callback_data: b.callback_data } : { url: b.url ?? '' }) })),
+  );
 }
 
 async function ptsOf(q: Q, me: string): Promise<{ pts: number; minPts: number }> {
@@ -1290,14 +1347,30 @@ export interface HistoryQuery {
   former?: boolean;
 }
 
-/** Видимое мне в беседе — то же условие, что `convRules.messageView === 'full'`. */
+/**
+ * Видимое мне в беседе — то же условие, что `convRules.messageView === 'full'`, плюс «История для новых» (аудит ЛС #236,
+ * п.8): у добавленного в группу со скрытой историей лента начинается с `history_from_key` его строки участника.
+ * Подзапрос не зависит от строки сообщения — база считает его один раз на запрос.
+ */
 function visibleTo(me: string, conversationId: string): SQL {
   return and(
     eq(conversationMessages.conversationId, conversationId),
     isNull(conversationMessages.deletedAt),
     sql`NOT (${me} = ANY(${conversationMessages.hiddenFor}))`,
     or(eq(conversationMessages.withheld, false), eq(conversationMessages.authorId, me)),
+    sql`${conversationMessages.sortKey} >= COALESCE((SELECT hm.history_from_key FROM conversation_members hm
+      WHERE hm.conversation_id = ${conversationId} AND hm.user_id = ${me}), 0)`,
   )!;
+}
+
+/** С какого ключа смотрящему видны беседы (аудит ЛС #236, п.8): только беседы, где граница есть. */
+async function historyFloors(viewerId: string, conversationIds: readonly string[], q: Q): Promise<Map<string, number>> {
+  if (conversationIds.length === 0) return new Map();
+  const rows = await q
+    .select({ id: conversationMembers.conversationId, key: conversationMembers.historyFromKey })
+    .from(conversationMembers)
+    .where(and(eq(conversationMembers.userId, viewerId), inArray(conversationMembers.conversationId, [...conversationIds])));
+  return new Map(rows.filter((r) => r.key !== null).map((r) => [r.id, Number(r.key)]));
 }
 
 /**
@@ -1316,10 +1389,12 @@ export async function history(me: string, conversationId: string, qy: HistoryQue
     let page: MsgRow[];
     let anchorKey: number | null = null;
     if (qy.around) {
+      // Аудит ЛС #236, п.14: якорь — только видимое мне (`vis`), иначе по ответу узнавался бы ключ порядка спрятанного,
+      // придержанного, до добавления или после выхода.
       const [anchor] = await tx
         .select({ sortKey: key })
         .from(conversationMessages)
-        .where(and(eq(conversationMessages.id, qy.around), eq(conversationMessages.conversationId, conversationId)));
+        .where(and(eq(conversationMessages.id, qy.around), vis));
       if (!anchor) return 'no-anchor';
       anchorKey = anchor.sortKey;
     } else if (qy.date) {
@@ -2084,6 +2159,11 @@ export interface SendInput {
   id?: string;
   /** Э5: момент отправки на самом деле (копия соседа); только вместе с `via`. */
   createdAt?: Date;
+  /** Карточки бота (#229, миграция 0154) — уже проверенные `normalizeEmbeds`; `embedsFallback` — `content` собран из них. */
+  embeds?: MessageEmbed[] | null;
+  embedsFallback?: boolean;
+  /** Кнопки под сообщением бота (#230, миграция 0155) — уже проверенные `botWire`. Пересылка/копии их не передают. */
+  keyboard?: InlineKeyboard | null;
 }
 
 export type SendResult =
@@ -2196,6 +2276,8 @@ export async function sendMessage(me: string, access: ConvAccess, input: SendInp
         sticker: input.sticker ?? null,
         service: input.service ?? null,
         media: input.media ?? null,
+        ...(input.embeds?.length ? { embeds: input.embeds, embedsFallback: input.embedsFallback === true } : {}),
+        ...(input.keyboard?.length ? { keyboard: input.keyboard } : {}),
       })
       // Тот же `client_id` параллельно в ДРУГОЙ беседе (в этой нас сериализует замок): ждём чужую фиксацию и отвечаем
       // по её строке — 200 или 409, а не 500 на уникальном ключе.
@@ -2267,7 +2349,18 @@ export type EditResult =
   | { kind: 'forbidden' }
   | { kind: 'empty' };
 
-export async function editMessage(me: string, access: ConvAccess, messageId: string, content: string): Promise<EditResult> {
+/**
+ * Правка сообщения. `opts.keyboard` — путь бота (#230, `editMessageText`): `undefined` — кнопки не трогать (путь человека
+ * `PATCH /conv/:id/messages/:mid`), `null`/`[]` — снять, значение — заменить (как Telegram: правка текста без `reply_markup`
+ * снимает клавиатуру — это решает `routes/botApi.ts`). Смена одних кнопок «(изм.)» не ставит и `edit_version` не двигает.
+ */
+export async function editMessage(
+  me: string,
+  access: ConvAccess,
+  messageId: string,
+  content: string,
+  opts: { keyboard?: InlineKeyboard | null } = {},
+): Promise<EditResult> {
   return db.transaction(async (tx): Promise<EditResult> => {
     const m = await lockMessage(tx, access.conversationId, messageId);
     if (!m || m.deletedAt) return { kind: 'not-found' };
@@ -2287,17 +2380,53 @@ export async function editMessage(me: string, access: ConvAccess, messageId: str
     if (!content && m.attachments.length === 0) return { kind: 'empty' };
     // Текст не изменился (06.10, сверка с Telegram): «правка» без изменений не ставит «изм.» и никого не будит — ни записи,
     // ни журнала, ни событий. Старый клиент слал такое всегда (сверки текста у него не было), ответ ему прежний — сообщение.
-    if (content === m.content) return { kind: 'ok', row: m, delivery: null };
+    const textChanged = content !== m.content;
+    const keyboard = opts.keyboard === undefined ? undefined : opts.keyboard?.length ? opts.keyboard : null;
+    const keyboardChanged = keyboard !== undefined && !sameKeyboard(m.keyboard, keyboard);
+    if (!textChanged && !keyboardChanged) return { kind: 'ok', row: m, delivery: null };
     const [row] = await tx
       .update(conversationMessages)
       // `edit_version` (Э0 ЛС между инстансами): +1 на правку — при слиянии копий у соседа побеждает бо́льшая.
-      .set({ content, editedAt: new Date(), editVersion: sql`${conversationMessages.editVersion} + 1` })
+      .set({
+        ...(textChanged ? { content, editedAt: new Date(), editVersion: sql`${conversationMessages.editVersion} + 1` } : {}),
+        ...(keyboardChanged ? { keyboard } : {}),
+      })
       .where(eq(conversationMessages.id, messageId))
       .returning();
     const audience = changeAudience({ action: 'edit', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor: new Set() });
     // С2: у кого сообщение закреплено, у тех поменялось превью в списке закрепа — следом событие со списком.
     const holders = (await pinHolders(tx, [messageId])).filter((id) => audience.includes(id));
     const entries = [...msgEntries(audience, access.conversationId, messageId), ...pinEntries(holders, access.conversationId)];
+    const nums = entryPts(entries, await journal(tx, entries));
+    const [delivery] = withPinDeliveries(access.conversationId, [messageId], entries, nums);
+    return { kind: 'ok', row, delivery: textChanged ? { ...delivery, edited: true } : delivery };
+  });
+}
+
+/** Кнопки сообщения те же (сравнение в одном порядке полей: из jsonb ключи приходят отсортированными). */
+function sameKeyboard(a: InlineKeyboard | null, b: InlineKeyboard | null): boolean {
+  return JSON.stringify(a?.length ? keyboardView(a) : null) === JSON.stringify(b?.length ? keyboardView(b) : null);
+}
+
+/**
+ * Только кнопки под сообщением (#230, `editMessageReplyMarkup` бота): своё живое сообщение; `null`/`[]` — снять. Не ставит
+ * «(изм.)», не двигает `edit_version`; рассылка `conv.change` — та же, что у правки. Те же кнопки — ничего не пишем.
+ */
+export async function editMessageKeyboard(
+  me: string,
+  access: ConvAccess,
+  messageId: string,
+  keyboard: InlineKeyboard | null,
+): Promise<EditResult> {
+  return db.transaction(async (tx): Promise<EditResult> => {
+    const m = await lockMessage(tx, access.conversationId, messageId);
+    if (!m || m.deletedAt) return { kind: 'not-found' };
+    if (m.authorId !== me) return { kind: 'forbidden' };
+    const next = keyboard?.length ? keyboard : null;
+    if (sameKeyboard(m.keyboard, next)) return { kind: 'ok', row: m, delivery: null };
+    const [row] = await tx.update(conversationMessages).set({ keyboard: next }).where(eq(conversationMessages.id, messageId)).returning();
+    const audience = changeAudience({ action: 'edit', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor: new Set() });
+    const entries = msgEntries(audience, access.conversationId, messageId);
     const nums = entryPts(entries, await journal(tx, entries));
     const [delivery] = withPinDeliveries(access.conversationId, [messageId], entries, nums);
     return { kind: 'ok', row, delivery };
@@ -2382,7 +2511,7 @@ async function deleteMessageTx(
     // Р19 «без следа»: и снимок «Переслано от» (`conv5`: имя автора оригинала) — надгробию он не нужен.
     await tx
       .update(conversationMessages)
-      .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null, media: null })
+      .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null, media: null, keyboard: null })
       .where(eq(conversationMessages.id, messageId));
     await tx.delete(conversationMessageReactions).where(eq(conversationMessageReactions.messageId, messageId));
     // С2: удалённое у обоих снимает его закрепы у всех.
@@ -2698,6 +2827,18 @@ export function startOnceSweeper(): void {
 export type ReactResult = { kind: 'ok'; changed: boolean; delivery: Delivery | null; audience: string[] } | { kind: 'not-found' };
 
 /** Поставить или снять свою реакцию. Повтор (строка уже есть / уже снята) — успех без события и без строки журнала. */
+/**
+ * Реакцию можно поставить (аудит ЛС #236, п.4): юникодный эмодзи или кастомный эмодзи, который есть на каком-нибудь
+ * сервере инстанса (`shared.isReactionEmoji` + строка `server_emojis`). Произвольный текст — нет.
+ */
+export async function reactionAllowed(emoji: string): Promise<boolean> {
+  if (!isReactionEmoji(emoji)) return false;
+  const custom = customReactionId(emoji);
+  if (custom === null) return true;
+  const [row] = await db.select({ id: serverEmojis.id }).from(serverEmojis).where(eq(serverEmojis.id, custom)).limit(1);
+  return !!row;
+}
+
 export async function reactMessage(
   me: string,
   access: ConvAccess,
@@ -2728,6 +2869,33 @@ export async function reactMessage(
               ),
             )
             .returning({ id: conversationMessageReactions.messageId });
+    // Аудит ЛС #236, п.4: не больше `REACTIONS_PER_USER_MAX` реакций одного человека на сообщение — новая вытесняет самые
+    // старые его реакции (Telegram Premium: четвёртая заменяет первую). Новую не трогаем, даже при равном времени.
+    if (op === 'add' && changed.length > 0) {
+      const mine = await tx
+        .select({ emoji: conversationMessageReactions.emoji })
+        .from(conversationMessageReactions)
+        .where(
+          and(
+            eq(conversationMessageReactions.messageId, messageId),
+            eq(conversationMessageReactions.userId, me),
+            ne(conversationMessageReactions.emoji, emoji),
+          ),
+        )
+        .orderBy(desc(conversationMessageReactions.createdAt), desc(conversationMessageReactions.emoji));
+      const evict = mine.slice(REACTIONS_PER_USER_MAX - 1).map((r) => r.emoji);
+      if (evict.length > 0) {
+        await tx
+          .delete(conversationMessageReactions)
+          .where(
+            and(
+              eq(conversationMessageReactions.messageId, messageId),
+              eq(conversationMessageReactions.userId, me),
+              inArray(conversationMessageReactions.emoji, evict),
+            ),
+          );
+      }
+    }
     const audience = changeAudience({ action: 'react', actorId: me, memberIds: access.memberIds, withheld: m.withheld, blockedActor });
     if (changed.length === 0) return { kind: 'ok', changed: false, delivery: null, audience };
     const pts = await journal(tx, msgEntries(audience, conversationId, messageId));
@@ -3406,7 +3574,20 @@ async function forwardSources(
   });
   // Служебную строку («X закрепил(а) сообщение», `pins2`) не переслать — как у Telegram: её нет среди доступного для пересылки.
   // G56: один элемент — у сообщения он должен быть (и не спрятан мной), иначе «нечего пересылать».
-  const rows = found.filter((m) => messageView(m, me) === 'full').filter((m) => !m.service).filter((m) => only === undefined || m.attachments.length === 1);
+  // Аудит ЛС #236: «История для новых» (п.8) — до своего добавления не переслать; бывший участник группы (п.9) — только
+  // ленту до выхода (`formerLeftAt`), как он её и видит.
+  const [mem] = await q
+    .select({ from: conversationMembers.historyFromKey, leftAt: conversationMembers.leftAt })
+    .from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, fromConversationId), eq(conversationMembers.userId, me)))
+    .limit(1);
+  const floor = mem?.from ?? 0;
+  const until = mem?.leftAt ? await formerLeftAt(fromConversationId, me, q) : null;
+  const inView = (m: MsgRow) => !!mem && m.sortKey >= floor && (!mem.leftAt || (!!until && m.createdAt.getTime() <= until.getTime()));
+  const rows = found
+    .filter((m) => messageView(m, me) === 'full' && inView(m))
+    .filter((m) => !m.service)
+    .filter((m) => only === undefined || m.attachments.length === 1);
   const ok = new Set(rows.map((m) => m.id));
   const missing = ids.filter((id) => !ok.has(id));
   if (missing.length > 0) return { missing };
@@ -3721,7 +3902,7 @@ export async function deleteMessages(
       // Надгробия — как у одиночного: текст, вложения и снимок «Переслано от» стираются (Р19 «без следа»).
       await tx
         .update(conversationMessages)
-        .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null, media: null })
+        .set({ deletedAt: new Date(), content: '', attachments: [], forwardedFrom: null, sticker: null, service: null, media: null, keyboard: null })
         .where(inArray(conversationMessages.id, todoIds));
       await tx.delete(conversationMessageReactions).where(inArray(conversationMessageReactions.messageId, todoIds));
       unpinned = (await removePins(tx, todoIds, null)).filter((id) => access.memberIds.includes(id));
@@ -4008,6 +4189,7 @@ export async function unreadCounts(me: string, ids: readonly string[]): Promise<
  */
 export async function deliver(d: Delivery | null): Promise<void> {
   if (!d) return;
+  botUpdatesOf([d]);
   // ⚠️ Лениво: `realtime.ts` открывает Redis при ЗАГРУЗКЕ модуля. Статический импорт делал бы этот модуль (а с ним
   // `unread.ts`, `cleanup.ts` и любой тест на PGlite) держателем открытого Redis — так 30.09 висел `accountCleanup.itest`.
   const { publishToUser } = await import('./realtime.js');
@@ -4017,11 +4199,22 @@ export async function deliver(d: Delivery | null): Promise<void> {
   const cap = conv?.kind === 'group' ? FEATURE_GROUPS1 : CAP_CONV1;
   // «Избранное» (`saved1`) — как группа: только соединениям с `groups1` (беседа 1:1 с ключом «я:я»).
   const capOut = cap === CAP_CONV1 && (await groupIdsAmong(db, [d.conversationId])).size > 0 ? FEATURE_GROUPS1 : cap;
-  /** Сводка беседы глазами человека; `null` — беседа ему ещё не показана (события нет). */
-  const summaryOf = async (userId: string): Promise<ConvSummary | ConvLeft | undefined | null> => {
-    const hidden = new Set<string>();
-    const [summary] = await summariesFor(userId, [d.conversationId], db, hidden);
-    return hidden.size > 0 ? null : summary;
+  /**
+   * Сводка беседы глазами человека; `null` — беседа ему ещё не показана (события нет). Аудит ЛС #236, п.12: `summariesFor`
+   * тяжёлый, а один человек бывает в `pts`, `pinPts` и `schedPts` одной доставки — считаем раз на человека.
+   */
+  const summaries = new Map<string, Promise<ConvSummary | ConvLeft | undefined | null>>();
+  const summaryOf = (userId: string): Promise<ConvSummary | ConvLeft | undefined | null> => {
+    let p = summaries.get(userId);
+    if (!p) {
+      p = (async () => {
+        const hidden = new Set<string>();
+        const [summary] = await summariesFor(userId, [d.conversationId], db, hidden);
+        return hidden.size > 0 ? null : summary;
+      })();
+      summaries.set(userId, p);
+    }
+    return p;
   };
   for (const [userId, pts] of d.pts) {
     const summary = await summaryOf(userId);
@@ -4089,9 +4282,69 @@ async function pinsChange(
  * порядке пачки — номера `pts` у него подряд, клиент применяет их как обычные. Сводка в каждом — уже итоговая (как и у
  * `deliver`, вид может быть новее номера события: свежесть клиент держит по номерам).
  */
+/**
+ * Боты (#229): крючки, а не импорт — модуль ботов тянет Redis и маршруты Bot API, а этот модуль живёт и без них (тесты на
+ * PGlite). Подключает `routes/botApi.ts` при регистрации; без крючков бесед с ботами просто нет событий для ботов.
+ * - `record` — те же записи, что уходят людям, → события в журнал бота-участника (`bots/botUpdates.ts`);
+ * - `chatMember` — человек открыл беседу с ботом / удалил её (`routes/conv.ts`);
+ * - `enabled` — боты включены на инстансе (настройка читается в момент вызова; `q` — текущая транзакция, если она есть).
+ */
+/** Статус человека в беседе с ботом: открыл (`member`), удалил у себя (`left`), заблокировал бота (`kicked`, аудит 26.10). */
+export type BotChatStatus = 'member' | 'left' | 'kicked';
+export interface BotConvHooks {
+  record(ds: readonly Delivery[]): Promise<void>;
+  chatMember(botId: string, humanId: string, conversationId: string, status: BotChatStatus, old?: BotChatStatus): Promise<void>;
+  enabled(q?: Q): Promise<boolean>;
+}
+let botConvHooks: BotConvHooks | null = null;
+export function configureBotConv(hooks: BotConvHooks | null): void {
+  botConvHooks = hooks;
+}
+export function botConv(): BotConvHooks | null {
+  return botConvHooks;
+}
+
+/**
+ * Очередь журнала ботов по беседам (аудит 26.10): `record` идёт в фоне, и две записи подряд (сообщение → правка) без очереди
+ * могли лечь в журнал бота в обратном порядке — `update_id` раньше у правки. Цепочка обещаний на беседу (в беседе 1:1 бот
+ * один, так что это очередь на бота в этой беседе): следующая запись ждёт прошлую. Пачка из нескольких бесед ждёт хвосты
+ * всех своих. Хвост снимается, когда очередь беседы опустела.
+ */
+const botChains = new Map<string, Promise<void>>();
+function enqueueBot(conversationIds: readonly string[], job: () => Promise<void>): void {
+  const keys = [...new Set(conversationIds)];
+  const prev = Promise.all(keys.map((k) => botChains.get(k)));
+  const run = prev.then(job).catch((err) => console.warn('[bots] журнал событий:', err instanceof Error ? err.message : err));
+  for (const k of keys) botChains.set(k, run);
+  void run.finally(() => {
+    for (const k of keys) if (botChains.get(k) === run) botChains.delete(k);
+  });
+}
+
+/** В фоне: сбой журнала бота не мешает рассылке людям. По порядку вызовов в каждой беседе (`enqueueBot`). */
+function botUpdatesOf(ds: readonly Delivery[]): void {
+  const hooks = botConvHooks;
+  if (!hooks) return;
+  enqueueBot(
+    ds.map((d) => d.conversationId),
+    () => hooks.record(ds),
+  );
+}
+
+/**
+ * `my_chat_member` (человек открыл / удалил у себя / заблокировал / разблокировал беседу с ботом) — в ту же очередь беседы,
+ * что и сообщения: «открыл» встаёт в журнал раньше первого сообщения. Для маршрутов (`routes/conv.ts`, `routes/blocks.ts`).
+ */
+export function queueBotChatMember(botId: string, humanId: string, conversationId: string, status: BotChatStatus, old?: BotChatStatus): void {
+  const hooks = botConvHooks;
+  if (!hooks) return;
+  enqueueBot([conversationId], () => hooks.chatMember(botId, humanId, conversationId, status, old));
+}
+
 export async function deliverMany(list: readonly (Delivery | null)[]): Promise<void> {
   const ds = list.filter((d): d is Delivery => d !== null);
   if (ds.length === 0) return;
+  botUpdatesOf(ds);
   // ⚠️ Лениво, как в `deliver`: `realtime.ts` открывает Redis при загрузке модуля.
   const { publishToUser } = await import('./realtime.js');
   const ids = [...new Set(ds.flatMap((d) => (d.messageId ? [d.messageId] : [])))];

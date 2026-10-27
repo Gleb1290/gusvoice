@@ -74,6 +74,7 @@ export function HotkeyCheatSheet({ onClose }: { onClose: () => void }) {
     { label: 'Выключить микрофон', combo: hk.mute },
     { label: 'Заглушить звук (деафен)', combo: hk.deafen },
     { label: 'Демонстрация экрана', combo: hk.screenShare },
+    ...(isDesktop() ? [{ label: 'Показывать окно в фокусе (во время показа)', combo: hk.focusShare ?? '' }] : []),
     { label: 'Рация (Push-to-Talk)', combo: audio.pushToTalk ? audio.pttKey : '' },
   ];
   const nav: Line[] = [

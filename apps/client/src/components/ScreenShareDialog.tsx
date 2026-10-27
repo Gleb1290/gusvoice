@@ -13,7 +13,19 @@ import {
 import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
 import { formatCombo, getHotkeys, isDesktop } from '../hotkeys';
 import { gvScreenSources, type ScreenSource } from '../nativeScreenShare';
-import { shareStartErrorText } from '../shareErrorText';
+import { shareStartErrorText, shareSwitchErrorText } from '../shareErrorText';
+import {
+  isCurrentCard,
+  SHARE_SWITCH_QUALITY_NOTE,
+  shareDialogConfirmDisabled,
+  shareDialogConfirmLabel,
+  shareDialogInitialSelection,
+  shareDialogInitialTab,
+  shareDialogTabs,
+  shareDialogTitle,
+  type CurrentShare,
+  type ShareDialogMode,
+} from '../screenShareDialogRules';
 import { Icon } from './Icon';
 import { Toggle } from './Toggle';
 import { Select } from './Select';
@@ -31,6 +43,9 @@ const CODEC_HINT: Record<StreamCodec, string> = {
 };
 
 type Tab = 'window' | 'screen' | 'camera';
+
+/** Цель смены источника: окно/экран нативного показа или камера (#237). */
+export type ShareSwitchTarget = { sourceId: string; isWindow: boolean } | { deviceId: string };
 
 const TABS: { key: Tab; label: string; group: string }[] = [
   { key: 'window', label: 'Окно', group: 'Открытые окна' },
@@ -58,15 +73,28 @@ export function ScreenShareDialog({
   onClose,
   onStart,
   onStartCamera,
+  mode = 'start',
+  current,
+  onSwitch,
 }: {
   onClose: () => void;
   onStart: (args: { sourceId: string; isWindow: boolean }) => Promise<void>;
   onStartCamera: (args: { deviceId: string }) => Promise<void>;
+  /**
+   * `switch` (#237) — смена источника УЖЕ идущего показа: блок качества скрыт, текущий источник выделен и
+   * помечен «Сейчас», кнопка «Показывать это» / «Уже показывается», вкладки только того же вида. Отмена,
+   * Esc и клик мимо ничего не меняют.
+   */
+  mode?: ShareDialogMode;
+  current?: CurrentShare | null;
+  onSwitch?: (target: ShareSwitchTarget) => Promise<void>;
 }) {
-  const [tab, setTab] = useState<Tab>('window');
+  const switching = mode === 'switch';
+  const tabs = shareDialogTabs(mode, current);
+  const [tab, setTab] = useState<Tab>(() => shareDialogInitialTab(mode, current));
   const [sources, setSources] = useState<ScreenSource[] | null>(null);
   const [cams, setCams] = useState<MediaDeviceInfo[] | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => shareDialogInitialSelection(mode, current));
   const [settings, setSettings] = useState<StreamSettings>(() => getStreamSettings());
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,11 +151,14 @@ export function ScreenShareDialog({
 
   function pickTab(t: Tab) {
     setTab(t);
-    setSelectedId(null);
+    // В режиме смены вернулись на вкладку текущего источника — он снова выбран (кнопка «Уже показывается»).
+    const curId = shareDialogInitialSelection(mode, current);
+    setSelectedId(isCurrentCard(mode, t, curId, current) ? curId : null);
   }
 
+  const shownTabs = TABS.filter((t) => tabs.includes(t.key));
   const onTabsKey = tabListKeyDown(
-    TABS.map((t) => t.key),
+    shownTabs.map((t) => t.key),
     tab,
     pickTab,
     (k) => `ss-tab-${k}`,
@@ -160,18 +191,23 @@ export function ScreenShareDialog({
   const picked = visible.find((s) => s.id === selectedId);
   const nativeDims = picked?.width && picked?.height ? fitNative(picked.width, picked.height) : undefined;
 
+  const selectedIsCurrent = isCurrentCard(mode, tab, selectedId, current);
+
   async function confirm() {
-    if (!selectedId || starting) return;
+    if (shareDialogConfirmDisabled(mode, selectedId, starting, selectedIsCurrent) || !selectedId) return;
     setStarting(true);
     setError(null);
     try {
-      if (tab === 'camera') await onStartCamera({ deviceId: selectedId });
+      if (switching) {
+        if (!onSwitch) throw new Error('смена источника недоступна');
+        await onSwitch(tab === 'camera' ? { deviceId: selectedId } : { sourceId: selectedId, isWindow: tab === 'window' });
+      } else if (tab === 'camera') await onStartCamera({ deviceId: selectedId });
       else await onStart({ sourceId: selectedId, isWindow: tab === 'window' });
       // success → the caller closes the dialog (it owns the sharing state).
     } catch (e) {
       // 🔴 Оболочка отказывает СТРОКОЙ, а не `Error` — разбор причины в `shareStartErrorText`
       // (`shareErrorText.ts`, под тестами).
-      setError(shareStartErrorText(e));
+      setError(switching ? shareSwitchErrorText(e) : shareStartErrorText(e));
       setStarting(false);
     }
   }
@@ -189,7 +225,7 @@ export function ScreenShareDialog({
       >
         <div className="admin-head">
           <h2 className="ss-title" id="ss-title">
-            <Icon name="screen-share" size={18} /> Демонстрация экрана
+            <Icon name={switching ? 'repeat' : 'screen-share'} size={18} /> {shareDialogTitle(mode)}
           </h2>
           <button type="button" className="icon-close" title="Закрыть" aria-label="Закрыть" onClick={onClose}>
             <Icon name="close" size={18} />
@@ -197,7 +233,7 @@ export function ScreenShareDialog({
         </div>
 
         <div className="admin-tabs ss-tabs" role="tablist" aria-label="Что транслировать" onKeyDown={onTabsKey}>
-          {TABS.map((t) => (
+          {shownTabs.map((t) => (
             <button
               key={t.key}
               type="button"
@@ -240,6 +276,7 @@ export function ScreenShareDialog({
                           key={c.deviceId}
                           role="radio"
                           aria-checked={selectedId === c.deviceId}
+                          aria-current={isCurrentCard(mode, 'camera', c.deviceId, current) ? 'true' : undefined}
                           data-id={c.deviceId}
                           tabIndex={selectedId ? (selectedId === c.deviceId ? 0 : -1) : i === 0 ? 0 : -1}
                           className={`ss-card ${selectedId === c.deviceId ? 'selected' : ''}`}
@@ -250,6 +287,7 @@ export function ScreenShareDialog({
                             <span className="ss-card-mono">
                               <Icon name="camera" size={24} />
                             </span>
+                            {isCurrentCard(mode, 'camera', c.deviceId, current) && <span className="ss-card-now">Сейчас</span>}
                             {selectedId === c.deviceId && (
                               <span className="ss-card-check">
                                 <Icon name="check" size={13} />
@@ -278,6 +316,7 @@ export function ScreenShareDialog({
                           key={src.id}
                           role="radio"
                           aria-checked={selectedId === src.id}
+                          aria-current={isCurrentCard(mode, tab, src.id, current) ? 'true' : undefined}
                           data-id={src.id}
                           tabIndex={selectedId ? (selectedId === src.id ? 0 : -1) : i === 0 ? 0 : -1}
                           className={`ss-card ${selectedId === src.id ? 'selected' : ''}`}
@@ -290,6 +329,7 @@ export function ScreenShareDialog({
                             ) : (
                               <span className="ss-card-mono">{mono}</span>
                             )}
+                            {isCurrentCard(mode, tab, src.id, current) && <span className="ss-card-now">Сейчас</span>}
                             {selectedId === src.id && (
                               <span className="ss-card-check">
                                 <Icon name="check" size={13} />
@@ -308,6 +348,15 @@ export function ScreenShareDialog({
           </div>
 
           <div className="ss-settings">
+            {/* Смена источника (#237): качество, частота, кодек и слои — свойства ПУБЛИКАЦИИ, а она не
+                пересоздаётся (зрители не видят ни события). Поэтому блок скрыт целиком. */}
+            {switching && (
+              <div className="ss-row">
+                <span className="ss-hint">{SHARE_SWITCH_QUALITY_NOTE}</span>
+              </div>
+            )}
+            {!switching && (
+              <>
             <div className="ss-row">
               <span className="settings-group-label" id="ss-res-label">
                 Разрешение
@@ -539,6 +588,8 @@ export function ScreenShareDialog({
                   : 'Кадры не отправляются. Чтобы увидеть ваш показ, придётся зайти в канал — и вы это заметите.'}
               </span>
             </div>
+              </>
+            )}
 
             <div className="ss-row">
               <span className="settings-group-label" id="ss-audio-label">
@@ -558,6 +609,7 @@ export function ScreenShareDialog({
               </div>
             )}
 
+            {!switching && (
             <div className="ss-row">
               <span className="settings-group-label" id="ss-bitrate-label">
                 Битрейт
@@ -568,6 +620,7 @@ export function ScreenShareDialog({
                 {settings.resolution === 'native' && nativeDims ? ` · ${nativeDims.width}×${nativeDims.height}` : ''}
               </span>
             </div>
+            )}
           </div>
 
           {error && (
@@ -587,7 +640,7 @@ export function ScreenShareDialog({
               баг отбирает Alt+Tab, то есть саму возможность дойти до окна приложения, — кнопка там
               бесполезна (за сутки её не нажал никто). Момент старта показа — последний, когда человек
               и читает подсказку, и ещё может переключаться. */}
-          {isDesktop() && diagHotkey && (
+          {!switching && isDesktop() && diagHotkey && (
             <span className="ss-diag-hint">
               <span>
                 Если во время показа откажут Alt+Tab или «Пуск» — нажмите <kbd>{diagHotkey}</kbd>, это
@@ -601,11 +654,11 @@ export function ScreenShareDialog({
           </button>
           <button
             type="button"
-            disabled={!selectedId || starting}
+            disabled={shareDialogConfirmDisabled(mode, selectedId, starting, selectedIsCurrent)}
             aria-describedby={!selectedId ? 'ss-foot-hint' : undefined}
             onClick={confirm}
           >
-            {starting ? 'Запуск…' : 'Начать трансляцию'}
+            {shareDialogConfirmLabel(mode, starting, selectedIsCurrent)}
           </button>
         </div>
       </div>

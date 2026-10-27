@@ -4,3 +4,7 @@ deploy/maps/regions/* text eol=lf
 Dockerfile text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+# Сгенерированная схема Bot API сверяется байт в байт (`node scripts/gen-bot-api.mjs --check`).
+docs/bot-api/openapi.json text eol=lf
+# Python-обёртки Bot API генерируются тем же скриптом и сверяются так же.
+packages/bot-sdk-py/gusvoice_bot/_generated.py text eol=lf

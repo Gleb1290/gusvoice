@@ -17,7 +17,7 @@ import { users } from './schema.js';
 export async function searchLocalUsers(me: string, q: string): Promise<UserSearchHit[]> {
   const name = sql`lower(${users.username})`;
   const rows = await db
-    .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl })
+    .select({ id: users.id, username: users.username, displayName: users.displayName, avatarUrl: users.avatarUrl, bot: users.bot })
     .from(users)
     .where(
       and(
@@ -27,11 +27,14 @@ export async function searchLocalUsers(me: string, q: string): Promise<UserSearc
         isNull(users.homeInstanceId),
         eq(users.verified, true),
         isNotNull(users.approvedAt),
+        // Боты (#229): находится только публичный и не выключенный — или свой (приватного открывает только владелец).
+        sql`(NOT ${users.bot} OR EXISTS (SELECT 1 FROM bots b WHERE b.user_id = ${users.id} AND b.disabled_at IS NULL AND (b.public OR b.owner_id = ${me})))`,
       ),
     )
     // Порядок — `rankUserHits`: точное первым, короче раньше, затем побайтно. Здесь он нужен, чтобы `LIMIT` не срезал
     // точное совпадение среди многих «по началу».
     .orderBy(sql`${name} = ${q} DESC`, sql`length(${users.username})`, sql`${name} COLLATE "C"`)
     .limit(USER_SEARCH_LIMIT);
-  return rankUserHits(rows, q);
+  // Бот (#229): значок «БОТ» в выдаче — поле только у ботов (добавление; авторы вебхуков сюда не попадают — не подтверждены).
+  return rankUserHits(rows, q).map(({ bot, ...hit }) => ({ ...hit, ...(bot ? { bot: true as const } : {}) }));
 }

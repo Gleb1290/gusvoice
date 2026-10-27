@@ -1,6 +1,6 @@
 import { useLocalParticipant, useRoomContext } from '@livekit/components-react';
 import { markDiag, setDiagSharing } from '../diag';
-import { Track, VideoPreset, type TrackPublishOptions } from 'livekit-client';
+import { createLocalScreenTracks, Track, VideoPreset, type LocalTrack, type TrackPublishOptions } from 'livekit-client';
 import { useEffect, useRef, useState } from 'react';
 import { comboFromEvent, comboFromMouse, comboToKeyPacked, getHotkeys, isDesktop, isMobile, mouseButtonOf, subscribeHotkeys } from '../hotkeys';
 import {
@@ -11,24 +11,34 @@ import {
   setHotkeyMouseMask,
   startNativeStreamAudio,
 } from '../nativeStreamAudio';
-import { gvForegroundWindow, gvScreenShareStart, nativeScreenShareAvailable } from '../nativeScreenShare';
 import {
+  gvForegroundWindow,
+  gvScreenShareStart,
+  gvScreenSources,
+  nativeScreenShareAvailable,
+} from '../nativeScreenShare';
+import {
+  getNativeSource,
   hasNativeAudio,
   markNativeSharing,
-  setNativeAudioStop,
+  setNativeAudio,
   stopNativeAudio,
   stopNativeShare,
+  switchNativeShare,
 } from '../nativeShareSession';
+import { sameNativeSource, type NativeSource } from '../nativeShareCore';
+import { shareSwitchErrorText } from '../shareErrorText';
+import type { CurrentShare } from '../screenShareDialogRules';
 import { toggleOverlayEnabled } from '../overlaySettings';
 import { playSound } from '../sounds';
 import { useStore, voiceApiOf, voiceIsHere } from '../store';
 import {
   bitrateFor,
   buildNativeShareConfig,
-  captureOptions,
   getStreamSettings,
   publishOptions,
   RES_OPTIONS,
+  webCaptureOptions,
   webScreenSettings,
   webShareLayers,
   type StreamSettings,
@@ -36,7 +46,7 @@ import {
 import { toast, toastError } from '../toast';
 import { toggleSelfDeafen, toggleSelfMute } from '../voiceSelf';
 import { Icon } from './Icon';
-import { ScreenShareDialog } from './ScreenShareDialog';
+import { ScreenShareDialog, type ShareSwitchTarget } from './ScreenShareDialog';
 import { SoundboardPicker } from './SoundboardPicker';
 import { StreamDebugPanel } from './StreamDebugPanel';
 
@@ -69,6 +79,11 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
   const { localParticipant, isScreenShareEnabled } = useLocalParticipant();
   const room = useRoomContext();
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  // Окно смены источника идущего показа (#237) — тот же `ScreenShareDialog` в режиме `switch`. `current` снимается
+  // при открытии: пока окно открыто, источник меняется только им самим.
+  const [switchDialog, setSwitchDialog] = useState<{ current: CurrentShare | null } | null>(null);
+  // Смена идёт: вторая (хоткей поверх кнопки, дребезг) не должна гнаться с первой за один и тот же захват.
+  const switchBusyRef = useRef(false);
   // Прямоугольник кнопки саундборда: панель раскрывается от него и сама выбирает сторону.
   const [sbAnchor, setSbAnchor] = useState<DOMRect | null>(null);
   // Stream debug numbers, opened from the green «live» indicator while sharing.
@@ -106,7 +121,8 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
       return n === 'NotAllowedError' || n === 'AbortError'; // user dismissed the OS picker — not an error
     };
     const start = (audio: boolean) =>
-      localParticipant.setScreenShareEnabled(true, captureOptions({ ...s, audio }), shareOptions({ ...s, audio }));
+      // #237: и при старте `surfaceSwitching: 'include'` — Chrome даёт свою кнопку «Показывать эту вкладку вместо» (решение владельца Р5).
+      localParticipant.setScreenShareEnabled(true, webCaptureOptions({ ...s, audio }), shareOptions({ ...s, audio }));
 
     // DESKTOP: share VIDEO ONLY (getDisplayMedia audio echoes our own voices and often won't start in
     // WebView2), and stream system audio NATIVELY — WASAPI capture that excludes GusVoice's voices.
@@ -119,7 +135,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
         return;
       }
       try {
-        setNativeAudioStop(await startNativeStreamAudio(room));
+        setNativeAudio(await startNativeStreamAudio(room));
       } catch (e) {
         toast('info', 'Системный звук стрима не подключён', String((e as Error)?.message ?? e));
       }
@@ -175,7 +191,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     // Сборка конфига — чистая функция в `streamSettings.ts`: здесь её не доказать тестом, а ошибка
     // в проводе «настройка → Rust» молча вернула бы человеку выключенное им (см. её комментарий).
     await gvScreenShareStart(buildNativeShareConfig({ url, token, sourceId, isWindow, settings: s }));
-    markNativeSharing();
+    markNativeSharing({ sourceId, isWindow });
     setShareDialogOpen(false);
     // Диагностика (#100) идёт БЕЗ спроса и с момента входа в голос (см. `VoiceConnection`): опция
     // «включите сбор» тут не работает — баг ломает Alt+Tab, и человек, у которого он воспроизводится,
@@ -210,7 +226,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     if (s.audio && nativeStreamAudioAvailable()) {
       try {
         // Window share → capture ONLY that window's process-tree audio; full-screen → everything minus us.
-        setNativeAudioStop(await startNativeStreamAudio(room, isWindow ? { sourceId } : undefined));
+        setNativeAudio(await startNativeStreamAudio(room, isWindow ? { sourceId } : undefined));
       } catch (e) {
         toast('info', 'Системный звук стрима не подключён', String((e as Error)?.message ?? e));
       }
@@ -253,33 +269,259 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     setShareDialogOpen(false);
     if (s.audio) {
       try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const cam = devices.find((d) => d.kind === 'videoinput' && d.deviceId === deviceId);
-        const audioDev = cam?.groupId
-          ? devices.find((d) => d.kind === 'audioinput' && d.groupId === cam.groupId)
-          : undefined;
-        if (audioDev) {
-          const astream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              deviceId: { exact: audioDev.deviceId },
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-            },
+        const atrack = await openCameraAudio(deviceId);
+        if (atrack) {
+          await localParticipant.publishTrack(atrack, {
+            source: Track.Source.ScreenShareAudio,
+            name: 'camera-audio',
+            dtx: false,
+            red: false,
           });
-          const atrack = astream.getAudioTracks()[0];
-          if (atrack) {
-            await localParticipant.publishTrack(atrack, {
-              source: Track.Source.ScreenShareAudio,
-              name: 'camera-audio',
-              dtx: false,
-              red: false,
-            });
-          }
         }
       } catch {
         toast('info', 'Звук устройства не подключён', 'Стрим камеры идёт без звука');
       }
+    }
+  }
+
+  // Звук самого устройства камеры (тот же groupId; у капчур-карт он есть) — без эхоподавления/шумодава/АРУ.
+  // Один код на старт показа камеры и на смену камеры (#237).
+  async function openCameraAudio(deviceId: string): Promise<MediaStreamTrack | null> {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cam = devices.find((d) => d.kind === 'videoinput' && d.deviceId === deviceId);
+    const audioDev = cam?.groupId ? devices.find((d) => d.kind === 'audioinput' && d.groupId === cam.groupId) : undefined;
+    if (!audioDev) return null;
+    const astream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: audioDev.deviceId },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+    return astream.getAudioTracks()[0] ?? null;
+  }
+
+  // ─── Смена окна/экрана/камеры на лету (#237) ───
+
+  /** Идёт ли показ камеры (вкладка «Камеры»): публикация ScreenShare на основном участнике с именем `camera-stream`. */
+  function isCameraShare(): boolean {
+    return localParticipant.getTrackPublication(Track.Source.ScreenShare)?.trackName === 'camera-stream';
+  }
+
+  /**
+   * Нативный показ: сменить окно/экран, не останавливая показ. Порядок (видео → звук), ошибки звука и
+   * обновление «текущего источника» — в `nativeShareCore.switchTo`. Отказ видео бросается наружу: окно
+   * смены остаётся открытым с текстом, показ идёт по-старому.
+   * `label` — имя окна для тоста «Показываю: …» (хоткей «окно в фокусе»); без него — «Показ переключён».
+   */
+  async function switchNativeSource(target: NativeSource, label?: string): Promise<void> {
+    if (switchBusyRef.current) throw new Error('смена уже идёт');
+    switchBusyRef.current = true;
+    try {
+      const s = getStreamSettings();
+      const wantAudio = s.audio && nativeStreamAudioAvailable();
+      const r = await switchNativeShare(target, {
+        wantAudio,
+        startAudio: wantAudio
+          ? async () => {
+              setNativeAudio(await startNativeStreamAudio(room, target.isWindow ? { sourceId: target.sourceId } : undefined));
+            }
+          : null,
+      });
+      if (r.outcome === 'same') return;
+      if (r.outcome === 'republished') {
+        toast('info', label ? `Показываю: ${label}` : 'Показ переключён', 'Картинка у зрителей обновится через секунду');
+      } else {
+        toast('info', label ? `Показываю: ${label}` : 'Показ переключён');
+      }
+      if (r.audio === 'failed') {
+        toast('info', 'Звук стрима не переключился', 'Показ идёт без звука');
+      }
+    } finally {
+      switchBusyRef.current = false;
+    }
+  }
+
+  /** Показ камеры: другая камера под тем же треком (`sid` у зрителей тот же), звук устройства — по той же развилке, что у браузера. */
+  async function switchCamera({ deviceId }: { deviceId: string }): Promise<void> {
+    const video = localParticipant.getTrackPublication(Track.Source.ScreenShare)?.videoTrack;
+    if (!video) throw new Error('показ не идёт');
+    const saved = getStreamSettings();
+    const s: StreamSettings = saved.resolution === 'native' ? { ...saved, resolution: '1080' } : saved;
+    const dims = RES_OPTIONS.find((r) => r.value === s.resolution)!;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        deviceId: { exact: deviceId },
+        width: { ideal: dims.width },
+        height: { ideal: dims.height },
+        frameRate: { ideal: s.fps },
+      },
+    });
+    const track = stream.getVideoTracks()[0];
+    if (!track) throw new Error('Камера не вернула видео');
+    try {
+      track.contentHint = s.mode;
+    } catch {
+      /* contentHint unsupported — cosmetic */
+    }
+    try {
+      // userProvidedTrack:false — SDK сам погасит СТАРУЮ камеру (иначе она осталась бы занятой).
+      await video.replaceTrack(track, { userProvidedTrack: false });
+    } catch (e) {
+      track.stop();
+      throw e;
+    }
+    try {
+      const atrack = s.audio ? await openCameraAudio(deviceId) : null;
+      const apub = localParticipant.getTrackPublication(Track.Source.ScreenShareAudio);
+      if (atrack && apub?.audioTrack) {
+        await apub.audioTrack.replaceTrack(atrack, { userProvidedTrack: false });
+      } else if (atrack) {
+        await localParticipant.publishTrack(atrack, { source: Track.Source.ScreenShareAudio, name: 'camera-audio', dtx: false, red: false });
+      } else if (apub?.track) {
+        await localParticipant.unpublishTrack(apub.track, true);
+      }
+    } catch {
+      toast('info', 'Звук устройства не переключился', 'Стрим камеры идёт без звука');
+    }
+    toast('info', 'Камера переключена');
+  }
+
+  /**
+   * Показ из браузера: новый выбор в окне браузера (жест пользователя — это нажатие кнопки) и
+   * `replaceTrack` под тем же опубликованным треком: `sid` и подписки зрителей остаются.
+   * 🔴 `userProvidedTrack: false` обязателен: по умолчанию SDK считает трек «пользовательским» и СТАРЫЙ
+   * захват не гасит — в Chrome осталась бы вторая полоска «идёт показ», а новый не погас бы на «Завершить».
+   * Обёртку `LocalTrack` из `createLocalScreenTracks` НЕ останавливаем: её `mediaStreamTrack` теперь у
+   * опубликованного трека, `stop()` оборвал бы показ. Отмена выбора в окне браузера — тишина.
+   */
+  async function switchWebShare(): Promise<void> {
+    const video = localParticipant.getTrackPublication(Track.Source.ScreenShare)?.videoTrack;
+    if (!video || switchBusyRef.current) return;
+    switchBusyRef.current = true;
+    let fresh: LocalTrack[] = [];
+    try {
+      const s = webScreenSettings(getStreamSettings());
+      const apub = localParticipant.getTrackPublication(Track.Source.ScreenShareAudio);
+      // Звук через WASAPI (десктоп, `startShare` выше) идёт мимо браузерного захвата — его не трогаем.
+      const nativeAudio = hasNativeAudio() || (isDesktop() && s.audio && nativeStreamAudioAvailable());
+      const wantAudio = s.audio && !screenAudioBroken && !nativeAudio;
+      try {
+        fresh = await createLocalScreenTracks(webCaptureOptions({ ...s, audio: wantAudio }));
+      } catch (e) {
+        const n = (e as DOMException)?.name;
+        if (n === 'NotAllowedError' || n === 'AbortError') return; // закрыли окно выбора — показ идёт как шёл
+        toastError(e, 'Не удалось сменить окно или экран');
+        return;
+      }
+      const nv = fresh.find((t) => t.kind === Track.Kind.Video);
+      const na = fresh.find((t) => t.kind === Track.Kind.Audio);
+      if (!nv) {
+        fresh.forEach((t) => t.stop());
+        toast('error', 'Не удалось сменить окно или экран', 'Браузер не вернул картинку');
+        return;
+      }
+      try {
+        await video.replaceTrack(nv.mediaStreamTrack, { userProvidedTrack: false });
+      } catch (e) {
+        fresh.forEach((t) => t.stop());
+        toastError(e, 'Не удалось сменить окно или экран');
+        return;
+      }
+      if (!nativeAudio) {
+        try {
+          if (na && apub?.audioTrack) {
+            await apub.audioTrack.replaceTrack(na.mediaStreamTrack, { userProvidedTrack: false });
+          } else if (na) {
+            await localParticipant.publishTrack(na, { source: Track.Source.ScreenShareAudio, dtx: false, red: false });
+          } else if (apub?.track) {
+            await localParticipant.unpublishTrack(apub.track, true);
+          }
+        } catch {
+          toast('info', 'Звук стрима не переключился', 'Показ идёт без звука');
+        }
+        if (wantAudio && !na) {
+          toast(
+            'info',
+            'Звук стрима не захвачен',
+            'Системный звук передаётся только при выборе «Весь экран» (отметьте «Поделиться звуком системы») или вкладки браузера. У отдельного окна приложения звука нет.',
+          );
+        }
+      }
+      toast('info', 'Показ переключён');
+    } finally {
+      switchBusyRef.current = false;
+    }
+  }
+
+  /** Кнопка «Сменить окно или экран»: нативный показ и камера — окно выбора в режиме смены, браузер — свой выбор браузера. */
+  async function openSwitch() {
+    if (nativeSharing) {
+      setSwitchDialog({ current: getNativeSource() });
+      return;
+    }
+    if (isCameraShare()) {
+      const dev = localParticipant.getTrackPublication(Track.Source.ScreenShare)?.videoTrack?.mediaStreamTrack.getSettings().deviceId;
+      setSwitchDialog({ current: dev ? { deviceId: dev } : null });
+      return;
+    }
+    await switchWebShare();
+  }
+
+  async function onSwitchTarget(target: ShareSwitchTarget): Promise<void> {
+    if ('deviceId' in target) await switchCamera(target);
+    else await switchNativeSource(target);
+    setSwitchDialog(null);
+  }
+
+  /**
+   * Хоткей «Показывать окно в фокусе» (#237, решение владельца 27.10): ВО ВРЕМЯ нативного показа переключает
+   * источник на окно переднего плана, не отрывая от игры. Вне показа — ничего, только тост «Сначала начните
+   * показ»: запуск показа окна в фокусе уже делает хоткей «Демонстрация экрана», второй запускающий хоткей
+   * путал бы (а у Discord/OBS «сменить сцену» вне эфира ничего не включает). Окно GusVoice (и оверлей — тот же
+   * процесс), рабочий стол и панель задач в источник не берутся.
+   */
+  async function showFocusedWindow() {
+    if (!nativeSharing) {
+      if (isScreenShareEnabled && isCameraShare()) {
+        toast('info', 'Показ камеры', 'Сменить камеру на окно в фокусе нельзя — завершите показ и начните заново');
+      } else {
+        toast('info', 'Сначала начните показ');
+      }
+      return;
+    }
+    const fg = await gvForegroundWindow();
+    if (!fg || fg.isSelf) {
+      toast('info', 'Показ не изменён', 'В фокусе окно GusVoice — переключитесь на то окно, которое хотите показать');
+      return;
+    }
+    if (fg.isShell) {
+      toast('info', 'Это окно не показать', 'Рабочий стол и панель задач в показ не берутся');
+      return;
+    }
+    if (sameNativeSource(getNativeSource(), { sourceId: fg.id, isWindow: true })) {
+      toast('info', 'Это окно уже показывается');
+      return;
+    }
+    // Имя окна и проверка, что оно вообще снимается: рабочий стол и панель задач живут в explorer.exe и
+    // в список окон не попадают. Список (с превью) дорог — зовём только когда оболочка не отдала заголовок
+    // или это explorer.exe.
+    let title = fg.title?.trim() || '';
+    if (!title || fg.exe === 'explorer.exe') {
+      const list = await gvScreenSources().catch(() => []);
+      const w = list.find((x) => x.kind === 'window' && x.id === fg.id);
+      if (w) title = w.title;
+      else if (fg.exe === 'explorer.exe') {
+        toast('info', 'Это окно не показать', 'Рабочий стол и панель задач в показ не берутся');
+        return;
+      }
+    }
+    if (!title) title = fg.exe.replace(/\.exe$/i, '') || 'окно';
+    try {
+      await switchNativeSource({ sourceId: fg.id, isWindow: true }, title);
+    } catch (e) {
+      toast('error', 'Не удалось сменить окно', shareSwitchErrorText(e));
     }
   }
 
@@ -358,8 +600,8 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
 
   // Hotkeys (mute / deafen / screen-share). Both paths call the LATEST handlers via a ref.
   // Hotkeys use quickShareFocused (stream the focused window, no picker); the toolbar button keeps toggleScreen (picker).
-  const actionsRef = useRef({ toggleMic, toggleDeafen, quickShareFocused });
-  actionsRef.current = { toggleMic, toggleDeafen, quickShareFocused };
+  const actionsRef = useRef({ toggleMic, toggleDeafen, quickShareFocused, showFocusedWindow });
+  actionsRef.current = { toggleMic, toggleDeafen, quickShareFocused, showFocusedWindow };
   // A single physical press can reach BOTH the focused window path and the unfocused native hook. Fire
   // each combo's action at most once per ~80ms so an overlap can't double-toggle. Keyed by combo so
   // pressing different hotkeys in quick succession never blocks one another.
@@ -387,6 +629,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
         combo === hk.mute ? actionsRef.current.toggleMic
         : combo === hk.deafen ? actionsRef.current.toggleDeafen
         : combo === hk.screenShare ? actionsRef.current.quickShareFocused
+        : hk.focusShare && combo === hk.focusShare ? actionsRef.current.showFocusedWindow
         : combo === hk.overlayToggle ? toggleOverlayEnabled
         // ⚠️ Метку нужно продублировать и ЗДЕСЬ. Нативный хук — не единственный путь: пока окно
         // GusVoice в фокусе, работает именно этот, оконный. Забыл — и хоткей молчал ровно тогда,
@@ -436,13 +679,14 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     };
     const boundCombos = (): string[] => {
       const hk = getHotkeys();
-      return [hk.mute, hk.deafen, hk.screenShare, hk.overlayToggle, hk.diagMark];
+      return [hk.mute, hk.deafen, hk.screenShare, hk.overlayToggle, hk.diagMark, hk.focusShare ?? ''];
     };
     const actionFor = (combo: string): (() => void) | null => {
       const hk = getHotkeys();
       if (combo === hk.mute) return () => void actionsRef.current.toggleMic();
       if (combo === hk.deafen) return () => void actionsRef.current.toggleDeafen();
       if (combo === hk.screenShare) return () => void actionsRef.current.quickShareFocused();
+      if (hk.focusShare && combo === hk.focusShare) return () => void actionsRef.current.showFocusedWindow();
       if (combo === hk.overlayToggle) return () => toggleOverlayEnabled();
       // Метка «сломалось» в отчёте показа. Работает поверх игры — в отличие от кнопки в окне, до
       // которой при отказавшем Alt+Tab не добраться. Вне показа markDiag сам ничего не делает.
@@ -526,6 +770,23 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
    * ⚠️ И нет, пока владелец не включил экономику ИЛИ снял позицию с продажи. Не ради тайны: без
    * монет у саундборда нет тормоза, ради которого он и ждал экономику.
    */
+  /**
+   * Кнопка «Сменить окно или экран» (#237) — ОДНО объявление на обе раскладки дока (тот же урок, что у
+   * саундборда). Стоит между глушением звука и саундбордом, НЕ рядом с «Завершить стрим»: промах по краю не
+   * должен обрывать показ. Иконка `repeat` (`screen-share` занят индикатором). Рисуется только во время показа.
+   */
+  const switchButton = sharing ? (
+    <button
+      type="button"
+      className="ctl ss-mini ss-switch"
+      title="Сменить окно или экран"
+      aria-label="Сменить окно или экран"
+      onClick={() => void openSwitch()}
+    >
+      <Icon name="repeat" size={wide ? 18 : 20} />
+    </button>
+  ) : null;
+
   const soundboardButton =
     sbEntry?.enabled && voiceChannelId ? (
       <span className="sb-wrap">
@@ -615,6 +876,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
             )}
             {/* Во время показа кнопка стоит рядом с глушением — до большой «Завершить стрим», чтобы
                 случайный промах по краю не обрывал показ. */}
+            {switchButton}
             {soundboardButton}
             <button type="button" className="ctl ss-btn ss-stop" title="Завершить показ экрана" onClick={toggleScreen}>
               <Icon name="close" size={16} />
@@ -646,6 +908,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
                 <Icon name={streamAudioMuted ? 'volume-off' : 'volume'} size={wide ? 18 : 20} />
               </button>
             )}
+            {switchButton}
           </>
         ))}
       {shareDialogOpen && (
@@ -653,6 +916,16 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
           onClose={() => setShareDialogOpen(false)}
           onStart={startNativeShare}
           onStartCamera={startCameraShare}
+        />
+      )}
+      {switchDialog && (
+        <ScreenShareDialog
+          mode="switch"
+          current={switchDialog.current}
+          onClose={() => setSwitchDialog(null)}
+          onStart={startNativeShare}
+          onStartCamera={startCameraShare}
+          onSwitch={onSwitchTarget}
         />
       )}
     </div>

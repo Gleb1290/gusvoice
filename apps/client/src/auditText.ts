@@ -75,6 +75,14 @@ export function describeAudit(e: AuditLogEntry): string {
     case 'webhook.delete':
       return `удалил вебхук ${q('name', 'без имени')}`;
 
+    // Боты на сервере (#231): `data.username` — ник бота (`{botId, username, permissions, readAll}`).
+    case 'bot.add':
+      return `добавил бота ${s('username') ? `@${s('username')}` : ''}`.trimEnd();
+    case 'bot.remove':
+      return `убрал бота ${s('username') ? `@${s('username')}` : ''}`.trimEnd();
+    case 'bot.update':
+      return `изменил доступ бота ${s('username') ? `@${s('username')} ` : ''}к сообщениям`;
+
     case 'category.create':
       return `создал категорию «${s('name')}»`;
     case 'category.update':

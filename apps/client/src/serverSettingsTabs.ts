@@ -96,12 +96,14 @@ const TABS: TabDef[] = [
   },
   // Все вебхуки сервера (#24, «Интеграции» у Discord). Право серверное; права каналов сервер учитывает сам при выдаче
   // списка (`/servers/:id/webhooks`), так что запертые каналы в разделе не видны.
+  // Боты сервера (#231) — там же, но по своему праву `MANAGE_SERVER`: внутри раздела два блока, каждый по своему праву
+  // (`ServerSettingsModal`, как «Основное»), поэтому дверь открывает любое из двух.
   {
     key: 'integrations',
     label: 'Интеграции',
-    sub: 'Вебхуки: внешние программы пишут в каналы',
+    sub: 'Боты и вебхуки',
     icon: 'link',
-    anyOf: [Permission.MANAGE_WEBHOOKS],
+    anyOf: [Permission.MANAGE_WEBHOOKS, Permission.MANAGE_SERVER],
   },
   {
     key: 'economy',

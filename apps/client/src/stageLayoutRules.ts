@@ -77,6 +77,11 @@ export type StageSpeakerInput = {
   speakingSince: ReadonlyMap<string, number>;
   /** Кто есть на сцене (без меня), в порядке плиток — запас, пока никто не заговорил. */
   present: readonly string[];
+  /**
+   * Боты в голосе (#232): крупно сами не выходят — музыка иначе навсегда заняла бы сцену. Ни кандидатом на смену, ни запасом
+   * «первый на сцене» бот не бывает; вручную открыть плитку бота можно (это не автофокус).
+   */
+  bots?: ReadonlySet<string>;
   now: number;
   holdMs?: number;
   minTalkMs?: number;
@@ -87,7 +92,7 @@ function speakerCandidate(prev: StageSpeaker, inp: StageSpeakerInput): { id: str
   let best: { id: string; since: number } | null = null;
   for (const id of inp.present) {
     const since = inp.speakingSince.get(id);
-    if (since === undefined || id === prev.id) continue;
+    if (since === undefined || id === prev.id || inp.bots?.has(id)) continue;
     if (!best || since < best.since) best = { id, since };
   }
   return best;
@@ -111,7 +116,7 @@ export function nextStageSpeaker(prev: StageSpeaker, inp: StageSpeakerInput): St
     return { id: cand.id, at: inp.now };
   }
   if (cur.id) return cur;
-  const first = inp.present[0] ?? null;
+  const first = inp.present.find((id) => !inp.bots?.has(id)) ?? null;
   return first === prev.id && prev.at === 0 ? prev : { id: first, at: 0 };
 }
 

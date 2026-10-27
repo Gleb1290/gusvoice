@@ -6,6 +6,7 @@ import { useStore } from '../store';
 import { confirmAction } from '../confirm';
 import { Avatar } from './Avatar';
 import { HelpDot } from './HelpDot';
+import { Icon } from './Icon';
 import { Toggle } from './Toggle';
 import { Select } from './Select';
 
@@ -24,7 +25,7 @@ const ROLE_COLORS = [0xf2b33d, 0x3fb97a, 0xe0574e, 0x3f7fb9, 0xc95e8c, 0x5e9c8c,
  *    (shared/permissions.ts) swaps it for the modern pair as soon as a role is opened, so it fades
  *    out instead of lingering.
  */
-const PERMS: { key: PermissionName; label: string; hint: string }[] = [
+export const PERMS: { key: PermissionName; label: string; hint: string }[] = [
   {
     key: 'ADMINISTRATOR',
     label: 'Администратор — все права',
@@ -146,7 +147,7 @@ const PERMS: { key: PermissionName; label: string; hint: string }[] = [
 ];
 
 /** Права, которые видны всем, но переключаются только владельцем сервера (см. PROTECTED_PERMISSIONS). */
-const isProtectedPerm = (key: PermissionName) => (Permission[key] & PROTECTED_PERMISSIONS) !== 0n;
+export const isProtectedPerm = (key: PermissionName) => (Permission[key] & PROTECTED_PERMISSIONS) !== 0n;
 
 const colorToHex = (n: number) => '#' + (n & 0xffffff).toString(16).padStart(6, '0');
 const hasBit = (perms: bigint, bit: bigint) => (perms & bit) === bit;
@@ -167,6 +168,7 @@ export function ServerRolesPanel({
   canManageRoles,
   canKick,
   view,
+  initialRoleId,
 }: {
   serverId: string;
   ownerId: string;
@@ -174,6 +176,8 @@ export function ServerRolesPanel({
   canManageRoles: boolean;
   canKick: boolean;
   view: 'roles' | 'members';
+  /** Какую роль выбрать при открытии (#231: «Права бота» в «Интеграциях» ведут к управляемой роли бота). */
+  initialRoleId?: string;
 }) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [members, setMembers] = useState<ServerMemberInfo[]>([]);
@@ -198,7 +202,7 @@ export function ServerRolesPanel({
       const [r, m] = await Promise.all([api.listRoles(serverId), api.listMembers(serverId)]);
       setRoles(r);
       setMembers(m);
-      if (!selId && r.length) selectRole(r[0]);
+      if (!selId && r.length) selectRole(r.find((x) => x.id === initialRoleId) ?? r[0]);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -228,6 +232,12 @@ export function ServerRolesPanel({
    * ограничивать некого, стоя рядом с живыми гостями сервера.
    */
   const systemRole = !!selected && (selected.isEveryone || !!selected.isGuests);
+  /**
+   * Роль бота (#231, `Role.managedBotId`): заводится сервером при добавлении бота и уходит вместе с ним. Руками не выдаётся,
+   * не снимается и не удаляется (сервер отвечает 400) — поэтому ни «Удалить роль», ни выдачи, ни крестиков. Права и имя
+   * правятся как у обычной роли; `ADMINISTRATOR` боту нельзя никому (решение владельца 26.10) — тумблер заперт.
+   */
+  const botRole = !!selected?.managedBotId;
   const roleMembers = !selected
     ? []
     : selected.isGuests
@@ -236,7 +246,7 @@ export function ServerRolesPanel({
         ? []
         : members.filter((m) => m.roleIds.includes(selected.id));
   // Добавлять в системную роль нечего: в «Гостей» попадают сами, в `@everyone` — все.
-  const roleNonMembers = selected && !systemRole ? members.filter((m) => !m.roleIds.includes(selected.id)) : [];
+  const roleNonMembers = selected && !systemRole && !botRole ? members.filter((m) => !m.roleIds.includes(selected.id)) : [];
 
   // Display highest-first ("выше = больше прав"); @everyone always sits at the bottom.
   const sortableRoles = roles.filter((r) => !r.isEveryone).sort((a, b) => b.position - a.position);
@@ -355,7 +365,8 @@ export function ServerRolesPanel({
   }
 
   // «Гости» в выдачу не попадают: бэкенд такую выдачу отклоняет, а местному она дала бы прав.
-  const assignableRoles = roles.filter((r) => !r.isEveryone && !r.isGuests);
+  // Роль бота (#231) — тоже: её держит только сам бот.
+  const assignableRoles = roles.filter((r) => !r.isEveryone && !r.isGuests && !r.managedBotId);
 
   const errorBox = error && (
     <div className="error" role="alert">
@@ -397,8 +408,16 @@ export function ServerRolesPanel({
             <div key={r.id} className={`role-item-row ${r.id === selId ? 'active' : ''}`}>
               <button type="button" className="role-item" onClick={() => selectRole(r)}>
                 <span className="role-dot" style={{ background: r.color ? colorToHex(r.color) : '#888' }} />
+                {r.managedBotId && <Icon name="bot" size={14} />}
                 {r.isEveryone ? '@everyone' : r.name}
                 {r.isGuests && <span className="muted"> · системная</span>}
+                {/* Подпись короткая: колонка ролей узкая, «· роль бота» переносилась в три строки. Полностью — в подсказке. */}
+                {r.managedBotId && (
+                  <span className="muted" title="Роль бота: выдана только ему, удаляется вместе с ним">
+                    {' '}
+                    · бот
+                  </span>
+                )}
               </button>
               {canManageRoles && !r.isEveryone && (
                 <span className="role-reorder">
@@ -437,6 +456,12 @@ export function ServerRolesPanel({
                     ссылаются права и упоминания.
                   </span>
                 )}
+                {botRole && (
+                  <span className="muted field-why">
+                    Роль бота: она есть только у него и уйдёт вместе с ним, когда бота уберут с сервера. Права
+                    администратора боту выдать нельзя.
+                  </span>
+                )}
               </label>
 
               <div className="field" style={{ gap: 8 }}>
@@ -460,7 +485,7 @@ export function ServerRolesPanel({
                 <span>Упоминаемая — @роль уведомляет участников</span>
                 <Toggle
                   checked={mentionable}
-                  disabled={!canManageRoles || systemRole}
+                  disabled={!canManageRoles || systemRole || botRole}
                   onChange={setMentionable}
                 />
               </div>
@@ -477,7 +502,7 @@ export function ServerRolesPanel({
                 <Toggle
                   checked={membersCanAssign && !roleHasAdminPerms}
                   // «Гостей» руками не выдают вовсе, поэтому и самовыдача к ней неприменима.
-                  disabled={!canManageRoles || systemRole || roleHasAdminPerms}
+                  disabled={!canManageRoles || systemRole || botRole || roleHasAdminPerms}
                   onChange={setMembersCanAssign}
                 />
               </div>
@@ -491,7 +516,9 @@ export function ServerRolesPanel({
                     </span>
                     <Toggle
                       checked={hasBit(perms, Permission[key])}
-                      disabled={!canManageRoles || (isProtectedPerm(key) && !canGrantProtected)}
+                      disabled={
+                        !canManageRoles || (isProtectedPerm(key) && !canGrantProtected) || (botRole && key === 'ADMINISTRATOR')
+                      }
                       label={label}
                       onChange={(v) => setPerms((p) => (v ? p | Permission[key] : p & ~Permission[key]))}
                     />
@@ -502,7 +529,7 @@ export function ServerRolesPanel({
               {!selected.isEveryone && (
                 <div className="role-members">
                   <div className="cat-name">
-                    {selected.isGuests ? 'Гости сервера' : 'Участники роли'} · {roleMembers.length}
+                    {selected.isGuests ? 'Гости сервера' : botRole ? 'Бот' : 'Участники роли'} · {roleMembers.length}
                   </div>
                   <div className="role-mchips">
                     {roleMembers.map((m) => (
@@ -515,7 +542,7 @@ export function ServerRolesPanel({
                         {m.user.displayName}
                         {/* Из «Гостей» не убирают: человек в ней, пока он гость (§5.9). Крестик
                             тут был бы кнопкой, которая всегда отвечает отказом. */}
-                        {canManageRoles && !selected.isGuests && (
+                        {canManageRoles && !selected.isGuests && !botRole && (
                           <button type="button" onClick={() => toggleMemberRole(m.user.id, selected.id, false)} disabled={busy}>
                             ×
                           </button>
@@ -548,7 +575,7 @@ export function ServerRolesPanel({
                   {/* Удалить системную роль нельзя (бэкенд отвечает отказом): без «Гостей»
                       ограничивать гостей станет нечем, а её переопределения каналов молча
                       перестанут действовать. */}
-                  {!systemRole && (
+                  {!systemRole && !botRole && (
                     <button type="button" className="danger-text" onClick={() => deleteRole(selected)} disabled={busy}>
                       Удалить роль
                     </button>
@@ -602,7 +629,7 @@ export function ServerRolesPanel({
                   {myRoles.map((r) => (
                     <span key={r.id} className="role-chip" style={{ borderColor: r.color ? colorToHex(r.color) : '#888' }}>
                       {r.name}
-                      {canManageRoles && (
+                      {canManageRoles && !r.managedBotId && (
                         <button type="button" onClick={() => toggleMemberRole(m.user.id, r.id, false)} disabled={busy}>
                           ×
                         </button>

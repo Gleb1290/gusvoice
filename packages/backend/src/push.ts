@@ -109,12 +109,13 @@ export interface PushSource {
 }
 
 /**
- * Пуш без текста устройствам БЕЗ ключей шифрования (#213, `pushRules.redactPushPayload`).
+ * Пуш без имени и текста устройствам БЕЗ ключей шифрования (#213; аудит ЛС #236, п.1, решение владельца 26.10).
  *
- * ⚠️ Выключено до выхода APK, который шлёт ключи: включи раньше — у всех нынешних телефонов пропадёт текст
- * в уведомлениях до обновления. Порядок: релиз с ключами → люди обновились → `true` отдельным коммитом.
+ * Включено: ntfy отдаёт тему на чтение без входа, и открытый JSON с текстом ЛС лежал бы там. Устройство без ключей
+ * получает то же, что при настройке показа «ничего» (`maskPushPayload(…, 'nothing')`): заголовок «GusVoice», «Новое
+ * сообщение», без автора, аватара и названия группы. Беседа, ключ и время остаются — тап открывает беседу.
  */
-const REDACT_KEYLESS = false;
+const REDACT_KEYLESS = true;
 
 const NTFY_BASE = env.ntfy.baseUrl; // e.g. https://ntfy.example.com
 const NTFY_TOKEN = env.ntfy.token;
@@ -384,7 +385,7 @@ export async function sendPushToUsers(
   const variant = (p: PushPayload) => ({
     payload: p,
     plain: Buffer.from(JSON.stringify(p), 'utf8'),
-    redacted: JSON.stringify(REDACT_KEYLESS ? redactPushPayload(p) : p),
+    redacted: JSON.stringify(REDACT_KEYLESS ? maskPushPayload(redactPushPayload(p), 'nothing') : p),
   });
   // Вариант тела на пару «настройка показа × без звука» — шифр и JSON собираются один раз на пару, не на устройство.
   const variants = new Map<string, ReturnType<typeof variant>>();
@@ -407,7 +408,7 @@ export async function sendPushToUsers(
        * 🔴 Текст сообщения — только шифром (#213). Устройство прислало ключи → тело aes128gcm (RFC 8291),
        * `X-UnifiedPush: 1` велит ntfy принять двоичное тело (он кладёт его base64 с `encoding`, а
        * приложение ntfy и наш встроенный распространитель раскодируют). Ключей нет или они кривые —
-       * пуш без текста (`redactPushPayload`), когда включён `REDACT_KEYLESS` (до того — как раньше).
+       * пуш без имени и текста (`maskPushPayload(…, 'nothing')`), `REDACT_KEYLESS` включён с аудита #236.
        */
       let wire: { body: string | Buffer; headers: Record<string, string> } = {
         body: v.redacted,
@@ -436,7 +437,7 @@ export async function sendPushToUsers(
              это открытый JSON с текстом ЛС: устройство прислало ключи ради шифра и получало открытым. Новое
              приложение без шифра покажет «Новое сообщение». */
           wire = {
-            body: JSON.stringify(redactPushPayload(v.payload)),
+            body: JSON.stringify(maskPushPayload(redactPushPayload(v.payload), 'nothing')),
             headers: { 'Content-Type': 'application/json' },
           };
         }

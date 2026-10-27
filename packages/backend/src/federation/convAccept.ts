@@ -784,6 +784,29 @@ interface Member {
   homeUserId: string | null;
 }
 
+/**
+ * Оригинал пересланного нашего человека у нас есть (аудит ЛС #236, п.2): его сообщение с тем же временем (до мс) — или
+ * пересланное от него с тем же временем оригинала (пересылка пересланного) — и тем же текстом (пустой текст копии —
+ * пересылка «без подписи»). Удалённое не считается.
+ */
+async function ourForwardOriginal(tx: Tx, userId: string, at: Date, content: string): Promise<boolean> {
+  if (!Number.isFinite(at.getTime())) return false;
+  const iso = at.toISOString();
+  const rows = await tx
+    .select({ content: conversationMessages.content })
+    .from(conversationMessages)
+    .where(
+      and(
+        isNull(conversationMessages.deletedAt),
+        sql`((${conversationMessages.authorId} = ${userId} AND ${conversationMessages.forwardedFrom} IS NULL
+              AND date_trunc('milliseconds', ${conversationMessages.createdAt}) = ${iso}::timestamptz)
+          OR (${conversationMessages.forwardedFrom}->>'userId' = ${userId} AND ${conversationMessages.forwardedFrom}->>'at' = ${iso}))`,
+      ),
+    )
+    .limit(20);
+  return rows.some((r) => content === '' || r.content === content);
+}
+
 interface LockedConv {
   nextKey: number;
   members: Member[];
@@ -981,18 +1004,35 @@ async function applyMessage(peer: string, self: string, conversationId: string, 
       // «Кто может мне писать» (`msgpriv1`): только 1:1 и не служебное (запись о звонке — своё правило «Кто может звонить»).
       (!c.group && recipients.length === 1 && !w.service && messageGate !== null && !(await messageGate(author.id, recipients[0]!.id)));
     let replyToId: string | null = null;
+    let parentContent: string | null = null;
     if (w.replyToId) {
       const [parent] = await tx
-        .select({ id: conversationMessages.id })
+        .select({ id: conversationMessages.id, content: conversationMessages.content, deletedAt: conversationMessages.deletedAt })
         .from(conversationMessages)
         .where(and(eq(conversationMessages.id, w.replyToId), eq(conversationMessages.conversationId, conversationId)))
         .limit(1);
       replyToId = parent?.id ?? null;
+      parentContent = parent && !parent.deletedAt ? parent.content : null;
     }
+    // Аудит ЛС #236, п.2: цитата — по нашей копии родителя, не по проводу (`convRules.fedReplyQuote`). Импорт — в теле: перечень
+    // статических импортов модуля закрыт проверкой (`activeLoops.test.ts`).
+    const { fedCreatedAt, fedReplyQuote } = await import('../convRules.js');
+    const replyQuote = fedReplyQuote(parentContent, w.replyQuote);
     const fwd = w.forwardedFrom;
-    const forwardedFrom: MessageForwardedFrom | null = fwd
-      ? { userId: c.byRef(fwd.author)?.id ?? '', displayName: fwd.name, at: new Date(fwd.at || w.createdAt).toISOString() }
-      : null;
+    let forwardedFrom: MessageForwardedFrom | null = null;
+    if (fwd) {
+      const at = new Date(fwd.at || w.createdAt);
+      const who = c.byRef(fwd.author);
+      /*
+       * Аудит ЛС #236, п.2: «Переслано от» НАШЕГО человека сосед мог приписать любому тексту. Привязка к нашему — только если
+       * оригинал у нас есть (`ourForwardOriginal`); нет — имя без привязки и `unverified` (клиент не ведёт в профиль).
+       * Человек другого инстанса — как раньше: проверить его оригинал нам нечем.
+       */
+      const verified = !who || who.home !== null || (await ourForwardOriginal(tx, who.id, at, w.content));
+      forwardedFrom = verified
+        ? { userId: who?.id ?? '', displayName: fwd.name, at: at.toISOString() }
+        : { userId: '', displayName: fwd.name, at: at.toISOString(), unverified: true };
+    }
     const sticker: MessageSticker | null = w.sticker
       ? { id: w.sticker.id, emoji: w.sticker.emoji, url: w.sticker.url, format: w.sticker.format as MessageSticker['format'] }
       : null;
@@ -1015,7 +1055,8 @@ async function applyMessage(peer: string, self: string, conversationId: string, 
     if (!content && !sticker && !service && !files) return;
     // G69 (`dmmedia1`): геопозиция / контакт — контакт сопоставляется с нашими людьми (своя или теневая строка).
     const media = w.media && !w.deleted ? await convMediaFromWire(tx, w.media, self) : null;
-    const createdAt = new Date(w.createdAt);
+    // Аудит ЛС #236, п.3: время копии — в окне [−30 дн, +5 мин] от нашего, иначе сейчас (`convRules.fedCreatedAt`).
+    const createdAt = fedCreatedAt(w.createdAt, Date.now());
     const [ins] = await tx
       .insert(conversationMessages)
       .values({
@@ -1030,7 +1071,7 @@ async function applyMessage(peer: string, self: string, conversationId: string, 
         content,
         attachments: [],
         replyToId,
-        replyQuote: w.replyQuote,
+        replyQuote,
         forwardedFrom,
         withheld: blocked,
         silent: w.silent,
@@ -1204,16 +1245,29 @@ async function applyReactions(peer: string, self: string, conversationId: string
     const theirs = c.members.filter((x) => (fromHost ? x.home !== null : x.home === peer)).map((x) => x.id);
     if (theirs.length === 0) return;
     const want = new Set<string>();
+    // Аудит ЛС #236, п.4: от соседа — тоже только эмодзи (вид ключа; кастомный — его сервера, проверить нечем) и не больше
+    // `REACTIONS_PER_USER_MAX` на человека: лишние сверх первых в списке отбрасываются.
+    const { isReactionEmoji, REACTIONS_PER_USER_MAX } = await import('@gusvoice/shared');
+    const perUser = new Map<string, number>();
+    const take = (id: string, emoji: string) => {
+      if (!isReactionEmoji(emoji)) return;
+      const key = `${id}\u0000${emoji}`;
+      if (want.has(key)) return;
+      const n = perUser.get(id) ?? 0;
+      if (n >= REACTIONS_PER_USER_MAX) return;
+      perUser.set(id, n + 1);
+      want.add(key);
+    };
     for (const r of w.reactions) {
       if (r.user.instanceId !== peer) continue;
       const who = c.byRef(r.user);
-      if (who) want.add(`${who.id}\u0000${r.emoji}`);
+      if (who) take(who.id, r.emoji);
     }
     if (fromHost) {
       const third = new Set(hostedRefs(c, w.reactions.map((r) => r.user), peer, self).map((x) => x.id));
       for (const r of w.reactions) {
         const who = r.user.instanceId === peer ? null : c.byRef(r.user);
-        if (who && third.has(who.id)) want.add(`${who.id}\u0000${r.emoji}`);
+        if (who && third.has(who.id)) take(who.id, r.emoji);
       }
     }
     const have = await tx

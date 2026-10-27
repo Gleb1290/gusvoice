@@ -69,6 +69,10 @@ const RETAINED_USER_FKS = [
   'audit_log.actor_id',
   'bans.banned_by',
   'bans.user_id',
+  // R296: users обезличиваются, не DELETE; bots и обе исторические ссылки остаются.
+  // Токен/доставка гасятся отдельно через accountDelete → deleteBotsOwnedBy, не в accountRows.
+  'bots.owner_id',
+  'bots.user_id',
   'channels.general_user_id',
   'coin_ledger.ref_user_id',
   'coin_ledger.user_id',
@@ -223,6 +227,15 @@ describe('строки аккаунта в соседних таблицах', (
         // Не каждый экспорт schema.ts — таблица.
       }
     }
+    // R296: эти FK пока объявлены ТОЛЬКО в SQL, поэтому Drizzle metadata их не видит.
+    // actual получаем из миграции, а не подставляем ожидаемые имена: новая ссылка на users
+    // в этом блоке тоже потребует политики. После добавления references в schema.ts мост убрать.
+    const migration = readFileSync(new URL('../drizzle/0154_bots.sql', import.meta.url), 'utf8').replace(/--[^\r\n]*/g, '');
+    const botTables = [...migration.matchAll(/\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+bots\s*\(([\s\S]*?)^\);/gm)];
+    assert.equal(botTables.length, 1, 'R296 единственный блок создания bots в миграции');
+    const sqlUserFks = [...botTables[0][1].matchAll(/^\s*(\w+)\s+[^,\r\n]*?\bREFERENCES\s+users\s*\(\s*id\s*\)/gm)]
+      .map(match => `bots.${match[1]}`);
+    actual.push(...sqlUserFks);
     const clearedDirectFks = CLEARED_USER_FK_TABLES
       .filter((name) => name !== 'member_roles')
       .map((name) => `${name}.user_id`);

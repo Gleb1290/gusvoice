@@ -252,7 +252,7 @@ async function routeApp(failExtras = false) {
   };
   for (const name of ['../audit.js', '../federation/directoryEvents.js', '../federation/guestAccess.js', '../federation/guestMembership.js',
     '../federation/instanceLabels.js', '../federation/instanceBan.js', '../federation/links.js', '../federation/guestRules.js',
-    '../authGuard.js', '../realtime.js', '../statusRules.js', '../shopRules.js', '../storage.js', '../telegram.js', '../stickerCatalog.js', '../util.js']) deps[name] = blocked(name);
+    '../authGuard.js', '../realtime.js', '../serverMembership.js', '../statusRules.js', '../shopRules.js', '../storage.js', '../telegram.js', '../stickerCatalog.js', '../util.js']) deps[name] = blocked(name);
   const routes = moduleFrom<typeof import('../src/routes/servers.js')>('../src/routes/servers.ts', deps);
   const unreadRoutes = moduleFrom<typeof import('../src/routes/unread.js')>('../src/routes/unread.ts', { '../auth.js': auth, '../unread.js': unread });
   const app = Fastify();

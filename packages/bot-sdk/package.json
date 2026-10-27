@@ -1,0 +1,63 @@
+{
+  "name": "@gusvoice/bot",
+  "version": "0.1.0",
+  "description": "Official Bot API v1 SDK for GusVoice: methods, updates over WebSocket or long polling, commands, signed webhook delivery. No dependencies; voice (API 4) is the optional add-on @gusvoice/bot-voice.",
+  "license": "MIT",
+  "author": "The GusVoice authors",
+  "homepage": "https://github.com/Gleb1290/gusvoice/tree/master/packages/bot-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Gleb1290/gusvoice/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gleb1290/gusvoice.git",
+    "directory": "packages/bot-sdk"
+  },
+  "keywords": [
+    "gusvoice",
+    "bot",
+    "bot-api",
+    "chat"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test --test-concurrency=4 src/publishWorkflow.test.ts src/bot.version.test.ts src/webhook.vectors.test.ts src/package.guard.test.ts src/examples.release.test.ts src/bot.voice.test.ts src/apiClient.voice.test.ts src/keyboard.test.ts src/context.test.ts src/webhook.test.ts src/apiClient.test.ts src/bot.test.ts src/bot.webhook.test.ts src/apiClient.phase3.test.ts"
+  },
+  "peerDependencies": {
+    "@gusvoice/bot-voice": "0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@gusvoice/bot-voice": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "20.19.43",
+    "tsx": "4.22.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

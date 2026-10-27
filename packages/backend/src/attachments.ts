@@ -2,7 +2,10 @@ import type { Readable } from 'node:stream';
 import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import {
   attLink,
+  attLinkExpiry,
   attSig,
+  attSigExp,
+  attSigExpValid,
   attSigValid,
   copyTimeoutMs,
   deriveAttKey,
@@ -115,12 +118,13 @@ export function privateAttachmentsReady(): boolean {
 
 /** Ссылка на файл для конкретного смотрящего (`tokenGen` — поколение его токенов). */
 export function attachmentLink(attId: string, viewerId: string, tokenGen: number): string {
-  return attLink(env.publicApiUrl, attId, viewerId, attSig(attKey(), attId, viewerId, tokenGen));
+  return attLink(env.publicApiUrl, attId, viewerId, attSigExp(attKey(), attId, viewerId, tokenGen, attLinkExpiry(Date.now())));
 }
 
 /** Подлинна ли подпись ссылки для этого смотрящего и поколения его токенов (сравнение за постоянное время). */
 export function attachmentSigValid(attId: string, viewerId: string, tokenGen: number, sig: string): boolean {
-  return attSigValid(attKey(), attId, viewerId, tokenGen, sig);
+  // Аудит ЛС #236, п.6: только подпись со сроком (`attSigExp`); бессрочная `v1` — отказ.
+  return attSigExpValid(attKey(), attId, viewerId, tokenGen, sig, Date.now());
 }
 
 /**

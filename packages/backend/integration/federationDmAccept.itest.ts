@@ -179,21 +179,109 @@ async function reactions(mutation?: Mutation) {
   try {
     await f.apply('msg', wire());
     await f.t.db.insert(schema.conversationMessageReactions).values([
-      { messageId: 'remote-msg', userId: 'local', emoji: 'local-kept' },
-      { messageId: 'remote-msg', userId: 'shadow', emoji: 'old' },
+      { messageId: 'remote-msg', userId: 'local', emoji: '❤' },
+      { messageId: 'remote-msg', userId: 'shadow', emoji: '👎' },
     ]);
     await f.apply('react', shared.serializeConvReactionsWire({ messageId: 'remote-msg', reactions: [
-      { user: remote, emoji: 'new' }, { user: local, emoji: 'forged' }, { user: { instanceId: third, userId: 'remote' }, emoji: 'third' },
+      { user: remote, emoji: '👍' }, { user: local, emoji: '🔥' }, { user: { instanceId: third, userId: 'remote' }, emoji: '😎' },
     ] }));
     const rows = await f.t.db.select().from(schema.conversationMessageReactions);
-    assert.equal(rows.some(r => r.userId === 'local' && r.emoji === 'forged'), false, 'реакция местного не подделывается соседом');
-    assert.equal(rows.some(r => r.userId === 'local' && r.emoji === 'local-kept'), true);
-    assert.equal(rows.some(r => r.userId === 'shadow' && r.emoji === 'new'), true); assert.equal(rows.some(r => r.emoji === 'old'), false);
+    assert.equal(rows.some(r => r.userId === 'local' && r.emoji === '🔥'), false, 'реакция местного не подделывается соседом');
+    assert.equal(rows.some(r => r.userId === 'local' && r.emoji === '❤'), true);
+    assert.equal(rows.some(r => r.userId === 'shadow' && r.emoji === '👍'), true); assert.equal(rows.some(r => r.emoji === '👎'), false);
     await f.apply('react', shared.serializeConvReactionsWire({ messageId: 'remote-msg', reactions: [] }));
     const cleared = await f.t.db.select().from(schema.conversationMessageReactions);
     assert.equal(cleared.length, 1); assert.equal(cleared[0].userId, 'local');
   } finally { await f.t.close(); }
 }
+
+async function auditReactions(mutation?: Mutation) {
+  const f = await fixture(mutation);
+  try {
+    await f.apply('msg', wire());
+    await f.apply('react', shared.serializeConvReactionsWire({ messageId: 'remote-msg', reactions:
+      ['lol', '👍', '👍', '❤', 'custom:peer-emoji', '🔥'].map(emoji => ({ user: remote, emoji })) }));
+    const rows = await f.t.db.select().from(schema.conversationMessageReactions);
+    assert.deepEqual(rows.map(r => r.emoji).sort(), ['👍', '❤', 'custom:peer-emoji'].sort(),
+      'R304 сосед: только три разных допустимых эмодзи');
+    assert.equal(rows.every(r => r.userId === 'shadow'), true);
+  } finally { await f.t.close(); }
+}
+test('R304 сосед: текст не расходует лимит, повтор не расходует место, четвёртая реакция отбрасывается', () => auditReactions());
+for (const [name, from, to] of [
+  ['текст', 'if (!isReactionEmoji(emoji)) return;', '// фильтр снят'],
+  ['четвёртая', 'if (n >= REACTIONS_PER_USER_MAX) return;', '// потолок снят'],
+] as const) test(`R304 контрфакт приёма реакций: ${name} не попадает в SQL`, async () => {
+  await auditReactions();
+  await assert.rejects(auditReactions([from, to]), e => e instanceof assert.AssertionError &&
+    e.operator === 'deepStrictEqual' && e.message.startsWith('R304 сосед: только три разных допустимых эмодзи'));
+});
+
+test('R304 пересылка от нашего человека привязывается только к существующему оригиналу с тем же текстом и временем', async () => {
+  const f = await fixture();
+  try {
+    const at = Date.now() - 60_000;
+    const forwardedFrom = { author: local, name: 'Локальный', at };
+    await f.apply('msg', wire({ id: 'unverified', content: 'Наш оригинал', forwardedFrom }));
+    assert.equal((await f.row('unverified')).forwardedFrom?.userId, '');
+    assert.equal((await f.row('unverified')).forwardedFrom?.unverified, true);
+    await f.t.db.insert(schema.conversationMessages).values({ id: 'original', conversationId: cid,
+      authorId: 'local', sortKey: 100, content: 'Наш оригинал', createdAt: new Date(at),
+      attachments: [{ name: 'photo.png', contentType: 'image/png', size: 1, url: 'https://fixture.invalid/photo.png' }] });
+    await f.apply('msg', wire({ id: 'verified', content: 'Наш оригинал', forwardedFrom }));
+    assert.equal((await f.row('verified')).forwardedFrom?.userId, 'local');
+    assert.equal((await f.row('verified')).forwardedFrom?.unverified, undefined);
+    await f.apply('msg', wire({ id: 'wrong-text', content: 'Подмена', forwardedFrom }));
+    assert.equal((await f.row('wrong-text')).forwardedFrom?.unverified, true);
+    await f.apply('msg', wire({ id: 'wrong-time', content: 'Наш оригинал', forwardedFrom: { ...forwardedFrom, at: at + 1 } }));
+    assert.equal((await f.row('wrong-time')).forwardedFrom?.unverified, true);
+    // hideCaptions очищает только подпись к вложению (forwardMessages), не текстовое сообщение.
+    // Без вложения это пустой пузырь: applyMessage правильно отказывает ДО INSERT независимо от автора пересылки.
+    // Крючок копирования файлов здесь не подключён: настоящий приём сохраняет запасной текст Э2,
+    // но ourForwardOriginal должен проверить исходный пустой w.content, а не этот запасной текст.
+    await f.apply('msg', wire({ id: 'without-caption', content: '', forwardedFrom, attachments: [{
+      id: 'captionless-file', name: 'photo.png', contentType: 'image/png', size: 1,
+      width: 1, height: 1, durationMs: null, waveform: null, asFile: false, spoiler: false, sha256: null,
+    }] }));
+    const withoutCaption = await f.row('without-caption');
+    assert.ok(withoutCaption, 'пересылка вложения без подписи сохраняется под id провода');
+    assert.equal(withoutCaption.content, f.a.FED_ATTACHMENTS_LATER_TEXT);
+    assert.equal(withoutCaption.forwardedFrom?.userId, 'local');
+    assert.equal(withoutCaption.forwardedFrom?.unverified, undefined);
+  } finally { await f.t.close(); }
+});
+
+async function auditQuote(mutation?: Mutation) {
+  const f = await fixture(mutation);
+  try {
+    await f.apply('msg', wire({ id: 'parent', content: 'Настоящий текст' }));
+    await f.apply('msg', wire({ id: 'quote', replyToId: 'parent', replyQuote: { text: 'Поддельный текст', offset: 0 } }));
+    assert.equal((await f.row('quote')).replyQuote, null, 'R304 цитата не подделывает нашу копию родителя');
+    await f.apply('msg', wire({ id: 'auto', replyToId: 'parent', replyQuote: { text: 'Поддельный текст', offset: 0, auto: true } }));
+    assert.equal((await f.row('auto')).replyQuote?.text, 'Настоящий текст');
+    await f.apply('msg', wire({ id: 'exact', replyToId: 'parent', replyQuote: { text: 'текст', offset: 10 } }));
+    assert.equal((await f.row('exact')).replyQuote?.text, 'текст');
+    await f.apply('msg', wire({ id: 'absent', replyToId: 'absent-parent', replyQuote: { text: 'текст', offset: 0 } }));
+    assert.equal((await f.row('absent')).replyQuote, null);
+  } finally { await f.t.close(); }
+}
+test('R304 фед-приём пересчитывает auto, принимает точную цитату и убирает поддельную или без родителя', () => auditQuote());
+test('R304 контрфакт цитаты провода как есть меняет настоящую строку сообщения', async () => {
+  await auditQuote();
+  await assert.rejects(auditQuote(['const replyQuote = fedReplyQuote(parentContent, w.replyQuote);', 'const replyQuote = w.replyQuote;']),
+    e => e instanceof assert.AssertionError && e.message.startsWith('R304 цитата не подделывает нашу копию родителя'));
+});
+test('R304 дата 2099 заменяется временем приёма, близкая дата автора сохраняется до миллисекунды', async () => {
+  const f = await fixture();
+  try {
+    const start = Date.now();
+    await f.apply('msg', wire({ id: 'future', createdAt: Date.UTC(2099, 0, 1) }));
+    const stored = (await f.row('future')).createdAt.getTime();
+    assert.ok(stored >= start && stored <= Date.now());
+    await f.apply('msg', wire({ id: 'near', createdAt: start - 1000 }));
+    assert.equal((await f.row('near')).createdAt.getTime(), start - 1000);
+  } finally { await f.t.close(); }
+});
 test('R190 реакции заменяются только у людей соседа, удаление peer guard допускает подделку местного', async () => {
   // Класс ошибки владельца состояния: итог соседа не имеет права менять реакцию нашего человека.
   await reactions();

@@ -104,3 +104,26 @@ export function extractEmojiNames(text: string): string[] {
   for (const m of text.matchAll(NAME_IN_TEXT)) out.add(m[1]);
   return [...out];
 }
+
+/**
+ * Реакция — только эмодзи (аудит ЛС #236, п.4): юникодный эмодзи (одна последовательность: пиктограмма, флаг из пары
+ * региональных букв, «клавиша» `1️⃣`, с модификаторами тона, ZWJ, VS16 и тегами) или ключ кастомного эмодзи сервера
+ * `custom:<id>` (`customReactionKey`). Произвольный текст («lol», ссылка) реакцией не бывает — до аудита сервер принимал
+ * любую строку ≤ 32. Есть ли такой кастомный эмодзи — проверяет вызывающий (база); здесь — только вид ключа.
+ */
+const UNICODE_REACTION =
+  /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[#*0-9]\uFE0F?\u20E3)(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[\uFE0F\u200D\u20E3]|[\u{E0020}-\u{E007F}])*$/u;
+const CUSTOM_REACTION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+export const REACTION_KEY_MAX = 32;
+export function isReactionEmoji(key: string): boolean {
+  if (!key || key.length > REACTION_KEY_MAX) return false;
+  const custom = customReactionId(key);
+  if (custom !== null) return CUSTOM_REACTION_ID.test(custom);
+  return UNICODE_REACTION.test(key);
+}
+
+/**
+ * Сколько разных реакций один человек ставит на одно сообщение (аудит ЛС #236, п.4; как у Telegram Premium — 3,
+ * `reactions_user_max_premium`). Четвёртая заменяет самую старую из его реакций на этом сообщении.
+ */
+export const REACTIONS_PER_USER_MAX = 3;

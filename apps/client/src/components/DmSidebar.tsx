@@ -818,6 +818,11 @@ function NewDmSheet({ initialQuery, pick }: { initialQuery: string; pick?: Conta
               </span>
               <span className="sr-label">
                 {nameOf(u.id, u.displayName)}
+                {(u as { bot?: unknown }).bot === true && (
+                  <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+                    БОТ
+                  </span>
+                )}
                 {subOf(u.id, u.username)}
               </span>
             </button>
@@ -843,6 +848,12 @@ function NewDmSheet({ initialQuery, pick }: { initialQuery: string; pick?: Conta
               </span>
               <span className="sr-label">
                 {nameOf(u.id, u.displayName)}
+                {/* Бот (#229): сервер добавляет `bot: true` в найденного (в типе `UserSearchHit` поля пока нет). */}
+                {(u as { bot?: unknown }).bot === true && (
+                  <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+                    БОТ
+                  </span>
+                )}
                 <span className="dm-sub"> @{u.username}</span>
               </span>
             </button>
@@ -1023,6 +1034,11 @@ function DmGlobalPeople({ q, dms, onOpened }: { q: string; dms: readonly DmChann
         </span>
         <span className="dm-name">
           <span className="dm-name-text">{name}</span>
+          {(u as { bot?: unknown }).bot === true && (
+            <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+              БОТ
+            </span>
+          )}
         </span>
         <span className="dm-when" />
         <span className="dm-preview">@{u.username}</span>

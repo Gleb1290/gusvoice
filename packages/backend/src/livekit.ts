@@ -1,6 +1,7 @@
 import { AccessToken, ParticipantPermission, RoomServiceClient, TrackSource } from 'livekit-server-sdk';
 import { env } from './env.js';
-import { publishGrant, voiceTokenMetadata } from './livekitRules.js';
+import { BOT_VOICE_TOKEN_TTL_S } from '@gusvoice/shared';
+import { botPublishGrant, publishGrant, voiceTokenMetadata } from './livekitRules.js';
 
 const roomService = new RoomServiceClient(env.livekit.urlInternal, env.livekit.apiKey, env.livekit.apiSecret);
 
@@ -15,15 +16,34 @@ const roomService = new RoomServiceClient(env.livekit.urlInternal, env.livekit.a
  * `permissions` are the target's resolved channel permissions — needed to restore the
  * correct set of allowed sources on unmute (and to keep camera/screen rights intact while muted).
  */
-export async function serverMute(room: string, identity: string, muted: boolean, permissions: bigint): Promise<void> {
+export async function serverMute(
+  room: string,
+  identity: string,
+  muted: boolean,
+  permissions: bigint,
+  opts?: { bot?: boolean },
+): Promise<void> {
   const parts = await roomService.listParticipants(room);
   if (!parts.some((x) => x.identity === identity)) return;
   await roomService.updateParticipant(room, identity, {
-    permission: new ParticipantPermission({
+    permission: opts?.bot ? botVoicePermission(permissions, muted) : new ParticipantPermission({
       canSubscribe: true,
       ...publishGrant(permissions, muted),
       canUpdateMetadata: true,
     }),
+  });
+}
+
+/**
+ * Права бота в комнате при мьюте/размьюте (#232, находка ТЗ 0.2): 🔴 `canSubscribe` всегда false — общий путь вернул бы боту
+ * слух, а `publishGrant` по `STREAM` — камеру и экран. Данных и своих атрибутов у бота нет.
+ */
+export function botVoicePermission(permissions: bigint, muted: boolean): ParticipantPermission {
+  return new ParticipantPermission({
+    canSubscribe: false,
+    canPublishData: false,
+    ...botPublishGrant(permissions, muted),
+    canUpdateMetadata: false,
   });
 }
 
@@ -88,6 +108,37 @@ export async function createVoiceToken(opts: {
     canSubscribe: true,
     ...publishGrant(opts.permissions, opts.serverMuted),
     canUpdateOwnMetadata: true, // lets the client publish its own deafen state via participant attributes
+  });
+  return at.toJwt();
+}
+
+/**
+ * Токен LiveKit БОТА (#232, этап 4, ТЗ §1.2). Личность = обычный id пользователя бота (на нём держатся presence, отсев из
+ * экономики, мьют/отключение по `/channels/:id/voice/:userId/*`, громкость у слушателя). 🔴 Бот не слышит людей никогда
+ * (`canSubscribe: false` — держит сам LiveKit), не шлёт данные, не меняет свои атрибуты; публикует только микрофон.
+ * Живёт 10 минут: украденный JWT нельзя отозвать перевыпуском токена бота, дальше токен продлевает сам LiveKit.
+ */
+export async function createBotVoiceToken(opts: {
+  botId: string;
+  name: string;
+  room: string;
+  permissions: bigint;
+  avatarUrl?: string | null;
+  serverMuted?: boolean;
+}): Promise<string> {
+  const at = new AccessToken(env.livekit.apiKey, env.livekit.apiSecret, {
+    identity: opts.botId,
+    name: opts.name,
+    ttl: BOT_VOICE_TOKEN_TTL_S,
+    metadata: voiceTokenMetadata(opts.permissions, opts.avatarUrl, { bot: true }),
+  });
+  at.addGrant({
+    roomJoin: true,
+    room: opts.room,
+    canSubscribe: false,
+    canPublishData: false,
+    canUpdateOwnMetadata: false,
+    ...botPublishGrant(opts.permissions, opts.serverMuted),
   });
   return at.toJwt();
 }

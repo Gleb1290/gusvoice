@@ -349,6 +349,14 @@ export function relayFedTyping(shadowId: string, dmId: string, action: string | 
 }
 
 /**
+ * Боты (#229, `sendChatAction`): «печатает» бота в беседе — тем же путём, что у человека без своих соединений (участник
+ * беседы, блокировка, показ беседы, предел `typing:<id>`).
+ */
+export function relayBotTyping(botId: string, dmId: string): Promise<void> {
+  return relayFedTyping(botId, dmId, undefined);
+}
+
+/**
  * Снять подписку на сервер у тех локальных соединений, чей владелец больше не участник (#91).
  *
  * Подписка выдавалась один раз и не перепроверялась, поэтому кикнутый продолжал получать поток

@@ -1,9 +1,18 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
 import { Goose, type GoosePose } from './Goose';
-import { runSplashFlow, type SplashDeps, type SplashUpdate, type SplashView } from '../splashFlow';
-import { endShareBeforeExit, markJustUpdated, unmarkJustUpdated } from '../updater';
+import {
+  initialSplashView,
+  runSplashFlow,
+  splashIntent,
+  type SplashDeps,
+  type SplashIntent,
+  type SplashUpdate,
+  type SplashView,
+} from '../splashFlow';
+import { endShareBeforeExit, markJustUpdated, peekSplashMarkers, takeSplashMarkers, unmarkJustUpdated } from '../updater';
 import { isDesktop } from '../hotkeys';
+import { appVersion } from '../desktopWindow';
 
 /**
  * Заставка при запуске десктопа (как у Discord, 15.10): окно `index.html?window=splash` 300×340
@@ -14,9 +23,9 @@ import { isDesktop } from '../hotkeys';
  * Поза гуся меняется по этапу; только готовые картинки маскота (`Goose`).
  */
 export const useSplash = create<SplashView & { set: (v: SplashView) => void }>((set) => ({
-  stage: 'checking',
-  version: null,
-  progress: null,
+  // Первый кадр — по меткам запуска (26.10): перезапуск ради обновления сразу «Скачиваю…», первый запуск
+  // новой версии — «Запускаю…», без мелькания «Проверяю обновления…».
+  ...initialSplashView(peekSplashMarkers(), Date.now()),
   set: (v) => set(v),
 }));
 
@@ -43,8 +52,15 @@ async function checkFeed(): Promise<SplashUpdate | null> {
   return update?.available ? update : null;
 }
 
+/** Разметка запуска: метки снимаются сразу (один раз на запуск), версия — установленная сборка. */
+async function launchIntent(): Promise<SplashIntent> {
+  const markers = takeSplashMarkers();
+  return splashIntent(markers, await appVersion(), Date.now());
+}
+
 function tauriDeps(): SplashDeps {
   return {
+    intent: launchIntent,
     check: checkFeed,
     now: () => performance.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),

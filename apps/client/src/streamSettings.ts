@@ -324,6 +324,16 @@ export function captureOptions(s: StreamSettings): ScreenShareCaptureOptions {
 }
 
 /**
+ * `getDisplayMedia` для показа ИЗ БРАУЗЕРА (#237): те же ограничения + `surfaceSwitching: 'include'` —
+ * Chrome/Edge рисуют свою кнопку «Показать эту вкладку» (подмена вкладки под тем же треком, без нашего
+ * UI). Только для вкладок; окна и экраны меняет наша кнопка «Сменить окно или экран».
+ * Отдельная функция, а не поле в `captureOptions`: та же форма уходит и в нативный путь/тесты.
+ */
+export function webCaptureOptions(s: StreamSettings): ScreenShareCaptureOptions {
+  return { ...captureOptions(s), surfaceSwitching: 'include' };
+}
+
+/**
  * Настройки показа ЭКРАНА из браузера (06.10, #207): VP9 → H.264.
  *
  * 🔴 SDK 2.20.0 для VP9-показа экрана ПЕРЕБИВАЕТ наше (`LocalParticipant.ts`, «vp9 svc with screenshare»):

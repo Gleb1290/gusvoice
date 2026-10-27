@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
-import { categories, categoryOverwrites, channelOverwrites, channels } from '../db/schema.js';
+import { categories, categoryOverwrites, channelOverwrites, channels, users } from '../db/schema.js';
 import { getChannelAudience, getChannelPermissions, getMemberContext } from '../permissions.js';
 import { publishToChannel, publishToServer } from '../realtime.js';
 import { serializeCategory, serializeChannel } from '../serialize.js';
@@ -39,6 +39,9 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
     if (userId) {
       const target = await getMemberContext(channel.serverId, userId);
       if (!target) return reply.code(400).send({ error: 'пользователь не состоит на сервере' });
+      // Бот (#231) в голос не ходит (до этапа 4 у него нет токена LiveKit) — «генералом» звуков канала быть не может.
+      const [u] = await db.select({ bot: users.bot }).from(users).where(eq(users.id, userId)).limit(1);
+      if (u?.bot) return reply.code(400).send({ error: 'бот не может быть генералом канала' });
     }
     await db.update(channels).set({ generalUserId: userId }).where(eq(channels.id, channelId));
     await writeAudit(channel.serverId, req.user!.sub, userId ? 'channel.general.set' : 'channel.general.clear', {

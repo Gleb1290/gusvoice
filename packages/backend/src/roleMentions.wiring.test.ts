@@ -6,7 +6,7 @@ import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
 
 const read = (file: string) => readFileSync(new URL(`./${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-const messageSource = read('routes/messages.ts');
+const messageSource = read('channelMessages.ts');
 const serializeSource = read('serialize.ts');
 const compact = (node: ts.Node) => node.getText().replace(/\s+/g, '');
 function nodes<T extends ts.Node>(root: ts.Node, predicate: (node: ts.Node) => node is T): T[] {
@@ -25,7 +25,8 @@ function route(file: ts.SourceFile, method: string, path: string) {
 function post(raw = messageSource) {
   // AST всего файла: не импортируем маршрут с базой/хранилищем и не исполняем вырезанное тело.
   const file = ts.createSourceFile('messages.ts', raw, ts.ScriptTarget.Latest, true);
-  const handler = route(file, 'post', '/channels/:id/messages');
+  const handler = nodes(file, ts.isFunctionDeclaration).find(n => n.name?.text === 'postChannelMessage');
+  assert.ok(handler?.body);
   const calls = nodes(handler, ts.isCallExpression);
   const resolves = calls.filter(n => n.expression.getText() === 'resolveRoleMentions'); assert.equal(resolves.length, 1);
   assert.deepEqual(resolves[0].arguments.map(compact), ['content', 'channel.serverId', 'perms.permissions'],
@@ -45,15 +46,20 @@ function post(raw = messageSource) {
 }
 function patch(raw = messageSource) {
   const file = ts.createSourceFile('messages.ts', raw, ts.ScriptTarget.Latest, true);
-  const handler = route(file, 'patch', '/channels/:id/messages/:messageId');
+  const handler = nodes(file, ts.isFunctionDeclaration).find(n => n.name?.text === 'editChannelMessage');
+  assert.ok(handler?.body);
   const calls = nodes(handler, ts.isCallExpression);
   assert.equal(calls.filter(n => ['resolveRoleMentions', 'resolveMentionedMembers', 'sendPushToUsers'].includes(n.expression.getText())).length, 0,
     'R266 PATCH: правка не пересчитывает роли и не будит адресатов');
-  const updates = calls.filter(n => compact(n.expression) === 'db.update(messages).set'); assert.equal(updates.length, 1);
-  const fields = updates[0].arguments[0]; assert.ok(fields && ts.isObjectLiteralExpression(fields));
-  assert.equal(fields.properties.some(n => n.name?.getText() === 'mentionRoles' || ts.isSpreadAssignment(n)), false,
-    'R266 PATCH: сохранённые упоминания не меняются даже через spread');
-  assert.ok(fields.properties.some(n => n.name?.getText() === 'content'), 'обычный текст действительно редактируется');
+  const updates = calls.filter(n => compact(n.expression) === 'db.update(messages).set'); assert.equal(updates.length, 2);
+  let updatesContent = false;
+  for (const update of updates) {
+    const fields = update.arguments[0]; assert.ok(fields && ts.isObjectLiteralExpression(fields));
+    assert.equal(fields.properties.some(n => n.name?.getText() === 'mentionRoles' || ts.isSpreadAssignment(n)), false,
+      'R266 PATCH: сохранённые упоминания не меняются даже через spread');
+    updatesContent ||= fields.properties.some(n => n.name?.getText() === 'content');
+  }
+  assert.ok(updatesContent, 'обычный текст действительно редактируется');
 }
 
 // Класс ошибки: проверенные id доходят до пуша, но теряются при записи; после перезагрузки исчезает бейдж.
@@ -65,7 +71,7 @@ it('R266 контрфакты потери записи POST и пересчёт
   assert.equal(messageSource.split(anchor).length - 1, 1); post();
   assert.throws(() => post(messageSource.replace(anchor, '')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R266 POST: разрешённые роли сохраняются'));
-  const update = 'db.update(messages).set({ content, editedAt: new Date() })';
+  const update = 'db.update(messages).set({ content, editedAt: new Date(), keyboard: nextKeyboard })';
   assert.equal(messageSource.split(update).length - 1, 1); patch();
   assert.throws(() => patch(messageSource.replace(update, 'db.update(messages).set({ content, mentionRoles: [], editedAt: new Date() })')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R266 PATCH: сохранённые упоминания не меняются'));

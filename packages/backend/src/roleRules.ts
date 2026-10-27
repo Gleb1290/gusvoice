@@ -117,3 +117,21 @@ export function assignRoleBlock(p: {
   if (!selfAssign && p.rolePosition >= p.actorHighest) return 'нельзя выдать роль своего уровня или выше';
   return null;
 }
+
+// ─── Боты на серверах (#231) ───
+
+/** Отказ: боту `ADMINISTRATOR` не выдаётся никому (решение владельца 26.10). */
+export const BOT_ADMIN_FORBIDDEN = 'Боту нельзя выдать права администратора';
+
+/** Просит ли маска `ADMINISTRATOR` (окно «Добавить бота», правка управляемой роли) — тогда 400 `BOT_ADMIN_FORBIDDEN`. */
+export function botAdminRequested(requested: bigint): boolean {
+  return (requested & Permission.ADMINISTRATOR) !== 0n;
+}
+
+/**
+ * Права управляемой роли бота при добавлении: не больше прав добавляющего (`clampGrant`, защищённые биты — только у
+ * владельца) и без `ADMINISTRATOR` — даже у владельца.
+ */
+export function botGrant(requested: bigint, actor: bigint, owner: boolean): bigint {
+  return clampGrant(requested, actor, owner) & ~Permission.ADMINISTRATOR;
+}

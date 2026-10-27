@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import Fastify from 'fastify';
 import ts from 'typescript';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
+import { testPushDevice } from './pushDevice.harness.js';
 
 process.env.NTFY_BASE_URL = 'https://ntfy.example.test';
 process.env.NTFY_TOKEN = 'integration-token';
@@ -17,6 +18,7 @@ let tokenFor: (id: string) => string;
 let redisPub: typeof import('../src/realtime.js').redisPub;
 const posted: { url: string; body: unknown }[] = [];
 const originalFetch = globalThis.fetch;
+let pushReceiver: ReturnType<typeof testPushDevice>;
 const authHeader = (id: string) => ({ authorization: `Bearer ${tokenFor(id)}` });
 
 type RecordedPush = Record<string, unknown>;
@@ -109,6 +111,7 @@ before(async () => {
 });
 
 beforeEach(async () => {
+  pushReceiver = testPushDevice();
   await truncateAll(t.raw);
   await t.raw.exec(`
     INSERT INTO users (id, username, display_name, password_hash) VALUES
@@ -126,9 +129,11 @@ beforeEach(async () => {
       ('push-a','recipient-a','phone-a','https://ntfy.example.test/recipient-a','android','read1'),
       ('push-b','recipient-b','phone-b','https://ntfy.example.test/recipient-b','android','read1');
   `);
+  // Проверки личных подписей относятся к устройству с шифрованием, не к keyless-заглушке.
+  await t.raw.query('UPDATE push_devices SET p256dh=$1, auth=$2', [pushReceiver.public.p256dh, pushReceiver.public.auth]);
   posted.length = 0;
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    posted.push({ url: String(url), body: typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body });
+    posted.push({ url: String(url), body: pushReceiver.decode(init?.body) });
     return new Response(null, { status: 200 });
   }) as typeof fetch;
 });

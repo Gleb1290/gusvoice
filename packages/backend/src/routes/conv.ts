@@ -2,6 +2,7 @@ import { CONV_GEOLIVE_FEDERATED_ERROR, CONV_POLL_FEDERATED_ERROR, CONV_POLL_LIMI
 import type { ConvGone, ConvMessage } from '@gusvoice/shared';
 import { ALBUM_ITEM_PEER_OLD_ERROR, type ConvAlbumItemDeleteResponse } from '@gusvoice/shared';
 import { isOnceMedia, ONCE_MEDIA_REFUSED } from '@gusvoice/shared';
+import { BOT_UNAVAILABLE_CODE, BOT_UNAVAILABLE_ERRORS, botUnavailableFor } from '@gusvoice/shared';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -13,6 +14,8 @@ import { catalogSticker } from '../stickerCatalog.js';
 import { dmDeliveryPlan } from '../blockRules.js';
 import { blockedBy, isBlockedBy } from '../blocks.js';
 import {
+  botConv,
+  queueBotChatMember,
   createDirect,
   resolveConvMedia,
   convHasRemote,
@@ -52,6 +55,8 @@ import {
   listenVoice,
   spendVoiceOnce,
   openOnceMedia,
+  formerLeftAt,
+  reactionAllowed,
   reactMessage,
   reorderConversationPins,
   revealDirect,
@@ -75,7 +80,7 @@ const geoLiveActions = () => import('../convGeoLives.js');
 
 import { hideStrangerBar, reportConversationPeer } from '../dmReports.js';
 import { DM_REPORT_LIMIT, isDmReportReason } from '../strangerRules.js';
-import { createScheduled, deleteScheduled, editScheduled, sendScheduledNow } from '../scheduled.js';
+import { configureScheduledLinkGuard, createScheduled, deleteScheduled, editScheduled, sendScheduledNow } from '../scheduled.js';
 import {
   SCHEDULE_MAX_AHEAD_DAYS,
   SCHEDULED_TEXT_MAX,
@@ -108,7 +113,7 @@ import { publishToUser } from '../realtime.js';
 import { publishDmFolders } from './dmFolders.js';
 import { shareServer } from '../db/peerQueries.js';
 import { canScheduleUntilOnline, readAtFor, readersFor } from '../lastSeen.js';
-import { attachments as attachmentRows, conversationMessages, users } from '../db/schema.js';
+import { attachments as attachmentRows, bots, conversationMessages, users } from '../db/schema.js';
 import { canWriteDm, DM_NEW_LIMIT, DM_PEER_GONE_ERROR, dmOpenRefusal, openDm } from '../dmRules.js';
 import { dmPolicy } from '../instanceSetup.js';
 import { reachableUser } from '../userSearchRules.js';
@@ -239,6 +244,7 @@ async function messagePrivacyRefused(
   me: string,
   access: { kind?: string; saved?: boolean; peerId: string | null } | null,
 ): Promise<boolean> {
+  if (await botSendRefused(reply, me, access)) return true;
   const g = messagePrivacy;
   if (!g || !access || access.kind === 'group' || access.saved || !access.peerId) return false;
   const local = !(await g.allowed(me, access.peerId));
@@ -246,6 +252,31 @@ async function messagePrivacyRefused(
   const remote = !local && g.remoteRefused?.(access.peerId, me) === true && !(await g.wrote(access.peerId, me));
   if (!local && !remote) return false;
   await reply.code(403).send({ error: MESSAGE_PRIVACY_ERROR });
+  return true;
+}
+
+/**
+ * Собеседник 1:1 — бот, и писать ему нельзя (решение владельца 26.10, A): выключен (админом или все боты инстанса) или
+ * приватный, а пишу не владелец → 403 `{ error, code: 'bot_unavailable', reason }` (ответ отправлен — `true`). Гейт на ОТПРАВКЕ,
+ * а не только на открытии беседы: бот мог стать приватным/выключенным уже после неё. Зовётся из `messagePrivacyRefused` —
+ * значит, его проходят все входы отправки: текст, файлы/альбомы и голосовые (`POST /conv/:id/messages`), пересылка В беседу
+ * (`/forward`), отложенные (`/scheduled`, `/scheduled/:sid/send`). Вторая линия — `bots/botUpdates.ts` не пишет боту событий.
+ */
+async function botSendRefused(
+  reply: FastifyReply,
+  me: string,
+  access: { kind?: string; saved?: boolean; peerId: string | null } | null,
+): Promise<boolean> {
+  if (!access || access.kind === 'group' || access.saved || !access.peerId) return false;
+  const [botRow] = await db
+    .select({ disabledAt: bots.disabledAt, public: bots.public, ownerId: bots.ownerId })
+    .from(bots)
+    .where(eq(bots.userId, access.peerId))
+    .limit(1);
+  if (!botRow) return false;
+  const why = botUnavailableFor(botRow, (await botConv()?.enabled()) !== false, me);
+  if (!why) return false;
+  await reply.code(403).send({ error: BOT_UNAVAILABLE_ERRORS[why], code: BOT_UNAVAILABLE_CODE, reason: why });
   return true;
 }
 
@@ -322,6 +353,8 @@ const ONCE_REFUSED_BODY = {
 let fedLinkGuard: ((peerId: string) => Promise<boolean>) | null = null;
 export function configureFedLinkGuard(guard: ((peerId: string) => Promise<boolean>) | null): void {
   fedLinkGuard = guard;
+  // Аудит ЛС #236, п.10: отложенное при срабатывании проверяет связку тем же крючком.
+  configureScheduledLinkGuard(guard);
 }
 
 /**
@@ -389,7 +422,19 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
 
   // 08.10 (`groups3`): `?former=1` — ещё и бывшие группы (только на чтение) отдельным полем `former`.
   const wantsFormer = (q: unknown): boolean => (q as { former?: unknown } | null)?.former === '1';
-  app.get('/conv', async (req) => listConversations(req.user!.sub, wantsGroups(req.query), wantsFormer(req.query)));
+  /*
+   * Аудит ЛС #236, п.13: список бесед и страницы ленты — тяжёлые чтения (сводки, вложения глазами смотрящего), и цикл по ним
+   * ничем не сдерживался. Свои лимиты, щедрые для человека (как `heavyReadBlock`, но отдельные ключи: открытие беседы с
+   * догрузкой страниц не должно отнимать квоту у поиска и списков участников).
+   */
+  const CONV_LIST_MAX = 30;
+  const CONV_HISTORY_MAX = 120;
+  const CONV_READ_WINDOW_S = 10;
+  app.get('/conv', async (req, reply) => {
+    const me = req.user!.sub;
+    if (await limited(reply, await rateHit(`conv-list:${me}`, CONV_LIST_MAX, CONV_READ_WINDOW_S))) return;
+    return listConversations(me, wantsGroups(req.query), wantsFormer(req.query));
+  });
 
   app.get('/conv/sync', async (req) => {
     const q = z
@@ -437,8 +482,16 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (userId === me) return reply.code(400).send({ error: 'cannot DM yourself' });
     const [other] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!other) return reply.code(404).send({ error: 'user not found' });
-    // Строка-автор вебхука (#24) — не человек: беседа с ней ушла бы в пустоту.
-    if (other.bot) return reply.code(403).send({ error: 'Это вебхук — ему нельзя написать' });
+    // Строка-автор вебхука (#24) — не человек: беседа с ней ушла бы в пустоту. Настоящий бот (#229) — запись в `bots`.
+    const [botRow] = other.bot ? await db.select().from(bots).where(eq(bots.userId, userId)).limit(1) : [];
+    if (!botRow) {
+      if (other.bot) return reply.code(403).send({ error: 'Это вебхук — ему нельзя написать' });
+    } else {
+      if (other.deletedAt) return reply.code(404).send({ error: 'user not found' });
+      // Выключен — 403; новый бот приватный: открыть беседу может только владелец, пока тот не включит «Доступен всем».
+      const why = botUnavailableFor(botRow, (await botConv()?.enabled()) !== false, me);
+      if (why) return reply.code(403).send({ error: BOT_UNAVAILABLE_ERRORS[why], code: BOT_UNAVAILABLE_CODE, reason: why });
+    }
     const [meRow] = await db.select({ home: users.homeInstanceId }).from(users).where(eq(users.id, me)).limit(1);
     // Человек другого инстанса: с Э1 — через его дом (`fedDirect`), без флага — прежний отказ (§5.8).
     if (other.homeInstanceId !== null && other.homeUserId && !meRow?.home && fedDirect) {
@@ -450,7 +503,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const opened = await openDm<{ id: string }>(
       {
         findExisting: (a, b) => findDirect(a, b),
-        shareServer: (one, two) => shareServer(one, two),
+        // Бот (#229): общий сервер и политика ЛС инстанса — правила о людях; к боту пускает его `public`/владелец (выше).
+        shareServer: (one, two) => (botRow ? Promise.resolve(true) : shareServer(one, two)),
         initiatorIsSuperAdmin: () => isSuperAdmin(asUserId(me)),
         create: async () => {
           created = await createDirect(me, userId);
@@ -471,6 +525,9 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const revealed = created ? null : await revealDirect(me, opened.row.id);
     if (created) void deliver(created.delivery).catch(() => {});
     if (revealed) void deliver(revealed).catch(() => {});
+    // Бот (#229): человек открыл с ним беседу — событие `my_chat_member` (`member`): и новую, и убранную раньше
+    // («Удалить чат» → «Написать» снова: `revealDirect` вернул её — для бота это новый вход, как в Telegram).
+    if (botRow && (created || revealed)) queueBotChatMember(userId, me, opened.row.id, 'member');
     const list = await listConversations(me);
     const summary = list.conversations.find((c) => c.id === opened.row.id);
     return reply.code(created ? 201 : 200).send(summary ?? { id: opened.row.id });
@@ -533,6 +590,7 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
       .parse(req.query);
     if ([q.before, q.after, q.around, q.date].filter(Boolean).length > 1)
       return reply.code(400).send({ error: 'only one of before/after/around/date' });
+    if (await limited(reply, await rateHit(`conv-history:${me}`, CONV_HISTORY_MAX, CONV_READ_WINDOW_S))) return;
     const before = q.before ? decodeCursor(q.before) : undefined;
     const after = q.after ? decodeCursor(q.after) : undefined;
     if (before === null || after === null) return reply.code(400).send({ error: 'bad cursor' });
@@ -982,7 +1040,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, await rateHit(`conv-forward:${me}`, FORWARD_MAX, FORWARD_WINDOW_S))) return;
 
     const access = await loadAccess(conversationId, me);
-    const source = await loadAccess(body.fromConversationId, me);
+    // Бывший участник группы (аудит ЛС #236, п.9) пересылает из ленты до выхода (`forwardSources` режет по времени выхода).
+    const source = (await loadAccess(body.fromConversationId, me)) ?? (await formerLeftAt(body.fromConversationId, me));
     const [peer] = access?.peerId
       ? await db.select({ deletedAt: users.deletedAt }).from(users).where(eq(users.id, access.peerId)).limit(1)
       : [];
@@ -1077,6 +1136,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
       .object({ emoji: z.string().min(1).max(32), op: z.enum(['add', 'remove']), big: z.boolean().optional() })
       .parse(req.body);
     if (await limited(reply, await rateHit(`conv-react:${me}`, REACT_MAX, WINDOW_S))) return;
+    // Аудит ЛС #236, п.4: реакция — только эмодзи; кастомный — существующий эмодзи сервера. Снимать можно любую уже стоящую.
+    if (op === 'add' && !(await reactionAllowed(emoji))) return reply.code(400).send({ error: 'invalid reaction' });
     const access = await loadAccess(conversationId, me);
     if (!access) return reply.code(404).send({ error: 'not found' });
     if (await fedLinkRefused(reply, access)) return;
@@ -1085,7 +1146,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     for (const uid of access.memberIds) if (uid !== me && (await blockedBy(uid)).has(me)) blockedActor.add(uid);
     const res = await reactMessage(me, access, mid, emoji, op, blockedActor);
     if (res.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
-    await deliver(res.delivery);
+    // Признак реакции (#231) — для `message_reaction` боту беседы; людям событие то же.
+    await deliver(res.delivery ? { ...res.delivery, reaction: { userId: me, emoji, op } } : null);
     // «Большая» реакция — только эффект: соединениям с `bigreact1`, старые получают обычную реакцию выше.
     for (const uid of bigReactionTargets({ big: big === true, op, actorId: me, audience: res.audience })) {
       await publishToUser(uid, { t: 'reaction.big', conversationId, messageId: mid, emoji, userId: me }, { cap: FEATURE_BIGREACT1 }).catch(() => {});
@@ -1685,6 +1747,8 @@ export async function convRoutes(app: FastifyInstance): Promise<void> {
     const hidden = await hideConversation(me, access, body.for === 'both');
     if (hidden.kind === 'not-found') return reply.code(404).send({ error: 'not found' });
     await deliver(hidden.delivery);
+    // Бот (#229): человек удалил беседу с ботом — событие `my_chat_member` (`left`); не бот — функция ничего не делает.
+    if (access.kind === 'direct' && access.peerId) queueBotChatMember(access.peerId, me, conversationId, 'left');
     for (const res of await clearHistory(me, access, body.for, hidden.upToKey)) {
       await deliverMany(res.deliveries);
     }

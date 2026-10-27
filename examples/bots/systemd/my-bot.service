@@ -1,0 +1,46 @@
+# Бот GusVoice как служба systemd на VPS: стартует с машиной, перезапускается при падении.
+#
+# Установка (от root), пример для echo.ts:
+#   useradd --system --home /opt/my-bot --shell /usr/sbin/nologin my-bot
+#   mkdir -p /opt/my-bot /etc/my-bot && cd /opt/my-bot
+#   npm init -y >/dev/null && npm pkg set type=module
+#   npm install @gusvoice/bot@0.1.0 tsx@4.22.4       # точные версии; пока пакет не опубликован — из tarball (packages/bot-sdk/README.md)
+#   cp /путь/к/echo.ts bot.ts && chown -R my-bot: /opt/my-bot
+#   cp docker/bot.env.example /etc/my-bot/env && chmod 600 /etc/my-bot/env && chown root: /etc/my-bot/env
+#   # впишите токен в /etc/my-bot/env, затем:
+#   cp my-bot.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now my-bot
+#   journalctl -u my-bot -f
+#
+# Токен лежит только в EnvironmentFile (читает root, до сброса прав), не в unit-файле и не в репозитории.
+# vps-panel.ts: ему нужны права на `systemctl restart <служба>` — это отдельное правило sudoers (SUDO=1), НЕ запускайте
+# бота от root «чтобы заработало».
+[Unit]
+Description=GusVoice bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=my-bot
+WorkingDirectory=/opt/my-bot
+EnvironmentFile=/etc/my-bot/env
+ExecStart=/opt/my-bot/node_modules/.bin/tsx /opt/my-bot/bot.ts
+Restart=on-failure
+RestartSec=5
+# Токен перевыпущен / бот выключен (401) — SDK завершается с ошибкой; не долбить сервер без конца.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Минимальные права: бот только ходит в сеть.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -149,6 +149,17 @@ export function nativeStreamAudioAvailable(): boolean {
 }
 
 /**
+ * Ручка идущего системного звука показа: `stop` гасит всё, `retarget` переводит захват на другое окно
+ * или экран (#237, «Сменить окно или экран») БЕЗ переопубликации — генератор, `timestamp` и
+ * опубликованная `ScreenShareAudio` (её `sid`, глушение, ползунок у зрителей) остаются теми же.
+ */
+export interface NativeStreamAudioHandle {
+  stop: () => Promise<void>;
+  /** `{ sourceId }` — звук только дерева процессов этого окна; без аргумента — весь системный минус голоса GusVoice. */
+  retarget: (windowSource?: { sourceId: string }) => Promise<void>;
+}
+
+/**
  * Start native capture and publish it as ScreenShareAudio on `room`. Returns a stop function that tears
  * everything down. Throws if unavailable or if Rust refuses to start.
  *
@@ -159,7 +170,7 @@ export function nativeStreamAudioAvailable(): boolean {
  * / `AudioData` lookups below would resolve against the param instead (→ always "WebCodecs unsupported",
  * killing native stream audio for BOTH paths). That regression shipped in v0.5.60.
  */
-export async function startNativeStreamAudio(room: Room, windowSource?: { sourceId: string }): Promise<() => Promise<void>> {
+export async function startNativeStreamAudio(room: Room, windowSource?: { sourceId: string }): Promise<NativeStreamAudioHandle> {
   const core = tauriCore();
   if (!core) throw new Error('Tauri core API недоступен');
   const Generator = (window as unknown as { MediaStreamTrackGenerator?: new (o: { kind: string }) => MediaStreamTrack & { writable: WritableStream } })
@@ -216,7 +227,18 @@ export async function startNativeStreamAudio(room: Room, windowSource?: { source
     red: false,
   });
 
-  return async () => {
+  // Смена цели: ТОТ ЖЕ `channel` и новая цель. Rust сам гасит прошлый захват (`audio_capture::start_stream`),
+  // но pid окна ищет ДО этого — на отказе (окно без процесса) прошлый захват остаётся живым, поэтому
+  // при ошибке вызывающий обязан погасить звук сам (`nativeShareCore.switchTo`).
+  const retarget = async (next?: { sourceId: string }): Promise<void> => {
+    await core.invoke('gv_stream_audio_start', {
+      onAudio: channel,
+      isWindow: !!next,
+      sourceId: next?.sourceId ?? null,
+    });
+  };
+
+  const stop = async () => {
     try {
       await core.invoke('gv_stream_audio_stop');
     } catch {
@@ -238,4 +260,5 @@ export async function startNativeStreamAudio(room: Room, windowSource?: { source
       /* ignore */
     }
   };
+  return { stop, retarget };
 }

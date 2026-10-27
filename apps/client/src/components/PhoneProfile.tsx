@@ -348,7 +348,7 @@ function PhoneProfile(p: PhoneProfileProps) {
               <div className="tgp-row-label">{dmBlocked}</div>
             </div>
           )}
-          {!isSelf && <ProfileEconomy userId={target.userId} name={target.name} />}
+          {!isSelf && !target.bot && <ProfileEconomy userId={target.userId} name={target.name} />}
         </section>
 
         {mediaConv && <SharedMediaPanel convId={mediaConv} scroller={scroller} onLeave={p.onClose} />}

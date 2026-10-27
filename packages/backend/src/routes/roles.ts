@@ -8,7 +8,7 @@ import { db } from '../db/index.js';
 import { memberRoles, roles, serverMembers } from '../db/schema.js';
 import { getMemberContext, highestPosition } from '../permissions.js';
 import { publishToServer } from '../realtime.js';
-import { assignRoleBlock, clampGrant, planReorder, selfAssignBlocked } from '../roleRules.js';
+import { assignRoleBlock, BOT_ADMIN_FORBIDDEN, botAdminRequested, clampGrant, planReorder, selfAssignBlocked } from '../roleRules.js';
 import { serializeRole } from '../serialize.js';
 import { id } from '../util.js';
 
@@ -119,6 +119,11 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     if (body.position !== undefined) patch.position = body.position;
     if (body.mentionable !== undefined) patch.mentionable = body.mentionable;
     if (body.membersCanAssign !== undefined) patch.membersCanAssign = body.membersCanAssign;
+    // Роль бота (#231): `ADMINISTRATOR` боту нельзя никому, и владельцу тоже (решение владельца 26.10) — отказ, а не молчаливый
+    // срез: человек должен видеть, почему галочка не встала.
+    if (role.managedBotId && body.permissions !== undefined && botAdminRequested(permsFromString(body.permissions))) {
+      return reply.code(400).send({ error: BOT_ADMIN_FORBIDDEN });
+    }
     if (body.permissions !== undefined) {
       // ⚠️ Передаём ТЕКУЩУЮ маску роли: защищённые биты обязаны сохраниться как есть, если правит не
       // владелец. Иначе админ, тронувший соседний тумблер, снял бы выданный владельцем MOVE_ANYONE.
@@ -156,6 +161,8 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     // Системная роль гостей (§5.9) — как `@everyone`: удалишь её, и ограничивать гостей станет
     // нечем, а выданные ей переопределения каналов молча перестанут действовать.
     if (role.isGuests) return reply.code(400).send({ error: 'роль «Гости» удалить нельзя' });
+    // Роль бота (#231) уходит вместе с ботом (каскад от его членства).
+    if (role.managedBotId) return reply.code(400).send({ error: 'Роль бота удаляется вместе с ботом' });
     const ctx = await getMemberContext(role.serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
@@ -189,6 +196,8 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
      * Гостю же эта строка не даёт ничего: роль у него и так базовая.
      */
     if (role.isGuests) return reply.code(400).send({ error: 'роль «Гости» выдаётся гостям сама' });
+    // Роль бота (#231) — только у него, выдаётся при добавлении бота.
+    if (role.managedBotId) return reply.code(400).send({ error: 'Роль бота выдаётся только ему' });
 
     const block = assignRoleBlock({
       isManager: has(ctx.serverPermissions, Permission.MANAGE_ROLES),
@@ -228,6 +237,7 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     // Снять «Гостей» тоже нельзя, и по той же причине: у гостя она не строкой, а правилом — снятие
     // выглядело бы как действие, а не меняло бы ничего.
     if (role?.isGuests) return reply.code(400).send({ error: 'роль «Гости» снять нельзя' });
+    if (role?.managedBotId) return reply.code(400).send({ error: 'Роль бота выдаётся только ему' });
     if (role && role.position >= highestPosition(ctx)) {
       return reply.code(403).send({ error: 'нельзя снять роль своего уровня или выше' });
     }

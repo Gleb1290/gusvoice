@@ -15,10 +15,11 @@
  * ⚠️ Считающая часть переехала в `nativeShareCore.ts` (просьба Codex, 2026-08-01): этот файл тянет
  * стор и Tauri, поэтому в Node не грузится и проверить в нём ничего нельзя.
  */
-import { createNativeShareSession } from './nativeShareCore';
+import { createNativeShareSession, type NativeSource, type NativeSwitchAudio, type NativeSwitchResult } from './nativeShareCore';
 import { layersOffPlan } from './layersOff';
-import { setDiagSharing } from './diag';
-import { gvScreenShareStop, onNativeShareEnded, onNativeShareHealed, onNativeShareLayersOff } from './nativeScreenShare';
+import { noteDiagSwitch, setDiagSharing } from './diag';
+import type { NativeStreamAudioHandle } from './nativeStreamAudio';
+import { gvScreenShareStop, gvScreenShareSwitch, onNativeShareEnded, onNativeShareHealed, onNativeShareLayersOff } from './nativeScreenShare';
 import { getStreamSettings, setStreamSettings } from './streamSettings';
 import { playSound } from './sounds';
 import { useStore } from './store';
@@ -56,6 +57,31 @@ onNativeShareLayersOff((reason) => {
 /** Запомнить teardown, вернутый `startNativeStreamAudio` (или `null`, если звук не поднялся). */
 export function setNativeAudioStop(fn: (() => Promise<void>) | null): void {
   session.setAudioStop(fn);
+}
+
+/** Запомнить ручку идущего звука показа целиком — со сменой цели (#237). `null` — звук не поднялся. */
+export function setNativeAudio(handle: NativeStreamAudioHandle | null): void {
+  session.setAudioStop(handle?.stop ?? null, handle?.retarget ?? null);
+}
+
+/** Что сейчас показывает нативный показ; `null` — не идёт или не знаем (#237). */
+export function getNativeSource(): NativeSource | null {
+  return session.getSource();
+}
+
+/**
+ * Сменить окно или экран нативного показа на лету (#237): видео (`gv_screen_share_switch`), потом звук.
+ * Порядок и ошибки — в `nativeShareCore.switchTo`. Отказ видео бросается наружу — показ идёт по-старому.
+ * `audio.wantAudio` — звук нужен (настройка в окне смены); `audio.startAudio` — поднять его, если не шёл.
+ */
+export async function switchNativeShare(
+  next: NativeSource,
+  audio?: NativeSwitchAudio,
+): Promise<NativeSwitchResult> {
+  const r = await session.switchTo(next, (n) => gvScreenShareSwitch(n), audio);
+  // Фаза показа в отчёте диагностики: что именно шло ПОСЛЕ смены (`switched` — сколько раз сменили).
+  if (r.outcome !== 'same') noteDiagSwitch(next.isWindow ? 'window' : 'screen');
+  return r;
 }
 
 export function hasNativeAudio(): boolean {
@@ -123,8 +149,8 @@ function watchHealed(): void {
 }
 
 /** Отметить, что companion-участник поднялся и трансляция пошла. */
-export function markNativeSharing(): void {
-  session.markSharing();
+export function markNativeSharing(source?: NativeSource): void {
+  session.markSharing(source);
   watchSourceEnd();
   watchHealed();
 }

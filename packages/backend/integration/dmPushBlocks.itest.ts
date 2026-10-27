@@ -487,8 +487,8 @@ test('повреждённый сохранённый ключ отправля�
   assert.equal(JSON.parse(String(wire.body)).dmId, 'dm');
 });
 
-test('рассылка шифрует устройство с ключами и сохраняет прежний JSON без ключей', async () => {
-  // Ловит открытый текст на новом устройстве, забытый X-UnifiedPush и преждевременную редактировку legacy-пуша.
+test('R304 рассылка шифрует устройство с ключами и обезличивает JSON устройства без ключей', async () => {
+  // Личные поля проверяются только после расшифровки; keyless не должен узнавать ни текст, ни автора.
   const encrypted = pushKeys();
   await t.raw.exec(`
     INSERT INTO push_devices (id, user_id, device_id, endpoint, platform, p256dh, auth) VALUES
@@ -496,7 +496,7 @@ test('рассылка шифрует устройство с ключами и 
        '${encrypted.public.p256dh}', '${encrypted.public.auth}'),
       ('p2', 'a', 'legacy', 'https://ntfy.example.test/legacy', 'android', null, null)
   `);
-  const payload = { type: 'dm' as const, title: 'Bravo', body: 'секрет', dmId: 'dm' };
+  const payload = { type: 'dm' as const, title: 'Bravo', body: 'секрет', dmId: 'dm', author: 'Bravo', authorId: 'b', avatar: 'https://media.example.test/face.png', group: 'Закрытая группа' };
   await sendPushToUsers(['a'], payload);
   assert.equal(posted.length, 2);
   const secure = posted.find((p) => p.url.endsWith('/encrypted'))!;
@@ -505,7 +505,29 @@ test('рассылка шифрует устройство с ключами и 
   assert.equal(secureHeaders['Content-Encoding'], 'aes128gcm');
   assert.equal(secureHeaders['X-UnifiedPush'], '1');
   assert.deepEqual(JSON.parse(decryptPush(Buffer.from(secure.init.body as Buffer), encrypted.receiver, encrypted.auth).toString()), payload);
-  assert.deepEqual(JSON.parse(String(legacy.init.body)), payload);
+  assert.deepEqual(JSON.parse(String(legacy.init.body)), { type: 'dm', title: 'GusVoice', body: 'Новое сообщение', dmId: 'dm' });
+});
+
+test('R304 звонок на устройство без ключей сохраняет Входящий звонок, но не имя, аватар и группу', async () => {
+  await t.raw.exec("INSERT INTO push_devices (id,user_id,device_id,endpoint,platform,caps) VALUES ('keyless-ring','a','phone','https://ntfy.example.test/keyless-ring','android','read1')");
+  await sendPushToUsers(['a'], { type: 'call', title: 'Секретное имя', body: 'Входящий звонок', dmId: 'dm', callId: 'call',
+    author: 'Секретное имя', authorId: 'b', avatar: 'https://media.example.test/a.png', group: 'Секретная группа' });
+  assert.equal(posted.length, 1);
+  assert.deepEqual(JSON.parse(String(posted[0].init.body)), { type: 'call', title: 'GusVoice', body: 'Входящий звонок', dmId: 'dm', callId: 'call' });
+});
+test('R304 контрфакт выключенной keyless-редакции ловит утечку заголовка, не ошибку шифрования', async () => {
+  await t.raw.exec("INSERT INTO push_devices (id,user_id,device_id,endpoint,platform) VALUES ('keyless-probe','a','phone','https://ntfy.example.test/keyless-probe','android')");
+  const raw = readFileSync(new URL('../src/push.ts', import.meta.url), 'utf8');
+  const probe = async (source: string) => {
+    posted.length = 0; const push = await compilePush(source);
+    await push.sendPushToUsers(['a'], { type: 'dm', title: 'Личное имя', body: 'Личный текст', dmId: 'dm', author: 'Личное имя' });
+    assert.equal(posted.length, 1);
+    assert.equal(JSON.parse(String(posted[0].init.body)).title, 'GusVoice', 'R304 keyless скрывает имя отправителя');
+  };
+  await probe(raw); const from = 'const REDACT_KEYLESS = true;'; assert.equal(raw.split(from).length - 1, 1);
+  await assert.rejects(probe(raw.replace(from, 'const REDACT_KEYLESS = false;')), (e: unknown) => e instanceof assert.AssertionError
+    && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' && e.message.split(/\r?\n/, 1)[0] === 'R304 keyless скрывает имя отправителя'
+    && e.actual === 'Личное имя' && e.expected === 'GusVoice');
 });
 
 test('R112 номер повтора есть только в отправке, не загрязняет очередь и сохраняется без звука', async () => {
@@ -2301,7 +2323,10 @@ test('пересылка сохраняет порядок источника, �
   // Ловит удвоение копий/событий при replay и неправильный маркер created на каждом элементе.
   await t.raw.exec(`INSERT INTO conversation_messages (id, conversation_id, author_id, content, sort_key) VALUES
     ('src-one', 'foreign-dm', 'c', 'first', 8001), ('src-two', 'foreign-dm', 'a', 'second', 8002), ('src-three', 'foreign-dm', 'c', 'third', 8003)`);
-  await t.raw.exec("INSERT INTO push_devices (id, user_id, device_id, endpoint, platform) VALUES ('forward-push', 'b', 'phone', 'https://ntfy.example.test/forward', 'android')");
+  const keys = pushKeys();
+  await t.raw.query(`INSERT INTO push_devices (id, user_id, device_id, endpoint, platform, p256dh, auth)
+    VALUES ('forward-push', 'b', 'phone', 'https://ntfy.example.test/forward', 'android', $1, $2)`,
+  [keys.public.p256dh, keys.public.auth]);
   const body = { clientId: '00000000-0000-4000-8000-000000000502', fromConversationId: 'foreign-dm', messageIds: ['src-three', 'src-one', 'src-two'] };
   const first = await injectFixture({ method: 'POST', url: '/conv/dm/forward', headers: authHeader('a'), payload: body });
   assert.equal(first.statusCode, 201, first.body);
@@ -2329,7 +2354,10 @@ test('пересылка сохраняет порядок источника, �
   };
   for (let i = 0; i < 10 && posted.length === 0; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.equal(posted.length, 1);
-  assert.match(String(posted[0].init.body), /Пересланные сообщения: 3/);
+  // REDACT_KEYLESS скрывает содержимое старому устройству; подпись пачки проверяется в настоящем шифре.
+  assert.equal((posted[0].init.headers as Record<string, string>)['Content-Encoding'], 'aes128gcm');
+  const push = JSON.parse(decryptPush(Buffer.from(posted[0].init.body as Buffer), keys.receiver, keys.auth).toString());
+  assert.equal(push.body, '↪ Пересланные сообщения: 3');
   published.length = 0; posted.length = 0;
   const replay = await injectFixture({ method: 'POST', url: '/conv/dm/forward', headers: authHeader('a'), payload: { ...body, messageIds: ['src-two', 'src-three', 'src-one'] } });
   assert.equal(replay.statusCode, 200, replay.body);
@@ -2814,9 +2842,16 @@ test('мутант фильтра видимости красит пересыл
   const access = await original.loadAccess('dm', 'a'); assert.ok(access);
   const input = { clientId: '00000000-0000-4000-8000-000000000802', fromConversationId: 'foreign-dm', messageIds: ['mut-hidden'], withheld: false };
   assert.equal((await original.forwardMessages('a', access, input)).kind, 'source-missing');
-  const mutant = await mutantConversations((s) => s.replace("found.filter((m) => messageView(m, me) === 'full')", 'found'));
+  const mutant = await mutantConversations((source) => {
+    const anchor = "    .filter((m) => messageView(m, me) === 'full' && inView(m))";
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный фильтр источников пересылки в полном conversations');
+    return source.replace(anchor, '');
+  });
   const wrong = await mutant.forwardMessages('a', access, input);
-  assert.throws(() => assert.equal(wrong.kind, 'source-missing'), assert.AssertionError);
+  assert.throws(() => assert.equal(wrong.kind, 'source-missing', 'скрытый источник не пересылается'), (e: unknown) =>
+    e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
+    && e.message.split(/\r?\n/, 1)[0] === 'скрытый источник не пересылается'
+    && e.actual === 'created' && e.expected === 'source-missing');
 });
 
 test('мутант атомарного запрета пачки красит удаление своего перед чужим', async () => {
@@ -2935,6 +2970,8 @@ test('пересылка расходует общий send и отдельны�
   // Ловит пачку N сообщений, обходящую оба бюджета пакетной отправки и расходов на хранение.
   await t.raw.exec("INSERT INTO conversation_messages (id, conversation_id, author_id, content) VALUES ('rate-source', 'foreign-dm', 'c', 'x')");
   await t.raw.exec("INSERT INTO push_devices (id, user_id, device_id, endpoint, platform) VALUES ('rate-push', 'b', 'phone', 'https://ntfy.example.test/rate', 'android')");
+  const keys = pushKeys();
+  await t.raw.query("UPDATE push_devices SET p256dh=$1,auth=$2 WHERE id='rate-push'", [keys.public.p256dh, keys.public.auth]);
   posted.length = 0;
   const incr = redisPub.incr;
   const hits: string[] = [];
@@ -2945,7 +2982,7 @@ test('пересылка расходует общий send и отдельны�
     assert.equal((await injectFixture({ method: 'POST', url: '/conv/dm/forward', headers: authHeader('a'), payload })).statusCode, 200);
     for (let i = 0; i < 10 && posted.length === 0; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     assert.equal(posted.length, 1);
-    assert.equal(JSON.parse(String(posted[0].init.body)).body, '↪ x');
+    assert.equal(JSON.parse(decryptPush(Buffer.from(posted[0].init.body as Buffer), keys.receiver, keys.auth).toString()).body, '↪ x');
     assert.equal(hits.filter((key) => key === 'rl:send:a').length, 2);
     assert.equal(hits.filter((key) => key === 'rl:conv-forward:a').length, 2);
   } finally { redisPub.incr = incr; }
@@ -3691,11 +3728,20 @@ test('правка прежним текстом и пробелами не ст
   const check = async (mod: typeof actual) => {
     const response = await mod.editMessage('a', access, result.row.id, 'контрфакт');
     assert.equal(response.kind, 'ok');
-    if (response.kind === 'ok') assert.equal(response.delivery, null, 'неизменённая правка не создаёт delivery');
+    if (response.kind === 'ok') assert.equal(response.delivery === null, true, 'неизменённая правка не создаёт delivery');
   };
   await check(actual);
-  const bad = await mutantConversations(source => source.replace("    if (content === m.content) return { kind: 'ok', row: m, delivery: null };", ''));
-  await assert.rejects(() => check(bad), assert.AssertionError);
+  const bad = await mutantConversations((source) => {
+    // Простое удаление раннего return теперь создаёт пустой Drizzle set и падает ДО проверки поведения.
+    // Потеря сравнения текста моделирует настоящую лишнюю правку: UPDATE, editedAt, журнал и delivery.
+    const anchor = '    const textChanged = content !== m.content;';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственное сравнение текста правки в полном conversations');
+    return source.replace(anchor, '    const textChanged = true;');
+  });
+  await assert.rejects(() => check(bad), (e: unknown) => e instanceof assert.AssertionError
+    && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
+    && e.message.split(/\r?\n/, 1)[0] === 'неизменённая правка не создаёт delivery'
+    && e.actual === false && e.expected === true);
 });
 
 test('история conv даёт список поставивших по времени с фильтром блока', async () => {

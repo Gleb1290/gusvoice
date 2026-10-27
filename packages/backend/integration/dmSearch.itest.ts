@@ -182,7 +182,7 @@ test('R183 мутант OR имени вместо AND вида обнаружи
 });
 for (const [name, anchor, replacement] of [
   ['message у gone', "return v && !('gone' in v) ? { ...h, message: v } : h;", 'return v ? { ...h, message: v } : h;'],
-  ['full игнорирует hidden_for', "const full = rows.filter((m) => messageView(m, viewerId) === 'full');", "const full = rows.filter((m) => messageView({ ...m, hiddenFor: [] }, viewerId) === 'full');"],
+  ['full игнорирует hidden_for', "const full = rows.filter((m) => messageView(m, viewerId) === 'full' && !beforeJoin(m));", "const full = rows.filter((m) => messageView({ ...m, hiddenFor: [] }, viewerId) === 'full' && !beforeJoin(m));"],
 ] as const) test(`R183 мутант «${name}» обнаруживается реальной сменой видимости до detail`, async () => {
   // Оригинал и мутант получают одинаковый SQL-хит и настоящий новый снимок PGlite, без поддельного gone DTO.
   await searchFixture(); await searchMessage('race-file', 1); await raceScenario();

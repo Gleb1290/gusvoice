@@ -126,15 +126,19 @@ export function visibleSnapshot(map: PresenceMap, visible: Set<string>): Presenc
 
 export function mapParticipant(p: PresenceParticipant, serverMutedIds: Set<string>): VoiceParticipant {
   let avatarUrl: string | null = null;
+  // Бот (#232): метка `bot: true` в метаданных токена (`createBotVoiceToken`) — только строгое `true`; битый JSON — не бот.
+  let bot = false;
   if (p.metadata) {
     try {
-      avatarUrl = (JSON.parse(p.metadata) as { avatarUrl?: string | null }).avatarUrl ?? null;
+      const meta = JSON.parse(p.metadata) as { avatarUrl?: string | null; bot?: unknown } | null;
+      avatarUrl = meta?.avatarUrl ?? null;
+      bot = meta?.bot === true;
     } catch {
       /* ignore non-JSON metadata */
     }
   }
   const mic = p.tracks.find((t) => t.source === TrackSource.MICROPHONE);
-  return {
+  const vp: VoiceParticipant = {
     userId: p.identity,
     displayName: p.name || p.identity,
     avatarUrl,
@@ -149,6 +153,9 @@ export function mapParticipant(p: PresenceParticipant, serverMutedIds: Set<strin
     screensharing: p.tracks.some((t) => t.source === TrackSource.SCREEN_SHARE),
     camera: p.tracks.some((t) => t.source === TrackSource.CAMERA),
   };
+  // Поле только у ботов (добавление): у людей объект прежний. Для бота `muted` = «ничего не играет» (нет дорожки / приглушена).
+  if (bot) vp.bot = true;
+  return vp;
 }
 
 /**

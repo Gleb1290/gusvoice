@@ -3,7 +3,12 @@ import {
   AVATAR_RENTAL_MAX_DAYS,
   AVATAR_RENTAL_MAX_DAYS_LIMIT,
   AVATAR_RENTAL_MAX_DAYS_MIN,
+  BOT_PER_USER_LIMIT_MAX,
+  botsEnabled,
   pluralDays,
+  type AdminBotInfo,
+  type BotCreators,
+  type BotSettings,
   type AdminServer,
   type AdminUser,
   type FederationDirectoryView,
@@ -211,6 +216,8 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
           <SmtpTab />
         ) : tab === 'economy' ? (
           <EconomyTab />
+        ) : tab === 'bots' ? (
+          <BotsTab />
         ) : loading ? (
           <div className="muted" role="status">
             Загрузка…
@@ -382,6 +389,301 @@ function SmtpTab() {
  * 🔴 **Цена в МИНУТАХ сидения.** Минуты значат одно и то же на любом сервере, монеты — нет: у
  * каждого своя ставка. Держатель называет цену в человеческом времени, сервер переводит её сам.
  */
+/**
+ * Раздел «Боты» (#229, этап 1 `docs/bots-plan.md`): кто может создавать ботов, лимит на человека, доставка на внутренние
+ * адреса (выкл по умолчанию — защита от SSRF) и все боты инстанса с владельцами: выключить / включить, удалить.
+ * ⚠️ Живёт в этом файле, а не отдельным модулем: тест `AvatarRentalLimit.test.ts` держит закрытый перечень импортов панели.
+ * Старый сервер без ботов отвечает 404 — раздел так и говорит.
+ */
+const BOT_CREATOR_CARDS: { value: BotCreators; title: string; text: string }[] = [
+  { value: 'all', title: 'Все', text: 'Любой человек на этом инстансе может создать себе ботов — в пределах лимита ниже.' },
+  { value: 'approved', title: 'Только одобренные', text: 'Только люди, чей аккаунт одобрил администратор.' },
+  { value: 'admin', title: 'Только администратор', text: 'Создавать ботов можете только вы.' },
+];
+
+function BotsTab() {
+  const [settings, setSettings] = useState<BotSettings | null>(null);
+  const [bots, setBots] = useState<AdminBotInfo[] | null>(null);
+  const [limit, setLimit] = useState('');
+  const [unsupported, setUnsupported] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const gone = (e: unknown) => {
+      if (!alive) return;
+      if ((e as { status?: number } | null)?.status === 404) setUnsupported(true);
+      else toastError(e);
+    };
+    adminApi()
+      .adminBotSettings()
+      .then((r) => {
+        if (!alive) return;
+        setSettings(r);
+        setLimit(String(r.perUserLimit));
+      })
+      .catch(gone);
+    adminApi()
+      .adminBots()
+      .then((r) => {
+        if (alive) setBots(r);
+      })
+      .catch(gone);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function save(patch: Partial<BotSettings>) {
+    setBusy(true);
+    try {
+      const r = await adminApi().adminSetBotSettings(patch);
+      const next = r && typeof r === 'object' && 'creators' in r ? r : settings && { ...settings, ...patch };
+      setSettings(next);
+      if (next) setLimit(String(next.perUserLimit));
+      toast('success', 'Сохранено');
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Главный тумблер «Боты на этом сервере» (владелец 26.10: включается здесь, а не в `.env`). Выключение сразу гасит всех
+   * ботов (токены не принимаются, события не копятся) — при живых ботах спрашивает, фокус на «Отмене». Включение — без вопроса.
+   * Старый сервер без поля `enabled` — как включено (`botsEnabled`).
+   */
+  async function toggleEnabled(on: boolean) {
+    if (!on && bots && bots.length > 0) {
+      const ok = await confirmAction({
+        title: 'Выключить ботов на этом сервере?',
+        body:
+          `Все боты (${bots.length}) сразу перестанут работать: их токены не будут приниматься, события для них не будут ` +
+          'копиться. Сами боты, их настройки и токены сохранятся — включите снова, и они продолжат работу.',
+        tone: 'danger',
+        // Это не удаление — значок предупреждения, а не корзины (`ConfirmHost` по умолчанию у danger рисует корзину).
+        icon: 'alert-circle',
+        confirmLabel: 'Выключить',
+      });
+      if (!ok) return;
+    }
+    await save({ enabled: on });
+  }
+
+  async function toggleInternal(on: boolean) {
+    if (on) {
+      const ok = await confirmAction({
+        title: 'Разрешить доставку на внутренние адреса?',
+        body:
+          'Тогда сервер будет слать события ботов и на адреса вашей локальной сети и самого сервера. Владелец бота сможет ' +
+          'так достучаться до внутренних служб, которые снаружи закрыты (атака SSRF). Включайте, только если всем ' +
+          'создателям ботов доверяете как себе.',
+        tone: 'danger',
+        // Риск безопасности, а не удаление — щит, а не корзина.
+        icon: 'shield',
+        confirmLabel: 'Разрешить',
+      });
+      if (!ok) return;
+    }
+    await save({ allowInternalWebhooks: on });
+  }
+
+  async function setDisabled(b: AdminBotInfo, disabled: boolean) {
+    if (disabled) {
+      const ok = await confirmAction({
+        title: `Выключить бота @${b.username}?`,
+        body: 'Его токен перестанет приниматься, пока вы не включите бота обратно. Владелец увидит пометку «Выключен администратором».',
+        confirmLabel: 'Выключить',
+      });
+      if (!ok) return;
+    }
+    try {
+      await adminApi().adminSetBotDisabled(b.id, disabled);
+      const at = disabled ? new Date().toISOString() : null;
+      setBots((list) => list && list.map((x) => (x.id === b.id ? { ...x, disabledAt: at } : x)));
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function remove(b: AdminBotInfo) {
+    const ok = await confirmAction({
+      title: `Удалить бота @${b.username}?`,
+      body: 'Бот исчезнет у владельца, его токен погаснет. Сообщения, которые он уже написал, останутся в беседах.',
+      tone: 'danger',
+      confirmLabel: 'Удалить бота',
+    });
+    if (!ok) return;
+    try {
+      await adminApi().adminDeleteBot(b.id);
+      setBots((list) => list && list.filter((x) => x.id !== b.id));
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  if (unsupported) {
+    return (
+      <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-bots">
+        <div className="muted">Этот сервер пока не поддерживает ботов — их добавят с обновлением сервера.</div>
+      </div>
+    );
+  }
+
+  const limitNum = /^\d+$/.test(limit.trim()) ? Number(limit.trim()) : NaN;
+  const limitOk = Number.isInteger(limitNum) && limitNum >= 0 && limitNum <= BOT_PER_USER_LIMIT_MAX;
+  // Пока настройка грузится — как включено (таблица ботов не пишет «не работает» раньше времени).
+  const on = settings ? botsEnabled(settings) : true;
+
+  return (
+    <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-bots">
+      {!settings ? (
+        <div className="muted" role="status">
+          Загрузка…
+        </div>
+      ) : (
+        <div className="smtp-form">
+          <div className="admin-bot-toggle admin-bots-main">
+            <span className="admin-bot-toggle-text">
+              <span id="admin-bots-enabled" className="admin-bots-main-title">
+                Боты на этом сервере
+              </span>
+              <span className="muted">
+                {on
+                  ? 'Включены: люди создают ботов по правилам ниже, боты получают сообщения и отвечают. Выключение сразу гасит всех ботов — токены перестают приниматься, события не копятся.'
+                  : 'Выключены: токены ботов не принимаются, события для них не копятся, создать бота нельзя. Включается только здесь — в файле .env ничего править не нужно.'}
+              </span>
+            </span>
+            <Toggle checked={on} disabled={busy} labelledBy="admin-bots-enabled" onChange={(v) => void toggleEnabled(v)} />
+          </div>
+          <hr className="smtp-sep" />
+          <div className={`admin-bots-rest${on ? '' : ' admin-bots-off'}`} aria-disabled={on ? undefined : true}>
+          <div className="field">
+            <span>Кто может создавать ботов</span>
+          </div>
+          <div className="reg-policy" role="radiogroup" aria-label="Кто может создавать ботов">
+            {BOT_CREATOR_CARDS.map((c) => (
+              <label key={c.value} className={`reg-card${settings.creators === c.value ? ' selected' : ''}`}>
+                <input
+                  type="radio"
+                  name="bot-creators"
+                  value={c.value}
+                  checked={settings.creators === c.value}
+                  disabled={busy || !on}
+                  onChange={() => void save({ creators: c.value })}
+                />
+                <span className="reg-card-dot" aria-hidden="true" />
+                <span className="reg-card-body">
+                  <span className="reg-card-title">{c.title}</span>
+                  <span className="reg-card-text">{c.text}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          <hr className="smtp-sep" />
+          <label className="field">
+            <span>Сколько ботов может быть у одного человека (до {BOT_PER_USER_LIMIT_MAX})</span>
+            <input
+              inputMode="numeric"
+              value={limit}
+              disabled={!on}
+              onChange={(e) => setLimit(e.target.value)}
+              aria-invalid={!limitOk || undefined}
+            />
+          </label>
+          {!limitOk && <div className="error">Целое число от 0 до {BOT_PER_USER_LIMIT_MAX}</div>}
+          <div className="muted" style={{ fontSize: 12 }}>
+            Вас как администратора лимит не ограничивает. 0 — новых ботов никто, кроме вас, не создаст.
+          </div>
+          <div className="smtp-actions">
+            <button
+              type="button"
+              className="auth-cta"
+              disabled={busy || !on || !limitOk || limitNum === settings.perUserLimit}
+              onClick={() => void save({ perUserLimit: limitNum })}
+            >
+              Сохранить лимит
+            </button>
+          </div>
+          <hr className="smtp-sep" />
+          <div className="admin-bot-toggle">
+            <span className="admin-bot-toggle-text">
+              <span id="admin-bots-internal">Разрешить доставку на внутренние адреса</span>
+              <span className="muted">
+                Обычно выключено. Включённая доставка пускает события ботов на адреса локальной сети — владелец бота
+                сможет достучаться до закрытых служб в ней (атака SSRF). Сам сервер (127.0.0.1, ::1) закрыт всегда.
+              </span>
+            </span>
+            <Toggle
+              checked={settings.allowInternalWebhooks}
+              disabled={busy || !on}
+              labelledBy="admin-bots-internal"
+              onChange={(v) => void toggleInternal(v)}
+            />
+          </div>
+          </div>
+        </div>
+      )}
+
+      <div className="cat-name admin-bots-title">Все боты{bots ? ` (${bots.length})` : ''}</div>
+      {!bots ? (
+        <div className="muted" role="status">
+          Загрузка…
+        </div>
+      ) : (
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>Бот и владелец</th>
+              <th>Кто пишет</th>
+              <th>Состояние</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {bots.map((b) => (
+              <tr key={b.id}>
+                <td className="cell-name">
+                  {b.displayName || b.username} <span className="muted">@{b.username}</span>
+                  <div className="muted admin-bot-owner">владелец @{b.owner.username}</div>
+                </td>
+                <td data-label="Кто пишет">{b.public ? 'Все' : 'Только владелец'}</td>
+                <td data-label="Состояние">
+                  {b.disabledAt ? (
+                    <span className="error">Выключен</span>
+                  ) : !on ? (
+                    <span className="muted">Не работает: боты выключены</span>
+                  ) : b.webhook?.disabledAt ? (
+                    <span className="muted">Доставка выключена после сбоев</span>
+                  ) : (
+                    'Работает'
+                  )}
+                </td>
+                <td className="cell-act">
+                  <button type="button" className="link" onClick={() => void setDisabled(b, !b.disabledAt)}>
+                    {b.disabledAt ? 'Включить' : 'Выключить'}
+                  </button>{' '}
+                  <button type="button" className="link admin-del" onClick={() => void remove(b)} title="Удалить бота">
+                    Удалить
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {bots.length === 0 && (
+              <tr>
+                <td colSpan={4} className="muted">
+                  Ботов на инстансе пока нет.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function EconomyTab() {
   const [minutes, setMinutes] = useState('');
   const [rentalDays, setRentalDays] = useState(String(AVATAR_RENTAL_MAX_DAYS));

@@ -7,6 +7,7 @@ import { useStore } from '../store';
 import { Avatar } from './Avatar';
 import { Icon } from './Icon';
 import { useUserMenu, type UserMenuTarget } from './UserContextMenu';
+import { botsAfterHumans, isVoiceBot, showDeafened, showMicOff } from '../voiceRules';
 
 export function avatarFromMetadata(metadata?: string): string | null {
   if (!metadata) return null;
@@ -75,6 +76,7 @@ function ParticipantRow({
   const serverMuted = useStore(
     (s) => (channelId ? s.presence[channelId]?.find((x) => x.userId === p.identity)?.serverMuted : false) ?? false,
   );
+  const isBot = useStore((s) => isVoiceBot(p.identity, channelId ? s.presence[channelId] : undefined, p.metadata));
   const voiceNameOf = useVoiceName();
 
   // Имя в токене LiveKit вшито на 4 часа, поэтому ник подставляем из ростера на отрисовке (#73).
@@ -86,6 +88,7 @@ function ParticipantRow({
     participant: p,
     voiceChannelId: channelId,
     serverMuted,
+    bot: isBot || undefined,
   };
 
   // A deafened member also has their mic off, so show just the deafen badge (it implies muted).
@@ -98,6 +101,12 @@ function ParticipantRow({
       <span className="vp-name">
         {name}
         {p.isLocal ? ' (вы)' : ''}
+        {/* Текст значка — как `botRules.BOT_TAG_TEXT` (импорт не тянем: проверка держит закрытый перечень импортов). */}
+        {isBot && (
+          <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+            БОТ
+          </span>
+        )}
       </span>
       <span className="vp-icons">
         {screenSharing ? (
@@ -105,11 +114,11 @@ function ParticipantRow({
             <Icon name="screen-share" size={15} />
           </span>
         ) : null}
-        {deafened ? (
+        {showDeafened(isBot, deafened) ? (
           <span className="vp-flag off" title="Звук выключен (деафен)">
             <Icon name="headphones-off" size={15} />
           </span>
-        ) : micMuted ? (
+        ) : showMicOff(isBot, micMuted, serverMuted) ? (
           <span className="vp-flag off" title="Микрофон выключен">
             <Icon name="mic-off" size={15} />
           </span>
@@ -133,16 +142,18 @@ export function VoiceParticipants() {
   const participants = useParticipants();
   const channelId = useStore((s) => s.voice?.channelId ?? null);
   const { open, menu } = useUserMenu();
+  const channelPresence = useStore((s) => (channelId ? s.presence[channelId] : undefined));
   return (
     <>
       <ul className="voice-participants">
         {/* Native screen-share companions ("<id>#screen") are publish-only ghosts — keep them out of
             the participant list (their stream still renders on the stage under the owner's name). */}
-        {participants
-          .filter((p) => !p.identity.endsWith('#screen'))
-          .map((p) => (
-            <ParticipantRow key={p.sid || p.identity} p={p} channelId={channelId} openMenu={open} />
-          ))}
+        {botsAfterHumans(
+          participants.filter((p) => !p.identity.endsWith('#screen')),
+          (p) => isVoiceBot(p.identity, channelPresence, p.metadata),
+        ).map((p) => (
+          <ParticipantRow key={p.sid || p.identity} p={p} channelId={channelId} openMenu={open} />
+        ))}
       </ul>
       {menu}
     </>

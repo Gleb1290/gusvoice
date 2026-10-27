@@ -24,6 +24,16 @@ function entry(action: AuditAction, data: Record<string, unknown> = {}, target?:
 const ALL: AuditAction[] = [...AUDIT_ACTIONS];
 
 describe('журнал действий', () => {
+  it('R303 бот в аудите назван по нику, старые записи без ника не оставляют сырых кодов или лишних пробелов', () => {
+    for (const [action, named, anonymous] of [
+      ['bot.add', 'добавил бота @weatherbot', 'добавил бота'],
+      ['bot.remove', 'убрал бота @weatherbot', 'убрал бота'],
+      ['bot.update', 'изменил доступ бота @weatherbot к сообщениям', 'изменил доступ бота к сообщениям'],
+    ] as const) {
+      assert.equal(describeAudit(entry(action, { username: 'weatherbot' })), named);
+      assert.equal(describeAudit(entry(action)), anonymous);
+    }
+  });
   it('реестр действий не содержит дублей', () => {
     // Ловит повтор в runtime-массиве: union его схлопнет, а общий тест молча проверит одну ветку дважды.
     assert.equal(new Set(AUDIT_ACTIONS).size, AUDIT_ACTIONS.length);

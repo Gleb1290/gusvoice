@@ -92,8 +92,33 @@ describe('стражи исходников оболочки', () => {
     assert.match(nvidiaEncoder, /output_delay\s*=\s*codec_\.maxFramerate\s*>=\s*30\s*\?\s*1\s*:\s*0/);
   });
 
-  it('dynacast включается именно когда GPU-путь не запланирован', () => {
-    // Ловит инверсию, которая у CPU-пути держит лишние слои, а у GPU-пути пульсирует PLI.
-    assert.match(screenshare, /room_opts\.dynacast\s*=\s*!gpu_planned/);
+  it('dynacast включается только для CPU с несколькими слоями через общее правило', () => {
+    // CPU + один слой даёт чёрное окно; инверсия GPU-пути возвращает пульсацию PLI.
+    // Не ищем старое inline-выражение: важны новое правило И настоящий вызов из start.
+    const production = screenshare.replace(/\r\n/g, '\n').split('\n#[cfg(test)]')[0]!;
+    const callMarker = 'R313 start передаёт gpu_planned и настоящий layers в share_dynacast';
+    const ruleMarker = 'R313 правило dynacast требует CPU и несколько слоёв';
+    function check(source: string) {
+      const code = source.replace(/\/\/[^\n]*/g, '');
+      const start = code.match(/pub async fn start\b[\s\S]*?\n\}/)?.[0] ?? '';
+      const assignments = [...start.matchAll(/\broom_opts\.dynacast\s*=\s*([^;]+);/g)];
+      assert.equal(assignments.length === 1
+        && assignments[0]![1]!.replace(/\s/g, '') === 'share_dynacast(gpu_planned,layers)', true, callMarker);
+      const rule = code.match(/pub fn share_dynacast\s*\([^)]*\)\s*->\s*bool\s*\{([^}]*)\}/)?.[1] ?? '';
+      assert.equal(rule.replace(/\s/g, '') === '!gpu_planned&&layers', true, ruleMarker);
+    }
+    check(production);
+    for (const [from, to, marker] of [
+      ['share_dynacast(gpu_planned, layers)', 'share_dynacast(!gpu_planned, layers)', callMarker],
+      ['share_dynacast(gpu_planned, layers)', 'share_dynacast(gpu_planned, true)', callMarker],
+      ['!gpu_planned && layers', 'gpu_planned && layers', ruleMarker],
+      ['!gpu_planned && layers', '!gpu_planned', ruleMarker],
+      ['!gpu_planned && layers', '!gpu_planned || layers', ruleMarker],
+    ] as const) {
+      assert.equal(production.split(from).length - 1, 1, 'R313 единственный production-якорь контрфакта');
+      assert.throws(() => check(production.replace(from, to)), error => error instanceof assert.AssertionError
+        && error.message.startsWith(marker) && error.operator === 'strictEqual' && error.actual === false && error.expected === true,
+      `R313 контрфакт ${to} падает на адресном контракте`);
+    }
   });
 });

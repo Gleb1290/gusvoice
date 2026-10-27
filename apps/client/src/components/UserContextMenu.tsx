@@ -42,6 +42,8 @@ export type UserMenuTarget = {
   username?: string;
   /** Беседа ЛС, из которой открыт профиль (G29, `media1`): карточка показывает её общие медиа. */
   convId?: string;
+  /** Это бот (#229, `User.bot`): в карточке профиля — значок «БОТ» у имени. */
+  bot?: boolean;
 };
 
 /**
@@ -402,6 +404,11 @@ function ProfileCard({
         <div className="pcard-name-row">
           <span className="pcard-name">{target.name}</span>
           {isSelf && <span className="pcard-badge">это вы</span>}
+          {target.bot && (
+            <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+              БОТ
+            </span>
+          )}
         </div>
         {username && <div className="pcard-handle">@{username}</div>}
         {/* «В сети» / «был(а) вчера в 21:05» (С1, `lastseen1`) — полная форма, как в профиле Telegram Desktop (`OnlineTextFull`). */}
@@ -445,7 +452,7 @@ function ProfileCard({
 
         {/* Экономика — только у ЧУЖОГО профиля: свой баланс и так висит чипом в шапке сервера,
             а «типнуть себе» смысла не имеет (сервер такое и не пропустит). */}
-        {!isSelf && <ProfileEconomy userId={target.userId} name={target.name} />}
+        {!isSelf && !target.bot && <ProfileEconomy userId={target.userId} name={target.name} />}
 
         {joined && (
           <div className="pcard-joined">
@@ -488,7 +495,7 @@ function ProfileCard({
 // ---- the menu --------------------------------------------------------------
 
 export function UserContextMenu({
-  target,
+  target: targetIn,
   pos,
   onClose,
   initialView = 'menu',
@@ -501,6 +508,10 @@ export function UserContextMenu({
   /** Меню «⋮» телефонного профиля (#218): без «Профиль», «Написать в ЛС» и пушей (они — кнопки профиля), с блокировкой. */
   fromProfile?: boolean;
 }) {
+  // Бот в голосе (#232): метка могла не прийти зовущему (меню из ростера) — досматриваем по presence; тогда и значок «БОТ», и
+  // отказ от звонка/тычка/чаевых/покупки те же, что у бота из списка голоса.
+  const botInVoice = useStore((s) => Object.values(s.presence).some((l) => l.some((v) => v.userId === targetIn.userId && v.bot === true)));
+  const target = botInVoice && !targetIn.bot ? { ...targetIn, bot: true } : targetIn;
   const bootstrap = useStore((s) => s.bootstrap);
   const me = useStore((s) => s.user);
   const members = useStore((s) => s.members);
@@ -646,7 +657,8 @@ export function UserContextMenu({
   const perms = bootstrap ? permsFromString(bootstrap.permissions) : 0n;
   const canMute = !isSelf && has(perms, Permission.MUTE_MEMBERS) && !!target.voiceChannelId;
   const canMove = !isSelf && has(perms, Permission.MOVE_MEMBERS) && !!target.voiceChannelId;
-  const canPoke = !isSelf && has(perms, Permission.POKE_MEMBERS) && !!target.voiceChannelId;
+  // Боту не тычут и не покупают тычок/чаевые: сервер ответит 400 (`bots don't accept this`), пункта не показываем.
+  const canPoke = !isSelf && has(perms, Permission.POKE_MEMBERS) && !!target.voiceChannelId && !target.bot;
   /**
    * Цена МЕГА пока и мой баланс — из общего кэша экономики, без своего запроса.
    *
@@ -763,9 +775,9 @@ export function UserContextMenu({
     );
   }
 
-  // Звонок из профиля — общий для карточки и телефонного экрана.
+  // Звонок из профиля — общий для карточки и телефонного экрана. Боту (#229, 26.10) не звонят — как в шапке беседы.
   const profileCall =
-    callsOn && !isSelf
+    callsOn && !isSelf && !target.bot
       ? shownSeen?.canCall === false
         ? // Запрет звонков (`presence4`, п.25): кнопка остаётся, нажатие объясняет (как Telegram), звонка нет.
           () => explainCallPrivacy(target.name)
@@ -778,8 +790,10 @@ export function UserContextMenu({
             })
       : undefined;
   // `presence4`: в сети — строка «в сети», а не «был(а) недавно» из ответа сервера (он считает «недавно» для скрытого времени).
-  const profileLastSeen =
-    shownSeen && online && !isSelf && !shownSeen.online ? { ...shownSeen, online: true, at: null, approx: null } : shownSeen;
+  // Бот (#229, 26.10): «был(а) в сети» у него нет — строки нет (значок «БОТ» у имени уже говорит, кто это).
+  const profileLastSeen = target.bot
+    ? null
+    : shownSeen && online && !isSelf && !shownSeen.online ? { ...shownSeen, online: true, at: null, approx: null } : shownSeen;
 
   if (view === 'profile' && phoneProfile?.isPhone()) {
     return phoneProfile.render({

@@ -9,7 +9,7 @@
     "start": "tsx src/index.ts",
     "bundle": "node build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/presenceRules.test.ts src/presenceSession.test.ts"
+    "test": "tsx --test --test-concurrency=4 src/presenceRules.bot.test.ts src/presenceRules.test.ts src/presenceSession.test.ts"
   },
   "dependencies": {
     "@fastify/websocket": "11.2.0",

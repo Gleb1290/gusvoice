@@ -10,8 +10,11 @@ import { nextStageSpeaker, stageSpeakerRecheckMs, type StageSpeaker } from './st
  * просто продолжает говорить, и новых событий может не прийти.
  *
  * `present` — кто на сцене, БЕЗ меня (себя крупно не выводим). `enabled` — выключено: ничего не считаем, `null`.
+ * `bots` — боты (#232): крупно сами не выходят (ни говорящим, ни запасом «первый на сцене»).
  */
-export function useStageSpeaker(present: readonly string[], enabled: boolean): string | null {
+export function useStageSpeaker(presentAll: readonly string[], enabled: boolean, bots?: ReadonlySet<string>): string | null {
+  // Боты (#232) на сцене «крупно» не участвуют вовсе: ни говорящим, ни запасом «первый на сцене».
+  const present = bots && bots.size > 0 ? presentAll.filter((id) => !bots.has(id)) : presentAll;
   // Строка, а не объект: селектор стора сравнивается по значению, иначе перерисовка на каждый кадр уровня.
   const speakingKey = useStore((s) => {
     if (!enabled) return '';
@@ -37,7 +40,11 @@ export function useStageSpeaker(present: readonly string[], enabled: boolean): s
     const since = sinceRef.current;
     for (const id of [...since.keys()]) if (!speaking.has(id)) since.delete(id);
     for (const id of speaking) if (!since.has(id)) since.set(id, now);
-    const inp = { speakingSince: since, present: presentKey ? presentKey.split(',') : [], now };
+    const inp = {
+      speakingSince: since,
+      present: presentKey ? presentKey.split(',') : [],
+      now,
+    };
     const next = nextStageSpeaker(stateRef.current, inp);
     stateRef.current = next;
     setSpeaker(next.id);

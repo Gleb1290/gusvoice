@@ -9,7 +9,17 @@ import {
   EMOJI_PER_SERVER,
   extractEmojiNames,
   suggestEmojiName,
+  isReactionEmoji,
 } from './emojiRules.js';
+
+describe('R304 реакции — именно эмодзи, не произвольный текст', () => {
+  for (const value of ['👍', '❤', '❤️', '👨‍👩‍👧', '🇷🇺', '1️⃣', '🏳️‍🌈', 'custom:abc']) {
+    it(`принимается целая реакция ${value}`, () => assert.equal(isReactionEmoji(value), true));
+  }
+  for (const value of ['lol', '👍a', 'custom:a b', '', '1']) {
+    it(`отклоняется текст ${JSON.stringify(value)}`, () => assert.equal(isReactionEmoji(value), false));
+  }
+});
 
 /**
  * Правила кастомных эмодзи.

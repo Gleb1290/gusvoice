@@ -34,6 +34,21 @@ export interface ChannelSnapshot {
   participants: VoiceParticipant[];
 }
 
+/**
+ * Срез без ботов и строк вебхуков (`users.bot`): они не люди, монет не получают и гусей не ловят (gitea #231, решение
+ * владельца). 🔴 Убираем ДО `planSamples`, а не после: бот в канале иначе считался бы «компанией» и поднимал бы ставку
+ * людям (`peers`). Пустые каналы выбрасываем — сессии без людей нет.
+ */
+export function withoutBots(snapshots: ChannelSnapshot[], bots: ReadonlySet<string>): ChannelSnapshot[] {
+  if (bots.size === 0) return snapshots;
+  const out: ChannelSnapshot[] = [];
+  for (const c of snapshots) {
+    const humans = c.participants.filter((p) => !bots.has(p.userId));
+    if (humans.length > 0) out.push({ ...c, participants: humans });
+  }
+  return out;
+}
+
 /** Один засчитанный отрезок присутствия одного человека. */
 export interface ActivitySample {
   serverId: string;

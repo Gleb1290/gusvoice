@@ -31,15 +31,16 @@ import { isSuperAdmin, requireAuth } from '../auth.js';
 import { asUserId } from '../superAdminRules.js';
 import { heavyReadBlock, retryMessage } from '../authGuard.js';
 import { publishToServer } from '../realtime.js';
+import { banMember, kickMember, leaveServer, unbanMember } from '../serverMembership.js';
 import { db } from '../db/index.js';
-import { bans, categories, channels, channelSounds, memberRoles, roles, serverEmojis, serverMembers, servers, serverSounds, stickerPacks, stickers, users } from '../db/schema.js';
+import { bans, categories, channels, channelSounds, memberRoles, roles, serverBots, serverEmojis, serverMembers, servers, serverSounds, stickerPacks, stickers, users } from '../db/schema.js';
 import {
   getEveryoneViewableChannels,
   getMemberContext,
   getServerChannelPermissions,
   highestPosition,
 } from '../permissions.js';
-import { serializeCategory, serializeChannel, serializeRole, serializeServer, serializeUserBrief, statusFieldsOf } from '../serialize.js';
+import { isRealBot, serializeCategory, serializeChannel, serializeRole, serializeServer, serializeUserBrief, statusFieldsOf } from '../serialize.js';
 import { statusSeenBy } from '../statusRules.js';
 import { animatedAvatarFor } from '../shopRules.js';
 import { isSupportedImage, putMedia } from '../storage.js';
@@ -365,6 +366,9 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
       .innerJoin(users, eq(serverMembers.userId, users.id))
       .where(eq(serverMembers.serverId, serverId));
     const mr = await db.select().from(memberRoles).where(eq(memberRoles.serverId, serverId));
+    // Боты сервера (#231): строка статуса бота «видит все сообщения / только обращения» — по галочке `read_all`.
+    const botRows = await db.select({ botId: serverBots.botId, readAll: serverBots.readAll }).from(serverBots).where(eq(serverBots.serverId, serverId));
+    const botReadsAll = new Map(botRows.map((b) => [b.botId, b.readAll]));
 
     const rolesByUser = new Map<string, string[]>();
     for (const r of mr) {
@@ -394,79 +398,29 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
         // кеша связок: имя инстанса меняется раз в недели, а ростер собирается постоянно.
         homeInstance: u.homeInstanceId ? instanceLabel(u.homeInstanceId) : null,
         ...statusOfMember(u),
+        // Бот (#231): поле только у ботов — значок «БОТ» и отдельная группа «Боты» в списке участников.
+        ...(isRealBot(u) ? { bot: true as const } : {}),
       },
       nickname: m.nickname,
       roleIds: rolesByUser.get(u.id) ?? [],
       joinedAt: m.joinedAt.toISOString(),
+      ...(isRealBot(u) ? { botReadsAll: botReadsAll.get(u.id) ?? false } : {}),
     }));
   });
 
   // Kick a member (KICK_MEMBERS). Cannot kick the owner or yourself.
   app.delete('/servers/:id/members/:userId', async (req, reply) => {
     const { id: serverId, userId } = z.object({ id: z.string(), userId: z.string() }).parse(req.params);
-    const ctx = await getMemberContext(serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.KICK_MEMBERS)) return reply.code(403).send({ error: 'forbidden' });
-
-    const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
-    if (server?.ownerId === userId) return reply.code(400).send({ error: 'cannot kick the owner' });
-    if (userId === req.user!.sub) return reply.code(400).send({ error: 'cannot kick yourself' });
-
-    // Hierarchy: you can only kick members whose highest role is strictly below yours.
-    const targetCtx = await getMemberContext(serverId, userId);
-    if (targetCtx && highestPosition(targetCtx) >= highestPosition(ctx)) {
-      return reply.code(403).send({ error: 'нельзя кикнуть того, чья роль выше или равна твоей' });
-    }
-
-    const [kicked] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    await db.delete(serverMembers).where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
-    await db.delete(memberRoles).where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
-    await writeAudit(serverId, req.user!.sub, 'member.kick', {
-      targetType: 'member',
-      targetId: userId,
-      data: { username: kicked?.username, displayName: kicked?.displayName },
-    });
-    // Гостя выкинули — его дом обязан узнать СРАЗУ (§5.5, индекс членств). Иначе у человека в
-    // «Где я гость» и в рейле остаётся сервер, откуда его уже убрали, — до суточной сверки.
-    if (kicked) await announceMembership({ guest: kicked, serverId, state: FED_MEMBERSHIP_STATES.removed });
-    // 🔴 Раньше здесь не публиковалось НИЧЕГО (#91): ростер у остальных не обновлялся, а у
-    // исключённого оставалась живая подписка на сервер, по которой он продолжал получать поток до
-    // переподключения. Гейтвей на этом событии снимает подписки тех, кто больше не участник.
-    await publishToServer(serverId, { t: 'server.invalidate', serverId });
+    const res = await kickMember(serverId, req.user!.sub, userId);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
     return reply.code(204).send();
   });
 
   // Покинуть сервер по своей воле (#92). Прав не требует — уйти вправе любой участник.
   app.post('/servers/:id/leave', async (req, reply) => {
     const { id: serverId } = z.object({ id: z.string() }).parse(req.params);
-    const userId = req.user!.sub;
-
-    // ⚠️ Проверяем ЧЛЕНСТВО НАПРЯМУЮ, а не через getMemberContext: тот отдаёт супер-админу
-    // виртуальный контекст на любом сервере, и «выход» превратился бы в no-op с кодом 204.
-    const [member] = await db
-      .select()
-      .from(serverMembers)
-      .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
-      .limit(1);
-    if (!member) return reply.code(404).send({ error: 'not a member' });
-
-    const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
-    // Владельцу уходить некуда: сервер остался бы без хозяина. Тот же гард, что у кика и у
-    // удаления аккаунта.
-    if (server?.ownerId === userId) {
-      return reply.code(400).send({ error: 'владелец не может выйти — передайте владение или удалите сервер' });
-    }
-
-    const [leaving] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    await db.delete(serverMembers).where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
-    await db.delete(memberRoles).where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
-    await writeAudit(serverId, userId, 'member.leave', { targetType: 'member', targetId: userId });
-    // Гость ушёл сам — дому это тем более надо знать: «Где я гость» у него открыт на том же экране,
-    // и список, не меняющийся после выхода, читается как «выход не сработал».
-    if (leaving) await announceMembership({ guest: leaving, serverId, state: FED_MEMBERSHIP_STATES.removed });
-    // Ростер у остальных обновится, а гейтвей на этом событии снимет подписку у ушедшего (#91) —
-    // иначе он продолжал бы получать поток сервера до переподключения.
-    await publishToServer(serverId, { t: 'server.invalidate', serverId });
+    const res = await leaveServer(serverId, req.user!.sub);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
     return reply.code(204).send();
   });
 
@@ -493,39 +447,9 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
           .optional(),
       })
       .parse(req.body ?? {});
-    const ctx = await getMemberContext(serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.BAN_MEMBERS)) return reply.code(403).send({ error: 'forbidden' });
-
-    const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
-    if (server?.ownerId === userId) return reply.code(400).send({ error: 'нельзя забанить владельца' });
-    if (userId === req.user!.sub) return reply.code(400).send({ error: 'нельзя забанить себя' });
-
-    const targetCtx = await getMemberContext(serverId, userId);
-    if (targetCtx && highestPosition(targetCtx) >= highestPosition(ctx)) {
-      return reply.code(403).send({ error: 'нельзя забанить того, чья роль выше или равна твоей' });
-    }
-
-    const [banned] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!banned) return reply.code(404).send({ error: 'пользователь не найден' });
-    const reason = body.reason?.trim() || null;
-    await db
-      .insert(bans)
-      .values({ serverId, userId, reason, bannedBy: req.user!.sub })
-      .onConflictDoUpdate({ target: [bans.serverId, bans.userId], set: { reason, bannedBy: req.user!.sub, createdAt: new Date() } });
-    await db.delete(serverMembers).where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
-    await db.delete(memberRoles).where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
-    await writeAudit(serverId, req.user!.sub, 'member.ban', {
-      targetType: 'member',
-      targetId: userId,
-      data: { username: banned.username, displayName: banned.displayName, reason },
-    });
-    // ⚠️ Причину бана дому НЕ пересказываем: она написана для журнала своего сервера и вполне может
-    // содержать то, чего человеку знать не следует. Дому достаточно, что членства больше нет.
-    await announceMembership({ guest: banned, serverId, state: FED_MEMBERSHIP_STATES.removed });
-    // См. комментарий в кике: без этого забаненный оставался подписанным на поток сервера.
-    await publishToServer(serverId, { t: 'server.invalidate', serverId });
-    await announceMembership({ guest: banned, serverId, state: FED_MEMBERSHIP_STATES.removed });
+    const res = await banMember(serverId, req.user!.sub, userId, body.reason);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
+    const { banned, server, reason } = res;
 
     /**
      * Жалоба держателю инстанса гостя (§5.11).
@@ -577,20 +501,8 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
   // Lift a ban (BAN_MEMBERS).
   app.delete('/servers/:id/bans/:userId', async (req, reply) => {
     const { id: serverId, userId } = z.object({ id: z.string(), userId: z.string() }).parse(req.params);
-    const ctx = await getMemberContext(serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.BAN_MEMBERS)) return reply.code(403).send({ error: 'forbidden' });
-
-    const [unbanned] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    await db.delete(bans).where(and(eq(bans.serverId, serverId), eq(bans.userId, userId)));
-    await writeAudit(serverId, req.user!.sub, 'member.unban', {
-      targetType: 'member',
-      targetId: userId,
-      data: { username: unbanned?.username, displayName: unbanned?.displayName },
-    });
-    // Живую подписку не трогает (человека и так нет на сервере) — но открытый список банов
-    // у модератора иначе остаётся устаревшим до переоткрытия.
-    await publishToServer(serverId, { t: 'server.invalidate', serverId });
+    const res = await unbanMember(serverId, req.user!.sub, userId);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
     return reply.code(204).send();
   });
 
@@ -623,6 +535,8 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     if (!targetCtx) return reply.code(400).send({ error: 'новый владелец должен быть участником сервера' });
 
     const [target] = await db.select().from(users).where(eq(users.id, body.newOwnerId)).limit(1);
+    // Бот владельцем сервера не бывает (#231): у него нет входа людей, сервер остался бы без хозяина.
+    if (target?.bot) return reply.code(400).send({ error: 'бот не может быть владельцем сервера' });
     /**
      * Владельцем сервера может быть только НАШ человек (требование 25, §5.8).
      *

@@ -1,12 +1,12 @@
-import { FED_ERRORS, isAnimatedImage } from '@gusvoice/shared';
+import { FED_ERRORS, groupMuteTarget, isAnimatedImage } from '@gusvoice/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { isSuperAdmin, requireAuth } from '../auth.js';
 import { rateHit, retryMessage } from '../authGuard.js';
 import { isBlockedBy } from '../blocks.js';
-import { addGroupMembers, createGroup, removeGroupMember, updateGroupInfo, type GroupOpResult } from '../convGroups.js';
-import { deliver, findDirect, listConversations, type Delivery } from '../conversations.js';
+import { addGroupMembers, createGroup, removeGroupMember, setGroupHistory, updateGroupInfo, type GroupOpResult } from '../convGroups.js';
+import { deliver, findDirect, listConversations, loadAccess, type Delivery } from '../conversations.js';
 import { db } from '../db/index.js';
 import { shareServer } from '../db/peerQueries.js';
 import { conversations, users } from '../db/schema.js';
@@ -15,7 +15,7 @@ import { GROUP_MEMBER_LIMIT, GROUP_TITLE_MAX, normalizeGroupTitle } from '../gro
 import { requireLocalUser } from '../guestGuard.js';
 import { dmPolicy } from '../instanceSetup.js';
 import { sendPushToUsers } from '../push.js';
-import { isSupportedImage, putMedia } from '../storage.js';
+import { isSupportedImage, putMedia, removeOwnMedia } from '../storage.js';
 import { asUserId } from '../superAdminRules.js';
 import { reachableUser } from '../userSearchRules.js';
 
@@ -100,7 +100,8 @@ async function notInvitable(me: string, ids: readonly string[]): Promise<string[
       if (!fedGroups || !(await fedGroups.invitable(u.homeInstanceId))) out.push(id);
       continue;
     }
-    if (!u || !reachableUser(u) || (await isBlockedBy(id, me))) {
+    // Боты (#229) и авторы вебхуков в группы не зовутся: этап 1 ботов — только беседы 1:1.
+    if (!u || u.bot || !reachableUser(u) || (await isBlockedBy(id, me))) {
       out.push(id);
       continue;
     }
@@ -136,7 +137,12 @@ async function pushAdded(conversationId: string, delivery: Delivery, added: read
   const homes = await db.select({ id: users.id, home: users.homeInstanceId }).from(users).where(inArray(users.id, [...added]));
   const local = added.filter((id) => homes.some((h) => h.id === id && h.home === null));
   if (local.length === 0) return;
-  await sendPushToUsers(local, { type: 'dm', title: c?.title ?? '', body: m?.content ?? '', dmId: conversationId });
+  // Аудит ЛС #236, п.16: заглушка группы (`push_mutes` `group:<id>`) чтится, как у пуша сообщения группы (`pushGroup`).
+  await sendPushToUsers(
+    local,
+    { type: 'dm', title: c?.title ?? '', body: m?.content ?? '', dmId: conversationId },
+    { scope: 'dm_user', targetId: groupMuteTarget(conversationId) },
+  );
 }
 
 export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
@@ -172,6 +178,21 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     return answer(reply, me, res);
   });
 
+  /**
+   * «История для новых» (аудит ЛС #236, п.8): только владелец; `visible` — новые участники увидят сообщения до добавления.
+   * Группа чужого дома — честный отказ (настройку держит хост).
+   */
+  app.put('/conv/:id/group/history', async (req, reply) => {
+    const me = req.user!.sub;
+    const { id } = convParams.parse(req.params);
+    const { visible } = z.object({ visible: z.boolean() }).parse(req.body);
+    if (await limited(reply, me)) return;
+    if (await groupHostOf(id)) return reply.code(403).send({ error: FED_ERRORS.dmGroupHostOnly });
+    const res = await setGroupHistory(me, id, visible);
+    if (res.kind === 'same') return answer(reply, me, { kind: 'ok', conversationId: id, delivery: { conversationId: id, messageId: null, pts: new Map() } });
+    return answer(reply, me, res);
+  });
+
   /** Фото группы (любой участник): картинка, не анимация, до 5 МБ — как аватар человека (`routes/users.ts`). */
   app.post('/conv/:id/group/photo', async (req, reply) => {
     const me = req.user!.sub;
@@ -179,6 +200,10 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
     if (await limited(reply, me)) return;
     // Э7 часть 1: фото группы чужого дома отсюда не меняется (файл пришлось бы везти хосту) — честный отказ.
     if (await groupHostOf(id)) return reply.code(403).send({ error: FED_ERRORS.dmGroupHostOnly });
+    // Аудит ЛС #236, п.5: участие — ДО загрузки. Раньше файл ложился в публичный бакет от любого вошедшего, а отказ
+    // `updateGroupInfo` приходил уже после: бакет копил чужие картинки по адресу группы.
+    const access = await loadAccess(id, me);
+    if (!access || access.kind !== 'group') return reply.code(404).send({ error: 'not found' });
     const file = await req.file();
     if (!file) return reply.code(400).send({ error: 'no file' });
     if (!isSupportedImage(file.mimetype)) return reply.code(400).send({ error: 'unsupported image type (png/jpeg/webp/gif)' });
@@ -193,7 +218,11 @@ export async function convGroupRoutes(app: FastifyInstance): Promise<void> {
       const e = err as { statusCode?: number; message?: string };
       return reply.code(e.statusCode ?? 500).send({ error: e.message ?? 'upload failed' });
     }
+    const [prev] = await db.select({ avatarUrl: conversations.avatarUrl }).from(conversations).where(eq(conversations.id, id)).limit(1);
     const res = await updateGroupInfo(me, id, { avatarUrl: url });
+    // Прежнее фото больше не нужно (аудит #236, п.5); не вышло (вышел, пока грузил) — убрать только что залитое.
+    if (res.kind !== 'ok') void removeOwnMedia(url).catch(() => {});
+    else if (prev?.avatarUrl && prev.avatarUrl !== url) void removeOwnMedia(prev.avatarUrl).catch(() => {});
     if (res.kind === 'same') return reply.code(200).send({ ok: true });
     return answer(reply, me, res);
   });

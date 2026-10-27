@@ -124,6 +124,19 @@ async function fixture(mutation?: Mutation, extra?: 'admin' | 'conv') {
     '@gusvoice/shared': shared, 'drizzle-orm': orm, './db/index.js': { db }, './db/schema.js': schema,
     './pushRules.js': pushRules, './env.js': { env: { ntfy: { baseUrl: '', token: '' } } },
   }, ['./federation/instanceLabels.js', './permissions.js', './pushCrypto.js', './pushDefer.js', './util.js']);
+  const audience = ['manager', 'reader', 'human'];
+  // Этап 3: формат шлюзового события строит настоящий вход; только аудитория и Redis — границы стенда.
+  const channelEvents = load<typeof import('../src/channelEvents.js')>('channelEvents', {
+    './permissions.js': { getChannelAudience: async (channel: string) => {
+      assert.equal(channel, 'text', 'публикация вебхука адресована его каналу');
+      return { serverId: 'server', userIds: audience };
+    } },
+    './realtime.js': { publishToChannel: async (server: string, channel: string, message: shared.GatewayServerMessage, ids: readonly string[]) => {
+      assert.equal(server, 'server'); assert.equal(channel, 'text');
+      assert.deepEqual([...ids], audience, 'рассылка получила вычисленную аудиторию');
+      events.push(message);
+    } },
+  });
   const routes = load<typeof import('../src/routes/webhooks.js')>('routes/webhooks', {
     '@gusvoice/shared': shared, 'node:crypto': crypto, 'drizzle-orm': orm, zod: { z },
     '../db/index.js': { db }, '../db/schema.js': schema, '../webhookRules.js': rules,
@@ -137,7 +150,7 @@ async function fixture(mutation?: Mutation, extra?: 'admin' | 'conv') {
     '../push.js': { resolveRoleMentions: push.resolveRoleMentions, resolveMentionedMembers: async () => [], contentPreview: pushRules.contentPreview,
       sendPushToUsers: async () => { throw new Error('push не должен уходить без получателей'); } },
     '../audit.js': { writeAudit: async () => {} }, '../serialize.js': serialize, '../util.js': { id: crypto.randomUUID },
-    '../realtime.js': { publishToChannel: async (_server: string, _channel: string, message: shared.GatewayServerMessage) => { events.push(message); } },
+    '../channelEvents.js': channelEvents,
     '../storage.js': { isOwnMediaUrl: (url: string) => url.startsWith(OWN), storageConfigured: () => true,
       attachmentBlocked: storageRules.attachmentBlocked,
       putAttachment: async (_id: string, _buffer: Buffer, _mime: string, name: string) => `${OWN}attachments/${name}`,
@@ -198,6 +211,8 @@ async function waitScenario(mutation?: Mutation) {
     status(response, 200, 'R274:wait-возвращает-сообщение');
     assert.equal(response.json().content, 'Второе'); assert.equal(response.json().author.displayName, 'CI');
     assert.equal(response.json().webhookId, 'hook'); assert.equal((await f.rows()).length, 2); assert.equal(f.events.length, 2);
+    assert.deepEqual(plain(f.events[1]), { t: 'message.create', serverId: 'server', channelId: 'text', message: response.json() },
+      'вход событий сохраняет DTO вебхука, включая имя отправки и webhookId');
     const [hook] = await t.db.select().from(schema.webhooks); assert.ok(hook.lastUsedAt);
   }, mutation);
 }

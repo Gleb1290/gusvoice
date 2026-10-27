@@ -24,7 +24,7 @@ import { db } from '../db/index.js';
 import { channels, messages, roles, users, webhooks } from '../db/schema.js';
 import { getChannelPermissions, getServerChannelPermissions } from '../permissions.js';
 import { contentPreview, resolveMentionedMembers, resolveRoleMentions, sendPushToUsers } from '../push.js';
-import { publishToChannel } from '../realtime.js';
+import { publishChannelMessageEvent } from '../channelEvents.js';
 import { serializeMessage, serializeWebhook } from '../serialize.js';
 import { attachmentBlocked, isOwnMediaUrl, isSupportedImage, putAttachment, putMedia, storageConfigured } from '../storage.js';
 import { id } from '../util.js';
@@ -205,7 +205,8 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
         await db.update(webhooks).set({ lastUsedAt: new Date() }).where(eq(webhooks.id, hook.id));
 
         const message = serializeMessage({ ...row, author, replyTo: null });
-        await publishToChannel(channel.serverId, channel.id, { t: 'message.create', channelId: channel.id, serverId: channel.serverId, message });
+        // Вход событий канала (#231): людям `message.create`, ботам «читать всё» — `message` (вебхук ботам в режиме приватности не виден).
+        await publishChannelMessageEvent(channel.serverId, channel.id, { kind: 'created', message }, author.id);
         // Пуш упомянутым — как у обычного сообщения канала (`routes/messages.ts`), с тем же гашением очередей.
         const preview = content || embedsPreview(embeds);
         void resolveMentionedMembers(content, channel.serverId, author.id, channel.id, mentionRoleIds).then(async (ids) => {

@@ -14,3 +14,18 @@ export function shareStartErrorText(e: unknown): string {
   const reason = typeof e === 'string' ? e : (e as Error)?.message;
   return reason ? `Не удалось начать трансляцию: ${reason}` : 'Не удалось начать трансляцию';
 }
+
+/**
+ * Текст отказа СМЕНЫ источника на лету (#237) для окна выбора и тостов. Показ при этом ИДЁТ старым
+ * источником — это и говорим. Строки Rust (`показ не идёт`, `источник не открылся`, таймаут) — межъязыковой
+ * контракт: незнакомую причину отдаём как есть.
+ */
+export function shareSwitchErrorText(e: unknown): string {
+  const reason = typeof e === 'string' ? e : (e as Error)?.message;
+  const tail = ' Показ продолжается прежним источником.';
+  if (!reason) return `Не удалось сменить источник.${tail}`;
+  if (/показ не идёт/i.test(reason)) return 'Показ уже не идёт — начните его заново.';
+  if (/не открылся|не найден|исчез/i.test(reason)) return `Источник не открылся: возможно, окно закрыли.${tail}`;
+  if (/таймаут|timeout|timed out/i.test(reason)) return `Источник не ответил за 3 секунды.${tail}`;
+  return `Не удалось сменить источник: ${reason}.${tail}`;
+}

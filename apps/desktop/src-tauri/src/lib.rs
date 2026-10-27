@@ -539,6 +539,24 @@ async fn gv_screen_share_start(config: serde_json::Value, app: tauri::AppHandle)
     }
 }
 
+/// Сменить источник идущего нативного показа, не останавливая его (#237, «Сменить окно или экран»).
+/// Ответ: `"same"` — уже показывается, `"hot"` — сменили под тем же треком, `"republished"` — в
+/// «Родном» размер вырос/упал больше чем вдвое, публикацию пересоздали (у зрителей ~1 с моргания).
+/// Ошибка — строкой (`показ не идёт`, `источник не открылся: …`, `таймаут: …`); старый показ при
+/// ошибке идёт дальше.
+#[tauri::command]
+async fn gv_screen_share_switch(source_id: String, is_window: bool, app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        screenshare::switch_source(source_id, is_window, app).await.map(|o| o.as_str().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (source_id, is_window, app);
+        Err("native screen share is Windows-only".into())
+    }
+}
+
 /// Stop the active native screen share (disconnect the companion participant).
 #[tauri::command]
 async fn gv_screen_share_stop() {
@@ -574,7 +592,7 @@ async fn gv_screen_share_preview() -> Option<String> {
 }
 
 /// The window currently in the foreground — for the "stream the focused window" hotkey. Returns
-/// `{ id, exe, isSelf }` (id = HWND as a stringified u64, feeds screenshare's `source_id` with
+/// `{ id, exe, isSelf, title, isShell }` (`title`/`isShell` — #237, хоткей «показывать окно в фокусе») (id = HWND as a stringified u64, feeds screenshare's `source_id` with
 /// `is_window: true`) or `null` when there's no foreground window. When `isSelf` (GusVoice's own
 /// window is in front, so there's nothing else to stream) the caller opens the picker instead.
 #[tauri::command]
@@ -1326,6 +1344,7 @@ pub fn run() {
             gv_stream_audio_stop,
             gv_screen_sources,
             gv_screen_share_start,
+            gv_screen_share_switch,
             gv_screen_share_stop,
             gv_screen_share_stats,
             gv_screen_share_preview,

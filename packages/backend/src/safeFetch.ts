@@ -515,3 +515,142 @@ export function resolvePeerTarget(raw: string, allowHosts: ReadonlySet<string>, 
   if (lookup === safeLookup) assertLiteralAllowed(url.hostname);
   return { url, lookup };
 }
+
+// ─── Доставка событий на адрес бота (#229, `bots/webhookDelivery.ts`) ─────────────────────────────────────────────────────
+// Тот же принцип, что выше: адрес проверяется ВНУТРИ резолвинга, соединение идёт ровно на проверенный IP (повторного
+// резолва нет), редиректы не ведутся вовсе (3xx — сбой доставки), ответ читается не дальше `maxBytes`.
+
+/**
+ * Куда нельзя НИКОГДА, даже с тумблером админа «внутренние адреса» (хоумлаб, бот в той же сети): «этот хост» и
+ * неуказанный адрес, loopback (127.0.0.0/8, ::1 и v4-mapped `::ffff:127.x` — там сам бэкенд, Redis, база и служебные порты;
+ * решение владельца 26.10, отменяет R297 «::1 при тумблере»), link-local (там `169.254.169.254` — метаданные облака),
+ * multicast и зарезервированные. Тумблер открывает только локальную сеть (10/8, 172.16/12, 192.168/16, fc00::/7…).
+ */
+export function isNeverTargetAddress(ip: string): boolean {
+  const v = isIP(ip);
+  if (v === 4) {
+    const n = v4ToInt(ip);
+    if (n === null) return true;
+    return NEVER_V4.some(([lo, hi]) => n >= lo && n <= hi);
+  }
+  if (v === 6) {
+    const g = expandV6(ip.toLowerCase().split('%')[0]);
+    if (!g) return true;
+    const zeros = (k: number) => g.slice(0, k).every((x) => x === 0);
+    if (zeros(8)) return true; // ::
+    if (zeros(7) && g[7] === 1) return true; // ::1 — loopback: закрыт всегда (владелец 26.10; R297 его пускал при тумблере)
+    if (zeros(5) && (g[5] === 0xffff || g[5] === 0)) {
+      return isNeverTargetAddress([g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join('.'));
+    }
+    if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    if ((g[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+    if (g[0] === 0xfd00 && g[1] === 0x0ec2) return true; // fd00:ec2::254 — метаданные AWS по v6
+    return false;
+  }
+  return true;
+}
+const NEVER_V4 = ['0.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '224.0.0.0/4', '240.0.0.0/4'].map(v4Block);
+
+/** Адрес-цель доставки боту: при `allowInternal` отбиваются только «никогда» (`isNeverTargetAddress`), иначе — всё внутреннее. */
+export function hookAddressBlocked(ip: string, allowInternal: boolean): boolean {
+  return allowInternal ? isNeverTargetAddress(ip) : isBlockedAddress(ip);
+}
+
+/** `lookup` доставки: КАЖДЫЙ адрес имени проверяется (round-robin не даёт лотереи), соединение — на проверенный. */
+function hookLookup(allowInternal: boolean): typeof dnsLookup {
+  return ((hostname: string, options: unknown, cb: unknown) => {
+    const opts = (typeof options === 'function' ? {} : ((options ?? {}) as { all?: boolean })) ?? {};
+    const done = (typeof options === 'function' ? options : cb) as (
+      err: NodeJS.ErrnoException | null,
+      address?: string | Addr[],
+      family?: number,
+    ) => void;
+    dnsLookup(hostname, { all: true }, (err, addrs) => {
+      if (err) return done(err);
+      const list = Array.isArray(addrs) ? addrs : [];
+      const bad = list.find((a) => hookAddressBlocked(a.address, allowInternal));
+      if (bad) return done(new BlockedTargetError(`${hostname} → ${bad.address}`));
+      const res = chooseLookupResult(list, opts.all === true);
+      if (!res) return done(new BlockedTargetError(`${hostname} не резолвится`));
+      if ('all' in res) return done(null, res.all);
+      done(null, res.address, res.family);
+    });
+  }) as typeof dnsLookup;
+}
+
+/**
+ * Почему адрес доставки не годится (26.10): `ru` — возвращают `parseHookUrl`/`checkHookTarget` (лог и тексты для людей),
+ * `en` — провод Bot API (`setWebhook` → `description`, как остальной провод, `hookUrlErrorEn`).
+ */
+export const HOOK_URL_ERRORS = {
+  unparsed: { ru: 'адрес не разобран', en: 'invalid URL' },
+  httpsOnly: { ru: 'нужен адрес https://', en: 'an HTTPS URL is required' },
+  httpOrHttps: { ru: 'нужен адрес https:// или http://', en: 'an HTTPS or HTTP URL is required' },
+  credentials: { ru: 'логин и пароль в адресе не принимаются', en: 'credentials in the URL are not allowed' },
+  noHost: { ru: 'в адресе нет хоста', en: 'the URL has no host' },
+  internal: { ru: 'адрес внутренний — доставка туда запрещена', en: 'internal addresses are not allowed' },
+  unresolved: { ru: 'имя хоста не резолвится', en: 'failed to resolve host' },
+} as const;
+
+/** Текст `HOOK_URL_ERRORS[…].ru` → его английская пара для провода; незнакомое — как есть. */
+export function hookUrlErrorEn(text: string): string {
+  for (const e of Object.values(HOOK_URL_ERRORS)) if (e.ru === text) return e.en;
+  return text;
+}
+
+/**
+ * Разобрать и проверить адрес доставки без сети: схема (`https`; `http` — только при `allowInternal`), без логина в адресе,
+ * IP-литерал — сразу по спискам. Ошибка — текст для автора бота.
+ */
+export function parseHookUrl(raw: string, allowInternal: boolean): { ok: true; url: URL } | { ok: false; error: string } {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, error: HOOK_URL_ERRORS.unparsed.ru };
+  }
+  if (url.protocol !== 'https:' && !(allowInternal && url.protocol === 'http:')) {
+    return { ok: false, error: allowInternal ? HOOK_URL_ERRORS.httpOrHttps.ru : HOOK_URL_ERRORS.httpsOnly.ru };
+  }
+  if (url.username || url.password) return { ok: false, error: HOOK_URL_ERRORS.credentials.ru };
+  const bare = url.hostname.replace(/^\[|\]$/g, '');
+  if (!bare) return { ok: false, error: HOOK_URL_ERRORS.noHost.ru };
+  if (isIP(bare) && hookAddressBlocked(bare, allowInternal)) return { ok: false, error: HOOK_URL_ERRORS.internal.ru };
+  return { ok: true, url };
+}
+
+/** Проверка адреса доставки при `setWebhook`: разбор + резолв ВСЕХ адресов имени. `null` — годится. */
+export async function checkHookTarget(raw: string, allowInternal: boolean, testLookup?: TestLookup): Promise<string | null> {
+  const parsed = parseHookUrl(raw, allowInternal);
+  if (!parsed.ok) return parsed.error;
+  const bare = parsed.url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(bare)) return null;
+  const lookup = testLookup ?? hookLookup(allowInternal);
+  return new Promise((resolve) => {
+    (lookup as (h: string, o: { all: true }, cb: (err: Error | null) => void) => void)(bare, { all: true }, (err) =>
+      resolve(err ? (err instanceof BlockedTargetError ? HOOK_URL_ERRORS.internal.ru : HOOK_URL_ERRORS.unresolved.ru) : null),
+    );
+  });
+}
+
+/**
+ * POST события на адрес бота. Бросает при сетевой ошибке, отказе цели и сроке; ответ (статус и первые `maxBytes` тела)
+ * возвращает как есть — успех решает вызывающий (2xx). Редиректы не ведутся.
+ */
+export async function safeHookPost(
+  raw: string,
+  body: Buffer,
+  headers: Record<string, string>,
+  opts: { allowInternal: boolean; deadlineMs: number; maxBytes: number },
+  testLookup?: TestLookup,
+): Promise<{ status: number; body: string }> {
+  const parsed = parseHookUrl(raw, opts.allowInternal);
+  if (!parsed.ok) throw new BlockedTargetError(parsed.error);
+  const res = await once(parsed.url, { ...headers, 'content-length': String(body.length) }, testLookup ?? hookLookup(opts.allowInternal), {
+    method: 'POST',
+    body,
+    maxBytes: opts.maxBytes,
+    deadlineMs: opts.deadlineMs,
+  });
+  return { status: res.status, body: res.body };
+}

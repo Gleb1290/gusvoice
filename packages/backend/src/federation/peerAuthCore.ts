@@ -10,7 +10,8 @@
 
 import type { FastifyRequest } from 'fastify';
 import type { FedErrorCode, FedInstanceDocument } from '@gusvoice/shared';
-import { verifyRequest, type VerifyFailure } from './httpSignature.js';
+import { createHash } from 'node:crypto';
+import { CLOCK_SKEW_TOLERANCE_S, verifyRequest, type VerifyFailure } from './httpSignature.js';
 import { findPeerKey, type PeerDocument, type PeerResult } from './peerClient.js';
 import { linkVerdict } from './linkRules.js';
 import type { StoredLink } from './linkService.js';
@@ -100,6 +101,11 @@ export interface PeerAuthDeps {
   getLink: (instanceId: string) => Promise<StoredLink | null>;
   /** Аварийная пауза держателя (`readInstanceMeta().paused`). */
   paused: () => Promise<boolean>;
+  /**
+   * Отметка «эта подпись уже была» (аудит ЛС #236, п.15): `true` — повтор. Ставится на `ttlS` секунд (до конца срока
+   * подписи с допуском часов). Нет крючка — проверки нет (как раньше).
+   */
+  seenSignature?: (key: string, ttlS: number) => Promise<boolean>;
   /** Наш публичный адрес API — отправитель подписывал полный адрес (`env.federation.apiBase`). */
   apiBase: string;
 }
@@ -222,7 +228,7 @@ export function createPeerAuth(deps: PeerAuthDeps) {
   async function authenticateLinkedPeer(
     req: PeerRequestLike,
     instanceId: string,
-    opts: { requireActive?: boolean } = {},
+    opts: { requireActive?: boolean; replayGuard?: boolean } = {},
   ): Promise<PeerAuthResult> {
     const unknown: PeerAuthResult = { ok: false, status: 401, error: 'unknown' };
     const link = await deps.getLink(instanceId);
@@ -269,6 +275,27 @@ export function createPeerAuth(deps: PeerAuthDeps) {
       // держателю о соседе, которого он сам заблокировал или которому уже не верит.
       if (refusal.storm && link.state !== 'blocked' && link.state !== 'trust-lost') deps.noteSignatureFailure(instanceId);
       return { ok: false, status: refusal.status, error: refusal.error, skewS: refusal.skewS };
+    }
+
+    /*
+     * Повтор подписанного запроса (аудит ЛС #236, п.15). Подпись без одноразового числа: перехвативший запрос (журнал
+     * прокси, зеркало трафика) мог повторить его до конца срока. Протокол не меняем (соседи прежних версий нонс не шлют):
+     * отметка — сама подпись. Ed25519 детерминирован, и два одинаковых GET в одну секунду дают одну подпись — поэтому
+     * только меняющие запросы; повтор отвечает как просроченная подпись (`expired` — код протокола, сосед его знает).
+     *
+     * 🔴 Два законно одинаковых POST в одну секунду (одно тело, один адрес) дают одну подпись, и второй получал `401`. Поэтому
+     * (а) идемпотентные маршруты («печатает» и «в сети», `routes/fedEphemeral.ts`) отметку не ставят — `replayGuard: false`:
+     * повторить их безвредно, а их отправитель не повторяет по 401; (б) на остальных ответ остаётся отказом, а не `200`: отметка
+     * ставится ДО обработчика, и `200` на дубль подтвердил бы доставку, которая могла оборваться (500 первого) — отправитель
+     * (`outbox.ts`) удалил бы пачку. `401` он считает неудачей и повторяет уже с новой секундой (новая подпись) — потери нет, ни
+     * тревоги, ни порчи связки: `noteSignatureFailure` и состояние связки здесь не трогаются (ветка идёт после проверки подписи).
+     */
+    if (opts.replayGuard !== false && deps.seenSignature && req.method !== 'GET' && req.method !== 'HEAD') {
+      const sig = String((req.headers as SignatureHeaders).signature ?? '');
+      const ttlS = Math.max(1, (verdict.expires ?? Math.floor(deps.now() / 1000)) - Math.floor(deps.now() / 1000) + CLOCK_SKEW_TOLERANCE_S);
+      if (await deps.seenSignature(`${instanceId}:${createHash('sha256').update(sig).digest('base64url')}`, ttlS)) {
+        return { ok: false, status: 401, error: 'expired' };
+      }
     }
 
     if (opts.requireActive !== false) {

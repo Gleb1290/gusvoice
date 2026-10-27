@@ -24,6 +24,7 @@ import {
   serializeRevocationEvent,
 } from '@gusvoice/shared';
 import { db } from '../db/index.js';
+import { memberChanged } from '../memberEvents.js';
 import { federationRevocations, serverMembers, users } from '../db/schema.js';
 import { env } from '../env.js';
 import { bumpTokenGeneration } from '../auth.js';
@@ -216,10 +217,17 @@ export async function applyRevocation(input: {
      * остаются, имя — «Удалённый пользователь»; уже обезличенную строку не трогает); здесь — гасим сессии и снимаем членства.
      */
     if (shadow.deletedAt === null && shadowGone) await shadowGone(shadow.id);
+    const removed = await db
+      .update(serverMembers)
+      .set({ state: FED_MEMBERSHIP_STATES.removed })
+      .where(and(eq(serverMembers.userId, shadow.id), eq(serverMembers.state, FED_MEMBERSHIP_STATES.active)))
+      .returning({ serverId: serverMembers.serverId });
     await db
       .update(serverMembers)
       .set({ state: FED_MEMBERSHIP_STATES.removed })
       .where(eq(serverMembers.userId, shadow.id));
+    // Боты серверов (#231): аккаунт гостя снят — `member → left`.
+    memberChanged(removed.map((m) => ({ serverId: m.serverId, userId: shadow.id, actorId: null, from: 'member' as const, to: 'left' as const })));
   } else if (input.gen !== null) {
     // Поколение ниже запомненного — откат дома из бэкапа: не понижаем (§5.6.1).
     if (input.gen <= shadow.homeGen) return false;

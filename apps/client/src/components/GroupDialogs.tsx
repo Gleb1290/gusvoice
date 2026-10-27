@@ -602,6 +602,32 @@ function GroupInfoDialog({ convId }: { convId: string }) {
           {downHint}
         </div>
       )}
+      {/* «История для новых» (аудит ЛС #236, п.8; Telegram «Chat history for new members» — только у админа): переключает
+          владелец; группа чужого дома и старый сервер (поля нет) — строки нет. */}
+      {owner && !fedHost && !former && group.historyForNew !== undefined && (
+        <>
+          <div className="settings-row">
+            <span id="group-history-new">История для новых участников</span>
+            {/* Разметка и классы `Toggle.tsx` (импорт компонента сюда закрыт проверкой границ модуля). */}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={group.historyForNew}
+              aria-labelledby="group-history-new"
+              disabled={busy}
+              className={`toggle ${group.historyForNew ? 'on' : ''}`}
+              onClick={() => void run(() => api.convGroupHistory(convId, !group.historyForNew))}
+            >
+              <span className="toggle-knob" />
+            </button>
+          </div>
+          <div className="muted pc-note">
+            {group.historyForNew
+              ? 'Новые участники увидят сообщения, отправленные до их добавления.'
+              : 'Новые участники увидят только сообщения после своего добавления.'}
+          </div>
+        </>
+      )}
       <SharedMediaRows convId={convId} former={!!former} onOpen={closeGroupDialog} />
       <div className="group-pick-head">
         <span className="muted">{groupMembersLabel(group.members.length)}</span>

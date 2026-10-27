@@ -19,6 +19,7 @@ import { EconomyPanel } from './EconomyPanel';
 import { ServerSoundboardPanel } from './ServerSoundboardPanel';
 import { ServerSoundsPanel } from './ServerSoundsPanel';
 import { ServerWebhooksPanel } from './ChannelWebhooksPanel';
+import { ServerBotsPanel } from './ServerBotsPanel';
 import { economyVisible } from '../economyVisible';
 import { confirmAction } from '../confirm';
 import { Select } from './Select';
@@ -57,12 +58,16 @@ export function ServerSettingsModal({
   const canEditOverwrites = has(serverPerms, Permission.MANAGE_ROLES);
   const canManageRoles = has(serverPerms, Permission.MANAGE_ROLES);
   const canKick = has(serverPerms, Permission.KICK_MEMBERS);
+  // «Интеграции» (#231): боты — по MANAGE_SERVER, вебхуки — по MANAGE_WEBHOOKS; дверь открывает любое из двух.
+  const canManageWebhooks = has(serverPerms, Permission.MANAGE_WEBHOOKS);
   const selfId = useStore((s) => s.user?.id ?? '');
   const startTab = initialTab && tabs.some((t) => t.key === initialTab) ? initialTab : undefined;
   const [tab, setTab] = useState<ServerSettingsTab>(startTab ?? tabs[0]?.key ?? 'general');
   // Телефон: сперва список разделов, тап — экран раздела (как в настройках и админке). Открыли сразу
   // на разделе (кнопка 👥) — список пропускаем: человек уже сказал, куда шёл.
   const [picked, setPicked] = useState(!!startTab);
+  /** «Права бота» в «Интеграциях» (#231) открывают «Роли» сразу на управляемой роли бота. */
+  const [rolePick, setRolePick] = useState<string | undefined>(undefined);
   const current = tabs.find((t) => t.key === tab);
   const [permCat, setPermCat] = useState<Category | null>(null);
   const [name, setName] = useState(server.name);
@@ -339,6 +344,7 @@ export function ServerSettingsModal({
             canManageRoles={canManageRoles}
             canKick={canKick}
             view={tab}
+            initialRoleId={rolePick}
           />
         ) : (
         <div className="admin-scroll" id="ss-panel-body" role="tabpanel" aria-labelledby={`ss-tab-${tab}`}>
@@ -355,7 +361,28 @@ export function ServerSettingsModal({
         ) : tab === 'soundboard' ? (
           <ServerSoundboardPanel serverId={server.id} />
         ) : tab === 'integrations' ? (
-          <ServerWebhooksPanel serverId={server.id} />
+          <>
+            {canRenameServer && (
+              <ServerBotsPanel
+                serverId={server.id}
+                ownerId={server.ownerId}
+                onOpenRole={
+                  tabs.some((t) => t.key === 'roles')
+                    ? (roleId) => {
+                        setRolePick(roleId);
+                        setTab('roles');
+                      }
+                    : undefined
+                }
+              />
+            )}
+            {canManageWebhooks && (
+              <>
+                {canRenameServer && <div className="settings-group-label dmf-gap">Вебхуки</div>}
+                <ServerWebhooksPanel serverId={server.id} />
+              </>
+            )}
+          </>
         ) : tab === 'economy' ? (
           <EconomyPanel serverId={server.id} />
         ) : !canGeneral ? (

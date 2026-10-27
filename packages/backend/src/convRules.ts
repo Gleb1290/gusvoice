@@ -512,10 +512,15 @@ export interface AttachmentAccessInput {
   /** Аккаунт смотрящего удалён — ссылка больше не работает, даже если была выдана. */
   viewerDeleted: boolean;
   att: { ownerId: string; conversationId: string; state: 'pending' | 'attached' | 'deleted' | 'scheduled' | 'remote'; messageId: string | null };
-  /** Участие СМОТРЯЩЕГО в беседе вложения; `null` — не участник. */
-  member: { leftAt: Date | string | null } | null;
+  /**
+   * Участие СМОТРЯЩЕГО в беседе вложения; `null` — не участник.
+   * `historyFromKey` — «История для новых» (аудит ЛС #236, п.8): лента ему видна с этого ключа; `null`/нет — вся.
+   * `formerUntil` — бывший участник группы (аудит #236, п.9): до какого времени ему видна лента (`formerLeftAt`); нет — файлов
+   * после выхода не отдаём вовсе, как раньше.
+   */
+  member: { leftAt: Date | string | null; historyFromKey?: number | null; formerUntil?: Date | null } | null;
   /** Сообщение, к которому прикреплено вложение (для `attached`). */
-  message: (ViewableMessage & { conversationId: string }) | null;
+  message: (ViewableMessage & { conversationId: string; sortKey?: number; createdAt?: Date | string }) | null;
 }
 
 /**
@@ -531,11 +536,19 @@ export interface AttachmentAccessInput {
  */
 export function attachmentAccess(i: AttachmentAccessInput): boolean {
   if (i.viewerDeleted || i.att.state === 'deleted') return false;
-  if (!i.member || i.member.leftAt) return false;
-  if (i.att.state === 'pending' || i.att.state === 'scheduled') return i.att.ownerId === i.viewerId;
+  if (!i.member) return false;
+  if (i.att.state === 'pending' || i.att.state === 'scheduled') return !i.member.leftAt && i.att.ownerId === i.viewerId;
   if (!i.message || i.att.messageId === null) return false;
   if (i.message.conversationId !== i.att.conversationId) return false;
-  return messageView(i.message, i.viewerId) === 'full';
+  if (messageView(i.message, i.viewerId) !== 'full') return false;
+  // «История для новых» (аудит ЛС #236, п.8): файл сообщения до добавления смотрящего — нет, как и само сообщение.
+  const from = i.member.historyFromKey;
+  if (typeof from === 'number' && typeof i.message.sortKey === 'number' && i.message.sortKey < from) return false;
+  if (!i.member.leftAt) return true;
+  // Бывший участник группы (аудит #236, п.9): лента до выхода ему видна (`history` с `former`) — и файлы из неё тоже.
+  const until = i.member.formerUntil;
+  if (!until || i.message.createdAt === undefined) return false;
+  return new Date(i.message.createdAt).getTime() <= until.getTime();
 }
 
 // ─── Пачки: пересылка и удаление выделенного (04.10, признак `conv5`) ───────────────────────────────────────────────
@@ -810,6 +823,36 @@ export function resolveReplyQuote(content: string, quote: { text: string; offset
   if (quote.offset !== undefined && quote.offset >= 0 && content.startsWith(text, quote.offset)) return { text, offset: quote.offset };
   const at = content.indexOf(text);
   return at < 0 ? null : { text, offset: at };
+}
+
+/**
+ * Цитата копии от соседа (аудит ЛС #236, п.2): провод не доверяем — цитата пересчитывается по НАШЕЙ копии родителя
+ * (`resolveReplyQuote`, как у своей отправки). Родителя у нас нет (ответ из другой беседы, родитель не дошёл) — цитаты нет:
+ * показать чужой текст под видом цитаты нашего человека нечем проверить. `auto` (снимок ответа из другой беседы) с
+ * родителем здесь же — снимок по нашей копии.
+ */
+export function fedReplyQuote(
+  parentContent: string | null,
+  quote: { text: string; offset: number; auto?: true } | null,
+): ReplyQuoteMark | null {
+  if (!quote || parentContent === null) return null;
+  if (quote.auto === true) return parentContent ? replyQuoteSnapshot(parentContent) : null;
+  return resolveReplyQuote(parentContent, quote);
+}
+
+/** Насколько в прошлое и будущее верим времени копии соседа (аудит ЛС #236, п.3). */
+export const FED_CREATED_AT_PAST_MS = 30 * 24 * 60 * 60 * 1000;
+export const FED_CREATED_AT_FUTURE_MS = 5 * 60 * 1000;
+
+/**
+ * Время новой копии от соседа (аудит ЛС #236, п.3): `createdAt` провода — только в окне [now − 30 дн, now + 5 мин], иначе
+ * now. Без этого сосед ставил сообщению любое время — «из будущего» оно висело бы последним в поиске по дате и в сводке.
+ */
+export function fedCreatedAt(wireMs: number, nowMs: number): Date {
+  if (!Number.isFinite(wireMs) || wireMs < nowMs - FED_CREATED_AT_PAST_MS || wireMs > nowMs + FED_CREATED_AT_FUTURE_MS) {
+    return new Date(nowMs);
+  }
+  return new Date(wireMs);
 }
 
 /**

@@ -287,6 +287,12 @@ pub struct ForegroundWindow {
     pub id: String,
     pub exe: String,
     pub is_self: bool,
+    /// Заголовок окна (#237): тост хоткея «Показываю: <имя окна>» без перечисления всех источников
+    /// с превью. Добавлено полем — старые клиенты его не читают.
+    pub title: String,
+    /// В фокусе оболочка, а не приложение (#237): рабочий стол, панель задач, «Пуск»/поиск,
+    /// переключатель Alt+Tab — показывать там нечего, и libwebrtc таких окон в список не берёт.
+    pub is_shell: bool,
 }
 
 pub fn foreground_window() -> Option<ForegroundWindow> {
@@ -308,6 +314,8 @@ pub fn foreground_window() -> Option<ForegroundWindow> {
             id: (hwnd.0 as usize as u64).to_string(),
             exe,
             is_self: pid == GetCurrentProcessId(),
+            title: window_title(hwnd),
+            is_shell: is_shell_window(hwnd),
         })
     }
 }
@@ -325,4 +333,49 @@ pub fn window_pid(hwnd_u64: u64) -> Option<u32> {
             Some(pid)
         }
     }
+}
+
+/// Классы окон оболочки, которые показывать нечего: рабочий стол, панель задач, «Пуск»/поиск,
+/// переключатель Alt+Tab. Отдельной чистой функцией — чтобы проверялась без Win32.
+pub fn is_shell_class(class: &str) -> bool {
+    matches!(
+        class,
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "Windows.UI.Core.CoreWindow"
+            | "MultitaskingViewFrame"
+            | "XamlExplorerHostIslandWindow"
+            | "ForegroundStaging"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_shell_class;
+
+    #[test]
+    fn рабочий_стол_панель_задач_и_системные_поверхности_не_считаются_окнами_приложений() {
+        for class in ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+            "Windows.UI.Core.CoreWindow", "MultitaskingViewFrame", "XamlExplorerHostIslandWindow", "ForegroundStaging"] {
+            assert!(is_shell_class(class), "{class}");
+        }
+        for class in ["Notepad", "Chrome_WidgetWin_1", "CabinetWClass", "", "Shell_TrayWndOther", "progman"] {
+            assert!(!is_shell_class(class), "{class}");
+        }
+    }
+}
+
+/// Окно оболочки (рабочий стол, панель задач, «Пуск», Alt+Tab) — по окну оболочки и классу.
+unsafe fn is_shell_window(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, GetShellWindow, GA_ROOT};
+    let root = GetAncestor(hwnd, GA_ROOT);
+    let hwnd = if root.0.is_null() { hwnd } else { root };
+    if hwnd == GetShellWindow() {
+        return true;
+    }
+    let mut class = [0u16; 128];
+    let n = GetClassNameW(hwnd, &mut class);
+    n > 0 && is_shell_class(&String::from_utf16_lossy(&class[..n as usize]))
 }

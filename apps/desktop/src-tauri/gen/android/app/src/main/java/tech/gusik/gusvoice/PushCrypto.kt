@@ -54,9 +54,21 @@ object PushCrypto {
       .toString()
   }
 
-  /** Похоже на шифр WebPush, а не на открытый JSON старого бэкенда. */
+  /**
+   * Похоже на шифр WebPush, а не на открытый JSON старого бэкенда. Один `{` в начале не довод: шифр начинается со
+   * случайной соли, и раз в 256 пушей первый байт — `{` (26.10 такой пуш лёг в шторку байтами шифра). Открытый —
+   * только тот, что целиком читается как JSON-объект.
+   */
   fun looksEncrypted(message: ByteArray): Boolean =
-    message.size >= HEADER_MIN + TAG_LEN && message[0] != '{'.code.toByte()
+    message.size >= HEADER_MIN + TAG_LEN && !isPlainJson(message)
+
+  private fun isPlainJson(message: ByteArray): Boolean =
+    message[0] == '{'.code.toByte() && try {
+      JSONObject(String(message, Charsets.UTF_8))
+      true
+    } catch (_: Exception) {
+      false
+    }
 
   /**
    * Расшифровать тело пуша. `null` — ключей ещё нет (пуш пришёл до регистрации) или шифр не сошёлся

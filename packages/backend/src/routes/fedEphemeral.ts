@@ -10,7 +10,8 @@ import { createAdmitPeer } from './fedAdmission.js';
  * Отдельным модулем, а не в `routes/federation.ts`: тот проверки собирают с явным перечнем зависимостей. Регистрирует `index.ts`
  * только при `FEDERATION_ENABLED` и `FEDERATION_DM_ENABLED` (иначе 404 — у соседа без признака мы и не спрашиваем).
  * Допуск соседа — тот же `createAdmitPeer` (предел по адресу до подписи, подпись связки, рабочая связка, предел `ephemeral`).
- * ⚠️ Повтор подписи не отсекаем: запись идемпотентна («печатает» живёт 6 с, у «в сети» — версия `at`), а запись одноразовых
+ * ⚠️ Повтор подписи не отсекаем (`replayGuard: false` в допуске — по умолчанию `authenticateLinkedPeer` отсекает повтор любого
+ * не-GET, и два одинаковых «печатает» в одну секунду давали второму `401 expired`): запись идемпотентна («печатает» живёт 6 с, у «в сети» — версия `at`), а запись одноразовых
  * меток на каждое «печатает» стоила бы больше самой записи.
  */
 const admitPeer = createAdmitPeer({
@@ -35,7 +36,7 @@ export async function fedEphemeralRoutes(app: FastifyInstance): Promise<void> {
 
     scope.post(FED_EPHEMERAL_PATH, async (req, reply) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const link = await admitPeer(req, reply, body.instance_id, 'ephemeral', { requireActive: true });
+      const link = await admitPeer(req, reply, body.instance_id, 'ephemeral', { requireActive: true, replayGuard: false });
       if (!link) return;
       const res = await acceptEphemeral(link, body);
       return reply.code(res.status).send(res.body);

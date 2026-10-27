@@ -10,3 +10,5 @@
 !**/.env.example
 README.md
 docs
+# Справка Bot API для нейронки — её отдаёт бэкенд (`/api/bot/v1/llms.txt`, packages/backend/Dockerfile).
+!docs/bots-llm.md

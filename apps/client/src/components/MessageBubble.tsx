@@ -50,6 +50,11 @@ export interface MessageBubbleProps extends Omit<HTMLAttributes<HTMLDivElement>,
    * `aria-checked` и `onClick`: это сквозные атрибуты строки, новых пропсов для выделения нет.
    */
   actions?: ReactNode;
+  /**
+   * Кнопки под пузырём (сообщение бота, #230 — `MessageKeyboard`). Есть — пузырь и кнопки встают колонкой `.bub-stack` (ширина
+   * кнопок = ширине пузыря, как у Telegram); нет — разметка строки прежняя.
+   */
+  kb?: ReactNode;
   children: ReactNode;
 }
 
@@ -68,6 +73,7 @@ export function MessageBubble({
   active = false,
   avatar,
   actions,
+  kb,
   children,
   className,
   ...row
@@ -81,9 +87,18 @@ export function MessageBubble({
   return (
     <div {...row} className={rowClass}>
       {avatar !== undefined && <span className="bub-ava">{avatar}</span>}
-      <div className={bubbleClass} style={kind === 'media' && mediaWidth ? { width: mediaWidth } : undefined}>
-        {children}
-      </div>
+      {kb ? (
+        <div className="bub-stack">
+          <div className={bubbleClass} style={kind === 'media' && mediaWidth ? { width: mediaWidth } : undefined}>
+            {children}
+          </div>
+          {kb}
+        </div>
+      ) : (
+        <div className={bubbleClass} style={kind === 'media' && mediaWidth ? { width: mediaWidth } : undefined}>
+          {children}
+        </div>
+      )}
       {actions}
     </div>
   );

@@ -121,7 +121,11 @@ export async function addGroupMembers(me: string, conversationId: string, userId
     const verdict = groupAddCheck(active.length, adding.length);
     if (verdict !== 'ok') return { kind: verdict };
     const known = new Set(rows.map((r) => r.userId));
+    // «История для новых» (аудит ЛС #236, п.8): скрыта — добавленным лента видна с записи «добавил» (её ключ — `nextKey`).
+    const [conv] = await tx.select({ historyForNew: conversations.historyForNew }).from(conversations).where(eq(conversations.id, conversationId));
+    const historyFromKey = conv?.historyForNew ? null : lock.nextKey;
     const fresh = {
+      historyFromKey,
       leftAt: null,
       joinedAt: new Date(),
       role: 'member' as const,
@@ -142,7 +146,7 @@ export async function addGroupMembers(me: string, conversationId: string, userId
     if (added.length > 0) {
       await tx
         .insert(conversationMembers)
-        .values(added.map((userId) => ({ conversationId, userId, role: 'member' as const, lastReadKey: lock.nextKey - 1 })));
+        .values(added.map((userId) => ({ conversationId, userId, role: 'member' as const, lastReadKey: lock.nextKey - 1, historyFromKey })));
     }
     const service: ConvGroupService = { kind: 'group', type: 'add', users: await brief(tx, adding) };
     const delivery = await insertService(tx, conversationId, lock.nextKey, me, service, [...active, ...adding]);
@@ -210,6 +214,31 @@ export async function updateGroupInfo(
     const service: ConvGroupService = 'title' in patch ? { kind: 'group', type: 'title', title: patch.title } : { kind: 'group', type: 'photo' };
     const delivery = await insertService(tx, conversationId, lock.nextKey, me, service, active);
     return { kind: 'ok', conversationId, delivery };
+  });
+}
+
+/**
+ * «История для новых» (аудит ЛС #236, п.8; Telegram «Chat history for new members», меняет только админ): переключает
+ * владелец группы. Касается только тех, кого добавят ПОСЛЕ: граница у уже добавленных (`history_from_key`) не меняется —
+ * открыть им старое задним числом или спрятать уже виденное нельзя. Служебной записи нет (как у Telegram); участникам —
+ * строка журнала `conv`, их сводка перечитывается.
+ */
+export async function setGroupHistory(me: string, conversationId: string, visible: boolean): Promise<GroupOpResult | { kind: 'same' }> {
+  return db.transaction(async (tx) => {
+    const lock = await lockConversation(tx, conversationId);
+    if (!lock || lock.kind !== 'group') return { kind: 'not-found' };
+    const active = (await membersOf(tx, conversationId)).filter((r) => !r.leftAt);
+    const mine = active.find((r) => r.userId === me);
+    if (!mine) return { kind: 'not-found' };
+    if (mine.role !== 'owner') return { kind: 'forbidden' };
+    const [cur] = await tx.select({ v: conversations.historyForNew }).from(conversations).where(eq(conversations.id, conversationId));
+    if (cur?.v === visible) return { kind: 'same' };
+    await tx.update(conversations).set({ historyForNew: visible }).where(eq(conversations.id, conversationId));
+    const pts = await journal(
+      tx,
+      active.map((r) => ({ userId: r.userId, conversationId, kind: 'conv' as const, messageId: null })),
+    );
+    return { kind: 'ok', conversationId, delivery: { conversationId, messageId: null, pts } };
   });
 }
 

@@ -1,0 +1,269 @@
+{
+  "$comment": "Общие векторы подписи доставки (X-GusVoice-Signature = t=<unix>,v1=<hex HMAC-SHA256(secret, t + \".\" + body)>). Одни и те же данные читают тесты TS (packages/bot-sdk) и Python (packages/bot-sdk-py); секреты вымышленные. now_s — «сейчас» проверяющего (секунды Unix), tolerance_s — окно (null = по умолчанию 300 с), expect — должна ли проверка пройти. body — сырое тело, UTF-8.",
+  "algorithm": "HMAC-SHA256",
+  "header": "X-GusVoice-Signature",
+  "default_tolerance_s": 300,
+  "cases": [
+    {
+      "name": "valid",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": true
+    },
+    {
+      "name": "valid-utf8-body",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":43,\"message\":{\"message_id\":\"m2\",\"text\":\"привет, мир — ✓\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=7bb35db3fe6c33f4b181562e83c16982426ff2445750dea38594854530c2a070",
+      "expect": true
+    },
+    {
+      "name": "valid-empty-body",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=955c4fe82e740226ebd8e49ad72d0b519a8c4bb2f9f0d313dad56fb1b5907818",
+      "expect": true
+    },
+    {
+      "name": "valid-uppercase-hex",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ECB35FF11CBC37C8136FB8541DA8D8DE5EE344543A3CDFCE3617CAD6B6BE02C",
+      "expect": true
+    },
+    {
+      "name": "valid-spaces-after-comma",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000, v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": true
+    },
+    {
+      "name": "valid-second-v1-matches",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=0ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": true
+    },
+    {
+      "name": "valid-at-window-edge-past",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000300,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": true
+    },
+    {
+      "name": "valid-at-window-edge-future",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1789999700,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": true
+    },
+    {
+      "name": "valid-custom-tolerance",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790003000,
+      "tolerance_s": 3600,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": true
+    },
+    {
+      "name": "too-old",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000301,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "too-far-in-future",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1789999699,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "custom-tolerance-exceeded",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000061,
+      "tolerance_s": 60,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "body-changed",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hellp\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "body-reserialized-with-spaces",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\n \"update_id\": 42,\n \"message\": {\n  \"message_id\": \"m1\",\n  \"text\": \"hello\"\n }\n}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "wrong-secret",
+      "secret": "whsec_another_secret_for_vectors",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "empty-secret",
+      "secret": "",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "signed-with-other-secret",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=11d9ac63928be6a7f7ee0e20bfcd43941446880f7b6134494b66a6934e6b43c1",
+      "expect": false
+    },
+    {
+      "name": "t-changed-signature-kept",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000010,
+      "tolerance_s": null,
+      "header": "t=1790000010,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "one-char-off",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=0ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "empty-header",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "",
+      "expect": false
+    },
+    {
+      "name": "garbage-header",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "not a signature",
+      "expect": false
+    },
+    {
+      "name": "no-v1",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000",
+      "expect": false
+    },
+    {
+      "name": "no-t",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "t-not-a-number",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=abc,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    },
+    {
+      "name": "v1-too-short",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02",
+      "expect": false
+    },
+    {
+      "name": "v1-too-long",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c0",
+      "expect": false
+    },
+    {
+      "name": "v1-not-hex",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "expect": false
+    },
+    {
+      "name": "v1-empty",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v1=",
+      "expect": false
+    },
+    {
+      "name": "unknown-scheme-v2-only",
+      "secret": "whsec_test_vector_not_a_real_secret",
+      "body": "{\"update_id\":42,\"message\":{\"message_id\":\"m1\",\"text\":\"hello\"}}",
+      "now_s": 1790000000,
+      "tolerance_s": null,
+      "header": "t=1790000000,v2=2ecb35ff11cbc37c8136fb8541da8d8de5ee344543a3cdfce3617cad6b6be02c",
+      "expect": false
+    }
+  ]
+}

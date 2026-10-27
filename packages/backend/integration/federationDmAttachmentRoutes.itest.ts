@@ -62,6 +62,9 @@ function fixture() {
     } }, './fedAdmission.js': admission,
   };
   const att = load<typeof import('../src/routes/att.js')>('att', { ...dependencies, zod: { z }, 'drizzle-orm': orm,
+    // R304: старые GET проверяют выдачу; новый POST links — отдельная авторизованная граница.
+    '../auth.js': { requireAuth: async () => {} },
+    '../conversations.js': { formerLeftAt: async () => null },
     '../db/index.js': { db: t.db }, '../db/schema.js': schema, '../convRules.js': convRules,
     '../authGuard.js': { rateHit: async () => 0, clientIp: () => 'fixture-ip', attachmentUploadBlock: guard('upload limit'), retryMessage: guard('retryMessage') },
     '../storage.js': { attachmentBlocked: guard('attachmentBlocked') },

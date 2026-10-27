@@ -42,9 +42,11 @@ export async function callRoutes(app: FastifyInstance): Promise<void> {
     if (!access) return reply.code(404).send({ error: 'not found' });
     if (access.kind !== 'direct' || access.saved || !access.peerId) return reply.code(400).send({ error: CALL_UNAVAILABLE });
     const peerId = access.peerId;
-    const [peer] = await db.select({ deletedAt: users.deletedAt }).from(users).where(eq(users.id, peerId)).limit(1);
+    const [peer] = await db.select({ deletedAt: users.deletedAt, bot: users.bot }).from(users).where(eq(users.id, peerId)).limit(1);
     const write = canWriteDm({ member: true, peerExists: !!peer, peerDeleted: !!peer?.deletedAt });
     if (write !== 'ok') return reply.code(403).send({ error: CALL_UNAVAILABLE });
+    // Бот (#229, 26.10) звонков не принимает (как в Telegram): новый клиент трубку не рисует, а старый звонил бы в пустоту.
+    if (peer?.bot) return reply.code(403).send({ error: CALL_UNAVAILABLE });
     if ((await isBlockedBy(peerId, me)) || (await isBlockedBy(me, peerId))) return reply.code(403).send({ error: CALL_UNAVAILABLE });
     const incoming = callOf(peerId);
     const answering = !!incoming && incoming.phase === 'ringing' && incoming.callerId === peerId && incoming.calleeId === me;

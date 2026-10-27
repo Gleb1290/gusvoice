@@ -62,6 +62,7 @@ import {
   fedLinkBroken,
   fedLinkBrokenText,
   messagePrivacyPlateText,
+  botUnavailablePlateText,
   fedLinkStale,
   fedLinkStaleText,
   fedPeerDown,
@@ -228,6 +229,42 @@ const NO_GONE: Record<string, true> = {};
  */
 const forwardKeys = new Map<string, string>();
 
+/**
+ * Пустая беседа с ботом (#229) — как новый чат с ботом у Telegram: по центру ленты аватар, имя со значком «БОТ», понятная
+ * подпись и кнопка «Старт» (шлёт `/start` обычным сообщением). Поля ввода в это время НЕТ (решение владельца 26.10; у
+ * telegram-tt `MiddleColumn.tsx` `canPostFooter` = `!isBotNotStarted`), его прячет `botGate` в `DmChatView`.
+ * `description` — «что умеет бот» (telegram-tt `MessageListAccountInfo.tsx`): `otherUser.botDescription` сводки беседы
+ * (26.10; старый сервер поля не шлёт — блока нет). Свой вид не выдумываем — классы `.empty-goose`, что у пустой ленты, и `.bot-tag` шапки.
+ * Здесь, а не модулем: харнессы шапки держат закрытый перечень импортов этого файла (текст команды — `botRules.BOT_START_COMMAND`).
+ */
+function BotStartEmpty({ name, avatarUrl, description, onStart }: { name: string; avatarUrl?: string | null; description?: string; onStart?: () => void }) {
+  return (
+    <div className="empty-goose bot-start-empty">
+      <Avatar url={avatarUrl} name={name} size={72} />
+      <div className="eg-title">
+        {name}
+        <span className="bot-tag">БОТ</span>
+      </div>
+      {/* «Что умеет этот бот?» (Telegram `MessageListAccountInfo`): описание бота из сводки беседы (`otherUser.botDescription`), многострочное. */}
+      {description && (
+        <div className="eg-sub bot-start-desc">
+          <div className="bot-start-what">Что умеет этот бот?</div>
+          {description}
+        </div>
+      )}
+      {/* Писать боту нельзя (`botUnavailable`, 26.10) — «Старт» не рисуем: причина — на плашке вместо поля ввода. */}
+      {onStart && (
+        <>
+          <div className="eg-sub">Это бот — им управляет программа. Нажмите «Старт», чтобы начать с ним разговор.</div>
+          <button type="button" className="dm-start bot-start" onClick={onStart}>
+            Старт
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function DmChatView({ dm }: { dm: DmChannel }) {
   const messagesRaw = useStore((s) => s.dmMessages[dm.id]);
   const messages = messagesRaw ?? EMPTY;
@@ -313,6 +350,16 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
      прочитал дальше, а не на каждую сводку. */
   // «Избранное» (`saved1`): сообщения сразу «прочитаны» (✓✓, как у Telegram, где читать их некому, кроме меня).
   const saved = !!dm.saved;
+  // Собеседник — бот (#229). В типе `otherUser` поля пока нет — читаем добавленное сервером (`botRules.isBotUser`).
+  const peerBot = !saved && !dm.group && (dm.otherUser as { bot?: unknown }).bot === true;
+  /* Бот ещё не начат (решение владельца 26.10, как у Telegram): пустая беседа с ботом — поля ввода нет, пока не нажата
+     «Старт». Нажали — поле сразу, не дожидаясь ответа бота (`botStartedIn`; в очереди уже лежит `/start`). Пока лента
+     грузится, поле тоже скрыто: иначе у пустой беседы оно мелькнуло бы и пропало. Не загрузилась — поле как обычно. */
+  const [botStartedIn, setBotStartedIn] = useState<string | null>(null);
+  // Писать боту нельзя (решение A, 26.10): выключен / приватный, а я не владелец — плашка вместо поля и без «Старт».
+  const botUnavailable = peerBot ? (dm.otherUser as { botUnavailable?: string }).botUnavailable : undefined;
+  const botGate =
+    peerBot && !failed && messages.length === 0 && outboxItems.length === 0 && botStartedIn !== dm.id && !initialDraft?.text && !botUnavailable;
   const peerReadKey = useStore((s) =>
     saved
       ? Number.MAX_SAFE_INTEGER
@@ -654,7 +701,8 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   const lastSeenOn = useStore((s) => serverLastSeen(s.serverFeatures));
   // «N прочитали» в меню своего сообщения группы (15.10, `readers1`); `read-at` — только 1:1 (группе он отвечает 404).
   const readersOn = useStore((s) => serverReaders(s.serverFeatures));
-  const peerOnline = online && !conn;
+  // Бот (#229, 26.10): точки «в сети» у аватара нет, под именем — «бот» (как у Telegram), а не «был(а)…».
+  const peerOnline = online && !conn && !peerBot;
   // Собеседник в «отошёл» (20.10): точка «нет на месте» и строка «нет на месте» вместо «в сети».
   const peerAway = useStore((s) => s.userStatuses?.[dm.otherUser.id]?.status === 'away');
   const peerTyping = typing && !conn;
@@ -688,6 +736,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
     avatarUrl: dm.otherUser.avatarUrl,
     username: dm.otherUser.username,
     convId: dm.id,
+    ...(peerBot ? { bot: true } : {}),
   };
   const showProfile = (el: HTMLElement | null) => {
     const r = el?.getBoundingClientRect();
@@ -846,6 +895,8 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
   // беседа 1:1 (не группа, не «Избранное»), заблокированному не звоним (сервер всё равно ответит 403).
   // «Кто может звонить» (`presence4`, решение владельца 08.10 п.25): собеседник запретил мне звонить (`canCall === false` из
   // `GET /users/:id/last-seen`) — трубка ОСТАЁТСЯ, по нажатию окно «ограничил(а) звонки» (как Telegram), звонка нет.
+  // Бот (#229, 26.10) звонков не принимает (Telegram у бота трубку не рисует) — трубки нет (`!peerBot` у кнопки и «Перезвонить»),
+  // сервер тоже отвечает 403.
   const callsOn =
     useStore((s) => serverCalls(s.serverFeatures)) && !group && !saved && !former && !blocked;
   const callsDenied = lastSeen?.canCall === false;
@@ -885,10 +936,11 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       // Файл до 512 МБ кусками (`bigfile1`) — путём бесед (`api.convUpload`).
       // Предел считает сама лента (`attachRules.dmAttachMaxBytes`): харнесс шапки грузит этот файл с перечнем импортов.
       bigFiles
-      onRedial={callsOn && !linkBroken && !callsDenied && !callsFedLocked && !inCall ? () => void useCall.getState().start(dm.id) : undefined}
+      onRedial={callsOn && !peerBot && !linkBroken && !callsDenied && !callsFedLocked && !inCall ? () => void useCall.getState().start(dm.id) : undefined}
       newSince={newSince}
       scrollKey={visitKey}
       feedId={dm.id}
+      botPeer={peerBot}
       loadMediaPage={loadMediaPage}
       title={
         /* Шапка беседы (раунд 11, HANDOFF §5): аватар с точкой «в сети», имя и строка состояния — «в сети» или пусто (без
@@ -919,9 +971,14 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
               </span>
             )}
           </span>
-          <span className={`dm-who${peerTyping ? ' typing' : ''}${saved || (!group && !peerOnline && !peerTyping && !conn && !seenText) ? ' solo' : ''}`}>
+          <span className={`dm-who${peerTyping ? ' typing' : ''}${saved || (!group && !peerBot && !peerOnline && !peerTyping && !conn && !seenText) ? ' solo' : ''}`}>
             <strong>
               {peerName}
+              {peerBot && (
+                <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+                  БОТ
+                </span>
+              )}
               {/* Э1 (`fedm1`): собеседник с другого инстанса — значок как `GuestMark` списка участников (импорт сюда нельзя, см. выше). */}
               {peerHomeLabel && (
                 <span className="guest-mark" title={`С инстанса «${peerHomeLabel}»`} aria-label={`с инстанса «${peerHomeLabel}»`}>
@@ -941,7 +998,9 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
                       : 'вы покинули группу'
                     : group
                       ? groupMembersLabel(group.members.length)
-                      : online
+                      : peerBot
+                        ? 'бот'
+                        : online
                         ? peerAway
                           ? 'нет на месте'
                           : 'в сети'
@@ -984,16 +1043,18 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             </button>
           )}
           {callsOn && !linkBroken && (
-            <button
-              type="button"
-              className="topbar-btn"
-              title={callsFedNoHint ? FED_NO_CALLS_TEXT : 'Позвонить'}
-              aria-label="Позвонить"
-              disabled={inCall || callsFedLocked}
-              onClick={() => (callsDenied ? explainCallPrivacy(peerName) : void useCall.getState().start(dm.id))}
-            >
-              <Icon name="phone" size={18} />
-            </button>
+            !peerBot && (
+              <button
+                type="button"
+                className="topbar-btn"
+                title={callsFedNoHint ? FED_NO_CALLS_TEXT : 'Позвонить'}
+                aria-label="Позвонить"
+                disabled={inCall || callsFedLocked}
+                onClick={() => (callsDenied ? explainCallPrivacy(peerName) : void useCall.getState().start(dm.id))}
+              >
+                <Icon name="phone" size={18} />
+              </button>
+            )
           )}
           <button
             ref={moreBtnRef}
@@ -1321,6 +1382,14 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
             <Icon name="lock" size={16} />
             <span className="muted">{messagePrivacyPlateText(peerName)}</span>
           </div>
+        ) : botUnavailable ? (
+          <div className="composer-blocked" role="status">
+            <Icon name="lock" size={16} />
+            <span className="muted">{botUnavailablePlateText(botUnavailable, peerName)}</span>
+          </div>
+        ) : botGate ? (
+          // Ничего на месте поля (не плашка): кнопка «Старт» — по центру ленты (`BotStartEmpty`).
+          <></>
         ) : undefined
       }
       /* Как у Telegram Android: просто «Сообщение» (решение владельца 09.10), без имени собеседника. */
@@ -1330,7 +1399,21 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       autocomplete={groupMentions}
       messages={messages}
       loading={messagesRaw === undefined && !failed}
-      emptyState={failed ? <FeedLoadError onRetry={() => void refreshDmHistory(dm.id)} /> : saved ? <SavedEmpty /> : undefined}
+      emptyState={failed ? (
+        <FeedLoadError onRetry={() => void refreshDmHistory(dm.id)} />
+      ) : saved ? (
+        <SavedEmpty />
+      ) : peerBot ? (
+        <BotStartEmpty
+          name={peerName}
+          avatarUrl={dm.otherUser.avatarUrl}
+          description={dm.otherUser.botDescription}
+          onStart={botUnavailable ? undefined : () => {
+            setBotStartedIn(dm.id);
+            useStore.getState().outboxEnqueue(dm.id, { key: newClientId(), content: '/start', files: [], replyToId: null });
+          }}
+        />
+      ) : undefined}
       // История глубже одной порции (#212): сервер отдавал её с первого дня, лента не просила.
       onLoadOlder={() => loadOlderDmMessages(dm.id)}
       feedWindow={feedWindow}

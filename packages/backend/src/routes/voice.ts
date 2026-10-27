@@ -33,7 +33,7 @@ import {
 } from '../pokeRules.js';
 import { voiceHierarchyDecision } from '../voiceRules.js';
 import { inVoiceChannel, voiceParticipantIds } from '../voicePresence.js';
-import { economySeenBy, moveCoins, walletOf } from '../coins.js';
+import { economySeenBy, isBotUser, moveCoins, walletOf } from '../coins.js';
 import { TIP_BLOCK_TEXT, TIP_COOLDOWN_MS, tipBlock, tipCooldownKey, tipSplit , MAX_TIPPERS_PER_DAY } from '../tipRules.js';
 import { buyItem } from '../purchase.js';
 import { receivedToday, shopFor } from '../shop.js';
@@ -78,6 +78,9 @@ async function voiceHierarchyBlock(
   ]);
   return voiceHierarchyDecision(actor, target, isMove);
 }
+
+/** Тычок и покупка награды для бота (#232, ТЗ §1.4) — 400 с этим текстом. */
+const BOTS_DONT_ACCEPT = "Bad Request: bots don't accept this";
 
 export async function voiceRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
@@ -151,7 +154,9 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     // The target's own resolved permissions decide which sources to restore on unmute.
     const targetPerms = await getChannelPermissions(channelId, userId);
     if (!targetPerms) return reply.code(404).send({ error: 'target not a member' });
-    await serverMute(roomForChannel(channelId), userId, muted, targetPerms.permissions);
+    // Бот (#232): своя ветка — мьют/размьют не возвращает ему слух, камеру и экран (`botVoicePermission`).
+    const targetIsBot = await isBotUser(db, userId);
+    await serverMute(roomForChannel(channelId), userId, muted, targetPerms.permissions, { bot: targetIsBot });
     // Track who's server-muted so presence can distinguish it from self-mute.
     if (muted) await redisPub.sadd(voiceServerMuteKey(channelId), userId);
     else await redisPub.srem(voiceServerMuteKey(channelId), userId);
@@ -195,6 +200,21 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     if (!target || target.type !== 'voice') return reply.code(400).send({ error: 'target is not a voice channel' });
     // The target channel must be on THIS server (P3-2) — no cross-server move (server isolation).
     if (target.serverId !== perms.serverId) return reply.code(400).send({ error: 'target channel is on another server' });
+    // Бот (#232): переносит не клиент, а SDK — по `voice_state { left, move_to }`; права бота в целевом канале — как у `joinVoice`.
+    if (await isBotUser(db, userId)) {
+      const [from] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
+      const { moveBotVoice } = await import('../bots/botVoice.js');
+      if (!from || !(await moveBotVoice(userId, from, target))) {
+        return reply.code(403).send({ error: "Forbidden: the bot can't connect to that channel" });
+      }
+      await redisPub.srem(voiceServerMuteKey(channelId), userId);
+      await writeAudit(perms.serverId, req.user!.sub, 'voice.move', {
+        targetType: 'member',
+        targetId: userId,
+        data: { fromChannelId: channelId, toChannelId, toChannelName: target.name },
+      });
+      return reply.code(204).send();
+    }
     const targetPerms = await getChannelPermissions(toChannelId, userId);
     if (!targetPerms || !has(targetPerms.permissions, Permission.CONNECT)) {
       return reply.code(400).send({ error: 'user cannot connect to the target channel' });
@@ -228,6 +248,8 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
 
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms) return reply.code(404).send({ error: 'not found' });
+    // Бот (#232): тычок ему не нужен — окно со звуком некому показать.
+    if (await isBotUser(db, userId)) return reply.code(400).send({ error: BOTS_DONT_ACCEPT });
 
     const [target] = await db
       .select({ id: users.id, presenceStatus: users.presenceStatus })
@@ -326,6 +348,8 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       walletOf(ch.serverId, req.user!.sub),
       walletOf(ch.serverId, userId),
     ]);
+    // Бот и строка вебхука вне GusCoins (gitea #231): им не типают. Для отправителя это тот же отказ, что «не принимает типы».
+    const targetIsBot = await isBotUser(db, userId);
     const key = tipCooldownKey(req.user!.sub, userId);
     const block = tipBlock(
       {
@@ -338,7 +362,7 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
         senderOptedOut: mine.optedOut,
         // Два разных выключателя: «не участвую в экономике» и «не принимаю типы» (#122). Для
         // отправителя они неразличимы намеренно — см. TIP_BLOCK_TEXT.
-        targetOptedOut: theirs.optedOut || theirs.tipsOptOut,
+        targetOptedOut: theirs.optedOut || theirs.tipsOptOut || targetIsBot,
         onCooldown: (await redisPub.exists(key)) === 1,
         balance: mine.balance,
         givenToday: mine.givenToday,
@@ -461,6 +485,8 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       .object({ item: z.string(), message: z.string().max(500).optional() })
       .parse(req.body ?? {});
 
+    // Бот (#232): адресная награда боту не покупается (монет и наград у ботов нет).
+    if (await isBotUser(db, userId)) return reply.code(400).send({ error: BOTS_DONT_ACCEPT });
     const spec = shopItem(item);
     if (!spec) return reply.code(404).send({ error: BUY_BLOCK_TEXT['unknown-item'] });
     /**

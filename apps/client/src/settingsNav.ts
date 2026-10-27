@@ -18,7 +18,7 @@
 
 import type { IconName } from './components/Icon';
 
-export type SectionKey = 'sound' | 'notif' | 'look' | 'data' | 'folders' | 'account' | 'privacy' | 'federation' | 'apps';
+export type SectionKey = 'sound' | 'notif' | 'look' | 'data' | 'folders' | 'account' | 'privacy' | 'bots' | 'federation' | 'apps';
 
 export interface SettingsGroup {
   /** id узла в разметке, к которому прокручиваем. */
@@ -176,6 +176,17 @@ export const SECTIONS: SettingsSection[] = [
       { id: 'set-g-blocked', label: 'Заблокированные' },
     ],
   },
+  /**
+   * «Мои боты» (#229, этап 1 `docs/bots-plan.md`) — как @BotFather у Telegram, только кнопками: создать бота, токен один раз,
+   * «Доступен всем», удалить. Виден всегда: старый сервер без ботов раздел покажет со словами «не поддерживает» (404).
+   */
+  {
+    key: 'bots',
+    label: 'Мои боты',
+    sub: 'Свои боты: уведомления и помощники',
+    icon: 'bot',
+    groups: [{ id: 'set-g-bots', label: 'Мои боты' }],
+  },
   {
     key: 'federation',
     label: 'Федерация',
@@ -280,6 +291,7 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
   { id: 'set-g-password', title: 'Смена пароля', section: 'account', group: 'Пароль', keywords: 'пароль сменить' },
   { id: 'set-g-sessions', title: 'Сессии и выход везде', section: 'account', group: 'Сессии', keywords: 'сессия выйти устройства вход' },
   { id: 'set-g-2fa', title: 'Двухфакторная аутентификация', section: 'account', group: '2FA', keywords: '2fa двухфакторная код totp резервные' },
+  { id: 'set-g-bots', title: 'Мои боты', section: 'bots', group: 'Мои боты', keywords: 'бот боты bot токен ключ api уведомления помощник создать программа' },
   { id: 'set-g-folders', title: 'Папки бесед', section: 'folders', group: 'Мои папки', keywords: 'папка папки вкладки беседы личные сообщения лс непрочитанные' },
   { id: 'set-g-lastseen', title: 'Время захода', section: 'privacy', group: 'Время захода', keywords: 'был в сети была последний заход онлайн приватность конфиденциальность видимость время прочтения прочитано скрыть никто все собеседники' },
   { id: 'set-g-calls', title: 'Кто может звонить', section: 'privacy', group: 'Звонки', keywords: 'звонки звонок позвонить кто может мне звонить приватность конфиденциальность никто все собеседники' },

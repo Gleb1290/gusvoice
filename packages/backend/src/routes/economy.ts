@@ -542,7 +542,7 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
       })
       .from(voiceActivity)
       .innerJoin(users, eq(users.id, voiceActivity.userId))
-      .where(and(eq(voiceActivity.serverId, serverId), gte(voiceActivity.createdAt, since)))
+      .where(and(eq(voiceActivity.serverId, serverId), gte(voiceActivity.createdAt, since), eq(users.bot, false)))
       // ⚠️ Сортировка ОБЯЗАТЕЛЬНА: `replay` копит состояние суток по ходу и на перемешанном вводе
       // посчитает потолок и затухание неправильно.
       .orderBy(asc(voiceActivity.createdAt));
@@ -799,7 +799,14 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
       })
       .from(coinLedger)
       .innerJoin(users, eq(users.id, coinLedger.userId))
-      .where(and(eq(coinLedger.serverId, serverId), eq(coinLedger.reason, 'voice'), gte(coinLedger.createdAt, since)))
+      .where(
+        and(
+          eq(coinLedger.serverId, serverId),
+          eq(coinLedger.reason, 'voice'),
+          gte(coinLedger.createdAt, since),
+          eq(users.bot, false),
+        ),
+      )
       .groupBy(coinLedger.userId, users.displayName)
       .orderBy(sql`SUM(${coinLedger.amount}) DESC`)
       .limit(10);
@@ -893,6 +900,8 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
           gt(coinBalances.seasonEarned, 0),
           // Отказавшийся от участия в таблице не показывается: он просил его не считать.
           eq(coinBalances.optedOut, false),
+          // Боты и строки вебхуков (`users.bot`) — не люди, в таблице их нет (gitea #231).
+          eq(users.bot, false),
         ),
       )
       .orderBy(sql`${coinBalances.seasonEarned} DESC`)
@@ -1008,7 +1017,9 @@ async function planRetro(serverId: string, economy: ServerEconomy) {
   const memberRows = await db
     .select({ userId: serverMembers.userId })
     .from(serverMembers)
-    .where(eq(serverMembers.serverId, serverId));
+    .innerJoin(users, eq(users.id, serverMembers.userId))
+    // Боты и строки вебхуков (`users.bot`) ретро не получают (gitea #231).
+    .where(and(eq(serverMembers.serverId, serverId), eq(users.bot, false)));
   const members = new Set(memberRows.map((r) => r.userId));
 
   const optedOutRows = await db
@@ -1103,7 +1114,8 @@ async function compensateRateRise(
   const rows = await tx
     .select({ userId: coinBalances.userId, balance: coinBalances.balance })
     .from(coinBalances)
-    .where(and(eq(coinBalances.serverId, serverId), gt(coinBalances.balance, 0)));
+    .innerJoin(users, eq(users.id, coinBalances.userId))
+    .where(and(eq(coinBalances.serverId, serverId), gt(coinBalances.balance, 0), eq(users.bot, false)));
 
   let sum = 0;
   const userIds: string[] = [];

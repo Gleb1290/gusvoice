@@ -1,7 +1,7 @@
 import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { EARNED_REASONS, freezeWindow, seasonId, seasonRange, wearsCrown, type SeasonLength } from './coinRules.js';
 import { db } from './db/index.js';
-import { coinLedger, seasonResults, serverEconomy } from './db/schema.js';
+import { coinLedger, seasonResults, serverEconomy, users } from './db/schema.js';
 
 /**
  * Закрытие сезона и заморозка итогов (этап 4, #117).
@@ -83,12 +83,15 @@ async function freeze(tx: Tx, serverId: string, finished: string, w: { from: Dat
       earned: sql<number>`SUM(${coinLedger.amount})::int`,
     })
     .from(coinLedger)
+    .innerJoin(users, eq(users.id, coinLedger.userId))
     .where(
       and(
         eq(coinLedger.serverId, serverId),
         inArray(coinLedger.reason, [...EARNED_REASONS]),
         gte(coinLedger.createdAt, w.from),
         lt(coinLedger.createdAt, w.to),
+        // Боты и строки вебхуков (`users.bot`) корону не носят (gitea #231).
+        eq(users.bot, false),
       ),
     )
     .groupBy(coinLedger.userId)

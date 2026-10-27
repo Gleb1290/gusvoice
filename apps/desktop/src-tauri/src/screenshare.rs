@@ -308,6 +308,17 @@ struct Session {
     /// Счётчик падений подряд (#109). Обнуляем, когда показ С ДВУМЯ СЛОЯМИ дошёл до «Завершить»:
     /// это и есть доказательство, что на этой машине они живут.
     streak_marker: Option<PathBuf>,
+    /// Поток захвата текущего поколения (#237): меняется при смене источника, трек и источник — нет.
+    capture: CaptureHandle,
+    /// Что снимаем СЕЙЧАС — по ней сторож источника (#99) проверяет живость после смены.
+    target: CaptureTarget,
+    /// Номер текущего поколения захвата (`ACTIVE_GEN`).
+    gen: u64,
+    /// С чем показ запущен — правило цели для нового источника.
+    share: ShareCfg,
+    /// С каким размером опубликованы кодировки (у «Родного» — источника на старте или после
+    /// переопубликации): от него решаем, пересоздавать ли публикацию при смене.
+    declared: (u32, u32),
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -515,6 +526,250 @@ fn reset_pipe_meters() {
     HEALS.store(0, Ordering::Relaxed);
     STUCK_S.store(0, Ordering::Relaxed);
     CAPTURE_NOW_US.store(0, Ordering::Relaxed);
+    SWITCHES.store(0, Ordering::Relaxed);
+    if let Ok(mut p) = PIPELINE_PENDING.lock() {
+        *p = None;
+    }
+}
+
+/// Счётчики конвейера от НОВОГО источника после смены (#237). Без этого сторож залипания и отчёт
+/// сравнивали бы кадры двух разных источников. Самолечение (`HEALS`) и путь кадра не трогаем: первое
+/// — свойство показа, а не источника, второе новое поколение выставило само (`activate_gen`).
+fn reset_switch_meters() {
+    PIPE_TOTAL_US.store(0, Ordering::Relaxed);
+    PIPE_CONV_US.store(0, Ordering::Relaxed);
+    PIPE_FRAMES.store(0, Ordering::Relaxed);
+    PIPE_LATE.store(0, Ordering::Relaxed);
+    STUCK_S.store(0, Ordering::Relaxed);
+    CAPTURE_NOW_US.store(0, Ordering::Relaxed);
+}
+
+// ─── Смена источника без остановки показа (#237) ───
+//
+// Трек, `NativeVideoSource` и комната `#screen` живут весь показ, а под ними пересоздаётся только поток
+// захвата. Каждый поток захвата — «поколение» со своим номером. Кадр уходит в источник только у
+// поколения, равного `ACTIVE_GEN`, и проверка с отдачей кадра идут ПОД ЭТИМ ЖЕ замком: новый захват
+// поднимается рядом со старым, пока не победил — его кадры выбрасываются, и два писателя в одном
+// источнике не смешиваются ни на кадр (иначе кодировщик дёрнул бы пересоздание слоёв дважды).
+
+/// Поколение захвата, чьи кадры сейчас уходят в источник показа. 0 — показа нет.
+static ACTIVE_GEN: Mutex<u64> = Mutex::new(0);
+/// Счётчик выданных номеров поколений: номера не повторяются и между показами.
+static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
+/// Сколько раз источник показа сменили на лету (уезжает в `ShareStats.switches`).
+static SWITCHES: AtomicU32 = AtomicU32::new(0);
+/// Смена идёт прямо сейчас: вторая смена параллельно и самолечение (#111) ждут.
+static SWITCHING: AtomicBool = AtomicBool::new(false);
+/// Путь кадра поколения, которое ещё не победило: его покажем, только когда оно станет текущим.
+static PIPELINE_PENDING: Mutex<Option<(u64, &'static str, String)>> = Mutex::new(None);
+/// Сколько новый захват может подниматься, прежде чем смену признаем неудачной (старый всё это время идёт).
+const SWITCH_READY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Шаг сна потока захвата, чьё поколение сейчас не текущее.
+const IDLE_GEN_SLEEP: Duration = Duration::from_millis(5);
+
+fn gen_lock() -> std::sync::MutexGuard<'static, u64> {
+    ACTIVE_GEN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn gen_is_live(gen: u64) -> bool {
+    *gen_lock() == gen
+}
+
+/// Выполнить `f` (отдать кадр в источник), только если поколение `gen` текущее, — под замком поколения.
+fn with_live_gen<T>(gen: u64, f: impl FnOnce() -> T) -> Option<T> {
+    let g = gen_lock();
+    if *g == gen {
+        Some(f())
+    } else {
+        None
+    }
+}
+
+/// Путь кадра от потока захвата поколения `gen`: текущее — сразу в отчёт, нет — отложить до победы.
+fn set_pipeline_for(gen: u64, kind: &'static str, note: impl Into<String>) {
+    let note = note.into();
+    let g = gen_lock();
+    if *g == gen {
+        set_pipeline(kind, note);
+    } else if let Ok(mut p) = PIPELINE_PENDING.lock() {
+        *p = Some((gen, kind, note));
+    }
+    drop(g);
+}
+
+/// Сделать поколение `gen` текущим. Возвращает прошлое поколение и прошлый путь кадра — для отката.
+fn activate_gen(gen: u64) -> (u64, (&'static str, String)) {
+    let mut g = gen_lock();
+    let prev_gen = std::mem::replace(&mut *g, gen);
+    let prev_pipe = PIPELINE.lock().map(|p| p.clone()).unwrap_or_default();
+    if let Some((pg, kind, note)) = PIPELINE_PENDING.lock().ok().and_then(|mut p| p.take()) {
+        if pg == gen {
+            set_pipeline(kind, note);
+        }
+    }
+    drop(g);
+    (prev_gen, prev_pipe)
+}
+
+/// Откат `activate_gen`: вернуть прошлое поколение и его путь кадра.
+fn restore_gen(gen: u64, pipe: (&'static str, String)) {
+    let mut g = gen_lock();
+    *g = gen;
+    set_pipeline(pipe.0, pipe.1);
+    drop(g);
+}
+
+/// Что и как снимать — всё, что нужно потоку захвата.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureTarget {
+    /// Номер источника libwebrtc: монитор или HWND.
+    pub id: u64,
+    pub is_window: bool,
+    /// Процесс окна на момент выбора: сторож источника (#99) отличает по нему «то же окно» от
+    /// «номер достался другому». У экрана `None`.
+    pub want_pid: Option<u32>,
+    /// Потолок кадра: больше — уменьшаем с сохранением пропорций.
+    pub tw: u32,
+    pub th: u32,
+    pub fps: u32,
+    pub cursor: bool,
+    /// Почему НЕ путь через видеокарту (#207, шаг 4). `None` — пробуем его.
+    pub gpu_skip: Option<&'static str>,
+}
+
+/// С чем показ запущен — то, что нужно, чтобы собрать цель для НОВОГО источника тем же правилом,
+/// что на старте. Качество при смене не меняется (решение владельца 27.10, Р2).
+#[derive(Clone, Debug)]
+pub struct ShareCfg {
+    /// «Родное» (0×0): размер источника, вписанный в 4K.
+    pub native: bool,
+    /// Потолок из настроек (у «Родного» 0×0).
+    pub width: u32,
+    pub height: u32,
+    /// Частота из настроек (от неё считается битрейт) и та, с которой снимаем (`mode_fps`).
+    pub cfg_fps: u32,
+    pub fps: u32,
+    pub mode: String,
+    pub codec: String,
+    pub gpu_pipeline: bool,
+    pub cursor: bool,
+    /// Слои показа — как решил старт (`decide_layers`).
+    pub layers: bool,
+}
+
+/// Цель захвата и размер, с которым публикуются кодировки, — общее правило старта и смены.
+///
+/// `known` — настоящий размер источника (`native_dims`), нужен только «Родному»: экран с известным
+/// размером снимаем ровно им, окно и неизвестное держит рамка 4K (окно растягивают на лету).
+/// Не узнали размер — объявляем 1080p, а кадр всё равно уходит родным.
+pub fn capture_target_for(
+    c: &ShareCfg,
+    id: u64,
+    is_window: bool,
+    known: Option<(u32, u32)>,
+    want_pid: Option<u32>,
+) -> (CaptureTarget, (u32, u32)) {
+    let (width, height) = if c.native {
+        let (w, h) = known.unwrap_or((1920, 1080));
+        fit_native(w, h)
+    } else {
+        (c.width, c.height)
+    };
+    let (tw, th) = if !c.native {
+        (c.width, c.height)
+    } else if is_window || known.is_none() {
+        (NATIVE_MAX_W, NATIVE_MAX_H)
+    } else {
+        (width, height)
+    };
+    // Путь кадра (#207, шаг 4): новый — только для экрана, H.264 и включённой настройки.
+    let gpu_skip: Option<&'static str> = if is_window {
+        Some("показ окна")
+    } else if !c.gpu_pipeline {
+        Some("выключено в настройках")
+    } else if c.codec != "h264" {
+        Some("кодек не H.264")
+    } else {
+        None
+    };
+    let t = CaptureTarget {
+        id,
+        is_window,
+        want_pid: if is_window { want_pid } else { None },
+        tw,
+        th,
+        fps: c.fps,
+        cursor: c.cursor,
+        gpu_skip,
+    };
+    (t, (width, height))
+}
+
+/// Нужно ли при смене пересоздать публикацию (#237, Р1): только в «Родном» и только когда площадь
+/// кадра выросла или упала БОЛЬШЕ чем вдвое. Битрейт и лестница слоёв посчитаны от размера на
+/// старте, и без пересчёта окно 720p → экран 1440p пошло бы мылом. Фиксированное разрешение — кадр
+/// и так вписывается в тот же потолок.
+pub fn switch_needs_republish(native: bool, declared: (u32, u32), next: (u32, u32)) -> bool {
+    if !native {
+        return false;
+    }
+    let a = declared.0 as f64 * declared.1 as f64;
+    let b = next.0 as f64 * next.1 as f64;
+    if a <= 0.0 || b <= 0.0 {
+        return false;
+    }
+    b > a * 2.0 || b * 2.0 < a
+}
+
+/// Итог смены источника: тот же, горячая смена под тем же треком, смена с переопубликацией.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchOutcome {
+    Same,
+    Hot,
+    Republished,
+}
+
+impl SwitchOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SwitchOutcome::Same => "same",
+            SwitchOutcome::Hot => "hot",
+            SwitchOutcome::Republished => "republished",
+        }
+    }
+}
+
+/// «Захват готов» — отправляется ОДИН раз: первым кадром, ошибкой или концом потока.
+#[derive(Clone)]
+struct ReadyTx(Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<(), String>>>>>);
+
+impl ReadyTx {
+    fn send(&self, r: Result<(), String>) {
+        if let Some(tx) = self.0.lock().ok().and_then(|mut g| g.take()) {
+            let _ = tx.send(r);
+        }
+    }
+
+    fn sent(&self) -> bool {
+        self.0.lock().map(|g| g.is_none()).unwrap_or(true)
+    }
+}
+
+/// Поток захвата одного поколения.
+struct CaptureHandle {
+    /// Свой стоп-флаг поколения; общий «показ кончился» — `Session.stop`, поток смотрит на оба.
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Погасить поток захвата и дождаться его в `spawn_blocking` (не держа async-поток).
+fn retire_capture(mut h: CaptureHandle) {
+    h.stop.store(true, Ordering::Relaxed);
+    if let Some(j) = h.join.take() {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _ = j.join();
+        });
+    }
 }
 
 /// Числа одного окна сторожа — всё, что нужно, чтобы решить «залипло или нет».
@@ -778,6 +1033,17 @@ pub fn gpu_path_planned(is_window: bool, gpu_pipeline: bool, codec: &str, nvenc:
     !is_window && gpu_pipeline && codec == "h264" && nvenc
 }
 
+/// Включать ли dynacast показу. Только когда кадр идёт через процессор И слоёв несколько.
+///
+/// 🔴 27.10 (v0.9.50): показ ОКНА с «Максимальным качеством» был у всех зрителей чёрным. Окно идёт
+/// через процессор → dynacast включён; «Максимальное качество» оставляет один слой без имени (`rid`
+/// пустой) → SDK по ответу сервера о смотримых слоях не находит его среди слоёв и выключает: захват
+/// шёл 60 к/с, кодировщик не получил ни кадра (`frames_encoded` 0, слой `active` 0, PLI копятся).
+/// С одним слоем dynacast экономить нечего, кроме паузы без зрителей.
+pub fn share_dynacast(gpu_planned: bool, layers: bool) -> bool {
+    !gpu_planned && layers
+}
+
 /// Подсказка оценщику канала WebRTC: `(старт, нижняя граница)`, бит/с, 0 — не трогать.
 ///
 /// 🔴 26.09 на гигабитной локалке оценщик застрял на 5,9 Мбит/с, а полный слой получал 3,5 из 12,9 —
@@ -972,68 +1238,83 @@ enum GpuEnd {
 /// в том, что уходит в источник: не I420 в оперативке, а общая D3D11-текстура, которую кодировщик
 /// NVENC каждого слоя сам переводит в NV12 и уменьшает (`nvidia/gv_d3d11_converter.h`).
 /// «Подготовки кадра» здесь нет вовсе, поэтому `convert_ms` у такого показа — ноль.
+///
+/// Смена источника (#237): поколение `gen` отдаёт кадры, только пока оно текущее. Кадр из видеопамяти
+/// уходит в источник прямо внутри `capture`, «снять, но не отдать» нельзя, поэтому готовность
+/// (`ready`) здесь — поднятое дублирование DXGI и перевод цвета, а не первый кадр; до победы поток
+/// спит и `capture` не зовёт.
 fn run_gpu_capture(
-    display: u64,
-    tw: u32,
-    th: u32,
-    fps: u32,
-    cursor: bool,
+    t: &CaptureTarget,
     vs: &NativeVideoSource,
-    stop: &AtomicBool,
+    gen: u64,
+    first: bool,
+    ready: &ReadyTx,
+    stopped: &dyn Fn() -> bool,
 ) -> GpuEnd {
     use webrtc_sys::gv_gpu_capture::ffi as gpu;
     if !gpu::gpu_capture_supported() {
-        set_pipeline("cpu", "NVENC недоступен");
+        set_pipeline_for(gen, "cpu", "NVENC недоступен");
         return GpuEnd::Fallback;
     }
-    let Ok(index) = i32::try_from(display) else {
-        set_pipeline("cpu", "номер экрана вне диапазона");
+    let Ok(index) = i32::try_from(t.id) else {
+        set_pipeline_for(gen, "cpu", "номер экрана вне диапазона");
         return GpuEnd::Fallback;
     };
-    let mut cap = gpu::new_gpu_screen_capture(index, tw, th, cursor);
+    let mut cap = gpu::new_gpu_screen_capture(index, t.tw, t.th, t.cursor);
     let Some(info) = cap.as_ref() else {
-        set_pipeline("cpu", "захват не создан");
+        set_pipeline_for(gen, "cpu", "захват не создан");
         return GpuEnd::Fallback;
     };
     let err = info.init_error().to_string();
     if !err.is_empty() {
-        set_pipeline("cpu", err);
+        set_pipeline_for(gen, "cpu", err);
         return GpuEnd::Fallback;
     }
     let (fw, fh) = (info.frame_width(), info.frame_height());
-    PIPE_SRC_W.store(info.source_width(), Ordering::Relaxed);
-    PIPE_SRC_H.store(info.source_height(), Ordering::Relaxed);
+    let (src_w, src_h) = (info.source_width(), info.source_height());
     let sys = vs.sys_handle();
     let Some(source) = sys.as_ref() else {
-        set_pipeline("cpu", "нет C++-источника");
+        set_pipeline_for(gen, "cpu", "нет C++-источника");
         return GpuEnd::Fallback;
     };
     // Курсор не поднялся — показ всё равно идёт через видеокарту, просто без курсора. Причину видно
     // в «Пути кадра» (панель и телеметрия), иначе «курсора нет» не отличить от «галочка выключена».
-    let cursor_err = if cursor { info.cursor_error().to_string() } else { String::new() };
-    set_pipeline("gpu", if cursor_err.is_empty() { String::new() } else { format!("курсор: {cursor_err}") });
+    let cursor_err = if t.cursor { info.cursor_error().to_string() } else { String::new() };
+    set_pipeline_for(gen, "gpu", if cursor_err.is_empty() { String::new() } else { format!("курсор: {cursor_err}") });
 
     // 🔴 Один обычный кадр ДО кадров из видеопамяти. Они идут мимо `capture_frame`, SDK их не
     // считает и до первого «своего» кадра подмешивает чёрные раз в 100 мс — вперемешку с нашими
     // (вендоренный libwebrtc, GUSVOICE.md). Чёрный честно: Y=16, U=V=128, а не нули — те зелёные.
-    let mut black = I420Buffer::new(fw, fh);
-    {
-        let (y, u, v) = black.data_mut();
-        y.fill(16);
-        u.fill(128);
-        v.fill(128);
+    // 🔴 Только первому захвату ИСТОЧНИКА (`first`): при горячей смене (#237) источник уже видел свои
+    // кадры, и чёрный кадр у зрителей мигнул бы.
+    if first {
+        let mut black = I420Buffer::new(fw, fh);
+        {
+            let (y, u, v) = black.data_mut();
+            y.fill(16);
+            u.fill(128);
+            v.fill(128);
+        }
+        vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, black));
     }
-    vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, black));
+    ready.send(Ok(()));
 
-    let frame_dur = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+    let frame_dur = Duration::from_micros(1_000_000 / t.fps.max(1) as u64);
     let mut next = Instant::now();
     let mut next_preview = Instant::now();
     let mut lost_run = 0u32;
     let mut rgba = Vec::new();
-    while !stop.load(Ordering::Relaxed) {
-        let t = Instant::now();
-        let status = cap.pin_mut().capture(source, 0);
-        PIPE_TOTAL_US.fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
+    while !stopped() {
+        let t0 = Instant::now();
+        // Не текущее поколение: кадр не снимаем вовсе — он ушёл бы в источник поверх чужих.
+        let Some(status) = with_live_gen(gen, || cap.pin_mut().capture(source, 0)) else {
+            std::thread::sleep(IDLE_GEN_SLEEP);
+            next = Instant::now();
+            continue;
+        };
+        PIPE_TOTAL_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        PIPE_SRC_W.store(src_w, Ordering::Relaxed);
+        PIPE_SRC_H.store(src_h, Ordering::Relaxed);
         match status {
             // Кадр ушёл: новый, повтор (экран не менялся) или повтор вместо пропущенного.
             0 | 1 | 4 | 5 => {
@@ -1044,21 +1325,21 @@ fn run_gpu_capture(
             3 => {
                 lost_run += 1;
                 if lost_run >= GPU_LOST_TICKS {
-                    set_pipeline("cpu", "захват DXGI потерян");
+                    set_pipeline_for(gen, "cpu", "захват DXGI потерян");
                     return GpuEnd::Fallback;
                 }
             }
             -2 => {
                 let why = gpu::native_encode_fail_reason().to_string();
-                set_pipeline("cpu", format!("кодировщик не взял кадр из видеопамяти: {why}"));
+                set_pipeline_for(gen, "cpu", format!("кодировщик не взял кадр из видеопамяти: {why}"));
                 return GpuEnd::Fallback;
             }
             -3 => {
-                set_pipeline("cpu", "кадр захвата не в BGRA (HDR?)");
+                set_pipeline_for(gen, "cpu", "кадр захвата не в BGRA (HDR?)");
                 return GpuEnd::Fallback;
             }
             _ => {
-                set_pipeline("cpu", format!("захват DXGI: код {status}"));
+                set_pipeline_for(gen, "cpu", format!("захват DXGI: код {status}"));
                 return GpuEnd::Fallback;
             }
         }
@@ -1157,6 +1438,216 @@ fn target_dims(sw: u32, sh: u32, tw: u32, th: u32) -> Option<(i32, i32)> {
     Some((dw, dh))
 }
 
+/// Поднять поток захвата поколения `gen` над источником `vs` (#237: вынесено из `start`, чтобы смена
+/// источника пересоздавала только его). `first` — первый захват этого ИСТОЧНИКА (старт или новая
+/// публикация): только ему нужен чёрный кадр перед кадрами из видеопамяти.
+///
+/// Готовность (`Receiver`) приходит один раз: `Ok` с первым кадром (у пути через видеокарту — с
+/// поднятым захватом, см. `run_gpu_capture`), `Err` — захватчик не создан или источника нет в списке.
+/// Раньше это были молчаливые `return`: показ шёл без кадров, пока сторож источника не погасит.
+fn spawn_capture(
+    t: CaptureTarget,
+    vs: NativeVideoSource,
+    gen: u64,
+    first: bool,
+    session_stop: Arc<AtomicBool>,
+) -> (CaptureHandle, tokio::sync::oneshot::Receiver<Result<(), String>>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ready = ReadyTx(Arc::new(Mutex::new(Some(tx))));
+    let own = stop.clone();
+    // Capture runs on its own thread (DesktopCapturer lives entirely here).
+    let join = std::thread::spawn(move || {
+        let stopped = move || own.load(Ordering::Relaxed) || session_stop.load(Ordering::Relaxed);
+        capture_thread(&t, &vs, gen, first, &ready, &stopped);
+        // Поток кончился, не дав ни кадра: смена не должна ждать таймаута.
+        ready.send(Err("источник не открылся: захват остановился".into()));
+    });
+    (CaptureHandle { stop, join: Some(join) }, rx)
+}
+
+fn capture_thread(
+    t: &CaptureTarget,
+    vs: &NativeVideoSource,
+    gen: u64,
+    first: bool,
+    ready: &ReadyTx,
+    stopped: &dyn Fn() -> bool,
+) {
+    match t.gpu_skip {
+        None => {
+            if let GpuEnd::Stopped = run_gpu_capture(t, vs, gen, first, ready, stopped) {
+                return;
+            }
+            // Отказ — в том числе посреди показа. Дальше старым путём, кодировщики сами
+            // вернутся к CUDA-сессии и начнут с опорного кадра.
+        }
+        Some(note) => set_pipeline_for(gen, "cpu", note),
+    }
+    let st = if t.is_window {
+        DesktopCaptureSourceType::Window
+    } else {
+        DesktopCaptureSourceType::Screen
+    };
+    // Курсор — только здесь, в самом показе: миниатюрам окна выбора и сторожу источника он не нужен.
+    let mut opts = DesktopCapturerOptions::new(st);
+    opts.set_include_cursor(t.cursor);
+    let Some(mut cap) = DesktopCapturer::new(opts) else {
+        ready.send(Err("источник не открылся: захватчик не создан".into()));
+        return;
+    };
+    let want_id = t.id;
+    let Some(src) = cap.get_source_list().into_iter().find(|s| s.id() == want_id) else {
+        ready.send(Err("источник не открылся: его нет в списке".into()));
+        return;
+    };
+    let (tw, th) = (t.tw, t.th);
+    let vs = vs.clone();
+    let ready_cb = ready.clone();
+    // 🔴 Полноразмерный буфер ПЕРЕИСПОЛЬЗУЕМ между кадрами. Раньше он выделялся заново на каждый
+    // кадр, 30–60 раз в секунду: на 1440p это ~5.5 МБ за кадр, то есть сотни мегабайт в секунду
+    // непрерывных выделений. Само по себе это не течёт, но делает нас самым частым просителем
+    // памяти на машине — а отказ в выделении получает тот, кто просит в неудачный момент.
+    // 2026-08-22 Windows объявила нехватку виртуальной памяти, и первым упал именно клиент,
+    // хотя занимал меньше всех.
+    //
+    // ⚠️ Переиспользовать можно ТОЛЬКО тот буфер, который не ушёл наружу. Отданный в
+    // `capture_frame` живёт дальше в конвейере кодирования (там свой счётчик ссылок, и из Rust
+    // его не видно) — тронешь его на следующем кадре, получишь рваную картинку. Поэтому:
+    // масштабируем — полноразмерный остаётся у нас; не масштабируем — он уходит, и следующий
+    // кадр выделяет новый.
+    let mut scratch: Option<I420Buffer> = None;
+    // Первое превью собираем сразу с первого же кадра: иначе наведённая мышка первые пять секунд
+    // показа не находила бы ничего.
+    let mut next_preview = Instant::now();
+    cap.start_capture(Some(src), move |res| {
+        if let Ok(frame) = res {
+            let t_conv = Instant::now();
+            let w = frame.width() as usize;
+            let h = frame.height() as usize;
+            if w == 0 || h == 0 {
+                return;
+            }
+            // Первый кадр нового источника = захват поднялся (#237).
+            ready_cb.send(Ok(()));
+            // Не текущее поколение: кадр выбрасываем, не тратя время на перевод цвета.
+            if !gen_is_live(gen) {
+                return;
+            }
+            PIPE_SRC_W.store(w as u32, Ordering::Relaxed);
+            PIPE_SRC_H.store(h as u32, Ordering::Relaxed);
+            let stride = frame.stride() as usize;
+            // Размер источника меняется на лету (окно тянут за угол) — буфер не того размера
+            // переиспользовать нельзя, проверяем перед тем, как взять.
+            let mut buf = match scratch.take() {
+                Some(b) if b.width() == w as u32 && b.height() == h as u32 => b,
+                _ => I420Buffer::new(w as u32, h as u32),
+            };
+            bgra_to_i420(frame.data(), stride, w, h, &mut buf);
+            // Кадр уходит в источник под замком поколения: смена могла случиться, пока переводили цвет.
+            let sent = match target_dims(w as u32, h as u32, tw, th) {
+                Some((dw, dh)) => {
+                    let scaled = buf.scale(dw, dh);
+                    scratch = Some(buf); // наружу ушла копия — полноразмерный снова наш
+                    with_live_gen(gen, || {
+                        vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, scaled))
+                    })
+                }
+                None => {
+                    // Уменьшать нечего: буфер уходит наружу, переиспользовать его нельзя.
+                    with_live_gen(gen, || vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buf)))
+                }
+            };
+            if sent.is_none() {
+                return;
+            }
+            PIPE_CONV_US.fetch_add(t_conv.elapsed().as_micros() as u64, Ordering::Relaxed);
+            PIPE_FRAMES.fetch_add(1, Ordering::Relaxed);
+            // Превью (#115) — ПОСЛЕ замеров конвейера: это не подготовка кадра, и попав внутрь
+            // `convert_ms` оно врало бы про стоимость самого показа.
+            if Instant::now() >= next_preview {
+                next_preview = Instant::now() + PREVIEW_EVERY;
+                if let Some(small) = downscale_bgra(frame.data(), stride, w, h) {
+                    if let Ok(mut slot) = PREVIEW.lock() {
+                        *slot = Some(small);
+                    }
+                }
+            }
+        }
+    });
+    // 🔴 Пейсинг ПО ДЕДЛАЙНУ, а не `sleep(frame_dur)` поверх работы.
+    // `capture_frame()` синхронно тянет за собой конвертацию BGRA→I420 (см. bgra_to_i420) —
+    // это единицы-десятки мс на кадр, тем больше, чем выше разрешение. Старый код спал ПОЛНЫЙ
+    // `frame_dur` СВЕРХУ этой работы → период = работа + сон, и до целевого fps не дотягивал
+    // (на 3440×1440 выходило ~34 из 60, при том что NVENC простаивал — «Ограничение: нет»).
+    // Теперь спим лишь ОСТАТОК до следующего тика: период = max(работа, frame_dur). Пока
+    // конвертация укладывается в бюджет кадра — держим ровный целевой fps; когда не укладывается
+    // (настоящий 4K), идём так быстро, как позволяет конвертация, без лишнего сна и без backlog.
+    // Микросекунды, а не миллисекунды: `1000/60` целочисленно = 16 мс (не 16.67) — само по себе
+    // роняло 60 → ~62.5, а с учётом округления и того ниже.
+    let frame_dur = Duration::from_micros(1_000_000 / t.fps.max(1) as u64);
+    let mut next = Instant::now();
+    while !stopped() {
+        // Поколение не текущее, а захват уже доказал, что живой: не снимаем вхолостую (старый
+        // способ снимает экран за сотни мс). Ждём победы или стопа.
+        if ready.sent() && !gen_is_live(gen) {
+            std::thread::sleep(IDLE_GEN_SLEEP);
+            next = Instant::now();
+            continue;
+        }
+        // Замеряем ВЕСЬ вызов: он синхронно тянет за собой колбэк с подготовкой кадра. Время
+        // самого захвата = это время минус подготовка, которую колбэк считает отдельно.
+        let t_all = Instant::now();
+        cap.capture_frame();
+        if gen_is_live(gen) {
+            PIPE_TOTAL_US.fetch_add(t_all.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+        next += frame_dur;
+        match next.checked_duration_since(Instant::now()) {
+            Some(rem) => std::thread::sleep(rem),
+            // Отстаём (конвертация тяжелее бюджета кадра) — не копим долг, сдвигаем дедлайн на «сейчас».
+            None => {
+                if gen_is_live(gen) {
+                    PIPE_LATE.fetch_add(1, Ordering::Relaxed);
+                }
+                next = Instant::now();
+            }
+        }
+    }
+}
+
+/// Опции публикации показа: старт, самолечение (#111) и переопубликация при смене (#237) строят их
+/// одним правилом, иначе пересоздание молча сменило бы человеку качество.
+fn share_publish_opts(
+    codec: &str,
+    max_bitrate: u64,
+    fps: u32,
+    layers: bool,
+    presets: &[VideoPreset],
+) -> TrackPublishOptions {
+    // 🔴 Слои обязательны (#109). Раньше стоял `false` с доводом «нижний слой никто
+    // не смотрит» — довод оказался неверным: его смотрит тот, кому плохо. Без запасного
+    // слоя зритель с потерями не может получить картинку полегче и вместо этого просит
+    // опорные кадры (PLI) — замерено 1.6 раза в секунду при норме 0.1. Каждый такой
+    // запрос заставляет НАШ кодировщик выдать опорный кадр, а слой один на всех →
+    // картинка пульсирует У ВСЕХ сразу. Один человек на мобильном интернете (47 %
+    // потерь) так уронил весь канал.
+    //
+    // Слоёв ТРИ (#191, 24.09): полный, средний на полной частоте кадров и экономный на
+    // 3 к/с — лестница и цена в `share_layer_presets`. До 0.8.5 SDK добавлял один
+    // половинный на 3 к/с, и выбор качества у зрителя был между полным и слайд-шоу.
+    // Выключатель `layers` в настройках показа возвращает один поток — на случай, если
+    // драйвер не даст столько сеансов NVENC («показ не стартует»).
+    TrackPublishOptions {
+        source: TrackSource::Screenshare,
+        video_codec: codec_of(codec),
+        video_encoding: Some(VideoEncoding { max_bitrate, max_framerate: fps as f64 }),
+        simulcast: layers,
+        simulcast_layers: layers.then(|| presets.to_vec()),
+        ..Default::default()
+    }
+}
+
 /// Connect the companion participant, start capturing the chosen source, and publish it.
 pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String> {
     stop().await; // tear down any in-flight share first
@@ -1216,25 +1707,26 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     // ─── С чем показ пойдёт на самом деле (06.10, #207): «Родное», режим, «Максимальное качество» ───
     let want_id: u64 = cfg.source_id.parse().map_err(|_| "bad source id".to_string())?;
     // «Родное» (0×0): размер источника, вписанный в 4K. До 06.10 «1080p» на мониторе 1440p или
-    // ультрашироком уменьшалось в НЕЦЕЛОЕ число раз — текст мылился ещё до кодировщика. Не узнали
-    // размер — объявляем 1080p, а кадр всё равно уходит родным (потолок ниже — 4K).
+    // ультрашироком уменьшалось в НЕЦЕЛОЕ число раз — текст мылился ещё до кодировщика. Правило цели
+    // и потолка кадра — `capture_target_for`, общее со сменой источника (#237).
     let native = cfg.width == 0 || cfg.height == 0;
     let known = if native { native_dims(cfg.is_window, want_id) } else { None };
-    let (width, height) = if native {
-        let (w, h) = known.unwrap_or((1920, 1080));
-        fit_native(w, h)
-    } else {
-        (cfg.width, cfg.height)
+    let share_cfg = ShareCfg {
+        native,
+        width: cfg.width,
+        height: cfg.height,
+        cfg_fps: cfg.fps,
+        fps: mode_fps(&cfg.mode, cfg.fps),
+        mode: cfg.mode.clone(),
+        codec: cfg.codec.clone(),
+        gpu_pipeline: cfg.gpu_pipeline,
+        cursor: cfg.cursor,
+        layers,
     };
-    // Потолок кадра для захвата. Окно в «Родном» растягивают на лету, а размер, который не узнали, —
-    // неизвестен: их держит только рамка 4K. Экран с известным размером — ровно он (вписанный в 4K).
-    let (cap_w, cap_h) = if !native {
-        (cfg.width, cfg.height)
-    } else if cfg.is_window || known.is_none() {
-        (NATIVE_MAX_W, NATIVE_MAX_H)
-    } else {
-        (width, height)
-    };
+    // Процесс окна снимаем ОДИН раз, на старте: дальше сторож сверяется именно с ним, иначе
+    // «то же окно» было бы не отличить от «Windows выдала этот номер кому-то другому» (#99).
+    let want_pid = if cfg.is_window { crate::apps_enum::window_pid(want_id) } else { None };
+    let (target, (width, height)) = capture_target_for(&share_cfg, want_id, cfg.is_window, known, want_pid);
     let fps = mode_fps(&cfg.mode, cfg.fps);
     let max_bitrate = if native || cfg.max_bitrate == 0 {
         share_bitrate(width, height, cfg.fps, cfg.mode == "motion", cfg.codec == "h264")
@@ -1300,7 +1792,7 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
         webrtc_sys::gv_gpu_capture::ffi::gpu_capture_supported(),
     );
     let mut room_opts = RoomOptions::default();
-    room_opts.dynacast = !gpu_planned;
+    room_opts.dynacast = share_dynacast(gpu_planned, layers);
     let (room, mut events) = Room::connect(&cfg.url, &cfg.token, room_opts)
         .await
         .map_err(|e| format!("livekit connect: {e}"))?;
@@ -1310,167 +1802,15 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     let source = NativeVideoSource::new(VideoResolution { width, height }, true);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let is_window = cfg.is_window;
-    // Процесс окна снимаем ОДИН раз, на старте: дальше сторож сверяется именно с ним, иначе
-    // «то же окно» было бы не отличить от «Windows выдала этот номер кому-то другому» (#99).
-    let want_pid = if is_window { crate::apps_enum::window_pid(want_id) } else { None };
-    let (tw, th) = (cap_w, cap_h);
-    let cursor = cfg.cursor;
-    let vs = source.clone();
-    let stop_thread = stop.clone();
-    // Путь кадра (#207, шаг 4): новый — только для экрана, H.264 и включённой настройки.
-    let gpu_skip: Option<&'static str> = if is_window {
-        Some("показ окна")
-    } else if !cfg.gpu_pipeline {
-        Some("выключено в настройках")
-    } else if cfg.codec != "h264" {
-        Some("кодек не H.264")
-    } else {
-        None
-    };
-
-    // Capture runs on its own thread (DesktopCapturer lives entirely here).
-    std::thread::spawn(move || {
-        match gpu_skip {
-            None => {
-                if let GpuEnd::Stopped = run_gpu_capture(want_id, tw, th, fps, cursor, &vs, &stop_thread) {
-                    return;
-                }
-                // Отказ — в том числе посреди показа. Дальше старым путём, кодировщики сами
-                // вернутся к CUDA-сессии и начнут с опорного кадра.
-            }
-            Some(note) => set_pipeline("cpu", note),
-        }
-        let st = if is_window {
-            DesktopCaptureSourceType::Window
-        } else {
-            DesktopCaptureSourceType::Screen
-        };
-        // Курсор — только здесь, в самом показе: миниатюрам окна выбора и сторожу источника он не нужен.
-        let mut opts = DesktopCapturerOptions::new(st);
-        opts.set_include_cursor(cursor);
-        let Some(mut cap) = DesktopCapturer::new(opts) else {
-            return;
-        };
-        let Some(src) = cap.get_source_list().into_iter().find(|s| s.id() == want_id) else {
-            return;
-        };
-        // 🔴 Полноразмерный буфер ПЕРЕИСПОЛЬЗУЕМ между кадрами. Раньше он выделялся заново на каждый
-        // кадр, 30–60 раз в секунду: на 1440p это ~5.5 МБ за кадр, то есть сотни мегабайт в секунду
-        // непрерывных выделений. Само по себе это не течёт, но делает нас самым частым просителем
-        // памяти на машине — а отказ в выделении получает тот, кто просит в неудачный момент.
-        // 2026-08-22 Windows объявила нехватку виртуальной памяти, и первым упал именно клиент,
-        // хотя занимал меньше всех.
-        //
-        // ⚠️ Переиспользовать можно ТОЛЬКО тот буфер, который не ушёл наружу. Отданный в
-        // `capture_frame` живёт дальше в конвейере кодирования (там свой счётчик ссылок, и из Rust
-        // его не видно) — тронешь его на следующем кадре, получишь рваную картинку. Поэтому:
-        // масштабируем — полноразмерный остаётся у нас; не масштабируем — он уходит, и следующий
-        // кадр выделяет новый.
-        let mut scratch: Option<I420Buffer> = None;
-        // Первое превью собираем сразу с первого же кадра: иначе наведённая мышка первые пять секунд
-        // показа не находила бы ничего.
-        let mut next_preview = Instant::now();
-        cap.start_capture(Some(src), move |res| {
-            if let Ok(frame) = res {
-                let t_conv = Instant::now();
-                let w = frame.width() as usize;
-                let h = frame.height() as usize;
-                if w == 0 || h == 0 {
-                    return;
-                }
-                PIPE_SRC_W.store(w as u32, Ordering::Relaxed);
-                PIPE_SRC_H.store(h as u32, Ordering::Relaxed);
-                let stride = frame.stride() as usize;
-                // Размер источника меняется на лету (окно тянут за угол) — буфер не того размера
-                // переиспользовать нельзя, проверяем перед тем, как взять.
-                let mut buf = match scratch.take() {
-                    Some(b) if b.width() == w as u32 && b.height() == h as u32 => b,
-                    _ => I420Buffer::new(w as u32, h as u32),
-                };
-                bgra_to_i420(frame.data(), stride, w, h, &mut buf);
-                match target_dims(w as u32, h as u32, tw, th) {
-                    Some((dw, dh)) => {
-                        let scaled = buf.scale(dw, dh);
-                        scratch = Some(buf); // наружу ушла копия — полноразмерный снова наш
-                        vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, scaled));
-                    }
-                    None => {
-                        // Уменьшать нечего: буфер уходит наружу, переиспользовать его нельзя.
-                        vs.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buf));
-                    }
-                }
-                PIPE_CONV_US.fetch_add(t_conv.elapsed().as_micros() as u64, Ordering::Relaxed);
-                PIPE_FRAMES.fetch_add(1, Ordering::Relaxed);
-                // Превью (#115) — ПОСЛЕ замеров конвейера: это не подготовка кадра, и попав внутрь
-                // `convert_ms` оно врало бы про стоимость самого показа.
-                if Instant::now() >= next_preview {
-                    next_preview = Instant::now() + PREVIEW_EVERY;
-                    if let Some(small) = downscale_bgra(frame.data(), stride, w, h) {
-                        if let Ok(mut slot) = PREVIEW.lock() {
-                            *slot = Some(small);
-                        }
-                    }
-                }
-            }
-        });
-        // 🔴 Пейсинг ПО ДЕДЛАЙНУ, а не `sleep(frame_dur)` поверх работы.
-        // `capture_frame()` синхронно тянет за собой конвертацию BGRA→I420 (см. bgra_to_i420) —
-        // это единицы-десятки мс на кадр, тем больше, чем выше разрешение. Старый код спал ПОЛНЫЙ
-        // `frame_dur` СВЕРХУ этой работы → период = работа + сон, и до целевого fps не дотягивал
-        // (на 3440×1440 выходило ~34 из 60, при том что NVENC простаивал — «Ограничение: нет»).
-        // Теперь спим лишь ОСТАТОК до следующего тика: период = max(работа, frame_dur). Пока
-        // конвертация укладывается в бюджет кадра — держим ровный целевой fps; когда не укладывается
-        // (настоящий 4K), идём так быстро, как позволяет конвертация, без лишнего сна и без backlog.
-        // Микросекунды, а не миллисекунды: `1000/60` целочисленно = 16 мс (не 16.67) — само по себе
-        // роняло 60 → ~62.5, а с учётом округления и того ниже.
-        let frame_dur = Duration::from_micros(1_000_000 / fps.max(1) as u64);
-        let mut next = Instant::now();
-        while !stop_thread.load(Ordering::Relaxed) {
-            // Замеряем ВЕСЬ вызов: он синхронно тянет за собой колбэк с подготовкой кадра. Время
-            // самого захвата = это время минус подготовка, которую колбэк считает отдельно.
-            let t_all = Instant::now();
-            cap.capture_frame();
-            PIPE_TOTAL_US.fetch_add(t_all.elapsed().as_micros() as u64, Ordering::Relaxed);
-            next += frame_dur;
-            match next.checked_duration_since(Instant::now()) {
-                Some(rem) => std::thread::sleep(rem),
-                // Отстаём (конвертация тяжелее бюджета кадра) — не копим долг, сдвигаем дедлайн на «сейчас».
-                None => {
-                    PIPE_LATE.fetch_add(1, Ordering::Relaxed);
-                    next = Instant::now();
-                }
-            }
-        }
-    });
+    // Первое поколение показа сразу текущее: старт, как и раньше, готовности захвата не ждёт.
+    let gen = NEXT_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    activate_gen(gen);
+    let (capture, _ready) = spawn_capture(target.clone(), source.clone(), gen, true, stop.clone());
 
     let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
     // Опции — отдельной переменной, а не прямо в вызове: ими же пересоздаётся публикация при
     // самолечении (#111), и разъехаться они не должны.
-    let opts = TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                video_codec: codec_of(&cfg.codec),
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate,
-                    max_framerate: fps as f64,
-                }),
-                // 🔴 Слои обязательны (#109). Раньше стоял `false` с доводом «нижний слой никто
-                // не смотрит» — довод оказался неверным: его смотрит тот, кому плохо. Без запасного
-                // слоя зритель с потерями не может получить картинку полегче и вместо этого просит
-                // опорные кадры (PLI) — замерено 1.6 раза в секунду при норме 0.1. Каждый такой
-                // запрос заставляет НАШ кодировщик выдать опорный кадр, а слой один на всех →
-                // картинка пульсирует У ВСЕХ сразу. Один человек на мобильном интернете (47 %
-                // потерь) так уронил весь канал.
-                //
-                // Слоёв ТРИ (#191, 24.09): полный, средний на полной частоте кадров и экономный на
-                // 3 к/с — лестница и цена в `share_layer_presets`. До 0.8.5 SDK добавлял один
-                // половинный на 3 к/с, и выбор качества у зрителя был между полным и слайд-шоу.
-                // Выключатель `layers` в настройках показа возвращает один поток — на случай, если
-                // драйвер не даст столько сеансов NVENC («показ не стартует»).
-                simulcast: layers,
-                simulcast_layers: layers.then(|| presets.clone()),
-                ..Default::default()
-    };
+    let opts = share_publish_opts(&cfg.codec, max_bitrate, fps, layers, &presets);
     let publish = room
         .local_participant()
         .publish_track(LocalTrack::Video(track), opts.clone())
@@ -1478,6 +1818,7 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
 
     if let Err(e) = publish {
         stop.store(true, Ordering::Relaxed);
+        retire_capture(capture);
         let _ = room.close().await;
         return Err(format!("publish: {e}"));
     }
@@ -1485,7 +1826,19 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
     // Показ живой — метку дальше ведёт `stop()` (штатная остановка) либо она переживает падение.
     marker_guard.disarm();
     if let Ok(mut g) = SESSION.lock() {
-        *g = Some(Session { stop: stop.clone(), room, source, opts, active_marker, streak_marker });
+        *g = Some(Session {
+            stop: stop.clone(),
+            room,
+            source,
+            opts,
+            active_marker,
+            streak_marker,
+            capture,
+            target,
+            gen,
+            share: share_cfg,
+            declared: (width, height),
+        });
     }
 
     // Сторож источника (#99): раз в 10 секунд проверяет, что окно/экран ещё существует.
@@ -1505,18 +1858,33 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut misses: u32 = 0;
+            let mut seen_gen = gen;
             loop {
                 tokio::time::sleep(SOURCE_CHECK).await;
                 if watch_stop.load(Ordering::Relaxed) {
                     return; // стрим уже остановлен обычным путём
                 }
-                let alive =
-                    tauri::async_runtime::spawn_blocking(move || source_exists(is_window, want_id, want_pid))
-                        .await
-                        .unwrap_or(true);
+                // 🔴 Цель — ТЕКУЩАЯ, из сессии, а не копия со старта (#237): после смены источника
+                // сторож иначе проверял бы старое окно и, когда его закроют, погасил бы живой показ.
+                let Some((t, g)) = current_target(&watch_stop) else {
+                    return;
+                };
+                if g != seen_gen {
+                    seen_gen = g;
+                    misses = 0; // промахи старого источника к новому не относятся
+                }
+                let alive = tauri::async_runtime::spawn_blocking(move || {
+                    source_exists(t.is_window, t.id, t.want_pid)
+                })
+                .await
+                .unwrap_or(true);
                 // Флаг проверяем ПОВТОРНО: пока шло перечисление, человек мог нажать «Завершить».
                 if watch_stop.load(Ordering::Relaxed) {
                     return;
+                }
+                // Пока проверяли, источник сменили (или смена идёт) — ответ про чужой источник.
+                if SWITCHING.load(Ordering::SeqCst) || current_target(&watch_stop).map(|c| c.1) != Some(g) {
+                    continue;
                 }
                 if alive {
                     misses = 0; // источник вернулся — прошлый промах был провалом, а не закрытием
@@ -1546,6 +1914,7 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
             let mut bad: u32 = 0;
             let mut heals: u32 = 0;
             let mut cooldown_until: Option<Instant> = None;
+            let mut seen_switches = SWITCHES.load(Ordering::Relaxed);
 
             loop {
                 tokio::time::sleep(STUCK_WINDOW).await;
@@ -1558,6 +1927,15 @@ pub async fn start(cfg: StartConfig, app: tauri::AppHandle) -> Result<(), String
                     continue;
                 };
                 let cur = Meters::now(st.frames_encoded);
+                // Источник сменили (#237): окно через смену смешало бы два источника — замер заново.
+                let switches = SWITCHES.load(Ordering::Relaxed);
+                if switches != seen_switches {
+                    seen_switches = switches;
+                    prev = Some(cur);
+                    bad = 0;
+                    STUCK_S.store(0, Ordering::Relaxed);
+                    continue;
+                }
                 let Some(p) = prev.replace(cur.clone()) else { continue };
                 let Some(input) = cur.diff(&p, target_fps, st.limit_reason == "cpu") else {
                     continue;
@@ -1666,6 +2044,13 @@ impl Meters {
     }
 }
 
+/// Текущая цель захвата и номер поколения — у сессии с этим стоп-флагом. `None` — её уже нет.
+fn current_target(session_stop: &Arc<AtomicBool>) -> Option<(CaptureTarget, u64)> {
+    let g = SESSION.lock().ok()?;
+    let s = g.as_ref().filter(|s| Arc::ptr_eq(&s.stop, session_stop))?;
+    Some((s.target.clone(), s.gen))
+}
+
 /// Почему лечение не состоялось.
 enum HealError {
     /// Сейчас нечего пересоздавать — подождём следующего окна.
@@ -1681,11 +2066,25 @@ enum HealError {
 /// WGC — пересоздаётся только отправитель, в котором и залипло ограничение. Провал для зрителя —
 /// около секунды вместо полного перезапуска показа.
 async fn republish() -> Result<(), HealError> {
+    // Смена источника (#237) сама снимает и публикует трек — второй снимающий ей помешал бы.
+    if SWITCHING.load(Ordering::SeqCst) {
+        return Err(HealError::NotNow("идёт смена источника".into()));
+    }
     let (local, source, opts) = {
         let g = SESSION.lock().map_err(|_| HealError::NotNow("сессия занята".into()))?;
         let s = g.as_ref().ok_or_else(|| HealError::NotNow("показ уже остановлен".into()))?;
         (s.room.local_participant(), s.source.clone(), s.opts.clone())
     };
+    republish_with(&local, source, opts).await
+}
+
+/// Снять трек показа и опубликовать новый поверх `source` с опциями `opts`: самолечение (#111) — тем
+/// же источником и опциями, смена источника с переопубликацией (#237) — новыми.
+async fn republish_with(
+    local: &LocalParticipant,
+    source: NativeVideoSource,
+    opts: TrackPublishOptions,
+) -> Result<(), HealError> {
 
     // ⚠️ Проверяем, что трек на месте, ДО снятия: `unpublish_track` внутри разворачивает
     // `publication.track().unwrap()` и на пустой публикации паникует.
@@ -1711,6 +2110,150 @@ async fn republish() -> Result<(), HealError> {
         .await
         .map_err(|e| HealError::Lost(format!("опубликовать заново: {e}")))?;
     Ok(())
+}
+
+/// Снимает флаг «смена идёт» на любом выходе из `switch_source`.
+struct SwitchingGuard;
+
+impl Drop for SwitchingGuard {
+    fn drop(&mut self) {
+        SWITCHING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Сменить источник идущего показа, не останавливая его (#237, «Сменить окно» как в Discord).
+///
+/// Трек, `NativeVideoSource` и участник `#screen` остаются — зрители не получают ни одного события,
+/// меняются только кадры (при другом размере кодировщик сам начинает с опорного). Порядок:
+/// 1. новый поток захвата поднимается РЯДОМ со старым, его кадры пока выбрасываются (`ACTIVE_GEN`);
+/// 2. ждём его готовности ≤ 3 с — ошибка или таймаут гасят только новый, старый показ идёт дальше;
+/// 3. новое поколение становится текущим, и только потом гасим старое.
+///
+/// В «Родном» при скачке площади кадра больше чем вдвое (`switch_needs_republish`) публикация
+/// пересоздаётся под новый размер (новый источник с новым объявленным размером: кодировки SDK считает
+/// от него) — у зрителей ~1 с моргания, его глотают грейсы клиента (3 и 6 с). Качество, режим, кодек
+/// и слои не меняются (решения владельца 27.10, Р1/Р2).
+pub async fn switch_source(source_id: String, is_window: bool, app: tauri::AppHandle) -> Result<SwitchOutcome, String> {
+    let id: u64 = source_id.parse().map_err(|_| "bad source id".to_string())?;
+    if SWITCHING.swap(true, Ordering::SeqCst) {
+        return Err("смена источника уже идёт".into());
+    }
+    let _busy = SwitchingGuard;
+
+    let (old_gen, share, declared, session_stop, source, local) = {
+        let g = SESSION.lock().map_err(|_| "показ не идёт".to_string())?;
+        let s = g.as_ref().ok_or_else(|| "показ не идёт".to_string())?;
+        if s.target.id == id && s.target.is_window == is_window {
+            return Ok(SwitchOutcome::Same);
+        }
+        (s.gen, s.share.clone(), s.declared, s.stop.clone(), s.source.clone(), s.room.local_participant())
+    };
+
+    // Цель — тем же правилом, что на старте. Win32-запросы блокирующие — не на async-потоке.
+    let share_b = share.clone();
+    let (target, next) = tauri::async_runtime::spawn_blocking(move || {
+        let known = if share_b.native { native_dims(is_window, id) } else { None };
+        let want_pid = if is_window { crate::apps_enum::window_pid(id) } else { None };
+        capture_target_for(&share_b, id, is_window, known, want_pid)
+    })
+    .await
+    .map_err(|e| format!("источник не открылся: {e}"))?;
+    if target.is_window && target.want_pid.is_none() {
+        return Err("источник не открылся: окна уже нет".into());
+    }
+
+    let republish = switch_needs_republish(share.native, declared, next);
+    // Переопубликация — новый источник: объявленный размер источника SDK берёт для кодировок слоёв,
+    // а поменять его у живого источника нельзя.
+    let vs = if republish {
+        NativeVideoSource::new(VideoResolution { width: next.0, height: next.1 }, true)
+    } else {
+        source
+    };
+    let gen = NEXT_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let (handle, ready) = spawn_capture(target.clone(), vs.clone(), gen, republish, session_stop.clone());
+    let up = match tokio::time::timeout(SWITCH_READY_TIMEOUT, ready).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("источник не открылся".to_string()),
+        Err(_) => Err("таймаут: источник не дал кадра за 3 с".to_string()),
+    };
+    if let Err(e) = up {
+        retire_capture(handle);
+        return Err(e);
+    }
+    // Пока ждали, показ могли завершить или начать заново.
+    if session_stop.load(Ordering::Relaxed) || current_target(&session_stop).is_none() {
+        retire_capture(handle);
+        return Err("показ не идёт".into());
+    }
+
+    // ─── Новое поколение побеждает: с этого кадра в источник пишет только оно ───
+    let (_, prev_pipe) = activate_gen(gen);
+    reset_switch_meters();
+
+    let mut new_opts = None;
+    if republish {
+        let max_bitrate =
+            share_bitrate(next.0, next.1, share.cfg_fps, share.mode == "motion", share.codec == "h264");
+        let presets = if share.layers {
+            share_layer_presets(next.0, next.1, max_bitrate, share.fps as f64)
+        } else {
+            Vec::new()
+        };
+        let opts = share_publish_opts(&share.codec, max_bitrate, share.fps, share.layers, &presets);
+        match republish_with(&local, vs.clone(), opts.clone()).await {
+            Ok(()) => {}
+            // Трек не снят — возвращаем старое поколение, показ идёт как шёл.
+            Err(HealError::NotNow(why)) => {
+                restore_gen(old_gen, prev_pipe);
+                retire_capture(handle);
+                return Err(format!("показ не переопубликован: {why}"));
+            }
+            // Трек снят, а новый не встал: показывать нечего — гасим честно, как самолечение.
+            Err(HealError::Lost(why)) => {
+                retire_capture(handle);
+                let _ = app.emit(ENDED_EVENT, ());
+                stop().await;
+                return Err(format!("показ потерян при переопубликации: {why}"));
+            }
+        }
+        if let Ok(mut g) = EFFECTIVE.lock() {
+            if let Some(e) = g.as_mut() {
+                e.width = next.0;
+                e.height = next.1;
+                e.bitrate = max_bitrate;
+            }
+        }
+        new_opts = Some(opts);
+    }
+
+    // Записать новое поколение в сессию и погасить старое.
+    let old = {
+        let mut g = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_mut().filter(|s| Arc::ptr_eq(&s.stop, &session_stop)) {
+            Some(s) => {
+                s.target = target;
+                s.gen = gen;
+                if let Some(opts) = new_opts {
+                    s.source = vs;
+                    s.opts = opts;
+                    s.declared = next;
+                }
+                Some(std::mem::replace(&mut s.capture, handle))
+            }
+            // Показ кончился прямо сейчас: новый поток гасит общий стоп-флаг, ему некуда писать.
+            None => {
+                retire_capture(handle);
+                None
+            }
+        }
+    };
+    let Some(old) = old else {
+        return Err("показ не идёт".into());
+    };
+    retire_capture(old);
+    SWITCHES.fetch_add(1, Ordering::Relaxed);
+    Ok(if republish { SwitchOutcome::Republished } else { SwitchOutcome::Hot })
 }
 
 /// Stop the active share: kill the capture thread and disconnect the companion participant.
@@ -1739,6 +2282,7 @@ pub async fn stop() {
     let session = SESSION.lock().ok().and_then(|mut g| g.take());
     if let Some(s) = session {
         s.stop.store(true, Ordering::Relaxed);
+        retire_capture(s.capture);
         finish_share_markers(s.active_marker.as_deref(), s.streak_marker.as_deref(), s.opts.simulcast);
         let room = s.room;
         tokio::spawn(async move {
@@ -1857,6 +2401,9 @@ pub struct ShareStats {
     /// Сколько секунд ПОДРЯД держится залипание прямо сейчас (0 — всё в порядке). Показывает и
     /// «почти сработало», иначе о промахах порога мы бы не узнали.
     pub stuck_s: u32,
+    /// Сколько раз источник показа сменили на лету (#237). Объясняет «ступеньку» счётчиков конвейера
+    /// в отчёте: на смене они начинаются заново.
+    pub switches: u32,
 
     // ─── Путь кадра (#207, шаг 4) ───
     /// `gpu` — кадр не покидает видеокарту, `cpu` — через оперативку. Пусто — показ не начался.
@@ -2030,6 +2577,7 @@ pub async fn stats() -> Option<ShareStats> {
     out.frames_late = PIPE_LATE.load(Ordering::Relaxed);
     out.capture_ms_now = CAPTURE_NOW_US.load(Ordering::Relaxed) as f64 / 1000.0;
     out.heals = HEALS.load(Ordering::Relaxed);
+    out.switches = SWITCHES.load(Ordering::Relaxed);
     out.stuck_s = STUCK_S.load(Ordering::Relaxed);
     if let Ok(g) = PIPELINE.lock() {
         out.pipeline = g.0.to_string();
@@ -2087,6 +2635,71 @@ pub async fn stats() -> Option<ShareStats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn смена_родного_размера_переопубликует_только_строго_за_двойной_площадью() {
+        // Сравнивается площадь, не каждая сторона: 100x100 -> 200x100 ровно x2.
+        assert!(!switch_needs_republish(true, (100, 100), (200, 100)));
+        assert!(!switch_needs_republish(true, (200, 100), (100, 100)));
+        assert!(switch_needs_republish(true, (100, 100), (201, 100)));
+        assert!(switch_needs_republish(true, (201, 100), (100, 100)));
+        assert!(!switch_needs_republish(true, (100, 100), (100, 100)));
+        assert!(!switch_needs_republish(true, (100, 100), (50, 200)));
+    }
+
+    #[test]
+    fn фиксированный_или_нулевой_размер_не_требует_переопубликации() {
+        assert!(!switch_needs_republish(false, (100, 100), (400, 400)));
+        assert!(!switch_needs_republish(false, (400, 400), (100, 100)));
+        for zero in [(0, 100), (100, 0), (0, 0)] {
+            assert!(!switch_needs_republish(true, zero, (100, 100)));
+            assert!(!switch_needs_republish(true, (100, 100), zero));
+        }
+    }
+
+    fn switch_test_cfg(native: bool) -> ShareCfg {
+        ShareCfg { native, width: 1280, height: 720, cfg_fps: 60, fps: 30,
+            mode: "detail".into(), codec: "h264".into(), gpu_pipeline: true,
+            cursor: false, layers: true }
+    }
+
+    #[test]
+    fn цель_родного_экрана_знает_размер_а_окно_оставляет_рамку_4k() {
+        let c = switch_test_cfg(true);
+        let (screen, declared) = capture_target_for(&c, 42, false, Some((5120, 2880)), Some(7));
+        assert_eq!(declared, (3840, 2160));
+        assert_eq!((screen.tw, screen.th), declared);
+        assert_eq!(screen.id, 42);
+        assert!(!screen.is_window);
+        assert_eq!(screen.want_pid, None);
+        assert_eq!(screen.gpu_skip, None);
+        assert_eq!(screen.fps, 30);
+        assert!(!screen.cursor);
+        let (window, declared) = capture_target_for(&c, 43, true, Some((1280, 720)), Some(7));
+        assert_eq!(declared, (1280, 720));
+        assert_eq!((window.tw, window.th), (NATIVE_MAX_W, NATIVE_MAX_H));
+        assert_eq!(window.id, 43);
+        assert!(window.is_window);
+        assert_eq!(window.want_pid, Some(7));
+        assert_eq!(window.gpu_skip, Some("показ окна"));
+        let (unknown, declared) = capture_target_for(&c, 44, false, None, None);
+        assert_eq!(declared, (1920, 1080));
+        assert_eq!((unknown.tw, unknown.th), (NATIVE_MAX_W, NATIVE_MAX_H));
+    }
+
+    #[test]
+    fn фиксированный_захват_не_берёт_родной_размер_и_соблюдает_ограничения_gpu() {
+        let mut c = switch_test_cfg(false);
+        let (fixed, declared) = capture_target_for(&c, 1, false, Some((3840, 2160)), Some(8));
+        assert_eq!(declared, (1280, 720));
+        assert_eq!((fixed.tw, fixed.th), declared);
+        assert_eq!(fixed.want_pid, None);
+        c.gpu_pipeline = false;
+        assert_eq!(capture_target_for(&c, 1, false, None, None).0.gpu_skip, Some("выключено в настройках"));
+        c.gpu_pipeline = true;
+        c.codec = "vp9".into();
+        assert_eq!(capture_target_for(&c, 1, false, None, None).0.gpu_skip, Some("кодек не H.264"));
+    }
 
     #[test]
     fn лестница_слоёв_совпадает_с_таблицей_клиента() {
@@ -2169,6 +2782,67 @@ mod tests {
         assert!(!gpu_path_planned(false, true, "vp9", true));
         assert!(!gpu_path_planned(false, true, "H264", true));
         assert!(!gpu_path_planned(false, true, "h264", false));
+    }
+
+    #[test]
+    fn dynacast_включается_только_для_cpu_с_несколькими_слоями() {
+        // CPU + один слой — чёрное окно из 0.9.50; GPU не должен включать dynacast даже со слоями.
+        // Единственный положительный случай сохраняет экономию кодирования CPU без зрителей.
+        let cases = [
+            (false, false, false),
+            (false, true, true),
+            (true, false, false),
+            (true, true, false),
+        ];
+        for (gpu_planned, layers, expected) in cases {
+            assert_eq!(share_dynacast(gpu_planned, layers), expected,
+                "R312 dynacast: gpu_planned={gpu_planned}, layers={layers}");
+        }
+
+        // Контрфакты формулы используют ту же таблицу: проверяем конкретные несовпавшие входы,
+        // а не просто то, что заведомо другая функция вернула какое-нибудь иное значение.
+        let mutants: [(&str, fn(bool, bool) -> bool, Vec<(bool, bool)>); 2] = [
+            ("!gpu_planned без layers", |gpu, _layers| !gpu, vec![(false, false)]),
+            ("!gpu_planned || layers", |gpu, layers| !gpu || layers, vec![(false, false), (true, true)]),
+        ];
+        for (name, mutant, expected_failures) in mutants {
+            let failures: Vec<_> = cases.iter().filter_map(|&(gpu, layers, expected)| {
+                (mutant(gpu, layers) != expected).then_some((gpu, layers))
+            }).collect();
+            assert_eq!(failures, expected_failures, "R312 контрфакт формулы: {name}");
+        }
+    }
+
+    fn start_использует_правило_dynacast(source: &str) -> bool {
+        // Ограничиваемся production-частью и телом start: строка-якорь самого теста, другая
+        // функция или закомментированный правильный вызов не должны сделать страж зелёным.
+        let production = source.split("\n#[cfg(test)]").next().unwrap_or("");
+        let Some((_, tail)) = production.split_once("\npub async fn start(") else { return false };
+        // Тело функции закрывается на нулевом отступе; вложенные блоки start имеют отступ.
+        let Some((body, _)) = tail.split_once("\n}") else { return false };
+        let code: String = body.lines()
+            .flat_map(|line| line.split("//").next().unwrap_or("").chars())
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let assignments: Vec<_> = code.split("room_opts.dynacast=").skip(1)
+            .filter_map(|tail| tail.split_once(';').map(|(value, _)| value))
+            .collect();
+        assignments == ["share_dynacast(gpu_planned,layers)"]
+    }
+
+    #[test]
+    fn start_передаёт_правилу_dynacast_настоящий_layers_а_не_константу() {
+        let source = include_str!("screenshare.rs");
+        assert!(start_использует_правило_dynacast(source), "R312 start: dynacast берётся из правила с layers");
+        let production = source.split("\n#[cfg(test)]").next().unwrap();
+        let anchor = "room_opts.dynacast = share_dynacast(gpu_planned, layers);";
+        assert_eq!(production.matches(anchor).count(), 1, "R312 единственный production-якорь dynacast");
+        for value in ["share_dynacast(gpu_planned, true)", "!gpu_planned", "!gpu_planned || layers"] {
+            // Правильный вызов оставлен в комментарии: страж обязан найти настоящее присваивание.
+            let replacement = format!("// {anchor}\n    room_opts.dynacast = {value};");
+            let mutant = production.replacen(anchor, &replacement, 1);
+            assert!(!start_использует_правило_dynacast(&mutant), "R312 контрфакт start: {value}");
+        }
     }
 
     #[test]

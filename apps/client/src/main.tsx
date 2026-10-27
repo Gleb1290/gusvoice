@@ -44,6 +44,7 @@ import { bindChunkedUpload } from './api';
 import { dmChunkedUploads } from './attachRules';
 import { CHUNK_FROM_BYTES, uploadInChunks } from './chunkedUpload';
 import { clearUploadProgress, setUploadDone, setUploadProgress } from './uploadProgress';
+import { installAttLinkRenewal } from './attLinks';
 
 // До любого подключения к комнате: иначе первые дорожки успеют запустить вечный цикл отрисовки.
 installLivekitTweaks();
@@ -58,6 +59,8 @@ installNativeSafeArea();
 installNativeMicActions();
 // Android-телефон: поворот экрана только на время просмотра фото/видео, потом снова портрет (viewerRotation.ts).
 installViewerRotation();
+// Файлы ЛС: истёкшая ссылка (аудит #236, п.6) у картинки/видео/звука в документе — новая ссылка и повтор (attLinks.ts).
+installAttLinkRenewal();
 
 const root = createRoot(document.getElementById('root')!);
 

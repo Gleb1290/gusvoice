@@ -1,7 +1,8 @@
-import type { Attachment, ConvMediaMark, ConvServiceMark, MessageEmbed, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
+import type { Attachment, BotCommandInfo, BotCommandsScoped, ConvMediaMark, ConvServiceMark, InlineKeyboard, MessageEmbed, MessageForwardedFrom, MessageSticker } from '@gusvoice/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  bigserial,
   boolean,
   foreignKey,
   index,
@@ -415,6 +416,11 @@ export const roles = pgTable('roles', {
    * гостей, оставив им `@everyone`, было бы нечем.
    */
   isGuests: boolean('is_guests').notNull().default(false),
+  /**
+   * Управляемая роль бота (0157, #231): id бота, которому роль принадлежит. Руками не выдаётся и не удаляется; уходит вместе
+   * с членством бота (составной FK на `server_members` с каскадом — только в SQL). У обычных ролей NULL.
+   */
+  managedBotId: text('managed_bot_id'),
 });
 
 export const serverMembers = pgTable(
@@ -447,6 +453,22 @@ export const serverMembers = pgTable(
     closedAt: timestamp('closed_at', { withTimezone: true }),
   },
   (t) => ({ pk: primaryKey({ columns: [t.serverId, t.userId] }) }),
+);
+
+/**
+ * Бот на сервере (0157, #231). Строка висит на ЧЛЕНСТВЕ бота (составной FK на `server_members` с каскадом — только в SQL):
+ * любой выход бота с сервера уносит её сама. `readAll` — галочка «читать все сообщения» (без неё — фильтр приватности).
+ */
+export const serverBots = pgTable(
+  'server_bots',
+  {
+    serverId: text('server_id').notNull(),
+    botId: text('bot_id').notNull(),
+    readAll: boolean('read_all').notNull().default(false),
+    addedBy: text('added_by'),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.serverId, t.botId] }) }),
 );
 
 export const memberRoles = pgTable(
@@ -537,6 +559,8 @@ export const messages = pgTable('messages', {
   // карточек для старых клиентов (у сообщения не было своего текста), новый клиент его не показывает.
   embeds: jsonb('embeds').$type<MessageEmbed[] | null>(),
   embedsFallback: boolean('embeds_fallback').notNull().default(false),
+  // Кнопки под сообщением бота в канале (0157, #231), как `conversation_messages.keyboard`. NULL — кнопок нет.
+  keyboard: jsonb('keyboard').$type<InlineKeyboard | null>(),
 });
 
 /**
@@ -717,6 +741,8 @@ export const conversations = pgTable('conversations', {
   avatarUrl: text('avatar_url'),
   /** Э7 часть 1 (#141, миграция 0142): версия состава у дома группы — +1 на каждое изменение состава, названия, фото. */
   groupVersion: integer('group_version').notNull().default(0),
+  /** «История для новых» (аудит ЛС #236, п.8, миграция 0156): новые участники видят старое. По умолчанию скрыта. */
+  historyForNew: boolean('history_for_new').notNull().default(false),
 });
 
 export const conversationMembers = pgTable(
@@ -733,6 +759,11 @@ export const conversationMembers = pgTable(
     leftAt: timestamp('left_at', { withTimezone: true }),
     /** «Прочитано до» — ключ последнего прочитанного сообщения, только вперёд. */
     lastReadKey: bigint('last_read_key', { mode: 'number' }).notNull().default(0),
+    /**
+     * С какого `sort_key` участнику видна лента группы (аудит ЛС #236, п.8, миграция 0156): ставится при добавлении, когда
+     * у группы скрыта «История для новых». `null` — видно всё.
+     */
+    historyFromKey: bigint('history_from_key', { mode: 'number' }),
     /** Черновик (Р7, миграция 0081): между МОИМИ устройствами; пусто — все четыре `null`. */
     draftText: text('draft_text'),
     draftReplyTo: text('draft_reply_to'),
@@ -863,6 +894,11 @@ export const conversationMessages = pgTable('conversation_messages', {
    * чужого сообщения в группе со смешанным составом — хост пересылает её дальше как есть. `null` — своё или 1:1.
    */
   originSig: jsonb('origin_sig').$type<Record<string, unknown>>(),
+  /** Карточки (миграция 0154, боты #229): формат вебхука (`normalizeEmbeds`); `null` — нет. `embedsFallback` — `content` собран из них. */
+  embeds: jsonb('embeds').$type<MessageEmbed[] | null>(),
+  embedsFallback: boolean('embeds_fallback').notNull().default(false),
+  /** Кнопки под сообщением бота (миграция 0155, #230): `reply_markup.inline_keyboard`, уже проверенный `botWire`; `null` — нет. Только ЛС. */
+  keyboard: jsonb('keyboard').$type<InlineKeyboard | null>(),
 });
 
 /**
@@ -1317,6 +1353,51 @@ export const pushAlways = pgTable(
 // Instance-wide settings editable from the admin panel (migration 0022). key -> JSON value.
 // Currently key='smtp' → SmtpConfig ({ host, port, secure, user, pass, from }); mailer.ts reads it,
 // falling back to the SMTP_* env vars when absent/blank. See settings.ts.
+/**
+ * Бот (миграция 0154, #229): `userId` — его строка в `users` (`bot=true`). Токен — только sha256 (`bots/botRules.ts`);
+ * `webhookSecret` — секрет подписи доставки, заданный ботом (нужен целиком — им подписываем, это не токен входа).
+ * ⚠️ Внешние ключи на `users` (`user_id`, `owner_id`, ON DELETE CASCADE) объявлены в SQL миграции, не здесь: перечень
+ * политик удаления по ссылкам на `users` (`accountRules.test.ts`) ведёт Codex. Политика: удаление аккаунта владельца
+ * удаляет его ботов (`bots/botLifecycle.ts` `deleteBotsOwnedBy`, зовёт `accountDelete.ts`); строка `bots` удалённого бота остаётся.
+ */
+export const bots = pgTable('bots', {
+  userId: text('user_id').primaryKey(),
+  ownerId: text('owner_id').notNull(),
+  tokenHash: text('token_hash').notNull(),
+  tokenCreatedAt: timestamp('token_created_at', { withTimezone: true }).notNull().defaultNow(),
+  description: text('description').notNull().default(''),
+  about: text('about').notNull().default(''),
+  public: boolean('public').notNull().default(false),
+  webhookUrl: text('webhook_url'),
+  webhookSecret: text('webhook_secret'),
+  webhookFailures: integer('webhook_failures').notNull().default(0),
+  webhookLastError: text('webhook_last_error'),
+  webhookLastErrorAt: timestamp('webhook_last_error_at', { withTimezone: true }),
+  webhookDisabledAt: timestamp('webhook_disabled_at', { withTimezone: true }),
+  disabledAt: timestamp('disabled_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  /** Команды (`setMyCommands`, 0155, #230): список целиком, замещается одним UPDATE; `[]` — нет. */
+  commands: jsonb('commands').$type<BotCommandInfo[]>().notNull().default([]),
+  commandsUpdatedAt: timestamp('commands_updated_at', { withTimezone: true }),
+  /** Команды по областям (0157, #231): `{all_private_chats?, all_group_chats?}`; нет ключа — `commands` (default). */
+  commandsScoped: jsonb('commands_scoped').$type<BotCommandsScoped>().notNull().default({}),
+  /** Пакетная доставка на адрес (0157, #231): тело POST — массив событий. */
+  webhookBatch: boolean('webhook_batch').notNull().default(false),
+  /** Сколько событий срезал потолок журнала (0157, #231). */
+  droppedUpdateCount: integer('dropped_update_count').notNull().default(0),
+});
+
+/** Журнал событий бота (0154): `updateId` растёт на весь инстанс; подтверждённое удаляется, хранение 24 ч. */
+export const botUpdates = pgTable('bot_updates', {
+  updateId: bigserial('update_id', { mode: 'number' }).primaryKey(),
+  botId: text('bot_id')
+    .notNull()
+    .references(() => bots.userId, { onDelete: 'cascade' }),
+  type: text('type').notNull(),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const instanceSettings = pgTable('instance_settings', {
   key: text('key').primaryKey(),
   value: jsonb('value').$type<Record<string, unknown>>().notNull(),

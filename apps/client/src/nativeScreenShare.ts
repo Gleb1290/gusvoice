@@ -70,6 +70,37 @@ export async function gvScreenShareStop(): Promise<void> {
     .catch(() => {});
 }
 
+/** Итог `gv_screen_share_switch` (#237): `same` — источник тот же; `hot` — захват заменён под живым треком; `republished` — ещё и тихо переопубликован (скачок размера). */
+export type ScreenShareSwitchOutcome = 'same' | 'hot' | 'republished';
+
+/** Оболочка не знает команды смены (exe старше клиента) — клиент предложит «Завершить и начать заново». */
+export class ScreenShareSwitchUnsupported extends Error {
+  constructor() {
+    super('Эта версия приложения не умеет менять источник на лету');
+    this.name = 'ScreenShareSwitchUnsupported';
+  }
+}
+
+/**
+ * Сменить окно или экран идущего нативного показа, не останавливая его (#237). Rust поднимает новый
+ * захват под ТЕМ ЖЕ треком и гасит старый только после первого кадра; на отказе старый показ идёт.
+ * Отказывает СТРОКОЙ (так устроен `invoke`) — текст для человека делает `shareSwitchErrorText`.
+ */
+export async function gvScreenShareSwitch(args: { sourceId: string; isWindow: boolean }): Promise<ScreenShareSwitchOutcome> {
+  const core = tauriCore();
+  if (!core) throw new ScreenShareSwitchUnsupported();
+  try {
+    const r = await core.invoke('gv_screen_share_switch', { sourceId: args.sourceId, isWindow: args.isWindow });
+    return r === 'same' || r === 'republished' ? r : 'hot';
+  } catch (e) {
+    const msg = typeof e === 'string' ? e : (e as Error)?.message;
+    if (msg && /gv_screen_share_switch/.test(msg) && /not found|unknown|не найден/i.test(msg)) {
+      throw new ScreenShareSwitchUnsupported();
+    }
+    throw e;
+  }
+}
+
 type TauriEvent = { listen: (event: string, handler: (e: { payload: unknown }) => void) => Promise<() => void> };
 function tauriEvent(): TauriEvent | null {
   return (window as unknown as { __TAURI__?: { event?: TauriEvent } }).__TAURI__?.event ?? null;
@@ -240,6 +271,8 @@ export interface NativeShareStats {
   max_quality?: boolean;
   layers_on?: boolean;
   keyframe_scale?: number;
+  /** Сколько раз источник менялся на лету (#237); у оболочки без смены поля нет. */
+  switches?: number;
 }
 
 /**
@@ -270,6 +303,10 @@ export interface ForegroundWindow {
   id: string; // HWND as a stringified u64 — use as `sourceId` with `isWindow: true`
   exe: string; // lowercased exe basename, e.g. "cs2.exe"
   isSelf: boolean; // GusVoice's own window is in front → caller opens the picker instead
+  /** Заголовок окна, если оболочка его отдаёт (#237); иначе имя окна берётся из списка источников. */
+  title?: string;
+  /** Окно оболочки (рабочий стол, панель задач, «Пуск», Alt+Tab) — в показ не берётся (#237). Старая оболочка поля не шлёт. */
+  isShell?: boolean;
 }
 
 /**

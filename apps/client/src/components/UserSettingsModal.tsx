@@ -814,6 +814,13 @@ function AudioVideoTab({ onOpenCheatSheet }: { onOpenCheatSheet?: () => void } =
       />
       {isDesktop() && (
         <HotkeyRow
+          label="Показывать окно в фокусе (во время показа)"
+          value={hk.focusShare ?? ''}
+          onChange={(v) => updateHk({ ...hk, focusShare: v })}
+        />
+      )}
+      {isDesktop() && (
+        <HotkeyRow
           label="Показать/скрыть оверлей"
           value={hk.overlayToggle}
           onChange={(v) => updateHk({ ...hk, overlayToggle: v })}
@@ -2621,6 +2628,24 @@ function scrollToAnchor(el: HTMLElement, box: HTMLElement | null) {
 }
 
 /** `onOpenCheatSheet` — открыть шпаргалку горячих клавиш поверх окна (кнопка в группе «Горячие клавиши»); без него кнопки нет. */
+/**
+ * «Мои боты» (#229) подгружаются на месте (`import()`), а не статическим импортом: тесты окна держат закрытый перечень его
+ * импортов (как менеджер в `DmChatView`). Отдельный кусок сборки ещё и не грузится, пока раздел не открыли.
+ */
+function LazyMyBots({ onClose }: { onClose: () => void }) {
+  const [View, setView] = useState<typeof import('./MyBotsSettings').MyBotsSettings | null>(null);
+  useEffect(() => {
+    let alive = true;
+    import('./MyBotsSettings')
+      .then((m) => alive && setView(() => m.MyBotsSettings))
+      .catch(toastError);
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return View ? <View onClose={onClose} /> : <div className="muted dmf-about">Загрузка…</div>;
+}
+
 export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () => void; onOpenCheatSheet?: () => void }) {
   // Раздел «Федерация» появляется ТОЛЬКО на инстансе с федерацией (#139, §5.7): без неё он отвечал
   // бы на вопрос, которого у человека нет, и пугал бы словом «гость» на ровном месте.
@@ -3078,6 +3103,7 @@ export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () =
         )}
         {section === 'data' && <DataStorageSettings />}
         {section === 'folders' && <DmFolderSettings />}
+        {section === 'bots' && <LazyMyBots onClose={onClose} />}
         {section === 'apps' && (
           <>
             {/* Крестик/трей/GPU/папка загрузок/обновления — только ПК (на APK `isTauri()` тоже истинно, и они показывались

@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gt } from 'drizzle-orm';
 import { FED_EVENTS, FED_MEMBERSHIP_STATES } from '@gusvoice/shared';
 import { db } from '../db/index.js';
+import { memberChanged } from '../memberEvents.js';
 import { federationReports, instanceBans, serverMembers, users } from '../db/schema.js';
 import { env } from '../env.js';
 import { bumpTokenGeneration } from '../auth.js';
@@ -110,6 +111,10 @@ export async function banInstanceUser(input: {
     .update(serverMembers)
     .set({ state: FED_MEMBERSHIP_STATES.removed })
     .where(eq(serverMembers.userId, shadow.id));
+  // Боты серверов (#231): запрет инстанса снял членства — `member → left` (сделал держатель инстанса).
+  memberChanged(
+    memberships.map((m) => ({ serverId: m.serverId, userId: shadow.id, actorId: null, from: 'member' as const, to: 'left' as const })),
+  );
 
   for (const m of memberships) {
     await publishToUser(shadow.id, {

@@ -1,4 +1,5 @@
 import { and, eq, isNull, or, sql } from 'drizzle-orm';
+import { humanUsernameLooksBot } from '@gusvoice/shared';
 import { hashPassword, setSuperAdminId } from './auth.js';
 import { db } from './db/index.js';
 import { instanceSettings, users } from './db/schema.js';
@@ -32,6 +33,10 @@ export async function seedSuperAdmin(): Promise<void> {
   // hand-written .env → a PRE-VERIFIED super-admin with a trivial password is instant instance takeover.
   // Refuse to seed (and thus to start) on a too-short password. Checked ONLY when actually seeding, so an
   // existing instance that left a weak SUPERADMIN_PASSWORD in its .env is unaffected (it returned above).
+  // Ник на «bot» — только у ботов (решение владельца 26.10, D): тот же отказ, что у регистрации и мастера установки.
+  if (humanUsernameLooksBot(username)) {
+    throw new Error(`SUPERADMIN_USERNAME «${username.trim()}» оканчивается на «bot» — такие ники только у ботов; сид супер-админа отклонён.`);
+  }
   if (password.length < 6) {
     throw new Error('SUPERADMIN_PASSWORD слишком короткий (минимум 6 символов) — сид супер-админа отклонён.');
   }

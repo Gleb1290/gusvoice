@@ -13,7 +13,11 @@ import { Icon } from './Icon';
 import { StatusDot } from './StatusDot';
 import { useUserMenu } from './UserContextMenu';
 
-/** Right-hand server member list, grouped by online / offline (online = active gateway socket). */
+/**
+ * Right-hand server member list, grouped by online / offline (online = active gateway socket).
+ * Боты (#231, решение владельца 26.10) — отдельной группой «Боты» сверху (как роль «показывать отдельно» у Discord): у бота
+ * нет «в сети», вместо статуса — что он видит (Telegram `edit_participants_box.cpp:2458` «has access to messages»).
+ */
 export function ServerMembersPanel() {
   const bootstrap = useStore((s) => s.bootstrap);
   const onlineUsers = useStore((s) => s.onlineUsers);
@@ -53,8 +57,10 @@ export function ServerMembersPanel() {
   const sorted = [...members].sort((a, b) =>
     (a.nickname || a.user.displayName).localeCompare(b.nickname || b.user.displayName),
   );
-  const online = sorted.filter((m) => dotOf(m) !== 'offline');
-  const offline = sorted.filter((m) => dotOf(m) === 'offline');
+  const bots = sorted.filter((m) => m.user.bot);
+  const people = sorted.filter((m) => !m.user.bot);
+  const online = people.filter((m) => dotOf(m) !== 'offline');
+  const offline = people.filter((m) => dotOf(m) === 'offline');
 
   /**
    * ЛКМ по строке — «написать». Гостю (и гостя) писать нельзя, и отказ за этим ходил на сервер:
@@ -72,7 +78,8 @@ export function ServerMembersPanel() {
   const row = (m: ServerMemberInfo) => {
     const name = m.nickname || m.user.displayName;
     const self = m.user.id === me?.id;
-    const dot = dotOf(m);
+    const bot = !!m.user.bot;
+    const dot = bot ? 'online' : dotOf(m);
     const custom = customOf(m);
     const showCustom = !!(custom && (custom.emoji || custom.text)) && customStatusVisible(statusOf(m), onlineSet.has(m.user.id), self);
     // Game activity (#40) takes the secondary line when present (like Discord); only for online rows.
@@ -108,17 +115,27 @@ export function ServerMembersPanel() {
             fallback="icon"
           />
           {crownId === m.user.id && <CrownMark size={mobile ? 16 : 12} />}
-          <span className="mp-dot-wrap">
-            <StatusDot status={dot} size={11} ringColor="var(--bg-2)" />
-          </span>
+          {!bot && (
+            <span className="mp-dot-wrap">
+              <StatusDot status={dot} size={11} ringColor="var(--bg-2)" />
+            </span>
+          )}
         </span>
         <span className="mp-meta">
           <span className={`mp-name${crownGlow(crownId === m.user.id)}`}>
             {name}
             {/* Гость виден сразу: список участников — первое место, где на человека смотрят. */}
             <GuestMark home={m.user.homeInstance} size={11} />
+            {/* Текст значка — как `botRules.BOT_TAG_TEXT` (импорт не тянем: проверка держит закрытый перечень импортов). */}
+            {bot && (
+              <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+                БОТ
+              </span>
+            )}
           </span>
-          {game ? (
+          {bot ? (
+            <span className="mp-custom">{m.botReadsAll ? 'видит все сообщения' : 'видит только обращения'}</span>
+          ) : game ? (
             <span className="mp-game" title={`Играет в ${game.name}`}>
               <Icon name="gamepad" size={12} />
               <span className="mp-game-name">{game.name}</span>
@@ -145,6 +162,12 @@ export function ServerMembersPanel() {
           <span className="mp-mobile-title">Участники</span>
           <span className="mp-mobile-count">{members.length}</span>
         </div>
+      )}
+      {bots.length > 0 && (
+        <>
+          <div className="mp-head">Боты — {bots.length}</div>
+          <ul className="mp-list">{bots.map((m) => row(m))}</ul>
+        </>
       )}
       {online.length > 0 && (
         <>

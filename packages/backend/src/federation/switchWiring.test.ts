@@ -88,6 +88,11 @@ zod:ZodError
 ./routes/mapsTiles.js:mapsTilesRoutes
 ./routes/messages.js:messageRoutes
 ./routes/webhooks.js:webhookRoutes
+./routes/bots.js:botRoutes
+./routes/botApi.js:botApiRoutes
+./bots/botDocs.js:botDocsRoutes
+./bots/botOpenApiRoute.js:botOpenApiRoutes
+./routes/botPress.js:botPressRoutes
 ./routes/push.js:pushRoutes
 ./blocks.js:onBlockChange
 ./routes/blocks.js:blockRoutes

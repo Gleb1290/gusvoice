@@ -104,9 +104,13 @@ async function fixture(edit?: Mutation, noHook = false) {
   const fanout = load<typeof import('../src/convSendFanout.js')>('convSendFanout', { ...common, './conversations.js': c, './authGuard.js': authGuard,
     './contacts.js': contacts, './contactRules.js': contactRules, './groupRules.js': groupRules, './push.js': push });
   const scheduled = load<typeof import('../src/scheduled.js')>('scheduled', { ...common, './attachments.js': attachmentIO, './blockRules.js': blockRules,
+    './messagePrivacy.js': privacy,
     './conversations.js': c, './convSendFanout.js': fanout, './convRules.js': rules, './scheduleRules.js': scheduleRules, './util.js': { uuidv7: crypto.randomUUID } });
   const routeCommon = { 'drizzle-orm': orm, '@gusvoice/shared': shared, zod: { z }, '../db/index.js': { db: t.db }, '../db/schema.js': schema };
   const att = load<typeof import('../src/routes/att.js')>('routes/att', { ...routeCommon, '../convRules.js': rules, '../attachmentRules.js': attachmentRules,
+    // R304: старые GET проверяют выдачу; новый POST links — отдельная авторизованная граница.
+    '../auth.js': { requireAuth: async () => {} },
+    '../conversations.js': { formerLeftAt: async () => null },
     '../attachments.js': attachmentIO, '../authGuard.js': authGuard, '../storage.js': unused('upload storage') });
   const convRoutes = load<typeof import('../src/routes/conv.js')>('routes/conv', { ...routeCommon, '../auth.js': auth, '../authGuard.js': authGuard,
     '../guestGuard.js': guests, './att.js': att, '../stickerCatalog.js': unused('stickers'), '../blockRules.js': blockRules, '../blocks.js': blocks,

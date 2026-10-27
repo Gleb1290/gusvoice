@@ -23,6 +23,15 @@ Codec SDK, which is compiled into the app. Those files carry NVIDIA's own licens
 allow to be combined with it. The permission covers exactly that combination and nothing else; without an NVIDIA GPU the
 app falls back to a software encoder.
 
+## Bot SDK and bot examples: MIT
+
+The official bot SDK in [`packages/bot-sdk/`](packages/bot-sdk/) (`@gusvoice/bot`) and the example bots in
+[`examples/bots/`](examples/bots/) are licensed under the **MIT License** (full text in
+[`packages/bot-sdk/LICENSE`](packages/bot-sdk/LICENSE)), not the AGPL. You can build bots with them — open or closed —
+without your bot's code falling under the AGPL. The GusVoice server and apps stay under `AGPL-3.0-only`.
+The Python SDK in [`packages/bot-sdk-py/`](packages/bot-sdk-py/) (`gusvoice-bot`) is under the same **MIT License**
+(full text in [`packages/bot-sdk-py/LICENSE`](packages/bot-sdk-py/LICENSE)).
+
 ## Third-party code in this repository
 
 Code written by others keeps its own license. The notable pieces:

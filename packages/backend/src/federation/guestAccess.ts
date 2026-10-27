@@ -23,6 +23,7 @@ import {
   type FedMembershipState,
 } from '@gusvoice/shared';
 import { db } from '../db/index.js';
+import { memberChanged } from '../memberEvents.js';
 import { channels, federationLinks, serverFederationExclusions, serverMembers, servers, users } from '../db/schema.js';
 import { disconnectUser, removeFromOtherRooms } from '../livekit.js';
 import { publishToServer, publishToUser } from '../realtime.js';
@@ -76,6 +77,8 @@ export async function closeServerForGuests(
     );
 
   await dropFromVoice(input.serverId, guests.map((g) => g.id));
+  // Боты сервера (#231): гости ушли (`member → left`, сделал держатель).
+  memberChanged(guests.map((g) => ({ serverId: input.serverId, userId: g.id, actorId: null, from: 'member' as const, to: 'left' as const })));
 
   /**
    * 🔴 Снять у закрытых гостей ПОДПИСКУ шлюза (аудит 19.09, F-03). Личное `server.access_closed`
@@ -143,6 +146,7 @@ export async function reopenServerForGuests(input: {
         ),
       ),
     );
+  memberChanged(guests.map((g) => ({ serverId: input.serverId, userId: g.id, actorId: null, from: 'left' as const, to: 'member' as const })));
 
   for (const guest of guests) {
     /**
@@ -275,10 +279,12 @@ export async function freezeGuestsOf(instanceId: string): Promise<number> {
     await bumpTokenGeneration(g.id);
     await removeFromOtherRooms(g.id, '').catch(() => {});
     await removeFromOtherRooms(`${g.id}#screen`, '').catch(() => {});
-    await db
+    const frozen = await db
       .update(serverMembers)
       .set({ state: FED_MEMBERSHIP_STATES.closedByHost, closedAt: new Date() })
-      .where(and(eq(serverMembers.userId, g.id), eq(serverMembers.state, FED_MEMBERSHIP_STATES.active)));
+      .where(and(eq(serverMembers.userId, g.id), eq(serverMembers.state, FED_MEMBERSHIP_STATES.active)))
+      .returning({ serverId: serverMembers.serverId });
+    memberChanged(frozen.map((m) => ({ serverId: m.serverId, userId: g.id, actorId: null, from: 'member' as const, to: 'left' as const })));
   }
   return guests.length;
 }
@@ -330,6 +336,7 @@ export async function thawGuestsOf(instanceId: string): Promise<number> {
       .update(serverMembers)
       .set({ state: FED_MEMBERSHIP_STATES.active, closedAt: null })
       .where(and(eq(serverMembers.serverId, row.serverId), eq(serverMembers.userId, row.id)));
+    memberChanged({ serverId: row.serverId, userId: row.id, actorId: null, from: 'left', to: 'member' });
     await publishToUser(row.id, { t: 'server.access_restored', serverId: row.serverId }).catch(() => {});
     await announceMembership({ guest: row, serverId: row.serverId, state: FED_MEMBERSHIP_STATES.active });
     thawed += 1;

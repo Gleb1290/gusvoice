@@ -56,6 +56,7 @@ export type IconName =
   | 'flame'
   | 'heart'
   | 'code'
+  | 'bot'
   | 'megaphone'
   | 'at'
   | 'activity'
@@ -212,6 +213,14 @@ const PATHS: Record<IconName, string[]> = {
   ],
   heart: ['M19.5 12.572 L12 20 L4.5 12.572 a5 5 0 1 1 7.5 -6.566 a5 5 0 1 1 7.5 6.572'],
   code: ['M7 8 L3 12 L7 16', 'M17 8 L21 12 L17 16', 'M14 4 L10 20'],
+  bot: [
+    'M8 7 H16 a3 3 0 0 1 3 3 v7 a3 3 0 0 1 -3 3 H8 a3 3 0 0 1 -3 -3 V10 a3 3 0 0 1 3 -3 Z',
+    'M8 12 a1 1 0 1 0 2 0 a1 1 0 1 0 -2 0 Z',
+    'M14 12 a1 1 0 1 0 2 0 a1 1 0 1 0 -2 0 Z',
+    'M12 3 V7',
+    'M5 11 H3 a1 1 0 0 0 -1 1 v3 a1 1 0 0 0 1 1 H5 M19 11 H21 a1 1 0 0 1 1 1 v3 a1 1 0 0 1 -1 1 H19',
+    'M9 16 H15',
+  ],
   megaphone: [
     'M18 8 a3 3 0 0 1 0 6',
     'M10 8 V19 a1 1 0 0 1 -1 1 H8 a1 1 0 0 1 -1 -1 v-5',

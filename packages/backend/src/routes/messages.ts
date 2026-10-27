@@ -6,14 +6,8 @@ import {
   POLL_MAX_OPTIONS,
   SERVER_SEARCH_MIN_CHARS,
   VOICE_MAX_MS,
-  canMentionEveryone,
-  hasBroadcastMention,
   WAVEFORM_BUCKETS,
   type Attachment,
-  type MessageReplyPreview,
-  type MessageSticker,
-  type ReactionGroup,
-  type ReactionReactor,
   type ServerSearchResponse,
 } from '@gusvoice/shared';
 import { and, desc, eq, ilike, inArray, isNotNull, lt, sql } from 'drizzle-orm';
@@ -24,89 +18,30 @@ import {
   attachmentUploadBlock,
   heavyReadBlock,
   messageSendBlock,
-  pushDebounced,
   retryMessage,
   serverSearchBlock,
 } from '../authGuard.js';
 import { db } from '../db/index.js';
 import { pollsFor, vote, votersOf } from '../polls.js';
-import { MESSAGE_TEXT_MAX, replyAttachmentPreview, TEXT_TOO_LONG } from '../convRules.js';
-import { channelReads, channels, messageReactions, messages, polls, stickerPacks, stickers, users } from '../db/schema.js';
+import { MESSAGE_TEXT_MAX, TEXT_TOO_LONG } from '../convRules.js';
+import { channelReads, channels, messages, polls, users } from '../db/schema.js';
 import { getChannelPermissions, getServerChannelPermissions, searchableChannelIds } from '../permissions.js';
-import { contentPreview, resolveMentionedMembers, resolveRoleMentions, sendPushToUsers } from '../push.js';
 import { publishToChannel, publishToUser } from '../realtime.js';
+import { publishChannelMessageEvent } from '../channelEvents.js';
 import { serializeMessage, serializeUserBrief } from '../serialize.js';
 import { attachmentBlocked, isOwnMediaUrl, putAttachment, storageConfigured } from '../storage.js';
 import { id } from '../util.js';
+import {
+  deleteChannelMessage,
+  editChannelMessage,
+  postChannelMessage,
+  reactionsFor,
+  replyPreviewsFor,
+  setChannelPinned,
+  setChannelReaction,
+} from '../channelMessages.js';
 import { searchAllServers, splitCursor } from '../serverSearch.js';
 import { releaseQuota, reserveQuota } from '../federation/guestQuota.js';
-
-/** Сколько поставивших канал отдаёт списком на чип реакции (аватарки на чипе — до трёх, как у Telegram Desktop). */
-const REACTORS_INLINE_MAX = 3;
-
-/** Aggregate reactions for a batch of messages into per-message groups, with `me` for the viewer. */
-async function reactionsFor(messageIds: string[], viewerId: string): Promise<Map<string, ReactionGroup[]>> {
-  const out = new Map<string, ReactionGroup[]>();
-  if (messageIds.length === 0) return out;
-  const rows = await db.select().from(messageReactions).where(inArray(messageReactions.messageId, messageIds));
-  const agg = new Map<string, Map<string, { count: number; me: boolean; reactors: ReactionReactor[] }>>();
-  for (const r of rows) {
-    let byEmoji = agg.get(r.messageId);
-    if (!byEmoji) {
-      byEmoji = new Map();
-      agg.set(r.messageId, byEmoji);
-    }
-    const cur = byEmoji.get(r.emoji) ?? { count: 0, me: false, reactors: [] };
-    cur.count += 1;
-    if (r.userId === viewerId) cur.me = true;
-    cur.reactors.push({ userId: r.userId, at: r.createdAt.toISOString() });
-    byEmoji.set(r.emoji, cur);
-  }
-  for (const [mid, byEmoji] of agg) {
-    out.set(
-      mid,
-      [...byEmoji.entries()].map(([emoji, v]) => {
-        const g: ReactionGroup = { emoji, count: v.count, me: v.me };
-        // «Кто поставил» (G75, #211; Telegram Desktop `kMaxRecentUserpics`): список — только пока людей немного (чип рисует их
-        // аватарки вместо числа); в каналах людей бывают сотни, большим группам список не шлём — чип с числом, как было.
-        // Только добавление к DTO (правило 11): `count` и `me` прежние.
-        if (v.count <= REACTORS_INLINE_MAX) {
-          g.reactors = [...v.reactors].sort((x, y) => x.at.localeCompare(y.at) || x.userId.localeCompare(y.userId));
-        }
-        return g;
-      }),
-    );
-  }
-  return out;
-}
-
-/**
- * Build compact reply previews (author name + content) for a batch of parent message ids.
- * 05.10: плюс вид вложений цитируемого (`convRules.replyAttachmentPreview`: число, вид, длительность, имя файла, видео;
- * стикер — вид `sticker`) — цитата на сообщение вне загруженного окна пишет «Фото» / «Видео» / «Стикер», а не
- * «вложение». Миниатюры нет: цитата канала — одна строка словами. Цитируемое всегда из того же канала (проверка при
- * отправке), так что смотрящему оно и так видно.
- */
-async function replyPreviewsFor(replyToIds: (string | null)[]): Promise<Map<string, MessageReplyPreview>> {
-  const ids = [...new Set(replyToIds.filter((x): x is string => !!x))];
-  const out = new Map<string, MessageReplyPreview>();
-  if (ids.length === 0) return out;
-  const rows = await db
-    .select({ m: messages, u: users })
-    .from(messages)
-    .innerJoin(users, eq(messages.authorId, users.id))
-    .where(inArray(messages.id, ids));
-  for (const r of rows) {
-    out.set(r.m.id, {
-      id: r.m.id,
-      // Вебхук (#24): имя, под которым пришло сообщение, а не служебной строки-автора.
-      authorName: r.m.webhookId ? (r.m.webhookName ?? r.u.displayName) : r.u.displayName,
-      content: r.m.content,
-      ...replyAttachmentPreview(r.m.attachments, !!r.m.sticker),
-    });
-  }
-  return out;
-}
 
 export async function messageRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
@@ -349,84 +284,14 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     if (body.attachments.some((a) => !isOwnMediaUrl(a.url)))
       return reply.code(400).send({ error: 'вложение должно быть загружено через этот сервер' });
 
-    const [channel] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
-    if (!channel) return reply.code(404).send({ error: 'not found' });
-    if (channel.type !== 'text') return reply.code(400).send({ error: 'not a text channel' });
-
-    const perms = await getChannelPermissions(channelId, req.user!.sub);
-    if (!perms) return reply.code(404).send({ error: 'not found' });
-    if (!has(perms.permissions, Permission.SEND_MESSAGES)) return reply.code(403).send({ error: 'forbidden' });
-
-    // A reply must point at an existing message in this same channel.
-    let replyToId: string | null = null;
-    if (body.replyToId) {
-      const [parent] = await db.select().from(messages).where(eq(messages.id, body.replyToId)).limit(1);
-      if (!parent || parent.channelId !== channelId) return reply.code(400).send({ error: 'invalid reply target' });
-      replyToId = parent.id;
-    }
-
-    // Стикер разрешаем ТОЛЬКО из набора этого же сервера: иначе по id можно было бы утащить в чат
-    // стикер чужого сервера, где отправитель даже не состоит. Кладём копией — набор потом удалят,
-    // а сообщение обязано остаться целым.
-    let sticker: MessageSticker | null = null;
-    if (body.stickerId) {
-      const [found] = await db
-        .select({ id: stickers.id, emoji: stickers.emoji, url: stickers.url, format: stickers.format })
-        .from(stickers)
-        .innerJoin(stickerPacks, eq(stickers.packId, stickerPacks.id))
-        .where(and(eq(stickers.id, body.stickerId), eq(stickerPacks.serverId, channel.serverId)))
-        .limit(1);
-      if (!found) return reply.code(400).send({ error: 'стикера нет на этом сервере' });
-      sticker = found;
-    }
-
-    const [author] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
-    // `@Роль` (#76): какие роли сообщение реально зовёт — решаем СЕЙЧАС, по праву автора, и кладём в сообщение.
-    const mentionRoleIds = await resolveRoleMentions(content, channel.serverId, perms.permissions);
-    // `@everyone`/`@here` (#76): зовут только с правом `MENTION_EVERYONE` (в канале — с учётом его переопределений); без
-    // права текст остаётся, но флаг `false` гасит звук, значок и пуш. Нет таких обращений — NULL.
-    const broadcastText = hasBroadcastMention(content);
-    const mentionEveryone = broadcastText ? canMentionEveryone(perms.permissions) : null;
-    const [row] = await db
-      .insert(messages)
-      .values({
-        id: id(),
-        channelId,
-        authorId: author.id,
-        content,
-        attachments: body.attachments,
-        replyToId,
-        sticker,
-        mentionRoles: mentionRoleIds,
-        mentionEveryone,
-      })
-      .returning();
-
-    const replies = await replyPreviewsFor([replyToId]);
-    const message = serializeMessage({ ...row, author, replyTo: replyToId ? (replies.get(replyToId) ?? null) : null });
-    await publishToChannel(channel.serverId, channelId, { t: 'message.create', channelId, serverId: channel.serverId, message });
-    // Wake offline @mentioned members (fire-and-forget; only fires when the content has an @mention).
-    void resolveMentionedMembers(content, channel.serverId, author.id, channelId, mentionRoleIds, mentionEveryone !== false).then(async (ids) => {
-      if (ids.length === 0) return;
-      // Push-bomb debounce (#5, P1-3): at most one mention-push per recipient per channel per window,
-      // so a burst of @mentions can't machine-gun someone's phone.
-      const fresh: string[] = [];
-      for (const uid of ids) if (!(await pushDebounced(uid, channelId))) fresh.push(uid);
-      if (fresh.length === 0) return;
-      // source = this server, so a member who muted the server won't get a phone push.
-      return sendPushToUsers(
-        fresh,
-        {
-          type: 'mention',
-          title: author.displayName,
-          body: contentPreview(content, body.attachments.length),
-          channelId,
-          serverId: channel.serverId,
-        },
-        { scope: 'server', targetId: channel.serverId },
-      );
+    const res = await postChannelMessage(req.user!.sub, channelId, {
+      content,
+      attachments: body.attachments,
+      replyToId: body.replyToId ?? null,
+      stickerId: body.stickerId ?? null,
     });
-    return reply.code(201).send(message);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
+    return reply.code(201).send(res.message);
   });
 
   // Edit your own message's text.
@@ -435,48 +300,17 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const { content: raw } = z.object({ content: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG) }).parse(req.body);
     const content = raw.trim();
 
-    const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
-    if (!msg || msg.channelId !== channelId) return reply.code(404).send({ error: 'not found' });
-    if (msg.authorId !== req.user!.sub) return reply.code(403).send({ error: 'forbidden' });
-    // Пробелы проходили `.min(1)` до обрезки и давали пустую реплику (#212) — разбор был в снятом `routes/dm.ts`.
-    if (!content && msg.attachments.length === 0) return reply.code(400).send({ error: 'empty message' });
-
-    const perms = await getChannelPermissions(channelId, req.user!.sub);
-    if (!perms) return reply.code(404).send({ error: 'not found' });
-
-    // Текст не изменился (06.10, сверка с Telegram): «правка» без изменений не ставит «изм.» и не рассылается — как у бесед
-    // (`conversations.editMessage`). Ответ прежний — сообщение как есть (старый клиент подставляет его себе в ленту).
-    const unchanged = content === msg.content;
-    const [row] = unchanged
-      ? [msg]
-      : await db.update(messages).set({ content, editedAt: new Date() }).where(eq(messages.id, messageId)).returning();
-    const [author] = await db.select().from(users).where(eq(users.id, msg.authorId)).limit(1);
-    const replies = await replyPreviewsFor([row.replyToId]);
-    const message = serializeMessage({
-      ...row,
-      author,
-      replyTo: row.replyToId ? (replies.get(row.replyToId) ?? null) : null,
-    });
-    if (!unchanged) await publishToChannel(perms.serverId, channelId, { t: 'message.update', channelId, message });
-    return reply.send(message);
+    const res = await editChannelMessage(req.user!.sub, channelId, messageId, content);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
+    return reply.send(res.message);
   });
 
   // Delete a message (author or MANAGE_MESSAGES).
   app.delete('/channels/:id/messages/:messageId', async (req, reply) => {
     const { id: channelId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
 
-    const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
-    if (!msg || msg.channelId !== channelId) return reply.code(404).send({ error: 'not found' });
-
-    const perms = await getChannelPermissions(channelId, req.user!.sub);
-    if (!perms) return reply.code(404).send({ error: 'not found' });
-    const isAuthor = msg.authorId === req.user!.sub;
-    if (!isAuthor && !has(perms.permissions, Permission.MANAGE_MESSAGES)) {
-      return reply.code(403).send({ error: 'forbidden' });
-    }
-
-    await db.delete(messages).where(eq(messages.id, messageId));
-    await publishToChannel(perms.serverId, channelId, { t: 'message.delete', channelId, messageId });
+    const res = await deleteChannelMessage(req.user!.sub, channelId, messageId);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
     return reply.code(204).send();
   });
 
@@ -485,62 +319,17 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const { id: channelId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
     const { emoji, op } = z.object({ emoji: z.string().min(1).max(32), op: z.enum(['add', 'remove']) }).parse(req.body);
 
-    const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
-    if (!msg || msg.channelId !== channelId) return reply.code(404).send({ error: 'not found' });
-
-    const perms = await getChannelPermissions(channelId, req.user!.sub);
-    if (!perms || !has(perms.permissions, Permission.VIEW_CHANNEL)) return reply.code(403).send({ error: 'forbidden' });
-
-    // Рассылаем только настоящее изменение: повтор запроса иначе удваивал реакцию у всех на экране (#212,
-    // разбор был в снятом `routes/dm.ts`).
-    const changed =
-      op === 'add'
-        ? await db
-            .insert(messageReactions)
-            .values({ messageId, userId: req.user!.sub, emoji })
-            .onConflictDoNothing()
-            .returning({ id: messageReactions.messageId })
-        : await db
-            .delete(messageReactions)
-            .where(
-              and(
-                eq(messageReactions.messageId, messageId),
-                eq(messageReactions.userId, req.user!.sub),
-                eq(messageReactions.emoji, emoji),
-              ),
-            )
-            .returning({ id: messageReactions.messageId });
-    if (changed.length === 0) return reply.code(204).send();
-    await publishToChannel(perms.serverId, channelId, { t: 'message.reaction', channelId, messageId, emoji, userId: req.user!.sub, op });
+    const res = await setChannelReaction(req.user!.sub, channelId, messageId, emoji, op);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
     return reply.code(204).send();
   });
 
   // Pin / unpin a message (MANAGE_MESSAGES). Re-serializes and broadcasts the message.
   async function setPinned(req: FastifyRequest, reply: FastifyReply, pinned: boolean) {
     const { id: channelId, messageId } = z.object({ id: z.string(), messageId: z.string() }).parse(req.params);
-    const [msg] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
-    if (!msg || msg.channelId !== channelId) return reply.code(404).send({ error: 'not found' });
-
-    const perms = await getChannelPermissions(channelId, req.user!.sub);
-    if (!perms) return reply.code(404).send({ error: 'not found' });
-    if (!has(perms.permissions, Permission.MANAGE_MESSAGES)) return reply.code(403).send({ error: 'forbidden' });
-
-    const [row] = await db
-      .update(messages)
-      .set({ pinnedAt: pinned ? new Date() : null })
-      .where(eq(messages.id, messageId))
-      .returning();
-    const [author] = await db.select().from(users).where(eq(users.id, row.authorId)).limit(1);
-    const reactions = await reactionsFor([row.id], req.user!.sub);
-    const replies = await replyPreviewsFor([row.replyToId]);
-    const message = serializeMessage({
-      ...row,
-      author,
-      reactions: reactions.get(row.id) ?? [],
-      replyTo: row.replyToId ? (replies.get(row.replyToId) ?? null) : null,
-    });
-    await publishToChannel(perms.serverId, channelId, { t: 'message.update', channelId, message });
-    return reply.send(message);
+    const res = await setChannelPinned(req.user!.sub, channelId, messageId, pinned);
+    if (res.kind === 'error') return reply.code(res.code).send({ error: res.error });
+    return reply.send(res.message);
   }
   app.put('/channels/:id/messages/:messageId/pin', (req, reply) => setPinned(req, reply, true));
   app.delete('/channels/:id/messages/:messageId/pin', (req, reply) => setPinned(req, reply, false));
@@ -626,7 +415,8 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
 
     const fresh = await pollsFor([row.id], author.id);
     const message = serializeMessage({ ...row, author, poll: fresh.get(row.id) ?? null });
-    await publishToChannel(channel.serverId, channelId, { t: 'message.create', channelId, serverId: channel.serverId, message });
+    // Опрос — тем же входом событий канала (людям `message.create`); ботам сообщение-опрос не отдаётся (`botChannel`).
+    await publishChannelMessageEvent(channel.serverId, channelId, { kind: 'created', message }, author.id);
     return message;
   });
 

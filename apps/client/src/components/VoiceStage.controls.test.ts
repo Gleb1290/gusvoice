@@ -12,6 +12,7 @@ import { stageHasVideo } from '../stageAutoShowRules';
 import * as stageOrderRules from '../stageOrderRules';
 import type { StageOrderLayout } from '../stageOrderPrefs';
 import * as stageLayoutRules from '../stageLayoutRules';
+import * as voiceRules from '../voiceRules';
 import * as streamPipRules from '../streamPipRules';
 import * as pendingWatchRules from '../pendingWatch';
 
@@ -116,6 +117,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     '../store': { useStore: (select: (s: typeof state) => unknown) => { useRevision(); return select(state); } },
     '../stageLayoutPrefs': { useStageLayout: () => { useRevision(); return options.layout ?? 'auto'; }, setStageLayout: setLayout },
     '../stageLayoutRules': stageLayoutRules,
+    '../voiceRules': voiceRules,
     '../useStageSpeaker': { useStageSpeaker: (ids: string[], enabled: boolean) => {
       useRevision(); calls.speaker.push({ ids: [...ids], enabled }); return enabled ? options.speakerId ?? null : null;
     } },

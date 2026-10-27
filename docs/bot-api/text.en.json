@@ -1,0 +1,353 @@
+{
+  "section.objects.intro": "Answers may gain new fields in future versions — skip unknown fields quietly. Ids are strings (UUIDs), time is Unix seconds.",
+  "section.methods.intro": "Required parameters are in bold. Every method returns its value in `result` inside `{\"ok\":true,…}`. Every method also works with `GET` (parameters in the query string); from a form or the query string numbers and flags may be strings (`limit=50`, `disable_notification=true`), arrays and objects are JSON strings.",
+  "section.events.intro": "A bot's event journal keeps events for **24 hours**, at most **1000** (a \"Read all messages\" bot — 10 000; the oldest go first, the count of dropped ones is `dropped_update_count`). Acknowledged events (`offset`, `ack`, a `2xx` answer from your URL) are deleted. Every event is an [Update](#update): `update_id` plus exactly one of these fields.",
+  "section.events.notes": "A bot does not see its own actions as events: sending, editing and deleting through the Bot API produce no events for the bot (the exception is `voice_state` — the bot learns about its own joins and leaves). Pins, \"typing\", read receipts, polls and stickers are not delivered to bots.",
+
+  "object.*.date": "time of the event",
+  "object.*.chat": "the conversation",
+  "object.*.message_id": "message id",
+  "object.*.instance_domain": "present for guests from other instances (federation); usernames may collide with local ones — authorize by `id`",
+  "object.*.old_status": "status before",
+  "object.*.new_status": "status after",
+  "object.*.dropped_update_count": "how many events the journal limit dropped (present if any)",
+  "object.*.server_muted": "a moderator muted it on the server",
+
+  "object.Attachment": "A file attached to a message.",
+  "object.Attachment.url": "a link made **for your bot**, downloaded with a plain `GET` without headers; do not publish it. It works while the bot has access to the conversation",
+  "object.Attachment.file_name": "file name",
+  "object.Attachment.mime_type": "file type",
+  "object.Attachment.file_size": "size in bytes",
+
+  "object.BotCommand": "A command in the hint list shown when a person types `/`, e.g. `{ \"command\": \"status\", \"description\": \"Server state\" }`.",
+  "object.BotCommand.command": "name without the slash",
+  "object.BotCommand.description": "what it does",
+
+  "object.BotCommandScope": "Where a command list applies.",
+  "object.BotCommandScope.type": "`default`, `all_private_chats` (DMs) or `all_group_chats` (servers). Other types → `400`. DMs use `all_private_chats` if set, otherwise `default`; servers use `all_group_chats`, otherwise `default`",
+
+  "object.BotUser": "The bot itself (the `getMe` result): a [User](#user) plus the bot's profile and what the server can do. Check `features` instead of guessing by version; an older server does not send `api_version`/`features`.",
+  "object.BotUser.id": "bot id",
+  "object.BotUser.username": "bot username",
+  "object.BotUser.display_name": "name; the username if unset",
+  "object.BotUser.bot": "always `true`",
+  "object.BotUser.description": "description (up to 512 characters)",
+  "object.BotUser.about": "short \"about\" (up to 120 characters)",
+  "object.BotUser.public": "whether everyone may message the bot",
+  "object.BotUser.api_version": "server Bot API version: 2 — buttons and commands, 3 — servers, 4 — voice",
+  "object.BotUser.features": "what the server supports: `polling`, `ws`, `webhook`, `keyboards`, `commands`, `client_id`, `servers`, `reactions`, `parse_mode`, `webhook_batch`, `voice`, …; new ones are appended",
+
+  "object.CallbackQuery": "A button with `callback_data` was pressed. Answer it with `answerCallbackQuery`.",
+  "object.CallbackQuery.id": "pass it to `answerCallbackQuery`",
+  "object.CallbackQuery.from": "who pressed",
+  "object.CallbackQuery.message": "the message with the buttons, whole (including `reply_markup`)",
+  "object.CallbackQuery.data": "`callback_data` of the pressed button",
+  "object.CallbackQuery.date": "press time",
+
+  "object.Chat": "A conversation. 🔴 **Check `type`**: code that assumed `\"dm\"` will see other values; ignore unknown ones.",
+  "object.Chat.id": "conversation id — the value to pass as `chat_id`",
+  "object.Chat.type": "`dm` — 1:1 chat, `channel` — text channel of a server, `server` — the server itself (membership events and `getChat` only), `voice` — voice channel (voice methods only)",
+  "object.Chat.server_id": "for channels: the server",
+  "object.Chat.title": "for channels and servers: the name",
+
+  "object.ChatFullInfo": "The `getChat` result: a [Chat](#chat) with details.",
+  "object.ChatFullInfo.id": "conversation id",
+  "object.ChatFullInfo.type": "as in [Chat](#chat)",
+  "object.ChatFullInfo.server_id": "for channels: the server",
+  "object.ChatFullInfo.title": "for channels and servers: the name",
+  "object.ChatFullInfo.user": "in a DM: the other participant",
+  "object.ChatFullInfo.member_count": "for a server: number of members",
+
+  "object.ChatMember": "A server member (`getChatMember`, `getChatMembers`). Permissions are not flags as in Telegram: look up the roles with `getServer`.",
+  "object.ChatMember.user": "the member",
+  "object.ChatMember.status": "`creator` — owner, `member`, `left`, `kicked` (banned)",
+  "object.ChatMember.nickname": "nickname on this server (present if set)",
+  "object.ChatMember.role_ids": "ids of the member's roles",
+  "object.ChatMember.joined_date": "when they joined the server",
+
+  "object.ChatMemberUpdated": "The bot's own membership changed (`my_chat_member`).",
+  "object.ChatMemberUpdated.from": "who changed it (the person, or a server admin)",
+  "object.ChatMemberUpdated.old_status": "status before: in a DM `member` / `left` / `kicked`",
+  "object.ChatMemberUpdated.new_status": "status after",
+
+  "object.ChatMembersPage": "A page of server members.",
+  "object.ChatMembersPage.members": "members of this page",
+  "object.ChatMembersPage.next_offset": "pass it as `offset` for the next page; absent on the last page",
+
+  "object.Error": "An error answer; the HTTP status equals `error_code`. Branch on `error_code`, not on the text of `description`.",
+  "object.Error.ok": "always `false`",
+  "object.Error.error_code": "HTTP status",
+  "object.Error.description": "text for humans, may change",
+  "object.Error.retry_after": "only on `429`: whole seconds to wait (also the `Retry-After` header)",
+
+  "object.InlineKeyboardButton": "A button under a message: `text` plus **exactly one** of `callback_data` and `url`. Other Telegram button kinds (`web_app`, `switch_inline_query`, `login_url`, …) are ignored.",
+  "object.InlineKeyboardButton.text": "button label",
+  "object.InlineKeyboardButton.callback_data": "up to **64 bytes** UTF-8, not characters (Cyrillic is 2 bytes per letter: 32 letters). Pressing sends the bot a `callback_query` with this string",
+  "object.InlineKeyboardButton.url": "`http(s)` only, no `user:password@` in the address. The person is asked \"Open link?\" for foreign addresses",
+
+  "object.InlineKeyboardMarkup": "Buttons under a message: rows of buttons, at least one row, 1–8 buttons in a row, at most 100 in total. From a form or the query string — a JSON string.",
+  "object.InlineKeyboardMarkup.inline_keyboard": "rows of buttons",
+
+  "object.InputEmbed": "A card for `sendMessage` (`embeds`), the same format as incoming webhooks. Card images only from this instance's storage or an uploaded file (`attachment://<file name>`, servers only); an external image is shown as a link.",
+  "object.InputEmbed.title": "title",
+  "object.InputEmbed.description": "text",
+  "object.InputEmbed.url": "link of the title",
+  "object.InputEmbed.color": "stripe colour, `0xRRGGBB` as a number",
+  "object.InputEmbed.timestamp": "ISO 8601 time shown at the bottom",
+  "object.InputEmbed.fields": "up to 25 fields `{ name, value, inline? }`",
+  "object.InputEmbed.author": "`{ name, url?, icon_url? }`",
+  "object.InputEmbed.footer": "`{ text, icon_url? }`",
+  "object.InputEmbed.image": "`{ url }` — big picture",
+  "object.InputEmbed.thumbnail": "`{ url }` — small picture",
+
+  "object.Message": "A message.",
+  "object.Message.chat": "where it was sent",
+  "object.Message.from": "author",
+  "object.Message.date": "send time",
+  "object.Message.edit_date": "present only if the message was edited",
+  "object.Message.text": "text (may be empty if the message has only an attachment or a card)",
+  "object.Message.reply_to_message_id": "present if it is a reply",
+  "object.Message.attachments": "present if there are attachments",
+  "object.Message.embeds": "present if there are cards",
+  "object.Message.reply_markup": "present if the message has buttons",
+
+  "object.MessageDeleted": "A message disappeared for the bot.",
+  "object.MessageDeleted.date": "time of deletion",
+
+  "object.MessageEmbed": "A card as stored by the server (field names as in the message feed: `iconUrl`, `imageLink`).",
+  "object.MessageEmbed.title": "title",
+  "object.MessageEmbed.url": "link of the title",
+  "object.MessageEmbed.description": "text",
+  "object.MessageEmbed.color": "stripe colour",
+  "object.MessageEmbed.timestamp": "time shown at the bottom",
+  "object.MessageEmbed.author": "author line",
+  "object.MessageEmbed.footer": "footer line",
+  "object.MessageEmbed.fields": "fields",
+  "object.MessageEmbed.image": "big picture from this instance's storage",
+  "object.MessageEmbed.thumbnail": "small picture from this instance's storage",
+  "object.MessageEmbed.imageLink": "an external `image` — shown as a link, not loaded",
+  "object.MessageEmbed.thumbnailLink": "an external `thumbnail` — shown as a link, not loaded",
+
+  "object.MessageReactionUpdated": "A person changed their reactions to a message (`message_reaction`).",
+  "object.MessageReactionUpdated.user": "who reacted",
+  "object.MessageReactionUpdated.old_reaction": "this person's reactions before",
+  "object.MessageReactionUpdated.new_reaction": "this person's reactions now",
+
+  "object.ReactionType": "A reaction.",
+  "object.ReactionType.type": "only `emoji` for now",
+  "object.ReactionType.emoji": "the emoji",
+
+  "object.ServerBrief": "A server the bot is on (`getMyServers`).",
+  "object.ServerBrief.id": "server id (`server_id` for `getServer`)",
+  "object.ServerBrief.title": "name",
+
+  "object.ServerInfo": "A server as the bot sees it (`getServer`).",
+  "object.ServerInfo.id": "server id",
+  "object.ServerInfo.title": "name",
+  "object.ServerInfo.channels": "channels the bot can see; `can_send` — whether the bot may post there",
+  "object.ServerInfo.roles": "roles; `managed` — a bot role (cannot be given to anyone else)",
+
+  "object.ServerMemberUpdated": "Someone joined, left, was kicked, banned or unbanned on a server (`chat_member`).",
+  "object.ServerMemberUpdated.chat": "the server (`type: \"server\"`)",
+  "object.ServerMemberUpdated.from": "who did it (the member themselves or a moderator)",
+  "object.ServerMemberUpdated.user": "whose membership changed",
+
+  "object.Update": "An event: `update_id` plus **exactly one** content field (see [Events](#events)). If a field that is not listed arrives (in future versions), skip it quietly.",
+  "object.Update.update_id": "increasing but **not necessarily consecutive** (the counter is shared by the whole instance)",
+  "object.Update.message": "a new message",
+  "object.Update.edited_message": "an edited message",
+  "object.Update.message_deleted": "a message disappeared",
+  "object.Update.my_chat_member": "the bot's own membership changed",
+  "object.Update.callback_query": "a button was pressed",
+  "object.Update.message_reaction": "reactions changed",
+  "object.Update.chat_member": "server membership changed",
+  "object.Update.voice_state": "someone joined or left a voice channel",
+
+  "object.User": "A person or a bot.",
+  "object.User.id": "user id (UUID)",
+  "object.User.username": "username",
+  "object.User.display_name": "name; the username if unset",
+  "object.User.bot": "`true` for bots",
+
+  "object.VoiceChatMember": "Who is in a voice channel now (`getVoiceChatMembers`).",
+  "object.VoiceChatMember.user": "the participant",
+  "object.VoiceChatMember.muted": "microphone off",
+  "object.VoiceChatMember.deafened": "sound off",
+  "object.VoiceChatMember.is_bot": "a bot",
+
+  "object.VoiceJoinResult": "Where and how to connect to voice (`joinVoice`).",
+  "object.VoiceJoinResult.url": "LiveKit address",
+  "object.VoiceJoinResult.token": "LiveKit token; LiveKit refreshes it while the session is alive, after a full drop call `joinVoice` again",
+  "object.VoiceJoinResult.room": "room name",
+  "object.VoiceJoinResult.chat": "the voice channel (`type: \"voice\"`)",
+  "object.VoiceJoinResult.server_muted": "the bot is muted by a moderator",
+  "object.VoiceJoinResult.expires_in": "token lifetime in seconds",
+  "object.VoiceJoinResult.audio": "what to publish: PCM `sample_rate` 48000, `channels` 2, `bitrate` as requested",
+
+  "object.VoiceStateUpdated": "Someone joined or left a voice channel of the server (`voice_state`).",
+  "object.VoiceStateUpdated.chat": "the voice channel",
+  "object.VoiceStateUpdated.user": "who (may be the bot itself)",
+  "object.VoiceStateUpdated.action": "what happened",
+  "object.VoiceStateUpdated.move_to": "only to the bot itself, when a moderator moved it: join this channel (the SDK does it on its own)",
+
+  "object.WebhookInfo": "Delivery-to-URL state (`getWebhookInfo`).",
+  "object.WebhookInfo.url": "the URL; an empty string if none",
+  "object.WebhookInfo.pending_update_count": "how many events are waiting in the journal",
+  "object.WebhookInfo.failures": "consecutive delivery failures",
+  "object.WebhookInfo.last_error_date": "time of the last failure (present if there was one)",
+  "object.WebhookInfo.last_error_message": "the last failure, a short English text, e.g. `Wrong response from the webhook: HTTP 502`",
+  "object.WebhookInfo.disabled_date": "present if the server switched delivery off after a series of failures",
+  "object.WebhookInfo.batch": "batched delivery is on",
+
+  "param.*.chat_id": "conversation or channel id",
+  "param.*.message_id": "message id",
+  "param.*.user_id": "member id",
+  "param.*.scope": "which list; default `{\"type\":\"default\"}`",
+  "param.*.reply_markup": "buttons under the message",
+  "param.*.parse_mode": "omitted — our markup; `HTML` — a Telegram subset converted to our markup; `MarkdownV2` → `400`",
+  "param.*.disable_notification": "no sound or push",
+  "param.*.drop_pending_updates": "discard accumulated events",
+
+  "method.getMe.summary": "Who am I. Handy to check that the token works.",
+
+  "method.getUpdates.summary": "Fetch new events (long polling).",
+  "method.getUpdates.notes": [
+    "Events come by ascending `update_id`. Until acknowledged with `offset`, the same events arrive again (this is how bot restarts are survived). If a delivery URL is set — `409`.",
+    "",
+    "**One consumer at a time** (as in Telegram): a new `getUpdates` or WebSocket of the same bot **replaces** the previous one — a waiting `getUpdates` answers `409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running`, an open WebSocket is closed with `4009`. Two copies of the bot with one token knock each other out — stop one. Reissuing the token, disabling the bot or all bots also ends a waiting `getUpdates` at once (`401`/`403`) instead of handing it a batch.",
+    "",
+    "Do not poll with two processes of the same bot: both will see the same events and answer twice."
+  ],
+  "param.getUpdates.offset": "acknowledge all events with `update_id` **lower** than `offset` (they are deleted) and return from `offset` on. Normally the last `update_id` + 1. Unset or ≤ 0 returns everything not yet acknowledged",
+  "param.getUpdates.limit": "default 100",
+  "param.getUpdates.timeout": "seconds, default 0 (answer at once). Above 0 the server waits up to `timeout` seconds for the first event (long polling)",
+  "param.getUpdates.allowed_updates": "only these kinds, e.g. `[\"message\",\"callback_query\"]`. The rest stay in the journal until acknowledged by `offset`. Unknown kinds are **ignored** (not a `400`): a bot written for a newer server keeps working",
+
+  "method.setWebhook.summary": "Turn on event delivery to a URL (see [Delivery to a URL](#delivery-to-a-url)).",
+  "method.setWebhook.notes": "The URL is checked immediately (see [SSRF protection](#ssrf-protection)); an error is `400 Bad Request: bad webhook: …`. After the call `getUpdates` answers `409` and open WebSockets are closed with code `4009`. Calling `setWebhook` again with a new URL or secret resets the failure counter.",
+  "param.setWebhook.url": "`https://…`, no login or password in the URL",
+  "param.setWebhook.secret_token": "**required**: every delivery is signed with it",
+  "param.setWebhook.batch": "batched delivery: the POST body is an array of up to 100 updates, signed as a whole; a `2xx` confirms the whole batch",
+
+  "method.deleteWebhook.summary": "Turn delivery to a URL off; returns the bot to `getUpdates`/WebSocket.",
+
+  "method.getWebhookInfo.summary": "Delivery-to-URL state.",
+
+  "method.sendMessage.summary": "Send a message.",
+  "method.sendMessage.notes": [
+    "At least one of `text`, `embeds` or a file is required (buttons alone are not enough). If `text` is empty and there are cards, `Message.text` is an empty string.",
+    "",
+    "Errors: `400` (empty, not your chat, reply target missing), `403` (bot blocked by the person / account deleted / no right to post in the channel), `415` (SVG/HTML), `429`, `503` (no file storage).",
+    "",
+    "```sh",
+    "curl -sS \"$GV_API/sendMessage\" -H \"Authorization: Bot $GV_TOKEN\" \\",
+    "  -F chat_id=<chat_id> -F text=\"Report\" -F \"files[0]=@report.pdf;type=application/pdf\"",
+    "```"
+  ],
+  "param.sendMessage.chat_id": "a DM or text channel the bot is in",
+  "param.sendMessage.text": "the same markup as people's messages",
+  "param.sendMessage.reply_to_message_id": "reply to a message",
+  "param.sendMessage.embeds": "cards, [InputEmbed](#inputembed)",
+  "param.sendMessage.disable_link_preview": "no link preview card",
+  "param.sendMessage.client_id": "your own id of this send: repeating `sendMessage` with the same `client_id` (a network drop, a restart) returns **the same** message instead of a second one. The same `client_id` with a different chat or content → `400`. Ignored in channels for now",
+  "param.sendMessage.files[0]": "files `files[0]`…`files[9]`: up to **10**, each up to **25 MB**. Other fields are strings; `embeds` and `reply_markup` — JSON strings",
+
+  "method.editMessageText.summary": "Change the text of the bot's own message.",
+  "method.editMessageText.notes": "The result has `edit_date`. Only the bot's **own** messages can be edited, otherwise `400`. The person sees an ordinary edit.",
+  "param.editMessageText.text": "new text",
+  "param.editMessageText.reply_markup": "buttons after the edit. 🔴 **Omitted — the buttons are removed** (as in Telegram)",
+
+  "method.deleteMessage.summary": "Delete a message.",
+  "method.deleteMessage.notes": "In a 1:1 conversation a bot, like a person, can delete both its own messages and the other person's — **for both**; in a channel — as the bot's role permits. Deleting the same message again also returns `true`.",
+
+  "method.sendChatAction.summary": "Show \"typing…\" to the other side. Call it before a long operation.",
+  "param.sendChatAction.action": "only `typing` for now",
+
+  "method.getChat.summary": "Details of a conversation, channel or server.",
+
+  "method.editMessageReplyMarkup.summary": "Change only the buttons of the bot's own message.",
+  "method.editMessageReplyMarkup.notes": "The person does **not** see \"(edited)\". The same buttons again are not an error (Telegram answers `400 message is not modified`; we just return the message).",
+  "param.editMessageReplyMarkup.reply_markup": "new buttons; **omitted — buttons are removed**",
+
+  "method.answerCallbackQuery.summary": "Answer a button press.",
+  "method.answerCallbackQuery.notes": "Answer **once** and within **15 seconds**: the person's client waits that long, then shows \"the bot did not answer\". A press lives **25 seconds**: until then the answer is accepted (a slightly late one too) and the event is delivered; after that it is neither. A second answer, a late one or someone else's id → `400 query is too old and response timeout expired or query id is invalid` (Telegram's text). Telegram's `url` and `cache_time` are not supported yet.",
+  "param.answerCallbackQuery.callback_query_id": "`callback_query.id`",
+  "param.answerCallbackQuery.text": "a toast for the person; without it the \"clock\" on the button just goes out",
+  "param.answerCallbackQuery.show_alert": "a dialog with an \"OK\" button instead of a toast",
+
+  "method.setMyCommands.summary": "Set the command hint list.",
+  "method.setMyCommands.notes": "The list is the hint shown when a person types `/` (and the \"/\" button next to the message box). Commands still arrive as ordinary `message` with text `/status …` — parse them yourself.",
+  "param.setMyCommands.commands": "**replaces** the whole list; `[]` — remove. A repeated name → `400`",
+
+  "method.getMyCommands.summary": "The current command list.",
+
+  "method.deleteMyCommands.summary": "Remove the command list (the same as `setMyCommands` with `[]`).",
+
+  "method.setMessageReaction.summary": "Set the bot's reactions to a message (in DMs too); the set is replaced, `[]` — remove.",
+  "param.setMessageReaction.reaction": "the bot's reactions",
+
+  "method.pinChatMessage.summary": "Pin a message in a channel (needs \"Manage messages\").",
+
+  "method.unpinChatMessage.summary": "Unpin a message in a channel (needs \"Manage messages\").",
+
+  "method.getChatHistory.summary": "Earlier messages of a channel: the latest page before `before_message_id` (or the newest), oldest first; polls and stickers are skipped. Only for \"Read all messages\" bots with \"Read history\" in the channel.",
+  "param.getChatHistory.before_message_id": "messages older than this one; omitted — from the newest",
+  "param.getChatHistory.limit": "default 50",
+
+  "method.getChatMember.summary": "One server member.",
+  "param.getChatMember.chat_id": "a server or a channel of it",
+
+  "method.getChatMemberCount.summary": "How many members a server has.",
+  "param.getChatMemberCount.chat_id": "a server or a channel of it",
+
+  "method.getChatMembers.summary": "Server members page by page.",
+  "param.getChatMembers.chat_id": "a server or a channel of it",
+  "param.getChatMembers.offset": "`next_offset` of the previous page; omitted — the first page",
+  "param.getChatMembers.limit": "default 100",
+
+  "method.getMyServers.summary": "Servers the bot is on.",
+
+  "method.getServer.summary": "A server: the channels the bot can see (with `can_send`) and roles (with `managed`).",
+  "param.getServer.server_id": "server id",
+
+  "method.addChatMemberRole.summary": "Give a role to a member (needs \"Manage roles\"; the role must be below the bot's).",
+  "param.addChatMemberRole.chat_id": "a server or a channel of it",
+  "param.addChatMemberRole.role_id": "role id (from `getServer`)",
+
+  "method.removeChatMemberRole.summary": "Take a role from a member (needs \"Manage roles\"; the role must be below the bot's).",
+  "param.removeChatMemberRole.chat_id": "a server or a channel of it",
+  "param.removeChatMemberRole.role_id": "role id (from `getServer`)",
+
+  "method.banChatMember.summary": "Ban a member (needs the matching permission; the target must be below the bot).",
+  "param.banChatMember.chat_id": "a server or a channel of it",
+  "param.banChatMember.reason": "reason of the ban",
+
+  "method.unbanChatMember.summary": "Lift a ban (needs the matching permission).",
+  "param.unbanChatMember.chat_id": "a server or a channel of it",
+
+  "method.kickChatMember.summary": "Kick a member from the server (needs the matching permission; the target must be below the bot).",
+  "param.kickChatMember.chat_id": "a server or a channel of it",
+
+  "method.leaveChat.summary": "The bot leaves a server; its role goes with it.",
+  "param.leaveChat.chat_id": "a server or a channel of it",
+
+  "method.joinVoice.summary": "Join a voice channel to play audio (see [Voice](#voice-api-4)). The bot never hears people.",
+  "method.joinVoice.notes": "Connect to LiveKit at `url` with `token` and publish PCM 48 kHz stereo as a `MICROPHONE` track. One voice channel per server: joining another channel of the same server moves the bot. Errors, in this order: `403 voice is disabled for bots on this server`, `400 chat not found`, `400 chat is a server; use a channel id`, `400 chat is not a voice channel`, `403 not enough rights to connect to the voice chat`, `403 not enough rights to speak in the voice chat`, `429`, `400 too many bots in the voice chat`, `400 too many active voice chats`.",
+  "param.joinVoice.chat_id": "voice channel id",
+  "param.joinVoice.bitrate": "bits per second, default 64000",
+
+  "method.leaveVoice.summary": "Leave a voice channel, or all of them. Idempotent: always `true`.",
+  "param.leaveVoice.chat_id": "voice channel id; omitted — leave all",
+
+  "method.getVoiceChatMembers.summary": "Who is in a voice channel now.",
+  "param.getVoiceChatMembers.chat_id": "voice channel id",
+
+  "event.message": "a person wrote to the bot in a DM, or a message the bot may see arrived in a channel (see [Bots on servers](#bots-on-servers-api-3))",
+  "event.edited_message": "such a message was edited (in channels filtered by the new text)",
+  "event.message_deleted": "a message disappeared for the bot (deleted for both in a DM; in channels — to \"read all\" bots and the author)",
+  "event.my_chat_member": "in a DM: a person opened the conversation (`new_status: \"member\"`; also when they press \"Message\" again after deleting the chat), deleted it on their side (`\"left\"`), blocked the bot (`\"kicked\"`) or unblocked it; on a server (`chat.type: \"server\"`): the bot was added, removed or banned",
+  "event.callback_query": "a person pressed a button with `callback_data` under the bot's message. **Not delivered if older than 25 seconds**",
+  "event.message_reaction": "a person changed reactions (to read-all bots and the message author; in DMs — to any message of the chat)",
+  "event.chat_member": "someone joined, left, was kicked, banned or unbanned on a server the bot is on",
+  "event.voice_state": "someone joined or left a voice channel the bot can see (including the bot itself — so it learns it was disconnected)"
+}

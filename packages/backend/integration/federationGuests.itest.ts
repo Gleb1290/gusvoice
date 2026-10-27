@@ -284,6 +284,8 @@ test('две исходящие жалобы на человека склеив�
   // Мутант прежнего поведения (`input.reason ?? existing.reason`) обязан терять r1 и провалить ту же проверку.
   await seedLink('peer-mutant');
   const instanceBanSource = readFileSync(new URL('../src/federation/instanceBan.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(instanceBanSource.split('const reason = mergeReportReason(existing.reason, input.reason);').length - 1, 1,
+    'единственный якорь мутанта склейки исходящих жалоб');
   const mutatedSource = instanceBanSource.replace(
     'const reason = mergeReportReason(existing.reason, input.reason);',
     'const reason = input.reason ?? existing.reason;',
@@ -297,6 +299,8 @@ test('две исходящие жалобы на человека склеив�
     '../realtime.js': await import('../src/realtime.js'), './guestRules.js': await import('../src/federation/guestRules.js'),
     './guestMembership.js': await import('../src/federation/guestMembership.js'), './eventStream.js': await import('../src/federation/eventStream.js'),
     './guestAccess.js': await import('../src/federation/guestAccess.js'),
+    // Отправка жалобы не снимает членство: запрещаем новый побочный эффект, а не молча гасим его.
+    '../memberEvents.js': { memberChanged: () => assert.fail('sendReport не должен менять членство') },
   };
   const mutantModule = { exports: {} as Record<string, unknown> };
   const mutantCode = ts.transpileModule(mutatedSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;

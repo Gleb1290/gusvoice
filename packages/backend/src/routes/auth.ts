@@ -1,4 +1,5 @@
 import type { AuthResponse, RegisterResponse } from '@gusvoice/shared';
+import { HUMAN_BOT_USERNAME_ERROR, humanUsernameLooksBot } from '@gusvoice/shared';
 import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import { anonymizeAccount } from '../accountDelete.js';
 import { accountDeleteBlock, isReservedUsername } from '../accountRules.js';
@@ -86,7 +87,10 @@ export const registerBody = z.object({
     .string()
     .min(3, 'Имя пользователя: минимум 3 символа')
     .max(32, 'Имя пользователя: максимум 32 символа')
-    .regex(/^[a-zA-Z0-9_.-]+$/, 'Имя пользователя: только латиница, цифры и . _ -'),
+    .regex(/^[a-zA-Z0-9_.-]+$/, 'Имя пользователя: только латиница, цифры и . _ -')
+    // Ник на «bot» — только у ботов (решение владельца 26.10, D), без учёта регистра. Проверка на ПОЛЕ, а не на объекте:
+    // `setup.ts` расширяет эту схему (`extend` у объекта с проверкой zod 4 не даёт) — мастер установки получает её же.
+    .refine((u) => !humanUsernameLooksBot(u), HUMAN_BOT_USERNAME_ERROR),
   email: z.string().email('Введите корректный email').max(254, 'Слишком длинный email'),
   password: z.string().min(6, 'Пароль: минимум 6 символов').max(128, 'Пароль: максимум 128 символов'),
   displayName: z.string().min(1).max(64, 'Отображаемое имя: максимум 64 символа').optional(),
@@ -336,7 +340,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (locked) return reply.code(429).send({ error: retryMessage(locked) });
     // Accept username OR email, case-insensitively (findByIdentifier), not username-only exact match.
     const [row] = await findByIdentifier(body.username);
-    if (!row || !(await verifyPassword(body.password, row.passwordHash))) {
+    // Бот (#229) и автор вебхука паролем не входят никогда (пароль у них непригодный — здесь и явно).
+    if (!row || !(await verifyPassword(body.password, row.passwordHash)) || row.bot) {
       const lockSeconds = await recordLoginFailure(ip, body.username);
       if (lockSeconds) return reply.code(429).send({ error: retryMessage(lockSeconds) });
       return reply.code(401).send({ error: 'invalid credentials' });

@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { after, before, beforeEach, test } from 'node:test';
 import ts from 'typescript';
 import * as orm from 'drizzle-orm';
+import * as shared from '@gusvoice/shared';
 import * as schema from '../src/db/schema.js';
 import * as binding from '../src/superAdminRules.js';
 import * as authRules from '../src/authRules.js';
@@ -23,7 +24,7 @@ function fixture(raw = source) {
   const forbidden = (what: string) => () => { throw new Error(`нежелательный IO: ${what}`); };
   const hashes: string[] = [];
   const deps: Record<string, unknown> = {
-    'drizzle-orm': orm, './db/index.js': { db: t.db }, './db/schema.js': schema,
+    '@gusvoice/shared': shared, 'drizzle-orm': orm, './db/index.js': { db: t.db }, './db/schema.js': schema,
     './superAdminRules.js': binding, './authRules.js': authRules,
     './env.js': { env: { superAdmin: { username: 'FixtureAdmin', email: 'fixture@example.invalid', password: 'synthetic-fixture-password' }, superAdminUsername: 'FixtureAdmin' } },
     './util.js': { id: () => 'admin' },

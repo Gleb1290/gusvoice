@@ -40,6 +40,13 @@ import type {
   BanInfo,
   Webhook,
   WebhookWithToken,
+  AdminBotInfo,
+  BotInfo,
+  BotSettings,
+  BotTokenResponse,
+  CreateBotBody,
+  MyBotsResponse,
+  UpdateBotBody,
   AdminInstanceSettings,
   InstanceUpdateInfo,
   Channel,
@@ -59,6 +66,13 @@ import type {
   ConvUnreadReactionsResponse,
   ConvListResponse,
   ConvMessage,
+  ConvBotInfo,
+  ChannelBotsInfo,
+  ServerBotInfo,
+  ServerBotLookup,
+  AddServerBotBody,
+  UpdateServerBotBody,
+  BotCallbackResult,
   ConvPinRequest,
   ConvPinsResponse,
   ConvPinOrderResponse,
@@ -986,8 +1000,25 @@ function makeApi(t: Transport) {
     if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
     return data as Webhook;
   },
+  // Мои боты (#229, контракт `@gusvoice/shared` `bots.ts`). Токен приходит ТОЛЬКО в ответе создания и перевыпуска — в базе
+  // лежит хеш. Старый сервер без ботов отвечает 404 (`err.status`) — раздел говорит «сервер не поддерживает ботов».
+  myBots: () => req<MyBotsResponse>('GET', '/bots'),
+  createBot: (body: CreateBotBody) => req<BotTokenResponse>('POST', '/bots', body),
+  updateBot: (botId: string, body: UpdateBotBody) => req<BotInfo>('PATCH', `/bots/${botId}`, body),
+  regenerateBotToken: (botId: string) => req<BotTokenResponse>('POST', `/bots/${botId}/token`),
+  deleteBot: (botId: string) => req<void>('DELETE', `/bots/${botId}`),
+  uploadBotAvatar: async (botId: string, file: File): Promise<BotInfo> => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await t.upload(`/bots/${botId}/avatar`, fd);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error((data as { error?: string }).error || `HTTP ${res.status}`), { status: res.status });
+    return data as BotInfo;
+  },
   /** Адрес приёма, который вставляют во внешнюю программу (как у Discord): `<api>/api/webhooks/<id>/<token>`. */
   webhookUrl: (webhookId: string, token: string) => `${t.base().replace(/\/+$/, '')}/api/webhooks/${webhookId}/${token}`,
+  // «Справка для нейронки» (боты #229, план §6): `docs/bots-llm.md` версии ЭТОГО инстанса, без токена (`bots/botDocs.ts`).
+  botLlmsUrl: () => `${t.base().replace(/\/+$/, '')}/api/bot/v1/llms.txt`,
 
   listRoles: (serverId: string) => req<Role[]>('GET', `/servers/${serverId}/roles`),
   createRole: (serverId: string, body: { name: string; color?: number; permissions?: string; mentionable?: boolean }) =>
@@ -1340,6 +1371,30 @@ function makeApi(t: Transport) {
     req<GifAttachResponse>('POST', '/gifs/external/attach', body),
   convEdit: (convId: string, messageId: string, content: string) =>
     req<ConvMessage>('PATCH', `/conv/${convId}/messages/${messageId}`, { content }),
+  /**
+   * Нажатие кнопки под сообщением бота (#230): долгий запрос — сервер держит его, пока бот не ответит (до `CALLBACK_QUERY_WAIT_S`).
+   * `timeoutMs` — свой предел клиента на обрыв сети (`botKeyboardRules.BOT_CALLBACK_CLIENT_WAIT_MS`). 409 `stale_button` — кнопки уже нет.
+   */
+  convBotCallback: (convId: string, messageId: string, data: string, timeoutMs: number) =>
+    t.req<BotCallbackResult>('POST', `/conv/${convId}/messages/${messageId}/callback`, { data }, { timeoutMs }),
+  /** Бот беседы 1:1 и его команды (#230); старый сервер — 404 (команд нет). */
+  convBotInfo: (convId: string) => req<ConvBotInfo>('GET', `/conv/${convId}/bot`),
+  // Боты на серверах (#231, ТЗ этапа 3 §2.2/§2.5/§2.6). Старый сервер маршрутов не знает — 404 (`err.status`).
+  /** Нажатие кнопки под сообщением бота в КАНАЛЕ — тот же долгий запрос, что в беседе (`convBotCallback`). */
+  channelBotCallback: (channelId: string, messageId: string, data: string, timeoutMs: number) =>
+    t.req<BotCallbackResult>('POST', `/channels/${channelId}/messages/${messageId}/callback`, { data }, { timeoutMs }),
+  /** Боты канала с их командами (подсказка по «/»): только живые и видящие канал; боты выключены — `bots: []`. */
+  channelBots: (channelId: string) => req<ChannelBotsInfo>('GET', `/channels/${channelId}/bots`),
+  serverBots: (serverId: string) => req<ServerBotInfo[]>('GET', `/servers/${serverId}/bots`),
+  /** Бот по точному нику (без регистра); 404 — нет такого (или он приватный и чужой). */
+  serverBotLookup: (serverId: string, username: string) =>
+    req<ServerBotLookup>('GET', `/servers/${serverId}/bots/lookup?username=${encodeURIComponent(username)}`),
+  addServerBot: (serverId: string, body: AddServerBotBody) => req<ServerBotInfo>('POST', `/servers/${serverId}/bots`, body),
+  updateServerBot: (serverId: string, botId: string, body: UpdateServerBotBody) =>
+    req<ServerBotInfo>('PATCH', `/servers/${serverId}/bots/${botId}`, body),
+  removeServerBot: (serverId: string, botId: string) => req<void>('DELETE', `/servers/${serverId}/bots/${botId}`),
+  /** «Мои боты» → «Серверы» → «Убрать»: владелец снимает своего бота с сервера. */
+  removeMyBotFromServer: (botId: string, serverId: string) => req<void>('DELETE', `/bots/${botId}/servers/${serverId}`),
   convDelete: (convId: string, messageId: string, scope: 'me' | 'both') =>
     req<void>('DELETE', `/conv/${convId}/messages/${messageId}?for=${scope}`),
   /** `big` (08.10, `bigreact1`) — «большая» реакция удержанием; ключ шлётся, только когда он есть (старый сервер его отбросит). */
@@ -1402,6 +1457,8 @@ function makeApi(t: Transport) {
   convCreateGroup: (body: CreateGroupRequest) => req<ConvSummary>('POST', '/conv/group', body),
   // Э7 (#141, `fedm6`): в группе чужого дома переименовать / позвать / удалить / выйти отвечают `{ ok: true, pending: true }` — сводка доедет `conv.change`.
   convRenameGroup: (convId: string, title: string) => req<ConvSummary | { ok: true; pending?: true }>('PATCH', `/conv/${convId}/group`, { title }),
+  /** «История для новых» (аудит ЛС #236, п.8): только владелец группы. */
+  convGroupHistory: (convId: string, visible: boolean) => req<ConvSummary>('PUT', `/conv/${convId}/group/history`, { visible }),
   convGroupPhoto: async (convId: string, file: File): Promise<ConvSummary> => {
     const fd = new FormData();
     fd.append('file', file);
@@ -1528,6 +1585,10 @@ function makeApi(t: Transport) {
 
   // Force-download URL for a chat attachment: the backend streams the MinIO object with
   // Content-Disposition: attachment (the <a download> attribute is a no-op cross-origin).
+  /** Адрес API этого транспорта (`attLinks`: продлевается только ссылка своего API). */
+  apiBaseUrl: (): string => t.base(),
+  /** Свежие ссылки на файлы ЛС по id (аудит ЛС #236, п.6): истёкшая ссылка — 404, `attLinks.renewAttLink` просит новую. */
+  attLinks: (ids: string[]) => req<{ links: Record<string, string> }>('POST', '/att/links', { ids }),
   attachmentDownloadUrl: (a: Attachment): string => {
     const m = a.url.match(/\/(attachments\/[A-Za-z0-9._-]+)$/);
     return m
@@ -1561,6 +1622,12 @@ function makeApi(t: Transport) {
     }>('GET', '/admin/economy'),
   adminSetEconomy: (patch: { avatarPriceMinutes?: number; avatarRentalMaxDays?: number }) =>
     req<{ ok: true; avatarPriceMinutes: number; avatarRentalMaxDays?: number }>('PUT', '/admin/economy', patch),
+  // Боты инстанса (#229): кто создаёт, лимит, внутренние адреса доставки; все боты с владельцами — выключить / удалить.
+  adminBots: () => req<AdminBotInfo[]>('GET', '/admin/bots'),
+  adminSetBotDisabled: (botId: string, disabled: boolean) => req<AdminBotInfo>('PATCH', `/admin/bots/${botId}`, { disabled }),
+  adminDeleteBot: (botId: string) => req<void>('DELETE', `/admin/bots/${botId}`),
+  adminBotSettings: () => req<BotSettings>('GET', '/admin/bots/settings'),
+  adminSetBotSettings: (patch: Partial<BotSettings>) => req<BotSettings>('PUT', '/admin/bots/settings', patch),
   adminUsers: () => req<AdminUser[]>('GET', '/admin/users'),
   adminServers: () => req<AdminServer[]>('GET', '/admin/servers'),
   adminSetCreateServers: (userId: string, canCreateServers: boolean) =>

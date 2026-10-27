@@ -18,13 +18,18 @@ const KEY = 'messages' as const;
  * «собеседник удалён», 404). Блокировку здесь не смотрим. Одним запросом: контакт, «я писал ему первым» (в беседе 1:1 есть
  * НЕ служебное и не удалённое сообщение получателя — тот же признак «я ответил», что у `peerQueries.isAcceptedPeer`), исключение.
  */
-export async function messageAllowedFor(senderId: string, recipientId: string): Promise<boolean> {
+export async function messageAllowedFor(
+  senderId: string,
+  recipientId: string,
+  /** Транзакция вызывающего (аудит ЛС #236, п.10: отложенное проверяется под замком беседы); по умолчанию — пул. */
+  q: Pick<typeof db, 'select' | 'execute'> = db,
+): Promise<boolean> {
   if (senderId === recipientId) return true;
-  const [row] = await db.select({ privacy: users.messagePrivacy }).from(users).where(eq(users.id, recipientId)).limit(1);
+  const [row] = await q.select({ privacy: users.messagePrivacy }).from(users).where(eq(users.id, recipientId)).limit(1);
   if (!row) return true;
   const privacy = normalizeMessagePrivacy(row.privacy);
   if (privacy === 'everyone') return true;
-  const res = await db.execute(sql`
+  const res = await q.execute(sql`
     SELECT
       EXISTS (SELECT 1 FROM user_contacts uc WHERE uc.owner_id = ${recipientId} AND uc.contact_id = ${senderId}) AS contact,
       EXISTS (SELECT 1 FROM privacy_exceptions pe

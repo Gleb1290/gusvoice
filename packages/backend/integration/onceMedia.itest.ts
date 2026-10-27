@@ -18,6 +18,8 @@ import * as scheduleRules from '../src/scheduleRules.js';
 import * as strangerRules from '../src/strangerRules.js';
 import * as contactRules from '../src/contactRules.js';
 import * as superAdminRules from '../src/superAdminRules.js';
+import * as messagePrivacyRules from '../src/messagePrivacyRules.js';
+import * as lastSeenRules from '../src/lastSeenRules.js';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
 // Реальная БД со всеми миграциями и настоящие маршруты Fastify. VM загружает целые модули приложения;
@@ -123,13 +125,21 @@ async function fixture(mutation?: Mutation) {
     './attachments.js': attachments, './env.js': { env: {} }, './serialize.js': serialize, './util.js': { uuidv7: randomUUID },
     './realtime.js': realtime,
   }, [], mutation);
+  const privacy = load<typeof import('../src/messagePrivacy.js')>('messagePrivacy', {
+    'drizzle-orm': orm, './db/index.js': { db: t.db }, './db/schema.js': schema,
+    './messagePrivacyRules.js': messagePrivacyRules, './lastSeenRules.js': lastSeenRules,
+  });
   const scheduled = load<typeof import('../src/scheduled.js')>('scheduled', {
+    './messagePrivacy.js': privacy,
     '@gusvoice/shared': shared, 'drizzle-orm': orm, './attachments.js': attachments, './blockRules.js': blockRules,
     './conversations.js': c, './convRules.js': rules, './db/index.js': { db: t.db }, './db/schema.js': schema,
     './scheduleRules.js': scheduleRules, './util.js': { uuidv7: randomUUID },
   }, ['./convSendFanout.js'], mutation);
   const authGuard = { rateHit: async () => 0, messageSendBlock: async () => 0, clientIp: () => 'fixture', retryMessage: () => 'fixture' };
   const att = load<typeof import('../src/routes/att.js')>('routes/att', {
+    // R304: старые GET проверяют выдачу; новый POST links — отдельная авторизованная граница.
+    '../auth.js': { requireAuth: async () => {} },
+    '../conversations.js': { formerLeftAt: async () => null },
     '@gusvoice/shared': shared, 'drizzle-orm': orm, zod: { z }, '../attachmentRules.js': attachmentRules,
     '../attachments.js': attachments, '../authGuard.js': authGuard, '../convRules.js': rules,
     '../db/index.js': { db: t.db }, '../db/schema.js': schema,
@@ -400,7 +410,13 @@ async function closedScenario(mutation?: Mutation) {
     status(head, 200, 'HEAD разрешён после открытия'); assert.equal(f.reads(), beforeHead, 'HEAD не открывает поток');
     const opened = await f.request('recipient', 'GET', link(p.id, 'recipient')); status(opened, 200, 'файл разрешён после открытия');
     assert.equal(opened.body, 'once-fixture-bytes');
-    status(await f.request('recipient', 'GET', link(p.id, 'recipient'), undefined, { 'if-none-match': `"${p.id}"` }), 304, 'открытый файл допускает условную проверку');
+    const conditional = await f.request('recipient', 'GET', link(p.id, 'recipient'), undefined, { 'if-none-match': `"${p.id}"` });
+    status(conditional, 200, 'открытое одноразовое не использует ETag');
+    assert.equal(conditional.body, 'once-fixture-bytes'); assert.equal(conditional.headers['cache-control'], 'private, no-store');
+    const ordinary = await f.media('image/jpeg', {});
+    const cached = await f.request('recipient', 'GET', link(ordinary.id, 'recipient'), undefined, { 'if-none-match': `"${ordinary.id}"` });
+    status(cached, 304, 'обычный файл по-прежнему поддерживает ETag'); assert.equal(cached.body, '');
+    assert.equal(cached.headers['cache-control'], 'private, no-cache');
     status(await f.request('recipient', 'POST', `/conv/dm/messages/${p.mid}/once-spent`), 204, 'получатель закрыл');
     for (const method of ['GET', 'HEAD'] as const) for (const viewer of ['author', 'recipient']) {
       const gone = await f.request(viewer, method, link(p.id, viewer), undefined, { 'if-none-match': `"${p.id}"` });

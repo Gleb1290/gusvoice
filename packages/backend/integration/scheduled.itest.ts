@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createDecipheriv, createECDH, createHmac, randomBytes } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 import { Readable } from 'node:stream';
 import { ZodError } from 'zod';
@@ -27,6 +28,28 @@ const removedStorageKeys: string[] = [];
 const published: { channel: string; message: string }[] = [];
 const posted: { url: string; init: RequestInit }[] = [];
 const originalFetch = globalThis.fetch;
+
+// Реальный получатель RFC 8291: текст проверяем после расшифровки, не отключая REDACT_KEYLESS.
+function pushReceiver() {
+  const key = createECDH('prime256v1'); key.generateKeys();
+  const auth = randomBytes(16);
+  return { key, auth, p256dh: key.getPublicKey().toString('base64url'), authText: auth.toString('base64url') };
+}
+function clearPush(body: Buffer, receiver: ReturnType<typeof pushReceiver>) {
+  const hmac = (key: Buffer, bytes: Buffer) => createHmac('sha256', key).update(bytes).digest();
+  const sender = body.subarray(21, 21 + body[20]!);
+  const secret = receiver.key.computeSecret(sender);
+  const info = Buffer.concat([Buffer.from('WebPush: info\0'), receiver.key.getPublicKey(), sender, Buffer.from([1])]);
+  const ikm = hmac(hmac(receiver.auth, secret), info);
+  const prk = hmac(body.subarray(0, 16), ikm);
+  const cek = hmac(prk, Buffer.from('Content-Encoding: aes128gcm\0\x01')).subarray(0, 16);
+  const nonce = hmac(prk, Buffer.from('Content-Encoding: nonce\0\x01')).subarray(0, 12);
+  const sealed = body.subarray(21 + body[20]!);
+  const decoder = createDecipheriv('aes-128-gcm', cek, nonce); decoder.setAuthTag(sealed.subarray(-16));
+  const clear = Buffer.concat([decoder.update(sealed.subarray(0, -16)), decoder.final()]);
+  assert.equal(clear.at(-1), 2);
+  return JSON.parse(clear.subarray(0, -1).toString());
+}
 
 const authHeader = (id: string) => ({ authorization: `Bearer ${tokenFor(id)}` });
 const sendAt = (ms: number) => new Date(ms).toISOString();
@@ -704,8 +727,9 @@ test('переоткрытый reply на удалённое сообщение 
 test('такт отложенного пользуется обычной доставкой push и передаёт тихость только тихому', async () => {
   // Ловит отдельную ветку планировщика, которая доставила бы сообщение без обычного push/silent fan-out.
   const { runScheduledTick } = await import('../src/scheduled.js');
-  await t.raw.exec(`INSERT INTO push_devices (id,user_id,device_id,endpoint,platform)
-    VALUES ('sched-push','b','phone','https://ntfy.example.test/scheduled','android')`);
+  const receiver = pushReceiver();
+  await t.raw.query(`INSERT INTO push_devices (id,user_id,device_id,endpoint,platform,p256dh,auth)
+    VALUES ('sched-push','b','phone','https://ntfy.example.test/scheduled','android',$1,$2)`, [receiver.p256dh, receiver.authText]);
   for (const [n, silent] of [true, false].entries()) {
     const res = await create({ clientId: client(500 + n), content: `scheduled-push-${n}`, whenOnline: true, silent });
     assert.equal(res.statusCode, 201, res.body);
@@ -713,12 +737,60 @@ test('такт отложенного пользуется обычной дос
   assert.equal((await runScheduledTick({ now: () => new Date(), isOnline: () => true })).sent, 2);
   for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.equal(posted.length, 2);
-  const payloads = posted.map((p) => JSON.parse(String(p.init.body)));
+  const payloads = posted.map((p) => {
+    assert.equal((p.init.headers as Record<string, string>)['Content-Encoding'], 'aes128gcm');
+    return clearPush(Buffer.from(p.init.body as Buffer), receiver);
+  });
   assert.equal(payloads[0].body, 'scheduled-push-0');
   assert.equal(payloads[0].silent, true);
   assert.equal(payloads[1].body, 'scheduled-push-1');
   assert.equal(Object.hasOwn(payloads[1], 'silent'), false);
   assert.equal((await scheduledRows()).length, 0);
+});
+
+test('R304 отложенное на устройстве без ключей не раскрывает автора и текст', async () => {
+  const { runScheduledTick } = await import('../src/scheduled.js');
+  await t.raw.exec(`INSERT INTO push_devices(id,user_id,device_id,endpoint,platform)
+    VALUES ('keyless','b','phone','https://ntfy.example.test/keyless','android')`);
+  assert.equal((await create({ clientId: client(950), content: 'секрет от Alpha', whenOnline: true })).statusCode, 201);
+  assert.equal((await runScheduledTick({ now: () => new Date(), isOnline: () => true })).sent, 1);
+  for (let i = 0; i < 50 && posted.length === 0; i++) await new Promise<void>(resolve => setTimeout(resolve, 10));
+  assert.equal(posted.length, 1);
+  const payload = JSON.parse(String(posted[0].init.body));
+  assert.deepEqual({ type: payload.type, title: payload.title, body: payload.body, dmId: payload.dmId },
+    { type: 'dm', title: 'GusVoice', body: 'Новое сообщение', dmId: 'dm' });
+  // key/mid/ts — служебная навигация, не содержимое. Наличие даже пустого персонального поля — регрессия.
+  for (const field of ['author', 'authorId', 'avatar', 'group', 'content', 'text']) {
+    assert.equal(Object.hasOwn(payload, field), false, `keyless не раскрывает поле ${field}`);
+  }
+});
+
+for (const reason of ['privacy', 'link'] as const) test(`R304 отложенное придерживается после ${reason === 'privacy' ? 'закрытия сообщений' : 'разрыва связки'} без события и push получателю`, async () => {
+  const { runScheduledTick, configureScheduledLinkGuard } = await import('../src/scheduled.js');
+  await t.raw.exec(`INSERT INTO push_devices(id,user_id,device_id,endpoint,platform)
+    VALUES ('withheld','b','phone','https://ntfy.example.test/withheld','android')`);
+  assert.equal((await create({ clientId: client(951), content: 'жду', whenOnline: true })).statusCode, 201);
+  if (reason === 'privacy') await t.raw.exec("UPDATE users SET message_privacy='contacts' WHERE id='b'");
+  const guarded: string[] = [];
+  configureScheduledLinkGuard(async id => { guarded.push(id); return reason === 'link'; });
+  try {
+    published.length = 0; posted.length = 0;
+    assert.equal((await runScheduledTick({ now: () => new Date(), isOnline: () => true })).sent, 1);
+    assert.equal((await messageRows())[0].withheld, true);
+    assert.equal((await scheduledRows()).length, 0);
+    assert.equal(eventsFor('b').length, 0);
+    assert.equal(eventsFor('a').some(e => e.t === 'conv.change'), true);
+    if (reason === 'link') assert.deepEqual(guarded, ['b']);
+    assert.equal(posted.length, 0);
+    // Парный допуск: новое отложенное после открытия настройки/восстановления связи действительно доставляется.
+    await t.raw.exec("UPDATE users SET message_privacy='everyone' WHERE id='b'");
+    configureScheduledLinkGuard(async () => false);
+    assert.equal((await create({ clientId: client(952), content: 'теперь можно', whenOnline: true })).statusCode, 201);
+    assert.equal((await runScheduledTick({ now: () => new Date(), isOnline: () => true })).sent, 1);
+    assert.equal((await messageRows()).find(m => m.client_id === client(952))?.withheld, false);
+    for (let i = 0; i < 50 && posted.length === 0; i++) await new Promise<void>(resolve => setTimeout(resolve, 10));
+    assert.equal(posted.length, 1, 'единственный push относится к разрешённой отправке');
+  } finally { configureScheduledLinkGuard(null); }
 });
 
 test('новое время после ошибки снимает failed и попытки, затем send-now отправляет ровно раз', async () => {

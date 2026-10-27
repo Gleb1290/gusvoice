@@ -65,7 +65,7 @@ export const WEBHOOK_TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
 /** Имя вебхука (окно настроек и подменный `username`): обрезанное, 1–80 знаков. */
 export const webhookName = z.string().trim().min(1, 'Имя не может быть пустым').max(WEBHOOK_NAME_MAX, `Имя — не длиннее ${WEBHOOK_NAME_MAX} знаков`);
 
-const embedSchema = z.object({
+export const embedSchema = z.object({
   title: z.string().max(256).nullish(),
   description: z.string().max(4096).nullish(),
   url: z.string().max(2048).nullish(),
@@ -83,7 +83,7 @@ const embedSchema = z.object({
   footer: z.object({ text: z.string().max(2048), icon_url: z.string().max(2048).nullish() }).nullish(),
   image: z.object({ url: z.string().max(2048) }).nullish(),
   thumbnail: z.object({ url: z.string().max(2048) }).nullish(),
-});
+}).meta({ id: 'InputEmbed' }); // имя схемы в OpenAPI Bot API (этап 5, #233); разбор не меняется
 export type WebhookEmbed = z.infer<typeof embedSchema>;
 
 /**

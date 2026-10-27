@@ -563,6 +563,19 @@ export function setDiagSharing(ctx: Record<string, unknown> | null): void {
   notify();
 }
 
+/**
+ * Источник идущего показа сменили на лету (#237): дописываем в текущую фазу, что показывается ТЕПЕРЬ и
+ * сколько раз меняли. Без этого фаза в отчёте говорила бы про окно, которого давно нет в кадре.
+ */
+export function noteDiagSwitch(source: 'window' | 'screen'): void {
+  const cur = shares[shares.length - 1];
+  if (!sharing || !cur) return;
+  cur.source = source;
+  cur.switched = (typeof cur.switched === 'number' ? cur.switched : 0) + 1;
+  cur.switchedAt = Date.now() - startedAt;
+  notify();
+}
+
 /** «Прямо сейчас сломалось». Ради этой отметки всё и затевалось: без неё в отчёте виден только рост. */
 export function markDiag(): void {
   if (!diagActive()) return;

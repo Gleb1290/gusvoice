@@ -1,0 +1,32 @@
+# Python SDK of the GusVoice Bot API (#233, phase 5). Runtime: the standard library only — no dependencies.
+# setuptools is needed only to BUILD the package; pinned exactly (project rule: exact versions).
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gusvoice-bot"
+version = "0.1.0"
+description = "GusVoice Bot API client for Python: long polling, webhooks with signature check, inline buttons. Standard library only."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "The GusVoice authors" }]
+keywords = ["gusvoice", "bot", "chat", "api"]
+dependencies = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Communications :: Chat",
+  "Typing :: Typed",
+]
+
+[tool.setuptools]
+packages = ["gusvoice_bot"]
+
+[tool.setuptools.package-data]
+gusvoice_bot = ["py.typed"]

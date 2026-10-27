@@ -110,6 +110,7 @@ function revocationModule(events: unknown[][], mutation?: Mutation) {
     '@gusvoice/shared': shared,
     '../db/index.js': { db: t.db },
     '../db/schema.js': schema,
+    '../memberEvents.js': { memberChanged: fail('отправка отзыва не меняет местное членство') },
     '../env.js': { env: { federation: { enabled: true } } },
     '../auth.js': { bumpTokenGeneration: async () => 1 },
     '../livekit.js': { removeFromOtherRooms: async () => {} },
@@ -181,11 +182,25 @@ test('R191 отзыв аккаунта обезличивает теневую �
     id: 'shadow', username: 'shadow@home-a', displayName: 'Собеседник', passwordHash: 'fixture', verified: true,
     homeInstanceId: 'home-a', homeUserId: 'home-user', homeUsername: 'home-user',
   });
-  const io = { hashes: 0, broadcasts: [] as unknown[][], tokenBumps: [] as string[] };
+  await t.db.insert(schema.users).values({ id: 'owner', username: 'owner', displayName: 'Владелец', passwordHash: 'fixture' });
+  await t.db.insert(schema.servers).values([
+    { id: 'active', name: 'Активный', ownerId: 'owner' },
+    { id: 'closed', name: 'Уже закрытый', ownerId: 'owner' },
+  ]);
+  await t.db.insert(schema.serverMembers).values([
+    { serverId: 'active', userId: 'shadow', state: 'active' },
+    { serverId: 'closed', userId: 'shadow', state: 'closed_by_host' },
+    { serverId: 'active', userId: 'owner', state: 'active' },
+  ]);
+  const io = { hashes: 0, broadcasts: [] as unknown[][], tokenBumps: [] as string[],
+    memberChanges: [] as import('../src/memberEvents.js').MemberChange[] };
+  const memberEvents = moduleOf<typeof import('../src/memberEvents.js')>('memberEvents', {});
+  memberEvents.configureMemberBots({ changed: async change => { io.memberChanges.push({ ...change }); } });
   // Обе сессии и голос — реальные side effects не нужны; фикстура изолирует DB-запись и профильный hook.
   const revocation = moduleOf<typeof import('../src/federation/guestRevocation.js')>('federation/guestRevocation', {
     'node:crypto': { randomUUID }, 'drizzle-orm': orm, '@gusvoice/shared': shared,
     '../db/index.js': { db: t.db }, '../db/schema.js': schema,
+    '../memberEvents.js': memberEvents,
     '../env.js': { env: { federation: { enabled: true } } },
     '../auth.js': { bumpTokenGeneration: async (id: string) => { io.tokenBumps.push(id); return io.tokenBumps.length; } },
     '../livekit.js': { removeFromOtherRooms: async () => {} }, '../realtime.js': { publishToUser: async () => {} },
@@ -204,6 +219,12 @@ test('R191 отзыв аккаунта обезличивает теневую �
   const deletedAt = first.deletedAt.getTime();
   assert.equal(io.hashes, 1);
   assert.equal(io.broadcasts.length, 1);
+  assert.deepEqual(io.memberChanges, [{ serverId: 'active', userId: 'shadow', actorId: null, from: 'member', to: 'left' }],
+    'событие отзыва касается только прежде активного членства гостя');
+  const memberships = await t.db.select().from(schema.serverMembers).orderBy(schema.serverMembers.serverId, schema.serverMembers.userId);
+  assert.deepEqual(memberships.map(row => [row.serverId, row.userId, row.state]), [
+    ['active', 'owner', 'active'], ['active', 'shadow', 'removed'], ['closed', 'shadow', 'removed'],
+  ], 'отзыв снимает все членства гостя, но не трогает другого участника');
 
   assert.equal(await revocation.applyRevocation(input), true);
   const [again] = await t.db.select().from(schema.users).where(orm.eq(schema.users.id, 'shadow'));
@@ -211,6 +232,7 @@ test('R191 отзыв аккаунта обезличивает теневую �
   assert.equal(again?.displayName, 'Удалённый пользователь');
   assert.equal(io.hashes, 1);
   assert.equal(io.broadcasts.length, 1);
+  assert.equal(io.memberChanges.length, 1, 'повтор отзыва не создаёт второе событие выхода');
 });
 
 function reportModules(eventCalls: unknown[][], deliveryCalls: unknown[][]) {

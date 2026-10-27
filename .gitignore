@@ -68,3 +68,10 @@ ds-bundle/
 
 # Своя карта OpenStreetMap: файлы PMTiles админа (десятки МБ-ГБ), в репозиторий не идут.
 /maps/
+
+# Python SDK ботов (packages/bot-sdk-py): байт-код и сборка пакета в репозиторий не идут.
+__pycache__/
+*.pyc
+/packages/bot-sdk-py/build/
+/packages/bot-sdk-py/dist/
+*.egg-info/

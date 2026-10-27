@@ -11,7 +11,8 @@ import { emojiForCode } from './emojiShortcodes';
 
 // ---- Композер: автодополнение --------------------------------------------------------------
 
-export type AcTrigger = '@' | '#' | ':';
+/** `/` — команды бота (#230, `commandTokenAt`): только в беседе с ботом. */
+export type AcTrigger = '@' | '#' | ':' | '/';
 
 export interface AcToken {
   trigger: AcTrigger;
@@ -41,6 +42,22 @@ export function acTokenAt(value: string, caret: number | null, serverScoped: boo
   const m = serverScoped || hashtags ? /(^|\s)([@#])([\p{L}\p{N}_.-]*)$/u.exec(head) : null;
   if (m && (serverScoped || m[2] === '#')) return { trigger: m[2] as '@' | '#', query: m[3], start: caret - m[3].length - 1 };
   return null;
+}
+
+/**
+ * Команда бота под кареткой (#230, tdesktop `field_autocomplete.cpp:405-418`): `/` — СТРОГО первый символ поля (до него нет даже
+ * пробела), каретка — в первом слове. Так `http://x`, `и/или` и `/etc/hosts` (после второго `/`) список не открывают. Звать
+ * только в беседе с ботом — в остальных чатах `/` как был. Сигнатуру `acTokenAt` не трогает.
+ */
+export function commandTokenAt(value: string, caret: number | null, withBot = false): AcToken | null {
+  if (caret == null) return null;
+  // Канал с ботами (#231): `/cmd@ник` — тоже команда под кареткой (фильтр и по нику бота, `filterChannelCommands`).
+  if (withBot) {
+    const b = /^\/([A-Za-z0-9_]*(?:@[A-Za-z0-9_]*)?)$/.exec(value.slice(0, caret));
+    return b ? { trigger: '/', query: b[1], start: 0 } : null;
+  }
+  const m = /^\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));
+  return m ? { trigger: '/', query: m[1], start: 0 } : null;
 }
 
 /**

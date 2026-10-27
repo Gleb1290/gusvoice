@@ -53,6 +53,8 @@ type WholeUpdaterOptions = {
   splashThrows?: boolean;
   noBridge?: boolean;
   calls?: string[];
+  now?: number;
+  observe?: (event: string, stored: Map<string, string>) => void;
 };
 
 function loadWholeUpdater(source: string, options: WholeUpdaterOptions = {}) {
@@ -64,7 +66,7 @@ function loadWholeUpdater(source: string, options: WholeUpdaterOptions = {}) {
     set: (patch: Record<string, unknown>) => Object.assign(state, patch),
   };
   let updateChecks = 0;
-  let virtualNow = 0;
+  let virtualNow = options.now ?? 0;
   let pollCallback: (() => void) | null = null;
   let splashChecks = 0;
   const calls = options.calls ?? [];
@@ -74,8 +76,8 @@ function loadWholeUpdater(source: string, options: WholeUpdaterOptions = {}) {
     './toast': { toast: () => {} },
     './updateStore': { useUpdate: { getState: () => state } },
     './splashFlow': { SPLASH_TIMING },
-    './nativeShareSession': { stopNativeShareIfActive: async () => { calls.push('stop'); } },
-    '@tauri-apps/plugin-process': { relaunch: async () => { calls.push('restart'); } },
+    './nativeShareSession': { stopNativeShareIfActive: async () => { calls.push('stop'); options.observe?.('stop', stored); } },
+    '@tauri-apps/plugin-process': { relaunch: async () => { calls.push('restart'); options.observe?.('restart', stored); } },
     '@tauri-apps/plugin-updater': {
       check: async () => { updateChecks++; return options.update ?? null; },
     },
@@ -147,6 +149,22 @@ function assertAssertionShape(error: unknown, operator: string, actual: unknown,
     assert.equal(assertion.actual, actual, `${label}: actual`);
     assert.equal(assertion.expected, expected, `${label}: expected`);
   }
+}
+
+function assertMutationAssertion(error: unknown, operator: string, actual: unknown, expected: unknown, label: string): true {
+  assert.ok(error instanceof assert.AssertionError, `${label}: именно host AssertionError`);
+  const assertion = error as Error & { code?: string; actual?: unknown; expected?: unknown; operator?: string };
+  assert.equal(assertion.code, 'ERR_ASSERTION', `${label}: code`);
+  assert.equal(assertion.message.split(/\r?\n/, 1)[0], label, `${label}: первая строка message`);
+  assert.equal(assertion.operator, operator, `${label}: operator`);
+  if (operator === 'deepStrictEqual') {
+    assert.deepStrictEqual(assertion.actual, actual, `${label}: actual`);
+    assert.deepStrictEqual(assertion.expected, expected, `${label}: expected`);
+  } else {
+    assert.equal(assertion.actual, actual, `${label}: actual`);
+    assert.equal(assertion.expected, expected, `${label}: expected`);
+  }
+  return true;
 }
 
 type UpdateFixture = { version: string; download: () => Promise<void>; install: () => Promise<void> };
@@ -478,5 +496,137 @@ describe('R244 обновление, которое ставится заста�
       assertAssertionShape(error, 'strictEqual', false, true, 'R244-background-viaSplash-mutation: маршрут');
       return true;
     });
+  });
+});
+
+describe('R295 метки одного прохода обновления', () => {
+  function callSync(harness: WholeUpdater, name: string, ...args: unknown[]): void {
+    (harness.api[name] as (...values: unknown[]) => void)(...args);
+    harness.checkIO();
+  }
+
+  it('markJustUpdated ставит обе версии меток, а unmark снимает обе; мутант пропускает installed', async () => {
+    const verify = async (source: string) => {
+      const harness = loadWholeUpdater(source);
+      callSync(harness, 'markJustUpdated', '9.9.295');
+      assert.deepStrictEqual(Array.from(harness.stored.entries()), [
+        ['gv:just-updated', '9.9.295'],
+        ['gv:installed-update', '9.9.295'],
+      ], 'R295-mark-sets-both');
+      callSync(harness, 'unmarkJustUpdated');
+      assert.deepStrictEqual(Array.from(harness.stored.entries()), [], 'R295-unmark-clears-both');
+    };
+
+    await verify(updaterSource);
+    const mutant = replaceOnce(updaterSource,
+      '    localStorage.setItem(INSTALLED_KEY, version);\n', '');
+    await assert.rejects(verify(mutant), (error: unknown) =>
+      assertMutationAssertion(error, 'deepStrictEqual', [['gv:just-updated', '9.9.295']], [
+        ['gv:just-updated', '9.9.295'], ['gv:installed-update', '9.9.295'],
+      ], 'R295-mark-sets-both'));
+  });
+
+  it('peek сохраняет метки и отдаёт installed с приоритетом, take снимает только свои метки', async () => {
+    const verify = async (source: string) => {
+      const harness = loadWholeUpdater(source);
+      harness.stored.set('gv:just-updated', 'legacy-version');
+      harness.stored.set('gv:installed-update', 'installed-version');
+      harness.stored.set('gv:update-on-relaunch', '{"version":"target-version","at":123}');
+      const peek = harness.api.peekSplashMarkers as () => { relaunch: string | null; installed: string | null };
+      const preferred = peek();
+      assert.equal(preferred.relaunch, '{"version":"target-version","at":123}', 'R295-peek-relaunch');
+      assert.equal(preferred.installed, 'installed-version', 'R295-peek-prioritizes-installed');
+      assert.equal(harness.stored.has('gv:installed-update'), true, 'R295-peek-does-not-consume-installed');
+      assert.equal(harness.stored.has('gv:update-on-relaunch'), true, 'R295-peek-does-not-consume-relaunch');
+      assert.equal(harness.stored.has('gv:just-updated'), true, 'R295-peek-does-not-consume-toast-marker');
+
+      harness.stored.delete('gv:installed-update');
+      assert.equal(peek().installed, 'legacy-version', 'R295-peek-falls-back-to-toast-marker');
+      harness.stored.set('gv:installed-update', 'installed-version');
+      const take = harness.api.takeSplashMarkers as () => { relaunch: string | null; installed: string | null };
+      const consumed = take();
+      assert.equal(consumed.relaunch, '{"version":"target-version","at":123}', 'R295-take-returns-relaunch');
+      assert.equal(consumed.installed, 'installed-version', 'R295-take-returns-installed');
+      assert.equal(harness.stored.has('gv:update-on-relaunch'), false, 'R295-take-clears-relaunch');
+      assert.equal(harness.stored.has('gv:installed-update'), false, 'R295-take-clears-installed');
+      assert.equal(harness.stored.has('gv:just-updated'), true, 'R295-take-preserves-toast-marker');
+      harness.checkIO();
+    };
+
+    await verify(updaterSource);
+    const mutant = replaceOnce(updaterSource,
+      '  clearSplashMarkers();\n  return m;',
+      '  clearSplashMarkers();\n  localStorage.removeItem(UPDATED_KEY);\n  return m;');
+    await assert.rejects(verify(mutant), (error: unknown) =>
+      assertMutationAssertion(error, 'strictEqual', false, true, 'R295-take-preserves-toast-marker'));
+  });
+
+  it('apply с заставкой использует настоящий default restart и пишет JSON до stop; без заставки метки нет', async () => {
+    const verifySplash = async (source: string) => {
+      const events: Array<{ name: string; marker: string | null }> = [];
+      const harness = loadWholeUpdater(source, {
+        update: { available: true, version: '9.9.295', body: 'notes', download: async () => {}, install: async () => {} },
+        splash: true,
+        now: 123456,
+        observe: (name, local) => events.push({ name, marker: local.get('gv:update-on-relaunch') ?? null }),
+      });
+      await (harness.api.manualUpdateCheck as () => Promise<void>)();
+      await (harness.api.applyPendingUpdate as () => Promise<void>)(); // deliberately no injected defaults
+      harness.checkIO();
+      const marker = JSON.stringify({ version: '9.9.295', at: 123456 });
+      assert.deepStrictEqual(harness.calls, ['stop', 'restart'], 'R295-default-restart-order');
+      assert.deepStrictEqual(events, [
+        { name: 'stop', marker },
+        { name: 'restart', marker },
+      ], 'R295-relaunch-marker-before-stop-and-restart');
+      assert.equal(harness.stored.get('gv:update-on-relaunch'), marker, 'R295-relaunch-json');
+    };
+
+    await verifySplash(updaterSource);
+    const mutant = replaceOnce(updaterSource,
+      'restart: () => Promise<void> = relaunchForSplashUpdate,',
+      'restart: () => Promise<void> = relaunchApp,');
+    await assert.rejects(verifySplash(mutant), (error: unknown) =>
+      assertMutationAssertion(error, 'deepStrictEqual', [
+        { name: 'stop', marker: null }, { name: 'restart', marker: null },
+      ], [
+        { name: 'stop', marker: '{"version":"9.9.295","at":123456}' },
+        { name: 'restart', marker: '{"version":"9.9.295","at":123456}' },
+      ], 'R295-relaunch-marker-before-stop-and-restart'));
+
+    const plain = loadWholeUpdater(updaterSource, {
+      update: { available: true, version: '9.9.295', body: 'notes', download: async () => {}, install: async () => {} },
+      splash: false,
+    });
+    await (plain.api.manualUpdateCheck as () => Promise<void>)();
+    await (plain.api.applyPendingUpdate as () => Promise<void>)();
+    assert.equal(plain.stored.has('gv:update-on-relaunch'), false, 'R295-no-relaunch-marker-without-splash');
+    plain.checkIO();
+  });
+
+  it('runLaunchUpdate без заставки снимает её метки, с заставкой сохраняет; мутант оставляет stale-маркер', async () => {
+    const verify = async (source: string) => {
+      const withoutSplash = loadWholeUpdater(source);
+      withoutSplash.stored.set('gv:installed-update', '9.9.295');
+      withoutSplash.stored.set('gv:update-on-relaunch', '{"version":"9.9.295","at":0}');
+      withoutSplash.stored.set('gv:just-updated', '9.9.295');
+      await runWholeLaunch(withoutSplash, async () => false);
+      assert.equal(withoutSplash.stored.has('gv:installed-update'), false, 'R295-no-splash-clears-installed');
+      assert.equal(withoutSplash.stored.has('gv:update-on-relaunch'), false, 'R295-no-splash-clears-relaunch');
+      assert.equal(withoutSplash.stored.get('gv:just-updated'), '9.9.295', 'R295-no-splash-preserves-toast-marker');
+
+      const withSplash = loadWholeUpdater(source);
+      withSplash.stored.set('gv:installed-update', '9.9.295');
+      withSplash.stored.set('gv:update-on-relaunch', '{"version":"9.9.295","at":0}');
+      await runWholeLaunch(withSplash, async () => true);
+      assert.equal(withSplash.stored.get('gv:installed-update'), '9.9.295', 'R295-splash-preserves-installed');
+      assert.equal(withSplash.stored.get('gv:update-on-relaunch'), '{"version":"9.9.295","at":0}', 'R295-splash-preserves-relaunch');
+    };
+
+    await verify(updaterSource);
+    const mutant = replaceOnce(updaterSource,
+      '  if (!splash) clearSplashMarkers();\n', '');
+    await assert.rejects(verify(mutant), (error: unknown) =>
+      assertMutationAssertion(error, 'strictEqual', true, false, 'R295-no-splash-clears-installed'));
   });
 });

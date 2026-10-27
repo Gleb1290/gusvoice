@@ -43,6 +43,7 @@ async function fixture(mutation?: Mutation) {
   const doc: shared.FedInstanceDocument = { instanceId: peer, name: 'Сосед', iconHash: null, domain: 'peer.invalid', clientOrigin: 'https://peer.invalid', apiBase: 'https://peer.invalid/api', protocol: { min: 1, max: 1 }, features: ['dm3'], appVersion: null, rootKey: rootPublic.toString('base64url'), keys: [signing.toDocumentKey(key)] };
   await t.db.insert(schema.federationLinks).values({ instanceId: peer, domain: doc.domain, apiBase: doc.apiBase, clientOrigin: doc.clientOrigin, rootKey: doc.rootKey, state: 'active', features: doc.features });
   let emergencyPause = false;
+  let replayCalls = 0;
   const auth = moduleOf<typeof import('../src/federation/peerAuth.js')>('federation/peerAuth', {
     './peerClient.js': { fetchPeerDocument: async () => ({ ok: true, value: { instanceId: peer, doc, fingerprint: 'fixture', protocolVersion: 1 } }) },
     './alerts.js': { noteSignatureFailure() {} },
@@ -50,6 +51,7 @@ async function fixture(mutation?: Mutation) {
     './instanceMeta.js': { readInstanceMeta: async () => ({ paused: emergencyPause }) },
     './trustLoss.js': { markTrustLost: () => { throw new Error('личность фикстуры не меняется'); } },
     './peerAuthCore.js': core, '../env.js': { env: { federation: { apiBase } } },
+    '../realtime.js': { redisPub: { set: async () => { replayCalls++; return null; } } },
   });
   const counters = new Map<string, number>();
   const rates: { key: string; max: number; seconds: number }[] = [];
@@ -69,7 +71,7 @@ async function fixture(mutation?: Mutation) {
   const headers = (body = payload) => ({ 'content-type': 'application/json', 'x-forwarded-for': '198.51.100.8',
     ...signature.signRequest({ method: 'POST', targetUri: `${apiBase}${path}`, body, keyid: key.kid, privateKeyDer: key.privateKeyDer, nowS: Math.floor(Date.now() / 1000) }) });
   const send = (body = payload) => app.inject({ method: 'POST', url: path, headers: headers(body), payload: body });
-  return { app, peer, payload, headers, send, counters, rates, accepted, pause: (value: boolean) => { emergencyPause = value; } };
+  return { app, peer, payload, headers, send, counters, rates, accepted, get replayCalls() { return replayCalls; }, pause: (value: boolean) => { emergencyPause = value; } };
 }
 
 test('R197 ephemeral без подписи отвергается, настоящая подпись сырого форматированного тела проходит, подмена отвергается', async () => {
@@ -85,6 +87,7 @@ test('R197 ephemeral без подписи отвергается, настоя�
     assert.equal(changed.statusCode, 401); assert.equal(f.accepted.length, 1);
     // Повтор подписи допустим у эфемерных записей: nonce-хранилище намеренно запрещено harness'ом.
     assert.equal((await f.send()).statusCode, 202); assert.equal(f.accepted.length, 2);
+    assert.equal(f.replayCalls, 0, 'ephemeral не читает и не пишет хранилище подписей');
   } finally { await f.app.close(); }
 });
 async function activeScenario(mutation?: Mutation) {
@@ -138,7 +141,7 @@ test('R197 адресный предел останавливает запрос
   } finally { await f.app.close(); }
 });
 for (const [name, mutation, check, failure] of [
-  ['requireActive false', ['{ requireActive: true }', '{ requireActive: false }'], activeScenario, 'ephemeral не принимается'],
+  ['requireActive false', ['{ requireActive: true, replayGuard: false }', '{ requireActive: false, replayGuard: false }'], activeScenario, 'ephemeral не принимается'],
   ['предел directory вместо ephemeral', ["body.instance_id, 'ephemeral'", "body.instance_id, 'directory'"], limitScenario, '601-й ephemeral отвергается'],
 ] as [string, Mutation, (mutation?: Mutation) => Promise<void>, string][]) {
   test(`R197 мутант маршрута «${name}» пойман адресным HTTP ответом`, async () => {

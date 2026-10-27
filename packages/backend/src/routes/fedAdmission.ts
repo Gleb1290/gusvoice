@@ -17,7 +17,7 @@ export interface AdmitPeerDeps {
   /** Сколько секунд ждать по пределу `kind` для `who` (`guardsRuntime.fedRateBlock`); `0` — можно. */
   rateBlock: (kind: FedLimitKind, who: string) => Promise<number>;
   /** Подпись и состояние связки (`peerAuth.authenticateLinkedPeer`). */
-  authenticate: (req: FastifyRequest, instanceId: string, opts: { requireActive?: boolean }) => Promise<PeerAuthResult>;
+  authenticate: (req: FastifyRequest, instanceId: string, opts: { requireActive?: boolean; replayGuard?: boolean }) => Promise<PeerAuthResult>;
   /** Адрес отправителя с учётом доверенных прокси. */
   clientIp: (req: FastifyRequest) => string;
 }
@@ -39,7 +39,7 @@ export function createAdmitPeer(deps: AdmitPeerDeps) {
     reply: FastifyReply,
     instanceId: unknown,
     kind: FedLimitKind,
-    opts: { requireActive?: boolean } = {},
+    opts: { requireActive?: boolean; replayGuard?: boolean } = {},
   ): Promise<StoredLink | null> {
     // Форма — до всякого похода в Redis: иначе там копились бы ключи с любыми присланными строками.
     if (!isInstanceId(instanceId)) {

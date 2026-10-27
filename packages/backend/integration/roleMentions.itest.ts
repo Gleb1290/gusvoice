@@ -85,7 +85,7 @@ function serverModule(changes: readonly Change[] = [], sharedApi: typeof shared 
   };
   for (const id of ['../audit.js', '../federation/directoryEvents.js', '../federation/guestAccess.js', '../federation/guestMembership.js',
     '../federation/instanceLabels.js', '../federation/instanceBan.js', '../federation/links.js', '../federation/guestRules.js',
-    '../authGuard.js', '../realtime.js', '../statusRules.js', '../shopRules.js', '../storage.js', '../stickerCatalog.js', '../util.js']) deps[id] = blocked(id);
+    '../authGuard.js', '../realtime.js', '../serverMembership.js', '../statusRules.js', '../shopRules.js', '../storage.js', '../stickerCatalog.js', '../util.js']) deps[id] = blocked(id);
   return moduleFrom<Servers>('../src/routes/servers.ts', deps, changes);
 }
 before(async () => {
@@ -393,6 +393,23 @@ async function messageApp(changes: readonly Change[] = []) {
   };
   for (const id of ['./federation/instanceLabels.js', './statusRules.js', './shopRules.js', './callRules.js', './lastSeenRules.js']) serialDeps[id] = blocked(id);
   const serialize = moduleFrom<typeof import('../src/serialize.js')>('../src/serialize.ts', serialDeps);
+  const realtime = { publishToChannel: async (_server: string, _channel: string, event: shared.GatewayServerMessage) => { events.push(event); } };
+  // Этап 3 вынес отправку из маршрута: исполняем оба целых модуля, не копируем их логику в заглушку.
+  const channelEvents = moduleFrom<typeof import('../src/channelEvents.js')>('../src/channelEvents.ts', {
+    './permissions.js': permissions, './realtime.js': realtime,
+  });
+  const pushDeps = { resolveRoleMentions: push.resolveRoleMentions, contentPreview,
+    resolveMentionedMembers: (...args: Parameters<Push['resolveMentionedMembers']>) => {
+      const pending = push.resolveMentionedMembers(...args); resolutions.push(pending); return pending;
+    },
+    sendPushToUsers: async (ids: string[]) => { pushes.push([...ids].sort()); },
+  };
+  const channelMessages = moduleFrom<typeof import('../src/channelMessages.js')>('../src/channelMessages.ts', {
+    '@gusvoice/shared': shared, 'drizzle-orm': orm, './db/index.js': { db: t.db }, './db/schema.js': schema,
+    './authGuard.js': { pushDebounced: async () => false }, './channelEvents.js': channelEvents,
+    './convRules.js': convRules, './permissions.js': permissions, './push.js': pushDeps,
+    './serialize.js': serialize, './util.js': { id: () => `post-${++next}` },
+  }, changes);
   const deps: Record<string, unknown> = {
     '@gusvoice/shared': shared, 'drizzle-orm': orm, zod,
     '../db/index.js': { db: t.db }, '../db/schema.js': schema, '../permissions.js': permissions,
@@ -403,16 +420,10 @@ async function messageApp(changes: readonly Change[] = []) {
     } },
     '../authGuard.js': { messageSendBlock: async () => null, pushDebounced: async () => false },
     '../util.js': { id: () => `post-${++next}` },
-    '../realtime.js': { publishToChannel: async (_server: string, _channel: string, event: shared.GatewayServerMessage) => { events.push(event); } },
-    '../push.js': { resolveRoleMentions: push.resolveRoleMentions, contentPreview,
-      resolveMentionedMembers: (...args: Parameters<Push['resolveMentionedMembers']>) => {
-        const pending = push.resolveMentionedMembers(...args); resolutions.push(pending); return pending;
-      },
-      sendPushToUsers: async (ids: string[]) => { pushes.push([...ids].sort()); },
-    },
+    '../realtime.js': realtime, '../channelEvents.js': channelEvents, '../channelMessages.js': channelMessages,
   };
   for (const id of ['../polls.js', '../storage.js', '../serverSearch.js', '../federation/guestQuota.js']) deps[id] = blocked(id);
-  const routes = moduleFrom<typeof import('../src/routes/messages.js')>('../src/routes/messages.ts', deps, changes);
+  const routes = moduleFrom<typeof import('../src/routes/messages.js')>('../src/routes/messages.ts', deps);
   await app.register(routes.messageRoutes); await app.ready();
   return { app, pushes, events, async send(content: string, user = 'author') {
     const response = await app.inject({ method: 'POST', url: '/channels/visible/messages',
@@ -446,6 +457,8 @@ async function postBroadcast(changes: readonly Change[] = []) {
     assert.deepEqual(plain((await unread.unreadSummary('reader')).servers.s), { unread: 4, mentions: 2 });
     assert.deepEqual(plain((await servers.buildBootstrap('s', 'reader'))?.reads.visible), { unread: 4, mentions: 2 });
     assert.equal(f.events.length, 4, 'запрет пинга не запрещает саму отправку и событие');
+    assert.deepEqual(plain(f.events[0]), { t: 'message.create', channelId: 'visible', serverId: 's', message: denied },
+      'новый вход событий сохраняет шлюзовой DTO сообщения без разрешённого пинга');
   } finally { await f.app.close(); }
 }
 

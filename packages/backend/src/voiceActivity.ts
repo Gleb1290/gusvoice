@@ -15,7 +15,13 @@ import { channels, users, voiceActivity } from './db/schema.js';
 import { env } from './env.js';
 import { publishToUser, redisPub } from './realtime.js';
 import { id } from './util.js';
-import { planSamples, SAMPLE_PERIOD_MS, type ActivitySample, type ChannelSnapshot } from './voiceActivityRules.js';
+import {
+  planSamples,
+  SAMPLE_PERIOD_MS,
+  withoutBots,
+  type ActivitySample,
+  type ChannelSnapshot,
+} from './voiceActivityRules.js';
 
 /**
  * Сбор сырой статистики присутствия в голосе — ШАГ 0 экономики GusCoins
@@ -172,20 +178,26 @@ async function creditSamples(samples: ActivitySample[], now: Date): Promise<void
  * ⚠️ Ровно `away`: «не беспокоить» и «невидимка» — заявления о том, как с человеком общаться, а не
  * о том, что его нет. Резать за них ставку значило бы штрафовать за настройку.
  */
-async function awaySet(userIds: string[]): Promise<Set<string>> {
-  if (userIds.length === 0) return new Set();
+async function voiceUserFlags(userIds: string[]): Promise<{ away: Set<string>; bots: Set<string> }> {
+  if (userIds.length === 0) return { away: new Set(), bots: new Set() };
   const rows = await db
-    .select({ id: users.id, status: users.presenceStatus })
+    .select({ id: users.id, status: users.presenceStatus, bot: users.bot })
     .from(users)
     .where(inArray(users.id, userIds));
-  return new Set(rows.filter((r) => r.status === 'away').map((r) => r.id));
+  return {
+    away: new Set(rows.filter((r) => r.status === 'away').map((r) => r.id)),
+    // Боты и строки вебхуков (`users.bot`) — не люди: ни срезов, ни монет, ни гусей (gitea #231).
+    bots: new Set(rows.filter((r) => r.bot).map((r) => r.id)),
+  };
 }
 
 async function tick(): Promise<void> {
-  const channelSnapshots = await readSnapshot();
+  const rawSnapshots = await readSnapshot();
   const now = Date.now();
-  const inVoice = [...new Set(channelSnapshots.flatMap((c) => c.participants.map((p) => p.userId)))];
-  const away = await awaySet(inVoice);
+  const inVoice = [...new Set(rawSnapshots.flatMap((c) => c.participants.map((p) => p.userId)))];
+  const { away, bots } = await voiceUserFlags(inVoice);
+  // 🔴 Ботов убираем из среза ДО расчёта: нет строки в `voice_activity` — нет ни монет, ни серии, ни гуся, ни ретро.
+  const channelSnapshots = withoutBots(rawSnapshots, bots);
   const { samples, cursors: nextCursors, duplicates } = planSamples(channelSnapshots, cursors, now, away);
   cursors = nextCursors;
   if (samples.length > 0) {

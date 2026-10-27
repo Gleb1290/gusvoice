@@ -184,6 +184,37 @@ function aborted(e: unknown): boolean {
   return (e as { aborted?: boolean } | null)?.aborted === true || (e as { name?: string } | null)?.name === 'AbortError';
 }
 
+/**
+ * Ведущая вкладка исходящих (аудит ЛС #236, п.11). Кеш бесед на диске общий у вкладок одного браузера: вторая вкладка
+ * поднимала из него очередь первой — файлы, которые первая ещё грузит, у второй «не загрузился», а готовое отправляли
+ * обе. Очередь с диска поднимает только вкладка, держащая замок Web Locks (`navigator.locks`, освобождается при её
+ * закрытии); нет API замков (старый WebView) — как раньше: вкладка считается ведущей.
+ */
+let outboxLeader: boolean | null = null;
+function locksApi(): LockManager | undefined {
+  return typeof navigator !== 'undefined' ? (navigator as Navigator & { locks?: LockManager }).locks : undefined;
+}
+function hasLocks(): boolean {
+  return typeof locksApi()?.request === 'function';
+}
+function claimOutboxLeader(): Promise<boolean> {
+  if (outboxLeader !== null) return Promise.resolve(outboxLeader);
+  const locks = locksApi();
+  if (!locks || !hasLocks()) return Promise.resolve((outboxLeader = true));
+  return new Promise<boolean>((resolve) => {
+    locks
+      .request('gv-conv-outbox', { ifAvailable: true }, (lock) => {
+        outboxLeader = !!lock;
+        resolve(outboxLeader);
+        // Держим замок, пока жива вкладка.
+        return lock ? new Promise<void>(() => {}) : undefined;
+      })
+      .catch(() => resolve((outboxLeader = true)));
+  });
+}
+// Замок — с загрузки вкладки, а не с первой очереди на диске: иначе вкладка с пустой очередью не была бы ведущей.
+if (typeof window !== 'undefined' && hasLocks()) void claimOutboxLeader();
+
 const HISTORY_PAGE = 50;
 /** Первая порция ленты из кеша (или после смены токена): покрывает весь кешированный хвост — ссылки обновятся все. */
 const STALE_PAGE = 100;
@@ -891,11 +922,19 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       if (rec.draftDirty?.length) set({ draftDirty: rec.draftDirty });
       if (rec.places && Object.keys(rec.places).length) set({ places: rec.places });
       // Исходящие, не ушедшие до перезапуска: с загруженными файлами — уходят сами тем же id (дубля не будет).
-      const outbox: Record<string, OutboxItem[]> = {};
-      for (const p of rec.outbox ?? []) (outbox[p.convId] ??= []).push(restoreItem(p));
-      if (Object.keys(outbox).length) {
-        set({ outbox });
-        pumpAll();
+      // Только ведущая вкладка (аудит #236, п.11): у второй вкладки эти строки — чужие, их шлёт первая.
+      const restore = () => {
+        const outbox: Record<string, OutboxItem[]> = {};
+        for (const p of rec.outbox ?? []) (outbox[p.convId] ??= []).push(restoreItem(p));
+        if (Object.keys(outbox).length) {
+          set({ outbox: { ...outbox, ...get().outbox } });
+          pumpAll();
+        }
+      };
+      if (rec.outbox?.length) {
+        // Без API замков или уже ведущая — сразу, как раньше; иначе — когда станет ясно, ведущая ли.
+        if (outboxLeader === true || !hasLocks()) restore();
+        else if (outboxLeader === null) void claimOutboxLeader().then((leader) => leader && restore());
       }
     },
 

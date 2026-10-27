@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "typeRoots": ["../../packages/bot-sdk/node_modules/@types"],
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@gusvoice/bot": ["../../packages/bot-sdk/src/index.ts"],
+      "@gusvoice/bot-voice": ["../../packages/bot-voice/src/index.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}

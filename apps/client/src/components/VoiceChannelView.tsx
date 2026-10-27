@@ -74,6 +74,7 @@ import { fitStageGrid, stageAvatarSize, STAGE_SCROLLBAR_PX, STAGE_GRID_HYSTERESI
 import { setHideNoVideo, useHideNoVideo } from '../stageViewPrefs';
 import { setStageLayout, useStageLayout } from '../stageLayoutPrefs';
 import { effectiveStageLayout, isOneBigLayout, type StageLayout } from '../stageLayoutRules';
+import { botAcceptsSocial, botsAfterHumans, isVoiceBot, showDeafened, showMicOff } from '../voiceRules';
 import { useStageSpeaker } from '../useStageSpeaker';
 import { StageLayoutPicker } from './StageLayoutPicker';
 import { usePhoneLayout } from '../phoneLayout';
@@ -776,6 +777,8 @@ function StageTile({
     (s) => (channelId ? s.presence[channelId]?.find((x) => x.userId === p.identity)?.serverMuted : false) ?? false,
   );
   const generalId = useStore((s) => s.bootstrap?.channels?.find((c) => c.id === channelId)?.generalUserId);
+  // Бот (#232): метка из presence канала или метаданных токена. Ему нет значков микрофона/деафена, тычка и чаевых; «БОТ» у имени.
+  const isBot = useStore((s) => isVoiceBot(p.identity, channelId ? s.presence[channelId] : undefined, p.metadata));
   // Плитка рисует ОДНОГО человека, поэтому здесь хук по месту уместен.
   const crownServerId = useStore((s) => s.bootstrap?.server.id);
   const crowned = useIsCrowned(p.identity, crownServerId);
@@ -790,8 +793,9 @@ function StageTile({
     participant: p,
     voiceChannelId: channelId,
     serverMuted,
+    bot: isBot || undefined,
   };
-  const canTip = !p.isLocal && tipMode !== 'none';
+  const canTip = !p.isLocal && tipMode !== 'none' && botAcceptsSocial(isBot);
   return (
     <div
       className={`stage-tile ${speaking ? 'speaking' : ''} ${camera ? 'has-cam' : ''}`}
@@ -845,9 +849,9 @@ function StageTile({
       )}
       {canTip && tipMode === 'hold' && holdHint && <span className="stage-tip-hold" aria-hidden="true">Удерживайте</span>}
       <div className="stage-meta">
-        {deafened ? (
+        {showDeafened(isBot, deafened) ? (
           <Icon name="headphones-off" size={14} />
-        ) : micMuted ? (
+        ) : showMicOff(isBot, micMuted, serverMuted) ? (
           <Icon name="mic-off" size={14} />
         ) : null}
         {screenSharing ? <Icon name="screen-share" size={14} /> : null}
@@ -861,6 +865,12 @@ function StageTile({
           {name}
           {p.isLocal ? ' (вы)' : ''}
         </span>
+        {/* Текст значка — как `botRules.BOT_TAG_TEXT` (импорт не тянем: проверка держит закрытый перечень импортов). */}
+        {isBot && (
+          <span className="bot-tag" title="Это бот: им управляет программа его владельца">
+            БОТ
+          </span>
+        )}
       </div>
     </div>
   );
@@ -1144,7 +1154,10 @@ function VoiceStage() {
   // Нечего показать крупно (нет показов или все закрыты) — в режимах «один крупно» крупно тот, кто говорит; себя — никогда.
   const others = participants.filter((p) => !p.isLocal && !p.identity.endsWith('#screen')).map((p) => p.identity);
   // Следим за говорящим и пока крупно показ: закрыл его — крупно сразу тот, кто говорит (или говорил последним), а не первый по списку.
-  const speakerId = useStageSpeaker(others, oneBig);
+  // Боты (#232): общий список — после людей; крупно сами не выходят (музыка иначе навсегда займёт сцену).
+  const channelPresence = useStore((s) => (channelId ? s.presence[channelId] : undefined));
+  const botIds = new Set(participants.filter((p) => isVoiceBot(p.identity, channelPresence, p.metadata)).map((p) => p.identity));
+  const speakerId = useStageSpeaker(others, oneBig, botIds);
   const bigPerson = speakerId && !hasManual ? participants.find((p) => p.identity === speakerId) : undefined;
   const watching = hasManual || !!bigPerson;
 
@@ -1194,8 +1207,9 @@ function VoiceStage() {
   useStageAutoShow({ room, channelId, hideNoVideo, hasVideo: stageHasVideo(screens, cameras) });
   // Спутники нативного показа ("<id>#screen") плиткой не рисуются — их видео идёт карточкой показа
   // под именем владельца; аватаркой второй раз они появляться не должны.
-  const allPeople = participants.filter(
-    (p) => !p.identity.endsWith('#screen') && (!hideNoVideo || camByIdentity.has(p.identity)),
+  const allPeople = botsAfterHumans(
+    participants.filter((p) => !p.identity.endsWith('#screen') && (!hideNoVideo || camByIdentity.has(p.identity))),
+    (p) => botIds.has(p.identity),
   );
   const hiddenCount = participants.filter((p) => !p.identity.endsWith('#screen')).length - allPeople.length;
   // Крупный говорящий в полосе второй раз не рисуется.
@@ -1608,7 +1622,9 @@ export function VoiceChannelView({ channel, connected }: { channel: Channel; con
     );
   }
 
-  const voiceIsEmpty = participants.length === 0;
+  // Боты (#232) — не «люди»: канал, где играет один музыкальный бот, для входящего пуст.
+  const humans = participants.filter((p) => p.bot !== true);
+  const voiceIsEmpty = humans.length === 0;
 
   // B11: в канале, куда ещё не вошли (или после обрыва), шапка тоже несёт название — раньше она была пустой.
   return (
@@ -1623,7 +1639,7 @@ export function VoiceChannelView({ channel, connected }: { channel: Channel; con
           <div className="eg-title">{voiceIsEmpty ? 'В голосовом канале пока никого' : 'В голосовом канале уже есть люди'}</div>
           <div className="eg-sub">
             {!voiceIsEmpty
-              ? `${participants.length} уже на связи — присоединяйтесь.`
+              ? `${humans.length} уже на связи — присоединяйтесь.`
               : 'Зайдите первым — разбудите гуся.'}
           </div>
           <button className="join-voice" onClick={() => joinVoice(channel.id).catch((e: Error) => toastError(e))}>

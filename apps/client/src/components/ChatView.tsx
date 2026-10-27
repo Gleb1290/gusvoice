@@ -125,6 +125,8 @@ export function ChatView({ channel }: { channel: Channel }) {
       }}
       onLoadOlder={() => loadOlderMessages(channel.id)}
       pollChannelId={channel.id}
+      // Боты канала (#231): команды по «/», «Меню» у поля, кнопки под их сообщениями.
+      botChannelId={channel.id}
       title={
         <>
           <span className="topbar-title">

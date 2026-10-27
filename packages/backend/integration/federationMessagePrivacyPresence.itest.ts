@@ -100,6 +100,7 @@ async function fixture(mutation?: Mutation) {
     '@gusvoice/shared': shared, 'drizzle-orm': orm, zod: { z }, '../convRules.js': convRules, '../dmRules.js': dmRules,
     '../scheduleRules.js': scheduleRules, '../strangerRules.js': strangerRules, '../blockRules.js': blockRules, '../contactRules.js': contactRules,
     '../superAdminRules.js': superAdminRules, '../userSearchRules.js': userSearchRules,
+    '../db/index.js': { db: t.db }, '../db/schema.js': schema,
   }, mutation, '\nexport { messagePrivacyRefused as testPrivacyRefused };\n');
   route.configureMessagePrivacy({ allowed: privacy.messageAllowedFor, wrote: privacy.wroteInDirect, remoteRefused: ephemeral.remoteMessageRefusedFor });
   async function guarded(peerId = 'shadow') {

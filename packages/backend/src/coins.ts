@@ -11,7 +11,7 @@ import {
   type SeasonLength,
 } from './coinRules.js';
 import { db } from './db/index.js';
-import { coinBalances, coinLedger, serverEconomy } from './db/schema.js';
+import { coinBalances, coinLedger, serverEconomy, users } from './db/schema.js';
 import { env } from './env.js';
 import { publishToUser } from './realtime.js';
 import { id } from './util.js';
@@ -123,6 +123,9 @@ type Tx = Pick<typeof db, 'select' | 'insert' | 'update'>;
  * хватает монет», потому что блокировать было нечего.
  */
 async function lockWallet(tx: Tx, serverId: string, userId: string) {
+  // 🔴 Боты и строки вебхуков (`users.bot`) вне GusCoins (gitea #231): кошелёк им не заводим, а значит начисление
+  // (голос, серия, гусь, ретро, пересчёт) для них — тихий ноль. Последний рубеж: первый — срез голоса (`voiceActivity.ts`).
+  if (await isBotUser(tx, userId)) return undefined;
   await tx.insert(coinBalances).values({ serverId, userId }).onConflictDoNothing();
   const [row] = await tx
     .select()
@@ -131,6 +134,15 @@ async function lockWallet(tx: Tx, serverId: string, userId: string) {
     .limit(1)
     .for('update');
   return row;
+}
+
+/**
+ * Бот или строка-автор вебхука (`users.bot`). Экономика на них не распространяется: ни монет, ни таблиц, ни гусей.
+ * ⚠️ Нет такой строки (человек удалён) — не бот: решать «удалён ли» эта проверка не должна.
+ */
+export async function isBotUser(q: Pick<Tx, 'select'>, userId: string): Promise<boolean> {
+  const [row] = await q.select({ bot: users.bot }).from(users).where(eq(users.id, userId)).limit(1);
+  return row?.bot === true;
 }
 
 /**

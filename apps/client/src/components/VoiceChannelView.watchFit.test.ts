@@ -23,7 +23,7 @@ const dormantImports = new Set(`@livekit/components-react livekit-client ../api 
 ../tipMode ../tipGesture ../voiceSelf ./Avatar ./Crown ../avatarAnimation ./BottomSheet ./Goose ./Icon
 ./UserContextMenu ./VoiceParticipants ../localUserAudio ./StreamTipFeed ./StreamVolumeControl ./StreamPipView
 ../pendingWatch ../streamCue ../watchGrace ../streamQuality ../windowCovered ../badPicture ./ContextMenu
-../stageGridRules ../stageViewPrefs ../stageLayoutPrefs ../stageLayoutRules ../useStageSpeaker ./StageLayoutPicker
+../stageGridRules ../stageViewPrefs ../stageLayoutPrefs ../stageLayoutRules ../voiceRules ../useStageSpeaker ./StageLayoutPicker
 ../phoneLayout ../stageAutoShowRules ../useStageAutoShow ../stageOrderRules ../stageOrderPrefs ../useStageDrag`.split(/\s+/));
 function load(raw = source, globals: Record<string, unknown> = {}): Exports {
   const module = { exports: {} as Exports };

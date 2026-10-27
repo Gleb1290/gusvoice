@@ -199,6 +199,8 @@ function el(): HTMLAudioElement {
     if (state.track) set({ at: a.currentTime * 1000 });
   });
   a.addEventListener('ended', onEnded);
+  // Аудит ЛС #236, п.6: плеер вне документа — его ошибку загрузки передаём продлению ссылок (`attLinks.ts`) событием.
+  a.addEventListener('error', () => document.dispatchEvent(new CustomEvent('gv-att-error', { detail: a })));
   // У аудиофайла длительности во вложении нет (её знает только голосовое) — берём из метаданных, чтобы полоса плеера шла.
   a.addEventListener('durationchange', () => {
     const t = state.track;

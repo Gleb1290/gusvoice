@@ -1,0 +1,353 @@
+{
+  "section.objects.intro": "В будущих версиях в ответах могут появиться новые поля — незнакомые спокойно пропускайте. Id — строки (UUID), время — секунды Unix.",
+  "section.methods.intro": "Обязательные параметры выделены. Все методы возвращают `result` внутри `{\"ok\":true,…}`. Любой метод работает и через `GET` (параметры в строке запроса); из формы и строки запроса числа и флаги можно передавать строками (`limit=50`, `disable_notification=true`), массивы и объекты — строкой JSON.",
+  "section.events.intro": "Журнал событий бота хранится **24 часа**, не больше **1000** событий (у бота «Читать все сообщения» — 10 000; старые уходят первыми, сколько срезано — `dropped_update_count`). Подтверждённые (`offset`, `ack`, ответ `2xx` адреса) удаляются. Каждое событие — [Update](#update): `update_id` и ровно одно из полей ниже.",
+  "section.events.notes": "Свои действия бот в событиях не видит: отправка, правка и удаление через Bot API событий боту не порождают (исключение — `voice_state`: о своих входах и выходах из голоса бот узнаёт). Закрепы, «печатает», прочтения, опросы и стикеры боту не отдаются.",
+
+  "object.*.date": "время события",
+  "object.*.chat": "беседа",
+  "object.*.message_id": "id сообщения",
+  "object.*.instance_domain": "есть у гостей с других инстансов (федерация); ники могут совпасть с местными — проверяйте по `id`",
+  "object.*.old_status": "статус до",
+  "object.*.new_status": "статус после",
+  "object.*.dropped_update_count": "сколько событий срезал потолок журнала (есть, если срезал)",
+  "object.*.server_muted": "модератор выключил ему микрофон на сервере",
+
+  "object.Attachment": "Файл, приложенный к сообщению.",
+  "object.Attachment.url": "ссылка именно **для вашего бота**, скачивается обычным `GET` без заголовков; не публикуйте её. Работает, пока у бота есть доступ к беседе",
+  "object.Attachment.file_name": "имя файла",
+  "object.Attachment.mime_type": "тип файла",
+  "object.Attachment.file_size": "размер в байтах",
+
+  "object.BotCommand": "Команда в подсказке, которую человек видит, набрав `/`, например `{ \"command\": \"status\", \"description\": \"Состояние сервера\" }`.",
+  "object.BotCommand.command": "имя без косой черты",
+  "object.BotCommand.description": "что делает",
+
+  "object.BotCommandScope": "Где действует список команд.",
+  "object.BotCommandScope.type": "`default`, `all_private_chats` (личные) или `all_group_chats` (серверы). Другие типы → `400`. В личных берётся `all_private_chats`, если задан, иначе `default`; на серверах — `all_group_chats`, иначе `default`",
+
+  "object.BotUser": "Сам бот (ответ `getMe`): [User](#user) плюс профиль бота и что умеет сервер. Нужное проверяйте по `features`, а не по версии; сервер постарше не присылает `api_version`/`features`.",
+  "object.BotUser.id": "id бота",
+  "object.BotUser.username": "ник бота",
+  "object.BotUser.display_name": "имя; если не задано — ник",
+  "object.BotUser.bot": "всегда `true`",
+  "object.BotUser.description": "описание (до 512 знаков)",
+  "object.BotUser.about": "коротко «о боте» (до 120 знаков)",
+  "object.BotUser.public": "можно ли писать боту всем",
+  "object.BotUser.api_version": "версия Bot API сервера: 2 — кнопки и команды, 3 — серверы, 4 — голос",
+  "object.BotUser.features": "что умеет сервер: `polling`, `ws`, `webhook`, `keyboards`, `commands`, `client_id`, `servers`, `reactions`, `parse_mode`, `webhook_batch`, `voice`, …; новые дописываются в конец",
+
+  "object.CallbackQuery": "Нажата кнопка с `callback_data`. Ответьте на неё `answerCallbackQuery`.",
+  "object.CallbackQuery.id": "его передают в `answerCallbackQuery`",
+  "object.CallbackQuery.from": "кто нажал",
+  "object.CallbackQuery.message": "сообщение с кнопками целиком (вместе с `reply_markup`)",
+  "object.CallbackQuery.data": "`callback_data` нажатой кнопки",
+  "object.CallbackQuery.date": "время нажатия",
+
+  "object.Chat": "Беседа. 🔴 **Проверяйте `type`**: код, рассчитанный на `\"dm\"`, увидит и другие значения; незнакомые игнорируйте.",
+  "object.Chat.id": "id беседы — его же передают в `chat_id`",
+  "object.Chat.type": "`dm` — беседа 1:1, `channel` — текстовый канал сервера, `server` — сам сервер (только события участия и `getChat`), `voice` — голосовой канал (только методы голоса)",
+  "object.Chat.server_id": "у каналов: сервер",
+  "object.Chat.title": "у каналов и серверов: название",
+
+  "object.ChatFullInfo": "Ответ `getChat`: [Chat](#chat) с подробностями.",
+  "object.ChatFullInfo.id": "id беседы",
+  "object.ChatFullInfo.type": "как в [Chat](#chat)",
+  "object.ChatFullInfo.server_id": "у каналов: сервер",
+  "object.ChatFullInfo.title": "у каналов и серверов: название",
+  "object.ChatFullInfo.user": "в личных: собеседник",
+  "object.ChatFullInfo.member_count": "у сервера: число участников",
+
+  "object.ChatMember": "Участник сервера (`getChatMember`, `getChatMembers`). Права — не флаги, как в Telegram: роли смотрите через `getServer`.",
+  "object.ChatMember.user": "участник",
+  "object.ChatMember.status": "`creator` — владелец, `member`, `left`, `kicked` (забанен)",
+  "object.ChatMember.nickname": "ник на этом сервере (есть, если задан)",
+  "object.ChatMember.role_ids": "id ролей участника",
+  "object.ChatMember.joined_date": "когда вступил на сервер",
+
+  "object.ChatMemberUpdated": "Изменилось участие самого бота (`my_chat_member`).",
+  "object.ChatMemberUpdated.from": "кто изменил (человек или админ сервера)",
+  "object.ChatMemberUpdated.old_status": "статус до: в личных `member` / `left` / `kicked`",
+  "object.ChatMemberUpdated.new_status": "статус после",
+
+  "object.ChatMembersPage": "Страница участников сервера.",
+  "object.ChatMembersPage.members": "участники этой страницы",
+  "object.ChatMembersPage.next_offset": "передайте его в `offset` за следующей страницей; на последней странице поля нет",
+
+  "object.Error": "Ответ-ошибка; HTTP-статус равен `error_code`. Ветвитесь по `error_code`, а не по тексту `description`.",
+  "object.Error.ok": "всегда `false`",
+  "object.Error.error_code": "HTTP-статус",
+  "object.Error.description": "текст для человека, может меняться",
+  "object.Error.retry_after": "только у `429`: сколько целых секунд подождать (и заголовок `Retry-After`)",
+
+  "object.InlineKeyboardButton": "Кнопка под сообщением: `text` и **ровно одно** из `callback_data` и `url`. Прочие виды кнопок Telegram (`web_app`, `switch_inline_query`, `login_url`, …) отбрасываются.",
+  "object.InlineKeyboardButton.text": "надпись на кнопке",
+  "object.InlineKeyboardButton.callback_data": "до **64 байт** UTF-8, а не знаков (кириллица — 2 байта на букву: 32 буквы). Нажатие шлёт боту `callback_query` с этой строкой",
+  "object.InlineKeyboardButton.url": "только `http(s)`, без `логин:пароль@` в адресе. Для чужих адресов человек видит «Открыть ссылку?»",
+
+  "object.InlineKeyboardMarkup": "Кнопки под сообщением: ряды кнопок, хотя бы один ряд, в ряду 1–8 кнопок, всего не больше 100. Из формы и строки запроса — строкой JSON.",
+  "object.InlineKeyboardMarkup.inline_keyboard": "ряды кнопок",
+
+  "object.InputEmbed": "Карточка для `sendMessage` (`embeds`), формат как у входящих вебхуков. Картинки карточек — только из хранилища этого инстанса или загруженный файл (`attachment://<имя файла>`, только на серверах); чужая картинка показывается ссылкой.",
+  "object.InputEmbed.title": "заголовок",
+  "object.InputEmbed.description": "текст",
+  "object.InputEmbed.url": "ссылка заголовка",
+  "object.InputEmbed.color": "цвет полоски, `0xRRGGBB` числом",
+  "object.InputEmbed.timestamp": "время ISO 8601 внизу карточки",
+  "object.InputEmbed.fields": "до 25 полей `{ name, value, inline? }`",
+  "object.InputEmbed.author": "`{ name, url?, icon_url? }`",
+  "object.InputEmbed.footer": "`{ text, icon_url? }`",
+  "object.InputEmbed.image": "`{ url }` — большая картинка",
+  "object.InputEmbed.thumbnail": "`{ url }` — маленькая картинка",
+
+  "object.Message": "Сообщение.",
+  "object.Message.chat": "куда отправлено",
+  "object.Message.from": "автор",
+  "object.Message.date": "время отправки",
+  "object.Message.edit_date": "есть, только если сообщение правили",
+  "object.Message.text": "текст (может быть пустым, если в сообщении только вложение или карточка)",
+  "object.Message.reply_to_message_id": "есть, если это ответ на сообщение",
+  "object.Message.attachments": "есть, если есть вложения",
+  "object.Message.embeds": "есть, если есть карточки",
+  "object.Message.reply_markup": "есть, если у сообщения есть кнопки",
+
+  "object.MessageDeleted": "Сообщение пропало у бота.",
+  "object.MessageDeleted.date": "время удаления",
+
+  "object.MessageEmbed": "Карточка в том виде, как её хранит сервер (имена полей как в ленте: `iconUrl`, `imageLink`).",
+  "object.MessageEmbed.title": "заголовок",
+  "object.MessageEmbed.url": "ссылка заголовка",
+  "object.MessageEmbed.description": "текст",
+  "object.MessageEmbed.color": "цвет полоски",
+  "object.MessageEmbed.timestamp": "время внизу карточки",
+  "object.MessageEmbed.author": "строка автора",
+  "object.MessageEmbed.footer": "подпись внизу",
+  "object.MessageEmbed.fields": "поля",
+  "object.MessageEmbed.image": "большая картинка из хранилища этого инстанса",
+  "object.MessageEmbed.thumbnail": "маленькая картинка из хранилища этого инстанса",
+  "object.MessageEmbed.imageLink": "чужая картинка `image` — показывается ссылкой, не грузится",
+  "object.MessageEmbed.thumbnailLink": "чужая картинка `thumbnail` — показывается ссылкой, не грузится",
+
+  "object.MessageReactionUpdated": "Человек поменял свои реакции на сообщение (`message_reaction`).",
+  "object.MessageReactionUpdated.user": "кто поставил",
+  "object.MessageReactionUpdated.old_reaction": "реакции этого человека до",
+  "object.MessageReactionUpdated.new_reaction": "реакции этого человека сейчас",
+
+  "object.ReactionType": "Реакция.",
+  "object.ReactionType.type": "пока только `emoji`",
+  "object.ReactionType.emoji": "сам эмодзи",
+
+  "object.ServerBrief": "Сервер, где есть бот (`getMyServers`).",
+  "object.ServerBrief.id": "id сервера (`server_id` для `getServer`)",
+  "object.ServerBrief.title": "название",
+
+  "object.ServerInfo": "Сервер глазами бота (`getServer`).",
+  "object.ServerInfo.id": "id сервера",
+  "object.ServerInfo.title": "название",
+  "object.ServerInfo.channels": "каналы, которые бот видит; `can_send` — может ли бот туда писать",
+  "object.ServerInfo.roles": "роли; `managed` — роль бота (её нельзя выдать никому другому)",
+
+  "object.ServerMemberUpdated": "Кто-то вступил, вышел, был выгнан, забанен или разбанен на сервере (`chat_member`).",
+  "object.ServerMemberUpdated.chat": "сервер (`type: \"server\"`)",
+  "object.ServerMemberUpdated.from": "кто это сделал (сам участник или модератор)",
+  "object.ServerMemberUpdated.user": "чьё участие изменилось",
+
+  "object.Update": "Событие: `update_id` плюс **ровно одно** поле с содержимым (см. [События](#события)). Если придёт поле, которого нет в списке (в будущих версиях), его нужно спокойно пропускать.",
+  "object.Update.update_id": "возрастает, но **не обязан идти подряд** (счётчик общий на инстанс)",
+  "object.Update.message": "новое сообщение",
+  "object.Update.edited_message": "изменённое сообщение",
+  "object.Update.message_deleted": "сообщение пропало",
+  "object.Update.my_chat_member": "изменилось участие самого бота",
+  "object.Update.callback_query": "нажата кнопка",
+  "object.Update.message_reaction": "изменились реакции",
+  "object.Update.chat_member": "изменилось участие на сервере",
+  "object.Update.voice_state": "кто-то вошёл в голосовой канал или вышел",
+
+  "object.User": "Человек или бот.",
+  "object.User.id": "id пользователя (UUID)",
+  "object.User.username": "ник",
+  "object.User.display_name": "имя; если не задано — ник",
+  "object.User.bot": "`true` у ботов",
+
+  "object.VoiceChatMember": "Кто сейчас в голосовом канале (`getVoiceChatMembers`).",
+  "object.VoiceChatMember.user": "участник",
+  "object.VoiceChatMember.muted": "микрофон выключен",
+  "object.VoiceChatMember.deafened": "звук выключен",
+  "object.VoiceChatMember.is_bot": "это бот",
+
+  "object.VoiceJoinResult": "Куда и с чем подключаться к голосу (`joinVoice`).",
+  "object.VoiceJoinResult.url": "адрес LiveKit",
+  "object.VoiceJoinResult.token": "токен LiveKit; пока сессия жива, LiveKit продлевает его сам, после полного обрыва — снова `joinVoice`",
+  "object.VoiceJoinResult.room": "имя комнаты",
+  "object.VoiceJoinResult.chat": "голосовой канал (`type: \"voice\"`)",
+  "object.VoiceJoinResult.server_muted": "модератор выключил боту микрофон",
+  "object.VoiceJoinResult.expires_in": "срок жизни токена в секундах",
+  "object.VoiceJoinResult.audio": "что публиковать: PCM `sample_rate` 48000, `channels` 2, `bitrate` — как просили",
+
+  "object.VoiceStateUpdated": "Кто-то вошёл в голосовой канал сервера или вышел (`voice_state`).",
+  "object.VoiceStateUpdated.chat": "голосовой канал",
+  "object.VoiceStateUpdated.user": "кто (может быть и сам бот)",
+  "object.VoiceStateUpdated.action": "что произошло",
+  "object.VoiceStateUpdated.move_to": "только самому боту, когда модератор его перенёс: зайти в этот канал (SDK делает это сам)",
+
+  "object.WebhookInfo": "Состояние доставки на адрес (`getWebhookInfo`).",
+  "object.WebhookInfo.url": "адрес; пустая строка — не задан",
+  "object.WebhookInfo.pending_update_count": "сколько событий ждёт в журнале",
+  "object.WebhookInfo.failures": "сбоев доставки подряд",
+  "object.WebhookInfo.last_error_date": "время последнего сбоя (есть, если был)",
+  "object.WebhookInfo.last_error_message": "последний сбой, короткий текст по-английски, например `Wrong response from the webhook: HTTP 502`",
+  "object.WebhookInfo.disabled_date": "есть, если сервер выключил доставку после серии сбоев",
+  "object.WebhookInfo.batch": "включена доставка пачками",
+
+  "param.*.chat_id": "id беседы или канала",
+  "param.*.message_id": "id сообщения",
+  "param.*.user_id": "id участника",
+  "param.*.scope": "какой список; по умолчанию `{\"type\":\"default\"}`",
+  "param.*.reply_markup": "кнопки под сообщением",
+  "param.*.parse_mode": "нет — наша разметка; `HTML` — подмножество Telegram, переводится в нашу разметку; `MarkdownV2` → `400`",
+  "param.*.disable_notification": "без звука и пуша",
+  "param.*.drop_pending_updates": "выбросить накопившиеся события",
+
+  "method.getMe.summary": "Кто я. Удобно проверить, что токен рабочий.",
+
+  "method.getUpdates.summary": "Забрать новые события (долгий опрос).",
+  "method.getUpdates.notes": [
+    "События идут по возрастанию `update_id`. Пока не подтверждено `offset`-ом, одни и те же события приходят снова (так пережидаются перезапуски бота). Если задан адрес доставки — `409`.",
+    "",
+    "**Потребитель один** (как в Telegram): новый `getUpdates` или WebSocket того же бота **сменяет** прежний — ждущий `getUpdates` отвечает `409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running`, открытый WebSocket закрывается кодом `4009`. Две копии бота с одним токеном выбивают друг друга — оставьте одну. Перевыпуск токена, выключение бота или всех ботов тоже сразу обрывают ждущий `getUpdates` (`401`/`403`), а не отдают ему пачку.",
+    "",
+    "Одновременно два процесса одного бота опрашивать нельзя: они оба увидят одни и те же события и ответят дважды."
+  ],
+  "param.getUpdates.offset": "подтвердить все события с `update_id` **меньше** `offset` (они удаляются) и отдавать начиная с `offset`. Обычно — последний `update_id` + 1. Не задан или ≤ 0 — отдаётся всё неподтверждённое",
+  "param.getUpdates.limit": "по умолчанию 100",
+  "param.getUpdates.timeout": "секунды, по умолчанию 0 (ответить сразу). Больше 0 — сервер ждёт первое событие до `timeout` секунд (долгий опрос)",
+  "param.getUpdates.allowed_updates": "только эти виды событий, например `[\"message\",\"callback_query\"]`. Остальные остаются в журнале до подтверждения `offset`-ом. Незнакомые виды **пропускаются** (не `400`): бот, написанный под сервер новее, продолжает работать",
+
+  "method.setWebhook.summary": "Включить доставку событий на адрес (см. [Доставка на адрес](#доставка-на-адрес)).",
+  "method.setWebhook.notes": "Адрес проверяется сразу (см. [SSRF](#защита-от-ssrf)); ошибка — `400 Bad Request: bad webhook: …`. После вызова `getUpdates` отвечает `409`, а открытые WebSocket закрываются кодом `4009`. Повторный `setWebhook` с новым адресом или секретом сбрасывает счётчик сбоев.",
+  "param.setWebhook.url": "`https://…`, без логина и пароля в адресе",
+  "param.setWebhook.secret_token": "**обязателен**: им подписывается каждая доставка",
+  "param.setWebhook.batch": "доставка пачками: тело POST — массив до 100 событий, подписанный целиком; `2xx` подтверждает всю пачку",
+
+  "method.deleteWebhook.summary": "Выключить доставку на адрес; бот возвращается к `getUpdates`/WebSocket.",
+
+  "method.getWebhookInfo.summary": "Состояние доставки на адрес.",
+
+  "method.sendMessage.summary": "Отправить сообщение.",
+  "method.sendMessage.notes": [
+    "Нужен хотя бы один из `text`, `embeds`, файла (одних кнопок мало). Если `text` пуст, а карточки есть, в `Message.text` вернётся пустая строка.",
+    "",
+    "Ошибки: `400` (пусто, чужая беседа, нет сообщения для ответа), `403` (бот заблокирован собеседником / он удалил аккаунт / нет права писать в канал), `415` (SVG/HTML), `429`, `503` (нет хранилища для файлов).",
+    "",
+    "```sh",
+    "curl -sS \"$GV_API/sendMessage\" -H \"Authorization: Bot $GV_TOKEN\" \\",
+    "  -F chat_id=<chat_id> -F text=\"Отчёт\" -F \"files[0]=@report.pdf;type=application/pdf\"",
+    "```"
+  ],
+  "param.sendMessage.chat_id": "личная беседа или текстовый канал, где есть бот",
+  "param.sendMessage.text": "та же разметка, что у сообщений людей",
+  "param.sendMessage.reply_to_message_id": "ответить на сообщение",
+  "param.sendMessage.embeds": "карточки, [InputEmbed](#inputembed)",
+  "param.sendMessage.disable_link_preview": "без карточки-превью ссылки",
+  "param.sendMessage.client_id": "ваш id этой отправки: повтор `sendMessage` с тем же `client_id` (обрыв сети, перезапуск) вернёт **то же** сообщение, а не второе. Тот же `client_id` с другой беседой или содержимым → `400`. В каналах пока не учитывается",
+  "param.sendMessage.files[0]": "файлы `files[0]`…`files[9]`: до **10**, каждый до **25 МБ**. Прочие поля — строки; `embeds` и `reply_markup` — строкой JSON",
+
+  "method.editMessageText.summary": "Изменить текст своего сообщения.",
+  "method.editMessageText.notes": "В ответе есть `edit_date`. Править можно только **свои** сообщения, иначе `400`. Человеку приходит как обычная правка.",
+  "param.editMessageText.text": "новый текст",
+  "param.editMessageText.reply_markup": "кнопки после правки. 🔴 **Нет параметра — кнопки снимаются** (как в Telegram)",
+
+  "method.deleteMessage.summary": "Удалить сообщение.",
+  "method.deleteMessage.notes": "В беседе 1:1 бот, как и человек, может удалить и свои сообщения, и сообщения собеседника — **у обоих**; в канале — насколько позволяет роль бота. Повторное удаление того же сообщения тоже `true`.",
+
+  "method.sendChatAction.summary": "Показать собеседнику «печатает…». Зовите перед долгой операцией.",
+  "param.sendChatAction.action": "сейчас только `typing`",
+
+  "method.getChat.summary": "Подробности о беседе, канале или сервере.",
+
+  "method.editMessageReplyMarkup.summary": "Поменять только кнопки своего сообщения.",
+  "method.editMessageReplyMarkup.notes": "«(изм.)» у человека **не** появляется. Те же кнопки ещё раз — не ошибка (Telegram отвечает `400 message is not modified`, мы просто отдаём сообщение).",
+  "param.editMessageReplyMarkup.reply_markup": "новые кнопки; **нет параметра — кнопки снимаются**",
+
+  "method.answerCallbackQuery.summary": "Ответить на нажатие кнопки.",
+  "method.answerCallbackQuery.notes": "Ответить можно **один раз** и в течение **15 секунд**: столько клиент человека ждёт, потом пишет «бот не ответил». Нажатие живёт **25 секунд**: до тех пор ответ принимается (и чуть опоздавший), а событие отдаётся боту; потом — ни то, ни другое. Повторный ответ, опоздавший или чужой id → `400 query is too old and response timeout expired or query id is invalid` (текст Telegram). `url` и `cache_time` из Telegram пока не поддерживаются.",
+  "param.answerCallbackQuery.callback_query_id": "`callback_query.id`",
+  "param.answerCallbackQuery.text": "всплывашка у человека; без него «часики» на кнопке просто гаснут",
+  "param.answerCallbackQuery.show_alert": "окно с кнопкой «Понятно» вместо всплывашки",
+
+  "method.setMyCommands.summary": "Задать подсказку команд.",
+  "method.setMyCommands.notes": "Список — подсказка, которую человек видит, набрав `/` (и кнопка «/» у поля ввода). Сами команды по-прежнему приходят обычным `message` с текстом `/status …` — разбирайте их сами.",
+  "param.setMyCommands.commands": "**замещает** весь список; `[]` — убрать. Повтор имени → `400`",
+
+  "method.getMyCommands.summary": "Текущий список команд.",
+
+  "method.deleteMyCommands.summary": "Убрать список команд (то же, что `setMyCommands` с `[]`).",
+
+  "method.setMessageReaction.summary": "Поставить реакции бота на сообщение (и в личных); набор заменяется целиком, `[]` — убрать.",
+  "param.setMessageReaction.reaction": "реакции бота",
+
+  "method.pinChatMessage.summary": "Закрепить сообщение в канале (нужно «Управлять сообщениями»).",
+
+  "method.unpinChatMessage.summary": "Открепить сообщение в канале (нужно «Управлять сообщениями»).",
+
+  "method.getChatHistory.summary": "Прошлые сообщения канала: последняя страница до `before_message_id` (или самые новые), по возрастанию времени; опросы и стикеры пропускаются. Только для ботов «Читать все сообщения» с правом «Читать историю» в канале.",
+  "param.getChatHistory.before_message_id": "сообщения старше этого; нет — от самых новых",
+  "param.getChatHistory.limit": "по умолчанию 50",
+
+  "method.getChatMember.summary": "Один участник сервера.",
+  "param.getChatMember.chat_id": "сервер или его канал",
+
+  "method.getChatMemberCount.summary": "Сколько участников на сервере.",
+  "param.getChatMemberCount.chat_id": "сервер или его канал",
+
+  "method.getChatMembers.summary": "Участники сервера постранично.",
+  "param.getChatMembers.chat_id": "сервер или его канал",
+  "param.getChatMembers.offset": "`next_offset` прошлой страницы; нет — первая страница",
+  "param.getChatMembers.limit": "по умолчанию 100",
+
+  "method.getMyServers.summary": "Серверы, где есть бот.",
+
+  "method.getServer.summary": "Сервер: каналы, которые бот видит (с `can_send`), и роли (с `managed`).",
+  "param.getServer.server_id": "id сервера",
+
+  "method.addChatMemberRole.summary": "Выдать участнику роль (нужно «Управлять ролями»; роль ниже роли бота).",
+  "param.addChatMemberRole.chat_id": "сервер или его канал",
+  "param.addChatMemberRole.role_id": "id роли (из `getServer`)",
+
+  "method.removeChatMemberRole.summary": "Снять с участника роль (нужно «Управлять ролями»; роль ниже роли бота).",
+  "param.removeChatMemberRole.chat_id": "сервер или его канал",
+  "param.removeChatMemberRole.role_id": "id роли (из `getServer`)",
+
+  "method.banChatMember.summary": "Забанить участника (нужно «Банить участников»; цель ниже бота).",
+  "param.banChatMember.chat_id": "сервер или его канал",
+  "param.banChatMember.reason": "причина бана",
+
+  "method.unbanChatMember.summary": "Снять бан (нужно «Банить участников»).",
+  "param.unbanChatMember.chat_id": "сервер или его канал",
+
+  "method.kickChatMember.summary": "Выгнать участника с сервера (нужно «Выгонять участников»; цель ниже бота).",
+  "param.kickChatMember.chat_id": "сервер или его канал",
+
+  "method.leaveChat.summary": "Бот уходит с сервера; его роль уходит вместе с ним.",
+  "param.leaveChat.chat_id": "сервер или его канал",
+
+  "method.joinVoice.summary": "Войти в голосовой канал, чтобы играть звук (см. [Голос](#голос-api-4)). Людей бот не слышит никогда.",
+  "method.joinVoice.notes": "Подключитесь к LiveKit по `url` с `token` и публикуйте PCM 48 кГц стерео дорожкой `MICROPHONE`. Один голосовой канал на сервер: вход в другой канал того же сервера переносит бота. Ошибки в таком порядке: `403 voice is disabled for bots on this server`, `400 chat not found`, `400 chat is a server; use a channel id`, `400 chat is not a voice channel`, `403 not enough rights to connect to the voice chat`, `403 not enough rights to speak in the voice chat`, `429`, `400 too many bots in the voice chat`, `400 too many active voice chats`.",
+  "param.joinVoice.chat_id": "id голосового канала",
+  "param.joinVoice.bitrate": "бит в секунду, по умолчанию 64000",
+
+  "method.leaveVoice.summary": "Выйти из голосового канала или из всех сразу. Повтор безопасен: всегда `true`.",
+  "param.leaveVoice.chat_id": "id голосового канала; нет — выйти из всех",
+
+  "method.getVoiceChatMembers.summary": "Кто сейчас в голосовом канале.",
+  "param.getVoiceChatMembers.chat_id": "id голосового канала",
+
+  "event.message": "человек написал боту в личные или в канале пришло сообщение, которое бот вправе видеть (см. [Боты на серверах](#боты-на-серверах-api-3))",
+  "event.edited_message": "такое сообщение изменили (в каналах фильтр — по новому тексту)",
+  "event.message_deleted": "сообщение пропало у бота (в личных удалено у обоих; в каналах — ботам «читать всё» и автору)",
+  "event.my_chat_member": "в личных: человек открыл беседу с ботом (`new_status: \"member\"`; в том числе когда нажал «Написать» заново после удаления чата), удалил её у себя (`\"left\"`), заблокировал бота (`\"kicked\"`) или разблокировал; на сервере (`chat.type: \"server\"`): бота добавили, убрали или забанили",
+  "event.callback_query": "человек нажал кнопку с `callback_data` под сообщением бота. **Старше 25 секунд не отдаётся**",
+  "event.message_reaction": "человек поменял реакции (ботам «читать всё» и автору сообщения; в личных — на любое сообщение беседы)",
+  "event.chat_member": "кто-то вступил, вышел, был выгнан, забанен или разбанен на сервере, где есть бот",
+  "event.voice_state": "кто-то вошёл в голосовой канал, который бот видит, или вышел (в том числе сам бот — так он узнаёт, что его отключили)"
+}

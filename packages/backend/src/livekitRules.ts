@@ -45,9 +45,21 @@ export function publishGrant(
  * Метаданные голосового токена — уезжают в LiveKit-вебхуки: аватар забирает presence, `priority`
  * влияет на порядок говорящих.
  */
-export function voiceTokenMetadata(permissions: bigint, avatarUrl?: string | null): string {
+export function voiceTokenMetadata(permissions: bigint, avatarUrl?: string | null, opts?: { bot?: boolean }): string {
+  // Бот (#232): метка `bot: true` — по ней presence ставит `VoiceParticipant.bot`; приоритет говорящего боту не положен.
+  if (opts?.bot) return JSON.stringify({ avatarUrl: avatarUrl ?? null, priority: false, bot: true });
   return JSON.stringify({
     avatarUrl: avatarUrl ?? null,
     priority: has(permissions, Permission.PRIORITY_SPEAKER),
   });
+}
+
+/**
+ * Publish-грант БОТА в голосе (#232, этап 4, ТЗ §1.2): только микрофон (бот шлёт музыку дорожкой MICROPHONE — тогда у слушателя
+ * работает его громкость, `localUserAudio`). Камеры и экрана нет ни при каких правах (`STREAM` не в счёт). Пара `canPublish` +
+ * `canPublishSources` неразрывна по той же причине, что у `publishGrant`: пустой список без `canPublish: false` = «можно всё».
+ */
+export function botPublishGrant(permissions: bigint, serverMuted = false): { canPublish: boolean; canPublishSources: TrackSource[] } {
+  if (!serverMuted && has(permissions, Permission.SPEAK)) return { canPublish: true, canPublishSources: [TrackSource.MICROPHONE] };
+  return { canPublish: false, canPublishSources: [] };
 }

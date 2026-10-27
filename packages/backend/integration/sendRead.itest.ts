@@ -21,7 +21,7 @@ const knownImports: Record<string, readonly string[]> = {
   "conversations": ["@gusvoice/shared","drizzle-orm","./convRules.js","./db/index.js","./db/schema.js","./dmWriteBarrier.js","./attachments.js","./env.js","./db/schema.js","./serialize.js","./util.js"],
   "blocks": ["drizzle-orm","./db/index.js","./db/schema.js"],
   "convSendFanout": ["drizzle-orm","./authGuard.js","./conversations.js","./db/index.js","./contacts.js","./contactRules.js","./db/schema.js","./groupRules.js","./push.js"],
-  "routes/att": ["@gusvoice/shared","drizzle-orm","zod","../attachmentRules.js","../attachments.js","../authGuard.js","../convRules.js","../db/index.js","../db/schema.js","../storage.js"],
+  "routes/att": ["../auth.js","../conversations.js","@gusvoice/shared","drizzle-orm","zod","../attachmentRules.js","../attachments.js","../authGuard.js","../convRules.js","../db/index.js","../db/schema.js","../storage.js"],
   "routes/conv": ["@gusvoice/shared","@gusvoice/shared","drizzle-orm","zod","../auth.js","../authGuard.js","../guestGuard.js","./att.js","../stickerCatalog.js","../blockRules.js","../blocks.js","../conversations.js","../convSendFanout.js","../dmReports.js","../strangerRules.js","../scheduled.js","../scheduleRules.js","../convRules.js","../contacts.js","../contactRules.js","../db/index.js","../realtime.js","./dmFolders.js","../db/peerQueries.js","../lastSeen.js","../db/schema.js","../dmRules.js","../instanceSetup.js","../userSearchRules.js","../push.js","../superAdminRules.js"],
 };
 let ioFailures: string[] = [];
@@ -78,7 +78,11 @@ async function fixture(mutation?: Mutation) {
   const fanout = load<typeof import('../src/convSendFanout.js')>('convSendFanout', {
     ...common, ...db, './conversations.js': c, './authGuard.js': { pushBurst: async () => 'drop' }, './push.js': pushRules,
   });
-  const att = load<typeof import('../src/routes/att.js')>('routes/att', { ...common, zod: { z } });
+  const att = load<typeof import('../src/routes/att.js')>('routes/att', { ...common, zod: { z },
+    // R304: старые GET проверяют выдачу; новый POST links — отдельная авторизованная граница.
+    '../auth.js': { requireAuth: async () => {} },
+    '../conversations.js': { formerLeftAt: async () => null },
+  });
   const route = load<typeof import('../src/routes/conv.js')>('routes/conv', {
     ...common, zod: { z }, '../db/index.js': { db: t.db }, '../db/schema.js': schema,
     '../auth.js': { requireAuth: async (req: any) => { req.user = { sub: req.headers['x-fixture-user'] ?? 'a' }; } },

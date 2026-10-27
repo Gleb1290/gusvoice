@@ -49,6 +49,15 @@ const auth = createPeerAuth({
   getLink: (instanceId) => getLink(instanceId),
   paused: async () => (await readInstanceMeta()).paused,
   apiBase: env.federation.apiBase,
+  // Аудит ЛС #236, п.15: отметка подписи в Redis (`SET NX EX`); лениво — `realtime.ts` открывает Redis при загрузке.
+  seenSignature: async (key, ttlS) => {
+    try {
+      const { redisPub } = await import('../realtime.js');
+      return (await redisPub.set(`fedsig:${key}`, '1', 'EX', ttlS, 'NX')) === null;
+    } catch {
+      return false; // Redis недоступен — не отрезать соседа: проверка повтора — заслон сверху, не условие связи
+    }
+  },
 });
 
 /** Забыть визитку соседа — при разрыве, перепривязке и потере доверия. */
@@ -70,7 +79,7 @@ export function targetUriOf(req: FastifyRequest): string {
 export function authenticateLinkedPeer(
   req: PeerRequestLike,
   instanceId: string,
-  opts: { requireActive?: boolean } = {},
+  opts: { requireActive?: boolean; replayGuard?: boolean } = {},
 ): Promise<PeerAuthResult> {
   return auth.authenticateLinkedPeer(req, instanceId, opts);
 }

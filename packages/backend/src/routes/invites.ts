@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
+import { memberChanged } from '../memberEvents.js';
 import { bans, invites, memberRoles, serverFederationExclusions, serverMembers, servers, users } from '../db/schema.js';
 import { inviteRefusalForGuest } from '../federation/guestRules.js';
 import { announceMembership } from '../federation/guestMembership.js';
@@ -243,6 +244,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
       if (guestHome && me) {
         await announceMembership({ guest: me, serverId: invite.serverId, state: FED_MEMBERSHIP_STATES.active });
       }
+      memberChanged({ serverId: invite.serverId, userId, actorId: userId, from: 'left', to: 'member' });
     } else if (guestHome && existing.state === FED_MEMBERSHIP_STATES.closedByHost) {
       // Членство есть, но закрыто держателем (§5.3.1): ссылка его не оживляет — это решение хозяина
       // сервера, а не вопрос наличия приглашения.
@@ -274,6 +276,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
       await db.update(invites).set({ uses: sql`${invites.uses} + 1` }).where(eq(invites.code, code));
       await publishToServer(invite.serverId, { t: 'server.invalidate', serverId: invite.serverId });
       if (me) await announceMembership({ guest: me, serverId: invite.serverId, state: FED_MEMBERSHIP_STATES.active });
+      memberChanged({ serverId: invite.serverId, userId, actorId: userId, from: 'left', to: 'member' });
     }
 
     return buildBootstrap(invite.serverId, userId);

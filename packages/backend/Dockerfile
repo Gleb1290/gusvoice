@@ -65,6 +65,9 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 # The minified app bundle (our code, obfuscated) + the schema migrations (SQL DDL only).
 COPY --from=build /app/packages/backend/dist ./packages/backend/dist
 COPY packages/backend/drizzle ./packages/backend/drizzle
+# Справка Bot API для нейронки (`GET /api/bot/v1/llms.txt`, bots/botDocs.ts) — ровно тот файл из docs/, что лежит в этом
+# коммите: источник один, копия только в образе (.dockerignore пропускает его исключением из `docs`).
+COPY docs/bots-llm.md ./docs/bots-llm.md
 
 WORKDIR /app/packages/backend
 # Версия для вкладки «Инстанс» и кнопки «Обновить» (О2б): CI master кладёт `master-<коммит>`, выгрузка выпуска —
@@ -75,6 +78,7 @@ ENV GV_VERSION=$GV_VERSION
 ENV BACKEND_PORT=4000
 # Source tree is gone in this image, so tell the migrator where the SQL lives (see db/index.ts).
 ENV MIGRATIONS_DIR=/app/packages/backend/drizzle
+ENV BOT_LLM_DOC=/app/docs/bots-llm.md
 EXPOSE 4000
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=5 \

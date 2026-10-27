@@ -26,6 +26,7 @@ import * as linkRules from '../src/federation/linkRules.js';
 import * as linkService from '../src/federation/linkService.js';
 import * as outboxRules from '../src/federation/outboxRules.js';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
+import { testPushDevice } from './pushDevice.harness.js';
 
 type Mutation = { file: string; from: string; to: string };
 type Push = typeof import('../src/push.js');
@@ -68,7 +69,8 @@ async function fixture(mutation?: Mutation) {
   ]);
   await t.db.insert(schema.federationLinks).values({ instanceId: peer, domain: 'peer.invalid', apiBase: 'https://peer.invalid/api',
     clientOrigin: 'https://peer.invalid', rootKey: 'fixture-root', state: 'active', features: ['dm1', 'dmgroup1'] });
-  await t.db.insert(schema.pushDevices).values({ id: 'local-phone', userId: 'local', deviceId: 'phone', endpoint: 'https://ntfy.invalid/local' });
+  const pushReceiver = testPushDevice();
+  await t.db.insert(schema.pushDevices).values({ id: 'local-phone', userId: 'local', deviceId: 'phone', endpoint: 'https://ntfy.invalid/local', ...pushReceiver.public });
   await t.db.insert(schema.conversations).values({ id: cid, kind: 'group', createdBy: 'author', title: 'Наша группа' });
   await t.db.insert(schema.conversationMembers).values(['author', 'local', 'shadow'].map(userId => ({ conversationId: cid, userId, role: userId === 'author' ? 'owner' as const : 'member' as const })));
   const unexpected: string[] = [], pushCalls: string[][] = [], guestCalls: string[][] = [], pushNetwork: Array<{ url: string; body: string }> = [];
@@ -115,7 +117,9 @@ async function fixture(mutation?: Mutation) {
     './federation/guestPush.js': { ...guest, notifyGuestHomes: async (...args: Parameters<typeof guest.notifyGuestHomes>) => {
       guestCalls.push(args[0].map(g => g.homeUserId)); const task = guest.notifyGuestHomes(...args); background.push(task); return task;
     } },
-  }, unexpected, undefined, { fetch: async (url: string, init: { body: string }) => { pushNetwork.push({ url, body: init.body }); return { status: 200, type: 'basic' }; } });
+  }, unexpected, undefined, { fetch: async (url: string, init: { body: unknown }) => {
+    pushNetwork.push({ url, body: JSON.stringify(pushReceiver.decode(init.body)) }); return { status: 200, type: 'basic' };
+  } });
   const observedPush = { ...push, sendPushToUsers: async (...args: Parameters<Push['sendPushToUsers']>) => {
     pushCalls.push([...args[0]]); const task = push.sendPushToUsers(...args); background.push(task); return task;
   } };
@@ -234,7 +238,7 @@ test('R210 HTTP создания смешанной группы пушит до
 });
 test('R210 передача added вместо local ловится настоящей рассылкой теневому после создания группы', async () => {
   await addedScenario();
-  await assert.rejects(addedScenario(false, { file: 'routes/convGroups', from: 'await sendPushToUsers(local, {', to: 'await sendPushToUsers(added, {' }),
+  await assert.rejects(addedScenario(false, { file: 'routes/convGroups', from: 'await sendPushToUsers(\n    local,', to: 'await sendPushToUsers(\n    added,' }),
     strictFailure('добавление будит только местных и не вызывает пустую рассылку', [['local', 'shadow']], [['local']]));
 });
 test('R210 потеря раннего выхода при всех теневых ловится вызовом с пустым списком получателей', async () => {

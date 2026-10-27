@@ -29,7 +29,7 @@ const dormantImports = [
   '../uiPrefs', './Avatar', './AvatarCropModal', './Icon', './NotifyExceptions', './Select', './SettingsShell',
   '../settingsChanged', '../settingsNav', '../settingsSnapshot', './GuestPlacesPanel', './InstancesPanel',
   '../federationClient', './OverlaySettingsPanel', './ToastSettingsPanel', './NotifyPopupSetting',
-  './SoundSettingsPanel', './StreamQualityPanel', '../streamSettings', './MicBubbleSetting', './Toggle',
+  './SoundSettingsPanel', './StreamQualityPanel', '../streamSettings', './MicBubbleSetting', './MyBotsSettings', './Toggle',
   '../avatarAnimation', '../liteMode', './LinkPreview', '../sendMode', '../emojiSuggest', '../dmListView',
   './DmListSwipe', '../quickReaction', './ContextMenu', './EmojiPicker', './DiagConsent', '../lastSeenText',
   './LastSeenExceptions', './MessagePrivacySetting', '../lastSeenExceptionsRules', '../callView', '../convSyncRules',

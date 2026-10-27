@@ -13,6 +13,13 @@
  * Ошибка/таймаут проверки (нет сети, фид недоступен) — молча «Запускаю…»: заставка запуск не блокирует.
  * Сломалось скачивание или установка — то же самое, приложение стартует на текущей версии.
  *
+ * 🔴 Обновление «в один проход» (26.10, жалоба владельца: «Обновить» в открытом приложении давало ДВА круга
+ * «Проверяю обновления…»). Запуск размечается заранее (`SplashIntent`, метки в localStorage — `updater.ts`):
+ * - `update` — перезапуск ради обновления (кнопка «Обновить», `applyPendingUpdate`): обновление уже известно,
+ *   поэтому сразу «Скачиваю обновление vX…», а `check()` за handle идёт молча под этим этапом, без минимума;
+ * - `justUpdated` — первый запуск только что поставленной версии: проверки нет, только «Запускаю…»;
+ * - `normal` — как раньше.
+ *
  * Все зависимости — параметры (`SplashDeps`): так ход проверяется в Node без окон и настоящего времени.
  */
 
@@ -58,7 +65,63 @@ export interface SplashUpdate {
   install(): Promise<void>;
 }
 
+/**
+ * Чем размечен запуск (26.10, «в один проход»): `update` — перезапуск ради уже найденного обновления
+ * (`version` — что показать до ответа фида), `justUpdated` — первый запуск только что установленной версии,
+ * `normal` — обычный запуск.
+ */
+export type SplashIntent = { kind: 'normal' } | { kind: 'update'; version: string } | { kind: 'justUpdated'; version: string };
+
+/** Сырые значения меток из localStorage (`updater.ts`: `takeSplashMarkers`/`peekSplashMarkers`). */
+export interface SplashMarkers {
+  /** `gv:update-on-relaunch` — JSON `{ version, at }`: «Обновить» перезапустило приложение ради обновления. */
+  relaunch: string | null;
+  /** `gv:installed-update` — версия, которую только что поставил апдейтер (ставится вместе с `gv:just-updated`). */
+  installed: string | null;
+}
+
+/** Метка «перезапуск ради обновления» старше этого — застряла (перезапуск не случился): обычный запуск. */
+export const RELAUNCH_UPDATE_TTL_MS = 2 * 60_000;
+
+function parseRelaunch(raw: string | null, nowMs: number): string | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as { version?: unknown; at?: unknown };
+    if (typeof v.version !== 'string' || !v.version || typeof v.at !== 'number') return null;
+    const age = nowMs - v.at;
+    return age >= 0 && age <= RELAUNCH_UPDATE_TTL_MS ? v.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Разметка запуска по меткам. `current` — версия запущенного приложения (null — не узнали).
+ * `justUpdated` — ТОЛЬКО если поставленная версия совпала с текущей: метка от сорвавшейся установки (версия
+ * чужая) проверку не отключает. `update` — свежая метка (≤ `RELAUNCH_UPDATE_TTL_MS`) с версией, отличной от
+ * текущей (совпала — обновление уже стоит, проверяем как обычно).
+ */
+export function splashIntent(m: SplashMarkers, current: string | null, nowMs: number): SplashIntent {
+  if (m.installed && current !== null && m.installed === current) return { kind: 'justUpdated', version: current };
+  const relaunch = parseRelaunch(m.relaunch, nowMs);
+  if (relaunch && relaunch !== current) return { kind: 'update', version: relaunch };
+  return { kind: 'normal' };
+}
+
+/**
+ * Первый кадр заставки — до того, как узнали версию приложения (иначе на долю секунды мелькает
+ * «Проверяю обновления…»). Догадка по меткам; ход (`runSplashFlow`) её сразу поправит, если не подтвердится.
+ */
+export function initialSplashView(m: SplashMarkers, nowMs: number): SplashView {
+  if (m.installed) return { stage: 'starting', version: null, progress: null };
+  const relaunch = parseRelaunch(m.relaunch, nowMs);
+  if (relaunch) return { stage: 'downloading', version: relaunch, progress: 0 };
+  return { stage: 'checking', version: null, progress: null };
+}
+
 export interface SplashDeps {
+  /** Разметка запуска (26.10). Нет или бросила — обычный запуск. */
+  intent?(): Promise<SplashIntent> | SplashIntent;
   /** Проверка фида; null — обновлений нет. Может бросить. */
   check(): Promise<SplashUpdate | null>;
   now(): number;
@@ -104,18 +167,38 @@ export async function runSplashFlow(deps: SplashDeps): Promise<'started' | 'inst
     return 'started';
   };
 
-  const t0 = deps.now();
-  deps.show({ stage: 'checking', version: null, progress: null });
-  deps.ping();
-  let update: SplashUpdate | null = null;
+  let intent: SplashIntent = { kind: 'normal' };
   try {
-    const r = await Promise.race([deps.check(), deps.sleep(t.checkTimeoutMs).then(() => TIMEOUT)]);
-    update = r === TIMEOUT ? null : (r as SplashUpdate | null);
+    intent = (await deps.intent?.()) ?? intent;
   } catch (e) {
-    console.warn('[splash] update check failed (starting current version):', e);
-    update = null;
+    console.warn('[splash] launch intent unknown (normal launch):', e);
   }
-  await holdUntil(t0 + t.checkMinMs);
+  // Первый запуск только что поставленной версии: проверять нечего — сразу «Запускаю…».
+  if (intent.kind === 'justUpdated') return start();
+
+  const checkFeed = async (): Promise<SplashUpdate | null> => {
+    try {
+      const r = await Promise.race([deps.check(), deps.sleep(t.checkTimeoutMs).then(() => TIMEOUT)]);
+      return r === TIMEOUT ? null : (r as SplashUpdate | null);
+    } catch (e) {
+      console.warn('[splash] update check failed (starting current version):', e);
+      return null;
+    }
+  };
+
+  let update: SplashUpdate | null = null;
+  if (intent.kind === 'update') {
+    // Перезапуск ради обновления: оно уже найдено — без этапа проверки, handle берём молча под «Скачиваю».
+    deps.show({ stage: 'downloading', version: intent.version, progress: 0 });
+    deps.ping();
+    update = await checkFeed();
+  } else {
+    const t0 = deps.now();
+    deps.show({ stage: 'checking', version: null, progress: null });
+    deps.ping();
+    update = await checkFeed();
+    await holdUntil(t0 + t.checkMinMs);
+  }
   if (!update) return start();
 
   const version = update.version;

@@ -377,6 +377,15 @@ type RowOutcome =
  * Вложения (`conv10`) уходят с сообщением, как у обычной отправки (`sendMessage` с `scheduledId` берёт «припаркованные» за
  * этой строкой); строка удаляется без отправки — её файлы «удалено».
  */
+/**
+ * Связка с инстансом собеседника разорвана (`federation/convLink.fedLinkBrokenFor`) — тот же крючок, что у
+ * `routes/conv.fedLinkRefused`: ставит `configureFedLinkGuard`. Не подключено — проверки нет (федерация ЛС выключена).
+ */
+let scheduledLinkGuard: ((peerId: string) => Promise<boolean>) | null = null;
+export function configureScheduledLinkGuard(guard: ((peerId: string) => Promise<boolean>) | null): void {
+  scheduledLinkGuard = guard;
+}
+
 async function sendRowTx(tx: Tx, s: ScheduledRow): Promise<RowOutcome> {
   const access = await loadAccess(s.conversationId, s.authorId, tx);
   const ids = [s.authorId, ...(access?.peerId ? [access.peerId] : [])];
@@ -408,7 +417,19 @@ async function sendRowTx(tx: Tx, s: ScheduledRow): Promise<RowOutcome> {
         .where(and(eq(userBlocks.blockerId, access.peerId), eq(userBlocks.blockedId, s.authorId)))
         .limit(1)
     ).length > 0;
-  const plan = access.saved ? { ...dmDeliveryPlan(false), notifyRecipient: false } : dmDeliveryPlan(blocked);
+  /*
+   * Аудит ЛС #236, п.10: отложенное проверяется на момент ОТПРАВКИ так же, как обычная отправка (`routes/conv.ts`
+   * `messagePrivacyRefused` / `fedLinkRefused`): собеседник с тех пор закрыл «Кто может мне писать» или связка с его
+   * инстансом разорвана — сообщение уходит придержанным (видит только автор), как при блокировке.
+   */
+  const refused =
+    !isGroup &&
+    !access.saved &&
+    access.peerId !== null &&
+    !blocked &&
+    (!(await (await import('./messagePrivacy.js')).messageAllowedFor(s.authorId, access.peerId, tx)) ||
+      (scheduledLinkGuard !== null && (await scheduledLinkGuard(access.peerId))));
+  const plan = access.saved ? { ...dmDeliveryPlan(false), notifyRecipient: false } : dmDeliveryPlan(blocked || refused);
   let replyToId = s.replyToId;
   if (replyToId) {
     const [parent] = await tx

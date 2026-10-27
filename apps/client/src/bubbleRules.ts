@@ -530,6 +530,7 @@ export function showsForwardedFrom(m: ForwardedSource, prev: ForwardedSource | u
  * назваться и живой человек — и его имя перестало бы открывать профиль. Сервер старше признака поля не шлёт — тогда имя
  * кнопкой у любого автора оригинала.
  */
-export function forwardedAuthorOpenable(from: Pick<MessageForwardedFrom, 'deleted'>): boolean {
-  return from.deleted !== true;
+export function forwardedAuthorOpenable(from: Pick<MessageForwardedFrom, 'deleted' | 'unverified'>): boolean {
+  // Не подтверждено (аудит ЛС #236, п.2): копия соседа приписала пересланное нашему человеку без оригинала — имя текстом.
+  return from.deleted !== true && from.unverified !== true;
 }

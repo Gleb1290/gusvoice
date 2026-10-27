@@ -1,0 +1,63 @@
+{
+  "name": "@gusvoice/bot-voice",
+  "version": "0.1.0",
+  "description": "Voice add-on for @gusvoice/bot: bots join voice channels and play audio (ffmpeg -> PCM -> LiveKit). Optional; the main SDK stays dependency-free.",
+  "license": "MIT",
+  "author": "The GusVoice authors",
+  "homepage": "https://github.com/Gleb1290/gusvoice/tree/master/packages/bot-voice#readme",
+  "bugs": {
+    "url": "https://github.com/Gleb1290/gusvoice/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gleb1290/gusvoice.git",
+    "directory": "packages/bot-voice"
+  },
+  "keywords": [
+    "gusvoice",
+    "bot",
+    "bot-api",
+    "voice",
+    "livekit"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "tsx --test --test-concurrency=4 src/grants.test.ts src/connection.test.ts src/pcm.test.ts src/ffmpeg.test.ts src/queue.test.ts src/reconnect.test.ts",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "1.1.0"
+  },
+  "peerDependencies": {
+    "@gusvoice/bot": "0.1.0"
+  },
+  "devDependencies": {
+    "@gusvoice/bot": "workspace:*",
+    "typescript": "5.9.3",
+    "@types/node": "20.19.43",
+    "tsx": "4.22.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

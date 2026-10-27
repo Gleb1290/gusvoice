@@ -1,6 +1,7 @@
 // DTO shapes shared between backend, presence and the web client.
 // Permission bitfields are serialized as decimal strings (see permissions.ts).
 
+import type { InlineKeyboard } from './bots';
 import type { StickerFormat } from './stickerRules';
 import type { NotifyView } from './notifyView';
 import type { ConvCallService } from './calls';
@@ -45,6 +46,8 @@ export interface User {
    * войти не может; в админ-панели рядом с ним кнопка «Подтвердить». Необязательное: старые серверы не присылают.
    */
   approved?: boolean;
+  /** Это бот (#234): значок «БОТ», «Старт» в пустой беседе. Добавлением — у людей и на старых серверах поля нет. */
+  bot?: true;
   displayName: string;
   avatarUrl: string | null;
   /**
@@ -421,6 +424,11 @@ export interface Role {
    * бы ему прав поверх `@everyone` вместо того, чтобы кого-то ограничить.
    */
   isGuests?: boolean;
+  /**
+   * Управляемая роль бота (#231): id бота-владельца роли. Руками не выдаётся, не снимается и не удаляется — уходит вместе
+   * с ботом. Поле только у таких ролей (у остальных DTO прежний, правило 11).
+   */
+  managedBotId?: string;
   /** Whether @mentioning this role notifies its members. */
   mentionable: boolean;
   /** Self-service: a member holding this role may grant it to others without MANAGE_ROLES (add-only). */
@@ -505,6 +513,10 @@ export const AUDIT_ACTIONS = [
   'webhook.update',
   'webhook.token',
   'webhook.delete',
+  // Боты на серверах (#231): добавлен, убран, изменён доступ к сообщениям («читать всё»).
+  'bot.add',
+  'bot.remove',
+  'bot.update',
 ] as const;
 
 /** Тип выводится ИЗ списка, а не пишется рядом — см. предупреждение выше. */
@@ -604,11 +616,13 @@ export interface ServerMemberInfo {
    */
   user: Pick<
     User,
-    'id' | 'username' | 'displayName' | 'avatarUrl' | 'animatedAvatarUrl' | 'homeInstance' | 'status' | 'customStatus'
+    'id' | 'username' | 'displayName' | 'avatarUrl' | 'animatedAvatarUrl' | 'homeInstance' | 'status' | 'customStatus' | 'bot'
   >;
   nickname: string | null;
   roleIds: string[];
   joinedAt: string;
+  /** Бот (#231): видит все сообщения (`true`) или только обращения (`false`). Только у ботов, у людей поля нет. */
+  botReadsAll?: boolean;
 }
 
 /** A server ban entry, for the bans management tab. */
@@ -838,7 +852,8 @@ export interface PollVoters {
 export interface Message {
   id: string;
   channelId: string;
-  author: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'>;
+  /** `bot` — автор бот (#234; поле добавлением, у людей и вебхуков его нет). */
+  author: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'bot'>;
   content: string;
   attachments: Attachment[];
   createdAt: string;
@@ -877,6 +892,8 @@ export interface Message {
    * клиент поля не знает — ему остаётся `content` (см. `embedsFallback`).
    */
   embeds?: MessageEmbed[];
+  /** Кнопки под сообщением бота в канале (#231). Поле только у сообщений с кнопками (правило 11). */
+  keyboard?: InlineKeyboard;
   /**
    * `true` — `content` не написан отправителем, а собран сервером из карточек для старых клиентов (сообщение вебхука
    * без текста, только с `embeds`). Новый клиент такой `content` НЕ показывает — рисует карточки.
@@ -937,6 +954,12 @@ export interface MessageForwardedFrom {
    * знает и показывает имя, как раньше.
    */
   deleted?: true;
+  /**
+   * Не подтверждено (аудит ЛС #236, п.2, только добавление): копия пришла от соседа с «Переслано от» нашего человека, а
+   * оригинала у нас нет — привязки к человеку нет (`userId` пустой), имя — как прислал сосед. Клиент не ведёт в профиль и
+   * помечает имя; старый клиент поле не знает и показывает имя, как у пересланного от человека без привязки.
+   */
+  unverified?: true;
 }
 
 export interface Invite {
@@ -956,7 +979,8 @@ export interface DmChannel {
   id: string;
   /** The other participant (never the requesting user). */
   /** `homeInstance` (Э1, #141) — только у собеседника с другого инстанса: значок в шапке беседы. */
-  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance'>;
+  /** `botDescription` (#229, 26.10) — только у бота: «что умеет этот бот» в пустой беседе (добавление). */
+  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance' | 'bot'> & { botDescription?: string; botUnavailable?: 'private' | 'disabled' };
   createdAt: string;
   lastMessageAt: string | null;
   /** Messages from the other user newer than my last-read mark (14-day window). GET /dm only. */
@@ -1026,6 +1050,12 @@ export interface ConvMessage extends Message {
    * как `HistoryItem::markReactionsRead` у Telegram. Нет поля — непрочитанных реакций нет или сервер до `reactunread1`.
    */
   reactionUnread?: true;
+  /**
+   * Кнопки под сообщением бота (#230, `reply_markup.inline_keyboard` Bot API). Поле есть ТОЛЬКО у таких сообщений (только ЛС с
+   * ботом); старый клиент поля не знает и показывает сообщение без кнопок (текст остаётся читаемым). Наружу (федерация) не едет,
+   * при пересылке не копируется. Нажатие — `POST /api/conv/:id/messages/:mid/callback` (`BotCallbackBody` → `BotCallbackResult`).
+   */
+  keyboard?: InlineKeyboard;
   /**
    * Служебная строка ленты: «X закрепил(а) сообщение» (G28, признак сервера `pins2`) — `kind: 'pin'`, `messageId` —
    * закреплённое; действие в группе (07.10, #211, С4, признак `groups1`) — `kind: 'group'`: «создал(а) группу», «добавил(а)»,
@@ -1162,7 +1192,13 @@ export interface ConvSummary {
    * всегда `null` (участники — в `group`).
    */
   /** `homeInstance` (Э1, #141) — только у собеседника с другого инстанса (добавление). */
-  otherUser: Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance'> | null;
+  /** `botDescription` (#229, 26.10) — только у живого бота с непустым описанием (`bots.description`), добавление. */
+  /**
+   * `botUnavailable` (решение A, 26.10) — писать этому боту нельзя: `disabled` (выключен админом или все боты инстанса),
+   * `private` (не «Доступен всем», а я не владелец). Клиент вместо поля ввода рисует плашку; старый клиент поле не знает —
+   * отправка ответит 403 `{ code: 'bot_unavailable', reason }`. Добавление.
+   */
+  otherUser: (Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'homeInstance' | 'bot'> & { botDescription?: string; botUnavailable?: 'private' | 'disabled' }) | null;
   createdAt: string;
   /** Время последнего видимого мне сообщения (не общее время беседы: придержанное у получателя её не поднимает). */
   lastMessageAt: string | null;
@@ -1293,6 +1329,12 @@ export interface ConvGroupInfo {
   members: ConvGroupMember[];
   /** Предел участников вместе с создателем (`GROUP_MEMBER_LIMIT`). */
   limit: number;
+  /**
+   * «История для новых» (аудит ЛС #236, п.8; Telegram «Chat history for new members»): `true` — новые участники видят
+   * сообщения до своего добавления; `false` — только с записи «добавил». Меняет владелец (`PUT /conv/:id/group/history`).
+   * Только добавление: нет поля — сервер старый (у него история видна всем).
+   */
+  historyForNew?: boolean;
 }
 
 export interface ConvGroupMember {
@@ -1701,6 +1743,11 @@ export interface VoiceParticipant {
   speaking: boolean;
   screensharing: boolean;
   camera: boolean;
+  /**
+   * Бот (#232, этап 4; метка `bot: true` в метаданных токена LiveKit). Для бота `muted` = «сейчас ничего не играет».
+   * Только добавление: старые клиенты и соседи поля не знают и покажут бота человеком.
+   */
+  bot?: true;
 }
 
 /** channelId -> participants. The shape the presence service broadcasts. */
@@ -1753,7 +1800,7 @@ export type DmPolicy = 'shared' | 'anyone';
  * Человек из поиска `GET /api/users/search?q=` (признак `users1`): только то, что нужно строке выбора «Написать», — без
  * почты и онлайна. Ищутся только свои живые люди инстанса.
  */
-export type UserSearchHit = Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl'>;
+export type UserSearchHit = Pick<User, 'id' | 'username' | 'displayName' | 'avatarUrl' | 'bot'>;
 
 /** Ответ `GET /api/users/search?q=`: точное совпадение логина первым, затем по началу логина, до 8 строк. */
 export interface UserSearchResponse {

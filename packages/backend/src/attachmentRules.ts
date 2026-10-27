@@ -28,9 +28,43 @@ export function attSigValid(key: Buffer, attId: string, viewerId: string, tokenG
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
+/**
+ * Срок ссылки на файл ЛС (аудит ЛС #236, п.6): ссылка — ключ на предъявителя, и бессрочная утёкшая (лог прокси, история
+ * браузера, пересланный адрес) открывала файл, пока человек в беседе. Теперь в подписи срок: конец СЛЕДУЮЩИХ суток UTC
+ * от выдачи. Ссылка живёт 24–48 ч (запас на границе суток), а за одни сутки адрес один и тот же — кеш браузера по адресу
+ * не сбрасывается на каждой порции ленты. Истёкшая — 404, клиент перечитывает ссылку (`POST /att/links`) и пробует снова.
+ */
+export const ATT_LINK_DAY_MS = 24 * 60 * 60 * 1000;
+export function attLinkExpiry(nowMs: number): number {
+  return (Math.floor(nowMs / ATT_LINK_DAY_MS) + 2) * ATT_LINK_DAY_MS;
+}
+
+/** Подпись ссылки со сроком: `<32 знака подписи>.<срок, секунды эпохи в base36>`; срок — внутри HMAC (`v2`). */
+export function attSigExp(key: Buffer, attId: string, viewerId: string, tokenGen: number, expMs: number): string {
+  const exp = Math.floor(expMs / 1000).toString(36);
+  const sig = createHmac('sha256', key).update(`v2\n${attId}\n${viewerId}\n${tokenGen}\n${exp}`).digest('base64url').slice(0, 32);
+  return `${sig}.${exp}`;
+}
+
+/**
+ * Подпись со сроком подлинна и не истекла. Старая подпись без срока (`v1`, до аудита) больше не принимается: такие
+ * ссылки бессрочны. Срок дальше, чем выдаёт `attLinkExpiry` сейчас, — подделка или чужие часы: отказ.
+ */
+export function attSigExpValid(key: Buffer, attId: string, viewerId: string, tokenGen: number, sig: string, nowMs: number): boolean {
+  const dot = sig.indexOf('.');
+  if (dot !== 32) return false;
+  const exp36 = sig.slice(dot + 1);
+  if (!/^[0-9a-z]{1,10}$/.test(exp36)) return false;
+  const expMs = parseInt(exp36, 36) * 1000;
+  if (!Number.isFinite(expMs) || expMs <= nowMs || expMs > attLinkExpiry(nowMs)) return false;
+  const want = Buffer.from(attSigExp(key, attId, viewerId, tokenGen, expMs));
+  const got = Buffer.from(sig);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const VIEWER_RE = /^[A-Za-z0-9-]{1,64}$/;
-const SIG_RE = /^[A-Za-z0-9_-]{32}$/;
+const SIG_RE = /^[A-Za-z0-9_-]{32}(?:\.[0-9a-z]{1,10})?$/;
 
 /** id вложения — UUID. Проверяется ДО запроса в базу: мусор в пути не должен доходить до SQL. */
 export function isAttId(s: string): boolean {
@@ -131,13 +165,17 @@ export function sanitizeFilename(name: string, max = 200): string {
   return Array.from(clean).slice(0, max).join('') || 'file';
 }
 
-export function attachmentHeaders(mime: string, filename: string, attId: string): Record<string, string> {
+/**
+ * `once` — одноразовое фото/видео (аудит ЛС #236, п.7): `no-store` — копия файла не остаётся в кеше браузера после
+ * просмотра (с `no-cache` она лежала на диске и открывалась бы снова без сервера).
+ */
+export function attachmentHeaders(mime: string, filename: string, attId: string, once = false): Record<string, string> {
   const safeName = sanitizeFilename(filename);
   return {
     'Content-Type': servedContentType(mime),
     'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}`,
     'Content-Security-Policy': "default-src 'none'; sandbox",
-    'Cache-Control': 'private, no-cache',
+    'Cache-Control': once ? 'private, no-store' : 'private, no-cache',
     ETag: `"${attId}"`,
     'Accept-Ranges': 'bytes',
   };

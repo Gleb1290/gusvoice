@@ -13,7 +13,8 @@
       "fast-uri": "3.1.7",
       "fast-xml-parser": "5.10.1",
       "find-my-way": "9.7.0",
-      "@fastify/busboy": "3.2.2"
+      "@fastify/busboy": "3.2.2",
+      "@gusvoice/bot-voice": "workspace:*"
     }
   },
   "scripts": {

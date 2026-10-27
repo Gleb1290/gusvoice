@@ -13,12 +13,13 @@ function load(raw: string): Rules {
   runInNewContext(js, { module, exports: module.exports, require: (id: string) => { throw Error(`Неизвестный импорт ${id}`); } });
   return module.exports;
 }
-function mutation(anchor: string, replacement: string, check: (rules: Rules) => void): void {
+function mutation(anchor: string, replacement: string, check: (rules: Rules) => void, marker?: string): void {
   assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта должен однозначно обозначать реальный код');
   check(layoutRules); // сначала выполняем тот же контракт на оригинальном модуле.
   assert.throws(
     () => check(load(source.replace(anchor, replacement))),
-    (error: unknown) => error instanceof assert.AssertionError && error.operator === 'strictEqual',
+    (error: unknown) => error instanceof assert.AssertionError && error.operator === 'strictEqual'
+      && (marker === undefined || error.message.startsWith(marker)),
     'мутант должен ломать именно ожидаемое равенство, а не падать по посторонней причине',
   );
 }
@@ -160,4 +161,61 @@ it('R248 мутанты hold, minTalk, удержания, fallback at=now и ne
     speakingSince: new Map([['newer', 1500], ['longest', 800]]), present: ['newer', 'longest'], now: 2500,
   }).id, 'longest');
   mutation('if (!best || since < best.since) best = { id, since };', 'if (!best || since > best.since) best = { id, since };', longest);
+});
+
+// Музыкальный бот может говорить часами: его VAD не должен вытеснять ни одного человека.
+const botInput = {
+  present: ['music', 'human-a', 'human-b'], bots: new Set(['music']),
+  speakingSince: new Map([['music', 0], ['human-b', 1400]]), now: 2000,
+};
+function botCandidate(r: Rules) {
+  assert.equal(r.nextStageSpeaker({ id: 'human-a', at: 0 }, botInput).id, 'human-b',
+    'R306_BOT_CANDIDATE: дольше всех играющий бот пропускается, человек остаётся кандидатом');
+}
+function botFallback(r: Rules) {
+  assert.equal(r.nextStageSpeaker({ id: null, at: 0 }, { ...botInput, speakingSince: new Map() }).id, 'human-a',
+    'R306_BOT_FALLBACK: первый не-бот, а не первая плитка');
+}
+
+it('R306 дольше всех говорящий бот не перехватывает крупный план у готового человека', () => botCandidate(layoutRules));
+
+it('R306 запасной крупный в тишине — первый человек после ботов с at:0', () => {
+  botFallback(layoutRules);
+  assert.deepEqual(layoutRules.nextStageSpeaker({ id: null, at: 0 }, { ...botInput, speakingSince: new Map() }),
+    { id: 'human-a', at: 0 });
+});
+
+it('R306 сцена только из ботов без прошлого спикера остаётся без крупного и без таймера', () => {
+  for (const speakingSince of [new Map<string, number>(), new Map([['music', 0], ['radio', 100]])]) {
+    const inp = { present: ['music', 'radio'], bots: new Set(['music', 'radio']), speakingSince, now: 5000 };
+    const next = layoutRules.nextStageSpeaker({ id: 'left-human', at: 4900 }, inp);
+    assert.deepEqual(next, { id: null, at: 0 }); assert.equal(layoutRules.stageSpeakerRecheckMs(next, inp), null);
+  }
+});
+
+it('R306 музыка не запускает таймер смены, но человек ждёт ровно 600 мс даже рядом с ботом', () => {
+  const prev = { id: 'human-a', at: 0 };
+  const music = { ...botInput, speakingSince: new Map([['music', 0]]) };
+  assert.deepEqual(layoutRules.nextStageSpeaker(prev, music), prev);
+  assert.equal(layoutRules.stageSpeakerRecheckMs(prev, music), null);
+  const before = { ...botInput, now: 1999 };
+  assert.deepEqual(layoutRules.nextStageSpeaker(prev, before), prev);
+  assert.equal(layoutRules.stageSpeakerRecheckMs(prev, before), 1);
+  assert.equal(layoutRules.nextStageSpeaker(prev, botInput).id, 'human-b');
+  assert.equal(layoutRules.stageSpeakerRecheckMs(prev, botInput), 0);
+});
+
+it('R306 отсутствие набора bots и пустой набор сохраняют прежний выбор говорящего и запасного', () => {
+  for (const bots of [undefined, new Set<string>()]) {
+    assert.equal(layoutRules.nextStageSpeaker({ id: null, at: 0 }, { ...botInput, bots }).id, 'music');
+    assert.equal(layoutRules.nextStageSpeaker({ id: null, at: 0 }, { ...botInput, bots, speakingSince: new Map() }).id, 'music');
+  }
+});
+
+it('R306 контрфакт бота-кандидата отвергается, а не просто оставляет сцену без кандидатов', () => {
+  mutation(' || inp.bots?.has(id)', '', botCandidate, 'R306_BOT_CANDIDATE:');
+});
+
+it('R306 контрфакт первой плитки бота вместо человека отвергается', () => {
+  mutation('inp.present.find((id) => !inp.bots?.has(id)) ?? null', 'inp.present[0] ?? null', botFallback, 'R306_BOT_FALLBACK:');
 });
