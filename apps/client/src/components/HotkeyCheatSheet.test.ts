@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert, { AssertionError } from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -217,21 +218,27 @@ it('один Esc закрывает только шпаргалку, возвр�
 it('контрфакт без capture не проходит: раньше зарегистрированный Esc настроек не должен закрывать нижнее окно', async () => {
   // Класс ошибки: bubbling слушатель верхнего окна приходит слишком поздно для уже открытых настроек.
   await withScene(source, checkEscape);
-  let changed = replaceOnce(source, "window.addEventListener('keydown', onKey, true);", "window.addEventListener('keydown', onKey);");
-  changed = replaceOnce(changed, "window.removeEventListener('keydown', onKey, true);", "window.removeEventListener('keydown', onKey);");
-  await withScene(changed, async (scene) => { await rejectsDomain(() => checkEscape(scene), CAPTURE_MARKER); });
+  await counterfact(async () => {
+    let changed = replaceOnce(source, "window.addEventListener('keydown', onKey, true);", "window.addEventListener('keydown', onKey);");
+    changed = replaceOnce(changed, "window.removeEventListener('keydown', onKey, true);", "window.removeEventListener('keydown', onKey);");
+    await withScene(changed, async (scene) => { await rejectsDomain(() => checkEscape(scene), CAPTURE_MARKER); });
+  });
 });
 
 it('контрфакт без preventDefault не проходит: обработанный шпаргалкой Esc должен быть погашен', async () => {
   // Класс ошибки: capture без preventDefault всё равно отдаёт тот же Esc нижнему диалогу.
   await withScene(source, checkEscape);
-  const changed = replaceOnce(source, '      e.preventDefault();', '      /* мутант: Esc не погашен */');
-  await withScene(changed, async (scene) => { await rejectsDomain(() => checkEscape(scene), PREVENT_MARKER); });
+  await counterfact(async () => {
+    const changed = replaceOnce(source, '      e.preventDefault();', '      /* мутант: Esc не погашен */');
+    await withScene(changed, async (scene) => { await rejectsDomain(() => checkEscape(scene), PREVENT_MARKER); });
+  });
 });
 
 it('контрфакт без alt у строки не проходит, даже если Ctrl+/ по-прежнему показан в шапке', async () => {
   // Класс ошибки: проверка одной шапки скрыла бы потерю альтернативного сочетания в строке навигации.
   await withScene(source, async (scene) => { checkAlt(scene); });
-  const changed = replaceOnce(source, ' alt={k.alt}', '');
-  await withScene(changed, async (scene) => { await rejectsDomain(() => checkAlt(scene), ALT_MARKER); });
+  await counterfact(async () => {
+    const changed = replaceOnce(source, ' alt={k.alt}', '');
+    await withScene(changed, async (scene) => { await rejectsDomain(() => checkAlt(scene), ALT_MARKER); });
+  });
 });

@@ -23,8 +23,8 @@ See [Differences from Telegram](#differences-from-telegram).
 | | Incoming webhook ([webhooks.md](webhooks.md)) | Bot |
 |---|---|---|
 | What it is | A secret URL that can **only post** to a text channel | An account with a token: receives messages **and** replies |
-| Where it posts | A server channel | A direct conversation with a person |
-| Reads messages | No | Yes — those sent to it in DMs |
+| Where it posts | A server channel | A direct conversation with a person; text channels of servers it was added to |
+| Reads messages | No | Yes: everything sent to it in DMs; in channels — commands, mentions and replies to it (everything with "Read all messages", see [Privacy](#privacy)) |
 | Sign-in | Token in the URL | Header `Authorization: Bot <token>` |
 | Profile, username, "message it directly" | No | Yes |
 | Who creates it | Anyone with "Manage webhooks" | Any person, if the instance administrator allows it |
@@ -948,6 +948,10 @@ The server sends ping frames every 30 seconds itself; ordinary client libraries 
 connection is dropped. Events are **not acknowledged automatically**: after a reconnect unacknowledged ones arrive again, so
 send `ack` (or pass `?offset=` when connecting). There is no `allowed_updates` on WebSocket — all kinds arrive.
 
+A bot has **one** connection at a time: a new WebSocket or `getUpdates` with the same token replaces the previous one — the
+old WebSocket is closed with `4009`, a waiting `getUpdates` answers `409` (see [getUpdates](#getupdates)). Run one copy of
+the bot per token.
+
 Close codes:
 
 | Code | Reason |
@@ -1046,12 +1050,12 @@ that moment.
 | Requests of one bot | 30 per second |
 | Sending and editing in one conversation | 5 per 5 seconds (≈ 1 per second with room for a burst) |
 | `getUpdates` and WebSocket connections | 30 per 10 seconds per bot |
-| WebSockets per bot | 3 at a time |
+| Event consumers per bot | 1: a new `getUpdates` or WebSocket replaces the previous one (`409` / `4009`, see [getUpdates](#getupdates)) |
 | JSON/form body | 64 KB |
 | Files per message / file size | 10 / 25 MB |
 | Message text | 4096 characters |
 | Cards per message | 10 (total card text up to 6000 characters) |
-| Event journal | 24 hours, up to 1000 per bot |
+| Event journal | 24 hours, up to 1000 per bot (a "Read all messages" bot — 10 000) |
 | `getUpdates` wait (`timeout`) | up to 50 seconds |
 | `getUpdates` `limit` | up to 100 |
 | Buttons | 8 in a row, 100 per message; `callback_data` up to 64 bytes; button text up to 64 characters |
@@ -1070,10 +1074,23 @@ On `429` wait `retry_after` seconds and retry. Do not hammer: if you need to sen
   disabled, people who already have a conversation with it get `403` when sending (text, files, voice, forwarding into the
   conversation, scheduled messages, button presses), and the app shows a notice instead of the message field. The bot gets
   no events from them.
-- A bot sees only what is written **to it in DMs**. Nothing else: no servers, no channels, no other conversations.
+- **What a bot sees.** A bot never sees other people's conversations (DMs between people, group conversations). Beyond
+  that it sees only where it was invited:
+  - **in its own direct conversation** — everything: the person's messages, their edits and deletions, reactions to any
+    message of the conversation, button presses, the conversation being opened, deleted or blocked (`my_chat_member`);
+  - **on a server it was added to** (API 3) — by default only channel messages addressed to the bot arrive: commands
+    (`/cmd`, `/cmd@your_bot`), a personal `@your_bot` mention, a mention of the bot role and replies to its messages. The
+    rest of the chatter never reaches the bot — it is not even stored in its journal;
+  - **with the "Read all messages" checkbox** («Читать все сообщения»; set by a server admin with "Manage server" when
+    adding the bot or later) — all channel messages, plus webhook messages, deletions and reactions to other people's
+    messages; with "Read history" also `getChatHistory`.
+
+  In both server modes a bot only sees channels where its role has "View channel", and never receives messages of other
+  bots. Details and exact rules — in [Bots on servers](#bots-on-servers-api-3).
 - A bot **does not write first** (anti-spam, as in Telegram): it has no way to create a conversation, only to reply in an
-  already open one.
-- Bots are not added to groups and do not federate (stage 1).
+  already open one. In a server channel it writes if its role may send messages there.
+- Bots are not added to group conversations and do not federate. On a server the bot does see guests from other
+  instances who are members there (see "Guests from other instances" in [Bots on servers](#bots-on-servers-api-3)).
 - The instance administrator sees all bots and can disable any with one press. If the owner's account is deleted, their bots
   are deleted too; messages the bot already wrote stay in the conversations.
 
@@ -1343,10 +1360,53 @@ connect();
 
 ## Official SDK
 
-A TypeScript/Node package `@gusvoice/bot` is being prepared: typed methods and events, a long-polling runner with
-reconnects and `429` handling, and a URL-delivery handler with signature verification. Sources —
-[`packages/bot-sdk`](../packages/bot-sdk); its description will be added here once the first version ships. You do not
-need it yet: everything above works over plain HTTP.
+The SDK is optional: everything above works over plain HTTP. With it the code is shorter — polling and WebSocket with
+reconnects, `429` retries, URL delivery with signature verification, buttons and commands are ready. The packages are
+published (MIT license):
+
+| Package | Install | What it does | Sources |
+|---|---|---|---|
+| `@gusvoice/bot` (npm) | `npm i @gusvoice/bot` | TypeScript, no dependencies: all methods, WebSocket or long polling, commands, buttons, URL delivery. Node.js 22+, Bun, Deno; on Node.js 18–21 — polling or the `ws` package | [`packages/bot-sdk`](../packages/bot-sdk) |
+| `@gusvoice/bot-voice` (npm) | `npm i @gusvoice/bot-voice` | Add-on to `@gusvoice/bot` for [voice](#voice-api-4): the bot plays audio in a voice channel (needs `ffmpeg`) | [`packages/bot-voice`](../packages/bot-voice) |
+| `gusvoice-bot` (PyPI) | `pip install gusvoice-bot` | Python 3.9+, standard library only: all methods, long polling, URL delivery with signature check, buttons. No WebSocket, no voice | [`packages/bot-sdk-py`](../packages/bot-sdk-py) |
+
+The first version of all three is `0.1.0`. The address you give the SDK is the instance site: the SDK reads
+`<address>/config.json` and takes the API address from there (`discover: false` / `discover=False` if you pass the API
+address directly). Keep the token in an environment variable.
+
+TypeScript — an echo bot (as [`examples/bots/echo.ts`](../examples/bots/echo.ts)):
+
+```ts
+import { Bot } from '@gusvoice/bot';
+
+const bot = new Bot(process.env.GUSVOICE_BOT_TOKEN!, { baseUrl: process.env.GUSVOICE_URL! });
+
+bot.command('start', (ctx) => ctx.reply('Hi! Write anything and I will repeat it.'));
+bot.on('message', (ctx) => ctx.reply(`echo: ${ctx.text}`));
+
+process.once('SIGINT', () => void bot.stop());
+await bot.start(); // WebSocket; bot.start({ mode: 'polling' }) for long polling
+```
+
+Python — an echo bot (as [`examples/bots/echo.py`](../examples/bots/echo.py)):
+
+```python
+import os
+from gusvoice_bot import Client
+
+bot = Client(os.environ["GUSVOICE_BOT_TOKEN"], os.environ["GUSVOICE_URL"])
+
+def on_update(update: dict) -> None:
+    msg = update.get("message")
+    if msg and msg.get("text"):
+        bot.send_message(msg["chat"]["id"], msg["text"], reply_to_message_id=msg["message_id"])
+
+bot.run_polling(on_update)
+```
+
+Run: `GUSVOICE_URL=https://chat.example.com GUSVOICE_BOT_TOKEN=gvb_… npx tsx echo.ts` (or `python3 echo.py`). The bot
+does not write first — open a conversation with it yourself. One copy per token: a second one knocks out the first
+(`409` / `4009`), and the SDK stops with that error. The full package API is in their READMEs.
 
 ---
 
@@ -1358,7 +1418,7 @@ Since `api_version` 3 (`getMe.features` contains `servers`) a bot can live on se
 
 **Chats.** `chat.type`: `dm` — 1:1 chat, `channel` — text channel (`server_id`, `title`), `server` — the server itself (membership events and `getChat` only). 🔴 **Check `chat.type`**: code that assumed `type === 'dm'` will now see other values. Message methods take a DM or channel `chat_id`; a server id → `400 chat is a server; use a channel id`, a voice channel → `400 chat is not a text channel`, foreign or invisible → `400 chat not found`.
 
-**Privacy.** By default a bot receives from a channel only: commands (`/cmd@your_bot` — you; `/cmd@other` — not you; plain `/cmd` — every bot of the channel), a personal `@your_bot` mention (`@everyone`/`@here` do not count), a mention of the bot role, and replies to the bot's messages. The "Read all messages" checkbox lifts the filter. The filter runs on the server BEFORE the event is stored. Edits are filtered by the NEW text. Messages of **other bots** never arrive (loop protection); webhook messages — only to "read all" bots. A bot only sees channels where its role has "View channel".
+**Privacy on a server** (the whole picture for DMs and servers is in [Privacy](#privacy)). In a direct conversation with the bot there is no filter: it gets everything the person writes. By default a bot receives from a channel only: commands (`/cmd@your_bot` — you; `/cmd@other` — not you; plain `/cmd` — every bot of the channel), a personal `@your_bot` mention (`@everyone`/`@here` do not count), a mention of the bot role, and replies to the bot's messages. The "Read all messages" checkbox (set by an admin with "Manage server" — when adding the bot or later in Integrations → Bots) lifts the filter. The filter runs on the server BEFORE the event is stored. Edits are filtered by the NEW text. Messages of **other bots** never arrive (loop protection); webhook messages — only to "read all" bots. A bot only sees channels where its role has "View channel".
 
 **Updates**: `message`, `edited_message`, `message_deleted` (read-all bots and the author), `callback_query` (`message.chat.type === 'channel'`), `message_reaction` (`old_reaction`/`new_reaction` of that person; read-all bots and the message author; in DMs — any message of the chat), `chat_member` (someone joined/left/was kicked/banned/unbanned — all bots of the server), `my_chat_member` (the bot itself was added/removed/banned; `chat.type === 'server'`). Statuses: `creator`, `member`, `left`, `kicked`. Pins, polls and stickers produce no updates. Ordering across server processes is not guaranteed.
 

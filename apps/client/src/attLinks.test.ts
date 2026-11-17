@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import * as attRules from './attLinkRules';
 import { load, mutate, sourceOf } from './R304.testHarness';
@@ -81,6 +82,9 @@ for (const [title, anchor, replacement, check, marker] of [
   ['чужой origin', 'if (!isAttLink(url) || !ours(url))', 'if (!isAttLink(url))', foreign, 'чужой origin не продлевается'],
   ['повтор после 500', '(res.status !== 404 && res.status !== 403)', 'false', (raw: string) => fetchCase(raw, 500, url(), false), 'fetch повторяет только доступное вложение'],
 ] as const) it(`R304 контрфакт attLinks: ${title} обнаруживается тем же сценарием`, async () => {
-  await check(source); await assert.rejects(check(mutate(source, anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(marker));
+  await check(source);
+  await counterfact(async () => {
+    await assert.rejects(check(mutate(source, anchor, replacement)),
+      e => e instanceof assert.AssertionError && e.message.includes(marker));
+  });
 });

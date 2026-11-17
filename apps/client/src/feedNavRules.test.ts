@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as rules from './feedNavRules';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 it('навигация распознаёт только Alt-стрелки и Ctrl+Alt края без Shift и Meta', () => {
   // Эти клавиши работают из textarea, но не должны отнимать выделение и системные сочетания.
@@ -24,10 +25,12 @@ it('стрелки и края списка не зацикливаются, н�
     assert.equal(api.feedNavTarget(ids, 'a', 'first'), null); assert.equal(api.feedNavTarget(ids, 'c', 'last'), null);
   };
   check(rules);
+  counterfact(() => {
   const source = readFileSync(new URL('./feedNavRules.ts', import.meta.url), 'utf8');
   for (const [a,b] of [['Math.max(0, Math.min(ids.length - 1, at))', 'at'], ["key === 'down' ? 1 : -1", "key === 'down' ? -1 : 1"]]) {
     assert.ok(source.includes(a), 'мутант найден'); const module = { exports: {} };
     runInNewContext(ts.transpileModule(source.replace(a,b), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
     assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
   }
+  });
 });

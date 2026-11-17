@@ -1,15 +1,14 @@
 import { PHONE_LAYOUT_QUERY, setPhoneLayoutPin } from './phoneLayout';
 
 /**
- * Поворот экрана в полноэкранном просмотре фото и видео (19.10, просьба владельца). Приложение на телефоне закреплено в
+ * Поворот экрана в полноэкранном просмотре фото, видео и стрима. Приложение на телефоне закреплено в
  * портрете (`MainActivity.onCreate`), а пока открыт просмотр, оболочка снимает закреп — экран следует датчику с учётом
  * системного «автоповорота», как окно Telegram Android (активность без фиксации; `PhotoViewer` сам ставит альбомную только
  * кнопкой «во весь экран» у видео и по закрытию возвращает прежнюю, `PhotoViewer.java:6062`/`:18154`). Закрыли — портрет.
  *
- * Счётчик держателей — сами слои просмотра в `<body>`: `Lightbox` (ленты ЛС и каналов, одноразовые, медиатека, отложенные,
- * аватары, предпросмотр отправки) и просмотр галереи вложений рисуются порталом прямо в `<body>`, поэтому наблюдатель только
- * за детьми `<body>` видит любой вход, включая «назад» Android, смену экрана и размонтирование, и два открытых подряд не
- * возвращают портрет друг у друга. Мост — `GusVoiceNative.setViewerRotation(on)`; ответ `true` — закреп действует (телефон),
+ * `Lightbox` и просмотр галереи вложений рисуются порталом прямо в `<body>`. Полноэкранный стрим остаётся внутри голосовой
+ * сцены и держит поворот через `holdViewerRotation()`. Возвращаем портрет после закрытия последнего просмотра.
+ * Мост — `GusVoiceNative.setViewerRotation(on)`; ответ `true` — закреп действует (телефон),
  * и на время просмотра держим телефонную раскладку (`setPhoneLayoutPin`): в альбомной окно шире 760 px. Планшет, браузер,
  * десктоп, старая оболочка без метода — ничего не делаем (Fullscreen API и `screen.orientation.lock` не трогаем).
  */
@@ -33,6 +32,7 @@ export function viewerOpen(root: ParentNode): boolean {
 let held = false;
 let pinned = false;
 let stopUnpin: (() => void) | null = null;
+const inlineViewers = new Set<symbol>();
 
 function cancelUnpin(): void {
   stopUnpin?.();
@@ -78,6 +78,22 @@ function hold(on: boolean): void {
   } else releasePin();
 }
 
+function sync(): void {
+  hold(inlineViewers.size > 0 || viewerOpen(document.body));
+}
+
+/** Разрешить поворот просмотрщику, который остаётся в своём дереве компонентов. */
+export function holdViewerRotation(): (() => void) | undefined {
+  if (typeof bridge()?.setViewerRotation !== 'function') return;
+  const viewer = Symbol();
+  inlineViewers.add(viewer);
+  sync();
+  return () => {
+    inlineViewers.delete(viewer);
+    sync();
+  };
+}
+
 /** Подключить на старте (`main.tsx`). Только в оболочке Android с методом моста. */
 export function installViewerRotation(): void {
   const native = bridge();
@@ -88,7 +104,6 @@ export function installViewerRotation(): void {
   } catch {
     /* оболочка без метода */
   }
-  const sync = () => hold(viewerOpen(document.body));
   new MutationObserver(sync).observe(document.body, { childList: true });
   sync();
 }

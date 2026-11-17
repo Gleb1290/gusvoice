@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -132,28 +133,34 @@ function loadMentions(raw: string): typeof import('./mentions.js') {
 
 it('R266 контрфакт сортировки: настоящий модуль проходит, короткие названия первыми ломают свидетель', () => {
   const raw = readFileSync(new URL('./mentions.ts', import.meta.url), 'utf8');
-  const from = '.sort((a, b) => b.name.length - a.name.length)';
-  assert.equal(raw.split(from).length, 2, 'точка мутации ровно одна');
+
   const witness = (api: typeof import('./mentions.js')) =>
     assert.deepEqual(Array.from(api.mentionedRoleIds('@Ночная смена', roles)), ['long'], 'R266:длинная-роль-не-пингует-короткую');
   witness(loadMentions(raw));
-  assert.throws(() => witness(loadMentions(raw.replace(from, '.sort((a, b) => a.name.length - b.name.length)'))),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:длинная-роль-не-пингует-короткую'));
+  runCounterfact(() => {
+    const from = '.sort((a, b) => b.name.length - a.name.length)';
+    assert.equal(raw.split(from).length, 2, 'точка мутации ровно одна');
+    assert.throws(() => witness(loadMentions(raw.replace(from, '.sort((a, b) => a.name.length - b.name.length)'))),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:длинная-роль-не-пингует-короткую'));
+  });
 });
 
 it('R266 контрфакт права: замена ИЛИ на И требует оба разрешения и ломает оба независимых допуска', () => {
   const raw = readFileSync(new URL('./mentions.ts', import.meta.url), 'utf8');
-  const from = 'return role.mentionable || canMentionEveryone(authorPerms);';
-  assert.equal(raw.split(from).length, 2, 'точка мутации ровно одна');
+
   const witness = (api: typeof import('./mentions.js')) => {
     assert.equal(api.canMentionRole({ mentionable: true }, 0n), true, 'R266:флага-роли-достаточно-без-права');
     assert.equal(api.canMentionRole({ mentionable: false }, Permission.MENTION_EVERYONE), true, 'R266:права-достаточно-без-флага');
     assert.equal(api.canMentionRole({ mentionable: false }, 0n), false);
   };
   witness(loadMentions(raw));
-  assert.throws(() => witness(loadMentions(raw.replace(from, from.replace('||', '&&')))),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:флага-роли-достаточно-без-права')
-      && error.actual === false && error.expected === true);
+  runCounterfact(() => {
+    const from = 'return role.mentionable || canMentionEveryone(authorPerms);';
+    assert.equal(raw.split(from).length, 2, 'точка мутации ровно одна');
+    assert.throws(() => witness(loadMentions(raw.replace(from, from.replace('||', '&&')))),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:флага-роли-достаточно-без-права')
+        && error.actual === false && error.expected === true);
+  });
 });
 
 // Класс ошибки: новый бит пересекается со старым либо незаметно отбирается у обычных участников.
@@ -209,8 +216,7 @@ it('R280 доменный everyone и here не зовут посторонне�
 // Класс ошибки: удаление одной собаки из SQL-хвоста возвращает ложный бейдж, не меняя правильный JS-разбор.
 it('R280 возврат доменного broadcast в SQL пойман адресным AssertionError после настоящего полного модуля', () => {
   const raw = readFileSync(new URL('./mentions.ts', import.meta.url), 'utf8');
-  const anchor = "const tail = '(?![A-Za-z0-9_@]|[.-]+[A-Za-z0-9_])';";
-  assert.equal(raw.split(anchor).length - 1, 1, 'меняется только хвост broadcastSqlPattern');
+
   const witness = (api: typeof import('./mentions.js')) => {
     for (const word of ['everyone', 'here']) {
       const domain = `@${word}@x.example`;
@@ -223,9 +229,13 @@ it('R280 возврат доменного broadcast в SQL пойман адр�
     }
   };
   witness(loadMentions(raw));
-  assert.throws(() => witness(loadMentions(raw.replace(anchor, anchor.replace('0-9_@', '0-9_')))),
-    error => error instanceof assert.AssertionError && error.message === 'R280:домен-не-становится-SQL-broadcast'
-      && error.actual === false && error.expected === true);
+  runCounterfact(() => {
+    const anchor = "const tail = '(?![A-Za-z0-9_@]|[.-]+[A-Za-z0-9_])';";
+    assert.equal(raw.split(anchor).length - 1, 1, 'меняется только хвост broadcastSqlPattern');
+    assert.throws(() => witness(loadMentions(raw.replace(anchor, anchor.replace('0-9_@', '0-9_')))),
+      error => error instanceof assert.AssertionError && error.message === 'R280:домен-не-становится-SQL-broadcast'
+        && error.actual === false && error.expected === true);
+  });
 });
 
 // Класс ошибки: запрет broadcast выключает ещё и личные упоминания местного человека или гостя.
@@ -244,15 +254,18 @@ it('R279 выключенный broadcast молчит на everyone и here, с
 // Класс ошибки: возврат старого MANAGE_ROLES открывает закрытые роли не тем людям.
 it('R279 мутант возврата MANAGE_ROLES пойман адресным AssertionError после оригинального правила', () => {
   const raw = readFileSync(new URL('./mentions.ts', import.meta.url), 'utf8');
-  const anchor = 'return role.mentionable || canMentionEveryone(authorPerms);';
-  assert.equal(raw.split(anchor).length - 1, 1);
+
   const witness = (api: typeof import('./mentions.js')) => {
     assert.ok(!api.canMentionRole({ mentionable: false }, Permission.MANAGE_ROLES), 'R279:управление-не-разрешает-пинг');
     assert.ok(api.canMentionRole({ mentionable: false }, Permission.MENTION_EVERYONE));
   };
   witness(loadMentions(raw));
-  assert.throws(() => witness(loadMentions(raw.replace(anchor, 'return role.mentionable || has(authorPerms, Permission.MANAGE_ROLES);'))),
-    error => error instanceof assert.AssertionError && error.message === 'R279:управление-не-разрешает-пинг');
+  runCounterfact(() => {
+    const anchor = 'return role.mentionable || canMentionEveryone(authorPerms);';
+    assert.equal(raw.split(anchor).length - 1, 1);
+    assert.throws(() => witness(loadMentions(raw.replace(anchor, 'return role.mentionable || has(authorPerms, Permission.MANAGE_ROLES);'))),
+      error => error instanceof assert.AssertionError && error.message === 'R279:управление-не-разрешает-пинг');
+  });
 });
 
 // Класс ошибки: тест видит объявление бита, но не потерю права в штатном наборе everyone.
@@ -266,9 +279,12 @@ it('R279 мутант удаления бита из умолчания пойм
       require(id: string) { assert.fail(`неожиданный импорт permissions: ${id}`); } });
     return module.exports as typeof permissions;
   };
-  const anchor = 'Permission.MENTION_EVERYONE;';
-  assert.equal(raw.split(anchor).length - 1, 1);
+
   defaultBroadcast(load(raw));
-  assert.throws(() => defaultBroadcast(load(raw.replace(anchor, '0n;'))),
-    error => error instanceof assert.AssertionError && error.message === 'R279:everyone-сохраняет-право-по-умолчанию');
+  runCounterfact(() => {
+    const anchor = 'Permission.MENTION_EVERYONE;';
+    assert.equal(raw.split(anchor).length - 1, 1);
+    assert.throws(() => defaultBroadcast(load(raw.replace(anchor, '0n;'))),
+      error => error instanceof assert.AssertionError && error.message === 'R279:everyone-сохраняет-право-по-умолчанию');
+  });
 });

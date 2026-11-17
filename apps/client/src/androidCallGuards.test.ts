@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
@@ -34,12 +35,15 @@ function body(source: string, name: string): string {
   return block(source, new RegExp(`\\bfun\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`));
 }
 
-function rejects(source: string, target: string, replacement: string, check: (source: string) => void): void {
+function rejects(source: string, target: string | (() => string), replacement: string | (() => string), check: (source: string) => void): void {
   check(source);
-  assert.equal(source.split(target).length - 1, 1, 'мутант изменяет одно место исходника');
-  const changed = source.replace(target, replacement);
+  counterfact(() => {
+  const anchor = typeof target === 'function' ? target() : target;
+  assert.equal(source.split(anchor).length - 1, 1, 'мутант изменяет одно место исходника');
+  const changed = source.replace(anchor, typeof replacement === 'function' ? replacement() : replacement);
   assert.notEqual(changed, source);
   assert.throws(() => check(changed), assert.AssertionError, 'удаление защиты краснит именно этот страж');
+  });
 }
 
 describe('R119 входящий звонок Android: статические границы доверия и жизненного цикла', () => {
@@ -66,8 +70,10 @@ describe('R119 входящий звонок Android: статические г�
     rejects(call, style, '', check);
     // Перенос, а не только удаление: CallStyle без FSI Android не принимает.
     check(call);
+    counterfact(() => {
     const moved = call.replace(style, '').replace('val n = builder.build()', `${style}\n    val n = builder.build()`);
     assert.throws(() => check(moved), assert.AssertionError);
+    });
   });
 
   it('до SDK 34 FSI разрешён, на SDK 34 и выше запрашивается системное право', () => {
@@ -168,12 +174,14 @@ describe('R119 входящий звонок Android: статические г�
     rejects(push, 'if (!encrypted) {', 'if (false) {', check);
     rejects(push, 'CallNotifier.onRead(context, payload.optString("dmId"))', '', check);
     check(push);
+    counterfact(() => {
     const clean = code(push);
     const fg = block(clean, /if \(isAppInForeground\(context\)\) \{/);
     const fgBlock = `if (isAppInForeground(context)) {${fg}}`;
     assert.equal(clean.split(fgBlock).length - 1, 1);
     const moved = clean.replace(fgBlock, '').replace('if (payload != null && payload.optString("type") == "dm"', `${fgBlock}\nif (payload != null && payload.optString("type") == "dm"`);
     assert.throws(() => check(moved), assert.AssertionError);
+    });
   });
 
   it('экран поверх блокировки и action receiver не экспортированы; FSI permission объявлен явно', () => {
@@ -191,10 +199,13 @@ describe('R119 входящий звонок Android: статические г�
     };
     rejects(manifest, '<uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />', '', check);
     for (const name of ['CallActionReceiver', 'IncomingCallActivity']) {
-      const tag = name === 'CallActionReceiver' ? 'receiver' : 'activity';
-      const entry = new RegExp(`<${tag}\\b[^>]*android:name="\\.${name}"[^>]*>`).exec(manifest)?.[0];
-      assert.ok(entry);
-      rejects(manifest, entry, entry.replace('android:exported="false"', 'android:exported="true"'), check);
+      const entry = () => {
+        const tag = name === 'CallActionReceiver' ? 'receiver' : 'activity';
+        const found = new RegExp(`<${tag}\\b[^>]*android:name="\\.${name}"[^>]*>`).exec(manifest)?.[0];
+        assert.ok(found);
+        return found;
+      };
+      rejects(manifest, entry, () => entry().replace('android:exported="false"', 'android:exported="true"'), check);
     }
     for (const attr of ['showWhenLocked', 'turnScreenOn']) rejects(manifest, `android:${attr}="true"`, '', check);
   });

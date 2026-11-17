@@ -1,6 +1,8 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as React from 'react';
@@ -34,10 +36,9 @@ async function scenario(raw = source) {
       '../peerName': { peerNameNow: fail('name action') }, '../toast': { toastError: fail('toast') },
       './Icon': { Icon: () => null },
     };
-    for (const id of ['./dmClearActions', '../dmRowRules', './DmArchive']) deps[id] = new Proxy({}, { get(_target, key) { assert.fail(`неожиданное действие ${id}.${String(key)}`); } });
     const module = { exports: {} as typeof import('./DmRowMenu') };
     runInNewContext(ts.transpileModule(raw, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-      { module, exports: module.exports, require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `неописанный импорт ${id}`); return deps[id]; } });
+      { module, exports: module.exports, require: testVmImports(new URL('./DmRowMenu.tsx', import.meta.url), deps) });
     function Probe() {
       const menu = module.exports.useDmRowMenu();
       return React.createElement(React.Fragment, null,
@@ -64,13 +65,19 @@ it('R179 меню строки имеет onBack только в уведомл�
 });
 it('R179 контрфакт onBack на основном уровне отвергается поведением меню строки', async () => {
   // Без отключения callback основной уровень съедал бы системную Назад и оставлял меню висеть.
-  await scenario(); const anchor = "target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'main' })";
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(scenario(source.replace(anchor, "() => setTarget({ ...target, level: 'main' })")), e => e instanceof assert.AssertionError && e.message.includes('main не имеет'));
+  await scenario();
+  await counterfact(async () => {
+    const anchor = "target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'main' })";
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(scenario(source.replace(anchor, "() => setTarget({ ...target, level: 'main' })")), e => e instanceof assert.AssertionError && e.message.includes('main не имеет'));
+  });
 });
 it('R179 контрфакт возврата не на main обнаруживается реальным Esc из подуровня', async () => {
   // Уникальный JSX-проп мутирует возврат, не кнопку входа на уровень уведомлений.
-  await scenario(); const anchor = "onBack={target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'main' })}";
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(scenario(source.replace(anchor, "onBack={target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'mute' })}")), e => e instanceof assert.AssertionError && e.message.includes('возврат уходит'));
+  await scenario();
+  await counterfact(async () => {
+    const anchor = "onBack={target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'main' })}";
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(scenario(source.replace(anchor, "onBack={target.level === 'main' ? undefined : () => setTarget({ ...target, level: 'mute' })}")), e => e instanceof assert.AssertionError && e.message.includes('возврат уходит'));
+  });
 });

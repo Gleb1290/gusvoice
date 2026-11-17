@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { cliSource, replaceOnce, withCopy } from './botReference.harness.js';
 
@@ -50,6 +51,8 @@ it('R307 изменённый Python-реестр входит в тот же --
 }));
 it('R307 контрфакт: --check, ставший записью, падает на запрете перезаписи, а не на коде CLI', async () => {
   await readonly();
-  await assert.rejects(readonly(replaceOnce(cliSource, 'if (check) {', 'if (false) {')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('R307_CHECK_READ_ONLY:') && e.actual === 1 && e.expected === 0);
+  await counterfact(async () => {
+    await assert.rejects(readonly(replaceOnce(cliSource, 'if (check) {', 'if (false) {')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('R307_CHECK_READ_ONLY:') && e.actual === 1 && e.expected === 0);
+  });
 });

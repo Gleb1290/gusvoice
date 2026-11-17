@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
@@ -10,11 +11,13 @@ describe('перестановка закреплённых бесед', () => {
     assert.deepEqual(convPinOrderPlan(current, ['d', 'c', 'b', 'a']), { kind: 'ok', order: ['d', 'c', 'b', 'a'] });
     assert.deepEqual(convPinOrderPlan(current, ['c']), { kind: 'ok', order: ['c', 'a', 'b', 'd'] });
     assert.deepEqual(current, ['a', 'b', 'c', 'd'], 'план не меняет входной снимок');
-    const source = convPinOrderPlan.toString();
-    const changed = source.replace(/\.\.\.ids\s*,\s*\.\.\.current\.filter/, '...current.filter').replace(/!seen\.has\(id\)\)\s*\]/, '!seen.has(id)), ...ids]');
-    assert.notEqual(changed, source, 'найден якорь переноса неназванных вперёд');
-    const mutant = runInNewContext(`(${changed})`, { Set }) as typeof convPinOrderPlan;
-    assert.throws(() => assert.equal(JSON.stringify(mutant(current, ['c'])), JSON.stringify({ kind: 'ok', order: ['c', 'a', 'b', 'd'] })), assert.AssertionError);
+    counterfact(() => {
+      const source = convPinOrderPlan.toString();
+      const changed = source.replace(/\.\.\.ids\s*,\s*\.\.\.current\.filter/, '...current.filter').replace(/!seen\.has\(id\)\)\s*\]/, '!seen.has(id)), ...ids]');
+      assert.notEqual(changed, source, 'найден якорь переноса неназванных вперёд');
+      const mutant = runInNewContext(`(${changed})`, { Set }) as typeof convPinOrderPlan;
+      assert.throws(() => assert.equal(JSON.stringify(mutant(current, ['c'])), JSON.stringify({ kind: 'ok', order: ['c', 'a', 'b', 'd'] })), assert.AssertionError);
+    });
   });
   it('чужая и незакреплённая беседы не становятся закрепами через перестановку', () => {
     for (const id of ['foreign', 'unpinned']) assert.deepEqual(convPinOrderPlan(['a', 'b'], ['b', id]), { kind: 'bad' });
@@ -23,11 +26,13 @@ describe('перестановка закреплённых бесед', () => {
   it('повтор id отклоняется, уникальный список принимается', () => {
     assert.deepEqual(convPinOrderPlan(['a', 'b'], ['b', 'b']), { kind: 'bad' });
     assert.deepEqual(convPinOrderPlan(['a', 'b'], ['b', 'a']), { kind: 'ok', order: ['b', 'a'] });
-    const source = convPinOrderPlan.toString();
-    const changed = source.replace(/seen\.has\(id\)\s*\|\|\s*/, '');
-    assert.notEqual(changed, source, 'проверка повтора найдена');
-    const mutant = runInNewContext(`(${changed})`, { Set }) as typeof convPinOrderPlan;
-    assert.throws(() => assert.equal(JSON.stringify(mutant(['a', 'b'], ['b', 'b'])), JSON.stringify({ kind: 'bad' })), assert.AssertionError);
+    counterfact(() => {
+      const source = convPinOrderPlan.toString();
+      const changed = source.replace(/seen\.has\(id\)\s*\|\|\s*/, '');
+      assert.notEqual(changed, source, 'проверка повтора найдена');
+      const mutant = runInNewContext(`(${changed})`, { Set }) as typeof convPinOrderPlan;
+      assert.throws(() => assert.equal(JSON.stringify(mutant(['a', 'b'], ['b', 'b'])), JSON.stringify({ kind: 'bad' })), assert.AssertionError);
+    });
   });
   it('тот же полный порядок, прежний префикс и пустой запрос не требуют записи', () => {
     for (const ids of [['a', 'b', 'c'], ['a'], []]) assert.deepEqual(convPinOrderPlan(['a', 'b', 'c'], ids), { kind: 'same' });
@@ -53,10 +58,12 @@ it('образец поиска отвергает пробелы и ищет п
   assert.equal(searchPattern(' \n\t '), null);
   assert.equal(searchPattern(' a%b_c\\ '), '%a\\%b\\_c\\\\%');
   assert.equal(searchPattern('Привет'), '%Привет%');
-  const source = searchPattern.toString(); const changed = source.replace(/q\.replace\(.+\)/, 'q');
-  assert.notEqual(changed, source);
-  const bad = runInNewContext(`(${changed})`) as typeof searchPattern;
-  assert.throws(() => assert.equal(bad('a%b_c\\'), '%a\\%b\\_c\\\\%'), assert.AssertionError);
+  counterfact(() => {
+    const source = searchPattern.toString(); const changed = source.replace(/q\.replace\(.+\)/, 'q');
+    assert.notEqual(changed, source);
+    const bad = runInNewContext(`(${changed})`) as typeof searchPattern;
+    assert.throws(() => assert.equal(bad('a%b_c\\'), '%a\\%b\\_c\\\\%'), assert.AssertionError);
+  });
 });
 
 it('цитата сохраняет выбранное смещение, находит текст после неверного offset и соблюдает 1024 UTF-16 знака', () => {
@@ -70,11 +77,13 @@ it('цитата сохраняет выбранное смещение, нах�
   assert.equal(resolveReplyQuote('есть текст', { text: 'чужой текст' }), null);
   assert.equal(resolveReplyQuote('есть текст', { text: '   ' }), null);
 
-  const source = resolveReplyQuote.toString();
-  const mutantSource = source.replace('text.length>REPLY_QUOTE_LIMIT', 'text.length>=REPLY_QUOTE_LIMIT');
-  assert.notEqual(mutantSource, source, 'точный предел является реальным условием функции');
-  const mutant = runInNewContext(`(${mutantSource})`, { REPLY_QUOTE_LIMIT: 1024 }) as typeof resolveReplyQuote;
-  assert.throws(() => assert.deepEqual(mutant('x'.repeat(1024), { text: 'x'.repeat(1024) }), { text: 'x'.repeat(1024), offset: 0 }), assert.AssertionError);
+  counterfact(() => {
+    const source = resolveReplyQuote.toString();
+    const mutantSource = source.replace('text.length>REPLY_QUOTE_LIMIT', 'text.length>=REPLY_QUOTE_LIMIT');
+    assert.notEqual(mutantSource, source, 'точный предел является реальным условием функции');
+    const mutant = runInNewContext(`(${mutantSource})`, { REPLY_QUOTE_LIMIT: 1024 }) as typeof resolveReplyQuote;
+    assert.throws(() => assert.deepEqual(mutant('x'.repeat(1024), { text: 'x'.repeat(1024) }), { text: 'x'.repeat(1024), offset: 0 }), assert.AssertionError);
+  });
 });
 import { runInNewContext } from 'node:vm';
 
@@ -87,19 +96,21 @@ it('большой эффект получает только аудитория
   assert.deepEqual(bigReactionTargets({ ...base, audience: ['actor'] }), []);
   assert.deepEqual(bigReactionTargets({ ...base, audience: ['peer'] }), ['peer']);
 
-  const source = bigReactionTargets.toString();
-  const noBigGuardSource = source.replace('if(!input.big||input.op!=="add")return[];', 'if(input.op!=="add")return[];');
-  assert.notEqual(noBigGuardSource, source);
-  const noBigGuard = runInNewContext(`(${noBigGuardSource})`) as typeof bigReactionTargets;
-  assert.throws(() => assert.equal(noBigGuard({ ...base, big: false }).join(','), ''), assert.AssertionError);
-  const allowRemoveSource = source.replace('if(!input.big||input.op!=="add")return[];', 'if(!input.big)return[];');
-  assert.notEqual(allowRemoveSource, source);
-  const allowRemove = runInNewContext(`(${allowRemoveSource})`) as typeof bigReactionTargets;
-  assert.throws(() => assert.equal(allowRemove({ ...base, op: 'remove' }).join(','), ''), assert.AssertionError);
-  const includeActorSource = source.replace('.filter(id=>id!==input.actorId)', '.filter(()=>true)');
-  assert.notEqual(includeActorSource, source);
-  const includeActor = runInNewContext(`(${includeActorSource})`) as typeof bigReactionTargets;
-  assert.throws(() => assert.equal(includeActor(base).join(','), 'peer'), assert.AssertionError);
+  counterfact(() => {
+    const source = bigReactionTargets.toString();
+    const noBigGuardSource = source.replace('if(!input.big||input.op!=="add")return[];', 'if(input.op!=="add")return[];');
+    assert.notEqual(noBigGuardSource, source);
+    const noBigGuard = runInNewContext(`(${noBigGuardSource})`) as typeof bigReactionTargets;
+    assert.throws(() => assert.equal(noBigGuard({ ...base, big: false }).join(','), ''), assert.AssertionError);
+    const allowRemoveSource = source.replace('if(!input.big||input.op!=="add")return[];', 'if(!input.big)return[];');
+    assert.notEqual(allowRemoveSource, source);
+    const allowRemove = runInNewContext(`(${allowRemoveSource})`) as typeof bigReactionTargets;
+    assert.throws(() => assert.equal(allowRemove({ ...base, op: 'remove' }).join(','), ''), assert.AssertionError);
+    const includeActorSource = source.replace('.filter(id=>id!==input.actorId)', '.filter(()=>true)');
+    assert.notEqual(includeActorSource, source);
+    const includeActor = runInNewContext(`(${includeActorSource})`) as typeof bigReactionTargets;
+    assert.throws(() => assert.equal(includeActor(base).join(','), 'peer'), assert.AssertionError);
+  });
 });
 import {
   attachmentAccess,
@@ -193,25 +204,33 @@ describe('G56 правила одного элемента альбома', () =
   it('контрфакт строгой границы одного элемента ловится последним видимым', () => {
     const p = albumInput({ scope: 'me', hidden: ['a:two', 'a:three'] });
     albumAssertion(albumRulesModule().albumItemDecision(p), 'whole', 'последний видимый удаляет сообщение');
-    const mutant = albumRulesModule("visible.length <= 1 ? 'whole' : 'hide'", "visible.length < 1 ? 'whole' : 'hide'");
-    albumFailure(mutant.albumItemDecision(p), 'hide', 'whole', 'последний видимый удаляет сообщение');
+    counterfact(() => {
+      const mutant = albumRulesModule("visible.length <= 1 ? 'whole' : 'hide'", "visible.length < 1 ? 'whole' : 'hide'");
+      albumFailure(mutant.albumItemDecision(p), 'hide', 'whole', 'последний видимый удаляет сообщение');
+    });
     const q = albumInput({ list: albumList.slice(0, 1) });
     albumAssertion(albumRulesModule().albumItemDecision(q), 'whole', 'последний общий удаляет сообщение');
-    const both = albumRulesModule("p.list.length <= 1 ? 'whole' : 'remove'", "p.list.length < 1 ? 'whole' : 'remove'");
-    albumFailure(both.albumItemDecision(q), 'remove', 'whole', 'последний общий удаляет сообщение');
+    counterfact(() => {
+      const both = albumRulesModule("p.list.length <= 1 ? 'whole' : 'remove'", "p.list.length < 1 ? 'whole' : 'remove'");
+      albumFailure(both.albumItemDecision(q), 'remove', 'whole', 'последний общий удаляет сообщение');
+    });
   });
   it('контрфакт потери проверки автора ловится разрешением чужой правки', () => {
     const p = albumInput({ authorId: 'b' });
     albumAssertion(albumRulesModule().albumItemDecision(p), 'forbidden', 'чужой альбом не редактируется');
-    const mutant = albumRulesModule("if (p.scope === 'both' && p.authorId !== p.viewerId) return 'forbidden';", '');
-    albumFailure(mutant.albumItemDecision(p), 'remove', 'forbidden', 'чужой альбом не редактируется');
+    counterfact(() => {
+      const mutant = albumRulesModule("if (p.scope === 'both' && p.authorId !== p.viewerId) return 'forbidden';", '');
+      albumFailure(mutant.albumItemDecision(p), 'remove', 'forbidden', 'чужой альбом не редактируется');
+    });
   });
   it('контрфакт пустого провода ловится сохранением именованных файлов рядом со старым без id', () => {
     // Один безымянный старый элемент делает gone.length < row.length: без guard удалятся все три закрытых файла.
     const list = [...albumList, {}];
     albumAssertion(albumRulesModule().removedByEdit(list, []), [], 'пустой провод не удаляет закрытые файлы');
-    const mutant = albumRulesModule('if (wire.length === 0) return [];', '');
-    albumFailure(mutant.removedByEdit(list, []), albumList, [], 'пустой провод не удаляет закрытые файлы');
+    counterfact(() => {
+      const mutant = albumRulesModule('if (wire.length === 0) return [];', '');
+      albumFailure(mutant.removedByEdit(list, []), albumList, [], 'пустой провод не удаляет закрытые файлы');
+    });
   });
 });
 
@@ -603,12 +622,14 @@ describe('порядок списка бесед с закрепами', () => {
     assert.ok(convListOrder({ ...pinnedOld, pinnedAt: undefined }, { ...pinnedNew, pinnedAt: null }) < 0, 'без закрепов остаётся сортировка по последнему сообщению');
 
     // Исполняемые контрфакты ловят оба типичных регресса: обратные даты закрепа и весь закреплённый блок внизу.
-    const source = convListOrder.toString();
-    const reversePinned = runInNewContext(`(${source.replace('pb.localeCompare(pa)', 'pa.localeCompare(pb)')})`) as typeof convListOrder;
-    assert.notEqual(reversePinned(pinnedNew, pinnedOld) < 0, true, 'мутант с обратным сравнением дат ломает порядок закрепов');
-    const pinLastSource = source.replace(/if\s*\(pa\s*===\s*null\)\s*return\s*1\s*;/, 'if(pa===null)return -1;').replace(/if\s*\(pb\s*===\s*null\)\s*return\s*-1\s*;/, 'if(pb===null)return 1;');
-    assert.notEqual(pinLastSource, source, 'якорь мутанта «закреплённые последними» найден');
-    const pinLast = runInNewContext(`(${pinLastSource})`) as typeof convListOrder;
-    assert.notEqual(pinLast(pinnedNew, recent) < 0, true, 'мутант с закрепами внизу ставит активную беседу выше закрепа');
+    counterfact(() => {
+      const source = convListOrder.toString();
+      const reversePinned = runInNewContext(`(${source.replace('pb.localeCompare(pa)', 'pa.localeCompare(pb)')})`) as typeof convListOrder;
+      assert.notEqual(reversePinned(pinnedNew, pinnedOld) < 0, true, 'мутант с обратным сравнением дат ломает порядок закрепов');
+      const pinLastSource = source.replace(/if\s*\(pa\s*===\s*null\)\s*return\s*1\s*;/, 'if(pa===null)return -1;').replace(/if\s*\(pb\s*===\s*null\)\s*return\s*-1\s*;/, 'if(pb===null)return 1;');
+      assert.notEqual(pinLastSource, source, 'якорь мутанта «закреплённые последними» найден');
+      const pinLast = runInNewContext(`(${pinLastSource})`) as typeof convListOrder;
+      assert.notEqual(pinLast(pinnedNew, recent) < 0, true, 'мутант с закрепами внизу ставит активную беседу выше закрепа');
+    });
   });
 });

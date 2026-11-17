@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -91,8 +92,10 @@ it('R303 контрфакт вставки без ника при конфлик
   conflict(rules);
   const anchor = 'owners.size > 1';
   conflict(mutated(anchor, anchor));
+  counterfact(() => {
   assert.throws(() => conflict(mutated(anchor, 'false')), (e: unknown) =>
     expectedAssertion(e, 'R303 конфликт команды адресуется выбранному боту', 'strictEqual') && e.actual === '/status' && e.expected === '/status@WeatherBot');
+  });
 });
 
 function prefix(r: Rules) {
@@ -222,48 +225,58 @@ it('R302 контрфакт поиска подстроки вместо пре�
   prefix(rules);
   const anchor = '.startsWith(q)';
   prefix(mutated(anchor, anchor));
+  counterfact(() => {
   const mutant = mutated(anchor, '.includes(q)');
   assert.throws(() => prefix(mutant), (e: unknown) =>
     expectedAssertion(e, 'R302 ищем только префикс, без регистра, сохраняя порядок бота', 'deepStrictEqual') &&
     Array.isArray(e.actual) && Array.isArray(e.expected) &&
     e.actual.map((c: { command: string }) => c.command).join(',') === 'status,restart,STop' &&
     e.expected.map((c: { command: string }) => c.command).join(',') === 'status,STop');
+  });
 });
 
 it('R302 контрфакт ограничения списка восемью действительно пойман', () => {
   allHundred(rules);
   const anchor = 'return commands.filter((c) => c.command.toLowerCase().startsWith(q));';
   allHundred(mutated(anchor, anchor));
+  counterfact(() => {
   const mutant = mutated(anchor,
     'return commands.filter((c) => c.command.toLowerCase().startsWith(q)).slice(0, 8);');
   assert.throws(() => allHundred(mutant), (e: unknown) =>
     expectedAssertion(e, 'R302 все сто команд видны без обрезания до восьми', 'deepStrictEqual') &&
     Array.isArray(e.actual) && e.actual.length === 8 && Array.isArray(e.expected) && e.expected.length === 100);
+  });
 });
 
 it('R302 контрфакт показа alert тостом действительно пойман', () => {
   alertWindow(rules);
   const anchor = "res.alert ? { kind: 'alert', text }";
   alertWindow(mutated(anchor, anchor));
+  counterfact(() => {
   const mutant = mutated(anchor, "res.alert ? { kind: 'toast', text }");
   assert.throws(() => alertWindow(mutant), (e: unknown) =>
     expectedAssertion(e, 'R302 alert открывает окно, а не тост', 'strictEqual') && e.actual === 'toast' && e.expected === 'alert');
+  });
 });
 
 it('R302 контрфакт тоста при timeout действительно пойман', () => {
   timeoutSilent(rules);
   const anchor = 'if (!res || res.timeout)';
   timeoutSilent(mutated(anchor, anchor));
+  counterfact(() => {
   const mutant = mutated(anchor, 'if (!res)');
   assert.throws(() => timeoutSilent(mutant), (e: unknown) =>
     expectedAssertion(e, 'R302 timeout молчит даже с текстом', 'strictEqual') && e.actual === 'toast' && e.expected === 'none');
+  });
 });
 
 it('R302 контрфакт молчаливой 409 действительно пойман', () => {
   staleVisible(rules);
   const anchor = "if (e?.status === 409) return 'stale';";
   staleVisible(mutated(anchor, anchor));
+  counterfact(() => {
   const mutant = mutated(anchor, "if (e?.status === 409) return 'silent';");
   assert.throws(() => staleVisible(mutant), (e: unknown) =>
     expectedAssertion(e, 'R302 409 показывает устаревшую кнопку, не молчит', 'strictEqual') && e.actual === 'silent' && e.expected === 'stale');
+  });
 });

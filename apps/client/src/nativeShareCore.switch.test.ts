@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { load, mutate, sourceOf } from './R304.testHarness';
@@ -86,6 +87,9 @@ for (const [title, anchor, replacement, check, marker] of [
   ['звук до видео', 'const outcome = await switchVideo(next);', 'if (audioRetarget) await audioRetarget(); const outcome = await switchVideo(next);', videoFirst, 'звук не меняется во время ожидания видео'],
   ['старый звук после отказа', "} catch (e) {\n          await stopAudio();", '} catch (e) {', failedRetarget, 'старый звук обязательно погашен'],
 ] as const) it(`R304 контрфакт: ${title} обнаруживается исходным сценарием`, async () => {
-  await check(source); await assert.rejects(check(mutate(source, anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(marker));
+  await check(source);
+  await counterfact(async () => {
+    await assert.rejects(check(mutate(source, anchor, replacement)),
+      e => e instanceof assert.AssertionError && e.message.includes(marker));
+  });
 });

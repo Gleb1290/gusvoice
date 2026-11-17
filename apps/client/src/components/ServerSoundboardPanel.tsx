@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { SoundboardQuota } from '@gusvoice/shared';
 import { api, type SoundboardClip } from '../api';
 import { nameFromFileName, SOUNDBOARD_NAME_MAX } from '../soundboardPick';
 import { playClip } from '../sounds';
@@ -21,7 +22,7 @@ import { Icon } from './Icon';
  * ⚠️ Пределы приезжают ОТ СЕРВЕРА, а не повторены здесь числами: иначе две стороны разошлись бы при
  * первой же правке, а разъехавшийся предел читается как каприз, а не как ошибка.
  */
-export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
+export function ServerSoundboardPanel({ serverId, canManageClips }: { serverId: string; canManageClips: boolean }) {
   const [clips, setClips] = useState<SoundboardClip[]>([]);
   const [limits, setLimits] = useState<{
     max: number;
@@ -30,6 +31,10 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
     defaultPriceCoins: number;
     maxPriceCoins: number;
   } | null>(null);
+  const [quota, setQuota] = useState<SoundboardQuota | null>(null);
+  const [quotaLimit, setQuotaLimit] = useState('');
+  const [quotaError, setQuotaError] = useState('');
+  const [quotaBusy, setQuotaBusy] = useState(false);
   const [name, setName] = useState('');
   /**
    * 🔴 Выбранный, но ещё НЕ залитый файл (порядок перевёрнут по запросу 05.09: сначала файл,
@@ -50,6 +55,8 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
       .then((r) => {
         if (!alive) return;
         setClips(r.clips);
+        setQuota(r.quota ?? null);
+        setQuotaLimit(r.quota ? String(r.quota.limit) : '');
         setLimits({
           max: r.max,
           maxBytes: r.maxBytes,
@@ -111,7 +118,9 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
       await api.uploadSoundboardClip(serverId, trimmed, file, wanted);
       // ⚠️ Перечитываем список, а не дописываем ответ заливки: ответ несёт только id/имя/ссылку, и
       // строка нового звука до перезахода показывала цену как `undefined`.
-      setClips((await api.listSoundboard(serverId)).clips);
+      const refreshed = await api.listSoundboard(serverId);
+      setClips(refreshed.clips);
+      setQuota(refreshed.quota ?? null);
       setName('');
       setPrice('');
       setPicked(null);
@@ -149,7 +158,9 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
     setBusy(true);
     try {
       await api.deleteSoundboardClip(serverId, clip.id);
-      setClips((v) => v.filter((c) => c.id !== clip.id));
+      const refreshed = await api.listSoundboard(serverId);
+      setClips(refreshed.clips);
+      setQuota(refreshed.quota ?? null);
     } catch (e) {
       toastError(e);
     } finally {
@@ -157,7 +168,26 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
     }
   }
 
-  const full = !!limits && clips.length >= limits.max;
+  const full = quota ? quota.used >= quota.limit : !!limits && clips.length >= limits.max;
+  async function saveQuota() {
+    const value = Number(quotaLimit);
+    if (!quotaLimit.trim() || !Number.isInteger(value) || value < 0 || value > 2_147_483_647) {
+      setQuotaError('Укажите целое число от 0 до 2 147 483 647.');
+      return;
+    }
+    setQuotaBusy(true);
+    setQuotaError('');
+    try {
+      await api.setSoundboardQuota(serverId, value);
+      const refreshed = await api.listSoundboard(serverId);
+      setClips(refreshed.clips);
+      setQuota(refreshed.quota ?? null);
+      setQuotaLimit(refreshed.quota ? String(refreshed.quota.limit) : '');
+      toast('success', 'Лимит сохранён');
+    } catch (e) {
+      setQuotaError(e instanceof Error ? e.message : 'Не удалось сохранить лимит');
+    } finally { setQuotaBusy(false); }
+  }
 
   return (
     <div className="settings-pane sbp">
@@ -166,12 +196,21 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
         Короткие звуки, которые любой участник может проиграть всем в голосовом канале. Выстрел
         стоит монет — этим он себя и сдерживает.
         {limits &&
-          ` До ${limits.max} звуков, не длиннее ${limits.maxSeconds} с и ${Math.round(limits.maxBytes / 1024)} КБ.`}
+          ` Не длиннее ${limits.maxSeconds} с и ${Math.round(limits.maxBytes / 1024)} КБ.`}
       </div>
+
+      {canManageClips && (quota ? <div className="muted" style={{ fontSize: 12 }}>
+        {quota.mode === 'per-user' ? 'Ваши звуки' : 'Звуки сервера'}: {quota.used} из {quota.limit}.
+      </div> : limits && <div className="muted" style={{ fontSize: 12 }}>Звуки сервера: {clips.length} из {limits.max}.</div>)}
+      {quota?.mode === 'per-user' && quota.canConfigure && <div className="sbp-add">
+        <label>Лимит звуков на человека <input type="number" min={0} max={2_147_483_647} step={1} value={quotaLimit} disabled={quotaBusy} onChange={(e) => setQuotaLimit(e.target.value)} /></label>
+        <button type="button" className="seg-mini" disabled={quotaBusy} onClick={() => void saveQuota()}>Сохранить лимит</button>
+      </div>}
+      {quotaError && <div className="error" role="alert">Не удалось сохранить лимит: {quotaError}</div>}
 
       {/* 🔴 Порядок: СНАЧАЛА файл, ПОТОМ имя (запрос 05.09). Пока файл не выбран, в строке
           вообще нет полей — придумывать подпись до выбора нечему. */}
-      <div className="sbp-add">
+      {canManageClips && <div className="sbp-add">
         <input
           ref={input}
           type="file"
@@ -201,11 +240,11 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
               placeholder="Название кнопки"
               maxLength={SOUNDBOARD_NAME_MAX}
               value={name}
-              disabled={busy}
+              disabled={busy || full}
               autoFocus
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && name.trim() && !busy) void upload(picked);
+                if (e.key === 'Enter' && name.trim() && !busy && !full) void upload(picked);
               }}
             />
             <input
@@ -222,7 +261,7 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
             <button
               type="button"
               className="seg-mini"
-              disabled={busy || !name.trim()}
+              disabled={busy || full || !name.trim()}
               onClick={() => void upload(picked)}
             >
               <Icon name="plus" size={14} /> Добавить
@@ -241,7 +280,7 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
             </button>
           </>
         )}
-      </div>
+      </div>}
       {/* Видно, ЧТО выбрано: иначе после выбора из вороха записей не отличить одну от другой. */}
       {picked && (
         <div className="muted" style={{ fontSize: 12, marginTop: -6 }}>
@@ -249,7 +288,11 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
         </div>
       )}
       {/* Отдельной строкой, а не отключённой кнопкой молча: «почему не жмётся» должно быть написано. */}
-      {full && <div className="muted" style={{ fontSize: 12 }}>Больше не поместится — удалите лишние.</div>}
+      {canManageClips && full && <div className="muted" style={{ fontSize: 12 }}>
+        {quota?.mode === 'per-user'
+          ? quota.limit === 0 ? 'Добавление звуков выключено администратором.' : 'Ваш лимит исчерпан. Удалите один из своих звуков.'
+          : 'Общий лимит сервера исчерпан.'}
+      </div>}
 
       {clips.length === 0 ? (
         <div className="muted" style={{ fontSize: 12 }}>Пока пусто.</div>
@@ -262,7 +305,7 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
                   чтобы сдвиг ставки его не переоценивал, — но эти цены ставят руками и по одному
                   звуку, глядя на балансы людей, и там минуты только мешают.
                   Рядом справочно минуты — чтобы видеть, во что цена обходится сегодня. */}
-              <input
+              {canManageClips && <input
                 type="number"
                 className="sbp-price-input"
                 defaultValue={c.ownPriceCoins ?? ''}
@@ -272,14 +315,14 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
                 max={limits?.maxPriceCoins}
                 disabled={busy}
                 onBlur={(e) => void savePrice(c, e.target.value)}
-              />
+              />}
               <span className="sbp-price-coins">≈ {c.priceMinutes} мин</span>
               {/* Прослушать — локально и только себе: это проверка «тот ли файл залил», а не выстрел,
                   и уж точно не повод разбудить весь канал. */}
               <button type="button" className="sound-icon-btn" title="Послушать себе" onClick={() => playClip(c.url)}>
                 <Icon name="volume" size={14} />
               </button>
-              <button
+              {canManageClips && <button
                 type="button"
                 className="sound-icon-btn danger"
                 title="Удалить"
@@ -287,7 +330,7 @@ export function ServerSoundboardPanel({ serverId }: { serverId: string }) {
                 onClick={() => void remove(c)}
               >
                 <Icon name="trash" size={14} />
-              </button>
+              </button>}
             </div>
           ))}
         </div>

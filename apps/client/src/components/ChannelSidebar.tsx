@@ -377,7 +377,7 @@ export function ChannelSidebar() {
               `liveVoice` существует только для канала, в котором ты сидишь. */}
           {isVoice && occupancy[c.id] ? <ChannelTimer occupancy={occupancy[c.id]} /> : null}
           {/* Mobile (design-step8 A): an explicit honey "Войти" button on voice channels you're not in. */}
-          {isVoice && isMobile() && voice?.channelId !== c.id && (
+          {isVoice && (isMobile() || phoneLayout) && voice?.channelId !== c.id && (
             <button
               className="ch-join"
               title="Войти в голосовой канал"

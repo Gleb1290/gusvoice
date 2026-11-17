@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import ts from 'typescript';
@@ -111,6 +112,7 @@ it('R260 гейт влияет только на свою обводку, чуж
 
 it('R260 контрфакт: удаление перепривязки замечается адресно, даже если sync продолжает существовать', () => {
   rebind(voiceSource);
+  counterfact(() => {
   const body = tick(voiceSource);
   const matches = descendants(body, n => ts.isIfStatement(n) && compact(n.expression) === 'isSelf&&micOn');
   assert.equal(matches.length, 1);
@@ -118,4 +120,5 @@ it('R260 контрфакт: удаление перепривязки заме�
   const changed = voiceSource.slice(0, removed.getStart()) + voiceSource.slice(removed.getEnd());
   assert.throws(() => rebind(changed), error => error instanceof assert.AssertionError
     && error.message.includes('R260:tick-перепривязывает-свой-трек'));
+  });
 });

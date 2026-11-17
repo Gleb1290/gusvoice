@@ -1,10 +1,12 @@
+import { counterfact, mutantsEnabled } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { after, before, it } from 'node:test';
+import { it, after, before } from 'node:test';
 import { spawn } from 'node:child_process';
+import { setTimeout as nativeSetTimeout, clearTimeout as nativeClearTimeout } from 'node:timers';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -59,7 +61,8 @@ async function createMenuServer(mutant?: keyof typeof MUTANTS) {
 before(async () => {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  server = await createMenuServer(process.env.GUSVOICE_CONTEXT_MUTANT as keyof typeof MUTANTS | undefined);
+  const mutation = mutantsEnabled() ? process.env.GUSVOICE_CONTEXT_MUTANT as keyof typeof MUTANTS | undefined : undefined;
+  server = mutation ? (await counterfact(() => createMenuServer(mutation), { timeoutMs: 60_000 }))! : await createMenuServer();
   const module = await server.ssrLoadModule('/src/components/ContextMenu.tsx');
   ContextMenu = module.ContextMenu; MenuItem = module.MenuItem;
 });
@@ -112,28 +115,42 @@ it('якорное меню пропускает синхронные актив
 it('меню с spotlight пропускает синхронные активации наружу, но поглощает следующий промах', async () => verify('spotlight'));
 
 for (const mutant of Object.keys(MUTANTS) as Array<keyof typeof MUTANTS>) {
-  it(`исходниковый мутант ContextMenu: ${mutant}`, async () => {
-    if (process.env.GUSVOICE_CONTEXT_MUTANT === mutant) {
-      let scenarioFailure: unknown;
-      try { await verify('anchor'); } catch (error) { scenarioFailure = error; }
-      assert.ok(scenarioFailure instanceof assert.AssertionError, `сценарий обнаружил мутант ${mutant}`);
-      assert.ok(scenarioFailure.message.startsWith(MUTANT_ASSERTIONS[mutant]),
-        `мутант ${mutant} обнаружен ожидаемым поведенческим контрфактом: ${scenarioFailure.message}`);
-      return;
+  it(`исходниковый мутант ContextMenu: ${mutant}`, { timeout: 60_000 }, async () => {
+    if (mutantsEnabled() && process.env.GUSVOICE_CONTEXT_MUTANT === mutant) {
+      return counterfact(async () => {
+        let scenarioFailure: unknown;
+        try { await verify('anchor'); } catch (error) { scenarioFailure = error; }
+        assert.ok(scenarioFailure instanceof assert.AssertionError, `сценарий обнаружил мутант ${mutant}`);
+        assert.ok(scenarioFailure.message.startsWith(MUTANT_ASSERTIONS[mutant]),
+          `мутант ${mutant} обнаружен ожидаемым поведенческим контрфактом: ${scenarioFailure.message}`);
+      }, { timeoutMs: 60_000 });
     }
     await verify('anchor');
-    const env: NodeJS.ProcessEnv = { ...process.env, GUSVOICE_CONTEXT_MUTANT: mutant };
-    delete env.NODE_TEST_CONTEXT;
-    const pattern = `^исходниковый мутант ContextMenu: ${mutant}$`;
-    const child = spawn(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', '--test-name-pattern', pattern, fileURLToPath(import.meta.url)],
-      { cwd: fileURLToPath(new URL('../..', import.meta.url)), env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => { output += chunk; }); child.stderr.on('data', (chunk: string) => { output += chunk; });
-    const status = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
-    assert.equal(status, 0, `сценарий должен обнаружить мутант ожидаемой ошибкой: ${mutant}\n${output}`);
-    assert.match(output, /# pass 1(?:\r?\n|$)/, 'дочерний сценарий завершился успешно только потому, что проверка поймала регрессию');
+    await counterfact(async () => {
+      const env: NodeJS.ProcessEnv = { ...process.env, GUSVOICE_CONTEXT_MUTANT: mutant };
+      delete env.NODE_TEST_CONTEXT;
+      const pattern = `^исходниковый мутант ContextMenu: ${mutant}$`;
+      const child = spawn(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', '--test-name-pattern', pattern, fileURLToPath(import.meta.url)],
+        { cwd: fileURLToPath(new URL('../..', import.meta.url)), env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let outputTail = Buffer.alloc(0);
+      const collect = (chunk: Buffer) => { outputTail = Buffer.concat([outputTail, chunk]).subarray(-16 * 1024); };
+      child.stdout.on('data', collect); child.stderr.on('data', collect);
+      const finished = new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+      let timer: ReturnType<typeof nativeSetTimeout> | undefined;
+      try {
+        const status = await Promise.race([finished, new Promise<never>((_, reject) => {
+          timer = nativeSetTimeout(() => reject(new Error(`Таймаут процесса мутанта ContextMenu: ${mutant}\n${outputTail.toString('utf8')}`)), 45_000);
+        })]);
+        const output = outputTail.toString('utf8');
+        assert.equal(status, 0, `сценарий должен обнаружить мутант ожидаемой ошибкой: ${mutant}\n${output}`);
+        assert.match(output, /# pass 1(?:\r?\n|$)/, 'дочерний сценарий завершился успешно только потому, что проверка поймала регрессию');
+      } finally {
+        if (timer !== undefined) nativeClearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }
+    }, { timeoutMs: 60_000 });
   });
 }
 
-after(async () => { await server?.close(); GlobalRegistrator.unregister(); });
+after(async () => {
+await server?.close(); GlobalRegistrator.unregister(); });

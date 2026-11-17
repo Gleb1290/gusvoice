@@ -1,7 +1,8 @@
+import { it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { it } from 'node:test';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { act, createElement } from 'react';
 import type { ViteDevServer } from 'vite';
 import type { DmChannel, User } from '@gusvoice/shared';
@@ -153,12 +154,14 @@ async function isolated(name: string) {
 }
 type Probe = (runtime?: ViteDevServer) => Promise<void>;
 function mutant(name: string, target: string, from: string, to: string, probe: Probe, message: string, actual: unknown, expected: unknown) {
-  it(name, async () => {
+  it(name, { timeout: 60_000 }, async () => {
     await probe(); // Оригинал обязан пройти до любой попытки засчитать мутант.
-    if (process.env.GUSVOICE_R297_DM_MUTANT !== name) return isolated(name);
-    const extra = await h.paneServer(source => mutate(source, from, to), target);
-    try { await assert.rejects(() => probe(extra), assertion(message, actual, expected)); }
-    finally { await extra.close(); }
+    await counterfact(async () => {
+      if (process.env.GUSVOICE_R297_DM_MUTANT !== name) return isolated(name);
+      const extra = await h.paneServer(source => mutate(source, from, to), target);
+      try { await assert.rejects(() => probe(extra), assertion(message, actual, expected)); }
+      finally { await extra.close(); }
+    }, { timeoutMs: 60000 });
   });
 }
 mutant('R297 контрфакт: бот-гейт снят', 'DmChatView', 'peerBot && !failed && messages.length === 0', 'false && !failed && messages.length === 0',

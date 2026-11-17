@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -64,8 +65,10 @@ it('голос и активный звонок сохраняют присут�
     assert.equal(api.presentForPeers({ visible: true, idle: true, inVoice: false, inCall: false }), false);
   };
   check(fixture().api);
-  assert.throws(() => check(fixture((s) => s.replace('(p.visible && !p.idle) || p.inVoice || p.inCall', '(p.visible && !p.idle) && p.inVoice && p.inCall')).api),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('голос независимо сохраняет присутствие'));
+  counterfact(() => {
+    assert.throws(() => check(fixture((s) => s.replace('(p.visible && !p.idle) || p.inVoice || p.inCall', '(p.visible && !p.idle) && p.inVoice && p.inCall')).api),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('голос независимо сохраняет присутствие'));
+  });
 });
 
 it('ровно 30000 мс уже простой, на миллисекунду раньше ещё присутствует', () => {
@@ -77,8 +80,10 @@ it('ровно 30000 мс уже простой, на миллисекунду �
     assert.equal(api.presenceIdle(100, 99), false);
   };
   check(fixture().api);
-  assert.throws(() => check(fixture((s) => s.replace('>= PRESENCE_IDLE_MS', '> PRESENCE_IDLE_MS')).api),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('граница 30 секунд включительна'));
+  counterfact(() => {
+    assert.throws(() => check(fixture((s) => s.replace('>= PRESENCE_IDLE_MS', '> PRESENCE_IDLE_MS')).api),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('граница 30 секунд включительна'));
+  });
 });
 
 it('телефон и касательный браузер без мыши не считают простой, обычный ПК считает', () => {
@@ -88,8 +93,10 @@ it('телефон и касательный браузер без мыши не
     assert.equal(fixture(change, false, false).api.idleApplies(), true);
   };
   check();
-  assert.throws(() => check((s) => s.replace('if (isMobile()) return false;', 'if (isMobile()) return true;')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('телефон не считает простой'));
+  counterfact(() => {
+    assert.throws(() => check((s) => s.replace('if (isMobile()) return false;', 'if (isMobile()) return true;')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('телефон не считает простой'));
+  });
 });
 
 function visibleSender() {
@@ -114,10 +121,12 @@ it('30 секунд без ввода отправляют visible false, пер
     await f.advance(30000); assert.deepEqual(wire.frames.at(-1), { t: 'visible', on: false });
   };
   await check();
-  await assert.rejects(() => check((s) => s.replace('  arm(PRESENCE_IDLE_MS);\n}', '}')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('простой отправляет visible false'));
-  await assert.rejects(() => check((s) => s.replace('      idleNow = false;\n      check();', '      /* mutant: ввод не возвращает присутствие */')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('ввод возвращает visible true'));
+  await counterfact(async () => {
+    await assert.rejects(() => check((s) => s.replace('  arm(PRESENCE_IDLE_MS);\n}', '}')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('простой отправляет visible false'));
+    await assert.rejects(() => check((s) => s.replace('      idleNow = false;\n      check();', '      /* mutant: ввод не возвращает присутствие */')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('ввод возвращает visible true'));
+  });
 });
 
 it('на телефоне нет таймера простоя, скрытие и возвращение всё равно меняют присутствие', async () => {

@@ -15,8 +15,9 @@ import { api } from '../api';
 import { serverSharedMedia } from '../convSyncRules';
 import { useDialogChrome } from '../dialogChrome';
 import { requestFeedJump } from '../feedJump';
-import { openAttachmentFile, sizeText } from '../fileActions';
+import { attachmentKey, fileJobOf, openAttachmentFile, progressText, sizeText, subscribeFileJobs } from '../fileActions';
 import { viewerDate } from '../mediaViewerRules';
+import { attachmentTarget, desktopFileOpenAvailable, isOpeningDownloadedFile, openDownloadedFile, subscribeDownloadedFileOpening } from '../pcDownloads';
 import { usePhoneLayout } from '../phoneLayout';
 import {
   copyingRefusal,
@@ -456,18 +457,30 @@ export function FileRow({ it, convId, onLeave, source }: { it: SharedItem; convI
   const a = it.att!;
   // Э3 (#141): копия ещё едет — в подписи «загружается» (как у карточки в ленте); нажатие скажет об этом тостом (`fileActions.run`).
   const copying = a.fedState === 'copying';
+  const desktop = desktopFileOpenAvailable() && !copying;
+  const key = desktop ? attachmentKey(a) : '';
+  const job = useSyncExternalStore(subscribeFileJobs, () => desktop ? fileJobOf(key) : null, () => null);
+  const opening = useSyncExternalStore(subscribeDownloadedFileOpening, () => desktop && isOpeningDownloadedFile(key), () => false);
+  const onClick = () => {
+    if (desktop && isOpeningDownloadedFile(key)) return;
+    if (desktop) void openDownloadedFile(attachmentTarget(a));
+    else openAttachmentFile(a);
+  };
   return (
     <div className="smedia-item">
-      <button type="button" className="smedia-item-main" onClick={() => openAttachmentFile(a)} title={a.name}>
+      <button type="button" className={opening ? 'smedia-item-main att-file-opening' : 'smedia-item-main'} onClick={onClick}
+        title={opening ? 'Открывается…' : job ? 'Отменить загрузку' : a.name} aria-busy={opening || undefined} aria-disabled={opening || undefined}>
         <span className="smedia-file-ico" aria-hidden="true">
-          {fileBadge(a.name)}
+          {job ? <Icon name="close" size={16} /> : fileBadge(a.name)}
         </span>
         <span className="smedia-item-text">
           <span className="smedia-item-title">{a.name}</span>
           <span className="smedia-item-sub">
-            {sizeText(a.size)} · {copying ? 'загружается · ' : ''}
-            {source ? `${source} · ` : ''}
-            {viewerDate(it.msg.createdAt)}
+            {opening ? 'Открывается…' : <>
+              {job ? progressText(job.loaded, job.total) : sizeText(a.size)} · {copying ? 'загружается · ' : ''}
+              {source ? `${source} · ` : ''}
+              {viewerDate(it.msg.createdAt)}
+            </>}
           </span>
         </span>
       </button>

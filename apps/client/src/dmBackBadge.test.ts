@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as rules from './dmBackBadge';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 function mutant(from: string, to: string): typeof rules {
   const source = readFileSync(new URL('./dmBackBadge.ts', import.meta.url), 'utf8');
@@ -23,8 +24,10 @@ it('бейдж считает только другие беседы с флаг
     assert.equal(api.dmBackBadgeCount([{ id: 'x', unread: 2 }], ['x'], null), 2);
   };
   check(rules);
+  counterfact(() => {
   for (const api of [mutant('d.id === currentDmId || ', ''), mutant('!unreadDms.includes(d.id)', 'false'), mutant('d.unread : 1', 'd.unread : 0')])
     assert.throws(() => check(api), assert.AssertionError);
+  });
 });
 
 it('ровно 99 показываются числом, только 100 и выше сокращаются', () => {
@@ -36,5 +39,7 @@ it('ровно 99 показываются числом, только 100 и в�
     assert.equal(api.dmBackBadgeLabel(999), '99+');
   };
   check(rules);
+  counterfact(() => {
   assert.throws(() => check(mutant('n > 99', 'n >= 99')), assert.AssertionError);
+  });
 });

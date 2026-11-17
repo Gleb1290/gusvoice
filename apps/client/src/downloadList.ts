@@ -42,9 +42,12 @@ function set(next: readonly DownloadEntry[]): void {
 }
 
 function release(e: DownloadEntry): void {
-  if (!e.href) return;
+  if (e.href && !pendingNativeSaves.has(e.href)) releaseHref(e.href);
+}
+
+function releaseHref(href: string): void {
   try {
-    URL.revokeObjectURL(e.href);
+    URL.revokeObjectURL(href);
   } catch {
     /* нечего освобождать */
   }
@@ -122,6 +125,41 @@ export function opensInBrowser(type: string): boolean {
 /** Сколько путей «ссылка → файл на диске» держим (хватает на сеанс; старые уходят первыми). */
 const SAVED_BY_URL_MAX = 200;
 const savedByUrl = new Map<string, string>();
+const savedByKey = new Map<string, { path: string; source: string }>();
+const pendingNativeSaves = new Map<string, { key: string; timer?: ReturnType<typeof setTimeout> }>();
+
+/** Пока WebView2 пишет на диск или ждёт выбора папки, повторно ту же загрузку не запускаем. */
+export function nativeSavePending(key: string): boolean {
+  return [...pendingNativeSaves.values()].some((save) => save.key === key);
+}
+
+export function beginNativeSave(key: string, href: string): void {
+  pendingNativeSaves.set(href, { key });
+  waitForNativeSave(href);
+}
+
+/** Освободить ожидание, если браузер так и не передал клик нативному хуку. */
+export function waitForNativeSave(href: string): void {
+  const save = pendingNativeSaves.get(href);
+  if (!save) return;
+  clearTimeout(save.timer);
+  save.timer = setTimeout(() => finishNativeSave(href), 10_000);
+}
+
+export function nativeSaveAcknowledged(url?: string): void {
+  const save = url ? pendingNativeSaves.get(url) : undefined;
+  if (save) {
+    clearTimeout(save.timer);
+    save.timer = undefined;
+  }
+}
+
+export function finishNativeSave(url?: string): void {
+  if (!url || !pendingNativeSaves.has(url)) return;
+  nativeSaveAcknowledged(url);
+  pendingNativeSaves.delete(url);
+  if (!list.some((e) => e.href === url)) releaseHref(url);
+}
 
 /** Имя файла из пути Windows или POSIX. */
 function baseNameOf(path: string): string {
@@ -152,6 +190,15 @@ export function noteSavedFile(f: { url?: string; path: string }): void {
     }
   }
   let hit = url ? list.find((e) => e.href === url) : undefined;
+  const key = pendingNativeSaves.get(url)?.key ?? (hit?.state === 'done' ? hit.key : undefined);
+  if (key && url.startsWith('blob:')) {
+    savedByKey.delete(key);
+    savedByKey.set(key, { path: f.path, source: url });
+    if (savedByKey.size > SAVED_BY_URL_MAX) {
+      const first = savedByKey.keys().next().value;
+      if (first !== undefined) savedByKey.delete(first);
+    }
+  }
   if (!hit && (!url || url.startsWith('blob:'))) {
     const onDisk = baseNameOf(f.path);
     hit = list.find((e) => e.state === 'done' && !e.path && sameSavedName(e.name, onDisk));
@@ -165,4 +212,9 @@ export function noteSavedFile(f: { url?: string; path: string }): void {
  */
 export function savedPathOf(key: string, url?: string): string | undefined {
   return list.find((e) => e.key === key && e.state === 'done' && e.path)?.path ?? (url ? savedByUrl.get(url) : undefined);
+}
+
+/** Для открытия нужна точная привязка к загрузке вложения, без подбора по имени или сетевому URL. */
+export function savedDownloadOf(key: string): { path: string; source: string } | undefined {
+  return savedByKey.get(key);
 }

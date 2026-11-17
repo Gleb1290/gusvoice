@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
@@ -89,10 +90,10 @@ it('на тач-экране иконка не раскрывает панель
     await act(async () => { Simulate.mouseEnter(host.querySelector('.trigger')!); await wait(220); });
     assert.equal(counts.open, 0, 'у устройства без hover панель остаётся закрытой');
   });
-  await assert.rejects(() => mounted(mutantHook(), true, async (host, counts) => {
+  await counterfact(() => assert.rejects(() => mounted(mutantHook(), true, async (host, counts) => {
     await act(async () => { Simulate.mouseEnter(host.querySelector('.trigger')!); await wait(100); });
     assert.equal(counts.open, 0, 'до порога панель ещё должна быть закрыта');
-  }), assert.AssertionError, 'исполняемый мутант с нулевой задержкой проходит через тот же DOM/React сценарий');
+  }), assert.AssertionError, 'исполняемый мутант с нулевой задержкой проходит через тот же DOM/React сценарий'));
 });
 
 it('закрепление закрывает hover-панель и гасит click, отказ оставить её открытой', async () => {
@@ -118,7 +119,6 @@ it('закрепление закрывает hover-панель и гасит c
   const source = readFileSync(new URL('./hoverPanel.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const original = 'if (opts.current.pin?.()) opts.current.close();';
   assert.ok(source.includes(original), 'найдено реальное условие закрытия после решения pin');
-  const mutant = original.replace('if (opts.current.pin?.()) ', '');
   const invoke = (statement: string, pinned: boolean) => {
     let closed = 0;
     runInNewContext(statement, { opts: { current: { pin: () => pinned, close: () => { closed++; } } } });
@@ -126,7 +126,10 @@ it('закрепление закрывает hover-панель и гасит c
   };
   assert.equal(invoke(original, false), 0, 'исходное условие не закрывает при отказе');
   assert.equal(invoke(original, true), 1, 'исходное условие закрывает после успешного закрепления');
-  assert.equal(invoke(mutant, false), 1, 'исполняемый мутант вызывает close без результата pin');
+  counterfact(() => {
+    const mutant = original.replace('if (opts.current.pin?.()) ', '');
+    assert.equal(invoke(mutant, false), 1, 'исполняемый мутант вызывает close без результата pin');
+  });
 });
 
 function expressionHoverSelectors() {

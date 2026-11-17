@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { React, environment, icon, load, mutate, sourceOf } from './R171.phoneHarness';
@@ -22,7 +23,7 @@ async function scene(options: Scenario, raw = source) {
       conv: { summaries: { group: { former: options.former, fedGroupHost: options.foreign ? { instanceId: 'neighbor', down: false } : null } } } };
     const useStore = Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state });
     const noView = () => null;
-    const mod = load<typeof Dialogs>(raw, {
+    const mod = load<typeof Dialogs>(new URL('./GroupDialogs.tsx', import.meta.url), raw, {
       '../api': { api: { convGroupHistory: async (id: string, visible: boolean) => { calls.push([id, visible]); await pending; } } },
       '../confirm': { confirmAction: outside }, '../dialogChrome': { useDialogChrome: () => ({ current: null }) },
       '../dmRules': dmRules, '../groupChatRules': groupRules, '../contactRules': contactRules,
@@ -54,7 +55,9 @@ for (const options of [{}, { history: true }, { owner: false }, { former: true }
   it(`R304 история новых участников в настоящем GroupDialogs: ${JSON.stringify(options)}`, async () => { await scene(options); });
 it('R304 контрфакт: переключатель рядовому участнику обнаруживается настоящей разметкой', async () => {
   await scene({ owner: false });
-  await assert.rejects(scene({ owner: false }, mutate(source, 'owner && !fedHost && !former && group.historyForNew !== undefined',
-    '!fedHost && !former && group.historyForNew !== undefined')),
-  e => e instanceof assert.AssertionError && e.message.includes('только у действующего владельца'));
+  await counterfact(async () => {
+    await assert.rejects(scene({ owner: false }, mutate(source, 'owner && !fedHost && !former && group.historyForNew !== undefined',
+      '!fedHost && !former && group.historyForNew !== undefined')),
+    e => e instanceof assert.AssertionError && e.message.includes('только у действующего владельца'));
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -138,9 +139,12 @@ for (const mutant of [
   { name: 'порог снижен до одной неудачи', from: 'const DOWN_AFTER_FAILS = 2;', to: 'const DOWN_AFTER_FAILS = 1;', check: (raw: string) => twoFailures('network', raw), prefix: 'R234-bg-first:', actual: true, expected: undefined },
   { name: 'успех сохраняет down из старой записи', from: 'state[link.instanceId] = { servers: sum.servers, dms: sum.dms };', to: 'state[link.instanceId] = { ...state[link.instanceId], servers: sum.servers, dms: sum.dms };', check: recovery, prefix: 'R234-bg-recovery:', actual: true, expected: undefined },
 ]) it(`R234 контрфакт целого bgGateways: ${mutant.name}`, async () => {
-  await mutant.check(source); assert.equal(source.split(mutant.from).length - 1, 1);
+  await mutant.check(source);
+  await counterfact(async () => {
+  assert.equal(source.split(mutant.from).length - 1, 1);
   await assert.rejects(() => mutant.check(source.replace(mutant.from, mutant.to)), e => e instanceof assert.AssertionError
     && e.message.startsWith(mutant.prefix) && e.operator === 'strictEqual' && e.actual === mutant.actual && e.expected === mutant.expected);
+  });
 });
 
 async function backgroundBroadcast(flag: boolean | null | undefined, content = '@everyone', raw = source) {
@@ -175,8 +179,11 @@ it('R279 фоновый шлюз считает разрешённые и ста
 });
 it('R279 игнорирование серверного запрета обнаруживается настоящим фоновым шлюзом', async () => {
   // Стенд передаёт кадр через onmessage всего модуля, а не повторяет формулу подсчёта.
-  await backgroundSilent(); const from = 'msg.message.mentionEveryone !== false';
+  await backgroundSilent();
+  await counterfact(async () => {
+  const from = 'msg.message.mentionEveryone !== false';
   assert.equal(source.split(from).length - 1, 1);
   await assert.rejects(() => backgroundSilent(source.replace(from, 'true')),
     (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 фоновый шлюз не добавляет'));
+  });
 });

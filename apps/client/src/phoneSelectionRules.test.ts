@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -15,11 +16,13 @@ it('user-select берётся у первого явного предка, auto
   };
   check(rules);
   const source = readFileSync(new URL('./phoneSelectionRules.ts', import.meta.url), 'utf8');
-  for (const [from, to] of [["v && v !== 'auto'", 'v'], ['if (v && v !== \'auto\') return v;', "if (v === 'none') return v;"]]) {
-    assert.ok(source.includes(from)); const module = { exports: {} };
-    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
-    assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of [["v && v !== 'auto'", 'v'], ['if (v && v !== \'auto\') return v;', "if (v === 'none') return v;"]]) {
+      assert.ok(source.includes(from)); const module = { exports: {} };
+      runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+      assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
+    }
+  });
 });
 
 it('снимается только запрещённое выделение интерфейса телефона, поля и разрешённый текст сохраняются', () => {
@@ -31,10 +34,12 @@ it('снимается только запрещённое выделение и
   };
   check(rules);
   const source = readFileSync(new URL('./phoneSelectionRules.ts', import.meta.url), 'utf8');
-  for (const [a,b] of [['!s.phone || ', ''], ['s.collapsed || ', ''], [' || s.fieldFocused', ''], ["=== 'none'", "!== 'text'"]]) {
-    assert.ok(source.includes(a), 'мутант меняет действующую ветку');
-    const module = { exports: {} };
-    runInNewContext(ts.transpileModule(source.replace(a,b), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
-    assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [a,b] of [['!s.phone || ', ''], ['s.collapsed || ', ''], [' || s.fieldFocused', ''], ["=== 'none'", "!== 'text'"]]) {
+      assert.ok(source.includes(a), 'мутант меняет действующую ветку');
+      const module = { exports: {} };
+      runInNewContext(ts.transpileModule(source.replace(a,b), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+      assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
+    }
+  });
 });

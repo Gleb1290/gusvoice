@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { before, after, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import { act } from 'react';
 import * as jsx from 'react/jsx-runtime';
@@ -38,7 +40,7 @@ async function scene(kind: Kind, copying: boolean, fill = false, source = raw) {
   try {
     const module = { exports: {} };
     runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-      { module, exports: module.exports, require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `явный импорт ${id}`); return deps[id]; } });
+      { module, exports: module.exports, require: testVmImports(new URL('./AttachmentView.tsx', import.meta.url), deps) });
     const Component = (module.exports as typeof import('./AttachmentView')).AttachmentView;
     await act(async () => root.render(React.createElement(Component, { a: attachment(kind, copying), fill, onOpen: () => { opened++; } })));
     if (!copying) {
@@ -85,8 +87,11 @@ it('R194 копирующееся фото в альбоме не перебив
 });
 it('R194 контрфакт снятого раннего copying-выхода ловится обращением к URL', async () => {
   // Класс ошибки: файл ещё едет, а компонент уже обращается к выдаче.
-  await scene('photo', true); const anchor = "if (a.fedState === 'copying') return <CopyingAttachment a={a} fill={fill} />;";
+  await scene('photo', true);
+  await counterfact(async () => {
+  const anchor = "if (a.fedState === 'copying') return <CopyingAttachment a={a} fill={fill} />;";
   assert.equal(raw.split(anchor).length - 1, 1, 'единственный copying-якорь');
   await assert.rejects(scene('photo', true, false, raw.replace(anchor, '')),
     (e: unknown) => e instanceof assert.AssertionError && e.message.includes('ещё не приехавший файл не запрашивает URL'));
+  });
 });

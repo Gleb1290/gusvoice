@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -95,8 +96,10 @@ function kindPresence(raw = hostSource) {
 it('R233 IPC передаёт kind только при непустом виде и сохраняет подпись отдельно', () => kindPresence());
 it('R233 контрфакт IPC: отсутствующий вид всё равно передан ключом undefined', () => {
   kindPresence(hostSource);
-  const from = '...(d.kind ? { kind: d.kind } : {}),';
-  assert.equal(hostSource.split(from).length - 1, 1);
-  assert.throws(() => kindPresence(hostSource.replace(from, 'kind: d.kind,')), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R233-host-kind-presence:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  counterfact(() => {
+    const from = '...(d.kind ? { kind: d.kind } : {}),';
+    assert.equal(hostSource.split(from).length - 1, 1);
+    assert.throws(() => kindPresence(hostSource.replace(from, 'kind: d.kind,')), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R233-host-kind-presence:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
@@ -198,9 +199,11 @@ for (const [name, before, after, failure] of [
 ] as const) {
   it(`проверка разрешения снимка убивает мутант «${name}»`, async () => {
     const source = recordingSource();
-    assert.equal(source.split(before).length - 1, 1, 'мутант меняет ровно одно место настоящего модуля');
     await verifySnapshotResolution(source);
+    await counterfact(async () => {
+    assert.equal(source.split(before).length - 1, 1, 'мутант меняет ровно одно место настоящего модуля');
     await assert.rejects(verifySnapshotResolution(source.replace(before, after)), failure);
+    });
   });
 }
 
@@ -246,9 +249,11 @@ it('старый вызов записи без opts сохраняет преж
 it('проверка записи убивает мутант без передачи softLimit в recordingFull', async () => {
   const source = recordingSource();
   const original = 'recordingFull(size, opts.softLimit)';
-  assert.equal(source.split(original).length - 1, 1, 'мутант меняет ровно один вызов');
   await verifyCustomRecordingLimit(source);
+  await counterfact(async () => {
+  assert.equal(source.split(original).length - 1, 1, 'мутант меняет ровно один вызов');
   await assert.rejects(verifyCustomRecordingLimit(source.replace(original, 'recordingFull(size)')), /старые 24 МиБ/);
+  });
 });
 
 it('mic:false не запрашивает звук, а mic:true и старый вызов без opts сохраняют аудиотрек', async () => {

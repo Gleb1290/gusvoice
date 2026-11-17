@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -36,4 +37,4 @@ for (const [name, from, to, failure] of [
   ['скрытый вход считается видимым', 'counted: !hidden', 'counted: true', 'скрытый open'],
   ['возврат не отменяет таймер', 'if (!hidden) {\n        stopTimer(st);', 'if (!hidden) {', 'возврат отменяет'],
   ['close повторяет hide', 'if (st.counted) {\n        st.counted = false;\n        deps.hide(conn);', '{\n        st.counted = false;\n        deps.hide(conn);', 'close уже скрытого'],
-]) it(`видимость сессии: мутант «${name}» пойман`, () => { check(load()); assert.throws(() => check(load(from, to)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure!)); });
+]) it(`видимость сессии: мутант «${name}» пойман`, () => { check(load()); counterfact(() => { assert.throws(() => check(load(from, to)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure!)); }); });

@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports.js';
 
-const source = readFileSync(new URL('./api.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const apiSourceUrl = new URL('./api.ts', import.meta.url);
+const source = readFileSync(apiSourceUrl, 'utf8').replace(/\r\n/g, '\n');
 type Api = typeof import('./api');
 function fixture(raw = source, body: unknown = { removed: 'item' }, status = 200) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const unused = () => assert.fail('IO вне удаления элемента альбома');
   const dependencies: Record<string, unknown> = {
-    './bgGateways': { mirrorToBg: unused },
     './config': { config: { apiUrl: 'https://album.example.test' }, activeInstance: () => null, activeInstanceId: () => null,
       instances: () => [], updateActiveInstance: unused, updateInstance: unused },
-    './imageSize': { measureMediaFile: unused },
   };
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: {
@@ -23,7 +24,7 @@ function fixture(raw = source, body: unknown = { removed: 'item' }, status = 200
     fetch: async (url: string, init: RequestInit) => {
       calls.push({ url, init }); return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     },
-    require: (id: string) => { assert.ok(Object.hasOwn(dependencies, id), `объявленный импорт полного api.ts: ${id}`); return dependencies[id]; },
+    require: testVmImports(apiSourceUrl, dependencies),
   });
   return { api: (module.exports as Api).api, calls };
 }
@@ -58,14 +59,17 @@ const path = '`/conv/${convId}/messages/${encodeURIComponent(messageId)}/attachm
 for (const [name, from, to, prefix, actual, expected] of [
   ['перепутан HTTP-метод', "      'DELETE',\n      " + path, "      'POST',\n      " + path,
     'G56-api-method:', 'POST', 'DELETE'],
-  ['attachmentId не экранируется', path, path.replace('${encodeURIComponent(attachmentId)}', '${attachmentId}'),
+  ['attachmentId не экранируется', path, () => path.replace('${encodeURIComponent(attachmentId)}', '${attachmentId}'),
     'G56-api-url:', 'https://album.example.test/api/conv/conversation/messages/message%2F%E2%84%96%201%3F/attachments/photo/№ 2??for=me',
     'https://album.example.test/api/conv/conversation/messages/message%2F%E2%84%96%201%3F/attachments/photo%2F%E2%84%96%202%3F?for=me'],
-  ['у себя превращается в у обоих', path, path.replace('${scope}', 'both'),
+  ['у себя превращается в у обоих', path, () => path.replace('${scope}', 'both'),
     'G56-api-url:', 'https://album.example.test/api/conv/conversation/messages/message%2F%E2%84%96%201%3F/attachments/photo%2F%E2%84%96%202%3F?for=both',
     'https://album.example.test/api/conv/conversation/messages/message%2F%E2%84%96%201%3F/attachments/photo%2F%E2%84%96%202%3F?for=me'],
 ] as const) it(`R213 API контрфакт: ${name}`, async () => {
-  await route(); assert.equal(source.split(from).length - 1, 1, 'однозначный якорь в полном api.ts');
-  await assert.rejects(route(source.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+  await route();
+  await counterfact(async () => {
+  assert.equal(source.split(from).length - 1, 1, 'однозначный якорь в полном api.ts');
+  await assert.rejects(route(source.replace(from, typeof to === 'function' ? to() : to)), (error: unknown) => error instanceof assert.AssertionError
     && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });

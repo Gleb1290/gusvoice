@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -91,14 +92,16 @@ describe('nativeVoiceService: Android foreground service при видимост
     f.setVisibility('visible');
     assert.deepEqual(f.calls, ['start'], 'becoming visible must start the pending service once');
 
-    const mutant = fixture({ hidden: true, sourceMutation: true });
-    mutant.api.startNativeVoiceService();
-    assert.deepEqual(mutant.calls, ['start'], 'the in-memory guard mutant incorrectly starts while hidden');
-    assert.throws(
-      () => assert.deepEqual(mutant.calls, [], 'hidden start must not reach the native bridge'),
-      (error: unknown) => error instanceof assert.AssertionError,
-      'the hidden-start contract must reject the guard mutant',
-    );
+    counterfact(() => {
+      const mutant = fixture({ hidden: true, sourceMutation: true });
+      mutant.api.startNativeVoiceService();
+      assert.deepEqual(mutant.calls, ['start'], 'the in-memory guard mutant incorrectly starts while hidden');
+      assert.throws(
+        () => assert.deepEqual(mutant.calls, [], 'hidden start must not reach the native bridge'),
+        (error: unknown) => error instanceof assert.AssertionError,
+        'the hidden-start contract must reject the guard mutant',
+      );
+    });
   });
 
   it('каждый возврат на экран повторяет запрос, а скрытие само его не вызывает', () => {

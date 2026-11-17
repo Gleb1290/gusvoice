@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import { useState } from 'react';
 import {
+  GAME_SOUND_EVENTS,
   getSoundSettings,
   playSound,
   setSoundSettings,
@@ -8,6 +9,7 @@ import {
   type SoundEvent,
   type SoundSettings,
 } from '../sounds';
+import { useStore } from '../store';
 import { Icon } from './Icon';
 
 const EVENTS = Object.keys(SOUND_EVENT_LABELS) as SoundEvent[];
@@ -15,6 +17,8 @@ const EVENTS = Object.keys(SOUND_EVENT_LABELS) as SoundEvent[];
 /** Per-browser sound preferences: master toggle, volume, and per-event toggles with preview. */
 export function SoundSettingsPanel() {
   const [s, setS] = useState<SoundSettings>(getSoundSettings());
+  const gamesShown = useStore((st) => st.user?.superAdmin === true);
+  const events = gamesShown ? EVENTS : EVENTS.filter((ev) => !GAME_SOUND_EVENTS.has(ev));
 
   function update(next: SoundSettings) {
     setS(next);
@@ -43,7 +47,7 @@ export function SoundSettingsPanel() {
         />
       </div>
       <div className={`sound-events ${s.enabled ? '' : 'disabled'}`}>
-        {EVENTS.map((ev) => (
+        {events.map((ev) => (
           <div className="sound-row" key={ev}>
             <label>
               <input

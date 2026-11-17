@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -76,5 +77,7 @@ for (const m of [
     check: (r: typeof rules) => assert.equal(r.attachmentAccess({ ...input, member: { leftAt: null, historyFromKey: 11 } }), false, 'R304 прежний файл до вступления закрыт') },
 ]) it(`R304 контрфакт: ${m.title}`, () => {
   m.check(rules); m.check(load(source));
-  assert.throws(() => m.check(load(change(m.from, m.to))), failure(m.label, m.actual, m.expected));
+  counterfact(() => {
+    assert.throws(() => m.check(load(change(m.from, m.to))), failure(m.label, m.actual, m.expected));
+  });
 });

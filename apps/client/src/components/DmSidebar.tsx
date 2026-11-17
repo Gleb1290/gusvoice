@@ -1309,7 +1309,7 @@ export function DmSidebar() {
   const peerIds = useMemo(() => dms.map((d) => d.otherUser.id), [dms]);
   const onlineSet = useVisibleOnline(peerIds);
   const userStatuses = useStore((s) => s.userStatuses);
-  const mobile = isMobile();
+  const mobile = isMobile() || phone;
   /* 🔴 Число прячется у беседы, которую ВИДНО, а не у «текущей» (#212, 28.09, поймано на S25): на телефоне
      список и лента — разные экраны, и сообщение в беседу, из которой человек вышел в список, пропадало без
      следа — ни числа, ни точки. Ровно та ошибка, что у каналов чинили 20.09 (`ChannelSidebar.shownChannelId`).
@@ -1397,15 +1397,24 @@ export function DmSidebar() {
   /* Черновик поднимает беседу (G34): у Telegram строка встаёт по времени черновика, когда он новее последнего сообщения.
      Время черновика — из сводки сервера (`draft.at`); закреплённые остаются наверху (`byRecent`). */
   const pool = q ? dms : inArchive ? archDms : mainDms;
+  // Черновик голосового (G54, `voiceDrafts.ts`) поднимает беседу так же, как текстовый.
+  const draftAtOf = (id: string) => (drafts[id]?.text ? summaries[id]?.draft?.at : (voiceDrafts.get(id) ?? null)) ?? null;
+  /* 🔴 30.10 (жалоба владельца «слева вечно черновик, черновик»): у ОТКРЫТОЙ беседы место строки — по черновику на
+     момент открытия, набор и его запись строку не двигают (и при открытии она не уезжает из-под пальца); новое место —
+     после ухода. Как Telegram: Android пишет черновик только в `ChatActivity.onPause`, Desktop рисует в списке облачный
+     черновик (`dialogs_layout.cpp`, `cloudDraft`), а облачный меняется при уходе / после 14 с простоя. */
+  const openDraft = useRef<{ id: string | null; at: string | null }>({ id: null, at: null });
+  if (openDraft.current.id !== shownDmId) openDraft.current = { id: shownDmId, at: shownDmId ? draftAtOf(shownDmId) : null };
+  const openDraftAt = openDraft.current.at;
   const ordered = useMemo(() => {
     const at = (d: DmChannel) => {
-      // Черновик голосового (G54, `voiceDrafts.ts`) поднимает беседу так же, как текстовый.
-      const draftAt = drafts[d.id]?.text ? summaries[d.id]?.draft?.at : (voiceDrafts.get(d.id) ?? null);
+      const draftAt = d.id === shownDmId ? openDraftAt : draftAtOf(d.id);
       return draftAt ? { ...d, lastMessageAt: rowActivityAt({ lastMessageAt: d.lastMessageAt, createdAt: d.createdAt, draftAt }) } : d;
     };
     const keyed = pool.map((d) => [d, at(d)] as const);
     return keyed.some(([d, k]) => d !== k) ? [...keyed].sort((a, b) => byRecent(a[1], b[1])).map(([d]) => d) : pool;
-  }, [pool, drafts, summaries, voiceDrafts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pool, drafts, summaries, voiceDrafts, shownDmId, openDraftAt]);
   const shown = useMemo(
     () =>
       q
@@ -1738,8 +1747,14 @@ export function DmSidebar() {
               active={!phone && d.id === currentDmId}
               unread={unread}
               unreadN={unreadN}
-              draft={drafts[d.id]?.text || (voiceDrafts.has(d.id) && d.id !== currentDmId ? 'Голосовое сообщение' : undefined)}
-              draftAt={drafts[d.id]?.text ? summaries[d.id]?.draft?.at : voiceDrafts.get(d.id)}
+              /* У открытой беседы «Черновик:» не показываем вовсе (30.10): строка — последнее сообщение, черновик
+                 появится после ухода (Android пишет его только в `ChatActivity.onPause`). */
+              draft={
+                d.id === shownDmId
+                  ? undefined
+                  : drafts[d.id]?.text || (voiceDrafts.has(d.id) && d.id !== currentDmId ? 'Голосовое сообщение' : undefined)
+              }
+              draftAt={d.id === shownDmId ? null : drafts[d.id]?.text ? summaries[d.id]?.draft?.at : voiceDrafts.get(d.id)}
               draftReply={!!drafts[d.id]?.replyToId}
               onPick={phone ? togglePick : undefined}
               onDropMsgs={phone ? undefined : dropMsgs}

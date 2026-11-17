@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
@@ -107,10 +108,12 @@ for (const [name, change] of Object.entries(mutations)) {
   it(`контрфакт поиска: ${name}`, async () => {
     const error = Object.assign(new Error('Повторите через две минуты'), { status: 429 });
     await checkError(error, 'Повторите через две минуты');
-    await assert.rejects(() => checkError(error, 'Повторите через две минуты', change), (caught: unknown) => {
-      assert.ok(caught instanceof assert.AssertionError);
-      assert.match(caught.message, /^поиск показывает ожидаемый текст сбоя/);
-      return true;
+    await counterfact(async () => {
+      await assert.rejects(() => checkError(error, 'Повторите через две минуты', change), (caught: unknown) => {
+        assert.ok(caught instanceof assert.AssertionError);
+        assert.match(caught.message, /^поиск показывает ожидаемый текст сбоя/);
+        return true;
+      });
     });
   });
 }

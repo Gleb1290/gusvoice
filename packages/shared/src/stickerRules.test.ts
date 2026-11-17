@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact, mutantTest } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { checkUserPackQuota, stickerPackMatches, reorderStickerPacks } from './stickerRules';
 import { readFileSync } from 'node:fs';
@@ -7,12 +8,15 @@ import ts from 'typescript';
 it('личная квота принимает 39 и отказывает на 40, поиск нормализует ё и перестановка ничего не теряет', () => {
   // Предел относится к загрузке, а неправильная перестановка не должна молча удалять набор другого устройства.
   assert.equal(checkUserPackQuota(39).ok,true); assert.equal(checkUserPackQuota(40).ok,false); assert.equal(checkUserPackQuota(41).ok,false);
-  const source = readFileSync(new URL('./stickerRules.ts', import.meta.url), 'utf8');
-  const needle = 'uploaded >= STICKER_PACKS_PER_USER';
-  assert.ok(source.includes(needle));
-  const module = { exports: {} as { checkUserPackQuota: typeof checkUserPackQuota } };
-  runInNewContext(ts.transpileModule(source.replace(needle, 'uploaded > STICKER_PACKS_PER_USER'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
-  assert.throws(() => assert.equal(module.exports.checkUserPackQuota(40).ok, false), assert.AssertionError);
+
+  runCounterfact(() => {
+    const source = readFileSync(new URL('./stickerRules.ts', import.meta.url), 'utf8');
+    const needle = 'uploaded >= STICKER_PACKS_PER_USER';
+    assert.ok(source.includes(needle));
+    const module = { exports: {} as { checkUserPackQuota: typeof checkUserPackQuota } };
+    runInNewContext(ts.transpileModule(source.replace(needle, 'uploaded > STICKER_PACKS_PER_USER'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+    assert.throws(() => assert.equal(module.exports.checkUserPackQuota(40).ok, false), assert.AssertionError);
+  });
   const pack = { title: 'Ёжики', name: 'HappyHedgehogs' };
   for (const q of ['', ' ', 'ЕЖ', 'happy']) assert.equal(stickerPackMatches(pack,q),true);
   assert.equal(stickerPackMatches(pack,'cats'),false);
@@ -158,7 +162,7 @@ describe('размер набора', () => {
 });
 import { pushStickerId } from './stickerRules';
 
-it('мутант без удаления повтора не проходит контракт списка и вытесненного хвоста', () => {
+mutantTest('мутант без удаления повтора не проходит контракт списка и вытесненного хвоста', () => {
   // Ловит серверное удаление нужного стикера из-за ложного переполнения.
   const source = readFileSync(new URL('./stickerRules.ts',import.meta.url),'utf8');
   const from = '...list.filter((x) => x !== id)'; assert.ok(source.includes(from));

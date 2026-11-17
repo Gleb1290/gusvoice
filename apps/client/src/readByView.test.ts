@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -26,7 +27,9 @@ it('чтение требует фокуса и отсутствия слоя, �
     }
   };
   check(rules);
-  for (const api of [mutant('!g.covered', 'true'), mutant('g.mobile ||', 'false ||')]) assert.throws(() => check(api), assert.AssertionError);
+  counterfact(() => {
+    for (const api of [mutant('!g.covered', 'true'), mutant('g.mobile ||', 'false ||')]) assert.throws(() => check(api), assert.AssertionError);
+  });
 });
 
 it('прочитан только нижний край внутри окна с допуском один пиксель, высокая строка не читается заранее', () => {
@@ -41,5 +44,7 @@ it('прочитан только нижний край внутри окна с
     assert.equal(f([100, 150]), 1);
   };
   check(rules);
-  for (const api of [mutant('<= viewBottom + 1', '< viewBottom + 1'), mutant('bottomAt(found) > viewTop', 'true')]) assert.throws(() => check(api), assert.AssertionError);
+  counterfact(() => {
+    for (const api of [mutant('<= viewBottom + 1', '< viewBottom + 1'), mutant('bottomAt(found) > viewTop', 'true')]) assert.throws(() => check(api), assert.AssertionError);
+  });
 });

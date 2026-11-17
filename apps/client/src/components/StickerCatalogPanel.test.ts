@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -212,17 +213,17 @@ it('R287 подпись называет загруженные наборы и 
 it('R287 контрфакт зависимости только от поиска обнаруживается обновлением открытой панели', async () => {
   // Класс ошибки: прежний [query] не реагирует на stickers.update даже при успешном серверном импорте.
   await compositionChanges();
-  await assert.rejects(() => compositionChanges(replaceOnce('[query, mineKey]', '[query]')), exactAssertion(UPDATE));
+  await counterfact(async () => { await assert.rejects(() => compositionChanges(replaceOnce('[query, mineKey]', '[query]')), exactAssertion(UPDATE)); });
 });
 it('R287 контрфакт ключа без сортировки обнаруживается лишним запросом при перестановке', async () => {
   // Класс ошибки: одинаковый состав в другом порядке считается новым составом.
   await orderOnly();
-  await assert.rejects(() => orderOnly(replaceOnce(".map((p) => p.id).sort().join(',')", ".map((p) => p.id).join(',')")),
-    exactAssertion(ORDER));
+  await counterfact(async () => { await assert.rejects(() => orderOnly(replaceOnce(".map((p) => p.id).sort().join(',')", ".map((p) => p.id).join(',')")),
+    exactAssertion(ORDER)); });
 });
 it('R287 контрфакт старой подписи обнаруживается по тексту настоящей панели', async () => {
   // Класс ошибки: откат текста вновь не объясняет, к чему относятся число и предел.
   await caption();
-  await assert.rejects(() => caption(replaceOnce('Загрузить из Telegram · вы загрузили {catalog.uploaded}',
-    'Загрузить из Telegram · ваших {catalog.uploaded}')), exactAssertion(LABEL));
+  await counterfact(async () => { await assert.rejects(() => caption(replaceOnce('Загрузить из Telegram · вы загрузили {catalog.uploaded}',
+    'Загрузить из Telegram · ваших {catalog.uploaded}')), exactAssertion(LABEL)); });
 });

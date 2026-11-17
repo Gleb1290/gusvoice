@@ -165,9 +165,19 @@ export function createVoiceHoldController<T extends HoldTake>(deps: VoiceHoldDep
   }
 
   function cancel(): void {
-    rec?.cancel();
+    // Telegram отменяет и готовящийся результат: корзина доступна, пока pause ждёт последний кусок.
+    // Одного rec здесь недостаточно — в этот момент устройство уже находится в stopping.
+    generation++;
+    if (lastToken) lastToken.mode = 'dead';
+    if (opening) opening.mode = 'dead';
+    opening = null;
+    hold = null;
+    lockedPress = null;
+    for (const r of new Set([rec, pausedRec, stopping])) r?.cancel();
     rec = null;
-    set({ recording: false });
+    pausedRec = null;
+    stopping = null;
+    set({ recording: false, preview: null, paused: false, holdUi: null, recMs: 0, recLevel: 0 });
   }
 
   /** Отпустил палец / «отправить» в записи без рук: остановить и отправить. */
@@ -208,7 +218,6 @@ export function createVoiceHoldController<T extends HoldTake>(deps: VoiceHoldDep
         // Пауза: микрофон за нами, записанное до паузы слушаем, «продолжить» пишет дальше в тот же файл.
         const take = await r.pause();
         if (gen !== generation) {
-          r.cancel();
           return;
         }
         pausedRec = r;
@@ -263,9 +272,7 @@ export function createVoiceHoldController<T extends HoldTake>(deps: VoiceHoldDep
   }
 
   function discardPreview(): void {
-    pausedRec?.cancel();
-    pausedRec = null;
-    if (state.preview) set({ preview: null, paused: false });
+    cancel();
   }
 
   /**

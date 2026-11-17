@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -207,7 +208,9 @@ it('R208 новая версия возвращает участника и до
 // Класс ошибки: catchUps сохраняет null вместо настоящей последней строки и повторяет всю историю.
 it('R208 null вместо последнего сообщения обнаруживается адресным after, не таймаутом', async () => {
   await returnedHistory();
-  await assert.rejects(returnedHistory(inFunction('federation/convAccept', 'groupCatchUp', 'catchUps.set(k, was.last)', 'catchUps.set(k, null)')), killed('догонка начинается после последнего местного сообщения'));
+  await counterfact(async () => {
+    await assert.rejects(returnedHistory(inFunction('federation/convAccept', 'groupCatchUp', 'catchUps.set(k, was.last)', 'catchUps.set(k, null)')), killed('догонка начинается после последнего местного сообщения'));
+  });
 });
 
 async function cursorGone(edit?: Mutation) {
@@ -220,8 +223,10 @@ async function cursorGone(edit?: Mutation) {
 // Класс ошибки: локальная строка не дошла до хоста; 404 cursor ошибочно принимается за отсутствие всей группы.
 it('R208 отсутствующий у хоста курсор вызывает 404 и один повтор от начала; отключённая ветка обнаруживается', async () => {
   await cursorGone();
-  await assert.rejects(cursorGone(inFunction('federation/convAccept', 'groupCatchUp',
-    'if (r.ok && r.value.status === 404 && after !== null && page === 0)', 'if (false)')), killed('404 курсора повторяется с after=null'));
+  await counterfact(async () => {
+    await assert.rejects(cursorGone(inFunction('federation/convAccept', 'groupCatchUp',
+      'if (r.ok && r.value.status === 404 && after !== null && page === 0)', 'if (false)')), killed('404 курсора повторяется с after=null'));
+  });
 });
 
 async function interrupted(edit?: Mutation) {
@@ -244,7 +249,9 @@ it('R208 сеть на второй странице держит курсор �
 // Класс ошибки: удаление сохранения after повторяет уже полученные страницы вместо продолжения.
 it('R208 потерянное catchUps.set(k, after) обнаруживается точным курсором повторной страницы', async () => {
   await interrupted();
-  await assert.rejects(interrupted(inFunction('federation/convAccept', 'groupCatchUp', 'else catchUps.set(k, after);', 'else {}')), killed('catchUps повторяет последнюю непройденную страницу'));
+  await counterfact(async () => {
+    await assert.rejects(interrupted(inFunction('federation/convAccept', 'groupCatchUp', 'else catchUps.set(k, after);', 'else {}')), killed('catchUps повторяет последнюю непройденную страницу'));
+  });
 });
 
 // Класс ошибки: любое обновление состава ошибочно запускает экспорт, хотя наши действующие люди не менялись.
@@ -264,4 +271,3 @@ it('R208 старый хост с 404 экспорта завершает воз
   assert.deepEqual(p.requests.filter(r => r.path.endsWith('/export')).map(r => r.query?.after), ['leave', null]);
   assert.deepEqual(await messageIds(pdb), ['before', 'leave', 'returned']); assert.equal(await cursor(), 2);
 });
-

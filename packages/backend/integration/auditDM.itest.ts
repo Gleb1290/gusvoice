@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -144,8 +145,10 @@ for (const visible of [false, true]) test(`R304 добавление в груп
 
 test('R304 мутант записи historyFromKey теряет ограничение новой строки участника', async () => {
   await historyScenario(false);
+  await counterfact(async () => {
   await assert.rejects(historyScenario(false, { file: 'convGroups', from: 'const historyFromKey = conv?.historyForNew ? null : lock.nextKey;', to: 'const historyFromKey = null;' }),
     e => e instanceof assert.AssertionError && e.message.startsWith('R304 новая строка участника хранит границу истории'));
+  });
 });
 
 test('R304 бывший участник получает файл и пересылает до выхода включительно, после выхода оба пути закрыты', async () => {
@@ -212,15 +215,19 @@ async function photoScenario(edit?: AuditEdit) {
 test('R304 фото группы проверяет участие до чтения multipart и заменяет фото с удалением прежнего объекта', () => photoScenario());
 test('R304 мутант проверки фото после загрузки обнаруживается записью публичного объекта посторонним', async () => {
   await photoScenario();
+  await counterfact(async () => {
   await assert.rejects(photoScenario({ file: 'routes/convGroups',
     from: "if (!access || access.kind !== 'group') return reply.code(404).send({ error: 'not found' });", to: '// ранний допуск удалён' }),
   e => e instanceof assert.AssertionError && e.message.startsWith('R304 чужое фото не читается и не загружается'));
+  });
 });
 test('R304 мутант без удаления старого фото обнаруживается незакрытым публичным объектом', async () => {
   await photoScenario();
+  await counterfact(async () => {
   await assert.rejects(photoScenario({ file: 'routes/convGroups',
     from: "else if (prev?.avatarUrl && prev.avatarUrl !== url) void removeOwnMedia(prev.avatarUrl).catch(() => {});", to: '// старый объект оставлен' }),
   e => e instanceof assert.AssertionError && e.message.startsWith('R304 замена удаляет только прежний объект'));
+  });
 });
 
 test('R304 обновление ссылок отдаёт только доступные id: чужая группа, скрытая история и неизвестный UUID не раскрываются', async () => {
@@ -277,9 +284,11 @@ async function anchorScenario(edit?: AuditEdit) {
 test('R304 around скрытого у меня сообщения возвращает no-anchor и HTTP 404, другому участнику якорь доступен', () => anchorScenario());
 test('R304 мутант поиска якоря без vis раскрывает скрытый ключ в настоящем SQL', async () => {
   await anchorScenario();
+  await counterfact(async () => {
   await assert.rejects(anchorScenario({ file: 'conversations', from: '.where(and(eq(conversationMessages.id, qy.around), vis));',
     to: '.where(eq(conversationMessages.id, qy.around));' }),
   e => e instanceof assert.AssertionError && e.message.startsWith('R304 скрытый якорь не раскрывает ключ'));
+  });
 });
 
 async function deliveryScenario(edit?: AuditEdit) {
@@ -304,6 +313,8 @@ async function deliveryScenario(edit?: AuditEdit) {
 test('R304 доставка совмещённых msg/pins/scheduled вычисляет сводку один раз на человека, следующая доставка перечитывает', () => deliveryScenario());
 test('R304 мутант без кеша сводок обнаруживается шестью SQL чтениями вместо двух', async () => {
   await deliveryScenario();
+  await counterfact(async () => {
   await assert.rejects(deliveryScenario({ file: 'conversations', from: 'summaries.set(userId, p);', to: '// кеш удалён' }),
     e => e instanceof assert.AssertionError && e.message.startsWith('R304 одна SQL сводка на человека в доставке'));
+  });
 });

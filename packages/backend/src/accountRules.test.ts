@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { getTableColumns } from 'drizzle-orm';
 import { getTableConfig } from 'drizzle-orm/pg-core';
@@ -20,6 +21,7 @@ import ts from 'typescript';
 const CLEARED_USER_FK_TABLES = [
   'channel_reads',
   'coin_balances',
+  'coin_recounts',
   'diag_reports',
   'dm_folders',
   'email_verifications',
@@ -52,7 +54,7 @@ it('удаление аккаунта очищает push_always — исход�
   const load = (mutant: boolean) => {
     const source = readFileSync(new URL('./accountRows.ts', import.meta.url), 'utf8');
     const anchor = 'await tx.delete(pushAlways).where(eq(pushAlways.userId, userId));';
-    assert.equal(source.split(anchor).length, 2, 'точный якорь tx.delete уникален');
+    if (mutant) assert.equal(source.split(anchor).length, 2, 'точный якорь tx.delete уникален');
     const changed = mutant ? source.replace(anchor, '/* пропущена очистка */') : source;
     if (mutant) assert.notEqual(changed, source);
     const module = { exports: {} as { anonymizeAccountRows: typeof anonymizeAccountRows } };
@@ -62,7 +64,47 @@ it('удаление аккаунта очищает push_always — исход�
     return module.exports.anonymizeAccountRows;
   };
   await check(anonymizeAccountRows); await check(load(false));
-  await assert.rejects(() => check(load(true)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('push_always удаляется'));
+  await counterfact(async () => {
+    await assert.rejects(() => check(load(true)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('push_always удаляется'));
+  });
+});
+
+it('R319 удаление аккаунта очищает карточки перерасчёта — пропуск delete не оставляет личную строку', async () => {
+  const check = async (remove: typeof anonymizeAccountRows) => {
+    const deleted: string[] = [];
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+      delete: (table: never) => ({ where: async () => { deleted.push(getTableConfig(table).name); } }),
+      update: () => ({ set: () => ({ where: async () => {} }) }),
+    };
+    await remove(tx as unknown as Parameters<typeof remove>[0], 'user', 'unusable', new Date(0));
+    assert.equal(deleted.filter(name => name === 'coin_recounts').length, 1,
+      'R319 coin_recounts удаляется ровно раз в транзакции');
+  };
+  const source = readFileSync(new URL('./accountRows.ts', import.meta.url), 'utf8');
+  const load = (raw: string) => {
+    // Настоящий модуль целиком, а не копия очистки. Подменён только ввод транзакции в check.
+    const module = { exports: {} as { anonymizeAccountRows: typeof anonymizeAccountRows } };
+    const deps: Record<string, unknown> = {
+      'drizzle-orm': drizzle, './db/schema.js': dbSchema, './accountRules.js': accountRules,
+    };
+    runInNewContext(ts.transpileModule(raw, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+    } }).outputText, { module, exports: module.exports,
+      require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `R319 закрытый импорт ${id}`); return deps[id]; },
+    });
+    return module.exports.anonymizeAccountRows;
+  };
+  await check(anonymizeAccountRows);
+  await check(load(source));
+  await counterfact(async () => {
+  const anchor = 'await tx.delete(coinRecounts).where(eq(coinRecounts.userId, userId));';
+  assert.equal(source.split(anchor).length, 2, 'R319 якорь очистки карточек уникален');
+  const mutant = load(source.replace(anchor, '/* R319 пропущена очистка карточек */'));
+  await assert.rejects(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError
+    && error.message.includes('R319 coin_recounts удаляется ровно раз в транзакции')
+    && error.actual === 0 && error.expected === 1 && error.operator === 'strictEqual');
+  });
 });
 
 const RETAINED_USER_FKS = [
@@ -82,6 +124,15 @@ const RETAINED_USER_FKS = [
   'conversation_message_reactions.user_id',
   'conversation_messages.author_id',
   'conversations.created_by',
+  // R326: история игр удерживается, открытые ставки возвращаются до обезличивания.
+  'game_rounds.created_by',
+  'game_stakes.user_id',
+  // R336: ходы и авторы предсказаний тоже остаются историей после обезличивания.
+  'game_moves.user_id',
+  'prediction_events.created_by',
+  // R339: помесячные результаты и уже выданные звания удерживают обезличенную историю.
+  'game_month_results.user_id',
+  'game_titles_awarded.user_id',
   // Журнал запретов на инстанс (F3, §5.11) переживает уход модератора: решение принимал ИНСТАНС,
   // и «кем поставлен» — подпись в журнале, а не связь с живым аккаунтом.
   'instance_bans.created_by',

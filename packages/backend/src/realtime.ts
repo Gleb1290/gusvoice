@@ -53,10 +53,22 @@ export interface CapRoute {
   notCap?: string;
 }
 
-/** События, которые ПО СМЫСЛУ видны всем участникам сервера — без привязки к каналу. */
+/**
+ * События, которые ПО СМЫСЛУ видны всем участникам сервера — без привязки к каналу.
+ * Колесо гусей-пиратов (`wheel.*`, `gameWheel.ts`) — одно на сервер: ставки и итог видит любой участник (чип/точка на
+ * кнопке «Активности»), а ставить может только сидящий в голосе — это проверяет маршрут, не рассылка. Так же — ставки на
+ * события (`prediction.state`, `gamePredictions.ts`, этап 5): событие уровня сервера.
+ */
 type ServerWideMessage = Extract<
   GatewayServerMessage,
-  { t: 'server.invalidate' } | { t: 'member.update' } | { t: 'online.update' } | { t: 'online.list' }
+  | { t: 'server.invalidate' }
+  | { t: 'member.update' }
+  | { t: 'online.update' }
+  | { t: 'online.list' }
+  | { t: 'wheel.state' }
+  | { t: 'wheel.result' }
+  | { t: 'prediction.state' }
+  | { t: 'games.launched' }
 >;
 
 /** События КАНАЛА: их получает только тот, кто имеет право этот канал видеть. */
@@ -74,6 +86,7 @@ type ChannelScopedMessage = Extract<
   | { t: 'soundboard' }
   | { t: 'typing' }
   | { t: 'tip' }
+  | { t: 'duel.state' }
 >;
 
 /**

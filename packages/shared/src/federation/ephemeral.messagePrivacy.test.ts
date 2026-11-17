@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -45,12 +46,20 @@ it('R212 empty views не добавляет запреты, а точное в�
   const p = parse(raw); assert.equal(p.views[0]!.lastSeen, raw.views[0].last_seen); assert.equal(p.views[1]!.approx, 'recently');
 });
 it('R212 контрфакт truthy-разбор превращает строку yes в запрет сообщений', () => {
-  strictFlag(load(source)); const from = 'r.no_messages === true'; assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => strictFlag(load(source.replace(from, 'r.no_messages'))), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R212-no-messages-boolean:') && e.operator === 'strictEqual' && e.actual === true && e.expected === undefined);
+  strictFlag(load(source));
+  runCounterfact(() => {
+    const from = 'r.no_messages === true';
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => strictFlag(load(source.replace(from, 'r.no_messages'))), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R212-no-messages-boolean:') && e.operator === 'strictEqual' && e.actual === true && e.expected === undefined);
+  });
 });
 it('R212 контрфакт всегда записывает запрет и ломает совместимость со старым presence', () => {
-  legacy(load(source)); const from = '...(v.noMessages ? { no_messages: true } : {}),'; assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => legacy(load(source.replace(from, 'no_messages: true,'))), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R212-legacy-presence:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  legacy(load(source));
+  runCounterfact(() => {
+    const from = '...(v.noMessages ? { no_messages: true } : {}),';
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => legacy(load(source.replace(from, 'no_messages: true,'))), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R212-legacy-presence:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  });
 });

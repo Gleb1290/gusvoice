@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -122,8 +123,10 @@ it('R214 AST смахивания не допускает непрозрачно
 function change(raw: string, anchor: string, replacement: string) { assert.equal(raw.split(anchor).length - 1, 1, 'единственный якорь R214 source-мутанта'); return raw.replace(anchor, replacement); }
 function killed(raw: string, anchor: string, replacement: string, scenario: (raw: string) => void, prefix: string, actual: unknown, expected: unknown) {
   scenario(raw);
-  assert.throws(() => scenario(change(raw, anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  counterfact(() => {
+    assert.throws(() => scenario(change(raw, anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 }
 it('R214 контрфакт done обходит очистку пустых меток', () => killed(editor, 'marks: pruneMarks(edit.marks ?? [])', 'marks: edit.marks ?? []', prune,
   'done вычищает пустые метки настоящим pruneMarks', false, true));
@@ -135,8 +138,10 @@ it('R214 контрфакт смахивания снижает нижнюю г�
   'нижняя граница непрозрачности равна половине', 0, 0.5));
 it('R214 контрфакт CSS возвращает полупрозрачный основной фон', () => {
   opaque(styles);
-  const base = /(?:^|\n)\.lightbox\s*\{[\s\S]*?\n\}/.exec(styles); assert.equal(!!base, true);
-  const changed = change(styles, base![0], change(base![0], 'background: #000;', 'background: #000000ed;'));
-  assert.throws(() => opaque(changed), e => e instanceof assert.AssertionError && e.message.startsWith('базовый просмотрщик не просвечивает лентой')
-    && e.operator === 'strictEqual' && e.actual === '#000000ed' && e.expected === '#000');
+  counterfact(() => {
+    const base = /(?:^|\n)\.lightbox\s*\{[\s\S]*?\n\}/.exec(styles); assert.equal(!!base, true);
+    const changed = change(styles, base![0], change(base![0], 'background: #000;', 'background: #000000ed;'));
+    assert.throws(() => opaque(changed), e => e instanceof assert.AssertionError && e.message.startsWith('базовый просмотрщик не просвечивает лентой')
+      && e.operator === 'strictEqual' && e.actual === '#000000ed' && e.expected === '#000');
+  });
 });

@@ -32,6 +32,11 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAUNCHED: AtomicBool = AtomicBool::new(false);
 /// Последний признак жизни заставки, мс от эпохи.
 static LAST_PING: AtomicU64 = AtomicU64::new(0);
+/// Событие главному окну: заставка закрылась, приложение на экране (28.10).
+const FINISHED_EVENT: &str = "gv-splash-finished";
+/// Журнал обновлений (28.10): файл в данных приложения, потолок размера — дальше остаётся свежая половина.
+const UPDATE_LOG: &str = "update-log.txt";
+const UPDATE_LOG_MAX: u64 = 128 * 1024;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -75,6 +80,9 @@ fn finish(app: &AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        // Главное окно ждёт этого, прежде чем вернуть человека в голосовой канал (`splashGate.ts`).
+        use tauri::Emitter;
+        let _ = w.emit(FINISHED_EVENT, ());
     }
     if let Some(s) = app.get_webview_window(LABEL) {
         let _ = s.destroy();
@@ -100,14 +108,58 @@ pub async fn gv_launch_splash() -> bool {
     LAUNCHED.load(Ordering::SeqCst)
 }
 
+/// Заставка ещё на экране (28.10). Пока она качает и ставит обновление, главное окно ПРЕЖНЕЙ версии уже
+/// загружено (скрыто) — и возвращало человека в голосовой канал, а через секунды установщик его убивал и
+/// новая версия заходила второй раз: два звука подключения на одно обновление. Главное окно ждёт конца
+/// заставки (`splashGate.ts`, событие [`FINISHED_EVENT`]).
+#[tauri::command]
+pub async fn gv_splash_active() -> bool {
+    ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Строка в журнал обновлений (28.10): заставка и главное окно пишут, кто что решил при запуске и
+/// обновлении (`updateLog` в `updater.ts`). `localStorage` для этого не годится — установщик убивает
+/// процесс раньше, чем WebView2 сбрасывает его на диск. Время и PID ставим здесь. Ошибки — молча.
+#[tauri::command]
+pub async fn gv_update_log(app: AppHandle, line: String) {
+    use std::io::Write;
+    let Ok(dir) = app.path().app_local_data_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(UPDATE_LOG);
+    if std::fs::metadata(&path).map(|m| m.len() > UPDATE_LOG_MAX).unwrap_or(false) {
+        if let Ok(old) = std::fs::read(&path) {
+            let tail = &old[old.len() / 2..];
+            let cut = tail.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+            let _ = std::fs::write(&path, &tail[cut..]);
+        }
+    }
+    let line: String = line.chars().filter(|c| *c != '\n' && *c != '\r').take(500).collect();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} pid={} v{} {}", now_ms(), std::process::id(), app.package_info().version, line);
+    }
+}
+
 /// Скрытый режим проверки обновления на пробной сборке: `GV_UPDATE_TEST=downgrade` в окружении →
-/// заставка проверяет с `allowDowngrades`, и пробная сборка «обновляется» на выпущенную версию из
-/// боевого фида (тихая установка + перезапуск). Любое другое значение — как будто переменной нет.
+/// заставка проверяет фид с разрешённым откатом, и пробная сборка «обновляется» на выпущенную версию
+/// из боевого фида (тихая установка + перезапуск). Любое другое значение — как будто переменной нет.
 /// Обычному человеку эту переменную взять неоткуда.
+///
+/// С tauri-plugin-updater 2.12 параметр `allowDowngrades` у JS-`check()` убран (страница больше не
+/// может ослабить проверку версии): откат разрешает сам Rust — `update_test_downgrade()` ниже
+/// подставляет сравнение «версия другая» в `default_version_comparator` при сборке плагина (`lib.rs`).
+/// Команда осталась: заставка по ней пишет в журнал, что идёт пробный откат.
 #[tauri::command]
 pub async fn gv_update_test_mode() -> Option<String> {
     match std::env::var("GV_UPDATE_TEST") {
         Ok(v) if v == "downgrade" => Some(v),
         _ => None,
     }
+}
+
+/// Тот же `GV_UPDATE_TEST=downgrade`, но для Rust: включён → плагин обновлений считает обновлением
+/// любую ДРУГУЮ версию фида, а не только более новую (вместо убранного `allowDowngrades` у `check()`).
+pub fn update_test_downgrade() -> bool {
+    matches!(std::env::var("GV_UPDATE_TEST").as_deref(), Ok("downgrade"))
 }

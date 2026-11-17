@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -189,10 +190,12 @@ for (const surface of ['menu', 'sheet'] as const) {
 
   it(`R168 ${label}: мутант только по mute пропускает неверный значок при 0%`, async () => {
     await zeroIsSilent(surface);
-    const anchor = "audio.muted || volPct === 0 ? 'volume-off' : 'volume'";
-    assert.equal(sources[surface].split(anchor).length - 1, 1, 'один точный якорь мутации значка шапки');
-    const mutant = sources[surface].replace(anchor, "audio.muted ? 'volume-off' : 'volume'");
-    await assert.rejects(zeroIsSilent(surface, mutant), (error: unknown) =>
-      error instanceof assert.AssertionError && error.message.includes('0% без mute перечёркивает значок шапки'));
+    await counterfact(async () => {
+      const anchor = "audio.muted || volPct === 0 ? 'volume-off' : 'volume'";
+      assert.equal(sources[surface].split(anchor).length - 1, 1, 'один точный якорь мутации значка шапки');
+      const mutant = sources[surface].replace(anchor, "audio.muted ? 'volume-off' : 'volume'");
+      await assert.rejects(zeroIsSilent(surface, mutant), (error: unknown) =>
+        error instanceof assert.AssertionError && error.message.includes('0% без mute перечёркивает значок шапки'));
+    });
   });
 }

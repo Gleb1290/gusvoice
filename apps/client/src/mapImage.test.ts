@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -64,7 +65,10 @@ for (const [label, from, to, check, prefix, actual, expected] of [
   ['пропал предел памяти', 'urls.size > KEEP', 'false', cap, 'R220-map-cap:', undefined, 'blob:map-1'],
   ['сбой не ждёт минуту', 'const FAIL_MS = 60_000;', 'const FAIL_MS = 0;', retry, 'R220-map-retry:', 2, 1],
 ] as const) it(`R220 контрфакт кеша карты: ${label}`, async () => {
-  await check(source); assert.equal(source.split(from).length - 1, 1);
-  await assert.rejects(check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await check(source);
+  await counterfact(async () => {
+    assert.equal(source.split(from).length - 1, 1);
+    await assert.rejects(check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

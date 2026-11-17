@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -37,10 +38,12 @@ function load(source = raw, onCompare?: (a: Uint8Array, b: Uint8Array) => void):
 
 function rejectMutant(from: string, to: string, marker: string, check: (api: Rules) => void): void {
   check(load());
+  counterfact(() => {
   assert.equal(raw.split(from).length - 1, 1, `Единственный якорь мутанта: ${from}`);
   const mutant = load(raw.replace(from, to));
   assert.throws(() => check(mutant), (error: unknown) =>
     error instanceof assert.AssertionError && error.message.includes(marker));
+  });
 }
 
 describe('R274 токен вебхука и служебный логин', () => {
@@ -107,10 +110,12 @@ describe('R274 токен вебхука и служебный логин', () =
       assert.equal(calls, 2, marker);
     };
     check(raw);
+    counterfact(() => {
     const from = 'return timingSafeEqual(a, b);';
     assert.equal(raw.split(from).length - 1, 1);
     assert.throws(() => check(raw.replace(from, "return a.toString('hex') === b.toString('hex');")),
       (error: unknown) => error instanceof assert.AssertionError && error.message.includes(marker));
+    });
   });
 
   it('служебный логин содержит невозможный для человеческого логина разделитель', () => {

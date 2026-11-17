@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -16,10 +17,13 @@ function lite(raw = source) {
 it('R176 html gv-lite скрывает и фон аватара и фон компактной полосы display none', () => lite());
 // Класс ошибки: правило gv-lite удалено или отключён только один слой.
 it('R176 мутанты удаления правила и потери слоя компактной шапки обнаруживаются адресным CSS', () => {
-  const anchor = 'html.gv-lite .tgp .tgp-bgimg,\nhtml.gv-lite .tgp .tgp-bar-bg {\n  display: none;\n}';
-  assert.equal(source.split(anchor).length - 1, 1); lite();
-  assert.throws(() => lite(source.replace(anchor, '')), assert.AssertionError);
-  assert.throws(() => lite(source.replace(anchor, 'html.gv-lite .tgp .tgp-bgimg {\n  display: none;\n}')), assert.AssertionError);
+  lite();
+  counterfact(() => {
+    const anchor = 'html.gv-lite .tgp .tgp-bgimg,\nhtml.gv-lite .tgp .tgp-bar-bg {\n  display: none;\n}';
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => lite(source.replace(anchor, '')), assert.AssertionError);
+    assert.throws(() => lite(source.replace(anchor, 'html.gv-lite .tgp .tgp-bgimg {\n  display: none;\n}')), assert.AssertionError);
+  });
 });
 // Класс ошибки: фоновый аватар перестал быть размытым или стал перехватывать действия.
 it('R176 фон аватара размыт затемнён и не ловит нажатия, полоса проявляется при collapsed', () => {

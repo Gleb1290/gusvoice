@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -161,18 +162,18 @@ for (const [name, anchor, replacement] of [
   ['перевёрнутая теснота', 'status.scrollWidth > status.clientWidth', 'status.scrollWidth < status.clientWidth'],
 ] as const) it(`R182 мутант «${name}» отвергается измерением ширины`, () => {
   // Whole-module original-first и адресное утверждение проверяют именно выбор формы.
-  fit(); assert.throws(() => fit(changed(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes('первая помещающаяся'));
+  fit(); counterfact(() => { assert.throws(() => fit(changed(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes('первая помещающаяся')); });
 });
 it('R182 потеря ResizeObserver обнаруживается подпиской hook на реальные изменения ширины', async () => {
   // Без observer первоначально верная форма устаревает после изменения кнопок шапки.
-  await hook(); await assert.rejects(hook(changed("bar && typeof ResizeObserver !== 'undefined'", 'false')),
-    e => e instanceof assert.AssertionError && e.message.includes('наблюдатель ширины'));
+  await hook(); await counterfact(async () => { await assert.rejects(hook(changed("bar && typeof ResizeObserver !== 'undefined'", 'false')),
+    e => e instanceof assert.AssertionError && e.message.includes('наблюдатель ширины')); });
 });
 for (const [name, anchor, replacement, at, now, tail] of [
   ['сегодня без короткой формы', 'return [full, `был(а) в ${hhmm(at)}`];', 'return [full];', date(12, 3, 53), date(12, 20), ['был(а) в 03:53']],
   ['вчера без короткой формы', 'const forms = [full, `вчера в ${hhmm(at)}`];', 'const forms = [full];', date(11, 3, 53), date(12, 20), ['вчера в 03:53']],
 ] as const) it(`R182 мутант «${name}» обнаруживается сохранением читаемой формы`, () => {
   // Короткая форма нужна только при тесноте, но должна существовать до замера.
-  forms(at, now, [...tail]); assert.throws(() => forms(at, now, [...tail], changed(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes('формы от полной'));
+  forms(at, now, [...tail]); counterfact(() => { assert.throws(() => forms(at, now, [...tail], changed(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes('формы от полной')); });
 });

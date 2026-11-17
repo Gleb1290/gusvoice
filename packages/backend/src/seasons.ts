@@ -30,6 +30,21 @@ import { coinLedger, seasonResults, serverEconomy, users } from './db/schema.js'
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
+ * Хуки этапа 6 ГусКоинов 2 (лидерборд игр, звания, «Итоги»): закрыть игровой месяц и заморозить «Итоги сезона экономики».
+ * Вставляет их `routes/gameBoard.ts` при регистрации (`gameMonths.ts`), как `gameMoney.configurePredictionAnnouncer`.
+ * ⚠️ Внедрением, а не импортом: у этого модуля закрытый круг зависимостей (его грузят изолированно тесты экономики), а
+ * подсчёт званий тянет за собой всю выборку игр. Нет хуков (экономика без маршрутов игр) — сезон закрывается как раньше.
+ */
+export interface SeasonHooks {
+  afterClose?: (serverId: string, now: Date) => Promise<unknown>;
+  freezeRecap?: (tx: Tx, serverId: string, finished: string, w: { from: Date; to: Date }) => Promise<void>;
+}
+let hooks: SeasonHooks = {};
+export function configureSeasonHooks(next: SeasonHooks): void {
+  hooks = next;
+}
+
+/**
  * Закрыть прошедший сезон, если он сменился.
  *
  * Вызывать перед всем, что читает или пишет сезонные числа: тиком начисления и запросом таблицы
@@ -42,6 +57,19 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * Возвращает идентификатор сезона, итоги которого заморожены этим вызовом, или `null`.
  */
 export async function closeSeasonIfNeeded(serverId: string, now: Date): Promise<string | null> {
+  const finished = await closeEconomySeason(serverId, now);
+  // Игровой месяц (ГусКоины 2, этап 6) закрывается здесь же — тем же тиком и теми же лидербордами, без нового импорта в
+  // `voiceActivity.ts` (хук `SeasonHooks.afterClose`). Своей транзакцией и под `catch`: сбой подсчёта званий не должен
+  // ни откатывать сезон, ни уносить начисление монет в тике голоса (повторится следующим тиком — закрытие идемпотентно).
+  try {
+    await hooks.afterClose?.(serverId, now);
+  } catch (err) {
+    console.error('[seasons] game month close failed', serverId, err);
+  }
+  return finished;
+}
+
+async function closeEconomySeason(serverId: string, now: Date): Promise<string | null> {
   return db.transaction(async (tx) => {
     const [row] = await tx
       .select({ closed: serverEconomy.closedSeasonId, length: serverEconomy.seasonLength })
@@ -112,16 +140,28 @@ async function freeze(tx: Tx, serverId: string, finished: string, w: { from: Dat
     .where(and(eq(seasonResults.serverId, serverId), eq(seasonResults.seasonId, finished)));
 
   const rows = totals.filter((t) => t.earned > 0);
-  if (rows.length === 0) return;
-  await tx.insert(seasonResults).values(
-    rows.map((t, idx) => ({
-      serverId,
-      seasonId: finished,
-      userId: t.userId,
-      earned: t.earned,
-      place: idx + 1,
-    })),
-  );
+  if (rows.length > 0) {
+    await tx.insert(seasonResults).values(
+      rows.map((t, idx) => ({
+        serverId,
+        seasonId: finished,
+        userId: t.userId,
+        earned: t.earned,
+        place: idx + 1,
+      })),
+    );
+  }
+
+  // «Итоги сезона экономики» (этап 6) — в той же транзакции, сразу за местами: срезы голоса живут 90 дней, потом квартал
+  // не пересчитать. Точкой сохранения: сбой сборки итогов не должен откатить корону и не дать сезону закрыться.
+  const freezeRecap = hooks.freezeRecap;
+  if (freezeRecap) {
+    try {
+      await tx.transaction(async (sp) => freezeRecap(sp, serverId, finished, w));
+    } catch (err) {
+      console.error('[seasons] economy recap freeze failed', serverId, finished, err);
+    }
+  }
 }
 
 /**

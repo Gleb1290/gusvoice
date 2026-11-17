@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -235,32 +236,40 @@ describe('R301 нажатия бота: владение, единственны
   });
   it('мутант без проверки владельца краснеет на чужом ответе, оригинал зелёный', async () => {
     await checkOwnership(source);
+    await counterfact(async () => {
     await assert.rejects(checkOwnership(replaceOnce('if (rec.botId !== botId) return false;', 'if (false) return false;')),
       (error: unknown) => error instanceof assert.AssertionError
         && error.message.split(/\r?\n/, 1)[0] === 'чужой бот не отвечает на нажатие'
         && error.operator === 'strictEqual' && error.actual === true && error.expected === false);
+    });
   });
   it('мутант без единственного DEL краснеет на двух параллельных ответах', async () => {
     await checkOneAnswer(source);
+    await counterfact(async () => {
     await assert.rejects(checkOneAnswer(replaceOnce('if ((await redisPub.del(queryKey(id))) !== 1) return false;',
       'await redisPub.del(queryKey(id));')),
     (error: unknown) => error instanceof assert.AssertionError
       && error.message.split(/\r?\n/, 1)[0] === 'один запрос принимает ровно один параллельный ответ'
       && error.operator === 'strictEqual' && error.actual === 2 && error.expected === 1);
+    });
   });
   it('мутант без отката отказа краснеет именно на лишнем занятом месте', async () => {
     await checkPending(source);
+    await counterfact(async () => {
     await assert.rejects(checkPending(replaceOnce('await redisPub.decr(k).catch(() => 0);', '/* rollback lost */')),
       (error: unknown) => error instanceof assert.AssertionError
         && error.message.split(/\r?\n/, 1)[0] === 'отказ не расходует место'
         && error.operator === 'strictEqual' && error.actual === '4' && error.expected === '3');
+    });
   });
   it('мутант общего ключа ответа краснеет на ответе не тому устройству', async () => {
     await checkIsolatedAnswers(source);
+    await counterfact(async () => {
     await assert.rejects(checkIsolatedAnswers(replaceOnce('const answerKey = (id: string) => `bot:cbqa:${id}`;',
       "const answerKey = (_id: string) => 'bot:cbqa:shared';")),
     (error: unknown) => error instanceof assert.AssertionError
       && error.message.split(/\r?\n/, 1)[0] === 'ответ адресован своему запросу, не соседнему'
       && error.operator === 'strictEqual' && error.actual === 'второму' && error.expected === 'первому');
+    });
   });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { after, before, beforeEach, test } from 'node:test';
@@ -282,6 +283,7 @@ test('две исходящие жалобы на человека склеив�
   ]);
 
   // Мутант прежнего поведения (`input.reason ?? existing.reason`) обязан терять r1 и провалить ту же проверку.
+  await counterfact(async () => {
   await seedLink('peer-mutant');
   const instanceBanSource = readFileSync(new URL('../src/federation/instanceBan.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.equal(instanceBanSource.split('const reason = mergeReportReason(existing.reason, input.reason);').length - 1, 1,
@@ -313,6 +315,7 @@ test('две исходящие жалобы на человека склеив�
   const mutantRow = await t.raw.query<{ reason: string }>("SELECT reason FROM federation_reports WHERE direction = 'out' AND instance_id = 'peer-mutant'");
   assert.throws(() => assert.deepEqual(mutantRow.rows[0]?.reason, 'm1\nm2'), assert.AssertionError,
     'мутант затирает m1 и должен провалить ожидание склейки');
+  });
 });
 
 test('разные входящие report_id одного человека добавляют причины, а не затирают первую', async () => {

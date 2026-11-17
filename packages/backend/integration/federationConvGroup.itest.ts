@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -167,10 +168,10 @@ async function versions(mutations: readonly Mutation[] = []) {
 it('R203 старая и равная версии игнорируются, следующая меняет название, фото, состав и владельца', async () => { await versions(); });
 it('R203 <= → < в обеих проверках версии обнаруживается равным снимком, не loader/таймаутом', async () => {
   await versions();
-  await assert.rejects(versions([
+  await counterfact(() => assert.rejects(versions([
     ['existing.origin !== peer || x.version <= existing.version', 'existing.origin !== peer || x.version < existing.version'],
     ['(existing && x.version <= cur.version)', '(existing && x.version < cur.version)'],
-  ]), assertion('старая и равная версия не переписывают снимок'));
+  ]), assertion('старая и равная версия не переписывают снимок')));
 });
 
 it('R203 несовпавший id, не группа и коллизия с местной беседой не меняют SQL; правильная новая группа проходит', async () => {

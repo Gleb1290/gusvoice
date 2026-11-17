@@ -1,3 +1,4 @@
+import { counterfact, mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -81,11 +82,13 @@ it('R125 тег беседы заменяет прежнее уведомлен�
     assert.deepEqual(plain(api.webNoticeOptions('текст', false, '')), { body: 'текст' });
   };
   check(loadNotifications());
-  for (const mutate of [
-    (s: string) => s.replace('`conv:${group}`', '`other:${group}`'),
-    (s: string) => s.replace('if (group) o.tag = `conv:${group}`;', 'if (group) { o.tag = `conv:${group}`; if (!silent) o.renotify = true; }'),
-    (s: string) => s.replace('if (group) o.tag = `conv:${group}`;', ''),
-  ]) assert.throws(() => check(loadNotifications(mutate)), assert.AssertionError);
+  counterfact(() => {
+    for (const mutate of [
+      (s: string) => s.replace('`conv:${group}`', '`other:${group}`'),
+      (s: string) => s.replace('if (group) o.tag = `conv:${group}`;', 'if (group) { o.tag = `conv:${group}`; if (!silent) o.renotify = true; }'),
+      (s: string) => s.replace('if (group) o.tag = `conv:${group}`;', ''),
+    ]) assert.throws(() => check(loadNotifications(mutate)), assert.AssertionError);
+  });
 });
 
 function timedNotices(api: NotifyApi, userAgent: string) {
@@ -141,11 +144,13 @@ it('R116 браузер ПК закрывает беседу ровно чере
     assert.deepEqual(f.shown.map(n => n.closes), [1, 2, 0], 'оставшийся таймер безопасен; уведомление без беседы не автозакрывается');
   };
   check(loadNotifications());
-  for (const mutate of [
-    (s: string) => s.replace('WEB_NOTICE_AUTOCLOSE_MS = 8000', 'WEB_NOTICE_AUTOCLOSE_MS = 7999'),
-    (s: string) => s.replace('cur.filter((x) => x !== n)', 'cur.filter(() => true)'),
-    (s: string) => s.replace('n.close();\n          } catch', '/* закрытие потеряно */\n          } catch'),
-  ]) assert.throws(() => check(loadNotifications(mutate)), assert.AssertionError);
+  counterfact(() => {
+    for (const mutate of [
+      (s: string) => s.replace('WEB_NOTICE_AUTOCLOSE_MS = 8000', 'WEB_NOTICE_AUTOCLOSE_MS = 7999'),
+      (s: string) => s.replace('cur.filter((x) => x !== n)', 'cur.filter(() => true)'),
+      (s: string) => s.replace('n.close();\n          } catch', '/* закрытие потеряно */\n          } catch'),
+    ]) assert.throws(() => check(loadNotifications(mutate)), assert.AssertionError);
+  });
 });
 
 it('R116 телефонные браузеры сохраняют уведомление до прочтения, без таймера автозакрытия', () => {
@@ -161,7 +166,9 @@ it('R116 телефонные браузеры сохраняют уведомл
     }
   };
   check(loadNotifications());
-  assert.throws(() => check(loadNotifications(s => s.replace('if (!phoneBrowser()) {', 'if (true) {'))), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(loadNotifications(s => s.replace('if (!phoneBrowser()) {', 'if (true) {'))), assert.AssertionError);
+  });
 });
 
 it('выключение всплывашек личных сообщений не глушит отдельный поток уведомлений групп', () => {
@@ -176,7 +183,7 @@ it('выключение всплывашек личных сообщений н
   assert.deepEqual(shown.map((notice) => notice.title), ['Группа'], 'выключение ЛС не отключает разрешённые уведомления группы');
 });
 
-it('мутант без гейта ЛС действительно показывает запрещённую всплывашку', () => {
+mutantTest('мутант без гейта ЛС действительно показывает запрещённую всплывашку', () => {
   const api = loadNotifications((source) => source.replace('if (opts.dmChat && !notifyPrefs.dm) return;', ''));
   const { shown } = fixture(api);
   api.setNotifyPrefs({ view: 'all', groups: true, dm: false });
@@ -205,8 +212,10 @@ it('исключение беседы разрешает всплывашку п
     assert.equal(shown.length, 2, 'снятие исключения возвращает общий запрет');
   };
   check(loadNotifications());
-  assert.throws(() => check(loadNotifications((s) => s.replace('if (!notifyAlwaysProbe(opts.group ?? opts.conv)) {', 'if (true) {'))),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('адресное исключение разрешает только'));
+  counterfact(() => {
+    assert.throws(() => check(loadNotifications((s) => s.replace('if (!notifyAlwaysProbe(opts.group ?? opts.conv)) {', 'if (true) {'))),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('адресное исключение разрешает только'));
+  });
 });
 
 it('нативное уведомление беседы маршрутизирует ответ, прочтение и обычный клик по своим меткам', async () => {
@@ -238,8 +247,10 @@ it('нативное уведомление беседы маршрутизир�
   const state = fixture(api, true);
   await check(api, calls, state);
 
-  const brokenCalls = { reply: [] as unknown[], read: [] as string[], clicked: [] as number[] };
-  const mutant = loadNotifications(source => source.replace("if (p.action === 'reply') {", "if (false) {"), { tauri: true, desktop: true });
-  const mutantState = fixture(mutant, true);
-  await assert.rejects(() => check(mutant, brokenCalls, mutantState), assert.AssertionError);
+  await counterfact(async () => {
+    const brokenCalls = { reply: [] as unknown[], read: [] as string[], clicked: [] as number[] };
+    const mutant = loadNotifications(source => source.replace("if (p.action === 'reply') {", "if (false) {"), { tauri: true, desktop: true });
+    const mutantState = fixture(mutant, true);
+    await assert.rejects(() => check(mutant, brokenCalls, mutantState), assert.AssertionError);
+  });
 });

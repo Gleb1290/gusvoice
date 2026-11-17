@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
@@ -105,12 +106,14 @@ it('новый звук глушит первый кружок, а чужой о
   const effects = { spends: [] as string[], heard: [] as string[], pauses: 0 };
   await exercise(loadRoundVideo(effects), effects, true);
 
-  const mutantEffects = { spends: [] as string[], heard: [] as string[], pauses: 0 };
-  const mutant = loadRoundVideo(mutantEffects, (source) => source.replace(
-    'if (modeRef.current !== \'loop\' && m?.once && !m.mine) spendOnce(m);',
-    'if (false) { /* мутант пропускает сгорание при размонтировании */ }',
-  ));
-  await assert.rejects(() => exercise(mutant, mutantEffects, true), assert.AssertionError);
+  await counterfact(async () => {
+    const mutantEffects = { spends: [] as string[], heard: [] as string[], pauses: 0 };
+    const mutant = loadRoundVideo(mutantEffects, (source) => source.replace(
+      'if (modeRef.current !== \'loop\' && m?.once && !m.mine) spendOnce(m);',
+      'if (false) { /* мутант пропускает сгорание при размонтировании */ }',
+    ));
+    await assert.rejects(() => exercise(mutant, mutantEffects, true), assert.AssertionError);
+  });
 });
 
 type RoundCase = (h: { host: HTMLDivElement; button: HTMLButtonElement; video: HTMLVideoElement; pauses: () => number; plays: () => number; render: (autoplay: boolean) => Promise<void> }) => Promise<void>;
@@ -208,10 +211,12 @@ const roundMutations: [string, string, string, RoundCase, string][] = [
 for (const [name, anchor, replacement, check, failure] of roundMutations) {
   it(`кружок: ${name} — оригинал проходит, исходниковый мутант ловится`, async () => {
     await roundCase(check);
-    await assert.rejects(() => roundCase(check, (source) => {
-      assert.equal(source.split(anchor).length, 2, 'точный якорь мутанта встречается один раз');
-      return source.replace(anchor, replacement);
-    }), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure));
+    await counterfact(async () => {
+      await assert.rejects(() => roundCase(check, (source) => {
+        assert.equal(source.split(anchor).length, 2, 'точный якорь мутанта встречается один раз');
+        return source.replace(anchor, replacement);
+      }), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure));
+    });
   });
 }
 it('беззвучный кружок без slider, звук открывает доступную перемотку; касание полосы не всплывает', async () => {
@@ -255,13 +260,15 @@ it('чужой одноразовый сгорает при конце прос�
   await endVideo(Component, effects, loopOnce, false);
   assert.deepEqual(effects.spends, ['foreign-ended'], 'расходуется только просмотренный чужой одноразовый кружок');
 
-  const mutantEffects = { spends: [] as string[], heard: [] as string[], pauses: 0 };
-  const mutant = loadRoundVideo(mutantEffects, (source) => source.replace(
-    'if (meta?.once && !meta.mine) spendOnce(meta);',
-    'if (meta?.once) spendOnce(meta);',
-  ));
-  await assert.rejects(async () => {
-    await endVideo(mutant, mutantEffects, { ...ownOnce, messageId: 'own-mutant' }, true);
-    assert.deepEqual(mutantEffects.spends, [], 'мутант ошибочно списывает свой кружок');
-  }, assert.AssertionError);
+  await counterfact(async () => {
+    const mutantEffects = { spends: [] as string[], heard: [] as string[], pauses: 0 };
+    const mutant = loadRoundVideo(mutantEffects, (source) => source.replace(
+      'if (meta?.once && !meta.mine) spendOnce(meta);',
+      'if (meta?.once) spendOnce(meta);',
+    ));
+    await assert.rejects(async () => {
+      await endVideo(mutant, mutantEffects, { ...ownOnce, messageId: 'own-mutant' }, true);
+      assert.deepEqual(mutantEffects.spends, [], 'мутант ошибочно списывает свой кружок');
+    }, assert.AssertionError);
+  });
 });

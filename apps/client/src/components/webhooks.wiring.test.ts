@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -113,6 +114,8 @@ for (const [label, raw, from, to, check, marker] of [
     permissionDoor, 'R274:дверь-только-текст-и-своё-право'],
 ] as const) it(`R274 контрфакт: ${label} ловится адресным AST-стражем после оригинала`, () => {
   check(raw);
-  assert.equal(raw.split(from).length - 1, 1, 'одна точка мутации');
-  assert.throws(() => check(raw.replace(from, to)), error => error instanceof assert.AssertionError && error.message.includes(marker));
+  counterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1, 'одна точка мутации');
+    assert.throws(() => check(raw.replace(from, to)), error => error instanceof assert.AssertionError && error.message.includes(marker));
+  });
 });

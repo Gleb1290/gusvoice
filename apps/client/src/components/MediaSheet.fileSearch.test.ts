@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -9,20 +10,21 @@ import { Simulate } from 'react-dom/test-utils';
 import { createRoot } from 'react-dom/client';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as rules from '../attachRules';
 import * as longText from '../longTextRules';
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const raw = read('./MediaSheet.tsx');
 const unused = () => assert.fail('действие вне поиска недавних файлов');
-function load<T>(source: string, deps: Record<string, unknown>): T {
+function load<T>(sourceUrl: URL, source: string, deps: Record<string, unknown>): T {
   const module = { exports: {} };
   class QuietIntersection { observe() {} unobserve() {} disconnect() {} }
   runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     module, exports: module.exports, window, document, URL, File, DOMException, Element, HTMLElement, navigator,
     IntersectionObserver: QuietIntersection, requestAnimationFrame, cancelAnimationFrame, performance,
-    require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `импорт полного MediaSheet или оболочки: ${id}`); return deps[id]; },
+    require: testVmImports(sourceUrl, deps),
   }); return module.exports as T;
 }
 type Scene = { root: HTMLElement; titles(): string[]; query(value: string): Promise<void> };
@@ -38,21 +40,19 @@ async function fixture(count: number, work: (f: Scene) => Promise<void>, source 
       contentType: 'text/plain', size: index + 1 }],
   })) };
   const common = { react: React, 'react-dom': ReactDOM, 'react/jsx-runtime': jsx };
-  const icon = load<typeof import('./Icon')>(read('./Icon.tsx'), common);
-  const bottom = load<typeof import('./BottomSheet')>(read('./BottomSheet.tsx'), { ...common, './Icon': icon });
+  const icon = load<typeof import('./Icon')>(new URL('./Icon.tsx', import.meta.url), read('./Icon.tsx'), common);
+  const bottom = load<typeof import('./BottomSheet')>(new URL('./BottomSheet.tsx', import.meta.url), read('./BottomSheet.tsx'), { ...common, './Icon': icon });
   const deps = { ...common, '../attachRules': rules, '../longTextRules': longText,
-    '../api': { api: { attachmentDownloadUrl: unused } }, '../store': { useStore: (select: (s: { dmMessages: typeof dmMessages }) => unknown) => select({ dmMessages }) },
+    '../store': { useStore: (select: (s: { dmMessages: typeof dmMessages }) => unknown) => select({ dmMessages }) },
     '../cameraCapture': { cameraSupported: () => false, cameraAllowedQuietly: async () => false, cameraCount: unused, openCamera: unused, stopStream: () => {} },
     '../nativeMedia': { nativeMediaInfo: async () => ({ perm: 'granted', asked: true, camera: false, mic: false, capture: false }),
       galleryAlbums: async () => [], galleryPage: async () => ({ items: [], end: true }), galleryThumb: unused,
       cancelNativeFiles: () => {}, galleryFiles: unused, galleryPermission: unused, pickDocumentsNative: unused,
       captureNative: unused, captureErrorCode: unused, cameraPermissionNative: unused },
-    '../toast': { toast: unused }, '../confirm': { confirmAction: unused }, './BottomSheet': bottom,
-    './CameraScreen': { CameraCell: unused, CameraScreen: unused }, './ContextMenu': { MenuItem: unused },
-    './MediaPickViewer': { MediaPickViewer: unused }, './SchedPick': { SchedPick: unused }, './Icon': icon };
+    './BottomSheet': bottom, './Icon': icon };
   try {
     // Исполняется целый MediaSheet с реальными recentFilesOf/filterFilesByName, React и BottomSheet.
-    const { MediaSheet } = load<typeof import('./MediaSheet')>(source, deps);
+    const { MediaSheet } = load<typeof import('./MediaSheet')>(new URL('./MediaSheet.tsx', import.meta.url), source, deps);
     await React.act(async () => { root.render(React.createElement(MediaSheet, { native: true, room: 10, caption: '',
       onSend: unused, onAttach: unused, onClose: unused, onSystemPick: unused })); });
     const tab = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Файл');
@@ -119,7 +119,10 @@ for (const [label, from, to, scenario, prefix, actual, expected] of [
     'R218-file-cap:', 20, 200],
   ['карточки источников не скрываются при поиске', '{!fileQuery.trim() && (', '{true && (', queryCards, 'R218-file-cards:', true, false],
 ] as const) it(`R218 поиск контрфакт: ${label}`, async () => {
-  await scenario(raw); assert.equal(raw.split(from).length - 1, 1, 'у мутации поиска один якорь в полном MediaSheet');
-  await assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  await scenario(raw);
+  await counterfact(async () => {
+    assert.equal(raw.split(from).length - 1, 1, 'у мутации поиска один якорь в полном MediaSheet');
+    await assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });

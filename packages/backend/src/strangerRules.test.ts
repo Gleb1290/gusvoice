@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { cleanReportComment, DM_REPORT_COMMENT_MAX, DM_REPORT_EVIDENCE_MAX, DM_REPORT_TEXT_MAX, evidenceFrom, isDmReportReason } from './strangerRules.js';
@@ -11,6 +12,7 @@ it('улики берутся только из пяти последних и �
   const expected = '3,4,5,6,7';
   const check = (fn: typeof evidenceFrom) => assert.equal(fn(messages).map((row) => row.messageId).join(','), expected);
   check(evidenceFrom);
+  counterfact(() => {
   const source = evidenceFrom.toString();
   assert.ok(source.includes('DM_REPORT_EVIDENCE_MAX'));
   const globals = { DM_REPORT_EVIDENCE_MAX, DM_REPORT_TEXT_MAX };
@@ -18,6 +20,7 @@ it('улики берутся только из пяти последних и �
   assert.throws(() => check(noReverse), assert.AssertionError);
   const six = runInNewContext(`(${source})`, { ...globals, DM_REPORT_EVIDENCE_MAX: 6 }) as typeof evidenceFrom;
   assert.throws(() => check(six), assert.AssertionError, 'шестая улика нарушает контракт ровно пяти последних');
+  });
 });
 
 it('пустые сообщения пропускаются, вложение становится пометкой, длинный текст ограничен', () => {
@@ -26,8 +29,10 @@ it('пустые сообщения пропускаются, вложение �
   const expected = ['текст', '[вложение]', 'я'.repeat(DM_REPORT_TEXT_MAX)].join('|');
   const check = (fn: typeof evidenceFrom) => assert.equal(fn(messages).map((row) => row.text).join('|'), expected);
   check(evidenceFrom);
+  counterfact(() => {
   const longer = runInNewContext(`(${evidenceFrom.toString()})`, { DM_REPORT_EVIDENCE_MAX, DM_REPORT_TEXT_MAX: DM_REPORT_TEXT_MAX + 1 }) as typeof evidenceFrom;
   assert.throws(() => check(longer), assert.AssertionError, 'улика длиннее 500 символов теряет нужный контекст');
+  });
 });
 
 it('комментарий очищает края, ровно 512 символов сохраняет, следующий обрезается', () => {
@@ -38,9 +43,11 @@ it('комментарий очищает края, ровно 512 символ�
   const value = 'x'.repeat(DM_REPORT_COMMENT_MAX + 1);
   const check = (fn: typeof cleanReportComment) => assert.equal(fn(value)?.length, DM_REPORT_COMMENT_MAX);
   check(cleanReportComment);
+  counterfact(() => {
   const source = cleanReportComment.toString();
   const mutant = runInNewContext(`(${source.replace('DM_REPORT_COMMENT_MAX', '2000')})`, { DM_REPORT_COMMENT_MAX: 2000 }) as typeof cleanReportComment;
   assert.throws(() => check(mutant), assert.AssertionError);
+  });
 });
 
 it('принимает только публичные причины жалобы', () => {

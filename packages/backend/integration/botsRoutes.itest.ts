@@ -1,8 +1,9 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { posix } from 'node:path';
-import { runInNewContext } from 'node:vm';
+import { Script } from 'node:vm';
 import { isDeepStrictEqual } from 'node:util';
 import { after, before, test } from 'node:test';
 import Fastify, { type InjectOptions } from 'fastify';
@@ -25,6 +26,9 @@ type Conv = typeof import('../src/conversations.js');
 type Socket = { send(data: string): void; close(code?: number, reason?: string): void; on(event: string, cb: (...args: any[]) => void): void };
 type Api = typeof import('../src/routes/botApi.js') & { __serve: (s: Socket, req: unknown) => Promise<void> };
 type WebhookDelivery = typeof import('../src/bots/webhookDelivery.js') & { __deliverLoop: (botId: string) => Promise<void> };
+// Только скомпилированный код, без контекстов/exports/моков. Живёт один процесс этого файла.
+// Число записей ограничено закрытым real и фиксированными вариантами Edit ниже, не числом fixture.
+const compiledScripts = new Map<string, Script>();
 let t: TestDb;
 before(async () => { t = await createTestDb(); });
 after(async () => { await t?.close(); const { pool } = await import('../src/db/index.js'); await pool.end(); });
@@ -145,7 +149,7 @@ async function fixture(edit?: Edit) {
   for (const name of ['stickerCatalog', 'dmReports', 'scheduled', 'routes/dmFolders', 'mailer', 'settings', 'instanceFeatures', 'totp', 'audit', 'channelMessages', 'serverMembership']) values[name] = dormant(name);
   const real = new Set([
     'auth', 'guestGuard', 'conversations', 'serialize', 'contacts', 'blocks', 'lastSeen', 'db/peerQueries', 'db/userSearch',
-    'messagePrivacy', 'convSendFanout', 'convGroups', 'accountDelete', 'accountRows',
+    'messagePrivacy', 'convSendFanout', 'convGroups', 'accountDelete', 'accountRows', 'gameMoney', 'gameMoneyRules', 'coins', 'streakRules',
     'bots/botStore', 'bots/botRules', 'bots/botUpdates', 'bots/botRead', 'bots/botWire', 'bots/botLifecycle', 'bots/webhookDelivery', 'bots/botCallback', 'bots/botChannel', 'bots/botVoice', 'routes/botPress', 'roleRules',
     'routes/att', 'routes/conv', 'routes/convGroups', 'routes/bots', 'routes/botApi', 'routes/auth', 'routes/calls', 'routes/blocks', 'callPrivacy',
     'convRules', 'dmRules', 'blockRules', 'groupRules', 'scheduleRules', 'strangerRules', 'contactRules', 'messagePrivacyRules',
@@ -168,8 +172,15 @@ async function fixture(edit?: Edit) {
     if (name === 'bots/webhookDelivery') source += '\nmodule.exports.__deliverLoop = deliverLoop;\n';
     const module = { exports: {} };
     modules.set(name, module.exports);
-    runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText, {
+    // source уже содержит проверенный edit и entrypoint-экспорты; оригинал и мутанты имеют разные ключи.
+    const scriptKey = `${name}\0${source}`;
+    let script = compiledScripts.get(scriptKey);
+    if (!script) {
+      script = new Script(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText);
+      compiledScripts.set(scriptKey, script);
+    }
+    script.runInNewContext({
       module, exports: module.exports, Date: name === 'bots/botCallback' ? CallbackDate : Date, Map, Set, Promise, Buffer, URL, URLSearchParams, AbortController, Error,
       console: { warn: (...args: unknown[]) => warnings.push(args.join(' ')), error: fail('console.error') },
       setTimeout: name === 'bots/botCallback'
@@ -323,10 +334,12 @@ async function summaryTransaction304(edit?: Edit) {
 test('R304 список ЛС с ботом читает настройки в своей SQL-транзакции и освобождает PGlite', () => summaryTransaction304());
 test('R304 контрфакт enabled без q ловится до вложенного SQL, а не зависанием файла', async () => {
   await summaryTransaction304();
+  await counterfact(async () => {
   await assert.rejects(summaryTransaction304({ file: 'conversations', from: 'botConvHooks?.enabled(q)', to: 'botConvHooks?.enabled()' }),
     (error: unknown) => error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual'
       && error.message.split(/\r?\n/, 1)[0] === 'R304 сводка передаёт свою транзакцию настройке ботов'
       && error.actual === false && error.expected === true);
+  });
 });
 // Композиция настоящего HTTP-маршрута с настоящим closeBotSockets: наблюдаем закрытие уже подключённого потребителя,
 // не подменяем сам closeBotSockets spy-функцией. Его ветка пробуждения poll отдельно исполняется в botApi.wake.test.ts.
@@ -970,7 +983,10 @@ for (const method of ['setWebhook', 'deleteWebhook'] as const) cases.push({ name
     : 'resetWebhookRetry(ctx.bot.userId);\n    if (q.drop_pending_updates) await dropUpdates(ctx.bot.userId);',
   to: 'resetWebhookRetry(ctx.bot.userId);' }, label: `R297-drop-${method}: true удаляет очередь`, actual: 1, expected: 0 });
 for (const c of cases) test(`R297 контрфакт: ${c.name}`, async () => {
-  await run(c.body); await assert.rejects(() => run(c.body, c.edit), killed(c.label, c.actual, c.expected));
+  await run(c.body);
+  await counterfact(async () => {
+    await assert.rejects(() => run(c.body, c.edit), killed(c.label, c.actual, c.expected));
+  });
 });
 
 const cases301: typeof cases = [
@@ -994,7 +1010,10 @@ const cases301: typeof cases = [
     label: 'R301-TTL: протухшее нажатие не выдаётся', actual: true, expected: false },
 ];
 for (const c of cases301) test(`R301 контрфакт: ${c.name}`, async () => {
-  await run(c.body); await assert.rejects(() => run(c.body, c.edit), killed(c.label, c.actual, c.expected));
+  await run(c.body);
+  await counterfact(async () => {
+    await assert.rejects(() => run(c.body, c.edit), killed(c.label, c.actual, c.expected));
+  });
 });
 
 async function webhookEnglish(f: Fixture) {
@@ -1332,7 +1351,10 @@ const hardeningMutants: Array<{ name: string; body: (f: Fixture) => Promise<void
     label: 'R303 бот скрыт от федерации даже при удалении', actual: 2, expected: 0 },
 ];
 for (const m of hardeningMutants) test(`R303 контрфакт: ${m.name}`, async () => {
-  await run(m.body); await assert.rejects(run(m.body, m.edit), killed(m.label, m.actual, m.expected));
+  await run(m.body);
+  await counterfact(async () => {
+    await assert.rejects(run(m.body, m.edit), killed(m.label, m.actual, m.expected));
+  });
 });
 async function summaryDescription(f: Fixture) {
   const b = await ready(f);
@@ -1408,7 +1430,10 @@ const r300Cases: typeof cases = [
     label: 'R300-call: бот не принимает звонок', actual: 201, expected: 403 },
 ];
 for (const c of r300Cases) test(`R300 контрфакт: ${c.name}`, async () => {
-  await run(c.body); await assert.rejects(() => run(c.body, c.edit), killed(c.label, c.actual, c.expected));
+  await run(c.body);
+  await counterfact(async () => {
+    await assert.rejects(() => run(c.body, c.edit), killed(c.label, c.actual, c.expected));
+  });
 });
 
 // R299: SDK настоящий, HTTP заменён только адаптером fetch→Fastify.inject, WS — мостом к настоящему entrypoint.

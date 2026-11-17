@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -61,10 +62,13 @@ function minimumOverRatio(api = real) {
 it('R221 очень узкая карта сохраняет обязательные 80 пикселей, даже если пропорция меняется', () => minimumOverRatio());
 it('R221 контрфакт ради пропорции отправляет высоту карты ниже минимума API', () => {
   minimumOverRatio(load(source));
-  const from = 'Math.max(MAP_STATIC_MIN_SIDE, Math.round(cssH * k))';
-  assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => minimumOverRatio(load(source.replace(from, 'Math.round(cssH * k)'))), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R221-map-floor:') && e.operator === 'strictEqual' && e.actual === 13 && e.expected === 80);
+
+  runCounterfact(() => {
+    const from = 'Math.max(MAP_STATIC_MIN_SIDE, Math.round(cssH * k))';
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => minimumOverRatio(load(source.replace(from, 'Math.round(cssH * k)'))), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R221-map-floor:') && e.operator === 'strictEqual' && e.actual === 13 && e.expected === 80);
+  });
 });
 function path(api = real) {
   const url = new URL(api.mapStaticPath({ ...q, w: 999, h: 1 }), 'https://self.invalid/api');
@@ -95,7 +99,10 @@ for (const [name, from, to, check, prefix, actual, expected] of [
   ['предел высоты стал 451', 'export const MAP_STATIC_MAX_H = 450;', 'export const MAP_STATIC_MAX_H = 451;',
     (api: Api) => assert.equal(api.parseMapStaticQuery({ ...q, h: 451 }) === null, true, 'R220-max-height: 451 запрещён API'), 'R220-max-height:', false, true],
 ] as const) it(`R220 контрфакт правил карты: ${name}`, () => {
-  check(load(source)); assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  check(load(source));
+  runCounterfact(() => {
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

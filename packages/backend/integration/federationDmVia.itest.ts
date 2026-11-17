@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -297,9 +298,11 @@ async function guardedWrite(kind: Parameters<typeof writeRequest>[0], mutation?:
 for (const kind of ['правка', 'удаление', 'реакция', 'закреп'] as const) it(`R198 ${kind} у обоих теневой сессии закрыта, местному доступна`, async () => { await guardedWrite(kind); });
 it('R198 удаление isShadow из fedLinkRefused обнаруживается успешной теневой правкой, а не loader', async () => {
   await guardedWrite('правка');
-  await assert.rejects(guardedWrite('правка', [
-    'if (fedVia && me && !opts.viaOk && (await fedVia.isShadow(me))) {', 'if (false) {',
-  ]), assertion('теневая запись закрыта до изменения SQL'));
+  await counterfact(async () => {
+    await assert.rejects(guardedWrite('правка', [
+      'if (fedVia && me && !opts.viaOk && (await fedVia.isShadow(me))) {', 'if (false) {',
+    ]), assertion('теневая запись закрыта до изменения SQL'));
+  });
 });
 
 it('R198 confirmed снимает непроверенную пометку и публикует conv.change обоим, повтор не пишет журнал', async () => {
@@ -339,7 +342,9 @@ async function foreignVerdict(mutation?: Mutation) {
 }
 it('R198 чужой дом не решает даже при повреждённом via_instance_id; снятая проверка дома автора краснеет', async () => {
   await foreignVerdict();
-  await assert.rejects(foreignVerdict(['if (author?.home !== instanceId) return; // решает только дом автора', '// проверка дома автора удалена']), assertion('решает только фактический дом автора'));
+  await counterfact(async () => {
+    await assert.rejects(foreignVerdict(['if (author?.home !== instanceId) return; // решает только дом автора', '// проверка дома автора удалена']), assertion('решает только фактический дом автора'));
+  });
 });
 it('R198 unverified сохраняет вид неподтверждённого и не публикует изменений, чужая беседа и незнакомое решение игнорируются', async () => {
   const f = await fixture(); await message(f);
@@ -372,7 +377,9 @@ async function pendingScope(mutation?: Mutation) {
 }
 it('R198 pendingFor выбирает живые pending по порядку и фактическому дому автора, удаление фильтра раскрывает чужое', async () => {
   await pendingScope();
-  await assert.rejects(pendingScope(['.filter((m) => people.get(m.authorId)?.homeInstanceId === instanceId)', '.filter(() => true)']), assertion('спрашивающий видит только pending своих авторов'));
+  await counterfact(async () => {
+    await assert.rejects(pendingScope(['.filter((m) => people.get(m.authorId)?.homeInstanceId === instanceId)', '.filter(() => true)']), assertion('спрашивающий видит только pending своих авторов'));
+  });
 });
 
 function wire(id = 'own-via', clientId: string | null = crypto.randomUUID(), overrides: Partial<shared.FedConvMessageWire> = {}): shared.FedConvMessageWire {
@@ -436,9 +443,11 @@ it('R202 существующая id принимается в своей бес
 });
 it('R202 мутант подтверждения id только по автору ловится коллизией между двумя доступными личками', async () => {
   await existingIdConversation();
-  await assert.rejects(existingIdConversation([
-    'exists.authorId === authorId && exists.conversationId === w.conversationId', 'exists.authorId === authorId',
-  ]), assertion('совпавшая id из другой доступной беседы не подтверждается'));
+  await counterfact(async () => {
+    await assert.rejects(existingIdConversation([
+      'exists.authorId === authorId && exists.conversationId === w.conversationId', 'exists.authorId === authorId',
+    ]), assertion('совпавшая id из другой доступной беседы не подтверждается'));
+  });
 });
 it('R198 чужая беседа, id чужого автора и claim из другой беседы отклоняются, парное своё принято', async () => {
   const f = await fixture(); await message(f, 'shadow', 'occupied-id');
@@ -460,10 +469,12 @@ async function recalculate(mutation?: Mutation) {
 }
 it('R198 дом пересчитывает отпечаток по тексту; доверие payload_hash соседа подтверждало бы подделку', async () => {
   await recalculate();
-  await assert.rejects(recalculate([
-    'const wireHash = payloadHash({ conversationId: row.conversationId, content: w.content, attachmentRefs: [], replyToId: w.replyToId });',
-    "const wireHash = w.payloadHash ?? '';",
-  ]), assertion('поддельный текст не подтверждается хешем соседа'));
+  await counterfact(async () => {
+    await assert.rejects(recalculate([
+      'const wireHash = payloadHash({ conversationId: row.conversationId, content: w.content, attachmentRefs: [], replyToId: w.replyToId });',
+      "const wireHash = w.payloadHash ?? '';",
+    ]), assertion('поддельный текст не подтверждается хешем соседа'));
+  });
 });
 
 it('R198 fallback доступен только своему участнику прямой беседы с тенью и dm4, отказ не выпускает гостевую сессию', async () => {
@@ -496,9 +507,11 @@ async function fallbackGeneration(mutation?: Mutation) {
 }
 it('R198 fallback кеширует внутри поколения, выход везде обновляет сессию; удалённое поколение в ключе краснеет', async () => {
   await fallbackGeneration();
-  await assert.rejects(fallbackGeneration([
-    'const cacheKey = `fed:fallback:${me}:${link.instanceId}:${u?.gen ?? 0}`;', 'const cacheKey = `fed:fallback:${me}:${link.instanceId}`;',
-  ]), assertion('новое поколение не получает мёртвую сессию из кеша'));
+  await counterfact(async () => {
+    await assert.rejects(fallbackGeneration([
+      'const cacheKey = `fed:fallback:${me}:${link.instanceId}:${u?.gen ?? 0}`;', 'const cacheKey = `fed:fallback:${me}:${link.instanceId}`;',
+    ]), assertion('новое поколение не получает мёртвую сессию из кеша'));
+  });
 });
 
 it('R200 fallback разделяет назначение via/call: dm4 и dmcall1 не подменяют друг друга, без обоих отказ', async () => {
@@ -523,10 +536,12 @@ it('R200 возврат требования dm4 для fallback звонка о
     assert.deepEqual([...(await f.membership.grantHostsOf('local'))], [B]);
   }
   await scenario();
-  await assert.rejects(scenario([
-    "const able = purpose === 'call' ? await hasFeature(link, FED_FEATURES.dmcall1, now) : await hasDm4(link, now);",
-    'const able = await hasDm4(link, now);',
-  ]), assertion('звонок не требует dm4 при наличии dmcall1'));
+  await counterfact(async () => {
+    await assert.rejects(scenario([
+      "const able = purpose === 'call' ? await hasFeature(link, FED_FEATURES.dmcall1, now) : await hasDm4(link, now);",
+      'const able = await hasDm4(link, now);',
+    ]), assertion('звонок не требует dm4 при наличии dmcall1'));
+  });
 });
 
 it('R198 две базы: после восстановления отчёт подтверждает настоящее, находит лишнее и оставляет единственную копию', async () => {

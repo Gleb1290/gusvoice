@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -100,12 +101,14 @@ for (const [label, changeRow, from, to] of exportCases) test(`R194 отдача 
   // Класс ошибки доступа: каждый conjunct нужен самостоятельно, валидный оригинал проходит тем же сценарием.
   await exportScenario(changeRow);
   // Такой же conjunct есть в markCopied: выбираем AST-тело именно отдачи, а не снимаем обе независимые проверки.
+  await counterfact(async () => {
   const raw = source('federation/convAtt'), tree = ts.createSourceFile('convAtt.ts', raw, ts.ScriptTarget.Latest, true);
   const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'fedAttachmentForPeer') as ts.FunctionDeclaration;
   assert.ok(fn?.body, 'функция отдачи найдена');
   const body = fn.body.getText(tree);
   assert.equal(body.split(from).length - 1, 1, 'один conjunct в выдаче');
   await assert.rejects(exportScenario(changeRow, [body, body.replace(from, to)]), e => e instanceof assert.AssertionError && e.message.includes('несоответствующий файл'));
+  });
 });
 test('R194 неизвестный файл и отсутствие участника спрашивающего дома не дают оригинал', async () => {
   // Класс ошибки доступа: существующий id и старое членство не заменяют нынешнего собеседника этого дома.
@@ -119,10 +122,12 @@ test('R194 снятие EXISTS участника обнаруживается �
   // Класс ошибки доступа: право спрашивающего дома выводится из нынешнего SQL-членства, не из знания id файла.
   const remove = async () => { await t.raw.exec("DELETE FROM conversation_members WHERE conversation_id='fed-files' AND user_id='shadow'"); };
   await exportScenario(remove);
+  await counterfact(async () => {
   await assert.rejects(exportScenario(remove, [
     'sql`EXISTS (SELECT 1 FROM ${conversationMembers} cm JOIN ${users} pu ON pu.id = cm.user_id\n          WHERE cm.conversation_id = ${attachments.conversationId} AND pu.home_instance_id = ${peer})`',
     'sql`true`',
   ]), e => e instanceof assert.AssertionError && e.message.includes('несоответствующий файл'));
+  });
 });
 async function hostGroupCopy(mutation?: Mutation) {
   const f = await fixture({ att: mutation });
@@ -151,6 +156,7 @@ test('R203 скопированный файл чужого автора раз�
 });
 test('R203 потеря групповой ветки OR ловится разрешённой копией, а не ошибкой загрузчика', async () => {
   await hostGroupCopy();
+  await counterfact(async () => {
   const raw = source('federation/convAtt'), tree = ts.createSourceFile('convAtt.ts', raw, ts.ScriptTarget.Latest, true);
   const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'fedAttachmentForPeer') as ts.FunctionDeclaration;
   assert.ok(fn?.body); const body = fn.body.getText(tree); const choices: ts.CallExpression[] = [];
@@ -159,6 +165,7 @@ test('R203 потеря групповой ветки OR ловится разр
   const branch = choices[0]; assert.equal(branch.arguments.length, 2);
   await assert.rejects(hostGroupCopy([body, body.replace(branch.getText(tree), branch.arguments[0].getText(tree))]),
     e => e instanceof assert.AssertionError && e.message.includes('наш хост группы отдаёт скопированный файл'));
+  });
 });
 for (const mode of ['dm2', 'no-dm2', 'no-hook'] as const) test(`R194 приём вложения ${mode}: ${mode === 'dm2' ? 'создаёт remote без заглушки' : 'сохраняет заглушку без строк файла'}`, async () => {
   // Класс ошибки feature-gate: метаданные файла не означают поддержку отдачи байтов соседом.
@@ -197,9 +204,11 @@ test('R201 вложение без dm2 удерживает курсор на р
 });
 test('R201 потеря NeedsFilesFeature обнаруживается копией, созданной слишком рано', async () => {
   await retryFiles();
+  await counterfact(async () => {
   await assert.rejects(() => retryFiles([
     'if (!files && !!attHooks && !sticker && !service && w.attachments.length > 0 && !lastTry)', 'if (false)',
   ]), e => e instanceof assert.AssertionError && e.message.includes('первая попытка удерживает вложение'));
+  });
 });
 
 async function thumbs(mutation?: Mutation) {
@@ -226,15 +235,19 @@ for (const [name, anchor, replacement] of [
   ['lastThumb', 'first.fedState !== undefined', 'false'], ['pinsFor', ' && !first.fedState', ''],
 ] as const) test(`R201 снятие fedState в ${name} обнаруживается преждевременной миниатюрой`, async () => {
   await thumbs();
+  await counterfact(async () => {
   const raw = source('conversations'), tree = ts.createSourceFile('conversations.ts', raw, ts.ScriptTarget.Latest, true);
   const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name) as ts.FunctionDeclaration;
   assert.ok(fn?.body); const body = fn.body.getText(tree); assert.equal(body.split(anchor).length - 1, 1, 'уникальный guard миниатюры');
   await assert.rejects(() => thumbs([body, body.replace(anchor, replacement)]), e => e instanceof assert.AssertionError && e.message.includes('copying и remote не получают'));
+  });
 });
 test('R194 снятие проверки dm2 обнаруживается лишней строкой remote', async () => {
   // Класс ошибки feature-gate: частичный протокол соседа не должен запускать копирование неотдаваемого файла.
   await noCapability();
+  await counterfact(async () => {
   await assert.rejects(noCapability(['&& !!peerLink?.features.includes(FED_FEATURES.dm2)', '']), e => e instanceof assert.AssertionError && e.message.includes('без dm2 строки'));
+  });
 });
 test('R194 id вложения, занятый местным оригиналом, не перезаписывается копией', async () => {
   // Класс ошибки коллизии: чужой id не является правом переписать владельца, storageKey или размер.
@@ -260,13 +273,15 @@ for (const path of ['tombstone', 'one', 'batch'] as const) {
   test(`R194 ${path} удаляет remote, мутант attached-only оставляет файл и обнаруживается`, async () => {
     // Класс ошибки удаления: ещё не скачанная копия тоже должна утратить доступ после удаления сообщения.
     await erase();
-    const from = path === 'tombstone'
+    await counterfact(async () => {
+  const from = path === 'tombstone'
       ? "eq(attachments.messageId, messageId), inArray(attachments.state, ['attached', 'remote'])"
       : path === 'one'
         ? ".where(and(eq(attachments.messageId, messageId), inArray(attachments.state, ['attached', 'remote'])))\n      .returning({ key: attachments.storageKey });\n    onPurge"
         : "inArray(attachments.messageId, todoIds), inArray(attachments.state, ['attached', 'remote'])";
     const to = from.replace("inArray(attachments.state, ['attached', 'remote'])", "eq(attachments.state, 'attached')");
     await assert.rejects(erase([from, to]), e => e instanceof assert.AssertionError && e.message.includes('удаление уводит и remote'));
+  });
   });
 }
 async function used() { return Number((await t.db.select().from(schema.federationLinks))[0].usedBytes); }
@@ -317,7 +332,9 @@ async function noOldState(mutation?: Mutation) {
 test('R195 удаление OLD.state из реального DDL обнаруживается лишним вычитанием при DELETE remote', async () => {
   // Класс ошибки триггера: исходный и мутированный полный SQL применяются лишь к тестовой базе.
   await noOldState();
+  await counterfact(async () => {
   await assert.rejects(noOldState(["AND OLD.state = 'attached'", '']), e => e instanceof assert.AssertionError && e.message.includes('remote не возвращает'));
+  });
 });
 async function clamp(mutation?: Mutation) {
   await fixture({ ddl: mutation }); await attachment({ originInstanceId: peer });
@@ -327,5 +344,7 @@ async function clamp(mutation?: Mutation) {
 test('R195 снятие GREATEST из реального DDL обнаруживается отрицательным used_bytes, не ошибкой SQL', async () => {
   // Класс ошибки границы: ручной сброс счётчика между резервом и стиранием не создаёт отрицательную квоту.
   await clamp();
+  await counterfact(async () => {
   await assert.rejects(clamp(['GREATEST(used_bytes - OLD.size, 0)', 'used_bytes - OLD.size']), e => e instanceof assert.AssertionError && e.message.includes('квота не уходит'));
+  });
 });

@@ -1,6 +1,8 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as React from 'react';
@@ -51,6 +53,7 @@ async function fixture(check: (f: {
       calls.push({ ...input }); return fitStageGrid(input);
     } },
   };
+  const imports = testVmImports(new URL('./VoiceChannelView.tsx', import.meta.url), deps);
   try {
     runInNewContext(ts.transpileModule(raw + '\nexport { useFitGrid };', { compilerOptions: {
       module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022,
@@ -61,7 +64,7 @@ async function fixture(check: (f: {
         borderLeftWidth: String(geometry.border), borderRightWidth: String(geometry.border),
         borderTopWidth: String(geometry.border), borderBottomWidth: String(geometry.border),
         columnGap: '12px', zoom: String(geometry.zoom) }),
-      require: (id: string) => deps[id] ?? {},
+      require: imports,
     });
     function Probe(p: ProbeProps) {
       const { ref, layout, fits } = module.exports.useFitGrid(p.count, p.enabled);
@@ -117,10 +120,12 @@ async function scrollbar(raw = source) {
 it('R164 неподвижный внешний rect и двадцать колебаний clientWidth на 12px не меняют сетку', () => scrollbar());
 
 it('R164 возврат clientWidth вместо внешнего rect обнаруживается реальным измерением', async () => {
-  const anchor = 'rect.width / zoom';
-  assert.equal(source.split(anchor).length - 1, 1);
   await scrollbar();
-  await assert.rejects(() => scrollbar(source.replace(anchor, 'el.clientWidth / zoom')), assert.AssertionError);
+  await counterfact(async () => {
+    const anchor = 'rect.width / zoom';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(() => scrollbar(source.replace(anchor, 'el.clientWidth / zoom')), assert.AssertionError);
+  });
 });
 
 it('R164 реальное увеличение внешнего контейнера меняет размер плитки и число колонок', () => fixture(async ({ host, geometry, resize }) => {

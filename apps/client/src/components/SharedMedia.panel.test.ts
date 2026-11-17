@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -19,7 +20,7 @@ const message = (id: string): ConvMessage => ({ id, createdAt: '2026-10-12T10:00
 const empty = () => null;
 type Fixture = { host: HTMLElement; scroller: HTMLElement; calls: string[]; scroll(own: boolean, top: number): Promise<void>; click(selector: string): Promise<void> };
 async function fixture(check: (f: Fixture) => Promise<void>, raw = source, counts: SharedMediaCounts = { ...zeros, file: 2, link: 1 },
-  next = false, embedded = true, enabled = true) {
+  next = false, embedded = true, enabled = true, windows = false) {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT'); Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   // Геометрия задана ДО эффектов загрузки, в том числе для внутреннего списка мутанта.
@@ -30,6 +31,8 @@ async function fixture(check: (f: Fixture) => Promise<void>, raw = source, count
   for (const [name, value] of [['scrollHeight', 3000], ['clientHeight', 500]] as const) Object.defineProperty(scroller, name, { configurable: true, get: () => value });
   scroller.scrollTo = options => { if (typeof options === 'object') scroller.scrollTop = options.top ?? 0; };
   const root = createRoot(host); const calls: string[] = [];
+  const opening = new Set<string>();
+  const openingListeners = new Set<() => void>();
   const state = { convActive: enabled, serverFeatures: ['media1'], selectDm: (id: string) => calls.push(`select:${id}`) };
   const useStore = Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state });
   const module = { exports: {} as typeof import('./SharedMedia') };
@@ -43,7 +46,25 @@ async function fixture(check: (f: Fixture) => Promise<void>, raw = source, count
     } },
     '../convSyncRules': { serverSharedMedia: (features: string[]) => features.includes('media1') },
     '../dialogChrome': { useDialogChrome: () => React.useRef(null) }, '../feedJump': { requestFeedJump: (conv: string, id: string) => calls.push(`jump:${conv}:${id}`) },
-    '../fileActions': { openAttachmentFile() {}, sizeText: (n: number) => `${n}` }, '../mediaViewerRules': { viewerDate: () => '12 октября' },
+    '../fileActions': {
+      attachmentKey: (a: shared.Attachment) => a.id, fileJobOf: () => null, subscribeFileJobs: () => () => {},
+      openAttachmentFile: (a: shared.Attachment) => calls.push(`existing:${a.id}`), sizeText: (n: number) => `${n}`,
+    },
+    '../pcDownloads': {
+      desktopFileOpenAvailable: () => windows,
+      isOpeningDownloadedFile: (key: string) => opening.has(key),
+      subscribeDownloadedFileOpening: (listener: () => void) => {
+        openingListeners.add(listener);
+        return () => { openingListeners.delete(listener); };
+      },
+      attachmentTarget: (a: shared.Attachment) => ({ key: a.id, url: a.url }),
+      openDownloadedFile: ({ key }: { key: string }) => {
+        calls.push(`desktop:${key}`);
+        opening.add(key);
+        for (const listener of openingListeners) listener();
+      },
+    },
+    '../mediaViewerRules': { viewerDate: () => '12 октября' },
     '../phoneLayout': { usePhoneLayout: () => true }, '../peerName': { usePeerName: () => (_id: string, fallback: string) => fallback },
     '../toast': { toastError(e: unknown) { throw e; } }, './BottomSheet': { BottomSheet: empty }, './Icon': { Icon }, './Lightbox': { Lightbox: empty },
     './SpoilerCover': { SpoilerParticles: empty, useSpoilerHidden: () => false }, './VideoAttachment': { BLANK_POSTER: '', videoFrameSrc: () => '' },
@@ -102,13 +123,27 @@ async function leave(raw = source) {
 }
 // Класс ошибки: Показать в чате оставляет экран профиля поверх открытой беседы.
 it('R173 Показать в чате вызывает onLeave и переход к нужному сообщению беседы', () => leave());
+it('общие файлы в Windows используют открытие скачанной копии, на остальных платформах прежний обработчик', async () => {
+  for (const windows of [true, false]) {
+    await fixture(async f => {
+      await f.click('.smedia-item-main');
+      if (windows) {
+        const row = f.host.querySelector('.smedia-item-main');
+        assert.equal(row?.getAttribute('aria-busy'), 'true');
+        assert.equal(row?.querySelector('.smedia-item-sub')?.textContent, 'Открывается…');
+        await f.click('.smedia-item-main');
+      }
+      assert.deepEqual(f.calls.filter(c => c.endsWith(':a:first')), [windows ? 'desktop:a:first' : 'existing:a:first']);
+    }, source, { ...zeros, file: 1 }, false, true, true, windows);
+  }
+});
 // Класс ошибки: встроенный scroller проигнорирован, обработчик остался у собственного списка.
 it('R173 мутант подгрузки по внутреннему списку обнаруживается реальными scroll событиями', async () => {
-  const anchor = 'scroller={scroller} onLeave={onLeave}'; assert.equal(source.split(anchor).length - 1, 1);
-  await scroller(); await assert.rejects(() => scroller(source.replace(anchor, 'scroller={null} onLeave={onLeave}')), assert.AssertionError);
+  const anchor = 'scroller={scroller} onLeave={onLeave}'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await scroller(); await counterfact(() => assert.rejects(() => scroller(source.replace(anchor, 'scroller={null} onLeave={onLeave}')), assert.AssertionError));
 });
 // Класс ошибки: onLeave потерян между панелью и телом общих медиа.
 it('R173 мутант потерянного onLeave обнаруживается переходом Показать в чате', async () => {
-  const anchor = 'scroller={scroller} onLeave={onLeave}'; assert.equal(source.split(anchor).length - 1, 1);
-  await leave(); await assert.rejects(() => leave(source.replace(anchor, 'scroller={scroller}')), assert.AssertionError);
+  const anchor = 'scroller={scroller} onLeave={onLeave}'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await leave(); await counterfact(() => assert.rejects(() => leave(source.replace(anchor, 'scroller={scroller}')), assert.AssertionError));
 });

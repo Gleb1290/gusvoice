@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -152,8 +153,10 @@ it('R187 пользовательский предпросмотр ссылки 
 it('R187 контрфакт игнорирования NODE_ENV обнаруживается предохранителем настоящего модуля', () => {
   // Класс ошибки: зелёный список местных адресов маскирует потерю обязательного отказа на production.
   productionGuard(load<Dev>(source).devPeersProblem);
-  const anchor = "if (input.nodeEnv === 'production') return 'FEDERATION_DEV_PEERS задан при NODE_ENV=production — режим стенда на проде запрещён';";
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный предохранитель production');
-  const mutant = load<Dev>(source.replace(anchor, 'if (false) return null;'));
-  assert.throws(() => productionGuard(mutant.devPeersProblem), error => error instanceof assert.AssertionError && error.message.includes('прод не включает режим стенда'));
+  counterfact(() => {
+    const anchor = "if (input.nodeEnv === 'production') return 'FEDERATION_DEV_PEERS задан при NODE_ENV=production — режим стенда на проде запрещён';";
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный предохранитель production');
+    const mutant = load<Dev>(source.replace(anchor, 'if (false) return null;'));
+    assert.throws(() => productionGuard(mutant.devPeersProblem), error => error instanceof assert.AssertionError && error.message.includes('прод не включает режим стенда'));
+  });
 });

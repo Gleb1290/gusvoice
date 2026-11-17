@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -95,9 +96,11 @@ for (const [label, from, to, check, prefix, actual, expected] of [
   ['пропал переворот верхнего угла', '[...shown].reverse()', '[...shown]', order, 'R223-order:', '1,2,3', '3,2,1'],
   ['обе причины скрытия обязательны', 'st.shown.length > 1 || st.queue.length > 0', 'st.shown.length > 1 && st.queue.length > 0', hideAll, 'R223-hide-all:', false, true],
 ] as const) it(`R223 контрфакт стопки: ${label}`, () => {
-  check(load(source)); assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError
-    && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  check(load(source)); counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError
+      && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });
 
 function lineParts(api: Rules) {
@@ -122,8 +125,10 @@ function lineParts(api: Rules) {
 it('R233 строка и выделенные части совпадают, у вида без подписи нет висящей запятой', () => lineParts(rules));
 it('R233 контрфакт строки: запятая после вида добавляется даже без подписи', () => {
   lineParts(load(source));
-  const from = "(n.body ? `${n.kind}, ` : n.kind)";
-  assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => lineParts(load(source.replace(from, '`${n.kind}, `'))), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R233-line-separator:') && e.operator === 'strictEqual' && e.actual === 'Фото, ' && e.expected === 'Фото');
+  counterfact(() => {
+    const from = "(n.body ? `${n.kind}, ` : n.kind)";
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => lineParts(load(source.replace(from, '`${n.kind}, `'))), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R233-line-separator:') && e.operator === 'strictEqual' && e.actual === 'Фото, ' && e.expected === 'Фото');
+  });
 });

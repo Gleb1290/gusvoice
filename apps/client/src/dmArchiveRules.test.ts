@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -38,8 +39,12 @@ it('непрочитанный архив считает беседы, искл�
   assert.deepEqual(rules.unreadOutsideArchive(list, ['a', 'b', 'e', 'unknown']), ['e', 'unknown']);
   const ids = ['x']; const kept = rules.unreadOutsideArchive([dm('x')], ids);
   assert.deepEqual(kept, ids); assert.notEqual(kept, ids);
-  assert.throws(() => assert.equal(mutant('n++;', 'n += d.unread ?? 0;').archiveUnreadChats(list, ['a','b','e'], null), 3), assert.AssertionError);
-  assert.throws(() => assert.deepEqual(mutant('!hidden.has(id)', 'true').unreadOutsideArchive(list, ['a','e']), ['e']), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => assert.equal(mutant('n++;', 'n += d.unread ?? 0;').archiveUnreadChats(list, ['a','b','e'], null), 3), assert.AssertionError);
+  });
+  counterfact(() => {
+    assert.throws(() => assert.deepEqual(mutant('!hidden.has(id)', 'true').unreadOutsideArchive(list, ['a','e']), ['e']), assert.AssertionError);
+  });
 });
 
 it('превью держит ровно восемь имён, остаток склоняется, прочитанность не выводится из одного числа', () => {
@@ -59,7 +64,9 @@ it('превью держит ровно восемь имён, остаток �
     }
   };
   check(rules);
-  for (const cap of [7, 9]) assert.throws(() => check(mutant('ARCHIVE_PREVIEW_NAMES = 8', `ARCHIVE_PREVIEW_NAMES = ${cap}`)), assert.AssertionError);
+  counterfact(() => {
+    for (const cap of [7, 9]) assert.throws(() => check(mutant('ARCHIVE_PREVIEW_NAMES = 8', `ARCHIVE_PREVIEW_NAMES = ${cap}`)), assert.AssertionError);
+  });
   const preview = rules.archivePreview([dm('archive-a', true), dm('archive-b', true)], [], (_id, fallback) => `Подпись ${fallback}`);
   assert.deepEqual(preview.names.map((n) => n.name), ['Подпись Имя archive-a', 'Подпись Имя archive-b']);
 });

@@ -82,6 +82,7 @@ import {
   serverOnceMedia,
   serverChatSearch,
   serverReactionsUnread,
+  placeForRead,
   serverBigReactions,
   serverChatPrefs,
   serverScheduledAttachments,
@@ -875,7 +876,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
     const s = useStore.getState();
     const last = s.conv.summaries[dm.id]?.lastMessage;
     const unread = readKey !== null && !!last && last.sortKey > readKey && last.authorId !== s.user?.id;
-    return { readKey, place: unread ? null : (s.places[dm.id] ?? null) };
+    return { readKey, place: unread ? null : placeForRead(s.places[dm.id], readKey) };
   }, [visitKey, readKey, dm.id]);
   const feedWindow: FeedWindowProps = {
     hasOlder: win?.hasMoreBefore ?? true,
@@ -1442,6 +1443,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       draft={initialDraft}
       draftRemote={draftRemote}
       onDraftChange={(text, replyToId) => useStore.getState().setDraft(dm.id, text, replyToId)}
+      onDraftLeave={() => useStore.getState().convDraftLeave(dm.id)}
       sendFlags={sendFlagsOn}
       mediaFlags={mediaFlagsOn}
       quoteOn={quoteOn}
@@ -1487,9 +1489,9 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
       voiceOnce={voiceOnceOn}
       mediaOnce={mediaOnceOn}
       roundOk={roundOn && !filesHint}
-      onSendVoice={filesHint ? undefined : async (take, opts) => {
+      onSendVoice={filesHint ? undefined : async (take, opts, onProgress) => {
         // ЛС голосовые умеют: это не серверная настройка, в отличие от стикеров и ников (#20).
-        const att = await api.convUpload(dm.id, take.file);
+        const att = await api.convUpload(dm.id, take.file, { onProgress });
         // Кружок (`circles1`, G68): квадратное видео с пометкой `round`; огибающей у него нет.
         const ref = take.round
           ? {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -332,39 +333,49 @@ function changeOnce(needle: string, replacement: string): string {
 it('контрфакт потерянного srcObject отвергается тем же сценарием после проверки оригинала', async () => {
   // Класс ошибки: тест проверяет только вызов API, но не реальный источник кадра.
   await checkStreamStarts();
-  const mutant = changeOnce('v.srcObject = stream;', 'v.srcObject = null;');
-  await assert.rejects(() => checkStreamStarts(mutant), error => error instanceof assert.AssertionError
-    && error.message.startsWith('PiP обязан показывать переданный поток'));
+  await counterfact(async () => {
+    const mutant = changeOnce('v.srcObject = stream;', 'v.srcObject = null;');
+    await assert.rejects(() => checkStreamStarts(mutant), error => error instanceof assert.AssertionError
+      && error.message.startsWith('PiP обязан показывать переданный поток'));
+  });
 });
 
 it('контрфакт слышимого показа отвергается тем же сценарием после проверки оригинала', async () => {
   // Класс ошибки: второй звук показа проходит незамеченным при успешном PiP.
   await checkStreamStarts();
-  const mutant = changeOnce('v.muted = true;', 'v.muted = false;');
-  await assert.rejects(() => checkStreamStarts(mutant), error => error instanceof assert.AssertionError
-    && error.message.startsWith('звук показа уже играет через комнату'));
+  await counterfact(async () => {
+    const mutant = changeOnce('v.muted = true;', 'v.muted = false;');
+    await assert.rejects(() => checkStreamStarts(mutant), error => error instanceof assert.AssertionError
+      && error.message.startsWith('звук показа уже играет через комнату'));
+  });
 });
 
 it('контрфакт потерянного callback отвергается закрытием после проверки оригинала', async () => {
   // Класс ошибки: окно закрыто, но владелец продолжает считать показ открытым.
   await checkStreamLeaves();
-  const mutant = changeOnce('onStreamLeave = onLeave;', 'onStreamLeave = null;');
-  await assert.rejects(() => checkStreamLeaves(mutant), error => error instanceof assert.AssertionError
-    && error.message.startsWith('закрытие обязано сообщить владельцу показа'));
+  await counterfact(async () => {
+    const mutant = changeOnce('onStreamLeave = onLeave;', 'onStreamLeave = null;');
+    await assert.rejects(() => checkStreamLeaves(mutant), error => error instanceof assert.AssertionError
+      && error.message.startsWith('закрытие обязано сообщить владельцу показа'));
+  });
 });
 
 it('контрфакт потери очистки при отказе PiP отвергается после проверки оригинала', async () => {
   // Класс ошибки: возврат ошибки R254 оставляет srcObject у уже запущенного скрытого видео.
   await checkStreamRequestRefusal();
-  const mutant = changeOnce('    v.pause();\n    v.srcObject = null;\n    throw e;', '    v.pause();\n    throw e;');
-  await assert.rejects(() => checkStreamRequestRefusal(mutant), error => error instanceof assert.AssertionError
-    && error.message.startsWith('отказ PiP освобождает поток скрытого элемента'));
+  await counterfact(async () => {
+    const mutant = changeOnce('    v.pause();\n    v.srcObject = null;\n    throw e;', '    v.pause();\n    throw e;');
+    await assert.rejects(() => checkStreamRequestRefusal(mutant), error => error instanceof assert.AssertionError
+      && error.message.startsWith('отказ PiP освобождает поток скрытого элемента'));
+  });
 });
 
 it('контрфакт потери pause при отказе PiP отвергается после проверки оригинала', async () => {
   // Класс ошибки: снятие источника без остановки скрытого плеера оставляет воспроизведение активным.
   await checkStreamRequestRefusal();
-  const mutant = changeOnce('    v.pause();\n    v.srcObject = null;\n    throw e;', '    v.srcObject = null;\n    throw e;');
-  await assert.rejects(() => checkStreamRequestRefusal(mutant), error => error instanceof assert.AssertionError
-    && error.message.startsWith('отказ PiP останавливает скрытый элемент'));
+  await counterfact(async () => {
+    const mutant = changeOnce('    v.pause();\n    v.srcObject = null;\n    throw e;', '    v.srcObject = null;\n    throw e;');
+    await assert.rejects(() => checkStreamRequestRefusal(mutant), error => error instanceof assert.AssertionError
+      && error.message.startsWith('отказ PiP останавливает скрытый элемент'));
+  });
 });

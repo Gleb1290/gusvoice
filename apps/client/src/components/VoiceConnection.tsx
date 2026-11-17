@@ -15,9 +15,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { getAudioSettings, subscribeAudioSettings } from '../audioSettings';
 import { startDiag, stopDiagAndUpload } from '../diag';
 import { cameraCaptureOptions } from '../cameraSettings';
-import { isAndroid, isDesktop, isMobile, pttKeyVk } from '../hotkeys';
+import { isAndroid, isDesktop, isMobile, isTauri, pttKeyVk } from '../hotkeys';
 import { createMicProcessor } from '../micProcessor';
-import { micChainNeeded, micChainSignature } from '../micProcessorRules';
+import { micCaptureOptions, micChainNeeded, micChainSignature } from '../micProcessorRules';
 import { applyUserAudio, subscribeUserAudio } from '../localUserAudio';
 import { stopNativeShareIfActive } from '../nativeShareSession';
 import { onNativeKeyPtt, onNativePtt, setPttKey, setPttMouseButton } from '../nativeStreamAudio';
@@ -25,6 +25,8 @@ import { startNativeVoiceService, stopNativeVoiceService } from '../nativeVoiceS
 import { sharedAudioContext, startVoiceKeepAlive, stopVoiceKeepAlive } from '../voiceKeepAlive';
 import { onMicPtt } from '../nativeMicActions';
 import { pttCanOpen } from '../micActionRules';
+import { createPttController, pttFeedbackOpen, pttMicTarget } from '../pttController';
+import { onUiPtt, setPttMicOpen } from '../pttUi';
 import { playSound } from '../sounds';
 import { useStore, voiceApiOf, voiceIsHere, type LiveVoiceState, type VoiceState } from '../store';
 import { creditScreenOwners, ownerOf, streamAudioVolume } from '../streamAudioRules';
@@ -45,6 +47,7 @@ import { StreamPipHost } from './StreamPipView';
 import { DiagConsentDialog } from './DiagConsent';
 import { setSelfMuted } from '../voiceSelf';
 import { GRACE_MS, touchVoiceSession } from '../voiceSession';
+import { createVoiceContinuity } from '../voiceContinuity';
 import { getMicGateOpen, ownRingSpeaking } from '../micGateState';
 import { vadFloor, vadInitial, vadOpenLevel, vadStep, type VadState } from '../speakingVad';
 
@@ -54,6 +57,35 @@ const LAYER_QUALITY: Record<StreamLayer, VideoQuality> = {
   medium: VideoQuality.MEDIUM,
   low: VideoQuality.LOW,
 };
+
+/**
+ * Тост отказа микрофона по ПРИЧИНЕ (приёмка 29.10, Chrome на телефоне): отказ разрешения браузером (`NotAllowedError`,
+ * «Permission dismissed/denied») показывался как «возможно, вас заглушил модератор». Модератор — только когда отказал СЕРВЕР:
+ * у токена нет права публиковать микрофон, и livekit-client бросает `PublishTrackError` (status 403, `hasPermissionsToPublish`).
+ */
+function micFailToast(e: unknown): void {
+  const name = (e as { name?: string } | null)?.name ?? '';
+  if (name === 'PublishTrackError' || (e as { status?: number } | null)?.status === 403) {
+    toastError(e, 'Микрофон недоступен — нет права говорить в этом канале (возможно, вас заглушил модератор)');
+    return;
+  }
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    toastError(
+      new Error(
+        isTauri()
+          ? 'Разрешите приложению доступ к микрофону в настройках системы.'
+          : 'Разрешите микрофон для сайта: значок слева от адреса → «Микрофон».',
+      ),
+      'Нет доступа к микрофону',
+    );
+    return;
+  }
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+    toastError(new Error('Подключите микрофон или выберите другой в настройках голоса.'), 'Микрофон не найден');
+    return;
+  }
+  toastError(e, 'Микрофон недоступен');
+}
 
 /**
  * Owns a single LiveKit Room instance for the active voice connection. The Room is
@@ -141,20 +173,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         // ещё нет в bootstrap (восстановление сессии при старте) — тогда просто поедет умолчание.
         audioPreset: { maxBitrate: voiceMaxBitrate(joinedChannel?.voiceBitrate) },
       },
-      audioCaptureDefaults: {
-        // Android FIX (confirmed on-device): force ALL WebRTC audio processing OFF on mobile. The Android
-        // System WebView's getUserMedia mic (Samsung; likely other OEMs) MANGLES audio when AEC/AGC/NS are
-        // on — "spike then silence" + heavy latency (auto-gain / echo-cancel misbehave, killing sustained
-        // speech). Raw mic = clean voice. Trade-off: no echo cancellation, so a user on SPEAKERPHONE may be
-        // echoed at the far end — revisit re-enabling ONLY echoCancellation if that bites (AGC was the
-        // likely culprit). Neither MODE_IN_COMMUNICATION (removed in MainActivity) nor the noise filter moved it.
-        autoGainControl: isMobile() ? false : a.autoGainControl,
-        echoCancellation: isMobile() ? false : a.echoCancellation,
-        // 'system' = browser/getUserMedia NS. 'rnnoise' runs our own filter (NS off here, applied
-        // as a track processor below); 'off' = no suppression at all.
-        noiseSuppression: isMobile() ? false : a.noiseFilter === 'system',
-        ...(a.inputDeviceId ? { deviceId: a.inputDeviceId } : {}),
-      },
+      audioCaptureDefaults: micCaptureOptions(a, isMobile()),
       // Camera resolution comes from the user's quality preset (#33; default 720p). The publish side
       // (simulcast off + maintain-resolution + bitrate) is applied per-preset in VoiceChannelView.
       videoCaptureDefaults: {
@@ -164,6 +183,20 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voice.channelId]);
+
+  // Check elapsed wall time before the first heartbeat or SDK callback after suspend.
+  // Otherwise a room left overnight would make its persisted session fresh again on resume.
+  // Desktop only: mobile voice may stay live while Android pauses the page timers.
+  const continuity = useMemo(() => createVoiceContinuity({
+    enabled: isDesktop(),
+    now: () => Date.now(),
+    touch: () => touchVoiceSession(voice.instanceId),
+    expire: () => {
+      const current = useStore.getState().voice;
+      if (current?.channelId === voice.channelId && current.instanceId === voice.instanceId) leaveVoice();
+      void room.disconnect();
+    },
+  }), [room, voice.instanceId, voice.channelId, leaveVoice]);
 
   /* 🔴 Голос живёт, пока смонтирован главный экран (01.10: переход между инстансами его больше не снимает). Сняли
      его с голосом в сторе — переход в инстанс без входа, «инстанс не отвечает», 401 — комната уже отключается
@@ -208,6 +241,23 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     return () => document.removeEventListener('pointerdown', unlock, true);
   }, []);
 
+  /* Браузер (29.10): звук собеседников, заблокированный политикой автовоспроизведения, — снять первым же касанием или
+     клавишей. Вход в голос нажатием — уже жест, но голос, восстановленный после перезагрузки вкладки (`restoreVoice`),
+     заходит без жеста, и Chrome на телефоне держит его немым (`room.canPlaybackAudio === false`) до `startAudio()`
+     из обработчика жеста (livekit-client). Оболочки Tauri автовоспроизведение не блокируют — там не нужно. */
+  useEffect(() => {
+    if (isTauri()) return;
+    const unlock = () => {
+      if (!room.canPlaybackAudio) void room.startAudio().catch(() => {});
+    };
+    document.addEventListener('pointerdown', unlock, true);
+    document.addEventListener('keydown', unlock, true);
+    return () => {
+      document.removeEventListener('pointerdown', unlock, true);
+      document.removeEventListener('keydown', unlock, true);
+    };
+  }, [room]);
+
   useEffect(() => {
     // Reconnect-grace (#11): if the connection drops and LiveKit can't restore it within GRACE_MS, we
     // visually leave the channel but KEEP the persisted session, so a restart within the window rejoins.
@@ -230,6 +280,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       }
     };
     const onState = (s: string) => {
+      if (!continuity.check()) return;
       setState(s);
       const vs: VoiceState =
         s === 'connected' ? 'connected' : s === 'connecting' ? 'connecting' : s === 'disconnected' ? 'disconnected' : 'reconnecting';
@@ -289,7 +340,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       // Уход из канала (или смена канала — `room` пересоздаётся) закрывает сессию и досылает хвост.
       void stopDiagAndUpload();
     };
-  }, [room, voice.url, voice.token, leaveVoice]);
+  }, [room, voice.url, voice.token, leaveVoice, continuity]);
 
   // 🔴 #96: нативную трансляцию гасит уход из канала — и ТОЛЬКО он. Companion-участник привязан к
   // комнате канала, поэтому осиротеть он может ровно в двух случаях: сменили канал (`room`
@@ -400,32 +451,76 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // re-binding or toggling PTT takes effect immediately (no reconnect needed). Never overrides
   // deafen. Listeners always mount; they no-op unless PTT is on and the binding matches.
   useEffect(() => {
-    let held = false;
-    let releaseTimer: ReturnType<typeof setTimeout> | null = null;
-    const clearRelease = () => {
-      if (releaseTimer) {
-        clearTimeout(releaseTimer);
-        releaseTimer = null;
+    let disposed = false;
+    const lp = room.localParticipant;
+    const canPublishMic = () => {
+      const permissions = lp.permissions;
+      return !permissions || (permissions.canPublish && (!permissions.canPublishSources.length ||
+        permissions.canPublishSources.includes(Track.sourceToProto(Track.Source.Microphone))));
+    };
+    let feedbackTrack: MediaStreamTrack | null = null;
+    const syncFeedback = () => {
+      if (disposed) return;
+      const publication = lp.getTrackPublication(Track.Source.Microphone);
+      const track = publication?.track?.mediaStreamTrack ?? null;
+      if (track !== feedbackTrack) {
+        feedbackTrack?.removeEventListener('ended', syncFeedback);
+        feedbackTrack = track;
+        feedbackTrack?.addEventListener('ended', syncFeedback);
       }
+      const s = useStore.getState();
+      setPttMicOpen(pttFeedbackOpen({
+        ptt: !disposed && getAudioSettings().pushToTalk,
+        connected: room.state === 'connected', muted: s.selfMuted, deafened: s.selfDeafened,
+        canPublish: canPublishMic(), micEnabled: lp.isMicrophoneEnabled,
+        trackLive: !!publication && !publication.isMuted && !!track && track.readyState === 'live' && track.enabled,
+      }));
     };
-    // Мьют сильнее рации, как в Discord (#156): заглушённый зажатием микрофон не открывает (`micActionRules.pttCanOpen`).
-    const start = () => {
-      if (held || !pttCanOpen(selfMuted, selfDeafened)) return;
-      held = true;
-      clearRelease(); // re-pressed during the release tail → keep the mic open
-      void room.localParticipant.setMicrophoneEnabled(true);
+    const ptt = createPttController({
+      canOpen: () => !disposed && getAudioSettings().pushToTalk && room.state === 'connected' &&
+        pttCanOpen(useStore.getState().selfMuted, useStore.getState().selfDeafened) && canPublishMic(),
+      apply: async (open) => {
+        // A late capture/close from the old PTT mode must respect the current open-mic intent.
+        const s = useStore.getState();
+        const enabled = pttMicTarget(open, {
+          disposed, ptt: getAudioSettings().pushToTalk, connected: room.state === 'connected',
+          muted: s.selfMuted, deafened: s.selfDeafened, canPublish: canPublishMic(),
+        });
+        try { await lp.setMicrophoneEnabled(enabled); } finally { syncFeedback(); }
+      },
+      releaseMs: () => getAudioSettings().pttReleaseMs,
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+      onError: (error) => console.warn('[voice] PTT microphone failed:', error),
+    });
+    const feedbackEvents = [RoomEvent.TrackMuted, RoomEvent.TrackUnmuted, RoomEvent.LocalTrackPublished,
+      RoomEvent.LocalTrackUnpublished, RoomEvent.ConnectionStateChanged, RoomEvent.ParticipantPermissionsChanged];
+    const changed = () => {
+      if (room.state !== 'connected' || !canPublishMic()) ptt.reset();
+      syncFeedback();
     };
-    const end = () => {
-      if (!held) return;
-      held = false;
-      // Keep the mic open for pttReleaseMs so the ends of words aren't clipped.
-      const delay = Math.max(0, getAudioSettings().pttReleaseMs);
-      clearRelease();
-      releaseTimer = setTimeout(() => {
-        releaseTimer = null;
-        if (!held) void room.localParticipant.setMicrophoneEnabled(false);
-      }, delay);
-    };
+    for (const event of feedbackEvents) room.on(event, changed);
+    syncFeedback();
+    let mode = getAudioSettings().pushToTalk;
+    const unsubMode = subscribeAudioSettings(() => {
+      const next = getAudioSettings().pushToTalk;
+      if (mode !== next) { mode = next; ptt.reset(); }
+      syncFeedback();
+    });
+    const unsubIntent = useStore.subscribe((next, previous) => {
+      if (next.selfMuted !== previous.selfMuted || next.selfDeafened !== previous.selfDeafened) {
+        ptt.reset();
+        syncFeedback();
+      }
+    });
+    const teardownUiPtt = onUiPtt((source, down, immediate) => {
+      if (down) ptt.press(source);
+      else ptt.release(source, immediate);
+    });
+    const startKey = () => ptt.press('key');
+    const endKey = () => ptt.release('key');
+    const startMouse = () => ptt.press('mouse');
+    const endMouse = () => ptt.release('mouse');
     const keyBinding = (): string | null => {
       const a = getAudioSettings();
       return a.pushToTalk && !a.pttKey.startsWith('Mouse') ? a.pttKey : null;
@@ -439,19 +534,19 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     const downKey = (e: KeyboardEvent) => {
       if (e.code !== keyBinding()) return;
       const target = e.target as HTMLElement | null;
-      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return; // don't hijack typing
-      start();
+      if (target && (/^(INPUT|TEXTAREA)$/.test(target.tagName) || target.closest('[data-ptt="true"]'))) return;
+      startKey();
     };
     const upKey = (e: KeyboardEvent) => {
-      if (e.code === keyBinding()) end();
+      if (e.code === keyBinding()) endKey();
     };
     const downMouse = (e: MouseEvent) => {
       if (e.button !== mouseButton()) return;
       if (e.button !== 0) e.preventDefault(); // suppress back/forward navigation while held
-      start();
+      if (!(e.target as HTMLElement | null)?.closest('[data-ptt="true"]')) startMouse();
     };
     const upMouse = (e: MouseEvent) => {
-      if (e.button === mouseButton()) end();
+      if (e.button === mouseButton()) endMouse();
     };
     window.addEventListener('keydown', downKey, true);
     window.addEventListener('keyup', upKey, true);
@@ -461,7 +556,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // Native GLOBAL mouse PTT (desktop): a low-level mouse hook in Rust fires even when GusVoice
     // isn't focused (the user is in a fullscreen game) — the window listeners above only fire when
     // focused. Tell Rust which button is bound (re-syncing on rebind) and route its press/release
-    // through the same start/end. When focused both paths fire, but `held` makes the 2nd a no-op.
+    // through the same start/end. When focused both paths fire, but the source ID makes the 2nd a no-op.
     const syncNative = () => {
       if (!isDesktop()) return;
       const b = mouseButton();
@@ -473,8 +568,8 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     };
     syncNative();
     const unsubNative = isDesktop() ? subscribeAudioSettings(syncNative) : null;
-    const teardownNative = isDesktop() ? onNativePtt(start, end) : null;
-    const teardownNativeKey = isDesktop() ? onNativeKeyPtt(start, end) : null;
+    const teardownNative = isDesktop() ? onNativePtt(startMouse, endMouse) : null;
+    const teardownNativeKey = isDesktop() ? onNativeKeyPtt(startKey, endKey) : null;
 
     // WEB (no native global hook): if a held PTT key/button is released while another window is focused,
     // that keyup/mouseup never reaches us → the mic would stick open. Force-release PTT on blur. NOT on
@@ -484,62 +579,68 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
     // Android (#156): рация с уведомления/пузыря — `window.__gvMicAction('ptt-down'|'ptt-up')` (`nativeMicActions.ts`). Пока её
     // держат оттуда, страница не в фокусе, и `blur` (шторка, чужое приложение поверх) не должен её отпускать — отпустит
     // только `ptt-up` натива.
-    let nativeHeld = false;
     const teardownMicPtt = isAndroid()
       ? onMicPtt(
-          () => {
-            nativeHeld = true;
-            start();
-          },
-          () => {
-            // 🔴 Отпускание с пузыря закрывает микрофон СРАЗУ: задержку отпускания уже выждал натив (`MicBubble`, `pttReleaseMs`
-            // в состоянии). Свой `setTimeout` тут не годится — у свёрнутого приложения таймеры страницы стоят, и микрофон
-            // висел открытым до возврата в приложение (приёмка на S20, 17.10).
-            nativeHeld = false;
-            if (!held) return;
-            held = false;
-            clearRelease();
-            void room.localParticipant.setMicrophoneEnabled(false);
-          },
+          () => ptt.press('android'),
+          // The native bubble has already waited its release tail; WebView timers may be frozen.
+          () => ptt.release('android', true),
         )
       : null;
     const onBlur = () => {
-      if (!nativeHeld) end();
+      if (!isDesktop()) {
+        ptt.release('key', true);
+        ptt.release('mouse', true);
+      }
     };
-    if (!isDesktop()) window.addEventListener('blur', onBlur);
+    const onHidden = () => { if (document.hidden) onBlur(); };
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onHidden);
 
     return () => {
       window.removeEventListener('keydown', downKey, true);
       window.removeEventListener('keyup', upKey, true);
       window.removeEventListener('mousedown', downMouse, true);
       window.removeEventListener('mouseup', upMouse, true);
-      if (!isDesktop()) window.removeEventListener('blur', onBlur);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onHidden);
+      unsubMode();
+      unsubIntent();
+      teardownUiPtt();
+      for (const event of feedbackEvents) room.off(event, changed);
       unsubNative?.();
       teardownNative?.();
       teardownNativeKey?.();
       teardownMicPtt?.();
-      // Перезапуск эффекта посреди зажатия (заглушились или «Не слышу» с рацией в руке) обнуляет `held` — микрофон,
-      // открытый этим зажатием, закрываем здесь, иначе он остался бы открытым до следующего нажатия.
-      const opened = held || releaseTimer != null;
-      clearRelease();
-      if (opened) void room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+      disposed = true;
+      feedbackTrack?.removeEventListener('ended', syncFeedback);
+      setPttMicOpen(false);
+      ptt.dispose(); // Also closes a getUserMedia that resolves after release/unmount.
       if (isDesktop()) {
         setPttMouseButton(-1); // stop the global hooks from firing PTT while out of voice
         setPttKey(0);
       }
     };
-  }, [room, selfMuted, selfDeafened]);
+  }, [room]);
 
-  // Heartbeat the persisted voice session while connected so its timestamp reflects "last alive" — a
-  // crash/restart within the grace window then auto-rejoins this exact channel on the next launch (#11).
+  // A delayed callback after sleep must validate continuity BEFORE refreshing localStorage.
+  // Check even while reconnecting; foreground events cover a throttled background timer.
   useEffect(() => {
-    if (state !== 'connected') return;
-    // По инстансу ГОЛОСА: после перехода активный — другой, и касание освежало бы чужую сессию.
-    const touch = () => touchVoiceSession(voice.instanceId);
-    touch();
-    const id = setInterval(touch, GRACE_MS / 3);
-    return () => clearInterval(id);
-  }, [state, voice.instanceId]);
+    const pulse = () => {
+      if (room.state === 'connected') continuity.heartbeat();
+      else continuity.check();
+    };
+    pulse();
+    const id = setInterval(pulse, GRACE_MS / 3);
+    window.addEventListener('focus', pulse);
+    window.addEventListener('pageshow', pulse);
+    document.addEventListener('visibilitychange', pulse);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', pulse);
+      window.removeEventListener('pageshow', pulse);
+      document.removeEventListener('visibilitychange', pulse);
+    };
+  }, [room, continuity]);
 
   // Apply our self mute/deafen INTENT to the live room whenever it changes or we (re)connect. Deafen
   // forces the mic off (the mute pref is preserved, so un-deafen restores it); PTT owns the mic while
@@ -564,7 +665,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       const micOn = !selfMuted && !selfDeafened;
       lp.setMicrophoneEnabled(micOn).catch((e) => {
         if (micOn) {
-          toastError(e, 'Микрофон недоступен — возможно, вас заглушил модератор');
+          micFailToast(e);
           setSelfMuted(true);
         }
       });
@@ -800,8 +901,8 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // restarts the processor on the fresh track — verified in livekit-client), so the unified mic chain
   // survives the swap with no extra work here. The browser-DSP getUserMedia constraints (echo / AGC)
   // aren't device ids, so re-capture the mic via restartTrack for those (passing the full current
-  // constraint set, incl. system noise-suppression, so none is dropped). noiseFilter (rnnoise/
-  // deepfilter/gain/gate) is owned by the mic-chain effect above — left out here to avoid racing it.
+  // constraint set, incl. system noise-suppression, so none is dropped). RNNoise/DeepFilter/gain/gate
+  // are owned by the mic-chain effect above; here we compare only effective browser capture flags.
   useEffect(() => {
     if (state !== 'connected') return;
     let prev = getAudioSettings();
@@ -819,17 +920,16 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       }
       // Browser-DSP toggles (echo cancellation / auto gain) — re-capture the mic to apply them. Skip
       // when the device also changed this tick: switchActiveDevice already re-captured with current settings.
-      const dspChanged = s.echoCancellation !== prev.echoCancellation || s.autoGainControl !== prev.autoGainControl;
+      const capture = micCaptureOptions(s, isMobile(), true);
+      const previousCapture = micCaptureOptions(prev, isMobile(), true);
+      const dspChanged = capture.echoCancellation !== previousCapture.echoCancellation
+        || capture.autoGainControl !== previousCapture.autoGainControl
+        || capture.noiseSuppression !== previousCapture.noiseSuppression;
       if (dspChanged && s.inputDeviceId === prev.inputDeviceId) {
         const track = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack;
         if (track) {
           void track
-            .restartTrack({
-              echoCancellation: s.echoCancellation,
-              autoGainControl: s.autoGainControl,
-              noiseSuppression: s.noiseFilter === 'system',
-              ...(s.inputDeviceId ? { deviceId: { exact: s.inputDeviceId } } : {}),
-            })
+            .restartTrack(capture)
             .catch((e) => console.warn('[voice] mic re-capture failed:', e));
         }
       }

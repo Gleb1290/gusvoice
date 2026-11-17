@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { z } from 'zod';
 import { BOT_VOICE_BITRATE, CALLBACK_DATA_MAX_BYTES } from '@gusvoice/shared';
@@ -186,10 +187,14 @@ const mutants: { name: string; edit: Edit; check(mod: typeof api): void; marker:
   { name: 'расширение required запроса игнорируется', edit: { from: 'for (const k of br) if (!ar.has(k)) out.push(`${at}: новое обязательное поле ${String(k)}`);', to: '/* required ignored */' }, check: mod => compatCase(breaking[7], mod), marker: 'R307 совместимость: новый обязательный параметр' },
 ];
 for (const m of mutants) it(`R307 контрфакт генератора: ${m.name}`, () => {
-  m.check(api); m.check(loadOpenApi()); assert.throws(() => m.check(loadOpenApi(m.edit)), assertion(m.marker));
+  m.check(api); m.check(loadOpenApi()); counterfact(() => {
+    assert.throws(() => m.check(loadOpenApi(m.edit)), assertion(m.marker));
+  });
 });
 it('R307 контрфакт: обязательный chat_id исчез из генерируемого запроса', () => {
   required(); required(loadOpenApi());
+  counterfact(() => {
   const w = loadWire({ from: '  chat_id: id,\n  text: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG).optional(),', to: '  chat_id: id.optional(),\n  text: z.string().max(MESSAGE_TEXT_MAX, TEXT_TOO_LONG).optional(),' });
   assert.throws(() => required(loadOpenApi(undefined, loadSpec(undefined, w), w)), assertion('R307 chat_id обязателен'));
+  });
 });

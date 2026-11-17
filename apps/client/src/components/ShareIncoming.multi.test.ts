@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -101,6 +102,8 @@ for (const mode of ['send-dm', 'send-mixed', 'draft-dm', 'draft-channel', 'draft
 it('R128 мутанты общего лимита и раннего удаления копии ловятся мультивыбором', async () => {
   // Выбранный канал не должен получать файл свыше своих 25 МБ или терять копию до отправки.
   await scene('send-mixed');
-  await assert.rejects(scene('send-mixed', change('Math.min(ATTACH_MAX_BYTES, dmAttachMaxBytes())', 'dmAttachMaxBytes()')), /ограничивает общий набор/);
-  await assert.rejects(scene('send-mixed', change('if (pickedToken.current !== s.token)', 'if (true)')), /удаляются однажды/);
+  await counterfact(async () => {
+    await assert.rejects(scene('send-mixed', change('Math.min(ATTACH_MAX_BYTES, dmAttachMaxBytes())', 'dmAttachMaxBytes()')), /ограничивает общий набор/);
+    await assert.rejects(scene('send-mixed', change('if (pickedToken.current !== s.token)', 'if (true)')), /удаляются однажды/);
+  });
 });

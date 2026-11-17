@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as React from 'react';
@@ -90,6 +92,7 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     selfMuted: false, selfDeafened: false, leaveVoice: noop };
   const icon = ({ name }: { name: string }) => React.createElement('i', { 'data-icon': name });
   const deps: Record<string, unknown> = {
+    './Activities': { ActivitiesButton: () => null, ActivitiesHost: () => null, DuelCard: () => null },
     react: React, 'react/jsx-runtime': jsx,
     '@livekit/components-react': { useParticipants: () => [peer, companion,
       ...(options.includeSelf ? [{ ...peer, identity: options.selfId ?? 'self', sid: 'local', name: 'Я', isLocal: true }] : []),
@@ -110,10 +113,17 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     },
     'livekit-client': { Track: { Source: { ScreenShare: 'screen', ScreenShareAudio: 'audio', Camera: 'camera' } }, RoomEvent: {} },
     '../hotkeys': { isMobile: () => !!options.mobile },
+    '../viewerRotation': { holdViewerRotation: () => {
+      calls.events.push('rotation:on');
+      return () => { calls.events.push('rotation:off'); };
+    } },
     // Мобильная ветка инициализирует настройку камеры и ставит обработчики кнопок при монтаже.
     // Камера/микрофон не являются предметом этих проверок режима перетаскивания.
     '../cameraSettings': { getCameraPreset: () => 'normal' },
     '../voiceSelf': { toggleSelfMute: noop, toggleSelfDeafen: noop },
+    '../usePttMicButton': { usePttMicButton: () => ({
+      title: state.selfMuted ? 'Включить микрофон' : 'Выключить микрофон', onClick: noop,
+    }) },
     '../store': { useStore: (select: (s: typeof state) => unknown) => { useRevision(); return select(state); } },
     '../stageLayoutPrefs': { useStageLayout: () => { useRevision(); return options.layout ?? 'auto'; }, setStageLayout: setLayout },
     '../stageLayoutRules': stageLayoutRules,
@@ -177,28 +187,25 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
       STREAM_QUALITY_HINT: { auto: 'Авто' }, STREAM_QUALITY_LABEL: { auto: 'Авто' } },
     '../badPicture': { useBadPictureAvailable: () => false },
   };
-  // Эти импорты нужны целому модулю, но данные сценарии их ветки не открывают.
-  // Если приложение проглотит бросок заглушки, журнал всё равно сделает тест красным.
-  for (const id of ['../api', '../toast', './BottomSheet', '../windowCovered', './ContextMenu']) {
-    deps[id] = new Proxy({}, { get: (_target, key) => {
-      const boundary = `${id}.${String(key)}`; unexpected.push(boundary);
-      throw new Error(`Неописанная граница ${boundary}`);
-    } });
-  }
   window.matchMedia = ((query: string) => ({ matches: query === '(hover: none)' && !!options.touch })) as typeof window.matchMedia;
   try {
     // Новый вынесенный контрол исполняется ЦЕЛИКОМ, а не копией JSX/вычислений из сцены.
-    // Его собственные границы перечислены отдельно: новый импорт нельзя молча подхватить из сцены.
+    // Собственный загрузчик контрола разрешает зависимости относительно его продуктового URL.
     const volumeDeps: Record<string, unknown> = { react: React, 'react/jsx-runtime': jsx,
       '../streamAudioRules': deps['../streamAudioRules'], './Icon': deps['./Icon'] };
+    const volumeImports = testVmImports(new URL('./StreamVolumeControl.tsx', import.meta.url), volumeDeps);
     const volumeModule = { exports: {} as Record<string, unknown> };
     runInNewContext(ts.transpileModule(rawVolume, { compilerOptions: {
       module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText,
     { module: volumeModule, exports: volumeModule.exports, document,
       require: (id: string) => {
-        assert.equal(Object.hasOwn(volumeDeps, id), true, `Неописанный импорт контрола громкости ${id}`); return volumeDeps[id];
+        return new Proxy(volumeImports(id) as object, { get(target, key) {
+          try { return Reflect.get(target, key); }
+          catch (error) { unexpected.push(`${id}.${String(key)}`); throw error; }
+        } });
       } });
     deps['./StreamVolumeControl'] = volumeModule.exports;
+    const imports = testVmImports(new URL('./VoiceChannelView.tsx', import.meta.url), deps);
     const module = { exports: {} as Record<string, React.ComponentType<any>> };
     // Исполняем целый модуль; export открывает только приватные компоненты для монтажа.
     runInNewContext(ts.transpileModule(raw + '\nexport { ScreenViewer, CameraViewer };', { compilerOptions: {
@@ -206,7 +213,10 @@ async function fixture(component: 'VoiceChannelView' | 'ScreenViewer' | 'CameraV
     { module, exports: module.exports, window, document, console, getComputedStyle,
       ResizeObserver: options.cols === undefined ? undefined : class { observe() {} disconnect() {} },
       require: (id: string) => {
-        assert.equal(Object.hasOwn(deps, id), true, `Неописанный импорт сцены ${id}`); return deps[id];
+        return new Proxy(imports(id) as object, { get(target, key) {
+          try { return Reflect.get(target, key); }
+          catch (error) { unexpected.push(`${id}.${String(key)}`); throw error; }
+        } });
       } });
     const props = component === 'VoiceChannelView' ? { channel: { id: 'channel', name: 'Гусиная', type: 'voice' }, connected: options.connected ?? true }
       : { track: { ...screen, participant: { ...peer, isLocal: !!options.localStream } }, hasAudio: true, audioMuted: !!options.muted, volume, viewers: [],
@@ -239,8 +249,8 @@ it('R200 подключённый телефон показывает voice-call
   return mobileBar();
 });
 it('R200 возврат прежнего имени call-bar обнаруживается на смонтированном телефоне', async () => {
-  await mobileBar(); const anchor = 'className="voice-call-bar"'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(() => mobileBar(source.replace(anchor, 'className="call-bar"')), e => e instanceof assert.AssertionError && e.message.includes('подключённый телефон получает'));
+  await mobileBar(); const anchor = 'className="voice-call-bar"'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(() => mobileBar(source.replace(anchor, 'className="call-bar"')), e => e instanceof assert.AssertionError && e.message.includes('подключённый телефон получает')));
 });
 async function balanceMode(raw = source) {
   for (const [mobile, phone, tip, shown] of [[true, true, 'hold', false], [false, false, 'button', true], [false, false, 'none', false]] as const) {
@@ -256,8 +266,8 @@ it('R200 удержание на телефоне не накрывает сце
   return balanceMode();
 });
 it('R200 условие не none вместо button обнаруживается лишним балансом в мобильной сцене', async () => {
-  await balanceMode(); const anchor = "activeTipMode === 'button' && economy"; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(() => balanceMode(source.replace(anchor, "activeTipMode !== 'none' && economy")), e => e instanceof assert.AssertionError && e.message.includes('пилюля баланса только'));
+  await balanceMode(); const anchor = "activeTipMode === 'button' && economy"; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(() => balanceMode(source.replace(anchor, "activeTipMode !== 'none' && economy")), e => e instanceof assert.AssertionError && e.message.includes('пилюля баланса только')));
 });
 
 // Сохранённая раскладка должна менять порядок настоящих плиток, не только аргумент чистого правила.
@@ -336,13 +346,13 @@ it('R169 второй показ владельца после браузерн�
 
 it('R169 мутант игнорирования сохранённого порядка обнаруживается настоящим DOM', async () => {
   const anchor = 'byStageKey(shownOrder, defaultKeys, [...streamCards, ...tiles])';
-  assert.equal(source.split(anchor).length - 1, 1); await orderedScene();
-  await assert.rejects(() => orderedScene(source.replace(anchor, 'byStageKey(defaultKeys, defaultKeys, [...streamCards, ...tiles])')), assert.AssertionError);
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1)); await orderedScene();
+  await counterfact(() => assert.rejects(() => orderedScene(source.replace(anchor, 'byStageKey(defaultKeys, defaultKeys, [...streamCards, ...tiles])')), assert.AssertionError));
 });
 it('R169 мутант ключа хранения без текущих колонок обнаруживается на двух раскладках', async () => {
   const anchor = 'saveStageOrder(channelId, gridCols, order)';
-  assert.equal(source.split(anchor).length - 1, 1); await commitScene();
-  await assert.rejects(() => commitScene(source.replace(anchor, 'saveStageOrder(channelId, 1, order)')), assert.AssertionError);
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1)); await commitScene();
+  await counterfact(() => assert.rejects(() => commitScene(source.replace(anchor, 'saveStageOrder(channelId, 1, order)')), assert.AssertionError));
 });
 
 const watchOptions = (): Options => ({ cols: 3, noCameraPeople: 3,
@@ -451,16 +461,28 @@ it('R246 режим без сохранения не пишет исходный
 });
 
 async function fullscreenKey(raw = source) {
-  await fixture('ScreenViewer', { mobile: true, stageKey: 's:peer#screen' }, async ({ host, click }) => {
+  await fixture('ScreenViewer', { mobile: true, stageKey: 's:peer#screen' }, async ({ host, click, calls }) => {
     assert.equal(host.querySelector('.screen-viewer')?.getAttribute('data-stage-key'), 's:peer#screen');
+    assert.deepEqual(calls.events, []);
     await click('[title="На весь экран"]');
     assert.equal(!!host.querySelector('.screen-viewer.pseudo-fs'), true);
     assert.equal(host.querySelector('.screen-viewer')?.hasAttribute('data-stage-key'), false, 'R246 полноэкранный показ не является плиткой перетаскивания');
+    assert.deepEqual(calls.events, ['rotation:on']);
     await click('[title="На весь экран"]');
     assert.equal(host.querySelector('.screen-viewer')?.getAttribute('data-stage-key'), 's:peer#screen');
+    assert.deepEqual(calls.events, ['rotation:on', 'rotation:off']);
   }, raw);
 }
 it('R246 ScreenViewer снимает stage-key на весь экран и возвращает после сворачивания', () => fullscreenKey());
+
+it('закрытие полноэкранного стрима освобождает поворот', () => fixture('VoiceChannelView', {
+  mobile: true, streams: true, watched: true,
+}, async ({ host, click, calls }) => {
+  await click('[title="На весь экран"]');
+  await click('[title="Закрыть стрим"]');
+  assert.equal(host.querySelector('.screen-viewer'), null);
+  assert.deepEqual(calls.events.filter(event => event.startsWith('rotation:')), ['rotation:on', 'rotation:off']);
+}));
 
 it('R246 перепутанный обработчик контейнера или ключ записи режима обнаруживается настоящей сценой', async () => {
   // Класс ошибки: видимые плитки верны, но жест/сохранение ошибочно принадлежат соседнему контейнеру.
@@ -469,8 +491,8 @@ it('R246 перепутанный обработчик контейнера ил
     ['onPointerDown={cardsDnd.drag.onPointerDown}', 'onPointerDown={watchDnd.drag.onPointerDown}', 'R246 контейнеры вызывают собственный обработчик'],
     ['saveStageOrder(channelId, mode, order)', 'saveStageOrder(channelId, 3, order)', 'R246 завершение пишет собственный mode'],
   ]) {
-    assert.equal(source.split(anchor).length - 1, 1);
-    await assert.rejects(() => watchWiring(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(message));
+    counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+    await counterfact(() => assert.rejects(() => watchWiring(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(message)));
   }
 });
 
@@ -482,21 +504,21 @@ it('R246 игнорирование Alt, узкого окна, числа по�
     ['const watchDragOn = watching && !mobile && !phoneLayout;', 'const watchDragOn = watching && !mobile;'],
     ['tipFree && watchedScreens.length > 1', 'tipFree'],
   ]) {
-    assert.equal(source.split(anchor).length - 1, 1);
-    await assert.rejects(() => watchGuards(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes('R246 enabled'));
+    counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+    await counterfact(() => assert.rejects(() => watchGuards(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes('R246 enabled')));
   }
   const anchor = 'byStageKey(watchDnd.shown, watchKeys, watchedScreens.map';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(() => watchWiring(source.replace(anchor, 'byStageKey(watchKeys, watchKeys, watchedScreens.map')),
-    e => e instanceof assert.AssertionError && e.message.includes('R246 настоящий DOM watch-streams'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(() => watchWiring(source.replace(anchor, 'byStageKey(watchKeys, watchKeys, watchedScreens.map')),
+    e => e instanceof assert.AssertionError && e.message.includes('R246 настоящий DOM watch-streams')));
 });
 
 it('R246 контрфакт stage-key в полноэкранном показе обнаруживается после реального раскрытия', async () => {
   await fullscreenKey();
   const anchor = 'data-stage-key={pseudo ? undefined : stageKey}';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(() => fullscreenKey(source.replace(anchor, 'data-stage-key={stageKey}')),
-    e => e instanceof assert.AssertionError && e.message.includes('R246 полноэкранный показ'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(() => fullscreenKey(source.replace(anchor, 'data-stage-key={stageKey}')),
+    e => e instanceof assert.AssertionError && e.message.includes('R246 полноэкранный показ')));
 });
 
 const openStreamIds = (host: HTMLElement) => [...host.querySelectorAll('.stage-watch-grid .screen-video')]
@@ -673,22 +695,24 @@ it('R248 телефон и узкое окно с сохранённым Сбо�
   }
 });
 
-async function layoutMutant(anchor: string, replacement: string, check: (raw?: string) => Promise<void>, prefix: string) {
-  assert.equal(source.split(anchor).length - 1, 1, 'R248 якорь мутанта уникален');
+async function layoutMutant(anchor: string, replacement: string | (() => string), check: (raw?: string) => Promise<void>, prefix: string) {
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R248 якорь мутанта уникален'));
   await check();
-  await assert.rejects(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix));
+  await counterfact(() => assert.rejects(() => check(source.replace(anchor, typeof replacement === 'function' ? replacement() : replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)));
 }
 it('R248 контрфакт отсутствия замены крупного обнаруживается при открытии второго показа', () =>
   layoutMutant('for (const w of watchedIds) if (w !== id) unwatch(w);', '// старый показ не закрыт', oneBigReplacement, 'R248 one-big:'));
 it('R248 контрфакт клика в Сетке без перехода в Фокус обнаруживается порядком намерений', () => {
   const anchor = "setStageLayout('focus');\n    } else if (oneBig) {\n      for (const w of watchedIds) if (w !== id) unwatch(w);";
-  return layoutMutant(anchor, anchor.replace("setStageLayout('focus');", '// Фокус не выбран'), gridToFocus, 'R248 grid-focus:');
+  return layoutMutant(anchor, () => anchor.replace("setStageLayout('focus');", '// Фокус не выбран'), gridToFocus, 'R248 grid-focus:');
 });
 it('R248 отменено R286: возврат эффекта автооткрытия обнаруживается в целом модуле сцены', async () => {
   // Класс ошибки: правильные карточки не доказывают отсутствие побочного намерения смотреть/слушать.
   await noAutomaticStreams();
+  await counterfact(async () => {
   const changed = restoreAutomaticEffect(source);
   await assert.rejects(() => noAutomaticStreams(changed), exactAssertion('R286 без намерения watch не вызывается'));
+  });
 });
 it('R248 контрфакты ключей watch вместо side обнаруживаются отдельными чтениями и порядком DOM', async () => {
   for (const mode of ['cards', 'people']) await layoutMutant(`side ? 'side-${mode}' : 'watch-${mode}'`, `'watch-${mode}'`, sideOrders, 'R248 side-order:');
@@ -737,14 +761,14 @@ it('R286 закрытие всех показов вместо хвоста об
   // Класс ошибки: упрощённый цикл закрывает и первый показ, хотя зритель его не закрывал.
   await speakerKeepsFirst();
   const anchor = "} else if (viewLayout === 'speaker') {\n      // Открытое (кликом — других нет) остаётся крупно одно.\n      for (const w of watchedIds.slice(1)) unwatch(w);";
-  await assert.rejects(() => speakerKeepsFirst(replaceOnce(source, anchor, anchor.replace('watchedIds.slice(1)', 'watchedIds'))),
-    exactAssertion('R286 Говорящий сохраняет первый открытый показ'));
+  await counterfact(() => assert.rejects(() => speakerKeepsFirst(replaceOnce(source, anchor, anchor.replace('watchedIds.slice(1)', 'watchedIds'))),
+    exactAssertion('R286 Говорящий сохраняет первый открытый показ')));
 });
 it('R286 сохранение фокуса камеры рядом с первым показом обнаруживается настоящим вьювером', async () => {
   // Класс ошибки: ограничить watched недостаточно — отдельное состояние камеры оставляет два крупных кадра.
   await speakerKeepsFirst();
-  await assert.rejects(() => speakerKeepsFirst(replaceOnce(source, 'if (watchedIds.length > 0) setFocusCamId(null);', '// фокус не сброшен')),
-    exactAssertion('R286 Говорящий сбрасывает фокус камеры при открытом показе'));
+  await counterfact(() => assert.rejects(() => speakerKeepsFirst(replaceOnce(source, 'if (watchedIds.length > 0) setFocusCamId(null);', '// фокус не сброшен')),
+    exactAssertion('R286 Говорящий сбрасывает фокус камеры при открытом показе')));
 });
 
 it('R286 явное намерение pendingWatch открывает браузерный и нативный показ во всех видах сцены', async () => {
@@ -825,10 +849,10 @@ it('R286 AST ограничивает watch обработчиком клика 
 it('R286 страж обнаруживает возврат автоэффекта и посторонний watch, но игнорирует комментарий', () => {
   // Класс ошибки: страж по имени пропустит безымянную автоматическую подписку, страж по тексту запретит историю решения.
   watchOnlyByIntent(); watchOnlyByIntent(source + '\n// stageAutoOpenStream autoOpenId watch(autoOpenId)\n');
-  assert.throws(() => watchOnlyByIntent(restoreAutomaticEffect(source)), exactAssertion('R286 сцена не содержит исполняемой старой автоматики'));
+  counterfact(() => assert.throws(() => watchOnlyByIntent(restoreAutomaticEffect(source)), exactAssertion('R286 сцена не содержит исполняемой старой автоматики')));
   const anchor = 'const oneBig = isOneBigLayout(viewLayout);';
-  assert.throws(() => watchOnlyByIntent(replaceOnce(source, anchor, `${anchor}\n  useEffect(() => { watch('peer'); }, [watch]);`)),
-    exactAssertion('R286 единственный прямой watch принадлежит открытию'));
+  counterfact(() => assert.throws(() => watchOnlyByIntent(replaceOnce(source, anchor, `${anchor}\n  useEffect(() => { watch('peer'); }, [watch]);`)),
+    exactAssertion('R286 единственный прямой watch принадлежит открытию')));
 });
 
 it('R163 ПК без просмотра объединяет показ, камеру и людей одной сеткой, спутник не дублируется', () => fixture('VoiceChannelView', { streams: true, cameras: true }, async ({ host }) => {
@@ -896,10 +920,10 @@ it('R230 контрфакт потери признака открытого в�
   // Класс ошибки: прежний текст возвращается только при просмотре, хотя обычная пустая сетка по-прежнему верна.
   await twoOpenScreens();
   const anchor = "{videoShown ? 'Скрыто участников без видео'";
-  assert.equal(source.split(anchor).length - 1, 1, 'R230 единственный выбор текста пустой сцены');
-  await assert.rejects(() => twoOpenScreens(source.replace(anchor, "{false ? 'Скрыто участников без видео'")), (e: unknown) =>
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R230 единственный выбор текста пустой сцены'));
+  await counterfact(() => assert.rejects(() => twoOpenScreens(source.replace(anchor, "{false ? 'Скрыто участников без видео'")), (e: unknown) =>
     e instanceof assert.AssertionError && e.message.startsWith('R230 сцена:') && e.operator === 'strictEqual'
-      && e.actual === true && e.expected === false);
+      && e.actual === true && e.expected === false));
 });
 it('R163 неподключённый канал не вызывает новые хуки сцены', () => fixture('VoiceChannelView', { connected: false }, async ({ host, calls }) => {
   assert.equal(calls.newHooks, 0); assert.equal(calls.autoShow.length, 0);
@@ -918,9 +942,9 @@ async function sceneAutoShow(raw = source) {
 it('R167 сцена передаёт автовозврату камеры и показы спутника, не только видимые плитки', () => sceneAutoShow());
 it('R167 мутант потери камер при подключении правила в сцене обнаруживается', async () => {
   const anchor = 'hasVideo: stageHasVideo(screens, cameras)';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственное подключение правила к сцене');
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственное подключение правила к сцене'));
   await sceneAutoShow();
-  await assert.rejects(() => sceneAutoShow(source.replace(anchor, 'hasVideo: stageHasVideo(screens, [])')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => sceneAutoShow(source.replace(anchor, 'hasVideo: stageHasVideo(screens, [])')), assert.AssertionError));
 });
 
 async function volumePop(raw = source) {
@@ -1005,11 +1029,11 @@ it('R168 значок стрима соответствует отображае
 });
 it('R168 мутант значка только по audioMuted не скрывается за правильным ползунком', async () => {
   const anchor = 'const silent = muted || volPct === 0;';
-  assert.equal(volumeSource.split(anchor).length - 1, 1, 'единственный расчёт тишины вынесенного контрола');
+  counterfact(() => assert.equal(volumeSource.split(anchor).length - 1, 1, 'единственный расчёт тишины вынесенного контрола'));
   await sliderIcons();
-  await assert.rejects(() => sliderIcons(source, volumeSource.replace(anchor, 'const silent = muted;')), (e: unknown) =>
+  await counterfact(() => assert.rejects(() => sliderIcons(source, volumeSource.replace(anchor, 'const silent = muted;')), (e: unknown) =>
     e instanceof assert.AssertionError && e.message.startsWith('ряд показывает отсутствие звука')
-      && e.actual === false && e.expected === true);
+      && e.actual === false && e.expected === true));
 });
 
 async function pipScene(raw = source) {
@@ -1028,10 +1052,10 @@ it('R254 показ в PiP считается открытым без watched, �
 it('R254 потеря PiP из открытых показов обнаруживается до проверки заглушки', async () => {
   await pipScene();
   const anchor = 'const inViewIds = streamsInView(watchedIds, pipStreams);';
-  assert.equal(source.split(anchor).length - 1, 1, 'R254 единственное объединение открытых показов сцены');
-  await assert.rejects(() => pipScene(source.replace(anchor, 'const inViewIds = watchedIds;')), (e: unknown) =>
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R254 единственное объединение открытых показов сцены'));
+  await counterfact(() => assert.rejects(() => pipScene(source.replace(anchor, 'const inViewIds = watchedIds;')), (e: unknown) =>
     e instanceof assert.AssertionError && e.message.startsWith('R254 PiP остаётся открытым')
-      && e.actual === 0 && e.expected === 1);
+      && e.actual === 0 && e.expected === 1));
 });
 async function pipFrame(raw = source) {
   // Класс ошибки: проверка только «есть обёртка viewer» пропускает второй VideoTrack поверх PiP.
@@ -1046,10 +1070,10 @@ it('R254 обычный просмотр сохраняет кадр, PiP дру
 it('R254 возврат видеокадра вместо заглушки обнаруживается на настоящем ScreenViewer', async () => {
   await pipFrame();
   const anchor = '{inPip ? <StreamPipStub id={track.participant.identity} /> : <VideoTrack trackRef={track} className="screen-video" />}';
-  assert.equal(source.split(anchor).length - 1, 1, 'R254 единственный выбор кадра или заглушки');
-  await assert.rejects(() => pipFrame(source.replace(anchor, '<VideoTrack trackRef={track} className="screen-video" />')), (e: unknown) =>
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R254 единственный выбор кадра или заглушки'));
+  await counterfact(() => assert.rejects(() => pipFrame(source.replace(anchor, '<VideoTrack trackRef={track} className="screen-video" />')), (e: unknown) =>
     e instanceof assert.AssertionError && e.message.startsWith('R254 точное совпадение PiP')
-      && e.actual === 0 && e.expected === 1);
+      && e.actual === 0 && e.expected === 1));
 });
 async function pipOwnButton(raw = source) {
   // Класс ошибки: своё локальное видео нельзя отправить в путь PiP для чужой подписки.
@@ -1063,10 +1087,10 @@ it('R254 кнопка PiP чужого показа подключена, у с�
 it('R254 снятие запрета PiP своего показа обнаруживается без зависимости от API браузера', async () => {
   await pipOwnButton();
   const anchor = '{!track.participant.isLocal && <StreamPipButton track={track} />}';
-  assert.equal(source.split(anchor).length - 1, 1, 'R254 единственная кнопка PiP в ряду сцены');
-  await assert.rejects(() => pipOwnButton(source.replace(anchor, '<StreamPipButton track={track} />')), (e: unknown) =>
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R254 единственная кнопка PiP в ряду сцены'));
+  await counterfact(() => assert.rejects(() => pipOwnButton(source.replace(anchor, '<StreamPipButton track={track} />')), (e: unknown) =>
     e instanceof assert.AssertionError && e.message.startsWith('R254 кнопка PiP доступна только чужому')
-      && e.actual === 1 && e.expected === 0);
+      && e.actual === 1 && e.expected === 0));
 });
 
 const severalPips = ['peer', 'peer#screen', 'guest-0#screen', 'guest-1'];
@@ -1089,16 +1113,16 @@ it('R256 четыре PiP разных владельцев и двух пока
 it('R256 объединение сцены только с первым PiP обнаруживается при сохранённом обычном просмотре', async () => {
   await multiPipScene();
   const anchor = 'const inViewIds = streamsInView(watchedIds, pipStreams);';
-  assert.equal(source.split(anchor).length - 1, 1, 'R256 единственное объединение показов сцены');
-  await assert.rejects(() => multiPipScene(source.replace(anchor, 'const inViewIds = streamsInView(watchedIds, pipStreams[0]);')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R256 сцена сохраняет все четыре'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R256 единственное объединение показов сцены'));
+  await counterfact(() => assert.rejects(() => multiPipScene(source.replace(anchor, 'const inViewIds = streamsInView(watchedIds, pipStreams[0]);')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R256 сцена сохраняет все четыре')));
 });
 it('R256 заглушка только первого PiP обнаруживается даже при полном списке открытых показов', async () => {
   await multiPipScene();
   const anchor = 'const inPip = isInPip(track.participant.identity, pipStreams);';
-  assert.equal(source.split(anchor).length - 1, 1, 'R256 единственный выбор заглушки показа');
-  await assert.rejects(() => multiPipScene(source.replace(anchor, 'const inPip = isInPip(track.participant.identity, pipStreams[0]);')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R256 сцена сохраняет все четыре'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'R256 единственный выбор заглушки показа'));
+  await counterfact(() => assert.rejects(() => multiPipScene(source.replace(anchor, 'const inPip = isInPip(track.participant.identity, pipStreams[0]);')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R256 сцена сохраняет все четыре')));
 });
 it('R256 закрытие любого из четырёх PiP на сцене убирает только его, не показы соседа или спутника', async () => {
   // Заглушка PiP не заменяет смысл «закрыть стрим»: снимаем оба намерения только выбранного identity.
@@ -1126,23 +1150,25 @@ for (const component of ['ScreenViewer', 'CameraViewer'] as const) {
   }));
 }
 it('R163 мутант без удержания ряда открытым окном громкости обнаруживается', async () => {
-  const anchor = 'useControlsReveal(volPop.open || !!qualityMenu)'; assert.equal(source.split(anchor).length - 1, 1);
-  await volumePop(); await assert.rejects(() => volumePop(source.replace(anchor, 'useControlsReveal(false)')), assert.AssertionError);
+  const anchor = 'useControlsReveal(volPop.open || !!qualityMenu)'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await volumePop(); await counterfact(() => assert.rejects(() => volumePop(source.replace(anchor, 'useControlsReveal(false)')), assert.AssertionError));
 });
 it('R163 мутант скрытия карточки показа вместо только участников обнаруживается', async () => {
   const check = (raw: string) => fixture('VoiceChannelView', { hide: true, streams: true }, async ({ host }) => {
     assert.equal(host.querySelectorAll('.stream-card').length, 1); assert.equal(host.querySelectorAll('.stage-tile').length, 0);
   }, raw);
   const anchor = 'const streamCards = unwatchedScreens.map((s, i) => (\n    <StreamCard\n      key={s.publication?.trackSid}\n      stageKey={streamKeys[i]}';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный конструктор карточек показа с ключами сцены');
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный конструктор карточек показа с ключами сцены'));
   await check(source);
+  await counterfact(async () => {
   const changed = source.replace(anchor, anchor.replace('unwatchedScreens.map', '(hideNoVideo ? [] : unwatchedScreens).map'));
   await assert.rejects(() => check(changed), assert.AssertionError);
+  });
 });
 it('R163 мутант игнорирования телефонной ширины обнаруживается в браузере', async () => {
   const check = (raw: string) => fixture('VoiceChannelView', { phone: true }, async ({ host }) => {
     assert.equal(!!host.querySelector('.stage-grid'), false); assert.equal(!!host.querySelector('.stage-people'), true);
   }, raw);
-  const anchor = 'const fit = !watching && !mobile && !phoneLayout;'; assert.equal(source.split(anchor).length - 1, 1);
-  await check(source); await assert.rejects(() => check(source.replace(anchor, 'const fit = !watching && !mobile;')), assert.AssertionError);
+  const anchor = 'const fit = !watching && !mobile && !phoneLayout;'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await check(source); await counterfact(() => assert.rejects(() => check(source.replace(anchor, 'const fit = !watching && !mobile;')), assert.AssertionError));
 });

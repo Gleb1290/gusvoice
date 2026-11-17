@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -126,7 +127,9 @@ for (const [name, once, spent, anchor, replacement] of [
 ] as const) test(`R196 контрфакт «${name}» не может тратить оригинал по неполной квитанции`, async () => {
   // Класс ошибки: whole-module мутант обязан падать на денежно-независимом факте удаления, не loader.
   await spendScenario(once, spent);
-  await assert.rejects(spendScenario(once, spent, false, [anchor, replacement]), e => e instanceof assert.AssertionError && e.message.includes('трата требует spent и once'));
+  await counterfact(async () => {
+    await assert.rejects(spendScenario(once, spent, false, [anchor, replacement]), e => e instanceof assert.AssertionError && e.message.includes('трата требует spent и once'));
+  });
 });
 test('R196 отказ чужому дому сохраняется даже при лишней legacy-строке участника 1:1', async () => {
   // Defence-in-depth: намеренно испорченная direct membership, НЕ допустимый пользовательский ЛС из трёх человек.
@@ -137,8 +140,10 @@ test('R196 отказ чужому дому сохраняется даже пр
     assert.deepEqual(await f.users(), [], 'дом слушателя обязан совпасть с отправителем даже при лишнем участнике');
   }
   await scenario();
-  const anchor = 'for (const u of w.listeners) {\n      if (u.instanceId !== peer) continue;';
-  await assert.rejects(scenario([anchor, 'for (const u of w.listeners) {']), e => e instanceof assert.AssertionError && e.message.includes('дом слушателя обязан совпасть'));
+  await counterfact(async () => {
+    const anchor = 'for (const u of w.listeners) {\n      if (u.instanceId !== peer) continue;';
+    await assert.rejects(scenario([anchor, 'for (const u of w.listeners) {']), e => e instanceof assert.AssertionError && e.message.includes('дом слушателя обязан совпасть'));
+  });
 });
 test('R196 fed:true в приёме listen обнаруживается настоящим журналом связки', async () => {
   // Класс ошибки: авторский журнал копии начинает бесконечно переотдавать квитанцию соседу.
@@ -147,8 +152,10 @@ test('R196 fed:true в приёме listen обнаруживается наст
     assert.equal((await t.db.select().from(schema.fedConvChanges)).length, 0, 'listen от соседа не создаёт эхо');
   }
   await scenario();
-  const anchor = 'const pts = await journal(tx, msgEntries(audience, conversationId, m.id), { fed: false });\n    delivery = { conversationId, messageId: m.id, pts };\n  });\n  if (purge.length > 0) attHooks?.purge(purge);';
-  await assert.rejects(scenario([anchor, anchor.replace('fed: false', 'fed: true')]), e => e instanceof assert.AssertionError && e.message.includes('listen от соседа не создаёт эхо'));
+  await counterfact(async () => {
+    const anchor = 'const pts = await journal(tx, msgEntries(audience, conversationId, m.id), { fed: false });\n    delivery = { conversationId, messageId: m.id, pts };\n  });\n  if (purge.length > 0) attHooks?.purge(purge);';
+    await assert.rejects(scenario([anchor, anchor.replace('fed: false', 'fed: true')]), e => e instanceof assert.AssertionError && e.message.includes('listen от соседа не создаёт эхо'));
+  });
 });
 async function localListen(spend: boolean, mutation?: Mutation) {
   const f = await fixture({ conv: mutation }); await attach(f, 'remote', true, false, 'remote');
@@ -172,22 +179,26 @@ for (const spend of [false, true]) {
   test(`R196 удаление fedRecord из ${spend ? 'траты' : 'прослушивания'} обнаруживается в реальном журнале`, async () => {
     // Класс ошибки: один из путей забывает нужную квитанцию, хотя локальные события остаются.
     await localListen(spend);
-    const source = raw('conversations'), name = spend ? 'spendVoiceOnce' : 'listenVoice';
-    const tree = ts.createSourceFile('conversations', source, ts.ScriptTarget.Latest, true);
-    const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name)!;
-    const body = fn.getText(tree), guard = 'await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE_E2.listen, entityId: messageId }]);';
-    assert.equal(body.split(guard).length - 1, 1);
-    await assert.rejects(localListen(spend, [body, body.replace(guard, '// квитанция удалена')]), e => e instanceof assert.AssertionError && e.message.includes('своё прослушивание записывает listen'));
+    await counterfact(async () => {
+      const source = raw('conversations'), name = spend ? 'spendVoiceOnce' : 'listenVoice';
+      const tree = ts.createSourceFile('conversations', source, ts.ScriptTarget.Latest, true);
+      const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name)!;
+      const body = fn.getText(tree), guard = 'await fedRecord(tx, [{ conversationId, kind: FED_CONV_CHANGE_E2.listen, entityId: messageId }]);';
+      assert.equal(body.split(guard).length - 1, 1);
+      await assert.rejects(localListen(spend, [body, body.replace(guard, '// квитанция удалена')]), e => e instanceof assert.AssertionError && e.message.includes('своё прослушивание записывает listen'));
+    });
   });
 }
 test('R196 старый attached-only фильтр не оставляет одноразовую remote-копию доступной', async () => {
   // Класс ошибки: медленный файл продолжает скачиваться после завершённого одноразового просмотра.
   await localListen(true);
-  const source = raw('conversations'), tree = ts.createSourceFile('conversations', source, ts.ScriptTarget.Latest, true);
-  const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'spendVoiceOnce')!;
-  const body = fn.getText(tree), filter = "inArray(attachments.state, ['attached', 'remote'])";
-  assert.equal(body.split(filter).length - 1, 1);
-  await assert.rejects(localListen(true, [body, body.replace(filter, "eq(attachments.state, 'attached')")]), e => e instanceof assert.AssertionError && e.message.includes('одноразовая remote-копия стирается'));
+  await counterfact(async () => {
+    const source = raw('conversations'), tree = ts.createSourceFile('conversations', source, ts.ScriptTarget.Latest, true);
+    const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'spendVoiceOnce')!;
+    const body = fn.getText(tree), filter = "inArray(attachments.state, ['attached', 'remote'])";
+    assert.equal(body.split(filter).length - 1, 1);
+    await assert.rejects(localListen(true, [body, body.replace(filter, "eq(attachments.state, 'attached')")]), e => e instanceof assert.AssertionError && e.message.includes('одноразовая remote-копия стирается'));
+  });
 });
 
 async function collected(mutation?: Mutation) {
@@ -246,9 +257,11 @@ for (const [name, replacement, target] of [
   ['фильтр связки потерян', 'picked = all;', 'строка связки без dm2once закрывает listen'],
 ] as const) test(`R203 мутант «${name}» ловится одним реальным журналом и сменой признаков связки`, async () => {
   await listenLinkGate();
-  await assert.rejects(listenLinkGate([
-    'if (link) picked = all.filter((r) => !KIND_FEATURE[r.kind] || has.has(KIND_FEATURE[r.kind] as string));', replacement,
-  ]), e => e instanceof assert.AssertionError && e.message.includes(target));
+  await counterfact(async () => {
+    await assert.rejects(listenLinkGate([
+      'if (link) picked = all.filter((r) => !KIND_FEATURE[r.kind] || has.has(KIND_FEATURE[r.kind] as string));', replacement,
+    ]), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 for (const [name, anchor, replacement, target] of [
   ['теневые слушатели', 'and(inArray(conversationVoiceListens.messageId, listenIds), isNull(users.homeInstanceId))', 'inArray(conversationVoiceListens.messageId, listenIds)', 'сборщик отдаёт только местных'],
@@ -256,7 +269,9 @@ for (const [name, anchor, replacement, target] of [
 ] as const) test(`R196 контрфакт сборщика «${name}» ловится настоящим SQL-проводом`, async () => {
   // Класс ошибки: сборщик не может присваивать чужие квитанции или объявлять траченным обычный файл.
   await collected();
-  await assert.rejects(collected([anchor, replacement]), e => e instanceof assert.AssertionError && e.message.includes(target));
+  await counterfact(async () => {
+    await assert.rejects(collected([anchor, replacement]), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 async function exportListens(mutation?: Mutation) {
   const f = await fixture({ changes: mutation });
@@ -282,13 +297,15 @@ test('R196 экспорт listen только для сообщений сосе
 test('R196 экспорт собственных listen обнаруживается даже при legacy self-listen строке', async () => {
   // Класс ошибки: два независимых отбора владельца нельзя убрать одновременно, иначе экспорт выдаёт третий тип строки.
   await exportListens();
-  const source = raw('federation/convChanges'), tree = ts.createSourceFile('convChanges', source, ts.ScriptTarget.Latest, true);
-  const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'exportForPeer')!;
-  const body = fn.getText(tree);
-  const first = 'page.filter((m) => m.home === instanceId && !m.deletedAt && !m.withheld)',
-    second = 'if (!m.deletedAt && !m.withheld && m.home === instanceId && heard.has(m.id))';
-  assert.equal(body.split(first).length - 1, 1); assert.equal(body.split(second).length - 1, 1);
-  const replacement = body.replace(first, 'page.filter((m) => !m.deletedAt && !m.withheld)')
-    .replace(second, 'if (!m.deletedAt && !m.withheld && heard.has(m.id))');
-  await assert.rejects(exportListens([body, replacement]), e => e instanceof assert.AssertionError && e.message.includes('экспорт listen только сообщения соседа'));
+  await counterfact(async () => {
+    const source = raw('federation/convChanges'), tree = ts.createSourceFile('convChanges', source, ts.ScriptTarget.Latest, true);
+    const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'exportForPeer')!;
+    const body = fn.getText(tree);
+    const first = 'page.filter((m) => m.home === instanceId && !m.deletedAt && !m.withheld)',
+      second = 'if (!m.deletedAt && !m.withheld && m.home === instanceId && heard.has(m.id))';
+    assert.equal(body.split(first).length - 1, 1); assert.equal(body.split(second).length - 1, 1);
+    const replacement = body.replace(first, 'page.filter((m) => !m.deletedAt && !m.withheld)')
+      .replace(second, 'if (!m.deletedAt && !m.withheld && heard.has(m.id))');
+    await assert.rejects(exportListens([body, replacement]), e => e instanceof assert.AssertionError && e.message.includes('экспорт listen только сообщения соседа'));
+  });
 });

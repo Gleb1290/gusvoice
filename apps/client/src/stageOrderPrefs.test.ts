@@ -1,15 +1,18 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import * as rules from './stageOrderRules';
 import type * as Prefs from './stageOrderPrefs';
 
-const source = readFileSync(new URL('./stageOrderPrefs.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const sourceUrl = new URL('./stageOrderPrefs.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 const key = 'gv_stage_order';
 function load(raw = source, initial?: string, broken = false) {
   const values = new Map<string, string>(initial === undefined ? [] : [[key, initial]]);
@@ -19,11 +22,9 @@ function load(raw = source, initial?: string, broken = false) {
     setItem: (k: string, v: string) => { if (broken) throw Error('storage unavailable'); values.set(k, v); },
     removeItem: (k: string) => { if (broken) throw Error('storage unavailable'); values.delete(k); },
   };
-  const deps: Record<string, unknown> = { react: React, './stageOrderRules': rules };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, localStorage: storage, require: (id: string) => {
-      if (!Object.hasOwn(deps, id)) throw Error(`Неизвестный импорт ${id}`); return deps[id];
-    } });
+    { module, exports: module.exports, localStorage: storage,
+      require: testVmImports(sourceUrl, { react: React, './stageOrderRules': rules }) });
   return { ...module.exports, values };
 }
 function channels(raw = source) {
@@ -155,13 +156,19 @@ async function reactive(raw = source) {
 it('R169 настоящие React хуки обновляют порядок и наличие раскладки после save и reset', () => reactive());
 // Класс ошибки: отсутствие уведомлений незаметно оставляет устаревший UI.
 it('R169 мутант без уведомлений обнаруживается React снимком', async () => {
-  const anchor = 'for (const fn of listeners) {'; assert.equal(source.split(anchor).length - 1, 1);
-  await reactive(); await assert.rejects(() => reactive(source.replace(anchor, 'for (const fn of []) {')), assert.AssertionError);
+  await reactive();
+  await counterfact(async () => {
+    const anchor = 'for (const fn of listeners) {'; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(() => reactive(source.replace(anchor, 'for (const fn of []) {')), assert.AssertionError);
+  });
 });
 // Класс ошибки: ключ без колонок смешивает раскладки разных ширин.
 it('R169 мутант чтения без числа колонок обнаруживается разными раскладками', () => {
-  const anchor = 'current[channelId]?.cols[String(cols)]'; assert.equal(source.split(anchor).length - 1, 1);
-  channels(); assert.throws(() => channels(source.replace(anchor, 'current[channelId]?.cols["2"]')), assert.AssertionError);
+  channels();
+  counterfact(() => {
+    const anchor = 'current[channelId]?.cols[String(cols)]'; assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => channels(source.replace(anchor, 'current[channelId]?.cols["2"]')), assert.AssertionError);
+  });
 });
 // Класс ошибки: ошибка маршрутизации режима через putStageOrder молча складывает ключ в cols.
 it('R246 мутант записи режима в cols вместо modes обнаруживается целым prefs-модулем', () => {
@@ -172,9 +179,11 @@ it('R246 мутант записи режима в cols вместо modes об�
     assert.deepEqual(entry.cols, {});
     assert.deepEqual(f.getStageOrder('a', 'watch-streams'), ['s:a']);
   }
-  const anchor = ': putStageModeOrder(current, channelId, layout, merged, Date.now()),';
-  assert.equal(source.split(anchor).length - 1, 1);
   modeWrite(source);
-  const mutant = source.replace(anchor, ': putStageOrder(current, channelId, Number(layout), merged, Date.now()),');
-  assert.throws(() => modeWrite(mutant), assert.AssertionError);
+  counterfact(() => {
+    const anchor = ': putStageModeOrder(current, channelId, layout, merged, Date.now()),';
+    assert.equal(source.split(anchor).length - 1, 1);
+    const mutant = source.replace(anchor, ': putStageOrder(current, channelId, Number(layout), merged, Date.now()),');
+    assert.throws(() => modeWrite(mutant), assert.AssertionError);
+  });
 });

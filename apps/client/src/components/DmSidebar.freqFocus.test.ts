@@ -1,3 +1,5 @@
+import { testVmImports } from '../testVmImports';
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -64,14 +66,12 @@ async function scene(phone: boolean, raw = source, alreadyFocused = false) {
     './Icon': { Icon: nil }, './GroupDialogs': { GroupDialogHost: nil }, './SharedMedia': { SharedMediaHost: nil },
     './SelfVoiceBar': { SelfVoiceBar: nil },
   };
-  const tree = ts.createSourceFile('DmSidebar.tsx', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const imports = new Set(tree.statements.filter(ts.isImportDeclaration).map(n => (n.moduleSpecifier as ts.StringLiteral).text));
   const module = { exports: {} };
   // Весь модуль, без извлечения onFindBlur/onFreqMenu и без eval фрагментов.
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
   { module, exports: module.exports, window, document, Date,
-    require: (id: string) => { assert.ok(imports.has(id) || id === 'react/jsx-runtime', id); return deps[id] ?? {}; } });
+    require: testVmImports(new URL('./DmSidebar.tsx', import.meta.url), deps) });
   const Sidebar = (module.exports as { DmSidebar: React.ComponentType }).DmSidebar;
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   try {
@@ -108,8 +108,10 @@ it('R133 закрытие меню при уже активном поле не 
 it('R133 безусловный onBlur вместо onFindBlur закрывает панель под меню и отвергается', async () => {
   // Контрфакт меняет настоящую JSX-проводку обеих платформ, а не копию callback в тесте.
   await scene(true); await scene(false);
-  const mutant = source.replaceAll('onBlur={onFindBlur}', 'onBlur={() => setFindFocused(false)}');
-  assert.notEqual(mutant, source);
-  for (const phone of [true, false]) await assert.rejects(scene(phone, mutant),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('меню удерживает панель поиска'));
+  await counterfact(async () => {
+    const mutant = source.replaceAll('onBlur={onFindBlur}', 'onBlur={() => setFindFocused(false)}');
+    assert.notEqual(mutant, source);
+    for (const phone of [true, false]) await assert.rejects(scene(phone, mutant),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('меню удерживает панель поиска'));
+  });
 });

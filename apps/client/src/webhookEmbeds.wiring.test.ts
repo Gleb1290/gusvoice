@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -101,10 +102,12 @@ function attachmentsContract(source: string) {
 }
 function rejectMutation(source: string, from: string, to: string, count: number, marker: string, check: (source: string) => void) {
   check(source);
-  assert.equal(source.split(from).length - 1, count, 'ровно ожидаемые якоря мутации');
-  const changed = source.split(from).join(to);
-  ast(changed); // Синтаксический сбой не считается доказательством обнаруженной регрессии.
-  assert.throws(() => check(changed), (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n')[0] === marker);
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, count, 'ровно ожидаемые якоря мутации');
+    const changed = source.split(from).join(to);
+    ast(changed); // Синтаксический сбой не считается доказательством обнаруженной регрессии.
+    assert.throws(() => check(changed), (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n')[0] === marker);
+  });
 }
 
 test('R279 новый клиент не дублирует карточки старым fallback-текстом и не создаёт из него превью', () => {
@@ -136,15 +139,17 @@ test('R279 контрфакт без !m.embedsFallback пойман адресн
 for (const bubble of [true, false]) test(`R280 потеря защиты только ${bubble ? 'пузыря' : 'строки канала'} обнаруживается при исправных соседних путях`, () => {
   // Общее удаление трёх стражей ловит preview раньше JSX: эти контрфакты доказывают защиту каждого рендера отдельно.
   fallbackContract(pane);
-  const bodies = messageBodies(ast(pane)).filter(n => isBubbleBody(n) === bubble);
-  assert.equal(bodies.length, 1);
-  const condition = bodies[0].condition;
-  assert.equal(compact(condition), 'm.content&&!m.embedsFallback');
-  const changed = pane.slice(0, condition.getStart()) + 'm.content' + pane.slice(condition.end);
-  ast(changed);
-  const marker = bubble ? 'R280 свёртка не рисуется в пузыре' : 'R280 свёртка не рисуется в строке канала';
-  assert.throws(() => fallbackContract(changed),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.split('\n')[0] === marker);
+  counterfact(() => {
+    const bodies = messageBodies(ast(pane)).filter(n => isBubbleBody(n) === bubble);
+    assert.equal(bodies.length, 1);
+    const condition = bodies[0].condition;
+    assert.equal(compact(condition), 'm.content&&!m.embedsFallback');
+    const changed = pane.slice(0, condition.getStart()) + 'm.content' + pane.slice(condition.end);
+    ast(changed);
+    const marker = bubble ? 'R280 свёртка не рисуется в пузыре' : 'R280 свёртка не рисуется в строке канала';
+    assert.throws(() => fallbackContract(changed),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.split('\n')[0] === marker);
+  });
 });
 
 test('R279 контрфакт открытия подписанной ссылки без вопроса пойман после проверки оригинала', () => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -153,9 +154,11 @@ test('R191 удаление автора лички адресует отзыв 
     "...(input.kind === 'sessions' ? await dmHostsOf(input.userId) : []),",
   ];
   await revokeScenario();
+  await counterfact(async () => {
   await assert.rejects(revokeScenario(mutant), (error: unknown) =>
     error instanceof assert.AssertionError && error.message.includes('только дом собеседника из личной беседы'),
   );
+  });
 });
 
 function profileModule(revocation: typeof import('../src/federation/guestRevocation.js'), io: { hashes: number; broadcasts: unknown[][] }) {

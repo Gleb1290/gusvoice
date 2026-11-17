@@ -1,3 +1,4 @@
+import { counterfact } from "../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -153,10 +154,12 @@ it('R200 401 соседа забывает мёртвую сессию без с
 });
 it('R200 мутант без owed теряет обязательный пустой отчёт после лежавшего дома', async () => {
   const original = await downThenUp(); assert.equal(original.reports.length, 1);
-  const anchor = 'if (items.length === 0 && !owed) return;'; assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь пустого отчёта');
-  const f = await downThenUp({ raw: source.replace(anchor, 'if (items.length === 0) return;') });
-  assert.throws(() => assert.equal(f.reports.length, 1, 'дом получает отчёт после обходного периода'),
-    e => e instanceof assert.AssertionError && e.message.includes('дом получает отчёт'));
+  await counterfact(async () => {
+    const anchor = 'if (items.length === 0 && !owed) return;'; assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь пустого отчёта');
+    const f = await downThenUp({ raw: source.replace(anchor, 'if (items.length === 0) return;') });
+    assert.throws(() => assert.equal(f.reports.length, 1, 'дом получает отчёт после обходного периода'),
+      e => e instanceof assert.AssertionError && e.message.includes('дом получает отчёт'));
+  });
 });
 const ownViaMessage = { id: 'own-via', conversationId: 'c', author: { id: 'shadow', displayName: 'Местный' }, content: 'моё сообщение', extra: { kept: true } } as unknown as ConvMessage & { extra: { kept: boolean } };
 const peerViaMessage = { id: 'peer-via', conversationId: 'c', author: { id: 'neighbor-peer', displayName: 'Сосед' }, content: 'ответ соседа' } as unknown as ConvMessage;
@@ -178,12 +181,14 @@ it('R204 удаление localize из history ловится по автору
   const original = await sendAndHistory();
   assert.equal(original.sent.author?.id, 'me', 'исходная send проходит через локализацию');
   assert.equal(original.history[0].author?.id, 'peer', 'исходная history проходит через локализацию');
-  const anchor = 'return (await apiVia(c).convHistory(convId, { limit: 40 })).messages.map((m) => localize(convId, c.userId, m));';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь локализации истории');
-  const mutant = await sendAndHistory(source.replace(anchor, 'return (await apiVia(c).convHistory(convId, { limit: 40 })).messages;'));
-  assert.equal(mutant.sent.author?.id, 'me', 'удаление локализации history не должно ломать send');
-  assert.throws(() => assert.equal(mutant.history[0].author?.id, 'peer', 'сообщение собеседника должно остаться за его строкой у нас'),
-    e => e instanceof assert.AssertionError && e.message.includes('сообщение собеседника должно остаться за его строкой у нас'));
+  await counterfact(async () => {
+    const anchor = 'return (await apiVia(c).convHistory(convId, { limit: 40 })).messages.map((m) => localize(convId, c.userId, m));';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь локализации истории');
+    const mutant = await sendAndHistory(source.replace(anchor, 'return (await apiVia(c).convHistory(convId, { limit: 40 })).messages;'));
+    assert.equal(mutant.sent.author?.id, 'me', 'удаление локализации history не должно ломать send');
+    assert.throws(() => assert.equal(mutant.history[0].author?.id, 'peer', 'сообщение собеседника должно остаться за его строкой у нас'),
+      e => e instanceof assert.AssertionError && e.message.includes('сообщение собеседника должно остаться за его строкой у нас'));
+  });
 });
 
 const groupDm = { ...dm, otherUser: { id: 'group-placeholder', displayName: 'Группа' },
@@ -214,16 +219,22 @@ async function groupHistory(raw = source) {
 it('R208 fedVia применяет групповую локализацию и к send, и к history', async () => { await groupHistory(); });
 // Удалённый гейт дома группы ошибочно заводит сессию собственной группе.
 it('R208 контрфакт fedVia без проверки fedGroupHost предлагает обход своей группы', async () => {
-  await groupFallback(); const anchor = '!!s.conv?.summaries?.[convId]?.fedGroupHost &&';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(groupFallback(source.replace(anchor, '')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('сессия нужна только группе чужого хоста') && e.actual === 1 && e.expected === 0);
+  await groupFallback();
+  await counterfact(async () => {
+    const anchor = '!!s.conv?.summaries?.[convId]?.fedGroupHost &&';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(groupFallback(source.replace(anchor, '')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('сессия нужна только группе чужого хоста') && e.actual === 1 && e.expected === 0);
+  });
 });
 // Замена группы на 1:1 теряет автора ответа, даже если своя отправка выглядит правильно.
 it('R208 контрфакт fedVia без group-localize присваивает историю заглушке собеседника', async () => {
-  await groupHistory(); const anchor = 'if (dm?.group) return viaLocalizeGroup(m, viaUserId, s.user?.id, dm.group.members);';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(groupHistory(source.replace(anchor, '')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('history группы выбирает участника')
-      && e.actual === 'group-placeholder' && e.expected === 'group-peer');
+  await groupHistory();
+  await counterfact(async () => {
+    const anchor = 'if (dm?.group) return viaLocalizeGroup(m, viaUserId, s.user?.id, dm.group.members);';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(groupHistory(source.replace(anchor, '')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('history группы выбирает участника')
+        && e.actual === 'group-placeholder' && e.expected === 'group-peer');
+  });
 });

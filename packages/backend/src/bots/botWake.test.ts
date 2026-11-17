@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -215,10 +216,12 @@ const mutants = [
 describe('будильник ботов: адресные исполняемые whole-module контрфакты', () => {
   for (const mutant of mutants) it(mutant.name, async () => {
     await mutant.verify(source); // Original-first: тот же сценарий и IO-адаптер проходят без мутации.
-    const changed = replaceOnce(source, mutant.from, mutant.to);
-    await assert.rejects(() => mutant.verify(changed), (error: unknown) => error instanceof assert.AssertionError
-      && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === mutant.marker
-      && error.operator === 'strictEqual' && error.actual === mutant.actual && error.expected === mutant.expected,
-    `засчитывается только адресный host AssertionError: ${mutant.marker}`);
+    await counterfact(async () => {
+      const changed = replaceOnce(source, mutant.from, mutant.to);
+      await assert.rejects(() => mutant.verify(changed), (error: unknown) => error instanceof assert.AssertionError
+        && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === mutant.marker
+        && error.operator === 'strictEqual' && error.actual === mutant.actual && error.expected === mutant.expected,
+      `засчитывается только адресный host AssertionError: ${mutant.marker}`);
+    });
   });
 });

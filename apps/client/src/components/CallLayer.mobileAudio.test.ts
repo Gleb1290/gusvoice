@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { afterEach, test } from 'node:test';
@@ -124,7 +125,7 @@ for (const [key, expected, from, to] of [
   ['noiseSuppression', false, "noiseSuppression: mobile ? false : a.noiseFilter !== 'off'", "noiseSuppression: mobile ? true : a.noiseFilter !== 'off'"],
 ] as const) test(`R236 мобильный ${key} = ${expected}, контрфакт обнаруживается на границе создания дорожки`, async () => {
   await captureRule(key, expected);
-  await assert.rejects(captureRule(key, expected, [from, to]), killed(`R236-${key}:`, !expected, expected));
+  await counterfact(() => assert.rejects(captureRule(key, expected, [from, to]), killed(`R236-${key}:`, !expected, expected)));
 });
 
 test('R236 ПК сохраняет настройки захвата пользователя и сразу подключает звук собеседника', async () => {
@@ -155,7 +156,7 @@ async function connectOrder(mutation?: Mutation) {
 }
 test('R237 мобильный connect ждёт микрофона и контекста, раннее подключение обнаруживается', async () => {
   await connectOrder();
-  await assert.rejects(connectOrder(['          await micOpen;\n          if (gone) return;', '          void micOpen;\n          if (gone) return;']), killed('R237-connect:', true, false));
+  await counterfact(() => assert.rejects(connectOrder(['          await micOpen;\n          if (gone) return;', '          void micOpen;\n          if (gone) return;']), killed('R237-connect:', true, false)));
 });
 async function delayed(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -167,7 +168,7 @@ async function delayed(mutation?: Mutation) {
 }
 test('R237 TrackSubscribed после безопасного connect подключает звук, удаление attach обнаруживается', async () => {
   await delayed();
-  await assert.rejects(delayed(["if (track.kind !== 'audio') return pickRemote();\n      attachAudio(track);", "if (track.kind !== 'audio') return pickRemote();"]), killed('R237-attach:', 0, 1));
+  await counterfact(() => assert.rejects(delayed(["if (track.kind !== 'audio') return pickRemote();\n      attachAudio(track);", "if (track.kind !== 'audio') return pickRemote();"]), killed('R237-attach:', 0, 1)));
 });
 async function unsubscribed(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -179,7 +180,7 @@ async function unsubscribed(mutation?: Mutation) {
 }
 test('R237 TrackUnsubscribed снимает подключённый звук, удаление detach обнаруживается', async () => {
   await unsubscribed();
-  await assert.rejects(unsubscribed(['for (const el of track.detach()) {', 'for (const el of []) {']), killed('R237-unsubscribed:', 0, 1));
+  await counterfact(() => assert.rejects(unsubscribed(['for (const el of track.detach()) {', 'for (const el of []) {']), killed('R237-unsubscribed:', 0, 1)));
 });
 async function keepMic(mutation?: Mutation) {
   const f = fixture(true, true, mutation);
@@ -188,7 +189,7 @@ async function keepMic(mutation?: Mutation) {
 }
 test('R236 stopMicTrackOnMute остаётся false в настоящих опциях Room, мутант true отвергается', async () => {
   await keepMic();
-  await assert.rejects(keepMic(['publishDefaults: { dtx: true, red: true, stopMicTrackOnMute: false }', 'publishDefaults: { dtx: true, red: true, stopMicTrackOnMute: true }']), killed('R236-keep:', true, false));
+  await counterfact(() => assert.rejects(keepMic(['publishDefaults: { dtx: true, red: true, stopMicTrackOnMute: false }', 'publishDefaults: { dtx: true, red: true, stopMicTrackOnMute: true }']), killed('R236-keep:', true, false)));
 });
 async function mutedPublish(mutation?: Mutation) {
   const f = fixture(true, true, mutation);
@@ -203,7 +204,7 @@ async function mutedPublish(mutation?: Mutation) {
 }
 test('R236 muted мобильный звонок сначала дожидается mute, только затем публикует микрофон', async () => {
   await mutedPublish();
-  await assert.rejects(mutedPublish(['if (useCall.getState().muted) await t.mute();\n            await r.localParticipant.publishTrack(t);', 'await r.localParticipant.publishTrack(t);\n            if (useCall.getState().muted) await t.mute();']), killed('R236-mute:', true, false));
+  await counterfact(() => assert.rejects(mutedPublish(['if (useCall.getState().muted) await t.mute();\n            await r.localParticipant.publishTrack(t);', 'await r.localParticipant.publishTrack(t);\n            if (useCall.getState().muted) await t.mute();']), killed('R236-mute:', true, false)));
 });
 async function readyAfter(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -217,7 +218,7 @@ async function readyAfter(mutation?: Mutation) {
 }
 test('R236 ready не становится true до завершения публикации, ранний ready обнаруживается', async () => {
   await readyAfter();
-  await assert.rejects(readyAfter(['        try {\n          const t = mic as LocalAudioTrack | null;', '        if (!gone) setReady(true);\n        try {\n          const t = mic as LocalAudioTrack | null;']), killed('R236-ready:', true, false));
+  await counterfact(() => assert.rejects(readyAfter(['        try {\n          const t = mic as LocalAudioTrack | null;', '        if (!gone) setReady(true);\n        try {\n          const t = mic as LocalAudioTrack | null;']), killed('R236-ready:', true, false)));
 });
 async function readyFinally(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -229,7 +230,7 @@ async function readyFinally(mutation?: Mutation) {
 }
 test('R236 ready устанавливается в finally и при ошибке публикации, перенос за try не проходит', async () => {
   await readyFinally();
-  await assert.rejects(readyFinally(['        } finally {\n          if (!gone) setReady(true);\n        }', '        } catch (e) { throw e; }\n        if (!gone) setReady(true);']), killed('R236-finally:', false, true));
+  await counterfact(() => assert.rejects(readyFinally(['        } finally {\n          if (!gone) setReady(true);\n        }', '        } catch (e) { throw e; }\n        if (!gone) setReady(true);']), killed('R236-finally:', false, true)));
 });
 async function cleanup(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -239,7 +240,7 @@ async function cleanup(mutation?: Mutation) {
 }
 test('R236 cleanup останавливает открытый микрофон до подключения, удаление stop обнаруживается', async () => {
   await cleanup();
-  await assert.rejects(cleanup(['      (mic as LocalAudioTrack | null)?.stop();', '      // cleanup stop удалён']), killed('R236-cleanup:', 0, 1));
+  await counterfact(() => assert.rejects(cleanup(['      (mic as LocalAudioTrack | null)?.stop();', '      // cleanup stop удалён']), killed('R236-cleanup:', 0, 1)));
 });
 test('R237 окончание звонка до micOpen останавливает поздний микрофон без connect и контекста', async () => {
   const f = fixture(); f.cleanup();
@@ -260,7 +261,7 @@ async function captureFailure(mutation?: Mutation) {
 }
 test('R237 отказ микрофона всё равно подключает комнату и ready, ранний выход обнаруживается', async () => {
   await captureFailure();
-  await assert.rejects(captureFailure(["toastError(e, 'Звонок: не удалось подключить звук');\n          },", "toastError(e, 'Звонок: не удалось подключить звук');\n            throw e;\n          },"]), killed('R237-capture-error:', false, true));
+  await counterfact(() => assert.rejects(captureFailure(["toastError(e, 'Звонок: не удалось подключить звук');\n          },", "toastError(e, 'Звонок: не удалось подключить звук');\n            throw e;\n          },"]), killed('R237-capture-error:', false, true)));
 });
 
 async function sharedContext(mutation?: Mutation) {
@@ -276,10 +277,10 @@ async function sharedContext(mutation?: Mutation) {
 }
 test('R237 webAudioMix получает тот же контекст до connect, поздняя подстановка обнаруживается', async () => {
   await sharedContext();
-  await assert.rejects(sharedContext([
+  await counterfact(() => assert.rejects(sharedContext([
     '          mix.audioContext = callPlaybackContext();\n        }\n        await r.connect(join.url, join.token);',
     '        }\n        await r.connect(join.url, join.token);\n        if (mobile) mix.audioContext = callPlaybackContext();',
-  ]), killed('R237-context:', false, true));
+  ]), killed('R237-context:', false, true)));
 });
 async function latency(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -294,7 +295,7 @@ for (const [name, replacement, actual] of [
   ['без latencyHint', 'new AudioContext()', undefined],
 ] as const) test(`R237 контекст playback: контрфакт ${name} обнаруживается в опциях конструктора`, async () => {
   await latency();
-  await assert.rejects(latency(["new AudioContext({ latencyHint: 'playback' })", replacement]), killed('R237-latency:', actual, 'playback'));
+  await counterfact(() => assert.rejects(latency(["new AudioContext({ latencyHint: 'playback' })", replacement]), killed('R237-latency:', actual, 'playback')));
 });
 async function closeContext(mutation?: Mutation) {
   const f = fixture(true, false, mutation);
@@ -306,7 +307,7 @@ async function closeContext(mutation?: Mutation) {
 }
 test('R237 завершение закрывает свой playback-контекст, отсутствие close обнаруживается', async () => {
   await closeContext();
-  await assert.rejects(closeContext(['      void mix.audioContext?.close().catch(() => {});', '      // close удалён']), killed('R237-close:', 0, 1));
+  await counterfact(() => assert.rejects(closeContext(['      void mix.audioContext?.close().catch(() => {});', '      // close удалён']), killed('R237-close:', 0, 1)));
 });
 async function nonMobile(browser: boolean, mutation?: Mutation) {
   const f = fixture(false, false, mutation, browser);
@@ -324,8 +325,8 @@ async function nonMobile(browser: boolean, mutation?: Mutation) {
 for (const [browser, name] of [[false, 'Windows Tauri'], [true, 'Android браузер без Tauri']] as const)
   test(`R237 ${name}: connect сразу, без playback и webAudioMix; смешение платформ обнаруживается`, async () => {
     await nonMobile(browser);
-    await assert.rejects(nonMobile(browser, [
+    await counterfact(() => assert.rejects(nonMobile(browser, [
       '...(mobile ? { webAudioMix: mix as { audioContext: AudioContext } } : {}),',
       '...(true ? { webAudioMix: mix as { audioContext: AudioContext } } : {}),',
-    ]), killed('R237-platform:', true, false));
+    ]), killed('R237-platform:', true, false)));
   });

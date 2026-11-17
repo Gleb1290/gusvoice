@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -120,8 +121,6 @@ describe('R167–R168 — разрешение автовозврата учас
 
   it('мутант «считать только показы» обнаруживается камерой без демонстраций', () => {
     const source = readFileSync(new URL('./stageAutoShowRules.ts', import.meta.url), 'utf8');
-    const anchor = ' || cameras.some(track => !track.publication?.isMuted)';
-    assert.equal(source.split(anchor).length - 1, 1, 'ровно один точный якорь мутации');
 
     function cameraKeepsHidden(rules: typeof import('./stageAutoShowRules.js')) {
       const hasVideo = rules.stageHasVideo([], [active]);
@@ -131,11 +130,15 @@ describe('R167–R168 — разрешение автовозврата учас
 
     const original = loadRules(source);
     cameraKeepsHidden(original);
-    const mutant = loadRules(source.replace(anchor, ''));
     // Парный контрфакт: мутант оставляет показ рабочим, ломается именно ветка камер.
     assert.equal(original.stageHasVideo([active], []), true);
-    assert.equal(mutant.stageHasVideo([active], []), true);
-    assert.throws(() => cameraKeepsHidden(mutant), /камера без показов запрещает автовыключение/);
+    counterfact(() => {
+      const anchor = ' || cameras.some(track => !track.publication?.isMuted)';
+      assert.equal(source.split(anchor).length - 1, 1, 'ровно один точный якорь мутации');
+      const mutant = loadRules(source.replace(anchor, ''));
+      assert.equal(mutant.stageHasVideo([active], []), true);
+      assert.throws(() => cameraKeepsHidden(mutant), /камера без показов запрещает автовыключение/);
+    });
   });
 });
 
@@ -193,31 +196,37 @@ describe('R168 — память видео в текущем включении 
   it('мутант без sawVideo преждевременно разрешает автовозврат в пустом канале', () => {
     const source = readFileSync(new URL('./stageAutoShowRules.ts', import.meta.url), 'utf8');
     emptyKeepsHidden(loadRules(source));
-    const mutant = mutateRules(source, ' && input.sawVideo;', ';');
-    assert.throws(() => emptyKeepsHidden(mutant), /видео ещё не было — автовозврат запрещён/);
-    assert.equal(mutant.canAutoShowStage(enabled), true, 'положительный путь сохранился');
+    counterfact(() => {
+      const mutant = mutateRules(source, ' && input.sawVideo;', ';');
+      assert.throws(() => emptyKeepsHidden(mutant), /видео ещё не было — автовозврат запрещён/);
+      assert.equal(mutant.canAutoShowStage(enabled), true, 'положительный путь сохранился');
+    });
   });
 
   it('мутант без сброса при смене канала наследует чужое закончившееся видео', () => {
     const source = readFileSync(new URL('./stageAutoShowRules.ts', import.meta.url), 'utf8');
     channelClearsSeen(loadRules(source));
-    const mutant = mutateRules(source, 'const saw = prev.key === key ? prev.saw : false;',
-      'const saw = key !== null ? prev.saw : false;');
-    assert.throws(() => channelClearsSeen(mutant), /новый пустой канал не наследует просмотренное видео/);
-    assert.equal(mutant.nextStageVideoSeen({ key: 'voice-1', saw: true }, enabled).saw, true,
-      'тот же канал по-прежнему помнит видео');
-    disablingClearsSeen(mutant);
+    counterfact(() => {
+      const mutant = mutateRules(source, 'const saw = prev.key === key ? prev.saw : false;',
+        'const saw = key !== null ? prev.saw : false;');
+      assert.throws(() => channelClearsSeen(mutant), /новый пустой канал не наследует просмотренное видео/);
+      assert.equal(mutant.nextStageVideoSeen({ key: 'voice-1', saw: true }, enabled).saw, true,
+        'тот же канал по-прежнему помнит видео');
+      disablingClearsSeen(mutant);
+    });
   });
 
   it('мутант без сброса при выключении не даёт начать новое включение с чистой памятью', () => {
     const source = readFileSync(new URL('./stageAutoShowRules.ts', import.meta.url), 'utf8');
     disablingClearsSeen(loadRules(source));
-    const mutant = mutateRules(source, 'const key = input.hideNoVideo ? input.channelId : null;',
-      'const key = input.channelId;');
-    assert.throws(() => disablingClearsSeen(mutant), /выключение стирает память даже при оставшемся видео/);
-    channelClearsSeen(mutant);
-    assert.equal(mutant.nextStageVideoSeen({ key: 'voice-1', saw: false }, {
-      ...enabled, hasVideo: true,
-    }).saw, true, 'запоминание активного видео сохранилось');
+    counterfact(() => {
+      const mutant = mutateRules(source, 'const key = input.hideNoVideo ? input.channelId : null;',
+        'const key = input.channelId;');
+      assert.throws(() => disablingClearsSeen(mutant), /выключение стирает память даже при оставшемся видео/);
+      channelClearsSeen(mutant);
+      assert.equal(mutant.nextStageVideoSeen({ key: 'voice-1', saw: false }, {
+        ...enabled, hasVideo: true,
+      }).saw, true, 'запоминание активного видео сохранилось');
+    });
   });
 });

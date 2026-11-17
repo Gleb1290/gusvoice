@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -35,6 +36,7 @@ it('обрезка оставляет только [from,to), сдвигает �
   assert.deepEqual(parsed?.blocks.map(b => b.at), [0, 1000, 1500]);
   assert.equal(parsed?.blocks.some(b => b.at === 2500), false, 'блок на исходной правой границе исключён после сдвига');
   assert.ok(trim.parseWebm(input), 'неизвестный размер кластера обрывается ровно на следующем 4-байтном идентификаторе');
+  counterfact(() => {
   const noClusterBoundary = mutant('if (sz.size < 0 && cid.len === 4) break;', '');
   assert.equal(noClusterBoundary.parseWebm(input), null, 'мутант заглатывает следующий кластер и ломает разбор записи');
   const mutantEnd = mutant('b.at < toMs', 'b.at <= toMs');
@@ -43,6 +45,7 @@ it('обрезка оставляет только [from,to), сдвигает �
   const mutantClock = mutant('const rel = b.at - start - base;', 'const rel = b.at - base;');
   assert.throws(() => assert.equal(mutantClock.parseWebm(mutantClock.cutWebm(input, 1500, 4000)!)?.blocks[0]?.at, 0), assert.AssertionError,
     'мутант оставляет абсолютный timestamp вместо нуля');
+  });
 });
 
 it('кластер короче 30 секунд, а неподдерживаемые BlockGroup и не-WebM безопасно дают null', () => {
@@ -54,9 +57,11 @@ it('кластер короче 30 секунд, а неподдерживаем
   const clusterId = id(0x1f43b675);
   const countClusters = (buf: Uint8Array) => Array.from({ length: buf.length - 3 }, (_, i) => clusterId.every((b, j) => buf[i + j] === b)).filter(Boolean).length;
   assert.equal(countClusters(out), 2, 'на отметке 30 с создаётся следующий кластер, а не блок со знаковым переполнением');
+  counterfact(() => {
   const noSpanGuard = mutant('kept[i].at - start - base < CLUSTER_SPAN_MS', 'true');
   assert.throws(() => assert.equal(countClusters(noSpanGuard.cutWebm(input, 0, 40000)!), 2), assert.AssertionError,
     'мутант кладёт отрезок длиннее 30 секунд в один кластер');
+  });
   assert.equal(trim.parseWebm(Uint8Array.from([0, 1, 2])), null);
   assert.equal(trim.cutWebm(input, 35000, 39000), null);
   const group = Uint8Array.from([...id(0x1a45dfa3), 0x80, ...id(0x18538067), 0xff,

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -360,18 +361,18 @@ test('R219 посторонний, чужая беседа и обычное с�
 });
 test('R219 контрфакт: потерян персональный pollView — голосовавший получает скрытый пустой вид', async () => {
   await privacy();
-  await assert.rejects(() => privacy(mutation('conversations', "if (m.media?.kind === 'poll') cm.media = convPollView(m.media, pollVotes.get(m.id) ?? [], viewerId);", '')),
-    killed('голосовавший получает итоги своим видом', false, true));
+  await counterfact(() => assert.rejects(() => privacy(mutation('conversations', "if (m.media?.kind === 'poll') cm.media = convPollView(m.media, pollVotes.get(m.id) ?? [], viewerId);", '')),
+    killed('голосовавший получает итоги своим видом', false, true)));
 });
 test('R219 контрфакт: снята проверка автора — чужое закрытие становится HTTP 200', async () => {
   await closeAuthor();
-  await assert.rejects(() => closeAuthor(mutation('convPolls', "if (p.authorId !== me) return { kind: 'refused', code: 403, error: 'остановить опрос может только автор' };", '', 'closeConvPoll')),
-    killed('не автор не может остановить опрос', 200, 403));
+  await counterfact(() => assert.rejects(() => closeAuthor(mutation('convPolls', "if (p.authorId !== me) return { kind: 'refused', code: 403, error: 'остановить опрос может только автор' };", '', 'closeConvPoll')),
+    killed('не автор не может остановить опрос', 200, 403)));
 });
 test('R219 контрфакт: отключён convHasRemote — смешанная группа получает неподдерживаемый опрос', async () => {
   await remoteGate();
-  await assert.rejects(() => remoteGate(mutation('routes/conv', "media?.kind === 'poll' && (await convHasRemote(db, conversationId))", "media?.kind === 'poll' && false", 'convRoutes')),
-    killed('создание опроса с человеком соседа запрещено', 201, 403));
+  await counterfact(() => assert.rejects(() => remoteGate(mutation('routes/conv', "media?.kind === 'poll' && (await convHasRemote(db, conversationId))", "media?.kind === 'poll' && false", 'convRoutes')),
+    killed('создание опроса с человеком соседа запрещено', 201, 403)));
 });
 
 async function acceptedPollStored(message: Message, conversationId: string, memberIds: readonly string[], homeIds: readonly string[]) {

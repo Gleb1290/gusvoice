@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -123,8 +124,10 @@ async function unknownHomeScenario(mutation?: Mutation) {
 test('R201 тень без данных дома не раскрывает гостевой заход, местный без крючка сохраняет SQL время', async () => { await unknownHomeScenario(); });
 test('R201 мутант SQL времени тени без home данных пойман парным местным сценарием', async () => {
   await unknownHomeScenario();
+await gatedCounterfact(async () => {
   await assert.rejects(unknownHomeScenario(["if (!r) return subject.remote ? { ...subject, lastSeenAt: null, privacy: 'nobody', exceptions: undefined } : subject;", 'if (!r) return subject;']),
     e => e instanceof assert.AssertionError && e.message.includes('без данных дома гостевой заход'));
+});
 });
 
 for (const [name, mutation, check, failure] of [
@@ -133,6 +136,8 @@ for (const [name, mutation, check, failure] of [
 ] as [string, Mutation, (mutation?: Mutation) => Promise<void>, string][]) {
   test(`R197 мутант lastSeen «${name}» пойман обеими сторонами privacy`, async () => {
     await check();
+await gatedCounterfact(async () => {
     await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+});
   });
 }

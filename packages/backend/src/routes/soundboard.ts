@@ -1,12 +1,12 @@
 import { has, Permission } from '@gusvoice/shared';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
 import { economySeenBy, pushWallet, walletOf } from '../coins.js';
 import { db } from '../db/index.js';
-import { channels, serverSoundboard, users } from '../db/schema.js';
+import { channels, serverSoundboard, serverSoundboardQuotas, users } from '../db/schema.js';
 import { getChannelPermissions, getMemberContext } from '../permissions.js';
 import { buyItem } from '../purchase.js';
 import { publishToChannel, publishToServer, redisPub } from '../realtime.js';
@@ -16,7 +16,6 @@ import {
   CLIP_BLOCK_TEXT,
   SOUNDBOARD_CHANNEL_COOLDOWN_MS,
   SOUNDBOARD_MAX_BYTES,
-  SOUNDBOARD_MAX_CLIPS,
   SOUNDBOARD_MAX_PRICE_COINS,
   SOUNDBOARD_MAX_SECONDS,
   clipBlock,
@@ -24,6 +23,9 @@ import {
   soundboardChannelKey,
   soundboardName,
 } from '../soundboardRules.js';
+import { finishSoundboardUpload, lockSoundboardUpload, scheduleSoundboardUploadCleanup } from '../soundboardCleanup.js';
+import { lockSoundboardServer, readSoundboardQuota, readSoundboardSettings, soundboardUsage } from '../soundboardQuota.js';
+import { soundboardLimit } from '../soundboardQuotaRules.js';
 import { putSound, resolveAudioMime, storageConfigured } from '../storage.js';
 import { id } from '../util.js';
 import { inVoiceChannel, voiceParticipantIds } from '../voicePresence.js';
@@ -49,17 +51,26 @@ export async function soundboardRoutes(app: FastifyInstance): Promise<void> {
     const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
 
-    const rows = await db
-      .select({
-        id: serverSoundboard.id,
-        name: serverSoundboard.name,
-        url: serverSoundboard.url,
-        priceCoins: serverSoundboard.priceCoins,
-      })
-      .from(serverSoundboard)
-      .where(eq(serverSoundboard.serverId, serverId))
-      // Порядок добавления — он же порядок кнопок: перетасовка убивает мышечную память.
-      .orderBy(asc(serverSoundboard.createdAt));
+    const authorId = req.user!.sub;
+    const managesServer = has(ctx.serverPermissions, Permission.MANAGE_SERVER);
+    const seesQuota = managesServer || has(ctx.serverPermissions, Permission.MANAGE_SOUNDBOARD);
+    const { rows, quota } = await db.transaction(async (tx) => {
+      const settings = await readSoundboardSettings(tx);
+      const quota = await readSoundboardQuota(tx, serverId, settings);
+      const rows = await tx
+        .select({
+          id: serverSoundboard.id,
+          name: serverSoundboard.name,
+          url: serverSoundboard.url,
+          priceCoins: serverSoundboard.priceCoins,
+          createdBy: serverSoundboard.createdBy,
+        })
+        .from(serverSoundboard)
+        .where(eq(serverSoundboard.serverId, serverId))
+        // Порядок добавления — он же порядок кнопок: перетасовка убивает мышечную память.
+        .orderBy(asc(serverSoundboard.createdAt));
+      return { rows, quota };
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
 
     /**
      * 🔴 Действующую цену считаем ЗДЕСЬ: своя у звука — уже в монетах, общая приезжает из каталога
@@ -90,13 +101,44 @@ export async function soundboardRoutes(app: FastifyInstance): Promise<void> {
      */
     return reply.send({
       clips,
-      max: SOUNDBOARD_MAX_CLIPS,
+      max: quota.mode === 'legacy' ? quota.limit : Number.MAX_SAFE_INTEGER,
+      ...(seesQuota && {
+        quota: {
+          ...quota,
+          used: quota.mode === 'legacy' ? rows.length : rows.filter((clip) => clip.createdBy === authorId).length,
+          canConfigure: managesServer && quota.mode === 'per-user',
+        },
+      }),
       maxBytes: SOUNDBOARD_MAX_BYTES,
       maxSeconds: SOUNDBOARD_MAX_SECONDS,
       // Общая цена — чтобы панель показывала, к чему откатится звук без своей цены.
       defaultPriceCoins: fallback.priceCoins,
       maxPriceCoins: SOUNDBOARD_MAX_PRICE_COINS,
     });
+  });
+
+  app.put('/servers/:id/soundboard/quota', async (req, reply) => {
+    const { id: serverId } = z.object({ id: z.string() }).parse(req.params);
+    const { limit } = z.object({ limit: soundboardLimit }).parse(req.body);
+    const ctx = await getMemberContext(serverId, req.user!.sub);
+    if (!ctx) return reply.code(404).send({ error: 'not a member' });
+    if (!has(ctx.serverPermissions, Permission.MANAGE_SERVER)) return reply.code(403).send({ error: 'forbidden' });
+
+    const outcome = await db.transaction(async (tx) => {
+      const settings = await readSoundboardSettings(tx, true);
+      if (!await lockSoundboardServer(tx, serverId)) return 'missing';
+      const quota = await readSoundboardQuota(tx, serverId, settings);
+      if (quota.mode === 'legacy') return 'legacy';
+      await tx.insert(serverSoundboardQuotas).values({ serverId, perUserLimit: limit }).onConflictDoUpdate({
+        target: serverSoundboardQuotas.serverId,
+        set: { perUserLimit: limit },
+      });
+      return 'saved';
+    });
+    if (outcome === 'missing') return reply.code(404).send({ error: 'not found' });
+    if (outcome === 'legacy') return reply.code(409).send({ error: 'личная квота на сервере не включена' });
+    await publishToServer(serverId, { t: 'server.invalidate', serverId });
+    return { ok: true };
   });
 
   /**
@@ -134,15 +176,6 @@ export async function soundboardRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: `файл больше ${Math.round(SOUNDBOARD_MAX_BYTES / 1024)} КБ` });
     }
 
-    // ⚠️ Считаем ДО заливки: иначе лишний файл уедет в хранилище и останется там сиротой.
-    const [count] = await db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(serverSoundboard)
-      .where(eq(serverSoundboard.serverId, serverId));
-    if ((count?.n ?? 0) >= SOUNDBOARD_MAX_CLIPS) {
-      return reply.code(400).send({ error: `больше ${SOUNDBOARD_MAX_CLIPS} звуков не поместится — удалите лишние` });
-    }
-
     /**
      * Цена звука приходит формой и НЕОБЯЗАТЕЛЬНА: пусто — действует общая из каталога. Пустая
      * строка и мусор трактуются одинаково, потому что для человека это одно и то же — «не указал».
@@ -155,22 +188,54 @@ export async function soundboardRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const clipId = id();
-    const url = await putSound(serverId, `sb-${clipId}`, buffer, mime, Date.now());
-    await db.insert(serverSoundboard).values({
-      id: clipId,
-      serverId,
-      name,
-      url,
-      priceCoins: parsedPrice === null ? null : Math.floor(parsedPrice),
-      createdBy: req.user!.sub,
+    const stamp = Date.now();
+    const authorId = req.user!.sub;
+    await scheduleSoundboardUploadCleanup(serverId, clipId, mime, stamp);
+    const outcome = await db.transaction(async (tx) => {
+      const settings = await readSoundboardSettings(tx, true);
+      const serverExists = await lockSoundboardServer(tx, serverId);
+      if (!serverExists) {
+        await finishSoundboardUpload(tx, clipId);
+        return { kind: 'missing' } as const;
+      }
+
+      const quota = await readSoundboardQuota(tx, serverId, settings);
+      const used = await soundboardUsage(tx, serverId, quota.mode === 'per-user' ? authorId : undefined);
+      if (used >= quota.limit) {
+        await finishSoundboardUpload(tx, clipId);
+        return { kind: 'full', quota } as const;
+      }
+
+      // Пока транзакция держит эту строку, воркер пропускает активную загрузку. При коммите
+      // запись о файле и отмена уборки вступают в силу одновременно, при откате задание остаётся.
+      await lockSoundboardUpload(tx, clipId);
+      const url = await putSound(serverId, `sb-${clipId}`, buffer, mime, stamp);
+      await tx.insert(serverSoundboard).values({
+        id: clipId,
+        serverId,
+        name,
+        url,
+        priceCoins: parsedPrice === null ? null : Math.floor(parsedPrice),
+        createdBy: authorId,
+      });
+      await finishSoundboardUpload(tx, clipId);
+      return { kind: 'saved', url } as const;
     });
+    if (outcome.kind === 'missing') return reply.code(404).send({ error: 'not found' });
+    if (outcome.kind === 'full') {
+      const { mode, limit } = outcome.quota;
+      const error = mode === 'legacy'
+        ? `больше ${limit} звуков не поместится — удалите лишние`
+        : `личная квота исчерпана (${limit})`;
+      return reply.code(400).send({ error });
+    }
     await writeAudit(serverId, req.user!.sub, 'soundboard.add', {
       targetType: 'server',
       targetId: serverId,
       data: { name },
     });
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
-    return reply.send({ id: clipId, name, url });
+    return reply.send({ id: clipId, name, url: outcome.url });
   });
 
   /**
@@ -216,6 +281,7 @@ export async function soundboardRoutes(app: FastifyInstance): Promise<void> {
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.MANAGE_SOUNDBOARD)) return reply.code(403).send({ error: 'forbidden' });
 
+    // SQL-триггер записывает удаление файла в той же транзакции, включая каскад при удалении сервера.
     // ⚠️ Условие И по серверу: без него держатель права на одном сервере стирал бы сэмплы чужого.
     const gone = await db
       .delete(serverSoundboard)

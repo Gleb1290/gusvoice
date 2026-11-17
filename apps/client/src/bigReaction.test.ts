@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -33,9 +34,11 @@ it('удержание растёт строго после 400 мс и дост
   };
   check(rules);
   check(mutant('return p > BIG_RELEASE_AT ? \'big\' : \'cancel\';', 'return p > BIG_RELEASE_AT ? \'big\' : \'cancel\';'));
+  counterfact(() => {
   assert.throws(() => check(mutant('return p > BIG_RELEASE_AT ? \'big\' : \'cancel\';',
     "return p >= BIG_RELEASE_AT ? 'big' : 'cancel';")), assert.AssertionError,
     'мутант включает большую реакцию ровно на 80% роста');
+  });
 });
 
 it('эффект не играет при любом из пяти запретов, даже если совпали несколько причин', () => {
@@ -49,6 +52,9 @@ it('эффект не играет при любом из пяти запрет�
     ]) assert.equal(api.shouldPlayBigEffect({ ...allowed, ...reason }), false);
   };
   check(rules);
+  check(mutant('c.tabHidden || c.reducedMotion || c.lite', 'c.tabHidden || c.reducedMotion || c.lite'));
+  check(mutant('return c.convOpen && c.onScreen;', 'return c.convOpen && c.onScreen;'));
+  counterfact(() => {
   const mutations: [string, string][] = [
     ['c.tabHidden || c.reducedMotion || c.lite', 'c.reducedMotion || c.lite'],
     ['c.tabHidden || c.reducedMotion || c.lite', 'c.tabHidden || c.lite'],
@@ -56,10 +62,9 @@ it('эффект не играет при любом из пяти запрет�
     ['return c.convOpen && c.onScreen;', 'return c.onScreen;'],
     ['return c.convOpen && c.onScreen;', 'return c.convOpen;'],
   ];
-  check(mutant('c.tabHidden || c.reducedMotion || c.lite', 'c.tabHidden || c.reducedMotion || c.lite'));
-  check(mutant('return c.convOpen && c.onScreen;', 'return c.convOpen && c.onScreen;'));
   for (const [from, to] of mutations) {
     assert.throws(() => check(mutant(from, to)), assert.AssertionError,
       `мутант снимает независимый запрет: ${from} → ${to}`);
   }
+  });
 });

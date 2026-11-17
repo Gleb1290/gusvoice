@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -47,14 +48,16 @@ it('R116 регистрация пуша передаёт пояс только 
     assert.deepEqual(body, { endpoint: 'https://push.test/endpoint', deviceId: 'device', platform: 'android', keys, caps: ['reply1'], tz: 'Europe/Moscow' });
   };
   check(apiSource);
-  for (const [before, after] of [
-    ['...(tz ? { tz } : {}),', 'tz,'],
-    ['...(tz ? { tz } : {}),', ''],
-  ]) {
-    const mutant = apiSource.replace(before, after);
-    assert.notEqual(mutant, apiSource);
-    assert.throws(() => check(mutant), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [before, after] of [
+      ['...(tz ? { tz } : {}),', 'tz,'],
+      ['...(tz ? { tz } : {}),', ''],
+    ]) {
+      const mutant = apiSource.replace(before, after);
+      assert.notEqual(mutant, apiSource);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
 });
 
 it('R116 сокет объявляет typing2 среди возможностей соединения', () => {
@@ -70,9 +73,11 @@ it('R116 сокет объявляет typing2 среди возможносте
     assert.equal(pushes, 1, 'возможность объявлена исполняемым вызовом, а не комментарием');
   };
   check(sockets);
-  const mutant = sockets.replace('caps?.push(FEATURE_TYPING2);', '/* caps?.push(FEATURE_TYPING2); */');
-  assert.notEqual(mutant, sockets);
-  assert.throws(() => check(mutant), assert.AssertionError);
+  counterfact(() => {
+    const mutant = sockets.replace('caps?.push(FEATURE_TYPING2);', '/* caps?.push(FEATURE_TYPING2); */');
+    assert.notEqual(mutant, sockets);
+    assert.throws(() => check(mutant), assert.AssertionError);
+  });
 });
 
 it('R116 запись кружка шлёт round сразу и каждые 2,5 секунды, голосовое не дублирует её', () => {
@@ -82,15 +87,17 @@ it('R116 запись кружка шлёт round сразу и каждые 2,5
     assert.match(text, /if \(!recording \|\| !roundRec\) return;\s*signalActionRef\.current\('round'\);\s*const t = setInterval\(\(\) => signalActionRef\.current\('round'\), 2500\);\s*return \(\) => clearInterval\(t\);\s*\}, \[recording, roundRec\]\)/);
   };
   check(pane);
-  for (const [before, after] of [
-    ["signalActionRef.current('round')", "signalActionRef.current('voice')"],
-    ['if (!recording || !roundRec) return;', 'if (!recording) return;'],
-    ['if (!recording || roundRec) return;', 'if (!recording) return;'],
-  ]) {
-    const mutant = pane.replace(before, after);
-    assert.notEqual(mutant, pane);
-    assert.throws(() => check(mutant), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [before, after] of [
+      ["signalActionRef.current('round')", "signalActionRef.current('voice')"],
+      ['if (!recording || !roundRec) return;', 'if (!recording) return;'],
+      ['if (!recording || roundRec) return;', 'if (!recording) return;'],
+    ]) {
+      const mutant = pane.replace(before, after);
+      assert.notEqual(mutant, pane);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
 });
 
 it('R116 открытие канала снимает только его уведомления и только при смене канала', () => {
@@ -98,12 +105,14 @@ it('R116 открытие канала снимает только его уве
     assert.match(text, /useStore\.subscribe\(\(st, prev\) => \{[^]*?if \(st\.currentChannelId && st\.currentChannelId !== prev\.currentChannelId\) clearOsNotifications\(channelNoticeGroup\(st\.currentChannelId\)\);/);
   };
   check(sockets);
-  for (const [before, after] of [
-    ['clearOsNotifications(channelNoticeGroup(st.currentChannelId));', 'clearOsNotifications(channelNoticeGroup(prev.currentChannelId));'],
-    ['st.currentChannelId !== prev.currentChannelId', 'true'],
-  ]) {
-    const mutant = sockets.replace(before, after);
-    assert.notEqual(mutant, sockets);
-    assert.throws(() => check(mutant), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [before, after] of [
+      ['clearOsNotifications(channelNoticeGroup(st.currentChannelId));', 'clearOsNotifications(channelNoticeGroup(prev.currentChannelId));'],
+      ['st.currentChannelId !== prev.currentChannelId', 'true'],
+    ]) {
+      const mutant = sockets.replace(before, after);
+      assert.notEqual(mutant, sockets);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -22,11 +23,13 @@ it('R119 ответ по ссылке звонка требует совпаде
       'ответ только совпавшему звонящему вызову');
   };
   check(raw);
-  for (const [from, to] of [
-    [" && now.phase === 'ringing'", ''], ['now?.id === callId && ', ''],
-    ['const now = useCall.getState().call;', 'const now = call.call;'],
-  ]) {
-    assert.ok(raw.includes(from!), 'якорь защиты существует');
-    assert.throws(() => check(raw.replace(from!, to!)), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of [
+      [" && now.phase === 'ringing'", ''], ['now?.id === callId && ', ''],
+      ['const now = useCall.getState().call;', 'const now = call.call;'],
+    ]) {
+      assert.ok(raw.includes(from!), 'якорь защиты существует');
+      assert.throws(() => check(raw.replace(from!, to!)), assert.AssertionError);
+    }
+  });
 });

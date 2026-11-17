@@ -1,3 +1,4 @@
+import { counterfact } from "../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -84,9 +85,11 @@ async function storeCase(fail: boolean, source = store) {
 
 it('R115 порядок закрепов оптимистичен, успех принимает серверные отметки, отказ откатывает и показывает тост', async () => {
   await storeCase(false); await storeCase(true);
-  const noRollback = store.replace('      put(before);\n      throw e;', '      throw e;');
-  assert.notEqual(noRollback, store);
-  await assert.rejects(storeCase(true, noRollback), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('прежние отметки'));
+  await counterfact(async () => {
+    const noRollback = store.replace('      put(before);\n      throw e;', '      throw e;');
+    assert.notEqual(noRollback, store);
+    await assert.rejects(storeCase(true, noRollback), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('прежние отметки'));
+  });
 });
 
 it('R126 sidebar включает drag с pinorder1 вне поиска в архиве, дома и своей pinFolder', () => {
@@ -103,12 +106,14 @@ it('R126 sidebar включает drag с pinorder1 вне поиска в ар�
     assert.equal(props.get('touchOk'), 'phone', 'палец переставляет только в телефонной раскладке');
   };
   check(source);
-  const mutant = source.replace('enabled: pinOrderOn && !q', 'enabled: true && !q'); assert.notEqual(mutant, source);
-  assert.throws(() => check(mutant), /drag ограничен признаком/);
-  const touchMutant = source.replace('touchOk: phone', 'touchOk: true'); assert.notEqual(touchMutant, source);
-  assert.throws(() => check(touchMutant), /палец переставляет/);
-  const folderMutant = source.replace(' || !!folderUi.pinFolder', ''); assert.notEqual(folderMutant, source);
-  assert.throws(() => check(folderMutant), /drag ограничен признаком/);
+  counterfact(() => {
+    const mutant = source.replace('enabled: pinOrderOn && !q', 'enabled: true && !q'); assert.notEqual(mutant, source);
+    assert.throws(() => check(mutant), /drag ограничен признаком/);
+    const touchMutant = source.replace('touchOk: phone', 'touchOk: true'); assert.notEqual(touchMutant, source);
+    assert.throws(() => check(touchMutant), /палец переставляет/);
+    const folderMutant = source.replace(' || !!folderUi.pinFolder', ''); assert.notEqual(folderMutant, source);
+    assert.throws(() => check(folderMutant), /drag ограничен признаком/);
+  });
 });
 
 it('R126 sidebar передаёт id своей папки, но архив переставляется в общем порядке', () => {
@@ -124,8 +129,10 @@ it('R126 sidebar передаёт id своей папки, но архив пе
     assert.match(source.replace(/\s/g, ''), /reorderHereRef\.current=inArchive\|\|folderUi\.home\?true:folderUi\.pinFolder\?\{folderId:folderUi\.pinFolder\.id,ids:q\?\[\]:pinnedIds,own:q\?null:folderUi\.ownPins\}:false;/, 'меню получает ids и свой набор папки и блокируется поиском');
   };
   check(raw);
-  const mutant = raw.replace('folderId: inArchive ? null : (folderUi.pinFolder?.id ?? null)', 'folderId: null');
-  assert.notEqual(mutant, raw); assert.throws(() => check(mutant), /архив общий/);
+  counterfact(() => {
+    const mutant = raw.replace('folderId: inArchive ? null : (folderUi.pinFolder?.id ?? null)', 'folderId: null');
+    assert.notEqual(mutant, raw); assert.throws(() => check(mutant), /архив общий/);
+  });
 });
 
 it('R117 широкая раскладка игнорирует палец и перо, мышь разрешена, телефон принимает касание после удержания', () => {
@@ -168,9 +175,11 @@ it('R117 широкая раскладка игнорирует палец и п
     }
   };
   check(drag);
-  const mutant = drag.replace('if (touch && live.current.touchOk === false) return;', '');
-  assert.notEqual(mutant, drag);
-  assert.throws(() => check(mutant), /начало drag/);
+  counterfact(() => {
+    const mutant = drag.replace('if (touch && live.current.touchOk === false) return;', '');
+    assert.notEqual(mutant, drag);
+    assert.throws(() => check(mutant), /начало drag/);
+  });
 });
 
 it('R115 меню закреплённой строки показывает только доступный шаг, старый сервер и незакреплённая без шагов', async () => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -131,9 +132,11 @@ it('R303 HTTP-сайт может использовать HTTP API, HTTPS disco
 });
 it('R303 контрфакт снятого HTTPS-гейта ловится на лишнем запросе, оригинал проходит первым', async () => {
   await downgrade();
+  await counterfact(async () => {
   const needle = 'if (/^https:/i.test(this.base) && !/^https:/i.test(found))';
   assert.equal(source.split(needle).length - 1, 1);
   await assert.rejects(downgrade(source.replace(needle, 'if (false)')), (error: unknown) => error instanceof assert.AssertionError
     && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === 'R303 HTTPS discovery не отправляет токен на HTTP'
     && error.operator === 'strictEqual' && error.actual === 2 && error.expected === 1);
+  });
 });

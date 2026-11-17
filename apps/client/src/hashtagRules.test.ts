@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -18,9 +19,11 @@ it('вынимаются только полноценные теги на гр�
   assert.deepEqual(rules.extractHashtags('#a #12 a#tag (#tag) #тег #tag,'), ['tag', 'тег', 'tag']);
   assert.deepEqual(rules.extractHashtags('начало #x_y и #два_слова #a1'), ['x_y', 'два_слова', 'a1']);
   assert.deepEqual(rules.extractHashtags('#' + 'я'.repeat(65)), []);
-  const mutant = mutated('if (/^\\d+$/.test(m[2])) continue;', 'if (false) continue;');
-  assert.throws(() => assert.deepEqual(mutant.extractHashtags('#12'), []), assert.AssertionError,
-    'мутант превращает числовую ссылку на сообщение в подсказку хэштега');
+  counterfact(() => {
+    const mutant = mutated('if (/^\\d+$/.test(m[2])) continue;', 'if (false) continue;');
+    assert.throws(() => assert.deepEqual(mutant.extractHashtags('#12'), []), assert.AssertionError,
+      'мутант превращает числовую ссылку на сообщение в подсказку хэштега');
+  });
 });
 
 it('повтор поднимает тег над равными, новый остаётся после равных, а список ограничен 64', () => {
@@ -30,10 +33,12 @@ it('повтор поднимает тег над равными, новый о�
   assert.equal(rules.incrementHashtag(Array.from({ length: 64 }, (_, i) => ({ tag: `t${i}`, count: 10 - i })), 'new').length, 64);
   const scaled = rules.incrementHashtag([{ tag: 'big', count: 0x4000 }, { tag: 'small', count: 4 }], 'big');
   assert.ok(scaled[0]!.count <= 0x2001 && scaled[1]!.count === 2, 'переполненный счётчик делится пополам и не застывает лидером');
-  const equalSeed = [{ tag: 'ahead', count: 3 }, { tag: 'repeat', count: 2 }];
-  const mutant = mutated('list[i - 1].count > list[i].count', 'list[i - 1].count >= list[i].count');
-  assert.throws(() => assert.deepEqual(mutant.incrementHashtag(equalSeed, 'repeat').map(x => x.tag), ['repeat', 'ahead']), assert.AssertionError,
-    'мутант не всплывает над равным счётчиком после повторного использования');
+  counterfact(() => {
+    const equalSeed = [{ tag: 'ahead', count: 3 }, { tag: 'repeat', count: 2 }];
+    const mutant = mutated('list[i - 1].count > list[i].count', 'list[i - 1].count >= list[i].count');
+    assert.throws(() => assert.deepEqual(mutant.incrementHashtag(equalSeed, 'repeat').map(x => x.tag), ['repeat', 'ahead']), assert.AssertionError,
+      'мутант не всплывает над равным счётчиком после повторного использования');
+  });
 });
 
 it('подсказка — неполный префикс без учёта регистра, целиком совпавший тег не повторяется', () => {
@@ -42,9 +47,11 @@ it('подсказка — неполный префикс без учёта р�
   assert.deepEqual(rules.matchHashtags(items, 'ТЕГ'), ['Тегирование']);
   assert.deepEqual(rules.matchHashtags(items, 'не'), []);
   assert.deepEqual(rules.matchHashtags(items, '', 2), ['Тегирование', 'тег']);
-  const mutant = mutated("t.toLowerCase().startsWith(q)", 't.startsWith(q)');
-  assert.throws(() => assert.deepEqual(mutant.matchHashtags(items, 'ТЕГ'), ['Тегирование']), assert.AssertionError,
-    'мутант теряет подсказку из-за регистра набранного префикса');
+  counterfact(() => {
+    const mutant = mutated("t.toLowerCase().startsWith(q)", 't.startsWith(q)');
+    assert.throws(() => assert.deepEqual(mutant.matchHashtags(items, 'ТЕГ'), ['Тегирование']), assert.AssertionError,
+      'мутант теряет подсказку из-за регистра набранного префикса');
+  });
 });
 
 it('отправка копит теги, повторный тег увеличивает счётчик, удаление не мутирует исходник', () => {
@@ -67,6 +74,8 @@ it('недавние хэштеги изолируются между аккау
   };
   check(rules);
   check(mutated('return userId ? `${KEY}.${userId}` : KEY;', 'return userId ? `${KEY}.${userId}` : KEY;'));
-  assert.throws(() => check(mutated('return userId ? `${KEY}.${userId}` : KEY;', 'return KEY;')), assert.AssertionError,
-    'мутант хранит чужие недавние теги в одном ключе');
+  counterfact(() => {
+    assert.throws(() => check(mutated('return userId ? `${KEY}.${userId}` : KEY;', 'return KEY;')), assert.AssertionError,
+      'мутант хранит чужие недавние теги в одном ключе');
+  });
 });

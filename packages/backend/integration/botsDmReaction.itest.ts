@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -124,7 +125,6 @@ test('R303 маршрут реакции человека передаёт де�
   assert.equal(source.split('await deliver(res.delivery ? { ...res.delivery, reaction: { userId: me, emoji, op } } : null);').length - 1, 1);
 });
 test('R303 контрфакт old_reaction равен новому набору ловится точным различием двух реакций', async () => {
-  const edit = { file: 'bots/botUpdates', from: "const before = r.op === 'add' ? now.filter((e) => e !== r.emoji) : [...now, r.emoji];", to: 'const before = now;' };
   // Проверяем только второе добавление: первое тоже отличается, но даёт другой предмет ошибки.
   async function probe(mutation?: Phase3Edit) {
     const f = await fixture(mutation);
@@ -135,8 +135,11 @@ test('R303 контрфакт old_reaction равен новому набору 
     } finally { await f.clean(); }
   }
   await probe();
+  await counterfact(async () => {
+  const edit = { file: 'bots/botUpdates', from: "const before = r.op === 'add' ? now.filter((e) => e !== r.emoji) : [...now, r.emoji];", to: 'const before = now;' };
   await assert.rejects(() => probe(edit), (e: unknown) => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'deepStrictEqual' &&
     e.message.split(/\r?\n/)[0] === 'R303 старый набор реакции не включает только что добавленную' &&
     JSON.stringify(e.actual) === JSON.stringify([{ type: 'emoji', emoji: '❤' }, { type: 'emoji', emoji: '👍' }]) &&
     JSON.stringify(e.expected) === JSON.stringify([{ type: 'emoji', emoji: '❤' }]));
+  });
 });

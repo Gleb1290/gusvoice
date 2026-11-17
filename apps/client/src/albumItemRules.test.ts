@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { before, after, it } from 'node:test';
@@ -77,10 +78,12 @@ function videoFrameTarget(r: Rules) {
 it('R215 видео без autoplay находится по src первого кадра, точное фото остаётся своим и чужое видео не принимается', () => videoFrameTarget(rules));
 it('R215 контрфакт сравнения только полного src теряет видео с первым кадром', () => {
   videoFrameTarget(load(source));
+  counterfact(() => {
   const from = 'a.url === src || a.url === bare';
   assert.equal(source.split(from).length - 1, 1, 'однозначный якорь исправленного сравнения src');
   assert.throws(() => videoFrameTarget(load(source.replace(from, 'a.url === src'))), (e: unknown) => e instanceof assert.AssertionError
     && e.message.startsWith('R215-video-frame:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });
 
 it('R213 признак album1 включает действия только у объявившего его сервера', () => {
@@ -151,8 +154,10 @@ for (const [name, from, to, scenario, prefix, actual, expected] of [
   ['из ячейки видео читается только img', " ?? cell.querySelector('video')?.getAttribute('src')", '', videoTarget, 'вложенная цель видео', false, true],
 ] as const) it(`R213 чистый контрфакт: ${name}`, () => {
   scenario(load(source));
+  counterfact(() => {
   assert.equal(source.split(from).length - 1, 1, 'однозначный якорь в полном чистом модуле');
   const mutant = load(source.replace(from, to));
   assert.throws(() => scenario(mutant), (error: unknown) => error instanceof assert.AssertionError
     && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -23,9 +24,11 @@ it('выделение нормализует CRLF, обрезает края, �
   assert.equal(rules.quoteFromSelection('x'.repeat(REPLY_QUOTE_MAX + 1), 'x'.repeat(REPLY_QUOTE_MAX + 1)), 'too-long');
   assert.equal(rules.quoteFromSelection('abc', '   '), null);
   assert.equal(rules.quoteFromSelection('abc', 'нет'), null);
-  const tooLongMutant = mutant('if (text.length > REPLY_QUOTE_MAX) return \'too-long\';', 'if (false) return \'too-long\';');
-  assert.throws(() => assert.equal(tooLongMutant.quoteFromSelection('x'.repeat(REPLY_QUOTE_MAX + 1), 'x'.repeat(REPLY_QUOTE_MAX + 1)), 'too-long'), assert.AssertionError,
-    'мутант принимает цитату длиннее максимума и расходится с серверным пределом');
+  counterfact(() => {
+    const tooLongMutant = mutant('if (text.length > REPLY_QUOTE_MAX) return \'too-long\';', 'if (false) return \'too-long\';');
+    assert.throws(() => assert.equal(tooLongMutant.quoteFromSelection('x'.repeat(REPLY_QUOTE_MAX + 1), 'x'.repeat(REPLY_QUOTE_MAX + 1)), 'too-long'), assert.AssertionError,
+      'мутант принимает цитату длиннее максимума и расходится с серверным пределом');
+  });
 });
 
 it('граничная суррогатная пара считается в UTF-16, не обрезается посередине эмодзи', () => {

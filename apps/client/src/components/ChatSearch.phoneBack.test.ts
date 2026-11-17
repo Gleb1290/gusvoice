@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -143,16 +144,16 @@ it('R158 размонтирование открытого поиска сним
 });
 it('R158 контрфакт без регистрации назад уводит беседу вместо закрытия поиска', async () => {
   await closesSearch();
-  await assert.rejects(closesSearch(mutate('const back = pushBackHandler(() => {', 'const back = ((_fn: () => boolean) => () => {})(() => {')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('одна назад не уводит беседу'));
+  await counterfact(() => assert.rejects(closesSearch(mutate('const back = pushBackHandler(() => {', 'const back = ((_fn: () => boolean) => () => {})(() => {')),
+    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('одна назад не уводит беседу')));
 });
 it('R158 контрфакт без подписки сохраняет поиск после ухода к списку', async () => {
   await leavesChat();
-  await assert.rejects(leavesChat(mutate('const unsub = useStore.subscribe((s, prev) => {', 'const unsub = ((_fn: (s: any, prev: any) => void) => () => {})((s, prev) => {')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('уход из content закрывает поиск'));
+  await counterfact(() => assert.rejects(leavesChat(mutate('const unsub = useStore.subscribe((s, prev) => {', 'const unsub = ((_fn: (s: any, prev: any) => void) => () => {})((s, prev) => {')),
+    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('уход из content закрывает поиск')));
 });
 it('R158 контрфакт return false после закрытия делает два шага одной назад', async () => {
   await closesSearch();
-  await assert.rejects(closesSearch(mutate('      close();\n      return true;\n    });', '      close();\n      return false;\n    });')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('одна назад не уводит беседу'));
+  await counterfact(() => assert.rejects(closesSearch(mutate('      close();\n      return true;\n    });', '      close();\n      return false;\n    });')),
+    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('одна назад не уводит беседу')));
 });

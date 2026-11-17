@@ -55,7 +55,8 @@ version = "0.3"
 version = "0.3.22"
 
 [build-dependencies.webrtc-sys-build]
-version = "0.3.18"
+version = "=0.3.18"
+path = "../webrtc-sys-build"
 
 [target.'cfg(target_os = "linux")'.build-dependencies.pkg-config]
 version = "0.3.22"

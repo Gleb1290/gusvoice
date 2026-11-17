@@ -7,6 +7,7 @@ import { startActivitySweeper } from './activity.js';
 import { startAttachmentSweeper, startDailyCleanup } from './cleanup.js';
 import { startSteamPoller } from './steam.js';
 import { startVoiceActivityCollector } from './voiceActivity.js';
+import { runAloneRecount } from './aloneRecount.js';
 import { runMigrations } from './db/index.js';
 import { env } from './env.js';
 import { configureDevPeers } from './federation/devPeers.js';
@@ -63,9 +64,11 @@ import { startScheduledWorker } from './scheduled.js';
 import { verifyMailer } from './mailer.js';
 import { bindSuperAdmin, seedSuperAdmin } from './seed.js';
 import { bootstrapIdentity } from './superAdminRules.js';
-import { ensureMediaBucket, ensurePrivateBucket } from './storage.js';
+import { ensureMediaBucket, ensurePrivateBucket, removeSoundboardObject } from './storage.js';
 import { corsOriginCheck, refreshPeerOrigins } from './corsOrigins.js';
 import { adminRoutes } from './routes/admin.js';
+import { adminSoundboardRoutes, startSoundboardCleanup } from './routes/adminSoundboard.js';
+import { adminStorageRoutes } from './routes/adminStorage.js';
 import { appInfoRoutes } from './routes/appinfo.js';
 import { auditRoutes } from './routes/audit.js';
 import { authRoutes } from './routes/auth.js';
@@ -83,6 +86,7 @@ import { uploadRoutes } from './routes/uploads.js';
 import { gifFileRoutes, gifRoutes } from './routes/gifs.js';
 import { redactLogUrl } from './attachmentRules.js';
 import { economyRoutes } from './routes/economy.js';
+import { gameWheelRoutes } from './routes/gameWheel.js';
 import { diagRoutes } from './routes/diag.js';
 import { inviteRoutes } from './routes/invites.js';
 import { linkPreviewRoutes } from './routes/linkPreview.js';
@@ -110,7 +114,8 @@ import { voiceRoutes } from './routes/voice.js';
 
 /**
  * Журнал запросов — как у Fastify по умолчанию, но с вырезанной подписью ссылок на закрытые файлы ЛС (шаг 1в):
- * ссылка `/api/att/<id>/<смотрящий>/<подпись>` — ключ на предъявителя, в журнале ей не место (`redactLogUrl`).
+ * ссылка `/api/att/<id>/<смотрящий>/<подпись>` — ключ на предъявителя, в журнале ей не место (`redactLogUrl`); там же
+ * прячется токен устройства в адресе шлюза FCM `/api/push/fcm/<токен>` (#247).
  */
 const app = Fastify({
   logger: {
@@ -206,6 +211,7 @@ await app.register(
     await api.register(dmFolderRoutes);
     // Сводка непрочитанного по всему инстансу — её спрашивает фоновый шлюз (#139, §5.7).
     await api.register(unreadRoutes);
+    // Пуш-устройства + шлюз FCM (#247, Google Play; регистрирует сам `pushRoutes`, только при ключе сервисного аккаунта).
     await api.register(pushRoutes);
     await api.register(blockRoutes);
     await api.register(contactRoutes);
@@ -213,6 +219,8 @@ await app.register(
     await api.register(voiceRoutes);
     await api.register(inviteRoutes);
     await api.register(adminRoutes);
+    await api.register(adminSoundboardRoutes);
+    await api.register(adminStorageRoutes);
     await api.register(auditRoutes);
     await api.register(soundRoutes);
     await api.register(soundboardRoutes);
@@ -231,6 +239,8 @@ await app.register(
     if (env.diagEnabled) await api.register(diagRoutes);
     // Экономика (#117) — по тому же правилу и по той же причине: выключено => маршрута НЕТ.
     if (env.economyEnabled) await api.register(economyRoutes);
+    // Колесо гусей-пиратов (ГусКоины 2, этап 2): снимок, ставки; такт раундов — по `onListen` внутри маршрутов.
+    if (env.economyEnabled) await api.register(gameWheelRoutes);
     // Федерация (#139). До #224 при выключенной федерации маршрутов не было вовсе (сосед получал честный 404); теперь её
     // включают тумблером в админке без перезапуска, поэтому маршруты есть всегда, а крючок `federationGate` на КАЖДОМ запросе
     // отвечает тем же 404 обработчика «не найдено», пока флаг выключен (`federation/gate.ts`). Снаружи — то же самое.
@@ -471,6 +481,7 @@ try {
   startDailyCleanup();
   // Файлы ЛС (шаг 1в): брошенные и вытесненные загрузки, недоудалённое после «удалить у обоих» — раз в час.
   startAttachmentSweeper();
+  startSoundboardCleanup(removeSoundboardObject, app.log);
   // Опасные ссылки (#218 п.5): список угроз — раз в сутки (первый раз через 20 с); выключатель `LINK_THREATS_ENABLED`.
   startLinkThreatsWorker();
   // Отложенные сообщения ЛС (С4, `conv9`): такт раз в 5 с — созревшие по времени и «Когда будет в сети» (в сети —
@@ -492,6 +503,11 @@ try {
   startSteamPoller();
   // Сырая статистика присутствия в голосе для экономики GusCoins — no-op без ECONOMY_STATS_ENABLED.
   startVoiceActivityCollector();
+  // Разовый перерасчёт сезона по правилу «один — затухание не бьёт» (28.10, `aloneRecount.ts`): по разу на сервер,
+  // в фоне — старт не ждёт; ошибка только в лог. Без экономики на инстансе — не нужен.
+  if (env.economyEnabled) {
+    void runAloneRecount((msg) => app.log.info(msg)).catch((e) => app.log.warn(e, '[recount] перерасчёт сезона не удался'));
+  }
   // Звонки 1:1, оборванные перезапуском (`calls2`): закрыть записью в ленте — копия живых звонков лежит в Redis.
   void closeOrphanCalls()
     .then((n) => n > 0 && app.log.info(`[calls] closed ${n} call(s) cut by restart`))

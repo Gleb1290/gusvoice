@@ -1,7 +1,8 @@
+import { it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { it } from 'node:test';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { createElement } from 'react';
 import type { ViteDevServer } from 'vite';
 import type { DmChannel, User } from '@gusvoice/shared';
@@ -140,17 +141,19 @@ async function isolated(name: string) {
 }
 
 function mutant(name: string, target: string, from: string, to: string, probe: (runtime?: ViteDevServer) => Promise<void>, message: string, actual: number, expected: number) {
-  it(name, async () => {
+  it(name, { timeout: 60_000 }, async () => {
     await probe(); // Оригинал проходит первым; ошибки импорта/стенда не считаются убийством мутанта.
-    if (process.env.GUSVOICE_R300_UI_MUTANT !== name) return isolated(name);
-    const extra = await h.paneServer(source => {
-      assert.equal(source.split(from).length - 1, 1, 'единственный точный якорь UI-мутанта');
-      return source.replace(from, to);
-    }, target);
-    try {
-      await assert.rejects(() => probe(extra), (error: unknown) => error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION'
-        && error.message.split(/\r?\n/)[0] === message && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
-    } finally { await extra.close(); }
+    await counterfact(async () => {
+      if (process.env.GUSVOICE_R300_UI_MUTANT !== name) return isolated(name);
+      const extra = await h.paneServer(source => {
+        assert.equal(source.split(from).length - 1, 1, 'единственный точный якорь UI-мутанта');
+        return source.replace(from, to);
+      }, target);
+      try {
+        await assert.rejects(() => probe(extra), (error: unknown) => error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION'
+          && error.message.split(/\r?\n/)[0] === message && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+      } finally { await extra.close(); }
+    }, { timeoutMs: 60000 });
   });
 }
 mutant('R300 контрфакт: шапка разрешает звонок боту', 'DmChatView', '            !peerBot && (', '            true && (',

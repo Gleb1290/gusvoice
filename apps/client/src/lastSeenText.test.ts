@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -26,11 +27,13 @@ it('R169 контрфакты приоритета присутствия, то�
   ];
   changes.forEach((change, i) => {
     probes[i]!({ contactStatusText } as typeof import('./lastSeenText'));
-    const altered = change(source); assert.notEqual(altered, source);
-    const module = { exports: {} as typeof import('./lastSeenText') };
-    runInNewContext(ts.transpileModule(altered, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { module, exports: module.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return { FEATURE_LASTSEEN1: 'lastseen1' }; } });
-    assert.throws(() => probes[i]!(module.exports), assert.AssertionError);
+    counterfact(() => {
+      const altered = change(source); assert.notEqual(altered, source);
+      const module = { exports: {} as typeof import('./lastSeenText') };
+      runInNewContext(ts.transpileModule(altered, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+        { module, exports: module.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return { FEATURE_LASTSEEN1: 'lastseen1' }; } });
+      assert.throws(() => probes[i]!(module.exports), assert.AssertionError);
+    });
   });
 });
 it('R169 присутствие контакта главнее снимка, а отсутствие снимка оставляет подпись ника', () => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -14,10 +15,10 @@ type Editor = React.ComponentType<{ editing: { id: null; draft: {
 async function check(picking: 'include' | 'exclude' | null, raw = source) {
   await environment(async (host, render) => {
     let done = 0;
-    const back = load<typeof AndroidBack>(backSource, {
+    const back = load<typeof AndroidBack>(new URL('../androidBack.ts', import.meta.url), backSource, {
       './hotkeys': { isAndroid: () => true }, './store': { useStore: { getState: () => ({}) } },
     }, { KeyboardEvent: window.KeyboardEvent });
-    const { FolderEditor } = load<{ FolderEditor: Editor }>(raw + '\nexport { FolderEditor };', {
+    const { FolderEditor } = load<{ FolderEditor: Editor }>(new URL('./DmFolderSettings.tsx', import.meta.url), raw + '\nexport { FolderEditor };', {
       '@gusvoice/shared': folderRules, '../androidBack': back,
       '../confirm': { confirmAction: async () => false }, '../convSyncRules': { serverGroups: () => false },
       '../dmListRules': { dmMuteOf: () => null, muteActive: () => false },
@@ -54,6 +55,8 @@ for (const picking of ['include', 'exclude', null] as const) it(`R179 Назад
 it('R179 немедленный выход из редактора вместо сброса выбора обнаруживается системной Назад', async () => {
   // Оригинал и контрфакт исполняют настоящие FolderEditor и стек androidBack.
   await check('include');
-  const broken = mutate(source, 'if (picking) setPicking(null);\n        else onDone();', 'onDone();');
-  await assert.rejects(() => check('include', broken), assert.AssertionError);
+  await counterfact(async () => {
+    const broken = mutate(source, 'if (picking) setPicking(null);\n        else onDone();', 'onDone();');
+    await assert.rejects(() => check('include', broken), assert.AssertionError);
+  });
 });

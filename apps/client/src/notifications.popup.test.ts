@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -99,9 +100,9 @@ for (const [label, from, to, check, prefix, actual, expected] of [
   ['сравнение заголовков ошибочно разрешает скрытые метаданные GusVoice', 'opts.popup && notifyShowsName(notifyPrefs.view) ? opts.popup : undefined',
     'opts.popup && n.title === title ? opts.popup : undefined', maskedTitlePrivacy, 'R228-privacy-same-title:', 'Секретная группа', shared.NOTIFY_HIDDEN_TITLE],
 ] as const) it(`R223 контрфакт доставки: ${label}`, () => {
-  check(source); assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  check(source); counterfact(() => assert.equal(source.split(from).length - 1, 1));
+  counterfact(() => assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected));
 });
 
 type PreviewMessage = Parameters<typeof import('./notifications').popupPreview>[0];
@@ -212,7 +213,7 @@ for (const [label, from, to, check, prefix, actual, expected] of [
   ['скрытая подпись проходит в popup', 'named?.preview && !notifyShowsText(notifyPrefs.view)', 'false', previewPrivacy, 'R233-preview-privacy-body:', 'Секретная подпись', shared.NOTIFY_HIDDEN_BODY],
   ['разрешённый вид пропадает по дороге в popup', '...(popup?.preview?.kind ? { kind: popup.preview.kind } : {}),', '', previewPrivacy, 'R233-preview-delivery-kind:', undefined, 'Фото'],
 ] as const) it(`R233 контрфакт превью: ${label}`, () => {
-  check(source); assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  check(source); counterfact(() => assert.equal(source.split(from).length - 1, 1));
+  counterfact(() => assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected));
 });

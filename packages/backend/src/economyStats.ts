@@ -40,6 +40,11 @@ export const REF = {
   ratePer5min: 10,
   /** Потолок в ВЗВЕШЕННЫХ минутах = дневной потолок 800 монет при ставке умолчания. */
   capWeightedMinutes: 400,
+  /**
+   * Порог одному в ВЗВЕШЕННЫХ минутах = `alone_cap` умолчания 90 монет при ставке умолчания (миграция 0158).
+   * 🔴 С 28.10 время одному не идёт в затухание и не режется им, а ограничено этим порогом.
+   */
+  aloneCapWeightedMinutes: 45,
 } as const;
 
 export interface EconomyStats {
@@ -88,20 +93,24 @@ export async function economyStats(windowDays = 30): Promise<EconomyStats> {
       FROM voice_activity
       WHERE created_at >= now() - make_interval(days => ${days}::int)
     ), r AS (
-      SELECT *, sum(seconds) OVER (PARTITION BY user_id, d ORDER BY created_at
+      -- Затухание считает только время В КОМПАНИИ (правило 28.10, coinRules.ts, accrue).
+      SELECT *, sum(CASE WHEN peers > 0 THEN seconds ELSE 0 END) OVER (PARTITION BY user_id, d ORDER BY created_at
                                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / 60.0 AS cum_min
       FROM s
     ), w AS (
       SELECT user_id, d,
              sum(seconds) / 60.0 AS raw_min,
-             least(${REF.capWeightedMinutes}::numeric, sum((seconds / 60.0)
-               * (CASE WHEN peers = 0 THEN ${REF.alone}::numeric
-                       WHEN peers = 1 THEN ${REF.pair}::numeric
-                       ELSE ${REF.company}::numeric END)
-               * (CASE WHEN deafened THEN ${REF.deafened}::numeric ELSE 1.0 END)
-               * power(${REF.decayPercent}::numeric,
-                       floor(greatest(cum_min - 1, 0) / ${REF.decayAfterMinutes}::numeric))
-             )) AS wmin
+             least(${REF.capWeightedMinutes}::numeric,
+               coalesce(sum((seconds / 60.0)
+                 * (CASE WHEN peers = 1 THEN ${REF.pair}::numeric ELSE ${REF.company}::numeric END)
+                 * (CASE WHEN deafened THEN ${REF.deafened}::numeric ELSE 1.0 END)
+                 * power(${REF.decayPercent}::numeric,
+                         floor(greatest(cum_min - 1, 0) / ${REF.decayAfterMinutes}::numeric))
+               ) FILTER (WHERE peers > 0), 0)
+               -- Одному: без затухания, «не слышу» — ноль, сверху свой суточный порог.
+               + least(${REF.aloneCapWeightedMinutes}::numeric,
+                   coalesce(sum((seconds / 60.0) * ${REF.alone}::numeric) FILTER (WHERE peers = 0 AND NOT deafened), 0))
+             ) AS wmin
       FROM r GROUP BY 1, 2
     )
     SELECT

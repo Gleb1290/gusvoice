@@ -19,7 +19,7 @@ import type {
   User,
   UserBrief,
 } from '@gusvoice/shared';
-import { normalizeNotifyRepeat, normalizeNotifyView, previewAllows } from '@gusvoice/shared';
+import { normalizeNotifyView, previewAllows } from '@gusvoice/shared';
 import { isSuperAdmin } from './auth.js';
 import { asUserId } from './superAdminRules.js';
 import { env } from './env.js';
@@ -162,7 +162,7 @@ export function serializeUser(u: UserRow, viewerId?: string): User {
           notifyView: normalizeNotifyView(u.notifyView),
           notifyGroups: u.notifyGroups ?? true,
           notifyDm: u.notifyDm ?? true,
-          notifyRepeat: normalizeNotifyRepeat(u.notifyRepeat),
+          notifyRepeat: 0, // Retired setting: keep the field for older clients, always disabled.
         }
       : {}),
     createdAt: u.createdAt.toISOString(),

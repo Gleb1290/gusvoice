@@ -101,12 +101,9 @@ export const users = pgTable('users', {
    */
   notifyView: text('notify_view').notNull().default('all'),
   notifyGroups: boolean('notify_groups').notNull().default(true),
-  /**
-   * Остаток настроек уведомлений (G38, миграция 0118, `push3`): «Личные сообщения» (`false` — пуш 1:1 не уходит) и
-   * «Повторять уведомления» (минуты, `shared/notifyView.ts`: `NOTIFY_REPEAT_MINUTES`, `0` — не повторять; умолчание 60, как
-   * у Telegram — миграция 0124).
-   */
+  /** «Личные сообщения» (миграция 0118, push3): false отключает обычный push 1:1. */
   notifyDm: boolean('notify_dm').notNull().default(true),
+  /** Legacy column (0118/0124): reminders retired 08.11; stored values/default are ignored, API returns 0. */
   notifyRepeat: integer('notify_repeat').notNull().default(60),
   /**
    * Когда аккаунт удалён (миграция 0061, F0 #139). Строка НЕ стирается — обезличивается, чтобы переписка
@@ -1542,6 +1539,12 @@ export const serverEconomy = pgTable('server_economy', {
    * упирались 53 % активных дней недельного замера 04.09; при 800 — ни один из 81.
    */
   dailyCap: integer('daily_cap').notNull().default(800),
+  /**
+   * Порог монет ОДНОМУ в канале за сутки (миграция 0158). 0 — без порога.
+   * 🔴 Пара к правилу «одному затухание не бьёт» (28.10): время в одиночку больше не подбивает
+   * ставку в компании, а одиночный фарм держит этот порог.
+   */
+  aloneCap: integer('alone_cap').notNull().default(90),
   decayAfterMinutes: integer('decay_after_minutes').notNull().default(120),
   decayPercent: integer('decay_percent').notNull().default(50),
   // Проценты, а не запреты (миграция 0034): выключенный микрофон не означает отсутствия, а «не
@@ -1574,6 +1577,11 @@ export const serverEconomy = pgTable('server_economy', {
   /** Одноразовая отметка: ретроначисление за сухой прогон уже выдано. */
   retroGrantedAt: timestamp('retro_granted_at', { withTimezone: true }),
   /**
+   * Одноразовая отметка: перерасчёт сезона по правилу «один — затухание не бьёт» уже выдан
+   * (миграция 0159, `aloneRecount.ts`). Ставится условным UPDATE по `IS NULL` — замок от второго запуска.
+   */
+  aloneRecountAt: timestamp('alone_recount_at', { withTimezone: true }),
+  /**
    * Последний сезон, итоги которого ЗАМОРОЖЕНЫ в `season_results` (миграция 0043).
    *
    * ⚠️ Отдельно от самого сезона: «сезон сменился» и «итоги записаны» — разные события. Ленивый
@@ -1581,6 +1589,11 @@ export const serverEconomy = pgTable('server_economy', {
    * на сервер и ДО того, как счётчики начнут обнуляться.
    */
   closedSeasonId: text('closed_season_id'),
+  /**
+   * Последний игровой месяц МСК, итоги которого заморожены (`game_month_results`, звания; миграция 0165,
+   * `gameMonths.closeGameMonthIfNeeded`). Отдельно от сезона: месяц игр не зависит от длины сезона экономики.
+   */
+  closedGameMonthId: text('closed_game_month_id'),
   /**
    * Длина сезона: `quarter` (времена года) или `month` (миграция 0045).
    * ⚠️ Смена разбивки — смена календарной сетки: сезон, начавшийся в том же окне, продолжается под
@@ -1621,6 +1634,34 @@ export const serverEconomy = pgTable('server_economy', {
    * ⚠️ Ставится один раз и не двигается: повторное включение после выключения границу не переносит.
    */
   accrualSince: timestamp('accrual_since', { withTimezone: true }),
+  /**
+   * Мини-игры (ГусКоины 2, миграция 0160): выключены, пока владелец не включит. Ставка — до `gamesBetMax`,
+   * проигрыш человека за сутки МСК — до `gamesDailyLossMax` (0 — без потолка; личный предел ниже, `coin_balances`),
+   * комиссия дуэлей и прогнозов `gamesFeePercent` сгорает. Деньги — `gameMoney.ts`, правила — `gameMoneyRules.ts`.
+   */
+  gamesEnabled: boolean('games_enabled').notNull().default(false),
+  gamesBetMax: integer('games_bet_max').notNull().default(300),
+  gamesDailyLossMax: integer('games_daily_loss_max').notNull().default(3000),
+  gamesFeePercent: integer('games_fee_percent').notNull().default(10),
+  /**
+   * Предел пары в играх с выбором (ГусКоины 2, этап 4, миграция 0163): сколько одна пара может выиграть друг у друга за
+   * сутки МСК в КНБ и Жадном гусе — чистым потоком (взаимные выигрыши гасят друг друга). Кубики не считаются. 0 — без предела.
+   */
+  gamesPairDailyMax: integer('games_pair_daily_max').notNull().default(1000),
+  /**
+   * Сундук-джекпот колеса (миграция 0161), в СОТЫХ монеты: 1.5 % каждой ставки из доли дома (`jackpotCentsOf`).
+   * Срывается раз в ~500 раундов (по хешу зерна; `WHEEL_JACKPOT_ODDS`) и делится между поставившими; остаток в сотых остаётся. `gameWheel.ts`.
+   */
+  wheelJackpotCents: bigint('wheel_jackpot_cents', { mode: 'number' }).notNull().default(0),
+  /**
+   * «Запустить игры» (миграция 0166, `gameLaunch.ts`): когда, кем и с каким подарком сидевшим в голосе. Ставится ОДИН раз —
+   * условие `games_launched_at IS NULL` в той же транзакции держит повторное нажатие. `null` — игры ещё не запускали
+   * (переключатель «Игры» отметку не ставит). Кем — простой идентификатор без внешнего ключа: справка рядом с записью
+   * журнала действий `economy.games-launch`, а не связь (аккаунт не удаляется, а обезличивается — `accountRules.ts`).
+   */
+  gamesLaunchedAt: timestamp('games_launched_at', { withTimezone: true }),
+  gamesLaunchedBy: text('games_launched_by'),
+  gamesLaunchGift: integer('games_launch_gift'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1668,8 +1709,11 @@ export const coinBalances = pgTable(
     deltaDecayMilli: integer('delta_decay_milli').notNull().default(0),
     /** Сутки экономики: граница — МЕСТНАЯ полночь (МСК), а не полночь UTC. */
     day: text('day').notNull().default(''),
+    /** Секунды для затухания — с 28.10 только время в КОМПАНИИ (миграция 0158, `coinRules.ts`). */
     secondsToday: integer('seconds_today').notNull().default(0),
     earnedToday: integer('earned_today').notNull().default(0),
+    /** Ценность за сутки в одиночку, тысячные монеты (миграция 0158) — для порога `alone_cap`. */
+    aloneEarnedMilli: integer('alone_earned_milli').notNull().default(0),
     givenToday: integer('given_today').notNull().default(0),
     receivedToday: integer('received_today').notNull().default(0),
     /**
@@ -1704,8 +1748,40 @@ export const coinBalances = pgTable(
      * зарабатывать.
      */
     tipsOptOut: boolean('tips_opt_out').notNull().default(false),
+    /**
+     * Мини-игры (миграция 0160). `gamesOptOut` — «не показывать мне игры»; `optedOut` выключает их тоже.
+     * `gamesLossLimit` — свой предел проигрыша за сутки МСК (null — как на сервере). 🔴 Понижение сразу, повышение —
+     * с начала следующих суток: `gamesLossLimitRaiseAt` не пуст — ждёт `gamesLossLimitRaise` (null — «как на сервере»).
+     * Иначе самоограничение снимается в тот же вечер, ради которого его ставили (`gameMoneyRules.planLossLimit`).
+     */
+    gamesOptOut: boolean('games_opt_out').notNull().default(false),
+    gamesLossLimit: integer('games_loss_limit'),
+    gamesLossLimitRaise: integer('games_loss_limit_raise'),
+    gamesLossLimitRaiseAt: timestamp('games_loss_limit_raise_at', { withTimezone: true }),
   },
   (t) => ({ pk: primaryKey({ columns: [t.serverId, t.userId] }) }),
+);
+
+/**
+ * Одноразовые карточки перерасчёта (миграция 0159, `aloneRecount.ts`): сколько доначислено и за какой
+ * сезон. `seenAt` пуст — карточку ещё не показали; снимок экономики отдаёт её как `recount`.
+ */
+export const coinRecounts = pgTable(
+  'coin_recounts',
+  {
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    amount: integer('amount').notNull(),
+    seasonId: text('season_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    seenAt: timestamp('seen_at', { withTimezone: true }),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.serverId, t.userId, t.kind] }) }),
 );
 
 /** Журнал операций: единственный способ ответить «было 500, стало 300, куда делись». */
@@ -1813,13 +1889,208 @@ export const coinLedger = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     /** Со знаком: плюс — приход, минус — расход. */
     amount: integer('amount').notNull(),
-    /** 'voice' | 'tip.out' | 'tip.in' | 'grant' | 'retro' | 'rescale' */
+    /**
+     * 'voice' | 'tip.out' | 'tip.in' | 'grant' | 'retro' | 'rescale' | 'goose' | 'streak' | 'recount' | 'shop.*' |
+     * игры (0160, `gameMoneyRules.GAME_LEDGER_REASONS`): '<wheel|duel|prediction>.<bet|stake|win|refund>' — `data.roundId`/`data.pick`,
+     * доля сундука колеса 'wheel.jackpot' (0161, `pick: 'jackpot'`),
+     * частичный UNIQUE `coin_ledger_game_once_uq` (одна строка на раунд, выбор, человека и причину).
+     */
     reason: text('reason').notNull(),
     refUserId: text('ref_user_id').references(() => users.id, { onDelete: 'set null' }),
     data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ wallet: index('coin_ledger_wallet_idx').on(t.serverId, t.userId, t.createdAt) }),
+);
+
+/**
+ * Раунд мини-игры (ГусКоины 2, миграция 0160): колесо, дуэль или прогноз. `data` — параметры, результат и сгоревшая
+ * комиссия. Незакрытые раунды находятся по индексу `(server_id, state)` после перезапуска.
+ * ⚠️ `createdBy` обнуляется, а не каскадит; аккаунт и так не удаляется, а обезличивается (`accountRows.ts`).
+ */
+export const gameRounds = pgTable(
+  'game_rounds',
+  {
+    id: text('id').primaryKey(),
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    kind: text('kind', { enum: ['wheel', 'duel', 'prediction'] }).notNull(),
+    state: text('state', { enum: ['open', 'locked', 'settled', 'cancelled'] }).notNull().default('open'),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp('settled_at', { withTimezone: true }),
+    /**
+     * Колесо (миграция 0161): конец окна ставок и момент итога; у дуэли (этап 3) — срок ответа на вызов и дедлайн
+     * нажатия/конец анимации (`gameDuel.ts`, одна живая на голосовой канал — `game_rounds_duel_channel_live_uq`, 0162); у прогноза пусто. Колонками, а не в `data`:
+     * такт `gameWheel.ts` ищет созревшее по индексу. Одно живое (`open|locked`) колесо на сервер — частичный UNIQUE
+     * `game_rounds_wheel_live_uq` (в миграции, не здесь).
+     */
+    lockAt: timestamp('lock_at', { withTimezone: true }),
+    settleAt: timestamp('settle_at', { withTimezone: true }),
+  },
+  (t) => ({ serverState: index('game_rounds_server_state_idx').on(t.serverId, t.state) }),
+);
+
+/**
+ * Ставка мини-игры = эскроу (миграция 0160): монеты уже списаны строкой журнала, здесь они «висят» до выплаты или
+ * возврата. 🔴 `paidAt`/`refundedAt` — замки идемпотентности: ставятся условным UPDATE по `IS NULL` (`gameMoney.ts`),
+ * повтор после падения посреди выплаты не платит второй раз. Ключ `(roundId, userId, pick)` — на колесе можно
+ * поставить на несколько чисел; у дуэли `pick = 'duel'`.
+ */
+export const gameStakes = pgTable(
+  'game_stakes',
+  {
+    roundId: text('round_id')
+      .notNull()
+      .references(() => gameRounds.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    serverId: text('server_id').notNull(),
+    pick: text('pick').notNull(),
+    amount: integer('amount').notNull(),
+    payout: integer('payout'),
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+    refundedAt: timestamp('refunded_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.roundId, t.userId, t.pick] }),
+    user: index('game_stakes_user_idx').on(t.userId),
+  }),
+);
+
+/**
+ * Ходы дуэлей с выбором (ГусКоины 2, этап 4, миграция 0163): КНБ — рука игрока в раунде `seq`, Жадный гусь — действие
+ * партии номер `seq` (`move.auto` — за молчащего сходил сервер). Ключ `(round_id, user_id, seq)` делает ход идемпотентным:
+ * повтор упирается в ключ, передумать нельзя. 🔴 Рука КНБ — секрет до раскрытия обоих: читает только сервер (`gameDuel.ts`).
+ * `user_id` удерживается при удалении аккаунта, как у `game_stakes` (аккаунт обезличивается).
+ */
+export const gameMoves = pgTable(
+  'game_moves',
+  {
+    roundId: text('round_id')
+      .notNull()
+      .references(() => gameRounds.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    move: jsonb('move').$type<Record<string, unknown>>().notNull(),
+    thinkMs: integer('think_ms'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.roundId, t.userId, t.seq] }),
+  }),
+);
+
+/**
+ * Событие для ставок (ГусКоины 2, этап 5, миграция 0164): уровня сервера, вопросы — `game_rounds kind='prediction'`
+ * (`data.eventId`), ставки — `game_stakes`. `open` → `locked` (таймер `lockAt` или «Закрыть») → `settled` | `cancelled`;
+ * `settledAt` — конец события (итог или отмена). `feePercent` заморожен при создании. `createdBy` удерживается при
+ * удалении аккаунта (обезличивание), живые события удаляемого создателя отменяются (`gameMoney.cancelPredictionsOf`).
+ * Частичные индексы такта и `(data->>'eventId')` вопросов — в миграции.
+ */
+export const predictionEvents = pgTable(
+  'prediction_events',
+  {
+    id: text('id').primaryKey(),
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
+    title: text('title').notNull(),
+    state: text('state', { enum: ['open', 'locked', 'settled', 'cancelled'] }).notNull().default('open'),
+    feePercent: integer('fee_percent').notNull().default(10),
+    lockAt: timestamp('lock_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lockedAt: timestamp('locked_at', { withTimezone: true }),
+    settledAt: timestamp('settled_at', { withTimezone: true }),
+    cancelReason: text('cancel_reason'),
+  },
+  (t) => ({ serverState: index('prediction_events_server_state_idx').on(t.serverId, t.state) }),
+);
+
+/**
+ * Замороженный лидерборд игр месяца (ГусКоины 2, этап 6, миграция 0165; `gameMonths.ts`). `net` — чистый результат по всем
+ * играм за месяц МСК, `stats` — разбивка (`GameBoardStats`). `userId` удерживается при удалении аккаунта, как у `seasonResults`.
+ */
+export const gameMonthResults = pgTable(
+  'game_month_results',
+  {
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    monthId: text('month_id').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    net: integer('net').notNull(),
+    place: integer('place').notNull(),
+    stats: jsonb('stats').$type<Record<string, unknown>>().notNull().default({}),
+    frozenAt: timestamp('frozen_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.serverId, t.monthId, t.userId] }) }),
+);
+
+/**
+ * Выданные звания месяца (этап 6, миграция 0165): равенство «всем» даёт несколько строк на звание. `value` — число повода в
+ * единицах звания (`GAME_TITLE_UNIT`). Удерживается при удалении аккаунта, как лидерборд.
+ */
+export const gameTitlesAwarded = pgTable(
+  'game_titles_awarded',
+  {
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    monthId: text('month_id').notNull(),
+    titleKey: text('title_key').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    value: integer('value').notNull().default(0),
+    awardedAt: timestamp('awarded_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.serverId, t.monthId, t.titleKey, t.userId] }),
+    user: index('game_titles_awarded_user_idx').on(t.serverId, t.userId, t.monthId),
+  }),
+);
+
+/** Переименование званий владельцем (этап 6, миграция 0165). Нет строки — название по умолчанию (`DEFAULT_GAME_TITLE_NAMES`). */
+export const serverGameTitles = pgTable(
+  'server_game_titles',
+  {
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    titleKey: text('title_key').notNull(),
+    name: text('name').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.serverId, t.titleKey] }) }),
+);
+
+/**
+ * Замороженные «Итоги» (этап 6, миграция 0165): `kind` 'economy' — сезон экономики (морозится в `seasons.freeze`), 'games' —
+ * месяц игр (`gameMonths.ts`). `userId` '' — общая часть сервера, иначе личная. Без ссылки на `users` (у общей строки пусто).
+ */
+export const seasonRecaps = pgTable(
+  'season_recaps',
+  {
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    kind: text('kind', { enum: ['economy', 'games'] }).notNull(),
+    periodId: text('period_id').notNull(),
+    userId: text('user_id').notNull().default(''),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    frozenAt: timestamp('frozen_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.serverId, t.kind, t.periodId, t.userId] }) }),
 );
 
 /**
@@ -1856,7 +2127,27 @@ export const serverSoundboard = pgTable(
   },
   // Порядок добавления — он же порядок кнопок в сетке: перетасовка между заходами убивает
   // мышечную память, ради которой саундборд и нужен.
-  (t) => ({ byServer: index('server_soundboard_server_idx').on(t.serverId, t.createdAt) }),
+  (t) => ({
+    byServer: index('server_soundboard_server_idx').on(t.serverId, t.createdAt),
+    byAuthor: index('server_soundboard_author_idx').on(t.serverId, t.createdBy),
+  }),
+);
+
+export const serverSoundboardQuotas = pgTable('server_soundboard_quotas', {
+  serverId: text('server_id').primaryKey().references(() => servers.id, { onDelete: 'cascade' }),
+  perUserLimit: integer('per_user_limit').notNull(),
+});
+
+export const soundboardCleanup = pgTable(
+  'soundboard_cleanup',
+  {
+    clipId: text('clip_id').primaryKey(),
+    serverId: text('server_id').notNull(),
+    url: text('url').notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    failures: integer('failures').notNull().default(0),
+  },
+  (t) => ({ byDue: index('soundboard_cleanup_due_idx').on(t.nextAttemptAt, t.clipId) }),
 );
 
 /**

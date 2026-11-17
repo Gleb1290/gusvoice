@@ -27,6 +27,7 @@ export type ServerSettingsTab =
   | 'soundboard'
   | 'integrations'
   | 'economy'
+  | 'games'
   | 'audit';
 
 export interface TabDef {
@@ -92,7 +93,7 @@ const TABS: TabDef[] = [
     label: 'Саундборд',
     sub: 'Сэмплы, которые включают в голосовом канале',
     icon: 'music',
-    anyOf: [Permission.MANAGE_SOUNDBOARD],
+    anyOf: [Permission.MANAGE_SOUNDBOARD, Permission.MANAGE_SERVER],
   },
   // Все вебхуки сервера (#24, «Интеграции» у Discord). Право серверное; права каналов сервер учитывает сам при выдаче
   // списка (`/servers/:id/webhooks`), так что запертые каналы в разделе не видны.
@@ -112,6 +113,17 @@ const TABS: TabDef[] = [
     icon: 'star',
     anyOf: [Permission.MANAGE_ECONOMY],
   },
+  // Игры в голосе (ГусКоины 2, решение владельца 30.10): всё про игры — состояние, запуск и пределы — в одном
+  // разделе, а не в глубине «Монет». Право то же, что у «Монет» (`MANAGE_ECONOMY`, его же проверяет сервер на
+  // сохранении), а показ дополнительно закрыт флагом `features.games` — пока игры в работе, раздел видит только
+  // супер-админ инстанса. Это скрытие в ИНТЕРФЕЙСЕ, не новое право: эндпоинты сервера остались как были.
+  {
+    key: 'games',
+    label: 'Игры',
+    sub: 'Игры в голосе: включение, запуск и пределы',
+    icon: 'gamepad',
+    anyOf: [Permission.MANAGE_ECONOMY],
+  },
   { key: 'audit', label: 'Журнал', sub: 'Кто и что менял на сервере', icon: 'activity', anyOf: [Permission.VIEW_AUDIT_LOG] },
 ];
 
@@ -123,6 +135,12 @@ const TABS: TabDef[] = [
  */
 export interface ServerSettingsFeatures {
   economy: boolean;
+  /**
+   * Раздел «Игры» (30.10): пока игры в работе — только супер-админу инстанса (`user.superAdmin`). Нет поля —
+   * раздела нет: старые вызовы и умолчание тестов игр не показывают. Без экономики раздела нет тоже — игры живут
+   * на её монетах.
+   */
+  games?: boolean;
 }
 
 /**
@@ -132,7 +150,11 @@ export interface ServerSettingsFeatures {
 const ALL_FEATURES: ServerSettingsFeatures = { economy: true };
 
 function available(features: ServerSettingsFeatures): TabDef[] {
-  return TABS.filter((t) => t.key !== 'economy' || features.economy);
+  return TABS.filter((t) => {
+    if (t.key === 'economy') return features.economy;
+    if (t.key === 'games') return features.economy && features.games === true;
+    return true;
+  });
 }
 
 export function serverSettingsTabs(perms: bigint, features: ServerSettingsFeatures = ALL_FEATURES): TabDef[] {

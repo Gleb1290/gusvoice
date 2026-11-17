@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -20,6 +21,7 @@ it('откаты границ, локальности и побайтной со
     return box.exports as typeof import('./userSearchRules.js');
   };
   contract(load(source));
+  counterfact(() => {
   for (const [from, to] of [
     ['{3,32}', '{2,32}'], ['u.homeInstanceId === null', 'true'],
     ['key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0', 'key(b) < key(a) ? -1 : key(b) > key(a) ? 1 : 0'],
@@ -28,6 +30,7 @@ it('откаты границ, локальности и побайтной со
     assert.ok(source.includes(from), 'найден якорь отката');
     assert.throws(() => contract(load(source.replace(from, to))), assert.AssertionError);
   }
+  });
 });
 
 it('поиск срезает пробелы и один @, но не два, и приводит регистр', () => {

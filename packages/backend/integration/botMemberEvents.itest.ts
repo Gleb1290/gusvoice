@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import Fastify, { type FastifyRequest } from 'fastify';
@@ -19,7 +20,7 @@ async function fixture(edit?: Phase3Edit) {
   const noop = async () => {};
   const fail = (name: string) => () => assert.fail(`неожиданная граница ${name}`);
   const f = await serverFixture(t, edit, {
-    real: ['routes/invites', 'accountDelete', 'accountRows'],
+    real: ['routes/invites', 'accountDelete', 'accountRows', 'gameMoney', 'gameMoneyRules', 'coins', 'coinRules', 'streakRules'],
     values: {
       accountRules, inviteRules, inviteLookup, 'federation/guestRules': guestRules, 'federation/linkRules': linkRules,
       // Сессия — IO. Решения о членстве, приглашении и удалении — настоящие модули выше.
@@ -108,8 +109,10 @@ test('R303 original-first контрфакт неверного статуса �
     } finally { await f.close(); }
   };
   await check();
+  await counterfact(async () => {
   await assert.rejects(check({ file: 'serverMembership', from: "if (gone.length > 0) memberChanged({ serverId, userId, actorId, from: 'member', to: 'left' });",
     to: "if (gone.length > 0) memberChanged({ serverId, userId, actorId, from: 'member', to: 'kicked' });" }),
     e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
       && e.message.startsWith('R303 кик сообщает left, а не бан') && e.actual === 'kicked' && e.expected === 'left');
+  });
 });

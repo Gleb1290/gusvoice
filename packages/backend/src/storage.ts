@@ -1,7 +1,9 @@
 import type { Readable } from 'node:stream';
 import * as Minio from 'minio';
+import type { StoredObject } from './adminStorageReport.js';
 import { policyGrantsPublic } from './attachmentRules.js';
 import { env } from './env.js';
+import { ownedSoundboardObjectKey, publicStorageKey } from './storageObjectKeys.js';
 import {
   attachmentExt,
   audioExt,
@@ -283,6 +285,40 @@ export async function listPrivateMultipart(prefix: string): Promise<{ key: strin
     uploadIdMarker = res.nextUploadIdMarker;
   }
   return out;
+}
+
+/** Список объектов обоих бакетов. SDK читает страницы ListObjectsV2 по мере потребления потока. */
+export async function* listStoredObjects(): AsyncGenerator<StoredObject> {
+  if (!minio) throw new Error('storage not configured');
+  if (env.minio.bucket === env.minio.privateBucket) throw new Error('public and private storage buckets must differ');
+  const buckets = { public: env.minio.bucket, private: env.minio.privateBucket } as const;
+  for (const bucket of ['public', 'private'] as const) {
+    let listedObject = false;
+    try {
+      for await (const item of minio.listObjectsV2(buckets[bucket], '', true)) {
+        if (item.name === undefined) continue;
+        listedObject = true;
+        yield { bucket, key: item.name, size: item.size };
+      }
+    } catch (error) {
+      // Без внешнего API бакет не создаётся автоматически. Существующий всё равно измеряем.
+      const absentDisabledBucket = bucket === 'private' && !env.publicApiUrl && !listedObject
+        && (error as { code?: string } | null)?.code === 'NoSuchBucket';
+      if (!absentDisabledBucket) throw error;
+    }
+  }
+}
+
+export function ownPublicStorageKey(url: string): string | null {
+  return publicStorageKey(url, env.minio.publicUrl, env.minio.bucket);
+}
+
+/** Удаляет только объект с ключом конкретного клипа на конкретном сервере. Ошибки S3 можно повторить. */
+export async function removeSoundboardObject(serverId: string, clipId: string, url: string): Promise<void> {
+  const key = ownedSoundboardObjectKey(serverId, clipId, url, env.minio.publicUrl, env.minio.bucket);
+  if (!key) return;
+  if (!minio) throw new Error('storage not configured');
+  await minio.removeObject(env.minio.bucket, key);
 }
 
 /** Upload a custom server sound (one per server+event) and return its public URL. */

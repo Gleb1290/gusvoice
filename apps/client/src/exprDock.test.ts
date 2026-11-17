@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -37,8 +38,10 @@ it('закреплённая колонка помещается ровно от
   check(rules);
   const source = readFileSync(new URL('./exprDock.ts', import.meta.url), 'utf8');
   check(load(source, { values: new Map(), writes: [], removals: [] }));
-  const broken = load(replaceSource(source, 'chatWidth >= EXPR_DOCK_MIN_CHAT', 'chatWidth >= 380'), { values: new Map(), writes: [], removals: [] });
-  assert.throws(() => check(broken), assert.AssertionError, 'мутант разрешает колонку, которая не вмещается');
+  counterfact(() => {
+    const broken = load(replaceSource(source, 'chatWidth >= EXPR_DOCK_MIN_CHAT', 'chatWidth >= 380'), { values: new Map(), writes: [], removals: [] });
+    assert.throws(() => check(broken), assert.AssertionError, 'мутант разрешает колонку, которая не вмещается');
+  });
 });
 
 it('настройка колонки по умолчанию выключена, включение хранится как 1', () => {
@@ -76,7 +79,9 @@ it('выключение удаляет ключ, а не сохраняет о�
   };
   const normalStore = { values: new Map<string, string>([['gv_expr_dock', '1']]), writes: [] as string[], removals: [] as string[] };
   check(load(source, normalStore), normalStore);
-  const brokenStore = { values: new Map<string, string>([['gv_expr_dock', '1']]), writes: [] as string[], removals: [] as string[] };
-  const broken = load(replaceSource(source, "else localStorage.removeItem(KEY);", "else localStorage.setItem(KEY, '0');"), brokenStore);
-  assert.throws(() => check(broken, brokenStore), assert.AssertionError, 'мутант оставляет ложный ключ в хранилище');
+  counterfact(() => {
+    const brokenStore = { values: new Map<string, string>([['gv_expr_dock', '1']]), writes: [] as string[], removals: [] as string[] };
+    const broken = load(replaceSource(source, "else localStorage.removeItem(KEY);", "else localStorage.setItem(KEY, '0');"), brokenStore);
+    assert.throws(() => check(broken, brokenStore), assert.AssertionError, 'мутант оставляет ложный ключ в хранилище');
+  });
 });

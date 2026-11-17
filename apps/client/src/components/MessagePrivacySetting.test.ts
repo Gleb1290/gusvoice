@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -137,7 +138,7 @@ for (const [label, from, to, scenario, prefix, actual, expected] of [
   ['Мои контакты отправляет Все', 'api.updateProfile({ messagePrivacy: o.value })', "api.updateProfile({ messagePrivacy: 'everyone' })", change,
     'R212-setting-update:', '[{"messagePrivacy":"everyone"}]', '[{"messagePrivacy":"contacts"}]'],
 ] as const) it(`R212 контрфакт настройки: ${label}`, async () => {
-  await scenario(raw); assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь целой настройки');
-  await assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  await scenario(raw); counterfact(() => assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь целой настройки'));
+  await counterfact(() => assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected));
 });

@@ -8,6 +8,7 @@ import { subscribeToServer } from './sockets';
 import { useCall } from './callStore';
 import { useStore } from './store';
 import { offerInviteLink } from './deepLinkInvite';
+import { choosePushPath } from './pushPathRules';
 
 /**
  * UnifiedPush registration bridge (Android). The native shell (MainActivity `GusVoiceNative`) drives
@@ -47,6 +48,17 @@ interface GusVoicePushBridge {
    * выход: стереть.
    */
   setNotifAuth?(json: string): void;
+  /** #247: есть ли в сборке встроенный распространитель (в сборке Google Play — нет). Нет метода (старый APK) — есть. */
+  embeddedPushAllowed?(): boolean;
+  /**
+   * Пуш магазина (#247): Google FCM в сборке Google Play. `storePushAvailable` — сборка Play И есть Google Play services;
+   * `storePushStart` — запросить токен (асинхронно); `storePushEndpoint` — адрес шлюза FCM бэкенда или "" (токена ещё
+   * нет); `storePushStop` — отозвать токен. Нет методов (F-Droid-сборка старше #247) — пуша магазина нет.
+   */
+  storePushAvailable?(): boolean;
+  storePushStart?(): void;
+  storePushEndpoint?(): string;
+  storePushStop?(): void;
 }
 
 function bridge(): GusVoicePushBridge | null {
@@ -110,6 +122,70 @@ function deviceId(): string {
 let inFlight = false;
 let registered = false;
 
+/** Пуш магазина (Google FCM, #247) есть: сборка Google Play и Google Play services на устройстве. Сбой моста — нет. */
+function storeAvailable(b: GusVoicePushBridge): boolean {
+  if (typeof b.storePushAvailable !== 'function' || typeof b.storePushEndpoint !== 'function') return false;
+  try {
+    return b.storePushAvailable() === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Путь пуша этого устройства — правило `choosePushPath` (`pushPathRules.ts`) над ответами моста. */
+function pushPath(b: GusVoicePushBridge) {
+  let embeddedAllowed = true;
+  try {
+    embeddedAllowed = b.embeddedPushAllowed?.() ?? true;
+  } catch {
+    /* старый/сломанный мост — как раньше */
+  }
+  return choosePushPath({
+    storeAvailable: storeAvailable(b),
+    embeddedBridge: typeof b.enableEmbeddedPush === 'function',
+    embeddedAllowed,
+    pushGateway: config.pushGateway,
+  });
+}
+
+/**
+ * Пуши идут через магазин (Google FCM, #247) — гайд настройки (`UserSettingsModal`, AndroidInstallTab) не предлагает
+ * ставить ntfy. Вне Android и в F-Droid-сборке — false.
+ */
+export function storePushActive(): boolean {
+  const b = bridge();
+  return !!b && storeAvailable(b);
+}
+
+/**
+ * Опрос адреса, который нативка выдаёт асинхронно (внешний распространитель, токен FCM): раз в секунду, до 20 раз;
+ * появился — регистрация на бэкенде. Не дождались — до следующего возврата в приложение (адрес стабилен).
+ */
+function pollEndpoint(b: GusVoicePushBridge, read: () => string): void {
+  let tries = 0;
+  const iv = window.setInterval(() => {
+    tries += 1;
+    let endpoint = '';
+    try {
+      endpoint = read();
+    } catch {
+      /* ignore */
+    }
+    if (endpoint && getToken()) {
+      window.clearInterval(iv);
+      inFlight = false;
+      registered = true;
+      void api.registerPush(endpoint, deviceId(), pushKeys(b), notifCaps(b), deviceTimeZone()).catch((e) => {
+        registered = false; // let a later foreground/boot retry
+        console.warn('[push] backend register failed', e);
+      });
+    } else if (tries >= 20) {
+      window.clearInterval(iv); // give up until next foreground/boot — the endpoint is stable once set
+      inFlight = false;
+    }
+  }, 1000);
+}
+
 /**
  * Kick off registration and, once the distributor hands back an endpoint (async round-trip), register
  * it with the backend. Idempotent: guarded so rapid calls don't stack, and the backend upserts per
@@ -119,11 +195,24 @@ export function startPushRegistration(): void {
   const b = bridge();
   if (b && getToken()) syncNotifAuth();
   if (!b || registered || inFlight || !getToken()) return;
+  const path = pushPath(b);
+
+  // Первым — пуш магазина (Google FCM, сборка Google Play, #247): токен приходит асинхронно, адрес — опросом.
+  if (path === 'store') {
+    inFlight = true;
+    try {
+      b.storePushStart?.();
+    } catch (e) {
+      console.warn('[push] storePushStart failed', e);
+    }
+    pollEndpoint(b, () => b.storePushEndpoint?.() ?? '');
+    return;
+  }
 
   // Preferred: EMBEDDED distributor (no second app). Needs the instance's ntfy address from discovery
   // (config.pushGateway). enableEmbeddedPush starts our foreground socket and returns the endpoint
   // synchronously — no polling needed. Absent on older APKs → fall through to the external path below.
-  if (typeof b.enableEmbeddedPush === 'function' && config.pushGateway) {
+  if (path === 'embedded' && b.enableEmbeddedPush && config.pushGateway) {
     inFlight = true;
     let endpoint = '';
     try {
@@ -150,28 +239,7 @@ export function startPushRegistration(): void {
     console.warn('[push] registerForPush failed', e);
   }
   // The endpoint arrives asynchronously (distributor round-trip); poll the native prefs a few times.
-  let tries = 0;
-  const iv = window.setInterval(() => {
-    tries += 1;
-    let endpoint = '';
-    try {
-      endpoint = b.getPushEndpoint();
-    } catch {
-      /* ignore */
-    }
-    if (endpoint && getToken()) {
-      window.clearInterval(iv);
-      inFlight = false;
-      registered = true;
-      void api.registerPush(endpoint, deviceId(), pushKeys(b), notifCaps(b), deviceTimeZone()).catch((e) => {
-        registered = false; // let a later foreground/boot retry
-        console.warn('[push] backend register failed', e);
-      });
-    } else if (tries >= 20) {
-      window.clearInterval(iv); // give up until next foreground/boot — the endpoint is stable once set
-      inFlight = false;
-    }
-  }, 1000);
+  pollEndpoint(b, () => b.getPushEndpoint());
 }
 
 /** Unregister this device from push (on logout) so a previous account stops waking this phone. */
@@ -203,6 +271,12 @@ export function stopPushRegistration(): void {
   // Embedded distributor (multi-instance builds): stop our foreground socket too.
   try {
     b.disableEmbeddedPush?.();
+  } catch {
+    /* ignore */
+  }
+  // Пуш магазина (#247): отозвать токен FCM — следующий вход получит новый.
+  try {
+    b.storePushStop?.();
   } catch {
     /* ignore */
   }
@@ -326,6 +400,13 @@ export function consumeDeepLink(): boolean {
 /** Run registration at boot (if already logged in) and whenever the app returns to the foreground. */
 export function initPushRegistration(): void {
   if (!isAndroid()) return;
+  // Новый токен FCM при живой странице (#247, `MainActivity.sendPushEndpointChanged`): адрес сменился — регистрироваться
+  // заново (бэкенд перезапишет запись этого устройства).
+  (window as unknown as { __gvPushEndpointChanged?: () => void }).__gvPushEndpointChanged = () => {
+    if (inFlight) return; // идёт опрос — он и заберёт новый адрес
+    registered = false;
+    startPushRegistration();
+  };
   startPushRegistration();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {

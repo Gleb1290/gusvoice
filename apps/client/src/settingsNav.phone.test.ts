@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -17,10 +18,12 @@ function check(module = nav) {
 }
 it('R169 телефон скрывает пять компьютерных групп и сохраняет свайп, компьютер делает обратное', () => check());
 for (const id of ['set-g-stream', 'set-g-windows']) it(`R169 потеря notMobile у ${id} обнаруживается телефонной навигацией`, () => {
-  check(); const anchor = new RegExp(`(\\{ id: '${id}',[^\\n]*), notMobile: true( \\})`, 'g');
-  assert.equal([...source.matchAll(anchor)].length, 1);
-  const raw = source.replace(anchor, '$1$2'); const module = { exports: {} };
-  runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
-    { module, exports: module.exports });
-  assert.throws(() => check(module.exports as typeof nav), assert.AssertionError);
+  check(); counterfact(() => {
+    const anchor = new RegExp(`(\\{ id: '${id}',[^\\n]*), notMobile: true( \\})`, 'g');
+    assert.equal([...source.matchAll(anchor)].length, 1);
+    const raw = source.replace(anchor, '$1$2'); const module = { exports: {} };
+    runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+      { module, exports: module.exports });
+    assert.throws(() => check(module.exports as typeof nav), assert.AssertionError);
+  });
 });

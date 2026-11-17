@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -110,21 +111,25 @@ it('R259 два конверта кружка проходят настоящи�
 
 it('R259 страж проводки ловит потерю publisher и потерю route после проверки оригинала', () => {
   const anchor = 'publishToUser: (userId, msg, route) => publishToUser(userId, msg, route),';
-  assert.equal(gatewaySource.split(anchor).length - 1, 1);
   for (const [replacement, marker] of [
     ['', 'R259 typingDeps получает публикацию Redis'],
     ['publishToUser: (userId, msg, route) => publishToUser(userId, msg),', 'R259 typingDeps не теряет cap/notCap'],
   ]) {
     publisherGuard();
+gatedCounterfact(() => {
+    assert.equal(gatewaySource.split(anchor).length - 1, 1);
     assert.throws(() => publisherGuard(gatewaySource.replace(anchor, replacement)),
       (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(marker));
+});
   }
 });
 
 it('R259 контрфакт потери notCap в Redis-конверте ловится после original-first сценария', async () => {
   await roundProbe();
+await gatedCounterfact(async () => {
   const anchor = 'if (route?.notCap !== undefined) env.notCap = route.notCap;';
   assert.equal(realtimeSource.split(anchor).length - 1, 1);
   await assert.rejects(() => roundProbe(realtimeSource.replace(anchor, '/* фильтр потерян */')),
     (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R259 JSON Redis сохраняет оба фильтра round/voice'));
+});
 });

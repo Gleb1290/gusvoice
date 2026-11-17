@@ -201,7 +201,7 @@ export function createFederation(deps: FederationDeps): Federation {
           // `dm2ttl` (19.10, #226): одноразовые фото и видео (`once`/`once_ttl` у фото/видео, `listen` с `spent`) — тем же флагом.
           ...(deps.dmEnabled ? [FED_FEATURES.dm2ttl] : []),
           // `dm3` (Э4, #141): мгновенное — `POST /fed/v1/ephemeral` («печатает», «в сети / был(а)») — тем же флагом.
-          ...(deps.dmEnabled ? [FED_FEATURES.dm3] : []),
+          ...(deps.dmEnabled ? [FED_FEATURES.dm3, FED_FEATURES.typing3] : []),
           // `dm4` (Э5 часть 1, #141): приём «через»-сообщений по долгой сессии и их сверка домом автора — тем же флагом.
           ...(deps.dmEnabled ? [FED_FEATURES.dm4] : []),
           // `dmcall1` (Э6, #141): звонки 1:1 с людьми соседа (`POST /fed/v1/call/invite`, событие `call.state`) — тем же флагом.

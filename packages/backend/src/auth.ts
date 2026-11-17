@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import { eq, sql } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import jwt from 'jsonwebtoken';
-import { effectiveTokenGeneration, shouldRefresh, TOKEN_TTL_S } from './authRules.js';
+import { authTokenTtlSeconds, effectiveTokenGeneration, shouldRefresh } from './authRules.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { env } from './env.js';
@@ -16,6 +16,8 @@ export interface AuthClaims {
   username: string;
   /** Token purpose: 'auth' = full session token; '2fa' = short-lived login challenge (NOT a session). */
   typ?: 'auth' | '2fa';
+  /** Только явное согласие на долгий вход; отсутствие поля = обычная сессия. */
+  rememberMe?: true;
   /**
    * Session revocation (migration 0019): the users.token_generation this token was minted with.
    * requireAuth rejects tokens whose generation no longer matches — bumping the column
@@ -37,8 +39,10 @@ export async function verifyPassword(plain: string, hash: string): Promise<boole
 
 // Срок жизни токена и порог продления (и почему они именно такие) — в `authRules.ts`.
 
-export function signToken(claims: { sub: string; username: string; gen: number }): string {
-  return jwt.sign({ ...claims, typ: 'auth' }, env.jwtSecret, { expiresIn: TOKEN_TTL_S });
+export function signToken(claims: { sub: string; username: string; gen: number; rememberMe?: boolean }): string {
+  const { rememberMe, ...identity } = claims;
+  return jwt.sign({ ...identity, typ: 'auth', ...(rememberMe === true ? { rememberMe: true } : {}) },
+    env.jwtSecret, { expiresIn: authTokenTtlSeconds(rememberMe) });
 }
 
 // --- Session revocation: verify the token's generation against users.token_generation.
@@ -84,8 +88,10 @@ export async function bumpTokenGeneration(userId: string): Promise<number> {
  * Short-lived token issued after the password step when 2FA is on. It is NOT a session token:
  * requireAuth rejects `typ === '2fa'`, and only POST /auth/login/totp accepts it.
  */
-export function signChallengeToken(claims: { sub: string; username: string }): string {
-  return jwt.sign({ ...claims, typ: '2fa' }, env.jwtSecret, { expiresIn: '5m' });
+export function signChallengeToken(claims: { sub: string; username: string; rememberMe?: boolean }): string {
+  const { rememberMe, ...identity } = claims;
+  return jwt.sign({ ...identity, typ: '2fa', ...(rememberMe === true ? { rememberMe: true } : {}) },
+    env.jwtSecret, { expiresIn: '5m' });
 }
 
 export function verifyToken(token: string): AuthClaims {
@@ -162,7 +168,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
  */
 function maybeRefresh(claims: AuthClaims, reply: FastifyReply): void {
   if (!shouldRefresh(claims.iat, Math.floor(Date.now() / 1000))) return;
-  const fresh = signToken({ sub: claims.sub, username: claims.username, gen: claims.gen ?? 0 });
+  const fresh = signToken({ sub: claims.sub, username: claims.username, gen: claims.gen ?? 0, rememberMe: claims.rememberMe });
   reply.header('x-refresh-token', fresh);
 }
 

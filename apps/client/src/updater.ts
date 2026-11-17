@@ -1,5 +1,5 @@
 import { isDesktop } from './hotkeys';
-import { toast } from './toast';
+import { toast, useToasts } from './toast';
 import { useUpdate } from './updateStore';
 import { SPLASH_TIMING, type SplashMarkers } from './splashFlow';
 
@@ -14,6 +14,19 @@ const INSTALLED_KEY = 'gv:installed-update';
  *  (`splashFlow.ts` `splashIntent`; старше `RELAUNCH_UPDATE_TTL_MS` — не в счёт). */
 const RELAUNCH_KEY = 'gv:update-on-relaunch';
 
+/**
+ * Строка в журнал обновлений на диске (28.10, `splash.rs` `gv_update_log` → `update-log.txt` в данных приложения):
+ * кто (`splash` / `main`) что решил при запуске и обновлении. Ради разбора жалоб «обновилось дважды»: метки в
+ * `localStorage` установщик обрывает раньше, чем WebView2 сбрасывает их на диск, и задним числом их не прочесть.
+ * Не Tauri / старая сборка без команды — молча.
+ */
+export function updateLog(who: 'splash' | 'main', msg: string): void {
+  if (typeof window === 'undefined') return;
+  const core = (window as unknown as { __TAURI__?: { core?: { invoke: (c: string, a?: unknown) => Promise<unknown> } } }).__TAURI__?.core;
+  if (!core) return;
+  core.invoke('gv_update_log', { line: `${who} ${msg}` }).catch(() => {});
+}
+
 /** How often to re-check for a newer build while the app stays open. */
 const POLL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -23,6 +36,14 @@ type UpdateHandle = NonNullable<Awaited<ReturnType<(typeof import('@tauri-apps/p
 let pendingUpdate: UpdateHandle | null = null;
 let snoozedVersion: string | null = null; // version we won't re-offer (user pressed "Позже", or it's already installed)
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+// Ручная проверка (30.10, «херова туча тостов»): тост ответа всегда один — новый заменяет прежний; пока проверка идёт,
+// повторный вызов ничего не делает. Частоту нажатий держит сама кнопка в настройках «Десктоп» (пауза после ответа, `UserSettingsModal`).
+let manualToastId: number | null = null;
+
+function manualToast(type: 'success' | 'error', title: string, subtitle: string): void {
+  if (manualToastId !== null) useToasts.getState().dismiss(manualToastId);
+  manualToastId = toast(type, title, subtitle);
+}
 
 /**
  * Штатно завершить нативный показ, пока процесс ещё жив (#112/#109, найдено 25.09).
@@ -116,6 +137,7 @@ function clearSplashMarkers(): void {
  *  нового запуска сразу качает, без этапа «Проверяю обновления…». */
 async function relaunchForSplashUpdate(): Promise<void> {
   const version = pendingUpdate?.version;
+  updateLog('main', `relaunch for update v${version ?? '?'}`);
   try {
     if (version) localStorage.setItem(RELAUNCH_KEY, JSON.stringify({ version, at: Date.now() }));
   } catch {
@@ -170,6 +192,7 @@ export async function downloadAndInstall(
   if (instLeft > 0) await pace.sleep(instLeft);
   // Метка — ДО `install()`: на Windows из него не возвращаются (см. `markJustUpdated`).
   markJustUpdated(update.version);
+  updateLog('main', `install v${update.version} (panel)`);
   try {
     await update.install();
   } catch (e) {
@@ -202,9 +225,11 @@ export async function runDesktopUpdateCheck(): Promise<void> {
     return;
   }
   if (!update?.available) {
+    updateLog('main', 'launch check: none');
     set({ phase: 'idle' });
     return;
   }
+  updateLog('main', `launch check: found v${update.version}`);
   try {
     await downloadAndInstall(update);
   } catch (e) {
@@ -226,6 +251,7 @@ export async function runLaunchUpdate(hadSplash: () => Promise<boolean> = launch
   } catch {
     splash = false;
   }
+  updateLog('main', `launch: splash=${splash}`);
   // Заставки не было — метки для неё никто не съест (сборка без заставки / заставка не открылась).
   if (!splash) clearSplashMarkers();
   if (!splash) await runDesktopUpdateCheck();
@@ -287,13 +313,14 @@ export async function manualUpdateCheck(): Promise<void> {
   if (!isDesktop()) return;
   const { phase, set } = useUpdate.getState();
   if (phase === 'downloading' || phase === 'installing' || phase === 'ready') return; // don't interrupt
+  if (phase === 'checking') return; // проверка уже идёт — второй запрос не нужен
   try {
     set({ phase: 'checking' });
     const { check } = await import('@tauri-apps/plugin-updater');
     const update = await check();
     if (!update?.available) {
       set({ phase: 'idle' });
-      toast('success', 'У вас последняя версия', 'Обновлений не найдено');
+      manualToast('success', 'У вас последняя версия', 'Обновлений не найдено');
       return;
     }
     snoozedVersion = null; // the user explicitly asked — re-offer even a version they snoozed
@@ -302,7 +329,7 @@ export async function manualUpdateCheck(): Promise<void> {
   } catch (e) {
     console.warn('[updater] manual check failed:', e);
     set({ phase: 'idle' });
-    toast('error', 'Не удалось проверить обновления', 'Проверьте интернет-соединение');
+    manualToast('error', 'Не удалось проверить обновления', 'Проверьте интернет-соединение');
   }
 }
 
@@ -365,6 +392,7 @@ export function notifyIfJustUpdated(): void {
     const ver = localStorage.getItem(UPDATED_KEY);
     if (!ver) return;
     localStorage.removeItem(UPDATED_KEY);
+    updateLog('main', `toast: updated to v${ver}`);
     toast('success', `GusVoice обновлён до v${ver}`, 'Установлена последняя версия', { sticky: true });
   } catch {
     /* localStorage unavailable — skip the heads-up, never break startup */

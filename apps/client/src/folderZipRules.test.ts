@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -21,9 +22,11 @@ function change(anchor: string, replacement: string) {
 async function killed(anchor: string, replacement: string, scenario: (api: Api) => unknown | Promise<unknown>,
   prefix: string, actual: unknown, expected: unknown) {
   await scenario(load()); // Тот же загрузчик и сценарий сначала должны пройти на оригинале.
-  const mutant = load(change(anchor, replacement));
-  await assert.rejects(async () => { await scenario(mutant); }, e => e instanceof assert.AssertionError
-    && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await counterfact(async () => {
+    const mutant = load(change(anchor, replacement));
+    await assert.rejects(async () => { await scenario(mutant); }, e => e instanceof assert.AssertionError
+      && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 }
 function file(name: string, size = 0, lastModified = 1234, onRead = () => {}): rules.FsFileNode<Info> {
   const info = { size, lastModified };

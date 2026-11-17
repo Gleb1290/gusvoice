@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, beforeEach, afterEach, after, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -280,8 +281,10 @@ function assertionAt(message: string) {
 }
 async function killed(check: (mod: Unread) => Promise<void>, changes: readonly Mutation[], message: string) {
   await check(unread); // Оригинал проходит тот же сценарий ДО любого мутанта.
+  await counterfact(async () => {
   const mutant = unreadModule(changes); // Загрузка/якорь не могут притвориться убитым поведенческим мутантом.
   await assert.rejects(check(mutant), assertionAt(message));
+  });
 }
 test('контрфакт без READ_HISTORY обнаруживается по запретному превью', async () => {
   await server(); await channel('history'); await overwrite('history', 's-everyone', P.READ_HISTORY); await message('h', 'history');
@@ -305,8 +308,10 @@ test('контрфакт подсчёта своих сообщений обна
 });
 test('контрфакты самого раннего вместо последнего сообщения обнаруживаются на обоих уровнях SQL', async () => {
   await latestFixture(); await latest();
+  await counterfact(async () => {
   for (const from of ['ORDER BY m.created_at DESC', 'ORDER BY c.server_id, lm.created_at DESC']) {
     const mutant = unreadModule([[from, from.replace('DESC', 'ASC')]]);
     await assert.rejects(latest(mutant), assertionAt('самое позднее сообщение сервера'));
   }
+  });
 });

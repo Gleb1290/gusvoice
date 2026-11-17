@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { posix } from 'node:path';
@@ -78,10 +79,13 @@ function replaceOnce(from: string, to: string) {
   assert.equal(script.split(from).length - 1, 1, `единственный якорь: ${from}`);
   return script.replace(from, to);
 }
-function strictCounterfact(verify: (raw: string) => void, raw: string, prefix: string, actual: number, expected: number) {
+function strictCounterfact(verify: (raw: string) => void, raw: () => string, prefix: string, actual: number, expected: number) {
   verify(script);
-  assert.throws(() => verify(raw), error => error instanceof assert.AssertionError && error.message.startsWith(prefix)
+  counterfact(() => {
+  const changed = raw();
+  assert.throws(() => verify(changed), error => error instanceof assert.AssertionError && error.message.startsWith(prefix)
     && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+});
 }
 const edgeFixture = () => [country('EDG', [rectangle(0, 0, 20, 2), rectangle(21, 0), rectangle(70, 0)])];
 const chainFixture = (bridgeSize: number) => [country('CHN', [rectangle(0, 0), rectangle(6, 0, bridgeSize, bridgeSize), rectangle(11.6, 0, .3, .3), rectangle(50, 0, .3, .3)])];
@@ -182,7 +186,7 @@ it('R227 крайние части у обоих антимеридианов н
 });
 it('R229 контрфакт расстояние между центрами теряет близкий остров вытянутого материка', () => {
   // Полный модуль получает ошибочную геометрию расстояний, но всё ещё выполняет настоящий pipeline.
-  const mutant = replaceOnce('function unitPoints(ring) {\n  const pts = [];', `function unitPoints(ring) {
+  const mutant = () => replaceOnce('function unitPoints(ring) {\n  const pts = [];', `function unitPoints(ring) {
   const cx = (Math.min(...ring.map(p => p[0])) + Math.max(...ring.map(p => p[0]))) / 2;
   const cy = (Math.min(...ring.map(p => p[1])) + Math.max(...ring.map(p => p[1]))) / 2;
   ring = [[cx, cy], [cx, cy]];
@@ -194,27 +198,27 @@ it('R229 контрфакт без уплотнения длинного бер�
   // Проверяется не наличие DENSIFY_KM в тексте, а результат вырезки реального генератора.
   const source = [country('STR', [rectangle(0, 0, 20, 2), rectangle(9, -4), rectangle(70, 0)])];
   strictCounterfact(raw => assert.equal(polygons(feature(generate(source, 0, raw), 'STR.main.geojson')).length, 2,
-    'R229-densify: середина берега не дальше его концов'), replaceOnce('const k = Math.max(1, Math.ceil(km / DENSIFY_KM));', 'const k = 1;'), 'R229-densify:', 1, 2);
+    'R229-densify: середина берега не дальше его концов'), () => replaceOnce('const k = Math.max(1, Math.ceil(km / DENSIFY_KM));', 'const k = 1;'), 'R229-densify:', 1, 2);
 });
 it('R229 контрфакт без порога площади создаёт бессмысленный выбор из-за 99 км² суши', () => {
   // Результат наблюдается через реально записанные файлы, а не через копию mainParts.
   strictCounterfact(raw => assert.equal(Number(generate(remoteFixture(99), 0, raw).has('REM.main.geojson')), 0,
-    'R229-remote-area: мелкая удалённая суша не требует вопроса'), replaceOnce('return remote >= MAIN_MIN_REMOTE_KM2 ? inMain : null;', 'return remote > 0 ? inMain : null;'), 'R229-remote-area:', 1, 0);
+    'R229-remote-area: мелкая удалённая суша не требует вопроса'), () => replaceOnce('return remote >= MAIN_MIN_REMOTE_KM2 ? inMain : null;', 'return remote > 0 ? inMain : null;'), 'R229-remote-area:', 1, 0);
 });
 it('R229 контрфакт цепочка через любую мелкую часть втягивает дальний остров', () => {
   // Мутант воспроизводит разрастание основной Норвегии через остров меньше 500 км².
   strictCounterfact(raw => assert.equal(polygons(feature(generate(chainFixture(.1), 0, raw), 'CHN.main.geojson')).length, 2,
-    'R229-chain-area: мелкий мост не расширяет основную часть'), replaceOnce('if (q.km2 >= MAIN_CHAIN_MIN_KM2) queue.push(j);', 'queue.push(j);'), 'R229-chain-area:', 3, 2);
+    'R229-chain-area: мелкий мост не расширяет основную часть'), () => replaceOnce('if (q.km2 >= MAIN_CHAIN_MIN_KM2) queue.push(j);', 'queue.push(j);'), 'R229-chain-area:', 3, 2);
 });
 it('R229 контрфакт строгий порог удалённой площади отвергает ровно 100 км²', () => {
   // Парная граничная приёмка исключает невидимое выпадение территории ровно на лимите.
   strictCounterfact(raw => assert.equal(Number(generate(exactRemoteFixture(100), 0, raw).has('REM.main.geojson')), 1,
-    'R229-remote-boundary: сто километров уже достаточно'), replaceOnce('return remote >= MAIN_MIN_REMOTE_KM2 ? inMain : null;', 'return remote > MAIN_MIN_REMOTE_KM2 ? inMain : null;'), 'R229-remote-boundary:', 0, 1);
+    'R229-remote-boundary: сто километров уже достаточно'), () => replaceOnce('return remote >= MAIN_MIN_REMOTE_KM2 ? inMain : null;', 'return remote > MAIN_MIN_REMOTE_KM2 ? inMain : null;'), 'R229-remote-boundary:', 0, 1);
 });
 it('R229 контрфакт строгий порог моста обрывает цепочку ровно при 500 км²', () => {
   // Контрфакт обязан потерять следующий остров, а не упасть на импорте или файловом доступе.
   strictCounterfact(raw => assert.equal(polygons(feature(generate(exactChainFixture(500), 0, raw), 'CHN.main.geojson')).length, 3,
-    'R229-chain-boundary: пятьсот километров продолжают цепочку'), replaceOnce('if (q.km2 >= MAIN_CHAIN_MIN_KM2) queue.push(j);', 'if (q.km2 > MAIN_CHAIN_MIN_KM2) queue.push(j);'), 'R229-chain-boundary:', 2, 3);
+    'R229-chain-boundary: пятьсот километров продолжают цепочку'), () => replaceOnce('if (q.km2 >= MAIN_CHAIN_MIN_KM2) queue.push(j);', 'if (q.km2 > MAIN_CHAIN_MIN_KM2) queue.push(j);'), 'R229-chain-boundary:', 2, 3);
 });
 
 function actual(name: string): Feature { return JSON.parse(readFileSync(new URL(name, regionDir), 'utf8')); }

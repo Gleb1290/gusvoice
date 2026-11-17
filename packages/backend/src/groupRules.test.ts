@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -23,8 +24,10 @@ it('создатель входит в предел пяти, повторы н�
     assert.equal(api.groupCreateCheck('me', []), 'empty');
     assert.equal(api.groupCreateCheck('me', ['me', 'a']), 'self');
   }; check(rules);
+gatedCounterfact(() => {
   assert.throws(() => check(mutant('set.size + 1 > limit', 'set.size + 1 >= limit')), assert.AssertionError);
   assert.throws(() => check(mutant('set.size + 1 > limit', 'set.size > limit')), assert.AssertionError);
+});
 });
 it('добавление ровно до пяти принимается, пустое и шестое отклоняются', () => {
   // Ловит расхождение ограничений создания и приглашения.
@@ -44,7 +47,9 @@ it('исключить другого может только владелец, 
     assert.equal(api.nextOwner([{ id: 'a' }], 'a'), null);
     assert.equal(api.nextOwner([], 'a'), null);
   }; check(rules);
+gatedCounterfact(() => {
   assert.throws(() => check(mutant("actorRole === 'owner' &&", 'true &&')), assert.AssertionError);
+});
 });
 it('название считает Unicode-символы и схлопывает пробелы, оба края лимита проверены', () => {
   // Ловит отказ законного названия с эмодзи и пустую группу без имени.

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -203,9 +204,11 @@ for (const [name, change, check] of [
 ] as const) {
   it(`R143 контрфакт «${name}» отвергается тем же поведенческим сценарием`, () => {
     check(load()); // Сначала original: ошибка загрузчика не считается пойманной регрессией.
-    const changed = change(source);
-    assert.notEqual(changed, source, 'найден участок мутации');
-    const mutant = load(changed); // Мутант также обязан успешно загрузить весь модуль.
-    assert.throws(() => check(mutant), assert.AssertionError);
+    counterfact(() => {
+      const changed = change(source);
+      assert.notEqual(changed, source, 'найден участок мутации');
+      const mutant = load(changed); // Мутант также обязан успешно загрузить весь модуль.
+      assert.throws(() => check(mutant), assert.AssertionError);
+    });
   });
 }

@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -73,8 +74,7 @@ it('R262 выбор фразы пропускает файл и GIF, кружо�
 it('R262 контрфакт снятия защиты asFile пойман на настоящем модуле после оригинала', () => {
   // Успех только по нужному отказу: ошибка VM/импорта не доказывает чувствительность проверки.
   const raw = readFileSync(new URL('./voiceMessage.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const anchor = 'a.once !== true || a.asFile || a.gif || a.round';
-  assert.equal(raw.split(anchor).length - 1, 1);
+
   const load = (source: string): typeof import('./voiceMessage.js') => {
     const module = { exports: {} };
     runInNewContext(ts.transpileModule(source, { compilerOptions: {
@@ -83,6 +83,10 @@ it('R262 контрфакт снятия защиты asFile пойман на �
     return module.exports as typeof import('./voiceMessage.js');
   };
   asFileCheck(isOnceMedia); asFileCheck(load(raw).isOnceMedia);
-  assert.throws(() => asFileCheck(load(raw.replace(anchor, 'a.once !== true || a.gif || a.round')).isOnceMedia),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R262 файл не становится') && e.actual === true && e.expected === false);
+  runCounterfact(() => {
+    const anchor = 'a.once !== true || a.asFile || a.gif || a.round';
+    assert.equal(raw.split(anchor).length - 1, 1);
+    assert.throws(() => asFileCheck(load(raw.replace(anchor, 'a.once !== true || a.gif || a.round')).isOnceMedia),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R262 файл не становится') && e.actual === true && e.expected === false);
+  });
 });

@@ -43,6 +43,16 @@ export interface ServerEconomy extends EconomySettings {
   /** Надбавка за гуся, пойманного в деафене (миграция 0058). */
   gooseDeafenedBonus: number;
   streakBonus: number;
+  /**
+   * Мини-игры (ГусКоины 2, миграция 0160). ⚠️ Поля ДОБАВЛЕНЫ: старый клиент их не знает; старый сервер не шлёт.
+   * `gamesDailyLossMax` 0 — без потолка. Правила — `gameMoneyRules.ts`.
+   */
+  gamesEnabled: boolean;
+  gamesBetMax: number;
+  gamesDailyLossMax: number;
+  gamesFeePercent: number;
+  /** Предел пары в играх с выбором за сутки МСК (этап 4, миграция 0163); 0 — без предела. ⚠️ Поле ДОБАВЛЕНО. */
+  gamesPairDailyMax: number;
 }
 
 type EconomyRow = typeof serverEconomy.$inferSelect;
@@ -58,6 +68,7 @@ export function toEconomy(row: EconomyRow): ServerEconomy {
     alonePercent: row.alonePercent,
     companyPercent: row.companyPercent,
     dailyCap: row.dailyCap,
+    aloneCap: row.aloneCap,
     decayAfterMinutes: row.decayAfterMinutes,
     decayPercent: row.decayPercent,
     mutedPercent: row.mutedPercent,
@@ -77,6 +88,12 @@ export function toEconomy(row: EconomyRow): ServerEconomy {
     gooseMinutes: row.gooseMinutes,
     gooseDeafenedBonus: row.gooseDeafenedBonus,
     streakBonus: row.streakBonus,
+    // 🔴 Каждое поле — вручную: забытая строка молча теряет настройку при каждом сохранении (как `aloneCap`, R317).
+    gamesEnabled: row.gamesEnabled,
+    gamesBetMax: row.gamesBetMax,
+    gamesDailyLossMax: row.gamesDailyLossMax,
+    gamesFeePercent: row.gamesFeePercent,
+    gamesPairDailyMax: row.gamesPairDailyMax,
   };
 }
 
@@ -96,6 +113,14 @@ export async function economyOf(serverId: string): Promise<ServerEconomy | null>
 }
 
 /**
+ * Открыт ли замок мини-игр на инстансе (`GAMES_OPEN`, решение 29.10, п. 9): `false` — включить игры сервера может только
+ * супер-админ (`gameMoneyRules.gamesLockedFor`). Здесь, потому что этот модуль уже читает окружение для экономики.
+ */
+export function gamesOpenOnInstance(): boolean {
+  return env.gamesOpen === true;
+}
+
+/**
  * Настройки сервера ГЛАЗАМИ КОНКРЕТНОГО ЧЕЛОВЕКА — с учётом закрытого показа (#117).
  *
  * 🔴 Возвращает `null` тому, кого нет в списке допуска, ровно как если бы экономики на сервере не
@@ -112,7 +137,7 @@ export async function economySeenBy(serverId: string, userId: string): Promise<S
 }
 
 /** Транзакция (или сам `db`) — всё денежное умеет работать и там, и там. */
-type Tx = Pick<typeof db, 'select' | 'insert' | 'update'>;
+export type Tx = Pick<typeof db, 'select' | 'insert' | 'update'>;
 
 /**
  * Взять кошелёк ПОД БЛОКИРОВКОЙ, заведя строку, если её ещё нет.
@@ -122,7 +147,7 @@ type Tx = Pick<typeof db, 'select' | 'insert' | 'update'>;
  * блокировка. Обратный порядок однажды уже стоил бага: первый тип новому человеку возвращал «не
  * хватает монет», потому что блокировать было нечего.
  */
-async function lockWallet(tx: Tx, serverId: string, userId: string) {
+export async function lockWallet(tx: Tx, serverId: string, userId: string) {
   // 🔴 Боты и строки вебхуков (`users.bot`) вне GusCoins (gitea #231): кошелёк им не заводим, а значит начисление
   // (голос, серия, гусь, ретро, пересчёт) для них — тихий ноль. Последний рубеж: первый — срез голоса (`voiceActivity.ts`).
   if (await isBotUser(tx, userId)) return undefined;
@@ -190,6 +215,7 @@ async function creditVoiceTx(tx: Tx, i: CreditInput): Promise<number> {
       seasonId: wallet.seasonId,
       secondsToday: wallet.secondsToday,
       earnedToday: wallet.earnedToday,
+      aloneEarnedMilli: wallet.aloneEarnedMilli,
       seasonEarned: wallet.seasonEarned,
     },
     i.now,
@@ -264,6 +290,8 @@ async function creditVoiceTx(tx: Tx, i: CreditInput): Promise<number> {
       // ни полночью, ни сменой сезона, ни отказом от участия.
       secondsTotal: sql`${coinBalances.secondsTotal} + ${Math.max(0, Math.floor(i.sample.seconds))}`,
       earnedToday: next.earnedToday,
+      // Порог одному — суточный, пишется абсолютным значением, как и `secondsToday` (28.10).
+      aloneEarnedMilli: next.aloneEarnedMilli,
       // ⚠️ Суточные счётчики типов трогаем ТОЛЬКО на смене суток. Раньше сюда писалось прочитанное
       // значение — то есть тик откатывал `givenToday` соседнего типа и тихо возвращал человеку уже
       // потраченный за сутки лимит.
@@ -458,10 +486,15 @@ export async function walletOf(serverId: string, userId: string) {
       recognitionTippers: 0,
       recognitionToday: 0,
       earnedToday: 0,
+      aloneEarnedMilli: 0,
       givenToday: 0,
       receivedToday: 0,
       optedOut: false,
       tipsOptOut: false,
+      gamesOptOut: false,
+      gamesLossLimit: null,
+      gamesLossLimitRaise: null,
+      gamesLossLimitRaiseAt: null,
     }
   );
 }

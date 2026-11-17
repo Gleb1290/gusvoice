@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -28,7 +29,11 @@ function keyboardMatrix(raw: string): void {
     // Соседние экраны не исполняются: JSX создаёт элементы, но React-дерево мы не монтируем.
     // Список закрытый: новый runtime-импорт требует явного решения, а не автоматической заглушки.
     const imports: Record<string, unknown> = {
+      './Activities': { ActivitiesButton: emptyComponent, ActivitiesHost: emptyComponent },
+      '../gameBoardClient': { ensureRecaps() {}, recapStorage: () => null },
+      '../gameBoardRules': { readRecapSeen: () => null, recapAutoQueue: () => [] },
       react: {
+        lazy: () => emptyComponent, Suspense: emptyComponent,
         useEffect: (effect: () => void | (() => void)) => effects.push(effect),
         useState: (initial: unknown) => [typeof initial === 'function' ? initial() : initial, () => {}],
       },
@@ -56,7 +61,7 @@ function keyboardMatrix(raw: string): void {
     };
     for (const name of [
       'AdminPanel', 'ChannelSidebar', 'MobileCallChip', 'MobileProfile', 'ChatView', 'DmChatView', 'DmSidebar',
-      'PhoneServerList', 'EconomyWelcome', 'FeatherLayer', 'BigReactionLayer', 'EffectsBench', 'GooseBonusHost',
+      'PhoneServerList', 'EconomyWelcome', 'RecountNotice', 'FeatherLayer', 'BigReactionLayer', 'EffectsBench', 'GooseBonusHost',
       'HotkeyCheatSheet', 'Goose', 'Icon', 'ImageViewerHost', 'MobileNav', 'ServerMembersPanel', 'ServerRail',
       'SidebarResizer', 'PokeModal', 'ServerClosedModal', 'ToastHost', 'UserSettingsModal', 'VoiceChannelView', 'VoiceConnection',
     ]) imports[`./${name}`] = { [name]: emptyComponent };
@@ -71,8 +76,10 @@ function keyboardMatrix(raw: string): void {
       },
     });
     module.exports.MainLayout();
-    assert.equal(effects.length, 1, 'R283 подготовка: единственный эффект MainLayout — клавиатура');
-    const cleanup = effects[0]();
+    assert.equal(effects.length, 2, 'R341 подготовка: эффекты перечитки итогов и клавиатуры');
+    const cleanups = effects.map(effect => effect()).filter((cleanup): cleanup is () => void => typeof cleanup === 'function');
+    assert.equal(cleanups.length, 1, 'R341 подготовка: только клавиатура подписывает слушатель и возвращает очистку');
+    const cleanup = cleanups[0];
     assert.equal(typeof cleanup, 'function', 'R283 подготовка: listener имеет очистку');
     try {
       const input = document.createElement('input');
@@ -129,15 +136,19 @@ it('R283: Ctrl и ⌘ открывают шпаргалку из любого п
 it('R283 контрфакт: без проверки телефона внешняя клавиатура открыла бы окно для ПК', () => {
   // Почему: один только успешный сценарий ПК не замечает исчезновения телефонного запрета.
   keyboardMatrix(layoutSource);
-  const mutant = replaceOnce(layoutSource, 'if (isPhoneUiNow()) return;', '');
-  killedBy(() => keyboardMatrix(mutant), 'R283/MainLayout/phone/outside/Ctrl+//toggle');
+  counterfact(() => {
+    const mutant = replaceOnce(layoutSource, 'if (isPhoneUiNow()) return;', '');
+    killedBy(() => keyboardMatrix(mutant), 'R283/MainLayout/phone/outside/Ctrl+//toggle');
+  });
 });
 
 it('R283 контрфакт: без Slash любое Ctrl-сочетание ошибочно становится шпаргалкой', () => {
   // Почему: физическая клавиша важна и для русской раскладки, и чтобы чужие сочетания не открывали шпаргалку.
   keyboardMatrix(layoutSource);
-  const mutant = replaceOnce(layoutSource, " && e.code === 'Slash'", '');
-  killedBy(() => keyboardMatrix(mutant), 'R283/MainLayout/desktop/outside/Ctrl+J/toggle');
+  counterfact(() => {
+    const mutant = replaceOnce(layoutSource, " && e.code === 'Slash'", '');
+    killedBy(() => keyboardMatrix(mutant), 'R283/MainLayout/desktop/outside/Ctrl+J/toggle');
+  });
 });
 
 const parse = (raw: string, name: string) => ts.createSourceFile(name, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -222,13 +233,17 @@ it('R283: вход из шапки убран, настройки получаю
 it('R283 контрфакт: потеря пропа между настройками и вкладкой убрала бы единственный видимый вход', () => {
   // Почему: объявленный проп без передачи дальше внешне похож на исправную проводку.
   const { forward } = wiring(settingsSource);
-  const mutant = settingsSource.slice(0, forward.getStart()) + settingsSource.slice(forward.end);
-  killedBy(() => wiring(mutant), 'R283/wiring/settings/forward-prop');
+  counterfact(() => {
+    const mutant = settingsSource.slice(0, forward.getStart()) + settingsSource.slice(forward.end);
+    killedBy(() => wiring(mutant), 'R283/wiring/settings/forward-prop');
+  });
 });
 
 it('R283 контрфакт: телефонный guard относится к реальной кнопке, а не к соседнему блоку', () => {
   // Почему: наличие !phoneUi где-нибудь в огромной вкладке ещё не скрывает кнопку шпаргалки.
   const { phoneGuard } = wiring(settingsSource);
-  const mutant = settingsSource.slice(0, phoneGuard.left.getStart()) + 'true' + settingsSource.slice(phoneGuard.left.end);
-  killedBy(() => wiring(mutant), 'R283/wiring/audio/phone-guard');
+  counterfact(() => {
+    const mutant = settingsSource.slice(0, phoneGuard.left.getStart()) + 'true' + settingsSource.slice(phoneGuard.left.end);
+    killedBy(() => wiring(mutant), 'R283/wiring/audio/phone-guard');
+  });
 });

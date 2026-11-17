@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -329,20 +330,26 @@ function mutate(from: string, to: string): string {
 
 it('R250 контрфакт без проверки владельца отписки теряет новую регистрацию и отвергается', () => {
   checkPtt();
-  const mutant = mutate('if (ptt === mine) ptt = null;', 'ptt = null;');
-  assert.throws(() => checkPtt(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('старая отписка не снимает новую рацию'));
+ counterfact(() => {
+    const mutant = mutate('if (ptt === mine) ptt = null;', 'ptt = null;');
+    assert.throws(() => checkPtt(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('старая отписка не снимает новую рацию'));
+ });
 });
 
 it('R251 контрфакт без дедупликации пузыря ловится через реальную подписку настроек', () => {
   checkBubble();
-  const mutant = mutate('if (lastBubble === enabled) return;', '');
-  assert.throws(() => checkBubble(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('повтор выключения пузыря не отправляется'));
+ counterfact(() => {
+    const mutant = mutate('if (lastBubble === enabled) return;', '');
+    assert.throws(() => checkBubble(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('повтор выключения пузыря не отправляется'));
+ });
 });
 
 it('R251 контрфакт без отправки пузыря на старте не прячется за будущим изменением настроек', () => {
   checkBubble();
-  const mutant = mutate('  pushMicBubble(getAudioSettings().micBubble === true);', '');
-  assert.throws(() => checkBubble(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('начальное выключение пузыря обязательно отправляется'));
+ counterfact(() => {
+    const mutant = mutate('  pushMicBubble(getAudioSettings().micBubble === true);', '');
+    assert.throws(() => checkBubble(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('начальное выключение пузыря обязательно отправляется'));
+ });
 });
 
 function checkInitialRelease(raw = source): void {
@@ -395,15 +402,19 @@ it('R252 задержка вне голоса не отправляет лишн
 // Класс ошибки: хардкод задержки в currentState должен обнаруживаться поведением настоящего модуля моста.
 it('R252 контрфакт постоянной задержки вместо текущих настроек обнаруживается на старте', () => {
   checkInitialRelease();
-  const mutant = mutate('pttReleaseMs: getAudioSettings().pttReleaseMs,', 'pttReleaseMs: 150,');
-  assert.throws(() => checkInitialRelease(mutant), error =>
-    error instanceof assert.AssertionError && error.message.startsWith('R252 начальная задержка берётся из аудионастроек'));
+ counterfact(() => {
+    const mutant = mutate('pttReleaseMs: getAudioSettings().pttReleaseMs,', 'pttReleaseMs: 150,');
+    assert.throws(() => checkInitialRelease(mutant), error =>
+      error instanceof assert.AssertionError && error.message.startsWith('R252 начальная задержка берётся из аудионастроек'));
+ });
 });
 
 // Класс ошибки: потеря sync в аудиоподписке должна краснить смену задержки, даже если начальная отправка прошла.
 it('R252 контрфакт без синхронизации аудио обнаруживается при смене одной задержки', () => {
   checkReleaseSync();
-  const mutant = mutate('    sync();', '');
-  assert.throws(() => checkReleaseSync(mutant), error =>
-    error instanceof assert.AssertionError && error.message.startsWith('R252 смена только задержки отправляется через аудиоподписку'));
+ counterfact(() => {
+    const mutant = mutate('    sync();', '');
+    assert.throws(() => checkReleaseSync(mutant), error =>
+      error instanceof assert.AssertionError && error.message.startsWith('R252 смена только задержки отправляется через аудиоподписку'));
+ });
 });

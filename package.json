@@ -10,11 +10,17 @@
   },
   "pnpm": {
     "overrides": {
-      "fast-uri": "3.1.7",
-      "fast-xml-parser": "5.10.1",
+      "fast-uri": "3.1.9",
+      "fast-xml-parser": "5.12.0",
       "find-my-way": "9.7.0",
       "@fastify/busboy": "3.2.2",
-      "@gusvoice/bot-voice": "workspace:*"
+      "minio>query-string": "10.0.0",
+      "minio@8.0.7>stream-json": "3.7.0",
+      "@gusvoice/bot-voice": "workspace:*",
+      "@esbuild-kit/core-utils@3.3.2>esbuild": "0.25.12"
+    },
+    "patchedDependencies": {
+      "minio@8.0.7": "patches/minio@8.0.7.patch"
     }
   },
   "scripts": {
@@ -28,9 +34,9 @@
     "check:tests": "node scripts/check-tests-listed.mjs"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "20.14.5",
+    "@happy-dom/global-registrator": "21.0.4",
     "@turf/buffer": "7.4.0",
     "@turf/simplify": "7.4.0",
-    "happy-dom": "20.14.5"
+    "happy-dom": "21.0.4"
   }
 }

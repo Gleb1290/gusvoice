@@ -218,9 +218,12 @@ function acceptPlaces(raw: unknown): Record<string, FeedPlace> {
   const out: Record<string, FeedPlace> = {};
   if (!raw || typeof raw !== 'object') return out;
   for (const [id, p] of Object.entries(raw as Record<string, unknown>)) {
-    const v = p as { messageId?: unknown; offset?: unknown } | null;
+    const v = p as { messageId?: unknown; offset?: unknown; readKey?: unknown } | null;
     if (v && typeof v.messageId === 'string' && typeof v.offset === 'number' && Number.isFinite(v.offset)) {
-      out[id] = { messageId: v.messageId, offset: v.offset };
+      out[id] = {
+        messageId: v.messageId, offset: v.offset,
+        ...(typeof v.readKey === 'number' && Number.isSafeInteger(v.readKey) && v.readKey >= 0 ? { readKey: v.readKey } : {}),
+      };
     }
   }
   return out;

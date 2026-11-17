@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import ts from 'typescript';
 
 // AST-стражи без загрузки маршрутов: не подключаем БД/секреты и не исполняем вырезки исходника.
@@ -60,6 +61,7 @@ for (const [route, count] of [
       // Ловит молчаливую отправку/сохранение первых байтов слишком большого файла как полного вложения.
       const source = readFileSync(new URL(`./routes/${route}.ts`, import.meta.url), 'utf8');
       assertGuard(source, count, index);
+      counterfact(() => {
       const original = bufferedFiles(source)[index]!;
       const guard = original.guard!;
       const start = guard.getStart(original.tree);
@@ -71,6 +73,7 @@ for (const [route, count] of [
       assert.notEqual(changedStatus, source.slice(start, end));
       const accepted = source.slice(0, start) + changedStatus + source.slice(end);
       assert.throws(() => assertGuard(accepted, count, index), assert.AssertionError);
+      });
     });
   }
 }

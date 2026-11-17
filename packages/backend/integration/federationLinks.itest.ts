@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { after, before, beforeEach, test } from 'node:test';
+import { after, before, beforeEach, mock, test } from 'node:test';
+import Redis from 'ioredis';
+import { RoomServiceClient } from 'livekit-server-sdk';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
 let t: TestDb;
@@ -12,6 +14,11 @@ let receiveRevocation: typeof import('../src/federation/revocation.js').receiveR
 let instanceBanFor: typeof import('../src/federation/instanceBan.js').instanceBanFor;
 
 before(async () => {
+  // A faster database must not expose a race between disconnect() and the offline Redis queue.
+  // Only external IO is stubbed; the database, rebind and revocation code stay real.
+  mock.method(Redis.prototype, 'connect', async () => {});
+  mock.method(Redis.prototype, 'publish', async () => 0);
+  mock.method(RoomServiceClient.prototype, 'listRooms', async () => []);
   t = await createTestDb();
   ({ activePeerHosts, listLinks, purgeStaleCodes } = await import('../src/federation/links.js'));
   ({ rebindLink, receiveRevocation } = await import('../src/federation/revocation.js'));
@@ -22,6 +29,7 @@ after(async () => {
   // `revocation.ts` тянет адресную рассылку гостям; живой Redis интеграционному тесту не нужен.
   (await import('../src/realtime.js')).redisPub.disconnect();
   await t.close();
+  mock.restoreAll();
 });
 
 const linkSql = (id: string, state = 'active', domain = `${id}.example`) => `

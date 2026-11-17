@@ -1,3 +1,5 @@
+import { testVmImports } from './testVmImports';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -23,14 +25,13 @@ const folderRaw = source('./dmFolders.ts'), barRaw = source('./components/DmFold
 const menuRaw = source('./components/DmRowMenu.tsx'), swipeRaw = source('./components/DmListSwipe.tsx');
 before(() => { GlobalRegistrator.register(); Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true }); });
 after(() => GlobalRegistrator.unregister());
-function whole<T>(raw: string, deps: Record<string, unknown>): T {
-  const module = { exports: {} }; const tree = ts.createSourceFile('module.tsx', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const imports = new Set(tree.statements.filter(ts.isImportDeclaration).map(n => (n.moduleSpecifier as ts.StringLiteral).text));
+function whole<T>(path: string, raw: string, deps: Record<string, unknown>): T {
+  const module = { exports: {} };
   // Полный модуль с реальными состояниями и замыканиями; внешние подсистемы — зависимости харнесса.
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     module, exports: module.exports, window, document, localStorage, Date, CSS: { escape: (id: string) => id },
-    require: (id: string) => { if (id === 'react/jsx-runtime') return jsx; assert.ok(imports.has(id), id); return deps[id] ?? {}; },
+    require: testVmImports(new URL(path, import.meta.url), { ...deps, 'react/jsx-runtime': jsx }),
   });
   return module.exports as T;
 }
@@ -42,7 +43,7 @@ function deferred<T>() {
 const folder = (id = 'own', own = true, pinned: string[] = ['a', 'b']): shared.DmFolder => ({ id, title: id, flags: shared.DM_FOLDER_PERSONAL,
   emoticon: null, include: [], exclude: [], ...(own ? { pinnedOwn: true as const } : {}), pinned });
 function folders(api: Record<string, unknown>, raw = folderRaw) {
-  return whole<{ useDmFolders: typeof FoldersHook }>(raw, { zustand: { create }, '@gusvoice/shared': shared,
+  return whole<{ useDmFolders: typeof FoldersHook }>('./dmFolders.ts', raw, { zustand: { create }, '@gusvoice/shared': shared,
     './api': { api }, './config': { activeInstanceId: () => 'instance' } }).useDmFolders;
 }
 async function mounted<T>(hook: () => T, run: (get: () => T, host: HTMLElement) => Promise<void>) {
@@ -74,9 +75,11 @@ async function pinCase(fail: boolean, raw = folderRaw) {
 it('R129 pinChat закрепляет сразу только свою папку, принимает ответ и откатывает отказ', async () => {
   // Оптимизм без снимка оставлял бы неподтверждённый закреп на одном устройстве.
   await pinCase(false); await pinCase(true);
-  await assert.rejects(pinCase(true, changed(folderRaw,
-    'set({ folders: (await api.dmFolderPin(folderId, convId, pinned)).folders });\n    } catch (e) {\n      set({ folders: was });',
-    'set({ folders: (await api.dmFolderPin(folderId, convId, pinned)).folders });\n    } catch (e) {')), /возвращает снимок/);
+  await counterfact(async () => {
+    await assert.rejects(pinCase(true, changed(folderRaw,
+      'set({ folders: (await api.dmFolderPin(folderId, convId, pinned)).folders });\n    } catch (e) {\n      set({ folders: was });',
+      'set({ folders: (await api.dmFolderPin(folderId, convId, pinned)).folders });\n    } catch (e) {')), /возвращает снимок/);
+  });
 });
 it('R129 откреп папки оптимистичен и не дублирует повторный закреп', async () => {
   // Общие закрепы и системная папка не получают ложный собственный набор на месте.
@@ -101,7 +104,9 @@ async function slotsCase(raw=folderRaw){
 it('R129 reorderPins собственного набора меняет только слоты названных до ответа', async () => {
   // Частичный drag видимых чатов не должен стереть закреплённые вне текущего отфильтрованного списка.
   await slotsCase();
-  await assert.rejects(slotsCase(changed(folderRaw,'return own ? dmFolderPinSlots(own, ids) : ids;','return ids;')),/сохраняет неназванные слоты/);
+  await counterfact(async () => {
+    await assert.rejects(slotsCase(changed(folderRaw,'return own ? dmFolderPinSlots(own, ids) : ids;','return ids;')),/сохраняет неназванные слоты/);
+  });
 });
 async function toggleCase(fail: boolean, raw=folderRaw) {
   const job=deferred<{folders:shared.DmFolder[]}>(); const calls:unknown[]=[];
@@ -118,7 +123,9 @@ async function toggleCase(fail: boolean, raw=folderRaw) {
 it('R129 убрать из папки сначала ждёт откреп и лишь затем обновляет правила',async()=>{
   // Правка исключения до снятия закрепа вернула бы чат при следующем ответе собственных закрепов.
   await toggleCase(false);await toggleCase(true);
-  await assert.rejects(toggleCase(false,changed(folderRaw,'      await get().pinChat(folderId, chat.id, false);','      void get().pinChat(folderId, chat.id, false);')),/не параллельно/);
+  await counterfact(async () => {
+    await assert.rejects(toggleCase(false,changed(folderRaw,'      await get().pinChat(folderId, chat.id, false);','      void get().pinChat(folderId, chat.id, false);')),/не параллельно/);
+  });
 });
 it('R129 добавить в папку не открепляет свой чат, отсутствующая и системная папки без запросов',async()=>{
   // Снятие закрепа принадлежит только действию «Убрать», не добавлению и не системной вкладке.
@@ -148,7 +155,7 @@ function menuModule(dms:shared.DmChannel[],calls:unknown[],raw=menuRaw,task?: (f
   const state={convActive:true,serverFeatures:['conv11','pinorder1','pinset1'],dms,conv:{summaries:{}},blockedUsers:[],pushMutedDmUsers:[],pushMuteUntil:{},pushAlwaysTargets:[],user:null};
   const command=(kind:string)=>(...args:unknown[])=>{calls.push([kind,...args]);return Promise.resolve();};
   const useStore=Object.assign((pick:(s:typeof state)=>unknown)=>pick(state),{getState:()=>state});
-  return whole<typeof RowMenu>(raw,{react:React,'../store':{useStore},'../convSyncRules':sync,'../dmListRules':list,
+  return whole<typeof RowMenu>('./components/DmRowMenu.tsx', raw,{react:React,'../store':{useStore},'../convSyncRules':sync,'../dmListRules':list,
     '../notifyExceptionsRules':{notifyAlwaysAction:()=>null},'./DmChatView':{toggleDmPinned:command('global')},'./Icon':{Icon:()=>null},
     './DmFolderBar':{useFoldersOn:()=>false,toggleFolderPinned:task??command('folder')},'./DmPinDrag':{reorderDmPins:command('order')},
     '../dmRowRules':{plural:(_n:number,_one:string,many:string)=>many},
@@ -170,8 +177,10 @@ async function rowCase(raw=menuRaw){
 }
 it('R129 меню строки использует own для ярлыка и toggleFolderPinned, общий закреп не влияет',async()=>{
   // Один чат может быть закреплён глобально, но не в этой папке, и наоборот.
-  await rowCase();await assert.rejects(rowCase(changed(menuRaw,'const pinnedHere = own ? own.includes(dm.id) : !!live.pinnedAt;','const pinnedHere = !!live.pinnedAt;')),/ярлык по собственному набору|меню меняет только/);
-  await assert.rejects(rowCase(changed(menuRaw,'own && pinFolder ? toggleFolderPinned','false ? toggleFolderPinned')),/меню меняет только/);
+  await rowCase();await counterfact(async () => {
+    await assert.rejects(rowCase(changed(menuRaw,'const pinnedHere = own ? own.includes(dm.id) : !!live.pinnedAt;','const pinnedHere = !!live.pinnedAt;')),/ярлык по собственному набору|меню меняет только/);
+    await assert.rejects(rowCase(changed(menuRaw,'own && pinFolder ? toggleFolderPinned','false ? toggleFolderPinned')),/меню меняет только/);
+  });
 });
 it('R129 массовый закреп pinIn добавляет только отсутствующих, при полном наборе снимает всех',async()=>{
   // Кнопка массового выбора сравнивает набор папки, не глобальные pinnedAt.
@@ -197,13 +206,15 @@ async function serialCase(raw=menuRaw){
 it('R129 массовые закрепы папки отправляются последовательно, не затирают ответы друг друга',async()=>{
   // Каждый ответ заменяет весь список папок, поэтому параллельные pinChat теряли бы соседний закреп.
   await serialCase();
-  await assert.rejects(serialCase(changed(menuRaw,'if (pinIn) void list.reduce<Promise<void>>((p, d) => p.then(() => toggleFolderPinned(pinIn.folderId, d.id, on)), Promise.resolve());',
-    'if (pinIn) void Promise.all(list.map((d) => toggleFolderPinned(pinIn.folderId, d.id, on)));')),/ждёт первого/);
+  await counterfact(async () => {
+    await assert.rejects(serialCase(changed(menuRaw,'if (pinIn) void list.reduce<Promise<void>>((p, d) => p.then(() => toggleFolderPinned(pinIn.folderId, d.id, on)), Promise.resolve());',
+      'if (pinIn) void Promise.all(list.map((d) => toggleFolderPinned(pinIn.folderId, d.id, on)));')),/ждёт первого/);
+  });
 });
 it('R129 свайп pinFolder закрепляет только папку, без неё работает общий путь',()=>{
   // Настройка свайпа не должна менять общий закреп, когда открыта папка со своим набором.
   const calls:unknown[]=[];const command=(kind:string)=>(...args:unknown[])=>{calls.push([kind,...args]);return Promise.resolve();};
-  const mod=whole<typeof ListSwipe>(swipeRaw,{react:React,'../chatSwipe':swipe,'../dmFolderView':view,'../store':{useStore:{getState:()=>({})}},
+  const mod=whole<typeof ListSwipe>('./components/DmListSwipe.tsx', swipeRaw,{react:React,'../chatSwipe':swipe,'../dmFolderView':view,'../store':{useStore:{getState:()=>({})}},
     './DmChatView':{toggleDmPinned:command('global')},'./DmFolderBar':{toggleFolderPinned:command('folder')}});
   for(const pinned of [false,true]){
     mod.runSwipeAction(dm('a'),'pin',{pinned,unread:false,muted:false,archived:false,pinFolder:'own'});
@@ -217,7 +228,7 @@ async function liveCase(phase:'cold'|'live',raw=barRaw,pinSet=true){
   useFolders.setState({folders:[folder('own',false,[])],activeId:'own',load:async()=>{}});
   const state={convActive:true,serverFeatures:pinSet?['folders1','pinorder2','pinset1']:['folders1','pinorder2'],conv:{phase}};
   const useStore=Object.assign((select:(s:typeof state)=>unknown)=>select(state),{getState:()=>state});
-  const mod=whole<typeof FolderBar>(raw,{react:React,'@gusvoice/shared':shared,'../dmFolders':{useDmFolders:useFolders,serverFolders:(f:string[])=>f.includes('folders1')},
+  const mod=whole<typeof FolderBar>('./components/DmFolderBar.tsx', raw,{react:React,'@gusvoice/shared':shared,'../dmFolders':{useDmFolders:useFolders,serverFolders:(f:string[])=>f.includes('folders1')},
     '../convSyncRules':sync,'../dmFolderView':view,'../dmListRules':list,'../store':{useStore},'./Icon':{Icon:()=>null}});
   await mounted(()=>mod.useDmFolderUi({dms:phase==='live'?[dm('a',true)]:[],unreadOf:()=>0,isMuted:()=>false,openId:null,phone:true}),async get=>{
     assert.equal(requests.length,phase==='live'&&pinSet?1:0,'перевод ждёт догнанный список бесед');
@@ -229,7 +240,9 @@ async function liveCase(phase:'cold'|'live',raw=barRaw,pinSet=true){
 it('R129 перевод папок ждёт conv.phase live и переносит видимые закрепы вместо пустого cold',async()=>{
   // Пустой ещё не догнанный список не должен перевести папку в навсегда пустой набор.
   await liveCase('cold');await liveCase('live');
-  await assert.rejects(liveCase('cold',changed(barRaw,'!enabled || !pinSetOn || !listLive || !folders','!enabled || !pinSetOn || !folders')),/ждёт догнанный список/);
+  await counterfact(async () => {
+    await assert.rejects(liveCase('cold',changed(barRaw,'!enabled || !pinSetOn || !listLive || !folders','!enabled || !pinSetOn || !folders')),/ждёт догнанный список/);
+  });
 });
 it('R129 live без pinset1 не переводит папку и оставляет общий набор',async()=>{
   // Догнанный список сам по себе не должен отправлять неизвестную ручку старому серверу.
@@ -239,7 +252,7 @@ it('R129 отказ закрепа папки показывает отдель�
   // Переполненный набор должен сообщить доступный предел, а не выглядеть как молчаливый отказ кнопки.
   for(const limited of [false,true]){
     const calls:unknown[]=[];const err=limited?{reason:'folders.pin_limit',max:100}:new Error('нет сети');
-    const mod=whole<typeof FolderBar>(barRaw,{react:React,'@gusvoice/shared':shared,'../dmFolderView':view,
+    const mod=whole<typeof FolderBar>('./components/DmFolderBar.tsx', barRaw,{react:React,'@gusvoice/shared':shared,'../dmFolderView':view,
       '../dmFolders':{useDmFolders:{getState:()=>({pinChat:async()=>{throw err;}})}},
       '../toast':{toast:(...args:unknown[])=>calls.push(['toast',...args]),toastError:(e:unknown)=>calls.push(['error',e])}});
     await mod.toggleFolderPinned('own','a',true);
@@ -266,12 +279,14 @@ it('R129 sidebar передаёт набор папки массовому вы�
     assert.deepEqual(calls,['folderOwnPinRows(ordered.filter(folderUi.keep),folderUi.ownPins)'],'показ строк использует собственный набор');
   };
   check(raw);
-  for(const[from,to,msg]of[
-    ['query.trim() || inArchive ? null : folderUi.ownPins','folderUi.ownPins','поиск и архив не наследуют'],
-    ['pinned: ownPinsHere ? ownPinsHere.includes(d.id) : !!d.pinnedAt','pinned: !!d.pinnedAt','свайп получает состояние'],
-    ['pinFolder: ownPinsHere ? folderUi.pinFolder?.id : undefined','pinFolder: undefined','свайп получает id'],
-    ['pinIn={ownPinsHere && folderUi.pinFolder ? { folderId: folderUi.pinFolder.id, own: ownPinsHere } : null}','pinIn={null}','массовый выбор получает'],
-  ])assert.throws(()=>check(changed(raw,from!,to!)),new RegExp(msg!));
+  counterfact(() => {
+    for(const[from,to,msg]of[
+      ['query.trim() || inArchive ? null : folderUi.ownPins','folderUi.ownPins','поиск и архив не наследуют'],
+      ['pinned: ownPinsHere ? ownPinsHere.includes(d.id) : !!d.pinnedAt','pinned: !!d.pinnedAt','свайп получает состояние'],
+      ['pinFolder: ownPinsHere ? folderUi.pinFolder?.id : undefined','pinFolder: undefined','свайп получает id'],
+      ['pinIn={ownPinsHere && folderUi.pinFolder ? { folderId: folderUi.pinFolder.id, own: ownPinsHere } : null}','pinIn={null}','массовый выбор получает'],
+    ])assert.throws(()=>check(changed(raw,from!,to!)),new RegExp(msg!));
+  });
 });
 
 it('R131 Ctrl+9 из своей папки включает архив, который обнуляет ownPinsHere без смены вкладки',()=>{
@@ -295,7 +310,9 @@ it('R131 Ctrl+9 из своей папки включает архив, кото
     assert.equal(condition.whenFalse.getText(tree),'folderUi.ownPins','в своей папке набор остаётся');
   };
   check(raw);
-  assert.throws(()=>check(changed(raw,'query.trim() || inArchive ? null : folderUi.ownPins','query.trim() ? null : folderUi.ownPins')),assert.AssertionError);
+  counterfact(() => {
+    assert.throws(()=>check(changed(raw,'query.trim() || inArchive ? null : folderUi.ownPins','query.trim() ? null : folderUi.ownPins')),assert.AssertionError);
+  });
 });
 
 it('R131 архив без ownPins использует общий закреп для массовой кнопки и свайпа',async()=>{
@@ -306,7 +323,7 @@ it('R131 архив без ownPins использует общий закреп 
     await React.act(async()=>button.click());assert.deepEqual(calls,[['global','archived',false]],'массовая кнопка открепляет общий список');
   });
   calls.length=0;const command=(kind:string)=>(...args:unknown[])=>{calls.push([kind,...args]);return Promise.resolve();};
-  const swipeMod=whole<typeof ListSwipe>(swipeRaw,{react:React,'../chatSwipe':swipe,'../dmFolderView':view,'../store':{useStore:{getState:()=>({})}},
+  const swipeMod=whole<typeof ListSwipe>('./components/DmListSwipe.tsx', swipeRaw,{react:React,'../chatSwipe':swipe,'../dmFolderView':view,'../store':{useStore:{getState:()=>({})}},
     './DmChatView':{toggleDmPinned:command('global')},'./DmFolderBar':{toggleFolderPinned:command('folder')}});
   swipeMod.runSwipeAction(dms[0]!,'pin',{pinned:true,unread:false,muted:false,archived:true,pinFolder:undefined});
   assert.deepEqual(calls,[['global','archived',false]],'свайп архива открепляет общий список');

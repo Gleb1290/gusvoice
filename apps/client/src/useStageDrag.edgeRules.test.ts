@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -20,9 +21,11 @@ function load(raw: string): Drag {
   return module.exports;
 }
 function mutation(anchor: string, replacement: string, check: (module: Drag) => void): void {
-  assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта должен однозначно обозначать реальный код');
   check(drag); // сначала убеждаемся, что контракт описывает настоящий, не мутированный модуль.
+  counterfact(() => {
+  assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта должен однозначно обозначать реальный код');
   assert.throws(() => check(load(source.replace(anchor, replacement))), assert.AssertionError);
+  });
 }
 
 // Класс ошибки: край и скорость дрейфуют независимо от поведения, заданного для автопрокрутки.

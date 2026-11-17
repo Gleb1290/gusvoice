@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -120,18 +121,22 @@ it('R290 /auth/me: без перезапуска добавляет все се�
 
 it('R290 контрфакт: чтение пустого process.env вместо текущего тумблера ломает именно второй ответ /auth/me', async () => {
   await checkRuntimeFeatures(); // original-first: ошибка импорта/фикстуры не доказывает чувствительность.
-  const mutant = `import { fedDmEnabledFromEnv } from '@gusvoice/shared';\n${replaceOnce(authSource,
+  await counterfact(async () => {
+const mutant = `import { fedDmEnabledFromEnv } from '@gusvoice/shared';\n${replaceOnce(authSource,
     'instanceFeatures(env.federation.dmEnabled)', 'instanceFeatures(fedDmEnabledFromEnv(process.env))')}`;
   await assert.rejects(() => checkRuntimeFeatures(mutant), featureFailure);
+});
 });
 
 it('R290 контрфакт: кеширование признаков при регистрации не замечает включение ЛС в следующем запросе', async () => {
   await checkRuntimeFeatures();
-  const cached = replaceOnce(authSource,
+  await counterfact(async () => {
+const cached = replaceOnce(authSource,
     'export async function authRoutes(app: FastifyInstance): Promise<void> {',
     'export async function authRoutes(app: FastifyInstance): Promise<void> {\n'
       + '  const cachedFeatures = instanceFeatures(env.federation.dmEnabled);');
   const mutant = replaceOnce(cached,
     'features: instanceFeatures(env.federation.dmEnabled)', 'features: cachedFeatures');
   await assert.rejects(() => checkRuntimeFeatures(mutant), featureFailure);
+});
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -70,15 +71,19 @@ for (const [index, label] of ['телефон', 'ПК'].entries()) for (const mu
   { label: 'недоступность без aria-disabled', from: 'aria-disabled={!group.reachable || undefined}', to: 'data-disabled={!group.reachable || undefined}', prefix: 'R234-header-aria:', actual: undefined, expected: '!group.reachable || undefined' },
 ]) it(`R234 контрфакт заголовка ${label}: ${mutation.label}`, () => {
   headerGuard(source);
-  const { file, headers } = parse(source), anchor = headers[index]!.getText(file);
-  assert.equal(source.split(anchor).length - 1, 1); assert.equal(anchor.split(mutation.from).length - 1, 1);
-  const changed = source.replace(anchor, anchor.replace(mutation.from, mutation.to));
-  assert.throws(() => headerGuard(changed), e => e instanceof assert.AssertionError && e.message.startsWith(mutation.prefix)
-    && e.operator === 'strictEqual' && e.actual === mutation.actual && e.expected === mutation.expected);
+  counterfact(() => {
+    const { file, headers } = parse(source), anchor = headers[index]!.getText(file);
+    assert.equal(source.split(anchor).length - 1, 1); assert.equal(anchor.split(mutation.from).length - 1, 1);
+    const changed = source.replace(anchor, anchor.replace(mutation.from, mutation.to));
+    assert.throws(() => headerGuard(changed), e => e instanceof assert.AssertionError && e.message.startsWith(mutation.prefix)
+      && e.operator === 'strictEqual' && e.actual === mutation.actual && e.expected === mutation.expected);
+  });
 });
 it('R234 контрфакт обработчика меню: недоступную группу ошибочно отсекает reachable', () => {
-  menuGuard(source); const anchor = 'if (!group.guest || !onGroupMenu) return;'; assert.equal(source.split(anchor).length - 1, 1);
-  const changed = 'if (!group.guest || !onGroupMenu || !group.reachable) return;';
-  assert.throws(() => menuGuard(source.replace(anchor, changed)), e => e instanceof assert.AssertionError && e.message.startsWith('R234-group-menu-guard:')
-    && e.operator === 'strictEqual' && e.actual === changed && e.expected === anchor);
+  menuGuard(source); counterfact(() => {
+    const anchor = 'if (!group.guest || !onGroupMenu) return;'; assert.equal(source.split(anchor).length - 1, 1);
+    const changed = 'if (!group.guest || !onGroupMenu || !group.reachable) return;';
+    assert.throws(() => menuGuard(source.replace(anchor, changed)), e => e instanceof assert.AssertionError && e.message.startsWith('R234-group-menu-guard:')
+      && e.operator === 'strictEqual' && e.actual === changed && e.expected === anchor);
+  });
 });

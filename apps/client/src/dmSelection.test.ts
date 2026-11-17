@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -187,10 +188,12 @@ it('выделить до сообщения выбирает ближайшую
   assert.equal(selectUpTo(['a', 'b'], [], 'b'), null);
   assert.equal(selectUpTo(['a'], ['a'], 'missing'), null);
   assert.equal(selectUpTo(['a', 'b', 'c'], ['a'], 'c', 2), null);
-  const firstPicked = mutatedSelection('  let near = -1;\n  for (let d = 1; d < order.length && near < 0; d++) {\n    if (t - d >= 0 && have.has(order[t - d])) near = t - d;\n    else if (t + d < order.length && have.has(order[t + d])) near = t + d;\n  }', '  const near = order.indexOf(picked[0]!);');
-  mutantMustFail(firstPicked.selectUpTo(['a', 'b', 'c', 'd', 'e'], ['e', 'a'], 'c'), ['e', 'a', 'b', 'c'], 'мутант берёт первое выбранное, а не ближайшее');
-  const noLimit = mutatedSelection('  return out.length <= max ? out : null;', '  return out;');
-  mutantMustFail(noLimit.selectUpTo(['a', 'b', 'c'], ['a'], 'c', 2), null, 'мутант без лимита показывает невозможный выбор');
-  const byKey = mutatedSelection("e.code === 'KeyC'", "e.key === 'c'");
-  mutantMustFail(byKey.selectionKey({ key: 'с', code: 'KeyC', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, repeat: false }), 'copy', 'мутант по key ломает русскую раскладку');
+  counterfact(() => {
+    const firstPicked = mutatedSelection('  let near = -1;\n  for (let d = 1; d < order.length && near < 0; d++) {\n    if (t - d >= 0 && have.has(order[t - d])) near = t - d;\n    else if (t + d < order.length && have.has(order[t + d])) near = t + d;\n  }', '  const near = order.indexOf(picked[0]!);');
+    mutantMustFail(firstPicked.selectUpTo(['a', 'b', 'c', 'd', 'e'], ['e', 'a'], 'c'), ['e', 'a', 'b', 'c'], 'мутант берёт первое выбранное, а не ближайшее');
+    const noLimit = mutatedSelection('  return out.length <= max ? out : null;', '  return out;');
+    mutantMustFail(noLimit.selectUpTo(['a', 'b', 'c'], ['a'], 'c', 2), null, 'мутант без лимита показывает невозможный выбор');
+    const byKey = mutatedSelection("e.code === 'KeyC'", "e.key === 'c'");
+    mutantMustFail(byKey.selectionKey({ key: 'с', code: 'KeyC', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, repeat: false }), 'copy', 'мутант по key ломает русскую раскладку');
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -80,18 +81,22 @@ it('R303 сбой крючка логируется и не отравляет �
   assert.equal(calls, 2); assert.equal(f.published.length, 2); assert.equal(f.warnings.length, 1); assert.match(f.warnings[0], /synthetic hook failure/);
 });
 it('R303 original-first мутант закрепа ловится точным AssertionError, не сбоем загрузки', { timeout: 5_000 }, async () => {
-  await noPin(); const anchor = "h && ev.kind !== 'pinned' && ev.kind !== 'markup'";
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(noPin(source.replace(anchor, 'h')), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
-    && e.message.startsWith('R303 закреп и кнопки не превращаются в правку боту') && e.operator === 'strictEqual' && e.actual === 2 && e.expected === 0);
+  await noPin(); await counterfact(async () => {
+    const anchor = "h && ev.kind !== 'pinned' && ev.kind !== 'markup'";
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(noPin(source.replace(anchor, 'h')), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
+      && e.message.startsWith('R303 закреп и кнопки не превращаются в правку боту') && e.operator === 'strictEqual' && e.actual === 2 && e.expected === 0);
+  });
 });
 it('R303 original-first мутант очереди обнаруживает правку, обогнавшую создание', { timeout: 5_000 }, async () => {
-  await queueCheck(); const anchor = 'const prev = queues.get(channelId) ?? Promise.resolve();';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(queueCheck(source.replace(anchor, 'const prev = Promise.resolve();')), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
-    && e.message.startsWith('R303 правка не обгоняет медленное создание') && e.operator === 'deepStrictEqual'
-    && JSON.stringify(e.actual) === '["c:created","c:edited","other:created"]'
-    && JSON.stringify(e.expected) === '["c:created","other:created"]');
+  await queueCheck(); await counterfact(async () => {
+    const anchor = 'const prev = queues.get(channelId) ?? Promise.resolve();';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(queueCheck(source.replace(anchor, 'const prev = Promise.resolve();')), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
+      && e.message.startsWith('R303 правка не обгоняет медленное создание') && e.operator === 'deepStrictEqual'
+      && JSON.stringify(e.actual) === '["c:created","c:edited","other:created"]'
+      && JSON.stringify(e.expected) === '["c:created","other:created"]');
+  });
 });
 it('R303 memberChanged пропускает одинаковый статус, обрабатывает пачку последовательно и переживает ошибку', { timeout: 5_000 }, async () => {
   const warnings: string[] = [], module = { exports: {} as typeof import('../memberEvents.js') };

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -200,11 +201,13 @@ describe('R301 исполняемые контрфакты всего модул
   for (const m of mutations) it(m.name, () => {
     m.check(wire);
     m.check(loadWire(source));
-    assert.equal(source.split(m.from).length - 1, 1, 'единственный якорь контрфакта');
-    assert.throws(() => m.check(loadWire(source.replace(m.from, m.to))), (error: unknown) => error instanceof assert.AssertionError
-      && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.message
-      && error.operator === 'strictEqual' && error.actual === m.actual && error.expected === m.expected,
-    `контрфакт убивается точным host AssertionError: ${m.message}`);
+    counterfact(() => {
+      assert.equal(source.split(m.from).length - 1, 1, 'единственный якорь контрфакта');
+      assert.throws(() => m.check(loadWire(source.replace(m.from, m.to))), (error: unknown) => error instanceof assert.AssertionError
+        && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.message
+        && error.operator === 'strictEqual' && error.actual === m.actual && error.expected === m.expected,
+      `контрфакт убивается точным host AssertionError: ${m.message}`);
+    });
   });
 });
 

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
@@ -275,10 +276,12 @@ test('R212 без подключения крючка convRoutes сохраня�
 });
 test('R212 одиночный groupgate-мутант эквивалентен: реальный loadAccess даёт группе peerId=null', async () => {
   await exemptions();
+  await counterfact(async () => {
   const raw = source('routes/conv'), ast = ts.createSourceFile('conv.ts', raw, ts.ScriptTarget.Latest, true);
   const fn = ast.statements.filter(n => ts.isFunctionDeclaration(n) && n.name?.text === 'messagePrivacyRefused');
   assert.equal(fn.length, 1); const from = fn[0].getText(ast), guard = " || access.kind === 'group'";
   assert.equal(from.split(guard).length, 2);
   // Не фабрикуем peerId у группы: дублирующий !access.peerId ещё защищает все реальные маршруты.
   await exemptions({ from, to: from.replace(guard, '') });
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -236,12 +237,14 @@ test('контрфакт: подпись из контактов автора в
   const isThisMessage = (p: RecordedPush) => p.type === 'dm' && p.dmId === 'mut-direct' && p.mid === 'm1';
   await waitForPushes(endpoint, 1, isThisMessage);
   assert.deepEqual(payloadsFor(endpoint).filter(isThisMessage).map((p) => p.title), ['Моя подпись']);
+  await counterfact(async () => {
   posted.length = 0;
   const mutant = await compileFanOut([['contactNamesFor(s.me, [peerId])', 'contactNamesFor(peerId, [s.me])']]);
   await mutant.fanOutSend(sent);
   await waitForPushes(endpoint, 1, isThisMessage);
   const title = payloadsFor(endpoint).find(isThisMessage)?.title;
   await assert.rejects(async () => assert.equal(title, 'Моя подпись'), assert.AssertionError);
+  });
 });
 
 test('контрфакт: один общий alias группы для всех адресатов не проходит', async () => {
@@ -260,6 +263,7 @@ test('контрфакт: один общий alias группы для всех
   const expectedTitles = ['Личный псевдоним в «Название группы»', 'Второй псевдоним в «Название группы»'];
   const controlTitles = [payloadsFor(endpointA)[0]?.title, payloadsFor(endpointB)[0]?.title];
   assert.deepEqual(controlTitles, expectedTitles, 'исходная версия действительно доставила адресные подписи');
+  await counterfact(async () => {
   posted.length = 0;
   const mutant = await compileFanOut([['pushNameFor(names, id, who.author)', 'pushNameFor(names, me, who.author)']]);
   await mutant.fanOutSend(sent);
@@ -271,6 +275,7 @@ test('контрфакт: один общий alias группы для всех
   ];
   assert.ok(mutantTitles.every((title) => typeof title === 'string'), 'мутант тоже отправил payload обоим адресатам');
   await assert.rejects(async () => assert.deepEqual(mutantTitles, expectedTitles), assert.AssertionError);
+  });
 });
 
 test('групповое исключение group:id перекрывает notifyGroups=false только своей группы и не отменяет полную заглушку', async () => {
@@ -305,5 +310,5 @@ test('групповое исключение group:id перекрывает no
     }
   };
   await check(await compileFanOut());
-  await assert.rejects(check(await compileFanOut([['.filter((id) => !always.has(id))', '']])), /фильтр группы recipient-a\/group:always-group/);
+  await counterfact(async () => assert.rejects(check(await compileFanOut([['.filter((id) => !always.has(id))', '']])), /фильтр группы recipient-a\/group:always-group/));
 });

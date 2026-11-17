@@ -5,7 +5,10 @@ import { isMockEconomy, mockLeaderboard } from '../benchMock';
 import { useStore } from '../store';
 import {
   LEDGER_REASON,
+  aloneCapHours,
   explainAccrual,
+  gamesView,
+  hoursLabel,
   type EconomyView,
   type Leaderboard,
   type LedgerEntry,
@@ -17,7 +20,9 @@ import { ledgerCsv, ledgerFileName } from '../ledgerCsv';
 import { useNameResolver } from '../memberName';
 import { streakCaption, streakDots, streakExplain, type StreakView } from '../streakView';
 import { toast, toastError } from '../toast';
+import { GameBoardSection, MyGameTitles } from './GameBoard';
 import { Goose } from './Goose';
+import { RecountNotice } from './RecountNotice';
 import { Icon } from './Icon';
 
 /**
@@ -31,6 +36,88 @@ import { Icon } from './Icon';
  * ⚠️ Ничего не рисуем, когда разбора нет (старые строки журнала) или когда никто ни на что не
  * повлиял: строка «полная ставка, и ничего её не меняло» — это шум, а не объяснение.
  */
+/**
+ * «За ожидание одному сегодня: X из порога» (28.10).
+ *
+ * 🔴 Только тому, кто управляет экономикой — по тому же решению 03.09, что и разбор начислений:
+ * пороги и множители — внутренняя кухня. Ему строка нужна, чтобы видеть, как порог одному
+ * (пара к правилу «одному затухание не бьёт») ложится на живых людей.
+ * ⚠️ Старый сервер не присылает ни порога, ни счётчика — тогда строки нет.
+ */
+function AloneCapLine({ view }: { view: EconomyView }) {
+  const s = view.settings;
+  const earned = view.wallet.aloneEarnedToday;
+  if (!view.canManage || !s || s.aloneCap === undefined || s.aloneCap <= 0 || earned === undefined) return null;
+  const hours = aloneCapHours(s.aloneCap, s.ratePer5min, s.alonePercent);
+  return (
+    <p className="muted" style={{ margin: '0 0 16px' }}>
+      За ожидание одному сегодня: {Math.min(earned, s.aloneCap)} из {s.aloneCap} {view.currencyName}
+      {hours !== null && <> (порог — это ≈ {hoursLabel(hours)} одному с включённым микрофоном)</>}
+    </p>
+  );
+}
+
+/**
+ * Блок «Игры» в кошельке (ГусКоины 2, этап 1): «не показывать мне игры» и счётчик «сегодня проиграно». Свой предел
+ * проигрыша переехал в карточку «Активности» (`GamesLimit.tsx`, владелец 29.10: «не перегружать настройки»); чекбокс
+ * остаётся здесь — скрыв себе игры, «Активности» уже не открыть, и вернуть их можно только отсюда.
+ *
+ * 🔴 Только если сервер ВКЛЮЧИЛ игры и прислал `wallet.games` (`gamesView`): старый сервер полей не знает —
+ * блока нет вовсе. Отказ от экономики выключает и игры, поэтому при нём блок только с серым чекбоксом.
+ * ⚠️ Свой компонент со своим состоянием: состояния самого кошелька не сдвигаются, а его стражи рендерят
+ * кошелёк, не заходя внутрь.
+ */
+function GamesBlock({ serverId, view, onViewChange }: {
+  serverId: string;
+  view: EconomyView;
+  onViewChange: (next: EconomyView) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seen = gamesView(view);
+  if (!seen) return null;
+  const { games } = seen;
+  const off = view.wallet.optedOut;
+
+  async function save(patch: { gamesOptOut?: boolean }) {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.setEconomyOptOut(serverId, patch);
+      if (result.games) onViewChange({ ...view, wallet: { ...view.wallet, games: result.games } });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <label className="wallet-opt-out">
+        <input
+          type="checkbox"
+          checked={games.optOut || off}
+          disabled={busy || off}
+          onChange={(e) => void save({ gamesOptOut: e.target.checked })}
+        />
+        <span>
+          <strong>Не показывать мне игры</strong>
+          <small>Колесо, дуэли и прогнозы на этом сервере пропадут для вас. Монеты и типы это не трогает.</small>
+        </span>
+      </label>
+      {!games.optOut && !off && (
+        <div className="eco-slider-hint">
+          Сегодня проиграно: {Math.max(0, games.lossToday)}
+          {games.effectiveLimit !== null ? ` из ${games.effectiveLimit}` : ' (без предела)'} {view.currencyName}. Свой предел — в
+          «Активностях» голосового канала, внизу карточки («Сундук на день»).
+        </div>
+      )}
+      {error && <div className="error">Не удалось изменить настройки игр: {error}</div>}
+    </>
+  );
+}
+
 function AccrualWhy({ entry, currency, detailed }: { entry: LedgerEntry; currency: string; detailed: boolean }) {
   if (!detailed) return null;
   const why = explainAccrual(entry.data);
@@ -351,6 +438,15 @@ export function CoinWalletModal({
   const nameOf = useNameResolver();
   const me = useStore((s) => s.user);
   const setWelcomeOpen = useStore((s) => s.setEconomyWelcomeOpen);
+  /**
+   * Лидерборд игр (этап 6): переключатель «Заработок · Игры» над таблицей — только когда игры этому человеку видны.
+   * «Итоги» — тихая кнопка в шапке рядом с «Как это работает», если есть хоть одни замороженные.
+   */
+  const gamesOn = !!gamesView(view);
+  const [boardTab, setBoardTab] = useState<'earned' | 'games'>('earned');
+  const recaps = useStore((s) => s.recaps[serverId]);
+  const openRecap = useStore((s) => s.openRecap);
+  const recapKind = recaps?.games ? 'games' : recaps?.economy ? 'economy' : null;
   const [ledger, setLedger] = useState<LedgerEntry[] | null>(null);
   const [board, setBoard] = useState<Leaderboard | null>(null);
   const [ledgerError, setLedgerError] = useState<string | null>(null);
@@ -358,6 +454,11 @@ export function CoinWalletModal({
   const [exporting, setExporting] = useState<'week' | 'month' | 'season' | null>(null);
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [optOutError, setOptOutError] = useState<string | null>(null);
+  /**
+   * Строка «Перерасчёт сезона» в журнале нажимаемая (28.10): открывает ту же карточку `RecountNotice` с суммой
+   * ЭТОЙ строки. Только показ — без отметки на сервере и без влияния на авто-показ (его решает `MainLayout`).
+   */
+  const [recountShown, setRecountShown] = useState<LedgerEntry | null>(null);
 
   /**
    * Выгрузить журнал за период таблицей.
@@ -437,7 +538,9 @@ export function CoinWalletModal({
     setOptOutError(null);
     try {
       const result = await api.setEconomyOptOut(serverId, patch);
-      onViewChange({ ...view, wallet: { ...view.wallet, optedOut: result.optedOut, tipsOptOut: result.tipsOptOut } });
+      // `games` — сервер пересчитал игры (отказ от экономики выключает и их); старый сервер его не шлёт.
+      onViewChange({ ...view, wallet: { ...view.wallet, optedOut: result.optedOut, tipsOptOut: result.tipsOptOut,
+        ...(result.games ? { games: result.games } : {}) } });
     } catch (err) {
       setOptOutError((err as Error).message);
     } finally {
@@ -446,6 +549,7 @@ export function CoinWalletModal({
   }
 
   return (
+    <>
     <div className="modal-overlay" onClick={onClose}>
       <section className="modal wallet-modal" role="dialog" aria-modal="true" aria-labelledby="wallet-title" onClick={(e) => e.stopPropagation()}>
         <div className="admin-head">
@@ -455,6 +559,11 @@ export function CoinWalletModal({
           <button type="button" className="wallet-how" onClick={() => setWelcomeOpen(true)}>
             Как это работает
           </button>
+          {recapKind && (
+            <button type="button" className="wallet-how wallet-recap" onClick={() => openRecap({ serverId, kind: recapKind })}>
+              Итоги
+            </button>
+          )}
           <button type="button" className="icon-close" title="Закрыть" onClick={onClose}>
             <Icon name="close" size={18} />
           </button>
@@ -476,11 +585,27 @@ export function CoinWalletModal({
           <div><span>За всё время</span><strong>{view.wallet.earnedTotal} {view.currencyName}</strong></div>
           <div><span>{view.season.name}</span><strong>{view.wallet.seasonEarned} {view.currencyName}</strong></div>
         </div>
+        <AloneCapLine view={view} />
 
         {view.level && <LevelBlock level={view.level} stages={view.levelStages ?? []} currency={view.currencyName} />}
         {view.streak && <StreakBlock streak={view.streak} currency={view.currencyName} />}
 
-        <LeaderboardSection board={board} meId={me?.id} currency={view.currencyName} />
+        {gamesOn && <MyGameTitles serverId={serverId} />}
+        {gamesOn && (
+          <div className="seg gb-seg wallet-board-tabs" role="tablist" aria-label="Таблица">
+            <button type="button" role="tab" aria-selected={boardTab === 'earned'} className={boardTab === 'earned' ? 'on' : ''} onClick={() => setBoardTab('earned')}>
+              Заработок
+            </button>
+            <button type="button" role="tab" aria-selected={boardTab === 'games'} className={boardTab === 'games' ? 'on' : ''} onClick={() => setBoardTab('games')}>
+              Игры
+            </button>
+          </div>
+        )}
+        {gamesOn && boardTab === 'games' ? (
+          <GameBoardSection serverId={serverId} currency={view.currencyName} />
+        ) : (
+          <LeaderboardSection board={board} meId={me?.id} currency={view.currencyName} />
+        )}
 
         <ShopSection view={view} serverId={serverId} />
 
@@ -507,7 +632,23 @@ export function CoinWalletModal({
         {ledger?.length === 0 && <div className="muted wallet-empty">Пока ничего не было</div>}
         {ledger && ledger.length > 0 && (
           <div className="wallet-ledger">
-            {ledger.map((entry) => (
+            {ledger.map((entry) =>
+              entry.reason === 'recount' ? (
+                // Кнопка во всю строку: тот же вид, что у остальных строк, плюс наведение/фокус (`.wallet-entry-btn`).
+                <button
+                  type="button"
+                  className="wallet-entry wallet-entry-btn"
+                  key={entry.id}
+                  title="Что это за начисление"
+                  onClick={() => setRecountShown(entry)}
+                >
+                  <span className="wallet-entry-main">
+                    <strong>{ledgerText(entry, nameOf)}</strong>
+                    <span>{new Date(entry.createdAt).toLocaleString('ru-RU', { dateStyle: 'medium', timeStyle: 'short' })}</span>
+                  </span>
+                  <b className={entry.amount < 0 ? 'wallet-negative' : 'wallet-positive'}>{amountText(entry.amount)}</b>
+                </button>
+              ) : (
               <div className="wallet-entry" key={entry.id}>
                 <div>
                   <strong>{ledgerText(entry, nameOf)}</strong>
@@ -517,7 +658,8 @@ export function CoinWalletModal({
                 </div>
                 <b className={entry.amount < 0 ? 'wallet-negative' : 'wallet-positive'}>{amountText(entry.amount)}</b>
               </div>
-            ))}
+              ),
+            )}
           </div>
         )}
 
@@ -543,7 +685,19 @@ export function CoinWalletModal({
           </span>
         </label>
         {optOutError && <div className="error">Не удалось изменить участие: {optOutError}</div>}
+        <GamesBlock serverId={serverId} view={view} onViewChange={onViewChange} />
       </section>
     </div>
+    {/* Сосед окна кошелька, а не потомок: клик по подложке карточки иначе всплыл бы и закрыл кошелёк. */}
+    {recountShown && (
+      <RecountNotice
+        amount={recountShown.amount}
+        currencyName={view.currencyName}
+        iconUrl={view.iconUrl}
+        seasonName={recountShown.data?.seasonId === view.season.id ? view.season.name : undefined}
+        onClose={() => setRecountShown(null)}
+      />
+    )}
+    </>
   );
 }

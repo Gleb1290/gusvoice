@@ -1,7 +1,9 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import ts from 'typescript';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
@@ -31,9 +33,7 @@ async function fixture(check: (host: HTMLElement, calls: string[]) => Promise<vo
     '../dmArchiveRules': archive, './Icon': { Icon } };
   try {
     runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-      { module, exports: module.exports, require: (id: string) => {
-        if (!Object.hasOwn(deps, id)) throw Error(`Неописанный импорт ${id}`); return deps[id];
-      } });
+      { module, exports: module.exports, require: testVmImports(new URL('./MobileNav.tsx', import.meta.url), deps) });
     await React.act(async () => root.render(React.createElement(module.exports.MobileNav)));
     await check(host, calls);
   } finally {
@@ -96,11 +96,13 @@ function mutate(anchor: string, replacement: string) {
 }
 // Класс ошибки: капсула потеряна в разметке.
 it('R170 мутант без класса капсулы обнаруживается настоящим DOM', async () => {
-  await capsule(); await assert.rejects(() => capsule(mutate('className="mnav-capsule"', 'className="mnav-old"')), assert.AssertionError);
+  await capsule(); await counterfact(async () => { await assert.rejects(() => capsule(mutate('className="mnav-capsule"', 'className="mnav-old"')), assert.AssertionError); });
 });
 // Класс ошибки: старый размер значка или точка вместо числа.
 it('R170 мутанты значка 20 и точки вместо badge обнаруживаются после успешного оригинала', async () => {
   await capsule();
-  await assert.rejects(() => capsule(mutate('<Icon name={icon} size={24} />', '<Icon name={icon} size={20} />')), assert.AssertionError);
-  await assert.rejects(() => capsule(mutate('{badge}</span>', '{""}</span>')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => capsule(mutate('<Icon name={icon} size={24} />', '<Icon name={icon} size={20} />')), assert.AssertionError);
+    await assert.rejects(() => capsule(mutate('{badge}</span>', '{""}</span>')), assert.AssertionError);
+  });
 });

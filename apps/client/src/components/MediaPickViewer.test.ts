@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -87,8 +88,10 @@ async function fixture(entries: Viewer.PickEntry[], start: number, check: (f: Fi
 const position = () => document.querySelector('.pick-pos')?.textContent;
 async function mutate(check: (raw?: string) => Promise<void>, from: string, to: string) {
   await check(source);
+  await counterfact(async () => {
   assert.equal(source.split(from).length - 1, 1, 'ровно один якорь');
   await assert.rejects(() => check(source.replace(from, to)), assert.AssertionError);
+  });
 }
 
 async function checkPx(raw = source) {

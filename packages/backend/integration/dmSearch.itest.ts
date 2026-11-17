@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { after, before, beforeEach, test } from 'node:test';
@@ -176,9 +177,11 @@ test('R183 мутант OR имени вместо AND вида обнаружи
   // Whole-module original-first: настоящий SQL должен различать одинаковые имена разных видов.
   await searchFixture(); await searchMessage('named-file', 1); await searchMessage('named-photo', 2, { mime: 'image/png' });
   await namesScenario(await searchModule());
+  await counterfact(async () => {
   const raw = searchChanged('if (qy.kind) msgConds.push(sharedMediaCondAlias(qy.kind, sql`x`));',
     "if (qy.kind) msgConds.push(or(sharedMediaCondAlias(qy.kind, sql`x`), sql`EXISTS (SELECT 1 FROM jsonb_array_elements(x.attachments) AS a WHERE a->>'name' ILIKE ${qy.pattern})`)!)");
   await assert.rejects(namesScenario(await searchModule(raw)), e => e instanceof assert.AssertionError && e.message.includes('имя файла не обходит'));
+  });
 });
 for (const [name, anchor, replacement] of [
   ['message у gone', "return v && !('gone' in v) ? { ...h, message: v } : h;", 'return v ? { ...h, message: v } : h;'],
@@ -186,8 +189,8 @@ for (const [name, anchor, replacement] of [
 ] as const) test(`R183 мутант «${name}» обнаруживается реальной сменой видимости до detail`, async () => {
   // Оригинал и мутант получают одинаковый SQL-хит и настоящий новый снимок PGlite, без поддельного gone DTO.
   await searchFixture(); await searchMessage('race-file', 1); await raceScenario();
-  await assert.rejects(raceScenario(searchChanged(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes('full не прикладывает'));
+  await counterfact(() => assert.rejects(raceScenario(searchChanged(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes('full не прикладывает')));
 });
 
 before(async () => {
@@ -298,10 +301,12 @@ test('буквальный подчёркнутый префикс не теря
   const original = await compile(source);
   const originalHits = await original.searchLocalUsers('a', 'a_cd');
   assert.deepEqual(originalHits.map((u) => u.id), ['literal-target']);
+  await counterfact(async () => {
   const mutation = source.replace('sql`starts_with(${name}, ${q})`', 'sql`${name} LIKE ${q + \'%\'}`');
   assert.notEqual(mutation, source, 'fixture must mutate the actual SQL predicate');
   const mutantHits = await (await compile(mutation)).searchLocalUsers('a', 'a_cd');
   assert.deepEqual(mutantHits.map((u) => u.id), [], 'LIKE must be caught losing target behind its eight false-prefix rows');
+  });
 });
 
 test('поиск проверяет ввод и гостевой доступ до Redis, а реальный счётчик ограничивает 31-й запрос', async () => {
@@ -457,7 +462,7 @@ test('настройки уведомлений валидируются и се
   assert.equal(response.statusCode, 200, response.body);
   assert.deepEqual(
     Object.fromEntries(['notifyView', 'notifyGroups', 'notifyDm', 'notifyRepeat'].map((key) => [key, response.json()[key]])),
-    { notifyView: 'nothing', notifyGroups: false, notifyDm: false, notifyRepeat: 60 },
+    { notifyView: 'nothing', notifyGroups: false, notifyDm: false, notifyRepeat: 0 },
   );
   assert.equal((await app.inject({ method: 'PATCH', url: '/users/me', headers: auth('a'), payload: { notifyRepeat: 7 } })).statusCode, 400);
   assert.equal((await app.inject({ method: 'PATCH', url: '/users/me', headers: auth('a'), payload: { notifyView: 'secret' } })).statusCode, 400);
@@ -469,6 +474,29 @@ test('настройки уведомлений валидируются и се
   assert.equal(serializeUser(own).notifyView, 'nothing');
   assert.equal(Object.hasOwn(serializeUser(own, 'b'), 'notifyView'), false);
   assert.equal(Object.hasOwn(serializeUser(own, 'b'), 'notifyGroups'), false);
+  for (const field of ['notifyDm', 'notifyRepeat']) assert.equal(Object.hasOwn(serializeUser(own, 'b'), field), false);
+  assert.equal(serializeUser(own).notifyRepeat, 0);
+});
+
+test('старый PATCH повторов принимает прежние интервалы, но не меняет сохранённую настройку и всегда отдаёт ноль', async () => {
+  // Legacy-столбец не мигрируем: старый клиент не может вновь включить повторы или переписать значение.
+  await t.raw.exec("UPDATE users SET notify_repeat=120 WHERE id='a'");
+  for (const notifyRepeat of [0, 5, 10, 30, 60, 120, 240]) {
+    const response = await app.inject({ method: 'PATCH', url: '/users/me', headers: auth('a'), payload: { notifyRepeat } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().notifyRepeat, 0);
+    const row = await t.raw.query<{ notify_repeat: number }>("SELECT notify_repeat FROM users WHERE id='a'");
+    assert.equal(row.rows[0]?.notify_repeat, 120);
+  }
+  for (const notifyRepeat of [-1, 1, 7, 241, 5.5, '60', null, true]) {
+    const response = await app.inject({ method: 'PATCH', url: '/users/me', headers: auth('a'), payload: { notifyRepeat } });
+    assert.equal(response.statusCode, 400, response.body);
+  }
+  const response = await app.inject({ method: 'PATCH', url: '/users/me', headers: auth('a'), payload: { notifyDm: true } });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().notifyRepeat, 0);
+  const row = await t.raw.query<{ notify_repeat: number }>("SELECT notify_repeat FROM users WHERE id='a'");
+  assert.equal(row.rows[0]?.notify_repeat, 120);
 });
 
 test('общий поиск серверов видит только каналы с обоими правами и курсор не теряет равные даты', async () => {
@@ -569,6 +597,7 @@ test('общий поиск серверов видит только канал�
   };
   const cursorControl = await compileCursor(cursorSource);
   assert.equal(cursorControl.splitCursor('2026-10-08 05:49:11+99|search-a'), null, 'неизменённый модуль отвергает недопустимый часовой пояс');
+  await counterfact(async () => {
   const hourMutation = cursorSource.replace('tzh <= TZ_MAX_HOUR', 'true');
   assert.notEqual(hourMutation, cursorSource, 'мутант границы часов найден');
   assert.equal((await compileCursor(hourMutation)).splitCursor('2026-10-08 05:49:11+99|search-a') === null, false,
@@ -586,6 +615,7 @@ test('общий поиск серверов видит только канал�
     assert.equal((await compileCursor(changedLimit)).splitCursor(cursor) === null, !accepted,
       `TZ_MAX_HOUR=${limit} ${accepted ? 'ошибочно принимает' : 'ошибочно отвергает'} граничный курсор`);
   }
+  });
   const { searchableChannelIds } = await import('../src/permissions.js');
   const searchables = searchableChannelIds(new Map([
     ['view-only', BigInt(Permission.VIEW_CHANNEL)],

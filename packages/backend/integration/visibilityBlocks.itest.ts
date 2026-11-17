@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -101,8 +102,10 @@ for (const blocker of ['viewer', 'subject'] as const) test(`R214 F5 блок о�
 });
 test('R214 F5 потеря NOT EXISTS в серверной ветке ловится настоящим SQL с общим сервером', async () => {
   await peerScenario('subject');
+  await counterfact(async () => {
   const from = 'AND NOT EXISTS (SELECT 1 FROM user_blocks ub\n          WHERE (ub.blocker_id = a.user_id AND ub.blocked_id = b.user_id)\n             OR (ub.blocker_id = b.user_id AND ub.blocked_id = a.user_id))';
   await assert.rejects(peerScenario('subject', { file: 'db/peerQueries', from, to: '' }), killed('блок не обходит общий сервер при loadPeers', true, false));
+  });
 });
 async function lastSeenScenario(connected = true, mutation?: Mutation) {
   const f = await fixture({ mutation, connected, hook: false });
@@ -124,8 +127,10 @@ for (const connected of [false, true]) test(`R214 F5 lastSeenFor и пачка �
   await lastSeenScenario(connected);
 });
 test('R214 F5 потеря blockedViewer ловится недавно вместо давно при живом шлюзе', async () => {
-  await lastSeenScenario(true); await assert.rejects(lastSeenScenario(true, { file: 'lastSeenRules', from: 'if (input.blockedViewer && !self)', to: 'if (false)' }),
+  await lastSeenScenario(true); await counterfact(async () => {
+  await assert.rejects(lastSeenScenario(true, { file: 'lastSeenRules', from: 'if (input.blockedViewer && !self)', to: 'if (false)' }),
     killed('заблокированный зритель видит давно', 'recently', 'long'));
+  });
 });
 async function presenceScenario(mixed = false, mutation?: Mutation) {
   const f = await fixture({ mixed, mutation });
@@ -159,7 +164,9 @@ test('R214 F5 блок своего человека не затрагивает
   finally { f.unsubscribe(); }
 });
 test('R214 F5 потеря blockNotice ловится отсутствием обязательного offline для пустого дома', async () => {
-  await presenceScenario(); await assert.rejects(presenceScenario(false, { file: 'federation/dmEphemeral',
+  await presenceScenario(); await counterfact(async () => {
+  await assert.rejects(presenceScenario(false, { file: 'federation/dmEphemeral',
     from: 'if (opts.blockNotice && opts.onlyHome && blockedHomes.has(opts.onlyHome) && !byHome.has(opts.onlyHome))', to: 'if (false)' }),
     killed('смена блока отправляет ровно одну запись дому заблокированного', 0, 1));
+  });
 });

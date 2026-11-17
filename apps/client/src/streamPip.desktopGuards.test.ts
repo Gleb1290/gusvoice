@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { it } from 'node:test';
@@ -205,73 +206,93 @@ it('все штатные capabilities main, overlay и других окон н
 
 it('мутант: удалённая мобильная ветка, оставленная в комментарии, обнаруживается', () => {
   checkMobile(rust);
-  const branch = mobileBranch(rust);
-  const original = branch.functionBody.slice(branch.attributeStart, branch.end);
-  const mutant = replaceOnce(rust, original, `/* ${original} */`);
-  assert.throws(() => checkMobile(mutant), failure('R255-main-mobile:'));
+  counterfact(() => {
+    const branch = mobileBranch(rust);
+    const original = branch.functionBody.slice(branch.attributeStart, branch.end);
+    const mutant = replaceOnce(rust, original, `/* ${original} */`);
+    assert.throws(() => checkMobile(mutant), failure('R255-main-mobile:'));
+  });
 });
 
 it('мутант: закомментированный cfg у PiP-команды не защищает Android', () => {
   checkRegistration(rust);
-  const mutant = replaceOnce(rust, '#[cfg(desktop)]\n            pip::gv_pip_arm,',
-    '// #[cfg(desktop)]\n            pip::gv_pip_arm,');
-  assert.throws(() => checkRegistration(mutant), failure('R255-pip-cfg:'));
+  counterfact(() => {
+    const mutant = replaceOnce(rust, '#[cfg(desktop)]\n            pip::gv_pip_arm,',
+      '// #[cfg(desktop)]\n            pip::gv_pip_arm,');
+    assert.throws(() => checkRegistration(mutant), failure('R255-pip-cfg:'));
+  });
 });
 
 it('мутант: cfg и команда на одной строке нарушают адресную регистрацию', () => {
   checkRegistration(rust);
-  const mutant = replaceOnce(rust, '#[cfg(desktop)]\n            pip::gv_pip_arm,', '#[cfg(desktop)] pip::gv_pip_arm,');
-  assert.throws(() => checkRegistration(mutant), failure('R255-pip-command-line:'));
+  counterfact(() => {
+    const mutant = replaceOnce(rust, '#[cfg(desktop)]\n            pip::gv_pip_arm,', '#[cfg(desktop)] pip::gv_pip_arm,');
+    assert.throws(() => checkRegistration(mutant), failure('R255-pip-command-line:'));
+  });
 });
 
 it('мутант: операция до создания main в setup обнаруживается', () => {
   checkSetup(rust);
-  const mutant = replaceOnce(rust, 'build_main_window(_app.handle())?;', 'prepare(); build_main_window(_app.handle())?;');
-  assert.throws(() => checkSetup(mutant), failure('R255-setup-first:'));
+  counterfact(() => {
+    const mutant = replaceOnce(rust, 'build_main_window(_app.handle())?;', 'prepare(); build_main_window(_app.handle())?;');
+    assert.throws(() => checkSetup(mutant), failure('R255-setup-first:'));
+  });
 });
 
 it('мутант: сворачивание родителя больше не учитывает открытый PiP', () => {
   checkVisibility(rust);
-  const mutant = replaceOnce(rust, 'let shown = shown || pip::any_open();', 'let shown = shown;');
-  assert.throws(() => checkVisibility(mutant), failure('R255-pip-visible:'));
+  counterfact(() => {
+    const mutant = replaceOnce(rust, 'let shown = shown || pip::any_open();', 'let shown = shown;');
+    assert.throws(() => checkVisibility(mutant), failure('R255-pip-visible:'));
+  });
 });
 
 it('мутант: проверка PiP после swap слишком поздняя и отклоняется', () => {
   checkVisibility(rust);
-  let mutant = replaceOnce(rust, 'let shown = shown || pip::any_open();', '');
-  mutant = replaceOnce(mutant, 'if WEBVIEW_SHOWN.swap(shown, Ordering::Relaxed) == shown {',
-    'if WEBVIEW_SHOWN.swap(shown, Ordering::Relaxed) == shown {\nlet shown = shown || pip::any_open();');
-  assert.throws(() => checkVisibility(mutant), failure('R255-pip-visible-order:'));
+  counterfact(() => {
+    let mutant = replaceOnce(rust, 'let shown = shown || pip::any_open();', '');
+    mutant = replaceOnce(mutant, 'if WEBVIEW_SHOWN.swap(shown, Ordering::Relaxed) == shown {',
+      'if WEBVIEW_SHOWN.swap(shown, Ordering::Relaxed) == shown {\nlet shown = shown || pip::any_open();');
+    assert.throws(() => checkVisibility(mutant), failure('R255-pip-visible-order:'));
+  });
 });
 
 it('мутант: чужая функция не может перехватить мобильный атрибут run', () => {
   checkEntryPoint(rust);
-  const mutant = replaceOnce(rust, '#[cfg_attr(mobile, tauri::mobile_entry_point)]',
-    '#[cfg_attr(mobile, tauri::mobile_entry_point)]\nfn accidental_entry() {}');
-  assert.throws(() => checkEntryPoint(mutant), failure('R255-mobile-entry:'));
+  counterfact(() => {
+    const mutant = replaceOnce(rust, '#[cfg_attr(mobile, tauri::mobile_entry_point)]',
+      '#[cfg_attr(mobile, tauri::mobile_entry_point)]\nfn accidental_entry() {}');
+    assert.throws(() => checkEntryPoint(mutant), failure('R255-mobile-entry:'));
+  });
 });
 
 it('мутант: автоматическое создание main в общем конфиге обнаруживается', () => {
   checkBaseConfig(baseConfig);
-  const mutant = replaceOnce(baseConfig, '"create": false', '"create": true');
-  assert.throws(() => checkBaseConfig(mutant), failure('R255-main-create-base:'));
+  counterfact(() => {
+    const mutant = replaceOnce(baseConfig, '"create": false', '"create": true');
+    assert.throws(() => checkBaseConfig(mutant), failure('R255-main-create-base:'));
+  });
 });
 
 it('мутант: автоматическое создание main в Windows-конфиге обнаруживается', () => {
   checkWindowsConfig(windowsConfig);
-  const mutant = replaceOnce(windowsConfig, '"create": false', '"create": true');
-  assert.throws(() => checkWindowsConfig(mutant), failure('R255-main-create-windows:'));
+  counterfact(() => {
+    const mutant = replaceOnce(windowsConfig, '"create": false', '"create": true');
+    assert.throws(() => checkWindowsConfig(mutant), failure('R255-main-create-windows:'));
+  });
 });
 
 for (const label of ['pip-*', '*', 'p*']) {
   it(`мутант: capability с меткой ${label} открывает права PiP и отклоняется`, () => {
     checkCapabilities(capabilities);
-    const original = capabilities.find(({ name }) => name === 'default.json');
-    assert.ok(original, 'R255-mutation-capability: штатный default.json существует');
-    const parsed = JSON.parse(original.raw);
-    parsed.windows = ['main', label];
-    const mutant = capabilities.map((entry) => entry === original ? { ...entry, raw: JSON.stringify(parsed) } : entry);
-    assert.throws(() => checkCapabilities(mutant), failure('R255-pip-capability:'));
+    counterfact(() => {
+      const original = capabilities.find(({ name }) => name === 'default.json');
+      assert.ok(original, 'R255-mutation-capability: штатный default.json существует');
+      const parsed = JSON.parse(original.raw);
+      parsed.windows = ['main', label];
+      const mutant = capabilities.map((entry) => entry === original ? { ...entry, raw: JSON.stringify(parsed) } : entry);
+      assert.throws(() => checkCapabilities(mutant), failure('R255-pip-capability:'));
+    });
   });
 }
 

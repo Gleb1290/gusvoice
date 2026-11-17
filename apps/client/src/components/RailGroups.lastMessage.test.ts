@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -118,22 +119,28 @@ it('R180 пустая строка без сообщения центрируе�
 it('R180 контрфакт раскрытия закрытого сообщения отвергается приватностью строки', async () => {
   // Класс ошибки: мутант обхода закрытого членства.
   await scene({ closed: true }, closed);
-  const anchor = 'const last = !s.closed ? (full?.lastMessage ?? null) : null;'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(scene({ closed: true }, closed, source.replace(anchor, 'const last = full?.lastMessage ?? null;')),
-    e => e instanceof assert.AssertionError && e.message.includes('закрытый сервер не раскрывает'));
+  await counterfact(async () => {
+    const anchor = 'const last = !s.closed ? (full?.lastMessage ?? null) : null;'; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(scene({ closed: true }, closed, source.replace(anchor, 'const last = full?.lastMessage ?? null;')),
+      e => e instanceof assert.AssertionError && e.message.includes('закрытый сервер не раскрывает'));
+  });
 });
 it('R180 контрфакт потери собственного автора отвергается подписью Вы', async () => {
   // Класс ошибки: мутант идентификации собственного сообщения.
   const check = (row: HTMLButtonElement) => preview(row, true); await scene({ last: 'self' }, check);
-  const anchor = 'groupPreviewAuthor(last, meId)'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(scene({ last: 'self' }, check, source.replace(anchor, 'groupPreviewAuthor(last, undefined)')),
-    e => e instanceof assert.AssertionError && e.message.includes('автор превью'));
+  await counterfact(async () => {
+    const anchor = 'groupPreviewAuthor(last, meId)'; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(scene({ last: 'self' }, check, source.replace(anchor, 'groupPreviewAuthor(last, undefined)')),
+      e => e instanceof assert.AssertionError && e.message.includes('автор превью'));
+  });
 });
 it('R180 контрфакт знака @ при нуле упоминаний отвергается DOM строки', async () => {
   // Класс ошибки: мутант границы положительного счётчика.
   const check = (row: HTMLButtonElement) => assert.equal(!!row.querySelector('[data-icon="at"]'), false, 'ноль без знака @');
   await scene({ mentions: 0 }, check);
-  const anchor = 'const atMark = !!last && !s.closed && s.mentions > 0;'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(scene({ mentions: 0 }, check, source.replace(anchor, 'const atMark = !!last && !s.closed && s.mentions >= 0;')),
-    e => e instanceof assert.AssertionError && e.message.includes('ноль без знака'));
+  await counterfact(async () => {
+    const anchor = 'const atMark = !!last && !s.closed && s.mentions > 0;'; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(scene({ mentions: 0 }, check, source.replace(anchor, 'const atMark = !!last && !s.closed && s.mentions >= 0;')),
+      e => e instanceof assert.AssertionError && e.message.includes('ноль без знака'));
+  });
 });

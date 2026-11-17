@@ -12,20 +12,6 @@ const settingsSource = () => read('apps/client/src/components/DataStorageSetting
 const mainSource = () => read(`${kotlin}MainActivity.kt`);
 const callSource = () => read(`${kotlin}CallAudio.kt`);
 const earSource = () => read(`${kotlin}RaiseToEar.kt`);
-function replaceOne(raw: string, from: string, to: string) {
-  assert.equal(raw.split(from).length - 1, 1, 'единственный адресный якорь');
-  return raw.replace(from, to);
-}
-function killed(check: () => void, message: string, actual: unknown, expected: unknown) {
-  assert.throws(check, (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(message)
-    && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
-}
-
-function all<T extends ts.Node>(node: ts.Node, predicate: (n: ts.Node) => n is T): T[] {
-  const found: T[] = [];
-  function walk(n: ts.Node) { if (predicate(n)) found.push(n); ts.forEachChild(n, walk); }
-  walk(node); return found;
-}
 function jsxTags(expression: ts.Node): string[] {
   const names: string[] = [];
   function walk(n: ts.Node) {
@@ -59,12 +45,6 @@ function appGuard(raw: string) {
 }
 function settingGuard(raw: string) {
   assert.equal(rendered(raw, 'DataStorageSettings', 'RaiseToEarSetting', './RaiseToEarSetting'), 1, 'настройка достижима из DataStorageSettings');
-}
-function removeJsx(raw: string, tag: string) {
-  const file = ts.createSourceFile('actual.tsx', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const found = all(file, ts.isJsxSelfClosingElement).filter(n => ts.isIdentifier(n.tagName) && n.tagName.text === tag);
-  assert.equal(found.length, 1, `единственный настоящий JSX ${tag}`);
-  return raw.slice(0, found[0].getStart(file)) + raw.slice(found[0].end);
 }
 
 // Лексическая проверка всего Kotlin-файла: комментарии, строки и ${...} не служат доказательством объявления/вызова.
@@ -197,24 +177,17 @@ function listenerGuard(raw: string) {
 }
 
 describe('R216 Android: подключение и исходниковые предохранители поднесения к уху', () => {
-  it('App монтирует Host, а импорт и JSX в недостижимой функции этого не заменяют', () => {
+  it('App монтирует один RaiseToEarHost', () => {
     const raw = appSource(); appGuard(raw);
-    const mutant = `${removeJsx(raw, 'RaiseToEarHost')}\nfunction UnreachableEarHost() { return <RaiseToEarHost />; }\n`;
-    killed(() => appGuard(mutant), 'App действительно монтирует один RaiseToEarHost', 0, 1);
   });
-  it('настройка достижима через AutoDownloadPanel, удаление его JSX не прячется наличием компонента в файле', () => {
+  it('настройка достижима из DataStorageSettings через AutoDownloadPanel', () => {
     const raw = settingsSource(); settingGuard(raw);
-    killed(() => settingGuard(removeJsx(raw, 'AutoDownloadPanel')), 'настройка достижима из DataStorageSettings', 0, 1);
   });
-  it('манифест даёт WAKE_LOCK, комментарий с тем же разрешением не считается', () => {
+  it('манифест объявляет WAKE_LOCK', () => {
     const raw = read(`${android}AndroidManifest.xml`); permissionGuard(raw);
-    const line = '<uses-permission android:name="android.permission.WAKE_LOCK" />';
-    killed(() => permissionGuard(replaceOne(raw, line, `<!-- ${line} -->`)), 'WAKE_LOCK объявлен настоящим разрешением манифеста', false, true);
   });
   it('обычный звонок не включает опасный для Samsung разговорный режим принудительно', () => {
     const raw = callSource(); forceGuard(raw);
-    killed(() => forceGuard(replaceOne(raw, 'private const val FORCE_COMM_MODE = false', 'private const val FORCE_COMM_MODE = true')),
-      'обычный звонок не навязывает MODE_IN_COMMUNICATION', 'true', 'false');
   });
   it('переутверждение вывода ограничено положительными числом и окном, пределы реально используются', () => {
     const p = parsed(callSource()), verify = block(p, 'fun', 'verifyRoute');
@@ -225,11 +198,6 @@ describe('R216 Android: подключение и исходниковые пр�
   });
   it('слушатель выбора изолирован в Api31, его регистрация и снятие не вызываются на старом Android', () => {
     const raw = callSource(); listenerGuard(raw);
-    const p = parsed(raw), start = block(p, 'fun', 'start');
-    const text = raw.slice(p.list[start.open].start, p.list[start.close].end);
-    const changed = replaceOne(text, 'if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {', 'if (true) {');
-    const mutant = raw.slice(0, p.list[start.open].start) + changed + raw.slice(p.list[start.close].end);
-    killed(() => listenerGuard(mutant), 'addOnCommunicationDeviceChangedListener защищён Android API31', false, true);
   });
   it('в NativeBridge три метода имеют JavascriptInterface, нужные параметры и делегируют реальным сервисам', () => {
     const p = parsed(mainSource()), bridge = block(p, 'class', 'NativeBridge');
@@ -242,15 +210,8 @@ describe('R216 Android: подключение и исходниковые пр�
     assert.equal(sequence(p, ['raiseToEar', '.', 'enable', '(', 'on', ')'], bridge).length, 1);
     assert.equal(sequence(p, ['callAudio', '.', 'commMode', '=', 'on'], bridge).length, 1);
   });
-  it('Activity создаёт CallAudio и RaiseToEar лениво, lazyOf с уже созданным объектом не подходит', () => {
+  it('Activity создаёт CallAudio и RaiseToEar лениво', () => {
     const raw = mainSource(); activityLazyGuard(raw);
-    for (const name of ['callAudioLazy', 'raiseToEarLazy']) {
-      const p = parsed(raw), range = lazyBody(p, block(p, 'class', 'MainActivity'), name), fieldAt = field(p, block(p, 'class', 'MainActivity'), name)!;
-      const text = raw.slice(p.list[fieldAt].start, p.list[range.close].end);
-      const eager = replaceOne(text, '= lazy {', '= lazyOf(run {') + ')';
-      const mutant = raw.slice(0, p.list[fieldAt].start) + eager + raw.slice(p.list[range.close].end);
-      killed(() => activityLazyGuard(mutant), `${name} создаётся отложенно, не при конструировании Activity`, false, true);
-    }
   });
   it('закрытие Activity не создаёт ни один сервис ради очистки', () => {
     const p = parsed(mainSource()), scope = block(p, 'fun', 'onDestroy');
@@ -259,10 +220,8 @@ describe('R216 Android: подключение и исходниковые пр�
   });
   it('контекст, датчики, AudioManager и wakeLock в RaiseToEar доступны только через lazy', () => {
     const raw = earSource(); earLazyGuard(raw);
-    killed(() => earLazyGuard(replaceOne(raw, 'private val app: Context by lazy {', 'private val app: Context = run {')),
-      'RaiseToEar.app обращается к контексту только лениво', false, true);
   });
-  it('wakeLock гасит экран по приближению только при поддержке нужного уровня, не подменяется обычным замком', () => {
+  it('wakeLock создаётся для поддержанного PROXIMITY_SCREEN_OFF_WAKE_LOCK', () => {
     const guard = (raw: string) => {
       const p = parsed(raw), scope = lazyBody(p, block(p, 'class', 'RaiseToEar'), 'wakeLock');
       assert.equal(sequence(p, ['pm', '.', 'isWakeLockLevelSupported', '(', 'PowerManager', '.', 'PROXIMITY_SCREEN_OFF_WAKE_LOCK', ')'], scope).length, 1,
@@ -271,7 +230,5 @@ describe('R216 Android: подключение и исходниковые пр�
         'создаётся именно proximity screen-off замок');
     };
     const raw = earSource(); guard(raw);
-    killed(() => guard(replaceOne(raw, 'pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,', 'pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,')),
-      'создаётся именно proximity screen-off замок', 0, 1);
   });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -24,9 +25,11 @@ it('каждое устройство видит только свою фазу 
   assert.equal(rules.callViewFor({ ...ringing, phase: 'active', calleeDevice: 'laptop' }, 'b', 'phone'), 'elsewhere');
   assert.equal(rules.callViewFor({ ...ringing, phase: 'ended' }, 'b', 'phone'), 'none');
   assert.equal(rules.callViewFor(ringing, 'stranger', 'phone'), 'none');
+  counterfact(() => {
   const broken = mutant('return call.calleeDevice === device ? \'active\' : \'elsewhere\';', "return 'active';");
   assert.throws(() => assert.equal(broken.callViewFor({ ...ringing, phase: 'active', calleeDevice: 'tablet' }, 'b', 'phone'), 'elsewhere'), assert.AssertionError,
     'мутант включает микрофон на устройстве, которое не ответило');
+  });
 });
 
 it('счётчик не теряет часы, статус и времена превью, серверные функции требуют capability', () => {

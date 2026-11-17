@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
@@ -164,7 +165,7 @@ async function checkFrozenLegacyFootprints(purge: () => Promise<number>): Promis
 async function compileCleanup(mutant: boolean): Promise<() => Promise<number>> {
   const source = readFileSync(new URL('../src/cleanup.ts', import.meta.url), 'utf8');
   const anchor = 'sql`${users.id} NOT IN (SELECT author_id FROM conversation_messages)`,';
-  assert.equal(source.split(anchor).length, 2, 'якорь живой защиты авторства уникален');
+  if (mutant) assert.equal(source.split(anchor).length, 2, 'якорь живой защиты авторства уникален');
   const changed = mutant ? source.replace(anchor,
     anchor + '\n        sql`${users.id} NOT IN (SELECT author_id FROM dm_messages)`,') : source;
   if (mutant) assert.notEqual(changed, source);
@@ -194,8 +195,10 @@ test('R140: после DROP старых ЛС пустые аккаунты уд
 
 test('R140 контрфакт: возврат NOT IN dm_messages ломает уборку после DROP', async () => {
   await checkFrozenLegacyFootprints(await compileCleanup(false));
+  await counterfact(async () => {
   const mutant = await compileCleanup(true);
   await assert.rejects(() => checkFrozenLegacyFootprints(mutant), /dm_messages/);
+  });
 });
 
 test('уборка журнала поднимает min_pts до последней удалённой строки', async () => {

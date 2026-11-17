@@ -5,6 +5,7 @@ import { rateHit, retryMessage } from '../authGuard.js';
 import { deliver, journalMuteChange } from '../conversations.js';
 import { MUTE_SECONDS_MAX, MUTE_SECONDS_MIN } from '../convRules.js';
 import { validWebPushKeys } from '../pushCrypto.js';
+import { fcmRelayRoutes, fcmRelayServiceAccount } from './fcmRelay.js';
 import {
   listPushAlways,
   listPushMutes,
@@ -17,7 +18,18 @@ import {
   unregisterPushDevice,
 } from '../push.js';
 
+/**
+ * Пуш: устройства, мьюты, «всегда» (под входом) + шлюз FCM (#247, Google Play) — без входа, отдельной соседней областью,
+ * чтобы `requireAuth` его не накрыл; только при ключе сервисного аккаунта `FCM_SERVICE_ACCOUNT_B64`, иначе маршрута нет.
+ * Шлюз регистрируется здесь, а не в `index.ts`: перечень проводки `index.ts` закреплён тестом.
+ */
 export async function pushRoutes(app: FastifyInstance): Promise<void> {
+  const fcmServiceAccount = fcmRelayServiceAccount((msg) => app.log.error(msg));
+  if (fcmServiceAccount) await app.register(fcmRelayRoutes, { serviceAccount: fcmServiceAccount });
+  await app.register(pushDeviceRoutes);
+}
+
+async function pushDeviceRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
   // Register (or refresh) this device's UnifiedPush endpoint. The backend POSTs wake payloads here
@@ -27,7 +39,8 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
     if (wait) return reply.code(429).send({ error: retryMessage(wait) });
     const b = z
       .object({
-        endpoint: z.string().url().max(500),
+        // До 4200: эндпоинт шлюза FCM (#247) несёт токен FCM (`validFcmToken`, до 4096 знаков). Колонка — `text`.
+        endpoint: z.string().url().max(4200),
         deviceId: z.string().min(1).max(200),
         platform: z.enum(['android', 'ios', 'web', 'desktop']).nullish(),
         // Ключи шифрования пуша (#213, WebPush) — только у новых установок; старые шлют без них.

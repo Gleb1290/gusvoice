@@ -1,30 +1,28 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { afterEach, it } from 'node:test';
+import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
 import * as dmListRules from './dmListRules';
 import { READERS_EXPIRE_MS, readersLabel, readersLineShown } from './lastSeenText';
 import { serverReaders } from './convSyncRules';
+import { testVmImports } from './testVmImports';
 
 type Mutation = readonly [string, string];
 const raw = readFileSync(new URL('./lastSeenText.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const syncRaw = readFileSync(new URL('./convSyncRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const now = Date.UTC(2026, 9, 15, 12);
 const fresh = { mine: true, read: true, createdAt: new Date(now).toISOString(), now };
-const unexpected: string[] = [];
-afterEach(() => assert.deepEqual(unexpected.splice(0), [], 'R239-client-rules-IO: нет скрытых импортов'));
-function load<T>(source: string): T {
+function load<T>(source: string, path = './lastSeenText.ts'): T {
   const module = { exports: {} as T };
   const deps: Record<string, unknown> = { '@gusvoice/shared': shared, './dmListRules': dmListRules };
-  // Исполняется весь модуль с закрытым перечнем зависимостей, не вырезанный расчёт.
+  // Исполняется весь модуль; новый неиспользуемый импорт не требует регистрации.
   runInNewContext(ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
-  } }).outputText, { module, exports: module.exports, require(id: string) {
-    if (!Object.hasOwn(deps, id)) { unexpected.push(id); throw new Error(`неожиданный импорт ${id}`); }
-    return deps[id];
-  } });
+  } }).outputText, { module, exports: module.exports,
+    require: testVmImports(new URL(path, import.meta.url), deps) });
   return module.exports;
 }
 function changed(source: string, [before, after]: Mutation) {
@@ -68,15 +66,17 @@ it('R239 только точный readers1 включает список чит
   assert.equal(serverReaders(['conv3', 'readers1']), true);
 });
 it('R239 контрфакты чужого и непрочитанного сообщения ловятся независимо на живом правиле', () => {
-  const anchor = 'if (!mine || !read || !createdAt) return false;';
   for (const [replacement, input] of [
     ['if (!read || !createdAt) return false;', { ...fresh, mine: false }],
     ['if (!mine || !createdAt) return false;', { ...fresh, read: false }],
   ] as const) {
     const check = (rule: typeof readersLineShown) => assert.equal(rule(input), false, 'R239-line-guard: неподходящее сообщение скрыто');
     check(readersLineShown); check(load<{ readersLineShown: typeof readersLineShown }>(raw).readersLineShown);
-    const rule = load<{ readersLineShown: typeof readersLineShown }>(changed(raw, [anchor, replacement])).readersLineShown;
-    assert.throws(() => check(rule), killed('R239-line-guard:', true, false));
+    counterfact(() => {
+      const anchor = 'if (!mine || !read || !createdAt) return false;';
+      const rule = load<{ readersLineShown: typeof readersLineShown }>(changed(raw, [anchor, replacement])).readersLineShown;
+      assert.throws(() => check(rule), killed('R239-line-guard:', true, false));
+    });
   }
 });
 it('R239 контрфакты включённой границы семи суток и разрешения битой даты не проходят', () => {
@@ -87,14 +87,18 @@ it('R239 контрфакты включённой границы семи су�
   ] as const) {
     const check = (rule: typeof readersLineShown) => assert.equal(rule(input), false, 'R239-line-expiry: просроченное и битое скрыто');
     check(readersLineShown); check(load<{ readersLineShown: typeof readersLineShown }>(raw).readersLineShown);
-    const rule = load<{ readersLineShown: typeof readersLineShown }>(changed(raw, mutation)).readersLineShown;
-    assert.throws(() => check(rule), killed('R239-line-expiry:', true, false));
+    counterfact(() => {
+      const rule = load<{ readersLineShown: typeof readersLineShown }>(changed(raw, mutation)).readersLineShown;
+      assert.throws(() => check(rule), killed('R239-line-expiry:', true, false));
+    });
   }
 });
 it('R239 контрфакт включения читателей любым непустым списком возможностей ловится старым сервером', () => {
   const check = (rule: typeof serverReaders) => assert.equal(rule(['lastseen1']), false, 'R239-client-capability: старый сервер не обещает readers');
-  check(serverReaders); check(load<{ serverReaders: typeof serverReaders }>(syncRaw).serverReaders);
-  const rule = load<{ serverReaders: typeof serverReaders }>(changed(syncRaw,
-    ['return !!features?.includes(FEATURE_READERS1);', 'return !!features?.length;'])).serverReaders;
-  assert.throws(() => check(rule), killed('R239-client-capability:', true, false));
+  check(serverReaders); check(load<{ serverReaders: typeof serverReaders }>(syncRaw, './convSyncRules.ts').serverReaders);
+  counterfact(() => {
+    const rule = load<{ serverReaders: typeof serverReaders }>(changed(syncRaw,
+      ['return !!features?.includes(FEATURE_READERS1);', 'return !!features?.length;']), './convSyncRules.ts').serverReaders;
+    assert.throws(() => check(rule), killed('R239-client-capability:', true, false));
+  });
 });

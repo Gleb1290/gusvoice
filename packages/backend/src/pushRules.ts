@@ -27,6 +27,47 @@ export function endpointAllowed(endpoint: string, ntfyBase: string): boolean {
 }
 
 /**
+ * Шлюз FCM (#247, Google Play; маршрут — `routes/fcmRelay.ts`, остальные правила — `fcmRelayRules.ts`): путь маршрута с
+ * префиксом `/api`. Эндпоинт устройства — `<база шлюза>/api/push/fcm/<токен FCM>`.
+ */
+export const FCM_RELAY_PATH = '/api/push/fcm/';
+/**
+ * Предел тела шлюза FCM: base64 от 3069 байт — 4092, вместе с ключом `gv` (2 байта) укладывается в предел FCM на
+ * data-сообщение (4096 с ключами). Больше — шлюз отвечает 413. Отправитель подгоняет нагрузку заранее (`fitPushPayload`).
+ */
+export const FCM_RELAY_BODY_MAX = 3069;
+/** Сколько байт шифр web-push добавляет к открытому тексту (RFC 8291): заголовок 86 + разделитель 1 + метка GCM 16. */
+export const WEB_PUSH_OVERHEAD = 103;
+
+/** Токен FCM одним сегментом пути (у FCM в токене бывают `:` `-` `_`). */
+const TOKEN_RE = /^[A-Za-z0-9_:-]{1,4096}$/;
+
+export function validFcmToken(token: string): boolean {
+  return TOKEN_RE.test(token);
+}
+
+/**
+ * Можно ли слать пуш на этот эндпоинт как на шлюз FCM `relayBase` (env `PUSH_FCM_RELAY`). Заслон от SSRF — как у ntfy
+ * (`pushRules.endpointAllowed`): сравнение РАЗОБРАННОГО origin, только https, плюс путь строго `/api/push/fcm/<токен>`
+ * одним сегментом, без user-info, запроса и якоря. Пустая база — шлюз не разрешён. База с путём (не корень) — тоже нет:
+ * маршрут шлюза живёт у корня origin.
+ */
+export function fcmRelayEndpointAllowed(endpoint: string, relayBase: string): boolean {
+  if (!relayBase) return false;
+  try {
+    const base = new URL(relayBase);
+    if (base.protocol !== 'https:' || (base.pathname !== '/' && base.pathname !== '')) return false;
+    const ep = new URL(endpoint);
+    if (ep.protocol !== 'https:' || ep.origin !== base.origin) return false;
+    if (ep.username || ep.password || ep.search || ep.hash) return false;
+    if (!ep.pathname.startsWith(FCM_RELAY_PATH)) return false;
+    return validFcmToken(ep.pathname.slice(FCM_RELAY_PATH.length));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Пуш для устройства БЕЗ ключей шифрования (#213): текст сообщения не отправляем вовсе.
  *
  * Такие устройства — установки до шифрования. Им по-прежнему приходит «кто и где» (заголовок и адрес
@@ -162,6 +203,55 @@ export function maskPushPayload<
   if (view === 'name') return call ? p : { ...p, body: NOTIFY_HIDDEN_BODY };
   const { author: _a, authorId: _i, avatar: _v, group: _g, ...rest } = p;
   return { ...rest, title: NOTIFY_HIDDEN_TITLE, body: call ? p.body : NOTIFY_HIDDEN_BODY } as P;
+}
+
+/** Сколько знаков поля оставлять при подгонке, прежде чем браться за следующее поле. */
+const FIT_KEEP_CHARS = 20;
+
+/** Первые `n` знаков по кодовым точкам (суррогатная пара не рвётся) и «…», если что-то отрезано. */
+function cutChars(s: string, n: number): string {
+  const chars = Array.from(s);
+  return chars.length <= n ? s : `${chars.slice(0, n).join('')}…`;
+}
+
+/**
+ * Подогнать нагрузку пуша под предел шифра `maxCipher` (размер JSON в UTF-8 + `WEB_PUSH_OVERHEAD`) — для шлюза FCM
+ * (`FCM_RELAY_BODY_MAX`): длинный пуш иначе получил бы 413. По очереди укорачивает `body`, `group`, `title`, `author`
+ * (по кодовым точкам, наибольшая длина, что влезает, но не короче `FIT_KEEP_CHARS`), потом убирает `avatar`; не хватило —
+ * безличная нагрузка (`maskPushPayload(…, 'nothing')`). Влезает сразу — возвращает тот же объект.
+ */
+export function fitPushPayload<
+  P extends { type?: string; title: string; body: string; author?: string; authorId?: string; avatar?: string; group?: string },
+>(p: P, maxCipher: number): P {
+  const size = (x: unknown) => Buffer.byteLength(JSON.stringify(x), 'utf8') + WEB_PUSH_OVERHEAD;
+  if (size(p) <= maxCipher) return p;
+  let cur: P = { ...p };
+  for (const field of ['body', 'group', 'title', 'author'] as const) {
+    const v = cur[field];
+    if (typeof v !== 'string') continue;
+    const len = Array.from(v).length;
+    if (len <= FIT_KEEP_CHARS) continue;
+    const at = (n: number): P => ({ ...cur, [field]: cutChars(v, n) });
+    if (size(at(FIT_KEEP_CHARS)) > maxCipher) {
+      cur = at(FIT_KEEP_CHARS);
+      continue;
+    }
+    // Наибольшее n в [FIT_KEEP_CHARS, len), при котором влезает: размер растёт с n.
+    let lo = FIT_KEEP_CHARS;
+    let hi = len - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (size(at(mid)) <= maxCipher) lo = mid;
+      else hi = mid - 1;
+    }
+    return at(lo);
+  }
+  if (cur.avatar !== undefined) {
+    const { avatar: _a, ...rest } = cur;
+    cur = rest as P;
+    if (size(cur) <= maxCipher) return cur;
+  }
+  return maskPushPayload(cur, 'nothing');
 }
 
 /**

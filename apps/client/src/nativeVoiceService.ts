@@ -22,6 +22,8 @@ import { isAndroid } from './hotkeys';
 interface GusVoiceNativeBridge {
   startVoiceService(): void;
   stopVoiceService(): void;
+  /** New APK: map channel volume keys to its actual media output, independently of microphone mode. */
+  voiceChannelVolumeSet?(active: boolean): void;
 }
 
 function bridge(): GusVoiceNativeBridge | null {
@@ -38,6 +40,14 @@ function pageHidden(): boolean {
   return typeof document !== 'undefined' && document.visibilityState === 'hidden';
 }
 
+function channelVolume(active: boolean): void {
+  try {
+    bridge()?.voiceChannelVolumeSet?.(active);
+  } catch (e) {
+    console.warn('[native-voice] channel volume routing failed:', e);
+  }
+}
+
 /** Попросить службу у нативной стороны — если голос идёт и страница на экране. */
 function requestStart(): void {
   if (!wanted || pageHidden()) return;
@@ -49,13 +59,17 @@ function requestStart(): void {
 }
 
 function onVisibilityChange(): void {
-  if (!pageHidden()) requestStart();
+  if (!pageHidden()) {
+    if (wanted) channelVolume(true);
+    requestStart();
+  }
 }
 
 /** Start the microphone foreground service (on voice join). Best-effort; logs and swallows failures. */
 export function startNativeVoiceService(): void {
   if (!bridge()) return;
   wanted = true;
+  channelVolume(true);
   if (!listening) {
     document.addEventListener('visibilitychange', onVisibilityChange);
     listening = true;
@@ -67,6 +81,7 @@ export function startNativeVoiceService(): void {
 /** Stop the microphone foreground service (on voice leave). Best-effort. */
 export function stopNativeVoiceService(): void {
   wanted = false;
+  channelVolume(false);
   if (listening) {
     document.removeEventListener('visibilitychange', onVisibilityChange);
     listening = false;

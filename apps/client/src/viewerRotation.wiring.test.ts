@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -58,26 +59,34 @@ it('R276 мост отклоняет планшет от 600dp до UI, теле
 });
 it('R276 контрфакт >600 не выдаёт планшет ровно 600dp за телефон', () => {
   nativeContract(kotlin);
-  const mutant = replaceOnce(kotlin, 'smallestScreenWidthDp >= 600', 'smallestScreenWidthDp > 600');
-  assert.throws(() => nativeContract(mutant), failure('R276:tablet-boundary'));
+  counterfact(() => {
+    const mutant = replaceOnce(kotlin, 'smallestScreenWidthDp >= 600', 'smallestScreenWidthDp > 600');
+    assert.throws(() => nativeContract(mutant), failure('R276:tablet-boundary'));
+  });
 });
 it('R276 контрфакт PORTRAIT в ветви on не маскируется правильным UNSPECIFIED в комментарии', () => {
   nativeContract(kotlin);
-  const from = 'if (on) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED';
-  const mutant = replaceOnce(kotlin, from, 'if (on) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT') + `\n// ${from}\n`;
-  assert.throws(() => nativeContract(mutant), failure('R276:orientation'));
+  counterfact(() => {
+    const from = 'if (on) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED';
+    const mutant = replaceOnce(kotlin, from, 'if (on) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT') + `\n// ${from}\n`;
+    assert.throws(() => nativeContract(mutant), failure('R276:orientation'));
+  });
 });
 it('R276 контрфакт изменения ориентации вне главного потока обнаруживается в теле моста', () => {
   nativeContract(kotlin);
-  const mutant = mutateNative('runOnUiThread {', 'run {');
-  assert.throws(() => nativeContract(mutant), failure('R276:ui-thread'));
+  counterfact(() => {
+    const mutant = mutateNative('runOnUiThread {', 'run {');
+    assert.throws(() => nativeContract(mutant), failure('R276:ui-thread'));
+  });
 });
 it('R276 контрфакт позднего отказа планшету не допускает изменение его ориентации', () => {
   nativeContract(kotlin);
-  const guard = 'if (resources.configuration.smallestScreenWidthDp >= 600) return false';
-  const moved = mutateNative(guard, '');
-  const mutant = mutateNative('return true', `${guard}\n      return true`, moved);
-  assert.throws(() => nativeContract(mutant), failure('R276:tablet-boundary'));
+  counterfact(() => {
+    const guard = 'if (resources.configuration.smallestScreenWidthDp >= 600) return false';
+    const moved = mutateNative(guard, '');
+    const mutant = mutateNative('return true', `${guard}\n      return true`, moved);
+    assert.throws(() => nativeContract(mutant), failure('R276:tablet-boundary'));
+  });
 });
 
 function startupContract(source: string) {
@@ -105,8 +114,10 @@ it('R276 main устанавливает наблюдение за просмо�
 });
 it('R276 закомментированный вызов установщика не считается запуском наблюдения', () => {
   startupContract(main);
-  assert.throws(() => startupContract(replaceOnce(main, '\ninstallViewerRotation();', '\n// installViewerRotation();')),
-    failure('R276:startup-call'));
+  counterfact(() => {
+    assert.throws(() => startupContract(replaceOnce(main, '\ninstallViewerRotation();', '\n// installViewerRotation();')),
+      failure('R276:startup-call'));
+  });
 });
 
 // Такой же узкий разбор дерева правил, как в stylesGuards: комментарий не правило,
@@ -180,35 +191,47 @@ it('R276 низкий сенсорный ландшафт вписывает ф�
 });
 it('R276 контрфакт hover:hover не подменяет телефонный media правильным комментарием', () => {
   landscapeContract(css);
-  const mutant = replaceOnce(css, media, media.replace('hover: none', 'hover: hover')) + `\n/* ${media} {} */`;
-  assert.throws(() => landscapeContract(mutant), failure('R276:touch-landscape'));
+  counterfact(() => {
+    const mutant = replaceOnce(css, media, media.replace('hover: none', 'hover: hover')) + `\n/* ${media} {} */`;
+    assert.throws(() => landscapeContract(mutant), failure('R276:touch-landscape'));
+  });
 });
 it('R276 контрфакт полей ПК вместо четырёх системных вставок уменьшает сцену и обнаруживается', () => {
   landscapeContract(css);
-  assert.throws(() => landscapeContract(mutateLandscape('padding: var(--sa-t) var(--sa-r) var(--sa-b) var(--sa-l);', 'padding: 64px 76px 84px;')),
-    failure('R276:stage-insets'));
+  counterfact(() => {
+    assert.throws(() => landscapeContract(mutateLandscape('padding: var(--sa-t) var(--sa-r) var(--sa-b) var(--sa-l);', 'padding: 64px 76px 84px;')),
+      failure('R276:stage-insets'));
+  });
 });
 it('R276 контрфакты потери ограничения каждой оси изображения ловятся по живому базовому правилу', () => {
   for (const axis of ['width', 'height']) {
     landscapeContract(css);
-    const anchor = '.lb-img {', start = css.indexOf(anchor), { end } = braced(css, start + anchor.length - 1);
-    const mutant = css.slice(0, start) + replaceOnce(css.slice(start, end), `max-${axis}: 100%;`, `max-${axis}: none;`) + css.slice(end);
-    assert.throws(() => landscapeContract(mutant), failure('R276:image-fit'));
+    counterfact(() => {
+      const anchor = '.lb-img {', start = css.indexOf(anchor), { end } = braced(css, start + anchor.length - 1);
+      const mutant = css.slice(0, start) + replaceOnce(css.slice(start, end), `max-${axis}: 100%;`, `max-${axis}: none;`) + css.slice(end);
+      assert.throws(() => landscapeContract(mutant), failure('R276:image-fit'));
+    });
     landscapeContract(css);
-    assert.throws(() => landscapeContract(mutateLandscape('.lightbox .lb-img {', `.lightbox .lb-img { max-${axis}: none;`)),
-      failure('R276:image-fit'));
+    counterfact(() => {
+      assert.throws(() => landscapeContract(mutateLandscape('.lightbox .lb-img {', `.lightbox .lb-img { max-${axis}: none;`)),
+        failure('R276:image-fit'));
+    });
   }
 });
 it('R276 контрфакт видимых стрелок не скрывается правильным правилом в комментарии', () => {
   landscapeContract(css);
-  assert.throws(() => landscapeContract(mutateLandscape('display: none;', 'display: flex;') + '\n/* .lightbox .lb-nav { display: none; } */'),
-    failure('R276:no-arrows'));
+  counterfact(() => {
+    assert.throws(() => landscapeContract(mutateLandscape('display: none;', 'display: flex;') + '\n/* .lightbox .lb-nav { display: none; } */'),
+      failure('R276:no-arrows'));
+  });
 });
 it('R276 контрфакты потери левой и правой вставки обеих панелей галереи обнаруживаются отдельно', () => {
   for (const [selector, gap] of [['.pick-top', '12px'], ['.pick-bar', '10px']]) for (const [side, token] of [['left', 'l'], ['right', 'r']]) {
     landscapeContract(css);
     // Одинаковое корректное выражение на соседней панели не спасает кнопку под вырезом.
-    assert.throws(() => landscapeContract(mutateLandscape(`padding-${side}: calc(${gap} + var(--sa-${token}));`, `padding-${side}: ${gap};`)),
-      failure(`R276:pick-insets — ${selector} ${side}`));
+    counterfact(() => {
+      assert.throws(() => landscapeContract(mutateLandscape(`padding-${side}: calc(${gap} + var(--sa-${token}));`, `padding-${side}: ${gap};`)),
+        failure(`R276:pick-insets — ${selector} ${side}`));
+    });
   }
 });

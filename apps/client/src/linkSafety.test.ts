@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -178,11 +179,13 @@ describe('контрфакты всего модуля правил ссылок
   ];
   for (const mutant of mutants) {
     it(mutant.name, () => {
-      assert.equal(source.split(mutant.from).length - 1, 1, 'мутация должна попасть ровно в одно место');
       const original = load(source);
       mutant.check(original);
-      const changed = load(source.replace(mutant.from, mutant.to));
-      assert.throws(() => mutant.check(changed), assert.AssertionError);
+      counterfact(() => {
+        assert.equal(source.split(mutant.from).length - 1, 1, 'мутация должна попасть ровно в одно место');
+        const changed = load(source.replace(mutant.from, mutant.to));
+        assert.throws(() => mutant.check(changed), assert.AssertionError);
+      });
     });
   }
 });

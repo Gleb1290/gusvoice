@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { File } from 'node:buffer';
 import { readFileSync } from 'node:fs';
@@ -129,15 +130,17 @@ describe('nativeMedia: протокол нативного моста', () => {
   it('реальный Android 10-мутант ломает границу сохранения на Android 9', () => {
     // Сохранение в публичный Downloads без Android 10 заставило бы обещать недоступный системный путь.
     const source = readFileSync(new URL('./nativeMedia.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-    const mutate = (s: string) => {
-      const changed = s.replaceAll('androidMajor() >= 10', 'androidMajor() >= 9');
-      assert.notEqual(changed, s, 'найдена настоящая проверка API level 10');
-      return changed;
-    };
-    const mutant = fixture(undefined, { userAgent: 'Mozilla/5.0 (Linux; Android 9; Mobile)' }, mutate);
     assert.equal(fixture(undefined, { userAgent: 'Android 9' }).api.canSaveFileNative(), false);
-    assert.throws(() => assert.equal(mutant.api.canSaveFileNative(), false, 'Android 9 не поддерживает Download API'), assert.AssertionError,
-      'мутант с порогом 9 должен нарушить проверку capability');
+    counterfact(() => {
+      const mutate = (s: string) => {
+        const changed = s.replaceAll('androidMajor() >= 10', 'androidMajor() >= 9');
+        assert.notEqual(changed, s, 'найдена настоящая проверка API level 10');
+        return changed;
+      };
+      const mutant = fixture(undefined, { userAgent: 'Mozilla/5.0 (Linux; Android 9; Mobile)' }, mutate);
+      assert.throws(() => assert.equal(mutant.api.canSaveFileNative(), false, 'Android 9 не поддерживает Download API'), assert.AssertionError,
+        'мутант с порогом 9 должен нарушить проверку capability');
+    });
     assert.equal(source.includes('canSaveFileNative'), true, 'проверяется оригинальный модуль, не алгоритм из теста');
   });
 

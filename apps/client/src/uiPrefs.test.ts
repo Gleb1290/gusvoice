@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -52,6 +53,8 @@ it('масштаб по умолчанию обычный, выбор устро
 });
 
 it('контрольный мутант нарушает верхнюю границу, поэтому тест ловит off-by-one', () => {
-  assert.equal(mutantClamp().clampWidth(481), 481, 'мутант принимает пиксель за разрешённым пределом');
+  counterfact(() => {
+    assert.equal(mutantClamp().clampWidth(481), 481, 'мутант принимает пиксель за разрешённым пределом');
+  });
   assert.equal(prefs.clampWidth(481), 480, 'настоящая функция удерживает ширину в диапазоне');
 });

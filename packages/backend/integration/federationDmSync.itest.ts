@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -87,8 +88,10 @@ test('R190 приём копии пишет местную догонку без
 test('R190 контрфакт без fed=false ловится вызовом hook, а не ошибкой загрузки', async () => {
   // Класс ошибки: снятый запрет эха.
   await journalOracle();
-  await assert.rejects(journalOracle(mutate(source('conversations'), 'fedHooks?.record && opts.fed !== false', 'fedHooks?.record')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('приём копии не вызывает fed hook'));
+  await counterfact(async () => {
+    await assert.rejects(journalOracle(mutate(source('conversations'), 'fedHooks?.record && opts.fed !== false', 'fedHooks?.record')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('приём копии не вызывает fed hook'));
+  });
 });
 async function foreignOracle(raw = source('federation/convChanges')) {
   await seed(); const ch = changes(raw);
@@ -111,8 +114,10 @@ test('R190 своё сообщение отдаётся, чужая живая �
 test('R190 контрфакт снятого foreign-фильтра ловится чужим id в реальном журнале', async () => {
   // Класс ошибки: журнал размножает чужие сообщения.
   await foreignOracle();
-  await assert.rejects(foreignOracle(mutate(source('federation/convChanges'), 'if (foreign.size > 0) {', 'if (false) {')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('живая чужая копия не попадает в журнал'));
+  await counterfact(async () => {
+    await assert.rejects(foreignOracle(mutate(source('federation/convChanges'), 'if (foreign.size > 0) {', 'if (false) {')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('живая чужая копия не попадает в журнал'));
+  });
 });
 async function e2(kind: string, entityId: string | null) {
   const ch = changes();

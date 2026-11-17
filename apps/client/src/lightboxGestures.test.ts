@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -78,7 +79,7 @@ describe('жесты просмотрщика', () => {
     assert.equal(nearMediaEdge(16, 20), 0);
   });
 
-  it('реальные мутанты ломают бросок, порог края, закрытие и резиновое сопротивление', () => {
+  mutantTest('реальные мутанты ломают бросок, порог края, закрытие и резиновое сопротивление', () => {
     // Четыре независимые регрессии были бы заметны только на точной границе или при потере соседа.
     const source = readFileSync(fileURLToPath(new URL('./lightboxGestures.ts', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
     const load = (code: string) => {

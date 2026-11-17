@@ -1,0 +1,51 @@
+# Ядро интеграционных тестов (PGlite): гоняется на КАЖДЫЙ push в джобе `checks` (`INTEGRATION_SET=core`).
+# Полный набор (все `*.itest.ts` этого каталога) идёт ночью и вручную перед тегом — `.gitea/workflows/heavy.yaml`.
+#
+# Формат: одно имя файла на строку, относительно этого каталога; суффикс `.itest.ts` можно не писать.
+# `#` — комментарий до конца строки, пустые строки пропускаются. Имя, которого нет на диске, или пустой список —
+# `scripts/run-integration.mjs` падает с понятной ошибкой (переименованный файл не выпадет из гейта молча).
+#
+# Кто попадает в ядро: то, чья поломка необратима или бьёт по соседям/чужим данным, а не просто по экрану.
+
+# База: все миграции поднимаются с нуля; привязка супер-админа по ID (ошибка = чужой человек с правами инстанса).
+migrations
+seedSuperAdmin
+
+# Деньги. Списанные/начисленные монеты не откатить, сезон пересчитывается по журналу — ошибка видна только задним числом.
+gameEconomy
+gameMoney
+aloneRecount
+economyAloneCap
+botEconomy
+gameWheel
+gameWheelSpin
+wheelSchema
+gameDuel
+gameDuel.choice
+gameDuelSeries
+duelAccountDelete
+
+# Федерация и подписи. Сосед живёт на другой версии (правило 11 CLAUDE.md): сломанная связка, политика или
+# повтор подписанного запроса бьёт по чужому инстансу, а не только по нашему.
+federationLinks
+federationPolicies
+federationSwitch
+federationDmAccept
+federationDmOpen
+federationDmDelivery
+federationGuests
+federationReplayRoutes
+
+# Права и видимость: утечка чужих сообщений, блокировок, настроек инстанса; гостю — не больше прав, чем положено.
+roleMentions
+visibilityBlocks
+messagePrivacy
+messagePrivacyRoutes
+federationMessagePrivacy
+adminInstanceAuth
+guestAccountRoutes
+
+# Аккаунты и боты: удаление/обезличивание аккаунта и доступ бота к серверам и ЛС.
+accountCleanup
+botsRoutes
+botsServerGuards

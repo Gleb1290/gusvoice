@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -31,10 +32,12 @@ function fixture(raw = source, timers = true) {
 }
 function counterfacts(check: (raw: string) => void, changes: [string, string][]) {
   check(source);
-  for (const [from, to] of changes) {
-    assert.equal(source.split(from).length - 1, 1, `мутация должна попасть ровно в одно место: ${from}`);
-    assert.throws(() => check(source.replace(from, to)), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of changes) {
+      assert.equal(source.split(from).length - 1, 1, `мутация должна попасть ровно в одно место: ${from}`);
+      assert.throws(() => check(source.replace(from, to)), assert.AssertionError);
+    }
+  });
 }
 
 it('R146 панель по умолчанию 200, лишь высота больше 50 принимается и округляется', () => {

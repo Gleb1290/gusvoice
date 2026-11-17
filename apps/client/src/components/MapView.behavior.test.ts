@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -87,7 +88,10 @@ for (const m of [
   { label: 'программное движение принято за жест', from: 'if (!e.originalEvent) return;', to: '', prefix: 'R231-map-event:', actual: 1, expected: 0 },
   { label: 'порог отвергает ровно 6 пикселей', from: '< USER_MOVE_MIN_PX', to: '<= USER_MOVE_MIN_PX', prefix: 'R231-map-edge:', actual: 0, expected: 1 },
 ]) it(`R231 контрфакт MapView: ${m.label}`, async () => {
-  await gestures(raw); assert.equal(raw.split(m.from).length - 1, 1, 'единственный якорь мутации');
-  await assert.rejects(() => gestures(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
-    && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === m.expected);
+  await gestures(raw);
+  await counterfact(async () => {
+    assert.equal(raw.split(m.from).length - 1, 1, 'единственный якорь мутации');
+    await assert.rejects(() => gestures(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
+      && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === m.expected);
+  });
 });

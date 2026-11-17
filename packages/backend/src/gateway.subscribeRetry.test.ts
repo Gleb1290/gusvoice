@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -132,6 +133,8 @@ function withoutSubscribeCatch() {
 // Класс ошибки: мутационный тест считает произвольный краш доказательством чувствительности.
 it('R264 backend мутант без catch пойман отсутствием адресного кадра после original-first', async () => {
   await rejected();
+await gatedCounterfact(async () => {
   await assert.rejects(() => rejected(withoutSubscribeCatch()),
     e => e instanceof assert.AssertionError && e.message.startsWith('R264 backend catch:'));
+});
 });

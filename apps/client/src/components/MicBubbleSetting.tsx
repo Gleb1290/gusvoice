@@ -70,10 +70,10 @@ export function MicBubbleSetting({ s, update }: { s: AudioSettings; update: (nex
 
   return (
     <>
-      {/* Без пузыря рацию на телефоне зажать нечем — человек немеет. */}
+      {/* В приложении рация есть у кнопки микрофона; пузырь нужен поверх других приложений. */}
       {needsMicBubbleHint({ supported, pushToTalk: s.pushToTalk, micBubble: on }) && (
         <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-          Чтобы говорить с рацией, включите кнопку поверх приложений.
+          Чтобы говорить с рацией в других приложениях, включите кнопку поверх приложений.
         </div>
       )}
       <div className="settings-row">

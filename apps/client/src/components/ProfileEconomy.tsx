@@ -2,10 +2,13 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { isMockEconomy, mockUserCard } from '../benchMock';
 import coinDefaultIcon from '../assets/guscoin.svg';
-import type { UserEconomyCard } from '../economy';
+import { gamesView, type UserEconomyCard } from '../economy';
 import { ensureEconomy } from '../economyClient';
+import { ensureGameTitles } from '../gameBoardClient';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
+import { titlesOf } from './GameBoard';
+import { GameTitleChip } from './GameTitleChip';
 
 /**
  * Экономический блок в карточке ЧУЖОГО профиля: уровень, баланс и кнопка «типнуть».
@@ -43,6 +46,17 @@ export function ProfileEconomy({
   );
   const [card, setCard] = useState<UserEconomyCard | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
+  /**
+   * Звания прошлого месяца (этап 6) — чипами под уровнем, как корона у ника: одно место, не у каждого сообщения. Берём из
+   * общего списка званий сервера (`games/titles`, кэш на 10 мин), отдельного поля в карточке нет; отказавшийся от игр в
+   * носителях не значится — и тут пусто.
+   */
+  const gamesOn = !!economy && !!gamesView(economy);
+  const titleDto = useStore((s) => (serverId ? s.gameTitles[serverId] : undefined));
+  useEffect(() => {
+    if (gamesOn && serverId) ensureGameTitles(serverId);
+  }, [gamesOn, serverId]);
+  const titles = gamesOn ? titlesOf(titleDto, userId) : [];
 
   useEffect(() => {
     if (!serverId || !economy?.enabled) return;
@@ -92,6 +106,13 @@ export function ProfileEconomy({
           {card.balance}
         </span>
       </div>
+      {titles.length > 0 && (
+        <div className="pe-titles">
+          {titles.slice(0, 3).map((t) => (
+            <GameTitleChip key={t.key} titleKey={t.key} name={t.name} />
+          ))}
+        </div>
+      )}
       {/*
         🔴 Кнопка не прячется, когда типнуть нельзя, — становится серой с причиной. Исчезнувшая
         кнопка читается как поломка, а серая объясняет правило: тип живёт в голосовом канале, это и

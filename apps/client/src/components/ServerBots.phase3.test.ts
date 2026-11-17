@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -216,7 +217,9 @@ for (const [name, target, anchor, replacement, probe, message, actual, expected]
   ['бот получает online-точку', 'ServerMembersPanel', '!bot && (', 'true && (', rosterProbe, 'R303 у ботов нет точки статуса', 2, 0],
 ] as const) it(`R303 контрфакт: ${name} ловится поведением настоящего компонента`, async () => {
   await probe();
-  const raw = sources[target]; assert.equal(raw.split(anchor).length - 1, 1);
-  await assert.rejects(() => probe(raw.replace(anchor, replacement)), (e: unknown) => e instanceof assert.AssertionError &&
-    e.operator === 'strictEqual' && e.message.split('\n')[0] === message && e.actual === actual && e.expected === expected);
+  await counterfact(async () => {
+    const raw = sources[target]; assert.equal(raw.split(anchor).length - 1, 1);
+    await assert.rejects(() => probe(raw.replace(anchor, replacement)), (e: unknown) => e instanceof assert.AssertionError &&
+      e.operator === 'strictEqual' && e.message.split('\n')[0] === message && e.actual === actual && e.expected === expected);
+  });
 });

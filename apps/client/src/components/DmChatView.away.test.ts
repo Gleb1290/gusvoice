@@ -1,7 +1,9 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as jsx from 'react/jsx-runtime';
@@ -31,18 +33,15 @@ type Scene = { presence: Presence; statuses?: Statuses; phone?: boolean };
 const unused = () => { throw new Error('R284: вызвано действие за границей проверки шапки'); };
 const noView = () => null;
 
-function loadModule<T>(raw: string, fileName: string, dependencies: Record<string, unknown>): T {
+function loadModule<T>(raw: string, sourceUrl: URL, dependencies: Record<string, unknown>): T {
   const module = { exports: {} as T };
-  // Только целые настоящие модули; неожиданный импорт — ошибка харнесса, не «пойманный мутант».
+  // Целые настоящие модули; неподготовленный экспорт падает в точке использования.
   runInNewContext(ts.transpileModule(raw, {
-    fileName,
+    fileName: sourceUrl.pathname,
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   }).outputText, {
     module, exports: module.exports,
-    require: (id: string) => {
-      if (!Object.hasOwn(dependencies, id)) throw new Error(`R284: неописанный импорт ${fileName}: ${id}`);
-      return dependencies[id];
-    },
+    require: testVmImports(sourceUrl, dependencies),
   });
   return module.exports;
 }
@@ -70,7 +69,7 @@ function renderHeader(scene: Scene, raw = source): string {
     { getState: unused });
   const useCall = Object.assign((select: (s: { call: null | { conversationId: string } }) => unknown) =>
     select({ call: scene.presence === 'call' ? { conversationId: dm.id } : null }), { getState: unused });
-  const online = loadModule<OnlineModule>(onlineSource, 'dmOnline.ts', {
+  const online = loadModule<OnlineModule>(onlineSource, new URL('../dmOnline.ts', import.meta.url), {
     react: React, '@gusvoice/shared': shared, './api': { api: {} }, './store': { useStore },
   });
   const seen: UserLastSeen = {
@@ -115,7 +114,7 @@ function renderHeader(scene: Scene, raw = source): string {
     '../muteRecent': { loadMuteRecent: () => [], saveMuteRecent: unused },
     '../phoneLayout': { usePhoneLayout: () => !!scene.phone },
   };
-  const chat = loadModule<ChatModule>(raw, 'DmChatView.tsx', dependencies);
+  const chat = loadModule<ChatModule>(raw, new URL('./DmChatView.tsx', import.meta.url), dependencies);
   return renderToStaticMarkup(React.createElement(chat.DmChatView, { dm }));
 }
 
@@ -177,10 +176,12 @@ for (const textFirst of [false, true]) {
     const scene: Scene = { presence: 'voice', statuses: { peer: { status: 'away' } } };
     const name = 'voice + away';
     checkHeader(scene, 'away', away, name, source, textFirst);
-    assert.equal(source.split(anchor).length - 1, 1, 'R284 / DmChatView / мутация / один актуальный селектор peerAway');
-    const mutant = source.replace(anchor, 'const peerAway = false;');
-    const expectedAddress = address(name, textFirst ? '.dm-who-status / текст' : '.dm-ava / настоящий StatusDot');
-    assert.throws(() => checkHeader(scene, 'away', away, name, mutant, textFirst),
-      (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n')[0] === expectedAddress);
+    counterfact(() => {
+      assert.equal(source.split(anchor).length - 1, 1, 'R284 / DmChatView / мутация / один актуальный селектор peerAway');
+      const mutant = source.replace(anchor, 'const peerAway = false;');
+      const expectedAddress = address(name, textFirst ? '.dm-who-status / текст' : '.dm-ava / настоящий StatusDot');
+      assert.throws(() => checkHeader(scene, 'away', away, name, mutant, textFirst),
+        (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n')[0] === expectedAddress);
+    });
   });
 }

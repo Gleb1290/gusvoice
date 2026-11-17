@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -26,12 +27,14 @@ it('файлы и голосовые не заглушаются автозаг�
   assert.equal(rules.shouldAutoLoad('photo', 1, 'group', s), true);
   assert.equal(rules.shouldAutoLoad('video', 1, 'dm', s), true);
   assert.equal(rules.shouldAutoLoad('photo', 1, null, { ...s, photo: { dm: false, group: false, channel: false } }), true);
+  counterfact(() => {
   const mutant = mutated("if (kind === 'file' || kind === 'voice') return true;", "if (kind === 'file') return true;");
   assert.throws(() => mutant.shouldAutoLoad('voice', 1, 'dm', s), /Cannot read properties/,
     'мутант начинает читать несуществующий переключатель голосового вместо безусловного допуска');
   const noSourceDefault = mutated('if (!source) return true;', 'if (!source) return false;');
   assert.throws(() => assert.equal(noSourceDefault.shouldAutoLoad('photo', 1, null, s), true), assert.AssertionError,
     'мутант показывает заглушку у отложенного вложения без источника');
+  });
 });
 
 it('границы 10 МБ включительны, saveData ограничивает фото и видео отдельно', () => {
@@ -46,6 +49,7 @@ it('границы 10 МБ включительны, saveData ограничив
   assert.equal(rules.shouldAutoplay('gif', s), true);
   assert.equal(rules.shouldAutoplay('video', { ...s, autoplayVideo: true }), true);
   assert.equal(rules.shouldAutoplay('video', { ...s, autoplayVideo: true }, true), false);
+  counterfact(() => {
   const mutant = mutated('bytes <= (saveData ? Math.min(s.photoLimitMb * MB, SAVE_DATA_PHOTO_BYTES) : s.photoLimitMb * MB)', 'bytes < (saveData ? Math.min(s.photoLimitMb * MB, SAVE_DATA_PHOTO_BYTES) : s.photoLimitMb * MB)');
   assert.notEqual(mutant.shouldAutoLoad('photo', 10 * mb, 'dm', s), true, 'мутант с исключительной границей теряет точный лимит');
   const noSaveLimit = mutated('Math.min(s.photoLimitMb * MB, SAVE_DATA_PHOTO_BYTES)', 's.photoLimitMb * MB');
@@ -54,6 +58,7 @@ it('границы 10 МБ включительны, saveData ограничив
   const saveAutoplay = mutated('if (saveData) return false;', 'if (false) return false;');
   assert.throws(() => assert.equal(saveAutoplay.shouldAutoplay('video', { ...s, autoplayVideo: true }, true), false), assert.AssertionError,
     'мутант запускает видео даже при включённой экономии трафика');
+  });
 });
 
 it('видео и кружки включены по умолчанию, а кружок отдельно уважает autoplayRound и saveData', () => {
@@ -70,8 +75,10 @@ it('видео и кружки включены по умолчанию, а кр
   };
   check(rules);
   check(mutated('return !saveData && s.autoplayRound;', 'return !saveData && s.autoplayRound;'));
+  counterfact(() => {
   assert.throws(() => check(mutated('return !saveData && s.autoplayRound;', 'return !saveData && s.autoplayGif;')), assert.AssertionError,
     'мутант использует настройку GIF вместо отдельного выключателя кружков');
+  });
 });
 
 it('битое поле получает заводское значение, соседние сохранены; ближайшая ступень и приоритет определения типа верны', () => {
@@ -83,12 +90,14 @@ it('битое поле получает заводское значение, с
   assert.equal(rules.mediaKindOf({ contentType: 'image/gif', asFile: true, gif: true }), 'file');
   assert.equal(rules.mediaKindOf({ contentType: 'image/gif', gif: true }), 'gif');
   assert.equal(rules.mediaKindOf({ contentType: 'image/png' }), 'photo');
+  counterfact(() => {
   const badFallback = mutated('photo: bySource(r.photo, d.photo),', 'photo: d.photo,');
   assert.throws(() => assert.equal(badFallback.acceptAutoDownload({ photo: { dm: false } }).photo.dm, false), assert.AssertionError,
     'мутант сбрасывает валидный выбор вместе с битым соседним полем');
   const wrongTie = mutated('Math.abs(s - n) < Math.abs(best - n)', 'Math.abs(s - n) <= Math.abs(best - n)');
   assert.throws(() => assert.equal(wrongTie.snapLimit(37, 10), 36), assert.AssertionError,
     'мутант меняет сохранённое значение на соседнюю ступень при равном расстоянии');
+  });
 });
 
 it('«Изменено» замечает один выключенный источник и старые снимки читаются как заводские', () => {

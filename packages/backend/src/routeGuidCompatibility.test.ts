@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -210,7 +211,8 @@ for (const site of sites) {
   it(`R289 возврат uuid() только в ${site.name} ломает именно его legacy-совместимость`, async () => {
     const original = fixture();
     for (const other of sites) for (const value of legacy) await accepts(original, other, value);
-    const probe = fixture({ [site.file]: stricterGuid(site) });
+    await counterfact(async () => {
+const probe = fixture({ [site.file]: stricterGuid(site) });
     for (const other of sites) {
       if (other !== site) {
         for (const value of legacy) await accepts(probe, other, value);
@@ -229,5 +231,7 @@ for (const site of sites) {
       // Мутант не должен изображать поломанный импорт или схему, отвергающую вообще всё.
       await accepts(probe, other, uuid4);
     }
-  });
+
+});
+});
 }

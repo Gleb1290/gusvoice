@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -153,16 +154,16 @@ async function repeatScenario(mutation?: Mutation) {
 test('R214 G4 повтор закрепа не создаёт второй пуш, служебную строку и журнал', async () => { await repeatScenario(); });
 test('R214 G4 контрфакт снятия проверки группы ловится пушем личного закрепа', async () => {
   await pinScenario(true, undefined, true);
-  await assert.rejects(pinScenario(true, { file: 'routes/conv', from: "access.kind === 'group' && scope === 'both' ? notify : undefined", to: "scope === 'both' ? notify : undefined" }, true),
-    killed('pushGroupPack вызывается только у группы с notify', 1, 0));
+  await counterfact(() => assert.rejects(pinScenario(true, { file: 'routes/conv', from: "access.kind === 'group' && scope === 'both' ? notify : undefined", to: "scope === 'both' ? notify : undefined" }, true),
+    killed('pushGroupPack вызывается только у группы с notify', 1, 0)));
 });
 test('R214 G4 контрфакт !groupNotify ловится тихим legacy закрепом вместо прежнего поведения', async () => {
-  await pinScenario(); await assert.rejects(pinScenario(undefined, { file: 'routes/conv', from: 'groupNotify === false ? { silent: true }', to: '!groupNotify ? { silent: true }' }),
-    killed('legacy закреп без notify не становится тихим', true, false));
+  await pinScenario(); await counterfact(() => assert.rejects(pinScenario(undefined, { file: 'routes/conv', from: 'groupNotify === false ? { silent: true }', to: '!groupNotify ? { silent: true }' }),
+    killed('legacy закреп без notify не становится тихим', true, false)));
 });
 test('R214 G4 контрфакт потери res.service ловится вторым пушем на повторный закреп', async () => {
-  await repeatScenario(); await assert.rejects(repeatScenario({ file: 'routes/conv', from: 'if (groupNotify === true && res.service)', to: 'if (groupNotify === true)' }),
-    killed('повтор закрепа не повторяет pushGroupPack', 2, 1));
+  await repeatScenario(); await counterfact(() => assert.rejects(repeatScenario({ file: 'routes/conv', from: 'if (groupNotify === true && res.service)', to: 'if (groupNotify === true)' }),
+    killed('повтор закрепа не повторяет pushGroupPack', 2, 1)));
 });
 test('R214 G4 ровно 60 знаков не обрезаются, пробельный текст даёт пуш без цитаты', async () => {
   for (const [content, expected] of [['x'.repeat(60), `закрепил(а) «${'x'.repeat(60)}»`], [' \n\t ', 'закрепил(а) сообщение']]) {
@@ -219,6 +220,7 @@ test('R215 G6 потеря audience.includes дублирует msg ушедше
   // Автор уже получил msg обычной аудиторией; departed-путь добавляет ему только conv. Неавтору нужны обе строки.
   await departedScenario('leave');
   await departedScenario('remove');
+  await counterfact(async () => {
   const mutation = { file: 'federation/convAccept',
     from: "...(audience.includes(userId) ? [] : [{ userId, conversationId, kind: 'msg' as const, messageId: ins.id }]),",
     to: "{ userId, conversationId, kind: 'msg' as const, messageId: ins.id }," };
@@ -228,9 +230,10 @@ test('R215 G6 потеря audience.includes дублирует msg ушедше
   await assert.rejects(departedScenario('leave', mutation), e => e instanceof assert.AssertionError
     && e.message.startsWith('ушедший получает ровно одну msg и одну conv') && e.operator === 'deepStrictEqual'
     && JSON.stringify(e.actual) === JSON.stringify(wrong) && JSON.stringify(e.expected) === JSON.stringify(expected));
+  });
 });
 test('R214 G6 контрфакт !gone без former ловится потерей числового peerReadKey у бывшей группы', async () => {
-  await departedScenario('remove'); await assert.rejects(departedScenario('remove', { file: 'conversations',
+  await departedScenario('remove'); await counterfact(() => assert.rejects(departedScenario('remove', { file: 'conversations',
     from: 'const peerReads = await peerReadKeys(me, rows.filter((r) => !gone(r) || former(r)).map',
-    to: 'const peerReads = await peerReadKeys(me, rows.filter((r) => !gone(r)).map' }), killed('бывшая группа сохраняет числовой ключ прочтения', null, 42));
+    to: 'const peerReads = await peerReadKeys(me, rows.filter((r) => !gone(r)).map' }), killed('бывшая группа сохраняет числовой ключ прочтения', null, 42)));
 });

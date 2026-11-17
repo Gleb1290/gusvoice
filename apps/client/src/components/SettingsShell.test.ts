@@ -65,40 +65,5 @@ it('окна разделов не вводят своих углов, фоку�
   }
   assert.match(css, /\.modal\[tabindex=['"]-1['"]\]:focus\s*\{\s*outline:\s*none/);
 });
-function assertScales(css: string) {
-  const glows: Record<string, string> = {
-    '.auth-cta': '0 6px 18px var(--accent-soft)', '.drop-line': '0 0 6px var(--accent-glow)',
-    '.goose-bonus:hover:not(:disabled), .goose-bonus:focus-visible': '0 14px 36px color-mix(in srgb, var(--accent) 25%, transparent)',
-    '.ch-mention': '0 1px 6px var(--danger-soft)',
-  };
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const selector = m[1]!.trim().replace(/\s+/g, ' ');
-    for (const d of m[2]!.matchAll(/(?:^|;)\s*(border-(?:(?:top|bottom)-(?:left|right)-)?radius|gap|box-shadow)\s*:\s*([^;]+)/g)) {
-      const value = d[2]!.trim();
-      if (d[1] === 'box-shadow') {
-        if (/^(?:none|inset\b|0 0 0 )/.test(value) || value.includes('var(--sh-')) continue;
-        assert.equal(value, glows[selector], selector); continue;
-      }
-      if (value === '0') continue;
-      if (d[1]!.startsWith('border-') && value === 'inherit') continue;
-      if (['.gv-toast', '.gv-toast-row'].includes(selector) && d[1] === 'gap' && /^0\.\d+em$/.test(value)) continue;
-      const scale = d[1] === 'gap' ? 'sp-' : d[1] === 'border-radius' ? '(?:r-|bub-)' : 'r-';
-      assert.ok(new RegExp(`^(?:var\\(--${scale}[\\w-]+\\)|0)(?:\\s+(?:var\\(--${scale}[\\w-]+\\)|0))*$`).test(value), `${selector}: ${d[1]}: ${value}`);
-    }
-  }
-}
-it('шкалы углов и зазоров используют токены, существующие световые тени перечислены явно', () => {
-  // Ловит новое случайное px-значение; старые нетокенизированные свечения не расширяют исключение на весь файл.
-  assertScales(readFileSync(new URL('../styles.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, ''));
-});
-it('страж замечает случайный радиус каждого угла, но принимает токен, ноль и наследование', () => {
-  // Ловит обход стража переходом от общего border-radius к четырём отдельным углам.
-  for (const corner of ['top-left', 'top-right', 'bottom-left', 'bottom-right']) {
-    for (const value of ['var(--r-1)', '0', 'inherit']) {
-      assert.doesNotThrow(() => assertScales(`.bub { border-${corner}-radius: ${value}; }`));
-    }
-    for (const value of ['3px', '50%', 'var(--bub-r)', 'var(--sp-1)']) {
-      assert.throws(() => assertScales(`.bub { border-${corner}-radius: ${value}; }`), /border-.*-radius/);
-    }
-  }
-});
+// Общие CSS-пины радиусов/теней удалены по §11: они запрещали форму иллюстраций,
+// не проверяя поведение оболочки настроек. Поведенческие проверки оболочки выше сохранены.

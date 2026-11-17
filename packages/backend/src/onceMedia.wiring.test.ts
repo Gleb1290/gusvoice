@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -57,6 +58,8 @@ for (const [label, source, from, to, check, marker] of [
   ['таймер держит процесс', conversationSource, '  timer.unref?.();', '', unref, 'R262:таймер-не-держит-процесс'],
 ] as const) it(`R262 контрфакт: ${label} ловится адресным AST-утверждением, не синтаксической ошибкой`, () => {
   check(source);
-  assert.equal(source.split(from).length - 1, 1, 'одна адресная точка мутации');
+  counterfact(() => {
+assert.equal(source.split(from).length - 1, 1, 'одна адресная точка мутации');
   assert.throws(() => check(source.replace(from, to)), error => error instanceof assert.AssertionError && error.message.includes(marker));
+});
 });

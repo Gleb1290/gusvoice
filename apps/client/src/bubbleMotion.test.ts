@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -27,9 +28,11 @@ it('первый показ, смена окна и более трёх новы
   };
   check(motion);
   check(mutant('export function freshTail(', 'export function freshTail('));
+  counterfact(() => {
   const noCap = mutant('added.length > MOTION_MAX', 'false');
   assert.throws(() => check(noCap), assert.AssertionError,
     'мутант анимирует порцию истории как четыре новых сообщения');
+  });
 });
 
 it('удалённые у края окна и большие очистки не схлопываются внутри оставшейся ленты', () => {
@@ -43,7 +46,9 @@ it('удалённые у края окна и большие очистки н�
   };
   check(motion);
   check(mutant('export function removedInPlace<T extends Row>(', 'export function removedInPlace<T extends Row>('));
+  counterfact(() => {
   const wrongNeighbor = mutant('while (k >= 0 && !have.has(prev[k].id)) k--;', '');
   assert.throws(() => check(wrongNeighbor), assert.AssertionError,
     'мутант привязывает подряд удалённые сообщения к уже исчезнувшему соседу');
+  });
 });

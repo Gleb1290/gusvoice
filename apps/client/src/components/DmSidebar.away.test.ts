@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -6,6 +7,7 @@ import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import type { DmChannel } from '@gusvoice/shared';
 import * as rowRules from '../dmRowRules';
 import * as listRules from '../dmListRules';
@@ -34,32 +36,13 @@ function load(raw: string) {
     './Avatar': { Avatar: noView }, './SavedAvatar': { SavedAvatar: noView }, './Icon': { Icon: noView },
     './StatusDot': { StatusDot },
   };
-  // Неиспользуемые ветки всего модуля закрыты по именам импортов: новый импорт не получает молчаливую заглушку.
-  const dormant = new Set([
-    '../api', '../hotkeys', '../store', '../dmOnline', '../useContactSeen', '../toast', '../dialogChrome', '../dmRules',
-    '../channelRules', '../chatKeysRules', '../dmArchiveRules', '../dmCompose', '../phoneLayout', '../androidBack',
-    '../connState', '../contactRules', '../contacts', './GroupDialogs', './DmRowMenu', './DmFolderBar', '../dmFolderView',
-    '../dmFolders', '../dmListSearchRules', './DmServerSearch', './DmAllSearch', './DmListSearch', './DmArchive',
-    '../dragOut', '../filesDrop', './DmListSwipe', './DmPinDrag', '../chatSwipe', './BottomSheet', './Goose',
-    './SelfVoiceBar', './SettingsShell', './SharedMedia', './VoicePanel', '../voiceDrafts',
-  ]);
-  for (const node of parse(raw).statements) {
-    if (!ts.isImportDeclaration(node) || node.importClause?.isTypeOnly || !ts.isStringLiteral(node.moduleSpecifier)) continue;
-    const id = node.moduleSpecifier.text;
-    if (Object.hasOwn(deps, id)) continue;
-    assert.equal(dormant.has(id), true, `R284 объявленный импорт: ${id}`);
-    const names = node.importClause?.namedBindings;
-    assert.ok(names && ts.isNamedImports(names), `R284 именованный импорт: ${id}`);
-    deps[id] = Object.fromEntries(names.elements.filter(n => !n.isTypeOnly)
-      .map(n => [n.propertyName?.text ?? n.name.text, unused(`${id}:${n.name.text}`)]));
-  }
   const module = { exports: {} as Pick<typeof import('./DmSidebar'), 'DmRow'> };
   // Настоящий memo-компонент, хуки React и StatusDot; исполнен полный модуль, не извлечённая копия строки.
   const code = ts.transpileModule(raw, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
   runInNewContext(code, { module, exports: module.exports,
-    require(id: string) { assert.equal(Object.hasOwn(deps, id), true, `R284 объявленный require: ${id}`); return deps[id]; },
+    require: testVmImports(new URL('./DmSidebar.tsx', import.meta.url), deps),
   });
   return module.exports.DmRow;
 }
@@ -168,11 +151,12 @@ it('R284 карта ЛС берёт peerAway по id собеседника и �
 });
 
 function mutant(from: string, to: string, scenario: (raw: string) => void, marker: string) {
-  scenario(source);
-  assert.equal(source.split(from).length - 1, 1, 'мутант имеет один якорь в полном модуле');
-  assert.throws(() => scenario(source.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.split('\n')[0] === marker && error.operator === 'strictEqual'
-    && error.actual === false && error.expected === true);
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1, 'мутант имеет один якорь в полном модуле');
+    assert.throws(() => scenario(source.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.split('\n')[0] === marker && error.operator === 'strictEqual'
+      && error.actual === false && error.expected === true);
+  });
 }
 it('R284 контрфакт: строка всегда показывает online вместо away', () => {
   // Класс ошибки: зелёная точка маскирует статус отошедшего собеседника.

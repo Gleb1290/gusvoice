@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
@@ -145,8 +146,8 @@ test('R129 мутанты одноразового перевода, фильт�
     [', eq(dmFolders.pinnedOwn, false)','',async(target:ReturnType<typeof Fastify>)=>{await transfer([{id:'legacy',ids:['one']}],target);const saved=await row('legacy');await transfer([{id:'legacy',ids:['two']}],target);assert.deepEqual(await row('legacy'),saved);}],
     ['const pinned = await pinnedChats(me, folders.flatMap((f) => f.ids));','const pinned = await ownChats(me, folders.flatMap((f) => f.ids));',async(target:ReturnType<typeof Fastify>)=>{const response=await transfer([{id:'legacy',ids:['loose','one']}],target);assert.equal(response.statusCode,200);assert.deepEqual((await row('legacy')).pinned_ids,['one']);}],
     ['set.length >= DM_FOLDER_PINNED_MAX','set.length > DM_FOLDER_PINNED_MAX',verifyPinLimit]
-  ] as const){await seed();await verify(app);await seed();const target=Fastify();errors(target);const mutant=await sourceModule<Routes>('../src/routes/dmFolders.ts',from,to);await target.register(mutant.dmFolderRoutes);await target.ready();try{await assert.rejects(()=>verify(target),assert.AssertionError,from);}finally{await target.close();}}
+  ] as const){await seed();await verify(app);await counterfact(async()=>{await seed();const target=Fastify();errors(target);const mutant=await sourceModule<Routes>('../src/routes/dmFolders.ts',from,to);await target.register(mutant.dmFolderRoutes);await target.ready();try{await assert.rejects(()=>verify(target),assert.AssertionError,from);}finally{await target.close();}}); }
   type Conv=typeof import('../src/conversations.js');const actual=await import('../src/conversations.js');
   const verify=async(mod:Conv)=>{await seed();const access=await actual.loadAccess('one','a');assert.ok(access);const result=await mod.setConversationPinned('a',access,false);assert.equal(result.kind,'ok');assert.deepEqual((await row()).pinned_ids,['one','two','three']);assert.deepEqual((await row('legacy')).pinned_ids,['two']);};
-  await verify(actual);const mutant=await sourceModule<Conv>('../src/conversations.ts','AND NOT pinned_own AND','AND');await assert.rejects(()=>verify(mutant),assert.AssertionError);
+  await verify(actual);await counterfact(async()=>{const mutant=await sourceModule<Conv>('../src/conversations.ts','AND NOT pinned_own AND','AND');await assert.rejects(()=>verify(mutant),assert.AssertionError);});
 });

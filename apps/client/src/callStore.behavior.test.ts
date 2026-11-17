@@ -1,4 +1,6 @@
+import { testVmImports } from './testVmImports';
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -13,13 +15,14 @@ function load(raw: string, callStart: () => Promise<unknown>) {
   const module = { exports: {} as { useCall: typeof UseCall; CALL_DEVICE: string } };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, {
     module, exports: module.exports, setTimeout, clearTimeout,
-    require: (id: string) => {
-      if (id === 'zustand') return { create };
-      if (id === './api') return { api: { callStart } };
-      if (id === './callView') return { callViewFor };
-      if (id === './store') return { useStore: { getState: () => ({ user: { id: 'me' }, dms: [] }) } };
-      return {};
-    },
+    require: testVmImports(new URL('./callStore.ts', import.meta.url), {
+      // В этом сценарии константы shared не читаются; неподготовленный экспорт останется ошибкой.
+      '@gusvoice/shared': { __esModule: true },
+      zustand: { create },
+      './api': { api: { callStart } },
+      './callView': { callViewFor },
+      './store': { useStore: { getState: () => ({ user: { id: 'me' }, dms: [] }) } },
+    }),
   });
   return module.exports;
 }
@@ -40,8 +43,10 @@ it('поздний ответ запуска сохраняет свёрнуты
     }
   };
   await check(source);
+  await counterfact(async () => {
   const from = 'set({ join: { url: res.url, token: res.token, room: res.room }, muted: false, ...NO_VIDEO });';
   assert.ok(source.includes(from)); const changed = source.replace(from, from.replace('muted: false', 'muted: false, expanded: true'));
   assert.notEqual(changed, source);
   await assert.rejects(check(changed), /шлюз и пользователь уже свернули/);
+  });
 });

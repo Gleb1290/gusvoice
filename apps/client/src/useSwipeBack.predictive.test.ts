@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -164,9 +165,11 @@ it('R121 системный жест при закрытии верхнего с
 });
 
 it('R121 мутант сброса layer на системном touchcancel обнаруживается по следующему progress', async () => {
-  const from = '} else if (!pred) layer = null;';
-  assert.equal(source.split(from).length - 1, 1, 'мутант меняет ровно onCancel');
   await checkSystemTouchCancel();
-  await assert.rejects(checkSystemTouchCancel(source.replace(from, '} else layer = null;')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('touchcancel не теряет ведомый слой'));
+  await counterfact(async () => {
+    const from = '} else if (!pred) layer = null;';
+    assert.equal(source.split(from).length - 1, 1, 'мутант меняет ровно onCancel');
+    await assert.rejects(checkSystemTouchCancel(source.replace(from, '} else layer = null;')),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.includes('touchcancel не теряет ведомый слой'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -380,10 +381,14 @@ const mutations: { title: string; mutation: Mutation; scene: (m?: Mutation) => P
 ];
 for (const m of mutations) test(`R209 контрфакт: ${m.title} ломает адресное поведение`, async () => {
   await m.scene();
-  await assert.rejects(() => m.scene(m.mutation), killed(m.label, m.expected, m.actual));
+  await counterfact(async () => {
+    await assert.rejects(() => m.scene(m.mutation), killed(m.label, m.expected, m.actual));
+  });
 });
 test('R209 контрфакт: без отката непоместившегося сообщения предел 60 оставляет лишние строки и неверный next', async () => {
   await largeScene(undefined, true);
-  await assert.rejects(() => largeScene({ from: 'picked.length = start;', to: '/* откат потерян */' }, true),
-    killed('R209 предел: непоместившееся сообщение полностью откачено', 59, 61));
+  await counterfact(async () => {
+    await assert.rejects(() => largeScene({ from: 'picked.length = start;', to: '/* откат потерян */' }, true),
+      killed('R209 предел: непоместившееся сообщение полностью откачено', 59, 61));
+  });
 });

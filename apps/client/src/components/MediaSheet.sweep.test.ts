@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -8,6 +9,7 @@ import * as jsx from 'react/jsx-runtime';
 import { createRoot } from 'react-dom/client';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as rules from '../attachRules';
 import * as longText from '../longTextRules';
 import type { GalleryItem } from '../nativeMedia';
@@ -15,11 +17,11 @@ import type { GalleryItem } from '../nativeMedia';
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const raw = read('./MediaSheet.tsx');
 const unused = () => assert.fail('граница вне жеста галереи');
-function load<T>(source: string, deps: Record<string, unknown>, globals: Record<string, unknown>): T {
+function load<T>(sourceUrl: URL, source: string, deps: Record<string, unknown>, globals: Record<string, unknown>): T {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-  { module, exports: module.exports, ...globals, require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `импорт целого UI-модуля: ${id}`); return deps[id]; } });
+  { module, exports: module.exports, ...globals, require: testVmImports(sourceUrl, deps) });
   return module.exports as T;
 }
 type Scene = {
@@ -50,24 +52,22 @@ async function fixture(work: (f: Scene) => Promise<void>, source = raw, options:
   const globals = { window, document, URL, File, DOMException, Element, HTMLElement, navigator,
     IntersectionObserver: QuietIntersection, requestAnimationFrame: request, cancelAnimationFrame: cancel, Date: ClockDate, performance };
   const common = { react: React, 'react-dom': ReactDOM, 'react/jsx-runtime': jsx };
-  const icon = load<typeof import('./Icon')>(read('./Icon.tsx'), common, globals);
-  const bottom = load<typeof import('./BottomSheet')>(read('./BottomSheet.tsx'), { ...common, './Icon': icon }, globals);
+  const icon = load<typeof import('./Icon')>(new URL('./Icon.tsx', import.meta.url), read('./Icon.tsx'), common, globals);
+  const bottom = load<typeof import('./BottomSheet')>(new URL('./BottomSheet.tsx', import.meta.url), read('./BottomSheet.tsx'), { ...common, './Icon': icon }, globals);
   const items: GalleryItem[] = Array.from({ length: 5 }, (_, index) => ({ id: `photo-${index}`, kind: index === options.blocked ? 'video' : 'image',
     mime: index === options.blocked ? 'video/mp4' : 'image/jpeg', size: index === options.blocked ? rules.ATTACH_MAX_BYTES + 1 : 100,
     width: 100, height: 80, durationMs: 1, added: index, name: `${index}.jpg`, rot: 0 }));
   const deps = { ...common, '../attachRules': rules, '../longTextRules': longText,
-    '../api': { api: { attachmentDownloadUrl: unused } }, '../store': { useStore: (select: (s: { dmMessages: object }) => unknown) => select({ dmMessages: {} }) },
+    '../store': { useStore: (select: (s: { dmMessages: object }) => unknown) => select({ dmMessages: {} }) },
     '../cameraCapture': { cameraSupported: () => false, cameraAllowedQuietly: async () => false, cameraCount: unused, openCamera: unused, stopStream: () => {} },
     '../nativeMedia': { nativeMediaInfo: async () => ({ perm: 'granted', asked: true, camera: false, mic: false, capture: false }),
       galleryAlbums: async () => [], galleryPage: async () => ({ items, end: true }), galleryThumb: unused,
       cancelNativeFiles: () => {}, galleryFiles: unused, galleryPermission: unused, pickDocumentsNative: unused,
       captureNative: unused, captureErrorCode: unused, cameraPermissionNative: unused },
-    '../toast': { toast: unused }, '../confirm': { confirmAction: unused }, './BottomSheet': bottom,
-    './CameraScreen': { CameraCell: unused, CameraScreen: unused }, './ContextMenu': { MenuItem: unused },
-    './MediaPickViewer': { MediaPickViewer: unused }, './SchedPick': { SchedPick: unused }, './Icon': icon };
+    './BottomSheet': bottom, './Icon': icon };
   try {
     // Целый настоящий MediaSheet, его закрытый useGallerySweep и GalleryCell. Правила и React не подменены.
-    const { MediaSheet } = load<typeof import('./MediaSheet')>(source, deps, globals);
+    const { MediaSheet } = load<typeof import('./MediaSheet')>(new URL('./MediaSheet.tsx', import.meta.url), source, deps, globals);
     await React.act(async () => { root.render(React.createElement(MediaSheet, { native: true, room: options.room ?? 10, caption: '',
       onSend: unused, onAttach: unused, onClose: unused, onSystemPick: unused })); });
     const list = document.querySelector<HTMLElement>('.gal-scroll'); assert.ok(list, 'настоящий список галереи смонтирован');
@@ -180,7 +180,10 @@ for (const [label, from, to, scenario, prefix, actual, expected] of [
   ['сдвиг до удержания не отменяет таймер', '> SWEEP_SLOP_PX)', '> Number.POSITIVE_INFINITY)', moved, 'R218-slop:', '["photo-0"]', '[]'],
   ['мышь включена в мазок', "e.pointerType === 'mouse' || ", '', mouse, 'R218-mouse:', '["photo-0","photo-1","photo-2"]', '[]'],
 ] as const) it(`R218 хук контрфакт: ${label}`, async () => {
-  await scenario(raw); assert.equal(raw.split(from).length - 1, 1, 'у мутации один якорь в полном MediaSheet');
+  await scenario(raw);
+  await counterfact(async () => {
+  assert.equal(raw.split(from).length - 1, 1, 'у мутации один якорь в полном MediaSheet');
   await assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
     && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });

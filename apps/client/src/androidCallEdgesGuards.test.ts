@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -30,10 +31,12 @@ function body(source: string, name: string): string {
 
 function rejects(source: string, target: string, replacement: string, check: (source: string) => void) {
   check(source);
+  counterfact(() => {
   assert.equal(source.split(target).length - 1, 1, 'контрфакт меняет одно место исходника');
   const mutant = source.replace(target, replacement);
   assert.notEqual(mutant, source);
   assert.throws(() => check(mutant), assert.AssertionError);
+  });
 }
 
 function askClauses(source: string): string[] {

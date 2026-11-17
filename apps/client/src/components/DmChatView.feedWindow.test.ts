@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -29,12 +30,14 @@ it('R134 DmChatView всегда передаёт настоящее окно л
       && prop.expression.text === 'feedWindow', 'окно ленты передано без отключающего гейта');
   }
   check(source);
-  const anchor = 'feedWindow={feedWindow}';
-  assert.equal(source.split(anchor).length - 1, 1, 'однозначная проводка окна');
-  const mutant = source.replace(anchor, 'feedWindow={false ? feedWindow : undefined}');
-  assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('без отключающего гейта'));
-  const init = 'const feedWindow: FeedWindowProps = {';
-  assert.equal(source.split(init).length - 1, 1, 'однозначное создание окна');
-  const disabled = source.replace(init, 'const feedWin = false; const feedWindow: FeedWindowProps = feedWin && {');
-  assert.throws(() => check(disabled), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('без feedWin=false'));
+  counterfact(() => {
+    const anchor = 'feedWindow={feedWindow}';
+    assert.equal(source.split(anchor).length - 1, 1, 'однозначная проводка окна');
+    const mutant = source.replace(anchor, 'feedWindow={false ? feedWindow : undefined}');
+    assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('без отключающего гейта'));
+    const init = 'const feedWindow: FeedWindowProps = {';
+    assert.equal(source.split(init).length - 1, 1, 'однозначное создание окна');
+    const disabled = source.replace(init, 'const feedWin = false; const feedWindow: FeedWindowProps = feedWin && {');
+    assert.throws(() => check(disabled), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('без feedWin=false'));
+  });
 });

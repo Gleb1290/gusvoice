@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -105,22 +106,27 @@ for (const [name, from, to] of [
   ['routes/bots', "closeBotSockets(id, 4001, 'token revoked');\n      await dropBotVoiceSoon(id);", "closeBotSockets(id, 4001, 'token revoked');"],
   ['bots/botLifecycle', "await import('./botVoice.js').then((m) => m.dropBotVoice(botId), () => undefined);", '// голос забыли'],
 ] as const) it(`R306 контрфакт: закрытие без выхода из голоса ${name}`, () => {
-  const raw = source(name); closeCoverage(raw, name); assert.equal(raw.split(from).length - 1, 1);
-  assert.throws(() => closeCoverage(raw.replace(from, to), name), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R306 каждый вход закрытия потребителя') && e.actual === 0 && e.expected === 1);
+  const raw = source(name); closeCoverage(raw, name); counterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1);
+    assert.throws(() => closeCoverage(raw.replace(from, to), name), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R306 каждый вход закрытия потребителя') && e.actual === 0 && e.expected === 1);
+  });
 });
 
-function mutation(raw: string, from: string, to: string, probe: (raw: string) => void, marker: string) {
-  assert.equal(raw.split(from).length - 1, 1, 'уникальный якорь адресного контрфакта');
+function mutation(raw: string, from: string, to: string | (() => string), probe: (raw: string) => void, marker: string) {
   probe(raw);
-  assert.throws(() => probe(raw.replace(from, to)), e => e instanceof assert.AssertionError
-    && e.operator === 'strictEqual' && e.message.startsWith(marker), 'контрфакт отвергается именно нарушенным стражем');
+  counterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1, 'уникальный якорь адресного контрфакта');
+    assert.throws(() => probe(raw.replace(from, typeof to === 'function' ? to() : to)), e => e instanceof assert.AssertionError
+      && e.operator === 'strictEqual' && e.message.startsWith(marker), 'контрфакт отвергается именно нарушенным стражем');
+  });
 }
 it('R306 контрфакты пустого helper, чужого модуля и чужого id обнаруживаются до caller', () => {
   const raw = source('routes/bots');
-  for (const to of ['return;', dropSoonStatement.replace('/botVoice.js', '/notVoice.js'),
-    dropSoonStatement.replace('m.dropBotVoice(botId)', "m.dropBotVoice('someone-else')")])
-    mutation(raw, dropSoonStatement, to, dropSoonCoverage, 'R306_DROP_HELPER:');
+  for (const makeTo of [() => 'return;', () => dropSoonStatement.replace('/botVoice.js', '/notVoice.js'),
+    () => dropSoonStatement.replace('m.dropBotVoice(botId)', "m.dropBotVoice('someone-else')")]) {
+    mutation(raw, dropSoonStatement, makeTo, dropSoonCoverage, 'R306_DROP_HELPER:');
+  }
 });
 it('R306 контрфакты мёртвого и расширенного условия настроек обнаруживаются', () => {
   const raw = source('routes/bots');

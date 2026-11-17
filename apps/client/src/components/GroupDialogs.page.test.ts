@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { React, load, sourceOf, icon, environment, click, mutate } from './R171.phoneHarness';
@@ -16,7 +17,7 @@ const noView = () => null;
 const outside = () => assert.fail('сеть, подтверждение и внешние действия вне сценария R258b');
 
 function modules(phone: boolean, raw: string) {
-  const { BottomSheet } = load<typeof Sheets>(sheetSource, { './Icon': { Icon: icon } });
+  const { BottomSheet } = load<typeof Sheets>(new URL('./BottomSheet.tsx', import.meta.url), sheetSource, { './Icon': { Icon: icon } });
   const state = {
     user: me, members: [{ user: person }], serverFeatures: [],
     dms: [{ id: 'group-chat', otherUser: { ...me, id: 'group:group-chat' }, group: {
@@ -27,7 +28,7 @@ function modules(phone: boolean, raw: string) {
   };
   const useStore = Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state });
   // В VM исполняются оба полных модуля. Подменяются только внешние границы, не Shell или сам лист.
-  return load<typeof Dialogs>(raw, {
+  return load<typeof Dialogs>(new URL('./GroupDialogs.tsx', import.meta.url), raw, {
     '../api': { api: { searchUsers: outside } }, '../confirm': { confirmAction: outside },
     '../dialogChrome': { useDialogChrome: () => ({ current: null }) },
     '../dmRules': dmRules, '../groupChatRules': groupRules, '../contactRules': contactRules,
@@ -173,8 +174,10 @@ it('R258b информация о группе и добавление учас�
 it('R258b контрфакт: потеря page только у новой группы обнаруживается тем же сценарием после оригинала', async () => {
   // Узкий маркер принимает только отсутствие настоящего page, не ошибку загрузки/импорта/кнопки.
   await checkNewPhone();
-  const changed = mutate(source, '<Shell page title="Новая группа"', '<Shell title="Новая группа"');
-  await assert.rejects(() => checkNewPhone(changed),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(pageMarker)
-      && error.actual === false && error.expected === true);
+  await counterfact(async () => {
+    const changed = mutate(source, '<Shell page title="Новая группа"', '<Shell title="Новая группа"');
+    await assert.rejects(() => checkNewPhone(changed),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(pageMarker)
+        && error.actual === false && error.expected === true);
+  });
 });

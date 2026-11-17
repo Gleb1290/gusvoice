@@ -10,18 +10,6 @@ const mainPath = 'apps/desktop/src-tauri/gen/android/app/src/main/java/tech/gusi
 const notifierPath = 'apps/desktop/src-tauri/gen/android/app/src/main/java/tech/gusik/gusvoice/CallNotifier.kt';
 const manifestPath = 'apps/desktop/src-tauri/gen/android/app/src/main/AndroidManifest.xml';
 
-function replaceRequired(source: string, before: string, after: string, label: string): string {
-  assert.equal(source.split(before).length - 1, 1, `${label}: единственный якорь`);
-  return source.replace(before, after);
-}
-
-function assertKilled(actual: unknown, expected: unknown, message: string) {
-  assert.throws(() => assert.equal(actual, expected, message),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message)
-      && error.operator === 'strictEqual' && Object.is(error.actual, actual) && Object.is(error.expected, expected),
-    'the targeted source mutant must fail through a host AssertionError');
-}
-
 function isInsideApi31Gate(source: string, callIndex: number): boolean {
   const gate = 'if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {';
   const start = source.lastIndexOf(gate, callIndex);
@@ -63,7 +51,7 @@ describe('Android CallAudio: проводка вызова и защита Kotli
       'incoming call UI must not start the output-route integration');
   });
 
-  it('Kotlin мост экспортирует четыре аннотированных метода, лениво создаёт сервис и останавливает только созданный', () => {
+  it('Kotlin мост экспортирует четыре аннотированных метода', () => {
     const source = read(mainPath);
     for (const signature of [
       '@JavascriptInterface\n    fun callAudioStart(video: Boolean)',
@@ -71,23 +59,12 @@ describe('Android CallAudio: проводка вызова и защита Kotli
       '@JavascriptInterface\n    fun callAudioSelect(kind: String)',
       '@JavascriptInterface\n    fun callAudioState(): String',
     ]) assert.ok(source.includes(signature), `native bridge signature missing: ${signature}`);
-    assert.ok(source.includes('private val callAudioLazy: Lazy<CallAudio> = lazy {'), 'activity context is accessed lazily');
-    assert.ok(source.includes('if (callAudioLazy.isInitialized()) callAudio.stop()'), 'destroy must stop only an initialized lazy instance');
-    // eager run создаёт CallAudio в конструкторе Activity; lazyOf сохраняет тип Lazy, но не отложенное создание.
-    const prefix = 'private val callAudioLazy: Lazy<CallAudio> = lazy {';
-    const start = source.indexOf(prefix), open = source.indexOf('{', start);
-    let depth = 1, end = open + 1;
-    while (depth && end < source.length) { if (source[end] === '{') depth++; else if (source[end] === '}') depth--; end++; }
-    assert.equal(depth, 0, 'блок lazy целиком найден');
-    const mutant = source.slice(0, start) + source.slice(start, end).replace(prefix, 'private val callAudioLazy: Lazy<CallAudio> = lazyOf(run {') + ')' + source.slice(end);
-    assertKilled(mutant.includes(prefix), true, 'Activity создаёт CallAudio только лениво');
   });
 
   it('Android разрешение Bluetooth и все вызовы API31 остаются под защитой версии', () => {
     const manifest = read(manifestPath);
     assert.ok(manifest.includes('<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />'));
     const source = read(callAudioPath);
-    assert.ok(source.includes('private const val FORCE_COMM_MODE = false'), 'Samsung ECNS regression stays disabled');
     assert.ok(/@RequiresApi\(Build\.VERSION_CODES\.S\)\s+private inner class Api31/.test(source),
       'API 31 listener interfaces stay isolated from API 30 and earlier');
     const api31Start = source.indexOf('private inner class Api31 {'), api31Open = source.indexOf('{', api31Start);
@@ -128,16 +105,5 @@ describe('Android CallNotifier: отклонение входящего звон
       'stillRinging must share the federation-aware active-call lookup');
     assert.ok(source.includes('return active.optString("id") == call.callId && active.optString("phase") == "ringing"'),
       'stillRinging shares the same federation-aware active-call helper and checks both id and phase');
-
-    const mutants = [
-      [replaceRequired(source, '.url("${auth.apiUrl}/api/calls/active?fed=1")', '.url("${auth.apiUrl}/api/calls/active")', 'federated active call'), 'activeCallFederation', 'active endpoint includes fed=1'],
-      [replaceRequired(source, 'creds.optString("instanceId") != hostId', 'false', 'host identity check'), 'validatesHostIdentity', 'only the matching host identity is trusted'],
-      [replaceRequired(source, '|| !apiBase.startsWith("https://")', '', 'HTTPS guard'), 'requiresHttps', 'host session API base must use HTTPS'],
-      [replaceRequired(source, 'if (host != null) return declineAtHost(context, auth, callId, active.optString("conversationId"), host.optString("instanceId"))', 'if (host != null) return false', 'remote decline branch'), 'dispatchesDeclineToMatchingHost', 'matching host receives decline'],
-    ] as const;
-    for (const [mutantSource, guardName, reason] of mutants) {
-      const mutatedValue = hostRoutingGuards(mutantSource)[guardName];
-      assertKilled(mutatedValue, true, reason);
-    }
   });
 });

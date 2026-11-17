@@ -1,6 +1,8 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import * as React from 'react';
@@ -97,7 +99,7 @@ async function fixture(options: Options, work: (f: {
     runInNewContext(ts.transpileModule(raw, { compilerOptions: {
       module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
     } }).outputText, { module, exports: module.exports, window, document, DOMRect, requestAnimationFrame, Error,
-      require: (id: string) => { assert.ok(Object.hasOwn(dependencies, id), `объявленная зависимость DmChatView: ${id}`); return dependencies[id]; },
+      require: testVmImports(new URL('./DmChatView.tsx', import.meta.url), dependencies),
     });
     await React.act(async () => { root.render(React.createElement(module.exports.DmChatView, { dm })); });
     assert.ok(pane, 'полный DmChatView смонтировал границу MessagePane');
@@ -190,7 +192,10 @@ for (const [name, from, to, scenario, prefix, actual, expected] of [
   ['ответ последнего элемента не снимает сообщение', "if (res.removed === 'message') useStore.getState().convAfterDelete(dm.id, messageId);", 'if (false) useStore.getState().convAfterDelete(dm.id, messageId);', deletion,
     'G56-dm-whole:', '[]', '[["source-conversation","album-message"]]'],
 ] as const) it(`R213 DmChatView контрфакт: ${name}`, async () => {
-  await scenario(); assert.equal(source.split(from).length - 1, 1, 'мутант меняет одно место полного DmChatView');
-  await assert.rejects(scenario(source.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  await scenario();
+  await counterfact(async () => {
+    assert.equal(source.split(from).length - 1, 1, 'мутант меняет одно место полного DmChatView');
+    await assert.rejects(scenario(source.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });

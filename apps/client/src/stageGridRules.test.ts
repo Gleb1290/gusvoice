@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -116,5 +117,7 @@ for (const [name, before, after, check] of [
   ['порог удержания обнулён', 'input.hysteresisPx ?? STAGE_GRID_HYSTERESIS_PX', 'input.hysteresisPx ?? 0', hysteresis],
 ] as const) it(`R163/R164 мутант: ${name}`, () => {
   check(fitStageGrid);
-  assert.throws(() => check(mutant(before, after)), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutant(before, after)), assert.AssertionError);
+  });
 });

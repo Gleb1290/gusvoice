@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -160,9 +161,11 @@ for (const path of paths) {
   });
   test(`R194 снятый guard ${path} обнаруживается реальным HTTP-входом до IO`, async () => {
     // Класс ошибки: закрытая кнопка не заменяет серверный отказ на каждом отдельном входе.
-    await filesScenario(path); const [name, route, guard] = guardInfo[path];
-    await assert.rejects(filesScenario(path, { name, pair: withoutGuard(name, route, guard) }),
-      e => e instanceof assert.AssertionError && e.message.includes('каждый вход соблюдает разрешение файлов'));
+    await filesScenario(path); await counterfact(async () => {
+      const [name, route, guard] = guardInfo[path];
+      await assert.rejects(filesScenario(path, { name, pair: withoutGuard(name, route, guard) }),
+        e => e instanceof assert.AssertionError && e.message.includes('каждый вход соблюдает разрешение файлов'));
+    });
   });
 }
 async function onceScenario(path: 'send' | 'scheduled', mutation?: { name: string; pair: Mutation }) {
@@ -189,10 +192,12 @@ for (const path of ['send', 'scheduled'] as const) {
   test(`R196 снятая проверка once только на ${path} ловится HTTP-матрицей`, async () => {
     // Класс ошибки: отложенное обходит запрет, который обычная отправка уже соблюдает (и наоборот).
     await onceScenario(path);
-    const route = path === 'send' ? '/conv/:id/messages' : '/conv/:id/scheduled';
-    const guard = 'if (onceRefs(body.attachments) && (await fedOnceRefused(access.peerId))) return reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });';
-    await assert.rejects(onceScenario(path, { name: 'routes/conv', pair: withoutGuard('routes/conv', route, guard) }),
-      e => e instanceof assert.AssertionError && e.message.includes('один раз требует отдельного признака'));
+    await counterfact(async () => {
+      const route = path === 'send' ? '/conv/:id/messages' : '/conv/:id/scheduled';
+      const guard = 'if (onceRefs(body.attachments) && (await fedOnceRefused(access.peerId))) return reply.code(400).send({ error: FED_ERRORS.dmAttachmentsLater });';
+      await assert.rejects(onceScenario(path, { name: 'routes/conv', pair: withoutGuard('routes/conv', route, guard) }),
+        e => e instanceof assert.AssertionError && e.message.includes('один раз требует отдельного признака'));
+    });
   });
 }
 

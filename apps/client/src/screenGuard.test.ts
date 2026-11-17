@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -101,8 +102,10 @@ for (const [label, anchor, replacement, failure] of [
 ] as const) {
   it(`R262 контрфакт screenGuard: ${label}`, () => {
     refcount();
-    assert.equal(source.split(anchor).length - 1, 1, 'уникальная production-мутация');
-    assert.throws(() => refcount(source.replace(anchor, replacement)), error =>
-      error instanceof assert.AssertionError && error.message.includes(failure));
+    counterfact(() => {
+      assert.equal(source.split(anchor).length - 1, 1, 'уникальная production-мутация');
+      assert.throws(() => refcount(source.replace(anchor, replacement)), error =>
+        error instanceof assert.AssertionError && error.message.includes(failure));
+    });
   });
 }

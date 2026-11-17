@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
@@ -87,8 +88,10 @@ it('dmAway перекрывает оба источника ЛС-присутс�
     assert.equal(api.dmPresent({ onlineUsers: [], dmOnlineUsers: [], dmAwayUsers: [] }, 'peer'), false);
   };
   check(loadOnline());
-  assert.throws(() => check(loadOnline((s) => s.replace(' && !s.dmAwayUsers?.includes(userId)', ''))),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('away перекрывает любое присутствие'));
+  counterfact(() => {
+    assert.throws(() => check(loadOnline((s) => s.replace(' && !s.dmAwayUsers?.includes(userId)', ''))),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('away перекрывает любое присутствие'));
+  });
 });
 
 it('presence4 показывает локальную точку при скрытом времени, но dmOnline не заменяет локальную активность', () => {
@@ -99,13 +102,17 @@ it('presence4 показывает локальную точку при скры
   assert.equal(api.dmDot(true, false, ['lastseen2', 'presence4'], false), true, 'серверное dm-присутствие видно независимо от приватности времени');
   assert.equal(api.dmDot(false, false, ['lastseen2'], true), false, 'до presence4 локальная точка по-прежнему требует видимого времени');
 
-  const mutant = loadOnline(source => source.replace('return online || local;', 'return online;'));
-  assert.equal(mutant.dmDot(false, false, ['lastseen2', 'presence4'], false), false, 'неизменённый контроль проходит и у мутанта');
-  assert.equal(mutant.dmDot(false, false, ['lastseen2', 'presence4'], true), false, 'мутант теряет единственный локальный сигнал');
+  counterfact(() => {
+    const mutant = loadOnline(source => source.replace('return online || local;', 'return online;'));
+    assert.equal(mutant.dmDot(false, false, ['lastseen2', 'presence4'], false), false, 'неизменённый контроль проходит и у мутанта');
+    assert.equal(mutant.dmDot(false, false, ['lastseen2', 'presence4'], true), false, 'мутант теряет единственный локальный сигнал');
+  });
 });
 
 it('после смены исключений сброс кэша снимает временную точку, а мутант оставляет её', async () => {
   assert.equal(await activityAfterReset(loadOnline()), false, 'настоящий resetExactCache уведомляет подписчика и очищает активность');
-  const mutant = loadOnline((source) => source.replace('  actionAt.clear();', '  // мутант: локальное действие переживает reset'));
-  assert.equal(await activityAfterReset(mutant), true, 'исполняемый мутант сохраняет устаревший online до исходного таймера');
+  await counterfact(async () => {
+    const mutant = loadOnline((source) => source.replace('  actionAt.clear();', '  // мутант: локальное действие переживает reset'));
+    assert.equal(await activityAfterReset(mutant), true, 'исполняемый мутант сохраняет устаревший online до исходного таймера');
+  });
 });

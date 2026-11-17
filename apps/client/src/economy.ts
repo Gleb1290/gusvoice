@@ -14,6 +14,12 @@ export interface EconomySettingsDto {
   alonePercent: number;
   companyPercent: number;
   dailyCap: number;
+  /**
+   * Порог монет одному в канале за сутки (28.10); `0` — без порога. Время одному с этого дня не
+   * идёт в затухание — одиночный фарм держит этот порог.
+   * ⚠️ Необязательное: сервер старой версии поля не знает, и тогда панель ползунок не рисует.
+   */
+  aloneCap?: number;
   decayAfterMinutes: number;
   decayPercent: number;
   mutedPercent: number;
@@ -42,6 +48,42 @@ export interface EconomySettingsDto {
   /** Монет за каждый день цепочки стрика; `0` — стрика нет. Потолок цепочки — неделя. */
   streakBonus: number;
   retroGrantedAt: string | null;
+  /**
+   * Мини-игры на сервере (ГусКоины 2, этап 1): колесо, дуэли, прогнозы. Выключены по умолчанию.
+   * ⚠️ Четыре поля ниже необязательны: сервер старой версии их не знает — тогда в панели нет раздела «Игры».
+   */
+  gamesEnabled?: boolean;
+  /** Максимальная ставка одним нажатием, 1…1 000 000. */
+  gamesBetMax?: number;
+  /** Потолок проигрыша человека за сутки МСК на этом сервере; `0` — без потолка. */
+  gamesDailyLossMax?: number;
+  /** Комиссия банка дуэлей и прогнозов, 0…50 %. Сгорает — строкой журнала не пишется. */
+  gamesFeePercent?: number;
+  /**
+   * Этап 4: сколько одна пара может выиграть друг у друга за сутки МСК в играх с выбором (КНБ, Жадный гусь) — чистый
+   * поток пары; кубики не ограничены. `0` — без предела. Старый сервер поля не шлёт — ползунка нет.
+   */
+  gamesPairDailyMax?: number;
+}
+
+/**
+ * Мои деньги в играх на сервере (ГусКоины 2, этап 1) — в снимке кошелька рядом с `optedOut`.
+ *
+ * 🔴 Самоограничение: понизить предел можно сразу, повысить — только с начала следующих суток МСК
+ * (`lossLimitRaise`), иначе в азарте предел поднимают ровно тогда, когда он нужен.
+ */
+export interface GamesWallet {
+  /** «Не показывать мне игры». */
+  optOut: boolean;
+  /** Мой предел проигрыша за сутки; `null` — как на сервере. */
+  lossLimit: number | null;
+  /** Отложенное повышение: какое значение и с какого момента (ISO, начало следующих суток МСК). */
+  /** `value: null` — повышение до «как на сервере» (свой предел снимается с начала суток). */
+  lossLimitRaise: { value: number | null; from: string } | null;
+  /** Проиграно сегодня (сутки МСК): ставки − выигрыши − возвраты. */
+  lossToday: number;
+  /** Действующий предел = min(мой, потолок сервера); `null` — без предела. */
+  effectiveLimit: number | null;
 }
 
 /**
@@ -67,6 +109,7 @@ export interface LevelStage {
   at: number;
 }
 
+import type { GamesLaunchDto } from '@gusvoice/shared';
 import type { StreakView } from './streakView';
 export type { StreakView };
 
@@ -104,6 +147,8 @@ export interface EconomySummary {
     retro: number;
     rescale: number;
     granted: number;
+    /** Разовый перерасчёт сезона (28.10). Необязательное: у старого сервера поля нет. */
+    recount?: number;
     minted: number;
   };
   top: { userId: string; displayName: string; coins: number }[];
@@ -120,6 +165,10 @@ export interface EconomyWallet {
   optedOut: boolean;
   /** Не принимать типы. ⚠️ Отдельно от `optedOut`: заработок при этом продолжается (#122). */
   tipsOptOut: boolean;
+  /** Монет за ожидание одному сегодня (28.10) — для строки «X из порога». Нет у старого сервера. */
+  aloneEarnedToday?: number;
+  /** Мои настройки и счётчик игр. Нет у старого сервера — тогда блока «Игры» в кошельке нет. */
+  games?: GamesWallet;
 }
 
 /** Позиция каталога с ценой по ТЕКУЩЕЙ ставке — то, что показывают человеку. */
@@ -209,6 +258,40 @@ export interface EconomyView {
    * баланс — пункт «Ущипнуть» в меню показывает её всегда, даже когда монет не хватает.
    */
   shop: ShopEntry[];
+  /**
+   * Непросмотренная карточка перерасчёта сезона (28.10): сколько доначислено по правилу «один —
+   * затухание не бьёт» и за какой сезон. Поля нет — показывать нечего (и у старого сервера его нет).
+   * Показ — `RecountNotice.tsx`, отметка — `api.markRecountSeen`.
+   */
+  recount?: { amount: number; seasonId: string };
+  /**
+   * Включены ли мини-игры на сервере и потолок проигрыша за сутки — ВСЕМ, а не только управляющему
+   * (как `awayPercent`): без них кошелёк не знает, показывать ли блок «Игры» и до скольки двигать
+   * личный предел. Необязательные: нет у старого сервера; тогда берём из `settings`, если они есть.
+   */
+  gamesEnabled?: boolean;
+  gamesDailyLossMax?: number;
+  /**
+   * Замок игр до приёмки (29.10, `GAMES_OPEN`): `true` — этому человеку включать игры нельзя, переключатель «Игры» и
+   * кнопка «Запустить игры» спрятаны (`gamesLaunchRules.ts`). Нет поля (старый сервер) — как раньше.
+   */
+  gamesLocked?: boolean;
+  /** Запуск игр сервера (`null` — не запускали; нет поля — старый сервер): карточка «Игры пришли в голос». */
+  gamesLaunch?: GamesLaunchDto | null;
+}
+
+/**
+ * Включены ли игры и каков потолок сервера — с того, что прислал сервер (`null` — блок «Игры» не рисуем).
+ *
+ * Верхние поля снимка видны всем; `settings` — только управляющему. Нет ни того, ни другого (старый
+ * сервер) или нет `wallet.games` — игр для этого клиента нет.
+ */
+export function gamesView(view: EconomyView): { games: GamesWallet; serverMax: number } | null {
+  const games = view.wallet.games;
+  const enabled = view.gamesEnabled ?? view.settings?.gamesEnabled;
+  if (!games || enabled !== true) return null;
+  const serverMax = view.gamesDailyLossMax ?? view.settings?.gamesDailyLossMax ?? 0;
+  return { games, serverMax };
 }
 
 export interface EconomyPreview {
@@ -242,7 +325,8 @@ export interface LedgerEntry {
   createdAt: string;
   /** Для типов сервер отдаёт, сколько монет сгорело по дороге. */
   /** Подробности операции: у типа — сгоревший налог, у голоса — разбор начисления, у серии — её день. */
-  data?: { burned?: number; days?: number } & AccrualData;
+  /** У перерасчёта сезона (`recount`, 28.10) — `seasonId`, за который доплачено. */
+  data?: { burned?: number; days?: number; seasonId?: string } & AccrualData;
 }
 
 /**
@@ -308,7 +392,8 @@ export function explainAccrual(data: AccrualData | undefined | null): AccrualExp
   };
   add('микрофон был выключен', data.presenceMilli);
   add((data.companyMilli ?? 0) >= 0 ? 'вы были в компании' : 'вы были одни', data.companyMilli);
-  add('сработало затухание за долгие часы', data.decayMilli);
+  // С 28.10 затухание считает только время в компании — ожидание одному сюда не попадает.
+  add('сработало затухание за долгие часы в компании', data.decayMilli);
   return {
     time: minutes(data.seconds ?? 0),
     fullCoins: coins(data.baseMilli),
@@ -331,6 +416,8 @@ export const LEDGER_REASON: Record<string, string> = {
   // вопрос человека — «откуда у меня сразу пачка монет».
   retro: 'За активность до включения монет',
   rescale: 'Пересчёт при смене ставки',
+  // Разовая доплата 28.10: сезон пересчитан по правилу «один — затухание не бьёт» (`RecountNotice.tsx`).
+  recount: 'Перерасчёт сезона',
   goose: 'Поймал гуся',
   streak: 'Дни подряд',
   // ⚠️ Покупки: причина приходит с ключом награды, поэтому их тут по одной на каждую позицию
@@ -339,6 +426,21 @@ export const LEDGER_REASON: Record<string, string> = {
   'shop.mega-poke': 'Ущипнул',
   'shop.soundboard': 'Выстрел саундборда',
   'shop.animated-avatar': 'Анимированный аватар',
+  // Мини-игры (ГусКоины 2). Ставка — списание в момент ставки, выигрыш и возврат — отдельные строки;
+  // комиссия строкой не пишется (сгорает). Ни одна из них не заработок и не идёт в сезон.
+  'wheel.bet': 'Ставка в колесе',
+  'wheel.win': 'Выигрыш в колесе',
+  'wheel.refund': 'Возврат ставки (колесо)',
+  // Доля сундука-джекпота (этап 2): не заработок, не сезон — как и выигрыш.
+  'wheel.jackpot': 'Джекпот колеса',
+  'duel.stake': 'Ставка в дуэли',
+  'duel.win': 'Выигрыш дуэли',
+  'duel.refund': 'Возврат ставки (дуэль)',
+  'prediction.bet': 'Ставка на прогноз',
+  'prediction.win': 'Выигрыш прогноза',
+  'prediction.refund': 'Возврат ставки (прогноз)',
+  // Подарок сидевшим в голосе в момент запуска игр (29.10): не заработок, не сезон.
+  'games.launch': 'Подарок за запуск игр',
 };
 
 /**
@@ -362,4 +464,89 @@ export function coinsPerHour(ratePer5min: number, companyPct: number): number {
 export function minutesForCoins(coins: number, ratePer5min: number): number {
   if (ratePer5min <= 0) return 0;
   return Math.round((coins / ratePer5min) * 5);
+}
+
+/**
+ * За сколько часов одному с включённым микрофоном выбирается порог `aloneCap` (28.10).
+ *
+ * ⚠️ ПРИКИДКА для подписи, как и `coinsPerHour`: мьют, «отошёл» и выплата шагами её сдвигают. Шаг —
+ * полчаса, не меньше получаса: точнее подпись всё равно не станет, а «0 ч» читалось бы как «не капает».
+ * `null` — одному не капает вовсе (ставка или «Один в канале» на нуле) или порога нет (`0`).
+ */
+export function aloneCapHours(aloneCap: number, ratePer5min: number, alonePercent: number): number | null {
+  const perHour = (ratePer5min * 12 * alonePercent) / 100;
+  if (aloneCap <= 0 || perHour <= 0) return null;
+  return Math.max(0.5, Math.round((aloneCap / perHour) * 2) / 2);
+}
+
+/** «3 ч», «2,5 ч» — часы по-русски, с запятой. */
+export function hoursLabel(hours: number): string {
+  return `${String(hours).replace('.', ',')} ч`;
+}
+
+/**
+ * «Запустить игры» (ГусКоины 2, решения владельца 29.10, пп. 8–9) — то, что нужно панели экономики (`EconomyPanel.tsx`)
+ * и карточке запуска (`GamesLaunchNotice.tsx`, `gamesLaunchRules.ts`). Здесь, а не в отдельном модуле: у панели закрытый
+ * перечень импортов, а у этого модуля — ни одного импорта значений.
+ *
+ * Ползунок подарка — зеркало shared `GAMES_LAUNCH_GIFT` (0…2000 шагом 50, по умолчанию 500); сервер проверяет подарок
+ * сам (`isGamesLaunchGift`), разойдись числа — запрос получит понятный отказ `bad-gift`, а не лишние монеты.
+ */
+export const LAUNCH_GIFT_SLIDER = { min: 0, max: 2000, step: 50, default: 500 } as const;
+
+/**
+ * Кнопка «Запустить игры»: сервер её знает (`gamesLaunch` пришло полем — старый сервер не шлёт), игры ещё не запускали
+ * и замок открыт для этого человека (`gamesLocked` false: флаг инстанса `GAMES_OPEN` открыт или он супер-админ).
+ * Право `MANAGE_ECONOMY` проверено тем, что панель вообще открыта (настройки приходят только ему).
+ */
+export function launchButtonVisible(v: { gamesLaunch?: GamesLaunchDto | null; gamesLocked?: boolean }): boolean {
+  return v.gamesLaunch === null && v.gamesLocked === false;
+}
+
+/**
+ * Переключатель «Игры» в панели. Прячется, если замок закрыт для этого человека и игры на сервере были выключены
+ * (включить их он не может). Игры уже включены (до замка) — оставляем: выключать можно всем. Старый сервер без
+ * `gamesLocked` — как раньше.
+ */
+export function gamesToggleVisible(gamesLocked: boolean | undefined, loadedGamesOn: boolean): boolean {
+  return gamesLocked !== true || loadedGamesOn;
+}
+
+/** Отметка «видел карточку запуска» — на сервер. Удобство, не данные: потерялась — карточка покажется ещё раз. */
+export function launchSeenKey(serverId: string): string {
+  return `gv_games_launch_seen:${serverId}`;
+}
+
+/** `localStorage` или `null` (приватный режим, запрет хранилища). */
+export function launchStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function readLaunchSeen(store: Pick<Storage, 'getItem'> | null | undefined, serverId: string): boolean {
+  try {
+    return !!store?.getItem(launchSeenKey(serverId));
+  } catch {
+    return false;
+  }
+}
+
+export function writeLaunchSeen(store: Pick<Storage, 'setItem'> | null | undefined, serverId: string): void {
+  try {
+    store?.setItem(launchSeenKey(serverId), '1');
+  } catch {
+    /* хранилище недоступно — страховка на сессию у `MainLayout` */
+  }
+}
+
+/** Снять отметку (запуск из своей панели не удался — карточка должна прийти, когда запустят). */
+export function clearLaunchSeen(store: Pick<Storage, 'removeItem'> | null | undefined, serverId: string): void {
+  try {
+    store?.removeItem(launchSeenKey(serverId));
+  } catch {
+    /* хранилище недоступно */
+  }
 }

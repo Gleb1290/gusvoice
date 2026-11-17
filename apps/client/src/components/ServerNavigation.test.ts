@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -33,10 +34,14 @@ it('R174 телефонная шапка каналов возвращает к 
 });
 it('R174 контрфакты пустого выбора сервера и primary-плюса отвергаются адресными стражами', () => {
   // Оригиналы проверяются до мутантов; уникальные якоря не меняют соседние ветки шапки.
-  layoutContract(); const fallback = 'serverListOpen || !currentServerId'; assert.equal(layout.split(fallback).length - 1, 1);
-  assert.throws(() => layoutContract(layout.replace(fallback, 'serverListOpen')), e => e instanceof assert.AssertionError && e.message.includes('нет текущего'));
-  sidebarContract(); const plus = 'className="head-icon" title="Новый канал" aria-label="Новый канал"'; assert.equal(sidebar.split(plus).length - 1, 1);
-  assert.throws(() => sidebarContract(sidebar.replace(plus, 'className="head-icon primary" title="Новый канал" aria-label="Новый канал"')), e => e instanceof assert.AssertionError && e.message.includes('создание только'));
+  layoutContract(); counterfact(() => {
+    const fallback = 'serverListOpen || !currentServerId'; assert.equal(layout.split(fallback).length - 1, 1);
+    assert.throws(() => layoutContract(layout.replace(fallback, 'serverListOpen')), e => e instanceof assert.AssertionError && e.message.includes('нет текущего'));
+  });
+  sidebarContract(); counterfact(() => {
+    const plus = 'className="head-icon" title="Новый канал" aria-label="Новый канал"'; assert.equal(sidebar.split(plus).length - 1, 1);
+    assert.throws(() => sidebarContract(sidebar.replace(plus, 'className="head-icon primary" title="Новый канал" aria-label="Новый канал"')), e => e instanceof assert.AssertionError && e.message.includes('создание только'));
+  });
 });
 async function rail(phone: boolean, raw = settings) {
   GlobalRegistrator.register(); const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
@@ -67,6 +72,8 @@ it('R174 SettingsRail телефона ставит стрелку первой 
 });
 it('R174 контрфакт правого крестика телефона отвергается по числу кнопок', async () => {
   // Якорь ограничен SettingsRail перед его кнопкой, не другим крестиком в SettingsShell.
-  await rail(true); const anchor = '{!phone && (\n          <button type="button" className="icon-close"'; assert.equal(settings.split(anchor).length - 1, 1);
-  await assert.rejects(rail(true, settings.replace(anchor, '{true && (\n          <button type="button" className="icon-close"')), e => e instanceof assert.AssertionError && e.message.includes('одна кнопка'));
+  await rail(true); await counterfact(async () => {
+    const anchor = '{!phone && (\n          <button type="button" className="icon-close"'; assert.equal(settings.split(anchor).length - 1, 1);
+    await assert.rejects(rail(true, settings.replace(anchor, '{true && (\n          <button type="button" className="icon-close"')), e => e instanceof assert.AssertionError && e.message.includes('одна кнопка'));
+  });
 });

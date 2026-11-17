@@ -23,7 +23,9 @@ export type GooseBonusOpportunity = {
  * ⚠️ `bonus` — сколько монет РЕАЛЬНО начислил сервер. Компонент его не выдумывает и не показывает
  * до ответа: обещать награду вперёд сервера значит однажды показать число, которого не начислили.
  */
-export type GooseBonusClaim = { ok: boolean; bonus?: number; reason?: 'expired' | 'claimed' | 'unavailable' };
+export type GooseBonusClaim =
+  | { ok: true; bonus: number }
+  | { ok: false; retry?: boolean };
 
 /**
  * A small, non-modal presentation for an opportunity supplied by the economy client.
@@ -133,16 +135,16 @@ export function GooseBonus({
     setClaiming(true);
     try {
       const res = await onClaim(currentOpportunity.id);
+      // При сбое связи сервер может по-прежнему держать этот жетон. Оставляем кнопку доступной.
+      if (!res.ok && res.retry) return;
+      setHiddenId(currentOpportunity.id);
       // ⚠️ Показываем ТОЛЬКО то, что подтвердил сервер: ни отказ, ни нулевую надбавку не рисуем.
-      if (res.ok && (res.bonus ?? 0) > 0) {
-        const shown = { id: currentOpportunity.id, amount: res.bonus! };
+      if (res.ok && res.bonus > 0) {
+        const shown = { id: currentOpportunity.id, amount: res.bonus };
         setReward(shown);
         window.setTimeout(() => setReward((r) => (r?.id === shown.id ? null : r)), GOOSE_REWARD_MS);
       }
     } finally {
-      // A prompt must never wait behind a modal or return after a failed request. The server remains
-      // authoritative; the next issued opportunity will have a different id and can be displayed.
-      setHiddenId(currentOpportunity.id);
       setClaiming(false);
     }
   }

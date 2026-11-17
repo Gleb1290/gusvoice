@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -198,17 +199,19 @@ async function equalVersion(edits: Edits = {}) {
 it('R208 равная версия меняет имя и домен дома, но не состав, название или события группы', async () => { await equalVersion(); });
 it('R208 перенос записи подписи за проверку версии обнаруживается равным снимком', async () => {
   await equalVersion();
-  const call = 'await rememberVouchedHomes(peer, self, x.profiles).catch(() => {});';
-  // Одна замена всей функции: именно перемещаем существующий вызов, не подменяем хранилище.
-  const original = source('federation/convGroup');
-  const ast = ts.createSourceFile('convGroup', original, ts.ScriptTarget.Latest, true);
-  const node = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'applyGroupConv');
-  assert.ok(node); const body = node.getText(ast);
-  const gate = "if (existing && (existing.kind !== 'group' || existing.origin !== peer || x.version <= existing.version)) return;";
-  assert.equal(body.split(call).length - 1, 1); assert.equal(body.split(gate).length - 1, 1);
-  const moved = body.replace(call, '').replace(gate, `${gate}\n  ${call}`);
-  await assert.rejects(equalVersion({ group: [body, moved] }),
-    killed('R208 равная версия: подпись дома обновляется до проверки состава', 'Третий дом', 'Новое имя дома'));
+  await counterfact(async () => {
+    const call = 'await rememberVouchedHomes(peer, self, x.profiles).catch(() => {});';
+    // Одна замена всей функции: именно перемещаем существующий вызов, не подменяем хранилище.
+    const original = source('federation/convGroup');
+    const ast = ts.createSourceFile('convGroup', original, ts.ScriptTarget.Latest, true);
+    const node = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'applyGroupConv');
+    assert.ok(node); const body = node.getText(ast);
+    const gate = "if (existing && (existing.kind !== 'group' || existing.origin !== peer || x.version <= existing.version)) return;";
+    assert.equal(body.split(call).length - 1, 1); assert.equal(body.split(gate).length - 1, 1);
+    const moved = body.replace(call, '').replace(gate, `${gate}\n  ${call}`);
+    await assert.rejects(equalVersion({ group: [body, moved] }),
+      killed('R208 равная версия: подпись дома обновляется до проверки состава', 'Третий дом', 'Новое имя дома'));
+  });
 });
 
 async function ignoredHomes(edits: Edits = {}) {
@@ -226,8 +229,10 @@ it('R208 профиль с нашим домом и домом хоста не �
 for (const [label, guard] of [['наш дом', 'id === self || '], ['дом хоста', 'id === peer || ']] as const) {
   it(`R208 забытое исключение «${label}» обнаруживается лишней настоящей строкой подписи`, async () => {
     await ignoredHomes();
+  await counterfact(async () => {
     await assert.rejects(ignoredHomes({ group: [guard, ''] }), killed('R208 исключения: сохраняется только третий дом', 2, 1));
   });
+});
 }
 
 it('R208 нерабочий хост и чужой origin ничего не запоминают; рабочий хост принимается', async () => {
@@ -283,10 +288,12 @@ async function producedHomes(edits: Edits = {}) {
 it('R208 хост сериализует home_name/home_domain третьего и адресата из настоящих связок', async () => { await producedHomes(); });
 it('R208 удалённый home в профиле хоста обнаруживается на реальной странице журнала', async () => {
   await producedHomes();
-  await assert.rejects(producedHomes({ changes: [
-    '...(u?.homeInstanceId && groupHomes.get(u.homeInstanceId) ? { home: groupHomes.get(u.homeInstanceId) } : {}),',
-    '/* мутант: профиль без подписи дома */',
-  ] }), killed('R208 хост: профиль третьего содержит имя по связке', undefined, 'Псевдоним третьего'));
+  await counterfact(async () => {
+    await assert.rejects(producedHomes({ changes: [
+      '...(u?.homeInstanceId && groupHomes.get(u.homeInstanceId) ? { home: groupHomes.get(u.homeInstanceId) } : {}),',
+      '/* мутант: профиль без подписи дома */',
+    ] }), killed('R208 хост: профиль третьего содержит имя по связке', undefined, 'Псевдоним третьего'));
+  });
 });
 
 it('R208 хост предпочитает localName, допускает 40 символов, убирает имя на 41 и не отдаёт негодный домен', async () => {
@@ -322,8 +329,10 @@ async function linkedPrecedence(edits: Edits = {}) {
 it('R208 настоящая связка перекрывает vouched имя, домен и reports, обновление vouched не подменяет её', async () => { await linkedPrecedence(); });
 it('R208 vouched вместо прямой связки обнаруживается подменой подписанного напрямую дома', async () => {
   await linkedPrecedence();
-  await assert.rejects(linkedPrecedence({ labels: ['if (cache.has(v.instanceId)) continue;', '/* мутант: vouched старше связки */'] }),
-    killed('R208 связка: прямое имя старше vouched', 'Слова хоста', 'Мой псевдоним'));
+  await counterfact(async () => {
+    await assert.rejects(linkedPrecedence({ labels: ['if (cache.has(v.instanceId)) continue;', '/* мутант: vouched старше связки */'] }),
+      killed('R208 связка: прямое имя старше vouched', 'Слова хоста', 'Мой псевдоним'));
+  });
 });
 
 async function collidingName(edits: Edits = {}) {
@@ -340,6 +349,8 @@ async function collidingName(edits: Edits = {}) {
 it('R208 совпавшие с нами и связкой имена подавляются, независимое принимается; домен сохраняется', async () => { await collidingName(); });
 it('R208 отключение защиты от одноимённого vouched обнаруживается на реальном кеше', async () => {
   await collidingName();
-  await assert.rejects(collidingName({ labels: ['nm && !taken.has(nm.toLowerCase()) ? nm : null', 'nm ? nm : null'] }),
-    killed('R208 имя: совпадение с нашим именем не выдаётся за другой дом', 'МеСтНыЙ ДоМ', null));
+  await counterfact(async () => {
+    await assert.rejects(collidingName({ labels: ['nm && !taken.has(nm.toLowerCase()) ? nm : null', 'nm ? nm : null'] }),
+      killed('R208 имя: совпадение с нашим именем не выдаётся за другой дом', 'МеСтНыЙ ДоМ', null));
+  });
 });

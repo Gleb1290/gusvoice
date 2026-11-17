@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -19,10 +20,12 @@ function handler(source: string, name: string, inline = false) {
 }
 function checkMutant(source: string, check: (s: string) => void, from: string, to: string) {
   check(source);
-  assert.equal(source.split(from).length - 1, 1, 'мутант имеет единственный точный якорь');
-  const changed = source.replace(from, to);
-  assert.notEqual(changed, source);
-  assert.throws(() => check(changed), assert.AssertionError);
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1, 'мутант имеет единственный точный якорь');
+    const changed = source.replace(from, to);
+    assert.notEqual(changed, source);
+    assert.throws(() => check(changed), assert.AssertionError);
+  });
 }
 
 it('R117 волна в выборе пропускает нажатие строке без перемотки и захвата; обычно перематывает', () => {

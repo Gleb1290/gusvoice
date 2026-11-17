@@ -1,3 +1,4 @@
+import { counterfact } from "../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -187,15 +188,19 @@ it('R266 единое решение упоминания доходит до р
 
 it('R266 контрфакты проводки: удаление проверки права или серверного ограничения ловится AST-стражем', () => {
   checkAutocomplete(chat);
-  const filter = '!r.isEveryone && canMentionRole(r, permsBits)';
-  assert.equal(chat.split(filter).length, 2);
-  assert.throws(() => checkAutocomplete(chat.replace(filter, '!r.isEveryone')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:подсказка-проверяет-допуск-роли'));
+  counterfact(() => {
+    const filter = '!r.isEveryone && canMentionRole(r, permsBits)';
+    assert.equal(chat.split(filter).length, 2);
+    assert.throws(() => checkAutocomplete(chat.replace(filter, '!r.isEveryone')),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:подсказка-проверяет-допуск-роли'));
+  });
   checkRoleDecision(sockets);
-  const roles = 'store.bootstrap?.server.id === msg.serverId ? store.bootstrap.member.roleIds : undefined';
-  assert.equal(sockets.split(roles).length, 2);
-  assert.throws(() => checkRoleDecision(sockets.replace(roles, 'store.bootstrap?.member.roleIds')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:роли-принадлежат-серверу-сообщения'));
+  counterfact(() => {
+    const roles = 'store.bootstrap?.server.id === msg.serverId ? store.bootstrap.member.roleIds : undefined';
+    assert.equal(sockets.split(roles).length, 2);
+    assert.throws(() => checkRoleDecision(sockets.replace(roles, 'store.bootstrap?.member.roleIds')),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R266:роли-принадлежат-серверу-сообщения'));
+  });
 });
 
 it('R279 ChatView не предлагает everyone и here без права, а смена права обновляет MessagePane', () => {
@@ -206,23 +211,27 @@ it('R279 ChatView не предлагает everyone и here без права, 
 it('R279 потеря проверки права или её передачи в MessagePane отвергается после оригинала', () => {
   // Проверяем обе границы: вычисленный, но не переданный флаг так же бесполезен, как отсутствие проверки.
   checkBroadcastAutocomplete(chat);
-  for (const [from, to, marker] of [
-    ['!canMentionEveryone(permsBits)', 'false', 'R279 подсказка учитывает право'],
-    ['autocomplete={autocompleteWithRights}', 'autocomplete={autocomplete}', 'R279 в MessagePane уходит'],
-  ]) {
-    assert.equal(chat.split(from).length - 1, 1);
-    assert.throws(() => checkBroadcastAutocomplete(chat.replace(from, to)),
-      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(marker));
-  }
+  counterfact(() => {
+    for (const [from, to, marker] of [
+      ['!canMentionEveryone(permsBits)', 'false', 'R279 подсказка учитывает право'],
+      ['autocomplete={autocompleteWithRights}', 'autocomplete={autocomplete}', 'R279 в MessagePane уходит'],
+    ]) {
+      assert.equal(chat.split(from).length - 1, 1);
+      assert.throws(() => checkBroadcastAutocomplete(chat.replace(from, to)),
+        (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(marker));
+    }
+  });
 });
 
 it('R279 MessagePane не может проигнорировать запрет everyone и here от ChatView', () => {
   // Даже правильный флаг в ChatView не защищает список, если MessagePane снова берёт все массовые пинги.
   checkBroadcastAutocomplete(chat);
-  const from = '(autocomplete.noBroadcast ? [] : BROADCAST_MENTIONS)';
-  assert.equal(pane.split(from).length - 1, 1);
-  assert.throws(() => checkBroadcastAutocomplete(chat, pane.replace(from, 'BROADCAST_MENTIONS')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 запрет права убирает'));
+  counterfact(() => {
+    const from = '(autocomplete.noBroadcast ? [] : BROADCAST_MENTIONS)';
+    assert.equal(pane.split(from).length - 1, 1);
+    assert.throws(() => checkBroadcastAutocomplete(chat, pane.replace(from, 'BROADCAST_MENTIONS')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 запрет права убирает'));
+  });
 });
 
 it('R282 renderContent передаёт флаг обычного текста настоящему рендеру вместе с ролями', () => {
@@ -238,17 +247,21 @@ it('R282 пузыри и канальная лента убирают плашк
 it('R282 возврат отрицания mentionEveryone в любом пути ленты отвергается после оригинала', () => {
   // Мутируем пути по одному: исправленный пузырь не должен маскировать регрессию канальной строки и наоборот.
   checkBroadcastRows(pane);
-  for (const { path, call } of broadcastRowSites(pane)) {
-    const mutant = replaceNode(pane, call.arguments[6], '!m.mentionEveryone');
-    assert.notEqual(mutant, pane);
-    assert.throws(() => checkBroadcastRows(mutant), failsAt(broadcastDecisionMarker(path)));
-  }
+  counterfact(() => {
+    for (const { path, call } of broadcastRowSites(pane)) {
+      const mutant = replaceNode(pane, call.arguments[6], '!m.mentionEveryone');
+      assert.notEqual(mutant, pane);
+      assert.throws(() => checkBroadcastRows(mutant), failsAt(broadcastDecisionMarker(path)));
+    }
+  });
 });
 
 it('R282 потеря флага между renderContent и рендером отвергается после оригинала', () => {
   // Проверка call-site не спасает, если помощник снова оставит аргумент рендера по умолчанию.
   checkBroadcastRenderer(pane);
-  const call = broadcastRenderCall(pane);
-  const mutant = replaceNode(pane, call.arguments[4], 'undefined');
-  assert.throws(() => checkBroadcastRenderer(mutant), failsAt('R282 renderContent передаёт plainBroadcast рендеру'));
+  counterfact(() => {
+    const call = broadcastRenderCall(pane);
+    const mutant = replaceNode(pane, call.arguments[4], 'undefined');
+    assert.throws(() => checkBroadcastRenderer(mutant), failsAt('R282 renderContent передаёт plainBroadcast рендеру'));
+  });
 });

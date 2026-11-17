@@ -31,6 +31,7 @@ import {
   lacksPeerRead,
   nextUnread,
   readKeyFor,
+  placeForRead,
   clampReadKey,
   seenFlushDelay,
   remoteDraftDecision,
@@ -219,13 +220,16 @@ const HISTORY_PAGE = 50;
 /** Первая порция ленты из кеша (или после смены токена): покрывает весь кешированный хвост — ссылки обновятся все. */
 const STALE_PAGE = 100;
 const RETRY_MS = [2_000, 5_000, 15_000, 30_000];
-/** Черновик на сервер — после паузы в наборе (Р7), но не реже раза в `DRAFT_MAX_WAIT_MS`; погашенный — сразу. */
-const DRAFT_SAVE_MS = 2_000;
-const DRAFT_MAX_WAIT_MS = 10_000;
 /**
- * Запись черновика не удалась (сеть, лимит) — повтор ровно через столько: предел набора `DRAFT_MAX_WAIT_MS` на него не
- * действует. Ещё раньше — на `ready` и следующей букве.
+ * Черновик на сервер (Р7, 30.10 — как у Telegram, а не на каждую паузу набора): сразу при уходе из беседы
+ * (`convDraftLeave`), при сворачивании / закрытии окна (`convFlushDrafts(true)` после срочной записи кеша), погашенный
+ * (отправили, стёрли) — сразу; пока человек сидит в беседе — только после `DRAFT_IDLE_MS` простоя (каждая буква таймер
+ * перезапускает). Число — Telegram Desktop `kSaveCloudDraftIdleTimeout` (14 с, `history_widget.cpp`); Android пишет
+ * облачный черновик только в `ChatActivity.onPause` (уход / сворачивание). Прежние 2 с паузы гоняли черновик между
+ * устройствами одного человека почти вживую — и чужое старое эхо перебивало набор (видео владельца 30.10).
  */
+const DRAFT_IDLE_MS = 14_000;
+/** Запись черновика не удалась (сеть, лимит) — повтор ровно через столько. Ещё раньше — на `ready` и уходе из беседы. */
 const DRAFT_RETRY_MS = 15_000;
 /** Без шлюза — догонка раз в столько (прокси режет WebSocket: событий нет вовсе, а список и ленты должны жить). */
 const POLL_MS = 30_000;
@@ -288,6 +292,12 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
   let retryStep = 0;
   // Поколение: сброс (выход, смена инстанса) обрывает идущую догонку — её ответы уже не про нас.
   let gen = 0;
+  // Открытие после догонки не вправе перебирать окно, если человек уже выбрал историю/цитату.
+  const openings = new Map<string, symbol>();
+  function keepPosition(convId: string): void {
+    openings.delete(convId);
+    set((s) => ({ conv: { ...s.conv, positionRev: { ...s.conv.positionRev, [convId]: (s.conv.positionRev?.[convId] ?? 0) + 1 } } }));
+  }
   /* Шлюз (`sockets`): события идут, только пока он `up` (после `ready`). `down` — оборвался или не подключился: окно в
      памяти уже не «живое», а список и ленты догоняем сами — сразу и раз в `POLL_MS`. До первого исхода — `unknown`. */
   let gateway: 'unknown' | 'up' | 'down' = 'unknown';
@@ -568,9 +578,10 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
   }
 
   /** Последняя порция беседы (открытие, перечитка). «Прочитано» — после ответа и только если беседа на экране. */
-  async function openLatest(convId: string): Promise<void> {
+  async function openLatest(convId: string, accepts = () => true): Promise<void> {
     const stale = !!get().conv.windows[convId]?.stale;
     const res = await sameGen(api.convHistory(convId, { limit: stale ? STALE_PAGE : HISTORY_PAGE }));
+    if (!accepts()) return;
     const s = get();
     // Хвост дописан к старому окну — длинное окно режется сверху, как после подгрузки нового.
     const r = fit(applyPage(s.conv, listOf(s, convId), convId, res, 'latest'), convId, 'newer');
@@ -578,8 +589,9 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
   }
 
   /** Окно ЗАМЕНЯЕТСЯ порцией (шаг 2г): открытие у непрочитанного, переход к сообщению, возврат на место. */
-  async function openJump(convId: string, q: { after?: string; around?: string; date?: string }): Promise<void> {
+  async function openJump(convId: string, q: { after?: string; around?: string; date?: string }, accepts = () => true): Promise<void> {
     const res = await sameGen(api.convHistory(convId, { ...q, limit: HISTORY_PAGE }));
+    if (!accepts()) return;
     const s = get();
     const r = applyPage(s.conv, listOf(s, convId), convId, res, 'jump');
     commit(r.state, { [convId]: r.list });
@@ -789,7 +801,6 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
 
   // ─── Черновики на сервер (Р7) ──────────────────────────────────────────────────────────────────────────────────
   const draftTimers = new Map<string, unknown>();
-  const draftFirstDirty = new Map<string, number>();
   const draftInFlight = new Set<string>();
   const draftAgain = new Set<string>();
 
@@ -818,12 +829,9 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
     );
   }
 
-  /** Набор: записать через `ms` после последней буквы, но не позже `DRAFT_MAX_WAIT_MS` от первой незаписанной. */
+  /** Набор: записать через `ms` после последней буквы (простой); новая буква таймер перезапускает. */
   function scheduleDraftSave(convId: string, ms: number): void {
-    const t0 = now();
-    const first = draftFirstDirty.get(convId) ?? t0;
-    draftFirstDirty.set(convId, first);
-    armDraftTimer(convId, Math.min(ms, Math.max(0, first + DRAFT_MAX_WAIT_MS - t0)));
+    armDraftTimer(convId, ms);
   }
 
   /** Одна запись черновика беседы за раз (порядок записей = порядок набора); набрали ещё, пока шла, — следующим кругом. */
@@ -838,7 +846,6 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       draftAgain.add(convId);
       return;
     }
-    draftFirstDirty.delete(convId);
     const sent = get().drafts[convId] ?? null;
     draftInFlight.add(convId);
     const myGen = gen;
@@ -856,7 +863,7 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       const status = (e as { status?: number }).status;
       // Беседы нет или запрос негоден — записать не выйдет никогда: черновик остаётся только на этом устройстве.
       if (status === 400 || status === 403 || status === 404) setDraftDirty(convId, false);
-      // Временный отказ — повтор ровно через `DRAFT_RETRY_MS`: предел набора (`DRAFT_MAX_WAIT_MS`) его не сокращает.
+      // Временный отказ — повтор ровно через `DRAFT_RETRY_MS`.
       else armDraftTimer(convId, DRAFT_RETRY_MS);
     } finally {
       if (myGen === gen) {
@@ -880,6 +887,7 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
     /** Начать с чистого листа (выход, смена инстанса): идущая догонка обрывается. */
     convReset: () => {
       gen++;
+      openings.clear();
       again = false;
       gateway = 'unknown';
       peerReadRefreshed = false;
@@ -902,7 +910,6 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       retryStep = 0;
       for (const t of draftTimers.values()) clearTimeout(t);
       draftTimers.clear();
-      draftFirstDirty.clear();
       draftInFlight.clear();
       draftAgain.clear();
       set({ conv: emptyConvState(), outbox: {}, drafts: {}, places: {}, draftDirty: [], draftRev: {} });
@@ -1014,11 +1021,13 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
       commit(r.conv, lists, r.unread);
     },
 
-    /** Список бесед: из памяти, если он уже есть, иначе — догонка (она же загрузит его). */
+    /** Пользователь выбрал позицию до завершения начального открытия (например, начал прокрутку истории). */
+    convKeepPosition: keepPosition,
+
+    /** Список бесед: дождаться догонки, чтобы визит снимал актуальное прочитанное, а не cursor кеша. */
     convEnsureList: async () => {
-      if (get().conv.pts === null) await runSync(false);
-      // Шлюза нет — открытый список догоняем сразу, не дожидаясь опроса (старый путь перечитывал его при каждом открытии).
-      else if (gateway === 'down') void runSync(false);
+      if (running) await running;
+      else if (get().conv.phase !== 'live') await runSync(false);
     },
 
     /**
@@ -1028,13 +1037,19 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
      */
     convOpen: async (convId: string) => {
       const myGen = gen;
+      const opening = Symbol(convId);
+      openings.set(convId, opening);
+      const accepts = () => myGen === gen && openings.get(convId) === opening;
+      // Кеш содержит прежнее прочитанное: выбирать окно до догонки значит снова открывать старую историю.
+      if (get().conv.phase !== 'live') await runSync(false);
+      if (!accepts()) return;
       const s0 = get();
       const hadList = !!s0.dmMessages[convId];
       set((s) => (s.historyFailed.includes(convId) ? { historyFailed: s.historyFailed.filter((x) => x !== convId) } : s));
       const summary = s0.conv.summaries[convId];
       const win = s0.conv.windows[convId];
       const list = listOf(s0, convId);
-      const place = s0.places?.[convId] ?? null;
+      const place = placeForRead(s0.places?.[convId], summary?.lastReadKey ?? 0);
       // Без окна (переключатель выключен) — как раньше: последние сообщения. Иначе открытие у непрочитанного дало бы
       // кусок из середины, а прежняя лента не умеет подгружать вниз.
       const action: ReturnType<typeof openAction> = !windowed()
@@ -1059,25 +1074,25 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
         action.fetch === 'none'
           ? Promise.resolve()
           : action.fetch === 'after'
-            ? openJump(convId, { after: afterKeyCursor(action.key) })
+            ? openJump(convId, { after: afterKeyCursor(action.key) }, accepts)
             : action.fetch === 'around'
-              ? openJump(convId, { around: action.messageId }).catch((e: { status?: number }) => {
+              ? openJump(convId, { around: action.messageId }, accepts).catch((e: { status?: number }) => {
                   // Сообщения места больше нет (удалили) — место забываем, открываем последние.
-                  if (e?.status !== 404 || myGen !== gen) throw e;
+                  if (e?.status !== 404 || !accepts()) throw e;
                   set((s) => {
                     const { [convId]: _gone, ...places } = s.places ?? {};
                     return { places };
                   });
-                  return openLatest(convId);
+                  return openLatest(convId, accepts);
                 })
-              : openLatest(convId);
+              : openLatest(convId, accepts);
       // После сброса (выход, другой инстанс) — ни «Повторить», ни «прочитано»: беседа уже не отсюда.
       const load = fetch
         .catch(() => {
-          if (myGen === gen && !get().dmMessages[convId]) set((s) => ({ historyFailed: [...s.historyFailed, convId] }));
+          if (accepts() && !get().dmMessages[convId]) set((s) => ({ historyFailed: [...s.historyFailed, convId] }));
         })
         .then(() => {
-          if (myGen === gen && onScreenId(get()) === convId) convReadNow(convId);
+          if (accepts() && onScreenId(get()) === convId) convReadNow(convId);
         });
       if (!hadList) await load;
     },
@@ -1144,6 +1159,7 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
      * сообщения для меня больше нет (удалили).
      */
     convJumpTo: async (convId: string, messageId: string): Promise<boolean> => {
+      keepPosition(convId);
       if (listOf(get(), convId)?.some((m) => m.id === messageId)) return true;
       try {
         await openJump(convId, { around: messageId });
@@ -1159,12 +1175,14 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
      * устройства); ответ — id этого сообщения (дня позже последнего — последнее), `null` — беседа пуста.
      */
     convJumpToDate: async (convId: string, day: Date): Promise<string | null> => {
+      keepPosition(convId);
       await openJump(convId, { date: dayStart(day).toISOString() });
       return firstOfDay(listOf(get(), convId) ?? [], day);
     },
 
     /** «Вниз» из окна не у хвоста: последние сообщения (на экране — прочитаны). Окно у хвоста — запроса нет. */
     convJumpLatest: async (convId: string): Promise<void> => {
+      keepPosition(convId);
       const win = get().conv.windows[convId];
       if (win && !win.hasMoreAfter && !win.stale) return;
       await openLatest(convId);
@@ -1180,8 +1198,9 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
           const { [convId]: _old, ...places } = s.places ?? {};
           return { places };
         }
-        if (cur && cur.messageId === place.messageId && cur.offset === place.offset) return s;
-        return { places: { ...s.places, [convId]: place } };
+        const readKey = s.conv.summaries[convId]?.lastReadKey ?? 0;
+        if (cur && cur.messageId === place.messageId && cur.offset === place.offset && cur.readKey === readKey) return s;
+        return { places: { ...s.places, [convId]: { ...place, readKey } } };
       }),
 
     /** Открыть или создать беседу с человеком; вернуть её id. */
@@ -1223,14 +1242,23 @@ export function createConvActions(set: Set, get: Get, deps: ConvDeps) {
 
     /**
      * Черновик на ЭТОМ устройстве изменился (`store.setDraft`, Р7): пометить незаписанным и записать на сервер после
-     * паузы в наборе; погашенный (отправили, стёрли) — сразу, чтобы на других устройствах он не висел рядом с
-     * отправленным. Сервер без `conv3` — ничего: черновик живёт только здесь.
+     * `DRAFT_IDLE_MS` простоя (или раньше — уход из беседы, сворачивание); погашенный (отправили, стёрли) — сразу, чтобы
+     * на других устройствах он не висел рядом с отправленным. Сервер без `conv3` — ничего: черновик живёт только здесь.
+     * Сюда приходит ТОЛЬКО набранное на этом устройстве: черновик, пришедший с сервера (`remoteDrafts`), обратно не
+     * пишется — лента не отдаёт его наружу (`MessagePane`, «тихое» значение поля).
      */
     convDraftChanged: (convId: string) => {
       if (!draftsSync()) return;
       setDraftDirty(convId, true);
-      scheduleDraftSave(convId, get().drafts[convId] ? DRAFT_SAVE_MS : 0);
+      scheduleDraftSave(convId, get().drafts[convId] ? DRAFT_IDLE_MS : 0);
     },
+
+    /**
+     * Человек ушёл из беседы (лента размонтирована: другая беседа, список, закрыли ЛС) — незаписанный черновик на сервер
+     * сразу, не дожидаясь простоя. Как Telegram: Android `ChatActivity.onPause` → `saveDraft`, Desktop — облачная запись
+     * при смене открытого чата. Записывать нечего (`dirty` нет) — ничего.
+     */
+    convDraftLeave: (convId: string) => void saveDraftNow(convId, false),
 
     /** Записать незаписанные черновики сейчас (фон, выгрузка, переход в другой инстанс); `keepalive` — переживёт закрытие. */
     convFlushDrafts: (keepalive = false) => saveDirtyDrafts(keepalive),

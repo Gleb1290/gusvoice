@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -7,7 +8,7 @@ import type * as AndroidBack from '../androidBack';
 
 const source = sourceOf('BottomSheet');
 const backSource = readFileSync(new URL('../androidBack.ts', import.meta.url), 'utf8');
-const sheets = (raw = source) => load<typeof Sheets>(raw, { './Icon': { Icon: icon } });
+const sheets = (raw = source) => load<typeof Sheets>(new URL('./BottomSheet.tsx', import.meta.url), raw, { './Icon': { Icon: icon } });
 
 async function pointerDrag(target: Element, distance: number) {
   await React.act(async () => {
@@ -76,7 +77,7 @@ async function pageKeyboard(system: boolean, withBack: boolean) {
   await environment(async (_host, render) => {
     let backs = 0, closes = 0, storeReads = 0;
     const { BottomSheet } = sheets();
-    const { stepBack, TOP_LAYERS } = load<typeof AndroidBack>(backSource, {
+    const { stepBack, TOP_LAYERS } = load<typeof AndroidBack>(new URL('../androidBack.ts', import.meta.url), backSource, {
       './hotkeys': { isAndroid: () => true },
       './store': { useStore: { getState: () => { storeReads++; return {}; } } },
     }, { KeyboardEvent: window.KeyboardEvent });
@@ -144,12 +145,12 @@ function failsAt(marker: string) {
 it('R258 удаление page-ветки обнаруживается отсутствием полноэкранной разметки', async () => {
   // Сначала оригинал; ошибка трансляции/импорта не считается успешным обнаружением мутанта.
   await pageMarkup();
-  await assert.rejects(() => pageMarkup(mutate(source, 'if (page)', 'if (false)')), failsAt('R258_PAGE_BRANCH'));
+  await counterfact(() => assert.rejects(() => pageMarkup(mutate(source, 'if (page)', 'if (false)')), failsAt('R258_PAGE_BRANCH')));
 });
 
 it('R258 подмена onBack на onClose у стрелки страницы обнаруживается реальным нажатием', async () => {
   // Не проверяем строку обработчика: одинаковый экран с неверным действием обязан провалить сценарий.
   await pageArrow(true);
-  await assert.rejects(() => pageArrow(true, mutate(source, 'onClick={onBack ?? onClose}', 'onClick={onClose}')),
-    failsAt('R258_PAGE_BACK'));
+  await counterfact(() => assert.rejects(() => pageArrow(true, mutate(source, 'onClick={onBack ?? onClose}', 'onClick={onClose}')),
+    failsAt('R258_PAGE_BACK')));
 });

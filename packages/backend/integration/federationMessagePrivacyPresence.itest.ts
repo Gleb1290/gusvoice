@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -200,6 +201,8 @@ for (const [label, mutation, check, prefix, actual, expected] of [
   ['чужой дом влияет на наших', { file: 'federation/dmEphemeral', from: 'v.noMessages && self && v.user.instanceId === self.instanceId', to: 'v.noMessages && self' }, wrongHome, 'R212-presence-home:', true, false],
   ['ответ не учитывает первое письмо', { file: 'routes/conv', from: '&& !(await g.wrote(access.peerId, me))', to: '&& true' }, replied, 'R212-remote-write:', true, false],
 ] as const) test(`R212 строгий контрфакт presence: ${label}`, async () => {
-  await check(); await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await check(); await counterfact(async () => {
+    await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

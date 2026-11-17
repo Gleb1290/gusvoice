@@ -669,6 +669,16 @@ export function UserContextMenu({
   const megaEntry = economyView?.enabled ? economyView.shop?.find((e) => e.item === 'mega-poke') : undefined;
   const megaPrice = megaEntry?.enabled && megaEntry.priceCoins > 0 ? megaEntry.priceCoins : null;
   const myBalance = economyView?.wallet.balance ?? 0;
+  /**
+   * «Вызвать на дуэль» (ГусКоины 2, этап 3): оба в ОДНОМ голосовом канале, игры сервера включены и не выключены мне
+   * (как `gamesView` из `economy.ts` — условие повторено здесь, чтобы не тянуть в меню новый модуль), цель — не я и не бот.
+   * Остальное (цель выключила игры, занята, лимиты) — отказом сервера в форме вызова: меню не выдаёт чужие настройки.
+   */
+  const myVoiceChannelId = useStore((s) => s.voice?.channelId ?? null);
+  const openActivities = useStore((s) => s.openActivities);
+  const gamesOn = !!economyView?.wallet.games && (economyView.gamesEnabled ?? economyView.settings?.gamesEnabled) === true;
+  const canDuel =
+    !isSelf && !target.bot && !!bootstrap && gamesOn && !!target.voiceChannelId && target.voiceChannelId === myVoiceChannelId;
   // ⚠️ Название валюты берём из настроек сервера, а не пишем «монет»: владелец её переименовывает,
   // и вшитое слово рассогласовалось бы с кошельком, где имя подставляется (аудит текстов 03.09).
   const currencyName = economyView?.currencyName ?? 'монет';
@@ -1261,6 +1271,17 @@ export function UserContextMenu({
           реально сидит в голосе — иначе тыкать некуда, и бэкенд всё равно откажет. */}
       {canPoke && (
         <MenuItem icon="bell" label="Ткнуть" sub="всплывёт окно со звуком" onClick={() => setView('poke')} />
+      )}
+      {canDuel && bootstrap && (
+        <MenuItem
+          icon="gamepad"
+          label="Вызвать на дуэль"
+          sub="кубики на монеты"
+          onClick={() => {
+            openActivities({ serverId: bootstrap.server.id, view: 'duel-new', targetId: target.userId });
+            onClose();
+          }}
+        />
       )}
 
       {/* 🔴 Цена показывается ВСЕГДА, а не только когда хватает монет. Серый пункт без числа человек

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -238,26 +239,32 @@ it('R268 место кнопки перемеряется при размере,
 
 it('R268 original-first мутант HTCAPTION не выдаётся за исправный hit-test Snap Layouts', () => {
   hitTest();
-  const mutant = changed(rust, 'WM_NCHITTEST => LRESULT(HTMAXBUTTON as isize)', 'WM_NCHITTEST => LRESULT(HTCAPTION as isize)');
-  assert.throws(() => hitTest(mutant), e => e instanceof assert.AssertionError &&
-    e.message.startsWith('R268:hit-test-это-кнопка-развернуть'));
+  counterfact(() => {
+    const mutant = changed(rust, 'WM_NCHITTEST => LRESULT(HTMAXBUTTON as isize)', 'WM_NCHITTEST => LRESULT(HTCAPTION as isize)');
+    assert.throws(() => hitTest(mutant), e => e instanceof assert.AssertionError &&
+      e.message.startsWith('R268:hit-test-это-кнопка-развернуть'));
+  });
 });
 it('R268 original-first мутант pointerdown теряет счётчик щелчков и отвергается стражем', () => {
   mouseWiring();
-  const mutant = changed(component, 'onMouseDown={(e) => titleBarPointerDown(e)}', 'onPointerDown={(e) => titleBarPointerDown(e)}');
-  assert.throws(() => mouseWiring(mutant), e => e instanceof assert.AssertionError &&
-    e.message.startsWith('R268:полоса-слушает-mousedown-для-detail'));
+  counterfact(() => {
+    const mutant = changed(component, 'onMouseDown={(e) => titleBarPointerDown(e)}', 'onPointerDown={(e) => titleBarPointerDown(e)}');
+    assert.throws(() => mouseWiring(mutant), e => e instanceof assert.AssertionError &&
+      e.message.startsWith('R268:полоса-слушает-mousedown-для-detail'));
+  });
 });
 it('R268 original-first мутант полосы в корне App теряет независимый крестик и отвергается стражем', () => {
   independentRoot();
-  const file = parse(main, 'main.tsx');
-  const own = nodes(file, ts.isCallExpression).find(n => callName(n) === 'createRoot(bar).render');
-  assert.ok(own);
-  // Переносим JSX в главный root, а не делаем синтаксически битый модуль: падение обязано быть предметным.
-  const withoutRoot = main.slice(0, own.getStart()) + 'void 0' + main.slice(own.end);
-  const mutant = changed(withoutRoot, '<App />', '<WindowTitleBar /><App />');
-  assert.throws(() => independentRoot(mutant), e => e instanceof assert.AssertionError &&
-    e.message.startsWith('R268:полоса-в-отдельном-корне'));
+  counterfact(() => {
+    const file = parse(main, 'main.tsx');
+    const own = nodes(file, ts.isCallExpression).find(n => callName(n) === 'createRoot(bar).render');
+    assert.ok(own);
+    // Переносим JSX в главный root, а не делаем синтаксически битый модуль: падение обязано быть предметным.
+    const withoutRoot = main.slice(0, own.getStart()) + 'void 0' + main.slice(own.end);
+    const mutant = changed(withoutRoot, '<App />', '<WindowTitleBar /><App />');
+    assert.throws(() => independentRoot(mutant), e => e instanceof assert.AssertionError &&
+      e.message.startsWith('R268:полоса-в-отдельном-корне'));
+  });
 });
 
 it('R285 полный экран получает всю клиентскую область до tao и сразу возвращает ноль', () => {
@@ -271,36 +278,46 @@ it('R285 обычное окно с WS_CAPTION и расчёт с нулевым
 it('R285 перенос ветки после DefSubclassProc обнаруживается даже при правильном комментарии', () => {
   // Наличие правильного return ниже базового обработчика уже не предотвращает изменение клиентской области.
   fullscreenOrder();
-  const normalized = rust.replace(/\r\n/g, '\n');
-  const branch = fullscreenBranch(normalized).block;
-  const withoutBranch = changed(normalized, branch, '');
-  const call = 'let result = DefSubclassProc(hwnd, msg, wparam, lparam);';
-  const mutant = changed(withoutBranch, call, `${call}\n    ${branch}`) + `\n/* ${branch} */`;
-  assert.throws(() => fullscreenOrder(mutant), fullscreenFailure(fullscreenMarkers.order));
+  counterfact(() => {
+    const normalized = rust.replace(/\r\n/g, '\n');
+    const branch = fullscreenBranch(normalized).block;
+    const withoutBranch = changed(normalized, branch, '');
+    const call = 'let result = DefSubclassProc(hwnd, msg, wparam, lparam);';
+    const mutant = changed(withoutBranch, call, `${call}\n    ${branch}`) + `\n/* ${branch} */`;
+    assert.throws(() => fullscreenOrder(mutant), fullscreenFailure(fullscreenMarkers.order));
+  });
 });
 it('R285 потеря проверки wparam не превращает любой WM_NCCALCSIZE в полноэкранный', () => {
   // Нулевой wparam означает другой контракт сообщения; обход tao там не разрешён.
   fullscreenCondition();
-  const mutant = changed(rust, ' && wparam.0 != 0', '');
-  assert.throws(() => fullscreenCondition(mutant), fullscreenFailure(fullscreenMarkers.wparam));
+  counterfact(() => {
+    const mutant = changed(rust, ' && wparam.0 != 0', '');
+    assert.throws(() => fullscreenCondition(mutant), fullscreenFailure(fullscreenMarkers.wparam));
+  });
 });
 it('R285 IsZoomed вместо WS_CAPTION не выдаётся за определение полного экрана', () => {
   // Обычное развёрнутое окно должно по-прежнему ограничиваться рабочей областью монитора.
   fullscreenCondition();
-  const mutant = changed(rust, '(GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0) == 0', 'IsZoomed(hwnd).as_bool()');
-  assert.throws(() => fullscreenCondition(mutant), fullscreenFailure(fullscreenMarkers.caption));
+  counterfact(() => {
+    const mutant = changed(rust, '(GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0) == 0', 'IsZoomed(hwnd).as_bool()');
+    assert.throws(() => fullscreenCondition(mutant), fullscreenFailure(fullscreenMarkers.caption));
+  });
 });
 it('R285 перевёрнутая проверка WS_CAPTION не перехватывает обычное окно вместо полного экрана', () => {
   // Перепутанный знак одновременно ломает fullscreen и отнимает обработку обычного окна у tao.
   fullscreenCondition();
-  const mutant = changed(rust, '& WS_CAPTION.0) == 0', '& WS_CAPTION.0) != 0');
-  assert.throws(() => fullscreenCondition(mutant), fullscreenFailure(fullscreenMarkers.caption));
+  counterfact(() => {
+    const mutant = changed(rust, '& WS_CAPTION.0) == 0', '& WS_CAPTION.0) != 0');
+    assert.throws(() => fullscreenCondition(mutant), fullscreenFailure(fullscreenMarkers.caption));
+  });
 });
 it('R285 ненулевой ответ не подменяет разрешение клиентской области во весь монитор', () => {
   // Порядок и правильное условие недостаточны, если ранний return имеет другой Win32-контракт.
   fullscreenOrder();
-  const normalized = rust.replace(/\r\n/g, '\n');
-  const branch = fullscreenBranch(normalized).block;
-  const mutant = changed(normalized, branch, changed(branch, 'return LRESULT(0);', 'return LRESULT(1);'));
-  assert.throws(() => fullscreenOrder(mutant), fullscreenFailure(fullscreenMarkers.zero));
+  counterfact(() => {
+    const normalized = rust.replace(/\r\n/g, '\n');
+    const branch = fullscreenBranch(normalized).block;
+    const mutant = changed(normalized, branch, changed(branch, 'return LRESULT(0);', 'return LRESULT(1);'));
+    assert.throws(() => fullscreenOrder(mutant), fullscreenFailure(fullscreenMarkers.zero));
+  });
 });

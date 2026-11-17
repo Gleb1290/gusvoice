@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -123,15 +124,19 @@ it('R289 контрфакты старого errors и последней вме
   ]) {
     // original-first: неизвестный импорт или ошибка загрузки не считаются обнаружением мутанта.
     await checkValidationReply(error);
+await gatedCounterfact(async () => {
     await assert.rejects(checkValidationReply(error, changeErrorHandler(from, to)), zodResponseFailure);
+});
   }
 });
 
 it('R289 контрфакт потерянной подсказки при пустых issues не превращается в безымянную ошибку', async () => {
   const error = new ZodError([]);
   await checkValidationReply(error);
+await gatedCounterfact(async () => {
   const mutant = changeErrorHandler("first?.message ?? 'Проверьте введённые данные'", "first?.message ?? ''");
   await assert.rejects(checkValidationReply(error, mutant), zodResponseFailure);
+});
 });
 
 it('R131 мутант возврата e.message для внутренней ошибки отвергается настоящим inject', async () => {
@@ -139,9 +144,11 @@ it('R131 мутант возврата e.message для внутренней о�
   const check = async (raw: string) => assert.deepEqual(await response(new Error('SQL: internal query failure'), raw),
     { status: 500, data: { error: 'internal error' } });
   await check(source);
+await gatedCounterfact(async () => {
   const mutant = source.replace("error: expose ? e.message : 'internal error'", 'error: e.message');
   assert.notEqual(mutant, source);
   await assert.rejects(check(mutant), assert.AssertionError);
+});
 });
 
 async function routeStatuses(raw = source): Promise<number[]> {
@@ -211,11 +218,13 @@ it('R137 возврат регистрации dmRoutes возвращает с�
   const verify = async (raw: string) => assert.deepEqual(await routeStatuses(raw),
     [404, 404, 404, 404, 200, 200, 200, 200, 200]);
   await verify(source);
+await gatedCounterfact(async () => {
   const anchor = 'await api.register(convRoutes);';
   assert.ok(source.includes(anchor));
   const mutant = "import { dmRoutes } from './routes/dm.js';\n" +
     source.replace(anchor, `${anchor}\n    await api.register(dmRoutes);`);
   await assert.rejects(verify(mutant), assert.AssertionError);
+});
 });
 
 function noLegacyTables(files: readonly { path: string; text: string }[]): void {
@@ -240,8 +249,10 @@ it('R137 сервер вне schema не обращается к старым т
   };
   collect(root);
   noLegacyTables(files);
+gatedCounterfact(() => {
   for (const table of ['dm_messages', 'dm_channels', 'dm_reads', 'dm_message_reactions']) {
     assert.throws(() => noLegacyTables([...files, { path: 'regression.ts', text: `SELECT * FROM ${table}` }]),
       assert.AssertionError);
   }
+});
 });

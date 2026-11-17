@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -265,21 +266,21 @@ it('R245 реальные карточка и заметки отвергают 
   const splashTitle = '? `Доступна версия ${v}`.trim()';
   const legacyTitle = ': `Доступно обновление ${v}`.trim()';
   await availableCard(original, true);
-  await assert.rejects(() => availableCard(mutate(splashTitle, '? `Доступно обновление ${v}`.trim()'), true),
-    exactFailure('R245 panel-offer-title:', 'Доступно обновление 9.9.9', 'Доступна версия 9.9.9'));
+  await counterfact(() => assert.rejects(() => availableCard(mutate(splashTitle, '? `Доступно обновление ${v}`.trim()'), true),
+    exactFailure('R245 panel-offer-title:', 'Доступно обновление 9.9.9', 'Доступна версия 9.9.9')));
   await availableCard(original, false);
-  await assert.rejects(() => availableCard(mutate(legacyTitle, ': `Доступна версия ${v}`.trim()'), false),
-    exactFailure('R245 panel-offer-title:', 'Доступна версия 9.9.9', 'Доступно обновление 9.9.9'));
+  await counterfact(() => assert.rejects(() => availableCard(mutate(legacyTitle, ': `Доступна версия ${v}`.trim()'), false),
+    exactFailure('R245 panel-offer-title:', 'Доступна версия 9.9.9', 'Доступно обновление 9.9.9')));
 
   await availableCard(original, true);
   const subtitle = "? viaSplash\n      ? 'приложение перезапустится на пару секунд'\n      : 'обновить можно, когда удобно'";
-  await assert.rejects(() => availableCard(mutate(subtitle,
+  await counterfact(() => assert.rejects(() => availableCard(mutate(subtitle,
     "? false\n      ? 'приложение перезапустится на пару секунд'\n      : 'обновить можно, когда удобно'"), true),
-    exactFailure('R245 panel-splash-sub:', 'обновить можно, когда удобно', 'приложение перезапустится на пару секунд'));
+    exactFailure('R245 panel-splash-sub:', 'обновить можно, когда удобно', 'приложение перезапустится на пару секунд')));
 
   await availableCard(original, true);
-  await assert.rejects(() => availableCard(mutate("'приложение перезапустится на пару секунд'", "'поставится при перезапуске'"), true),
-    exactFailure('R245 panel-splash-sub:', 'поставится при перезапуске', 'приложение перезапустится на пару секунд'));
+  await counterfact(() => assert.rejects(() => availableCard(mutate("'приложение перезапустится на пару секунд'", "'поставится при перезапуске'"), true),
+    exactFailure('R245 panel-splash-sub:', 'поставится при перезапуске', 'приложение перезапустится на пару секунд')));
 
   const buttons = [
     {
@@ -295,44 +296,44 @@ it('R245 реальные карточка и заметки отвергают 
   ];
   for (const { anchor, probe, prefix } of buttons) {
     await probe(original, true);
-    await assert.rejects(() => probe(mutate(anchor, anchor.replace('Обновить', "{viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}")), true),
-      exactFailure(`${prefix}:`, 'Перезапустить и обновить', 'Обновить'));
+    await counterfact(() => assert.rejects(() => probe(mutate(anchor, anchor.replace('Обновить', "{viaSplash ? <><RestartIcon /> Перезапустить и обновить</> : 'Обновить'}")), true),
+      exactFailure(`${prefix}:`, 'Перезапустить и обновить', 'Обновить')));
     await probe(original, true);
-    await assert.rejects(() => probe(mutate(anchor, anchor.replace('Обновить', '<RestartIcon /> Обновить')), true),
-      exactFailure(`${prefix}-icon:`, 1, 0));
+    await counterfact(() => assert.rejects(() => probe(mutate(anchor, anchor.replace('Обновить', '<RestartIcon /> Обновить')), true),
+      exactFailure(`${prefix}-icon:`, 1, 0)));
   }
 
   await availableCard(original, true);
-  await assert.rejects(() => availableCard(mutate('pose="head"', 'pose="wave"'), true),
-    exactFailure('R244 panel-goose-pose:', 'wave', 'head'));
+  await counterfact(() => assert.rejects(() => availableCard(mutate('pose="head"', 'pose="wave"'), true),
+    exactFailure('R244 panel-goose-pose:', 'wave', 'head')));
 
   await availableCard(original, true);
-  await assert.rejects(() => availableCard(mutate('<Goose pose="head" size={32} />', '<svg />'), true),
-    exactFailure('R244 panel-goose-pose:', undefined, 'head'));
+  await counterfact(() => assert.rejects(() => availableCard(mutate('<Goose pose="head" size={32} />', '<svg />'), true),
+    exactFailure('R244 panel-goose-pose:', undefined, 'head')));
 });
 
 it('R240 старые тексты установки отвергаются по реальной карточке, а не наличию строк в исходнике', async () => {
   await installing();
-  await assert.rejects(() => installing(mutate("? 'Устанавливаю…'", "? 'Перезапускаю…'")),
-    exactFailure('R240 panel-install-title:', 'Перезапускаю…', 'Устанавливаю…'));
+  await counterfact(() => assert.rejects(() => installing(mutate("? 'Устанавливаю…'", "? 'Перезапускаю…'")),
+    exactFailure('R240 panel-install-title:', 'Перезапускаю…', 'Устанавливаю…')));
   await installing();
-  await assert.rejects(() => installing(mutate("? 'приложение перезапустится само'", "? 'нужен перезапуск'")),
-    exactFailure('R240 panel-install-sub:', 'нужен перезапуск', 'приложение перезапустится само'));
+  await counterfact(() => assert.rejects(() => installing(mutate("? 'приложение перезапустится само'", "? 'нужен перезапуск'")),
+    exactFailure('R240 panel-install-sub:', 'нужен перезапуск', 'приложение перезапустится само')));
 });
 
 it('R240 обход временного ограничения процентов ловится на уже скачанном файле в момент ноль', async () => {
   await fastDownload();
   const anchor = 'shownDownloadFraction(real, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done)';
-  await assert.rejects(() => fastDownload(mutate(anchor, 'shownDownloadFraction(real, now - startedAt, 0, done)')),
-    exactFailure('R240 panel-paced:', '100%', '0%'));
+  await counterfact(() => assert.rejects(() => fastDownload(mutate(anchor, 'shownDownloadFraction(real, now - startedAt, 0, done)')),
+    exactFailure('R240 panel-paced:', '100%', '0%')));
 });
 
 it('R240 выдуманные байты и преждевременный конец неизвестной длины отвергаются разными пробами', async () => {
   await realProgress();
   const anchor = 'shownDownloadFraction(real, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done)';
-  await assert.rejects(() => realProgress(mutate(anchor, 'shownDownloadFraction(1, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done)')),
-    exactFailure('R240 panel-real:', '50%', '20%'));
+  await counterfact(() => assert.rejects(() => realProgress(mutate(anchor, 'shownDownloadFraction(1, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done)')),
+    exactFailure('R240 panel-real:', '50%', '20%')));
   await realProgress();
-  await assert.rejects(() => realProgress(mutate(anchor, 'shownDownloadFraction(real, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done || total === 0)')),
-    exactFailure('R240 panel-unknown:', '100%', '90%'));
+  await counterfact(() => assert.rejects(() => realProgress(mutate(anchor, 'shownDownloadFraction(real, now - startedAt, PANEL_DOWNLOAD_MIN_MS, done || total === 0)')),
+    exactFailure('R240 panel-unknown:', '100%', '90%')));
 });

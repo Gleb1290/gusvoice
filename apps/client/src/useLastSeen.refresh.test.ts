@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -25,9 +26,9 @@ async function scene(check: (f: {
     const useStore = Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state });
     const calls: { id: string; resolve: (value: UserLastSeen) => void }[] = [];
     const api = { userLastSeen: (id: string) => new Promise<UserLastSeen>(resolve => calls.push({ id, resolve })) };
-    const dmOnline = load<typeof import('./dmOnline')>(onlineSource, { '@gusvoice/shared': shared, './api': { api }, './store': { useStore } });
+    const dmOnline = load<typeof import('./dmOnline')>(new URL('./dmOnline.ts', import.meta.url), onlineSource, { '@gusvoice/shared': shared, './api': { api }, './store': { useStore } });
     const timers = new Map<number, { fn: () => void; ms: number }>(); let next = 0;
-    const hooks = load<typeof import('./useLastSeen')>(raw,
+    const hooks = load<typeof import('./useLastSeen')>(new URL('./useLastSeen.ts', import.meta.url), raw,
       { './api': { api }, './store': { useStore }, './dmOnline': dmOnline, './lastSeenText': lastSeenText },
       { setTimeout: (fn: () => void, ms: number) => { timers.set(++next, { fn, ms }); return next; }, clearTimeout: (id: number) => timers.delete(id) });
     const Witness = () => React.createElement('output', null, JSON.stringify(hooks.useLastSeen(person)));
@@ -80,15 +81,19 @@ it('R208 эпоха не вызывает lastSeen без признака се�
 // Забытый epoch в deps сохраняет видимость старого статуса, но лишает его реального обновления.
 it('R208 контрфакт useLastSeen без epoch в зависимостях теряет перезапрос', async () => {
   await epoch();
-  await assert.rejects(epoch(mutate(source, '[on, userId, online, myPrivacy, epoch]', '[on, userId, online, myPrivacy]')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('эпоха повторно запрашивает смонтированный статус')
-      && e.actual === 1 && e.expected === 2);
+  await counterfact(async () => {
+    await assert.rejects(epoch(mutate(source, '[on, userId, online, myPrivacy, epoch]', '[on, userId, online, myPrivacy]')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('эпоха повторно запрашивает смонтированный статус')
+        && e.actual === 1 && e.expected === 2);
+  });
 });
 
 // Контрфакт отдельно доказывает отсутствие мерцания, а не только новый HTTP-вызов.
 it('R208 контрфакт сброса view в начале перезапроса теряет прежний ответ', async () => {
   await epoch();
-  await assert.rejects(epoch(mutate(source, '    let alive = true;', '    setView(null);\n    let alive = true;')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('ожидающий перезапрос не сбрасывает прежний статус')
-      && e.actual === null && JSON.stringify(e.expected) === JSON.stringify(first));
+  await counterfact(async () => {
+    await assert.rejects(epoch(mutate(source, '    let alive = true;', '    setView(null);\n    let alive = true;')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('ожидающий перезапрос не сбрасывает прежний статус')
+        && e.actual === null && JSON.stringify(e.expected) === JSON.stringify(first));
+  });
 });

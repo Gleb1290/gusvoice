@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -266,5 +267,8 @@ for (const [name, mutation, scenario, failure] of [
   ['потеря origin-хоста', () => sqlMutation('sql`EXISTS (SELECT 1 FROM conversations c WHERE c.id = ${fedConvChanges.conversationId}', 'sql`false`'), hostFeed, 'origin-хост получает группу и без своих людей'],
   ['fed:false при пересылке', () => ({ file: 'federation/convAccept', from: 'const relay = c.group?.host === true;', to: 'const relay = false;' }), relay, 'хост записывает принятую копию в журнал третьему дому'],
 ] as const) test(`R203 мутант «${name}» пойман адресной проверкой группового журнала`, async () => {
-  await scenario(); await assert.rejects(scenario(mutation()), killed(failure));
+  await scenario();
+  await counterfact(async () => {
+    await assert.rejects(scenario(mutation()), killed(failure));
+  });
 });

@@ -37,6 +37,8 @@ ENV COREPACK_ENABLE_NETWORK=0
 
 WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+# Заплатки `pnpm.patchedDependencies` (корневой package.json): без них `pnpm install --frozen-lockfile` падает.
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/client/package.json ./apps/client/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \

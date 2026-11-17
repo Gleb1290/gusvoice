@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import ts from 'typescript';
 import * as holdRules from './voiceHold.js';
 import { createVoiceHoldController, type HoldRecording, type HoldTake, type VoiceHoldDeps } from './voiceHoldController.js';
@@ -48,6 +49,46 @@ function harness(overrides: Partial<VoiceHoldDeps<Take>> = {}, factory = createV
 const point = (id = 1, x = 100, y = 100) => ({ id, x, y });
 
 describe('жизненный цикл удержания голосового сообщения', () => {
+  it('корзина во время подготовки прослушивания отменяет запись и не принимает поздний снимок', async () => {
+    const paused = deferred<Take>();
+    const h = harness();
+    h.recording.pause = () => paused.promise;
+    await h.controller.start();
+    const stopping = h.controller.stop();
+    h.controller.cancel();
+    assert.equal(h.calls.cancelled, 1, 'устройство освобождено сразу, а не после снимка');
+    paused.resolve(h.take);
+    await stopping;
+    assert.equal(h.controller.getState().preview, null);
+    assert.equal(h.controller.getState().recording, false);
+    assert.equal(h.controller.getState().paused, false);
+    assert.deepEqual(h.calls.sent, []);
+  });
+  it('корзина при открытии устройства не позволяет поздней камере начать новую запись', async () => {
+    const pending = deferred<HoldRecording<Take>>();
+    const h = harness({ openMic: () => pending.promise });
+    const opening = h.controller.start();
+    h.controller.cancel();
+    pending.resolve(h.recording);
+    await opening;
+    assert.equal(h.calls.cancelled, 1);
+    assert.equal(h.controller.getState().recording, false);
+    assert.equal(h.controller.getState().preview, null);
+  });
+  it('отменённая пауза не подменяет следующую запись своим поздним результатом', async () => {
+    const paused = deferred<Take>();
+    const h = harness();
+    h.recording.pause = () => paused.promise;
+    await h.controller.start();
+    const stopping = h.controller.stop();
+    h.controller.cancel();
+    await h.controller.start();
+    paused.resolve(h.take);
+    await stopping;
+    assert.equal(h.controller.getState().recording, true);
+    assert.equal(h.controller.getState().preview, null);
+    h.controller.cancel();
+  });
   it('dispose во время незавершённой паузы сразу гасит микрофон, поздний снимок не создаёт превью', async () => {
     // Регрессия R40: локальный рекордер между rec и pausedRec раньше терялся при уходе со страницы.
     const paused = deferred<Take>(); const h = harness(); let snapshots = 0;
@@ -72,6 +113,7 @@ describe('жизненный цикл удержания голосового с
     const short = harness({ minTakeMs: () => 1000 }); short.take.durationMs = 999;
     await short.controller.start(); await short.controller.finish();
     assert.deepEqual(short.calls.sent, []);
+    await counterfact(async () => {
     const raw = readFileSync(new URL('./voiceHoldController.ts', import.meta.url), 'utf8');
     const altered = raw.replace('take.durationMs < minTake()', 'take.durationMs < minTake() - 1');
     assert.notEqual(raw, altered);
@@ -81,6 +123,7 @@ describe('жизненный цикл удержания голосового с
     const bad = harness({ minTakeMs: () => 1000 }, (module.exports as typeof import('./voiceHoldController')).createVoiceHoldController<Take>);
     bad.take.durationMs = 999; await bad.controller.start(); await bad.controller.finish();
     assert.throws(() => assert.deepEqual(bad.calls.sent, []), assert.AssertionError);
+    });
   });
 
   it('пауза продолжает тот же рекордер, отправка берёт окончательный файл, а не снимок', async () => {

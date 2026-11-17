@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -196,13 +197,17 @@ async function recordScenario(mutation?: Mutation) {
 test('R200 convAccept с callPlan тихо читает hangup, а missed остаётся непрочитанным и будит настоящую fanout-ветку', async () => { await recordScenario(); });
 test('R200 удаление callPlan поймано лишним пушем состоявшегося звонка', async () => {
   await recordScenario(); await truncateAll(t.raw);
-  await assert.rejects(recordScenario({ file: 'federation/convAccept', from: 'const callPlan = service && callRecordHooks ? callRecordHooks.plan(service as { kind?: unknown; reason?: unknown }) : null;', to: 'const callPlan = null;' }),
-    e => e instanceof assert.AssertionError && e.message.includes('состоявшийся звонок не будит'));
+  await counterfact(async () => {
+    await assert.rejects(recordScenario({ file: 'federation/convAccept', from: 'const callPlan = service && callRecordHooks ? callRecordHooks.plan(service as { kind?: unknown; reason?: unknown }) : null;', to: 'const callPlan = null;' }),
+      e => e instanceof assert.AssertionError && e.message.includes('состоявшийся звонок не будит'));
+  });
 });
 for (const [name, from, to, failure] of [
   ['снят блок звонящего', '(await isBlockedBy(caller.id, inv.toUserId)) || ', '', 'блок shadow→local'],
   ['снят блок получателя', ' || (await isBlockedBy(inv.toUserId, caller.id))', '', 'блок local→shadow'],
 ]) test(`R200 мутант «${name}» пойман unavailable без раскрытия блокировки`, async () => {
   await blockScenario(); await truncateAll(t.raw);
-  await assert.rejects(blockScenario({ file: 'federation/dmCalls', from, to }), e => e instanceof assert.AssertionError && e.message.includes(failure));
+  await counterfact(async () => {
+    await assert.rejects(blockScenario({ file: 'federation/dmCalls', from, to }), e => e instanceof assert.AssertionError && e.message.includes(failure));
+  });
 });

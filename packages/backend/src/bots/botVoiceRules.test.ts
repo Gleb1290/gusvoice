@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -101,6 +102,8 @@ const mutants = [
 ] as const;
 for (const [title, from, to, check, marker, actual, expected] of mutants) it(`R306 контрфакт: ${title}`, () => {
   check(rules); check(load());
-  assert.throws(() => check(load(from, to)), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
-    && e.operator === 'strictEqual' && e.message.startsWith(marker) && e.actual === actual && e.expected === expected);
+  counterfact(() => {
+    assert.throws(() => check(load(from, to)), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
+      && e.operator === 'strictEqual' && e.message.startsWith(marker) && e.actual === actual && e.expected === expected);
+  });
 });

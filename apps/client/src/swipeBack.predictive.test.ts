@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import ts from 'typescript';
@@ -40,9 +41,11 @@ it('R121 предиктивный жест начинает с полного р
   for (const progress of [-1, 0]) near(predictiveBackScale(progress), 1);
   for (const progress of [1, 2]) near(predictiveBackScale(progress), 0.9);
   guardScale(source);
+  counterfact(() => {
   const mutant = source.replace('PREDICTIVE_BACK_SCALE = 0.9', 'PREDICTIVE_BACK_SCALE = 0.85');
   assert.notEqual(mutant, source, 'контрфакт меняет предел сжатия');
   assert.throws(() => guardScale(mutant), assert.AssertionError);
+  });
 });
 
 // Ловит обратный ход/рывки и подмену нелинейной Telegram-кривой линейным сжатием.
@@ -85,7 +88,9 @@ it('R121 опора находится у дальнего края: слева 
   assert.equal(predictiveBackOriginX(0, 81), 0);
   assert.equal(predictiveBackOriginX(0, 0), 0);
   guardOrigin(source);
+  counterfact(() => {
   const mutant = source.replace('return edge === 1 ?', 'return edge === 0 ?');
   assert.notEqual(mutant, source, 'контрфакт действительно меняет стороны');
   assert.throws(() => guardOrigin(mutant), assert.AssertionError);
+  });
 });

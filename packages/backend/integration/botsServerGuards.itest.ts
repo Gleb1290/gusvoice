@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -257,9 +258,11 @@ async function commandScopesProbe(edit?: Phase3Edit) {
 test('R303 настоящий store и GET выбирают group-команды каналу, private-команды ЛС и default после удаления области', () => commandScopesProbe());
 test('R303 контрфакт канального commandsFor с dm-областью ловит точную подмену списка', async () => {
   await commandScopesProbe();
+  await counterfact(async () => {
   await assert.rejects(() => commandScopesProbe({ file: 'routes/botPress', from: "commandsFor(b, 'server')", to: "commandsFor(b, 'dm')" }),
     (e: unknown) => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' &&
       e.message.split(/\r?\n/)[0] === 'R303 канал берёт серверную область команд, не приватную' && e.actual === 'private_only' && e.expected === 'group_only');
+  });
 });
 
 for (const [name, file, from, to, probe, message, actual, expected] of [
@@ -272,10 +275,12 @@ for (const [name, file, from, to, probe, message, actual, expected] of [
 ] as const) test(`R303 контрфакт: ${name}`, async () => {
   await probe();
   // В botPress такой страж есть и для ЛС; якорь уточнён соседним комментарием канальной ветки.
+  await counterfact(async () => {
   const raw = readFileSync(new URL(`../src/${file}.ts`, import.meta.url), 'utf8');
   const newline = raw.includes('\r\n') ? '\r\n' : '\n';
   const edit = file === 'routes/botPress' ? { file, from: `// 3. Точное совпадение с кнопкой ТЕКУЩЕЙ клавиатуры.${newline}      ${from}`,
     to: '// 3. Точное совпадение с кнопкой ТЕКУЩЕЙ клавиатуры.' } : { file, from, to };
   await assert.rejects(() => probe(edit), (error: unknown) => error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION' &&
     error.operator === 'strictEqual' && error.message.split(/\r?\n/)[0] === message && error.actual === actual && error.expected === expected);
+  });
 });

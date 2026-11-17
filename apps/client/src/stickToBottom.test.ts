@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as jump from './stickToBottom';
@@ -15,15 +16,17 @@ it('«Вниз» сначала ведёт к черте на нижней гр�
   assert.equal(jump.unreadDividerNeeded(101, 100, true), true);
   assert.equal(jump.unreadDividerNeeded(0, 100, false), true);
   const source = readFileSync(new URL('./stickToBottom.ts', import.meta.url), 'utf8');
-  for (const [from, to, check] of [
-    ['firstUnreadTop >= viewBottom', 'firstUnreadTop > viewBottom', (api: typeof jump) => assert.equal(api.jumpDownTarget(100, 100), 'unread')],
-    ['!atTail || dividerToEnd > viewHeight', 'dividerToEnd > viewHeight', (api: typeof jump) => assert.equal(api.unreadDividerNeeded(0, 100, false), true)],
-  ] as const) {
-    assert.ok(source.includes(from), 'мутируется действующее правило');
-    const module = { exports: {} };
-    runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
-    assert.throws(() => check(module.exports as typeof jump), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to, check] of [
+      ['firstUnreadTop >= viewBottom', 'firstUnreadTop > viewBottom', (api: typeof jump) => assert.equal(api.jumpDownTarget(100, 100), 'unread')],
+      ['!atTail || dividerToEnd > viewHeight', 'dividerToEnd > viewHeight', (api: typeof jump) => assert.equal(api.unreadDividerNeeded(0, 100, false), true)],
+    ] as const) {
+      assert.ok(source.includes(from), 'мутируется действующее правило');
+      const module = { exports: {} };
+      runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+      assert.throws(() => check(module.exports as typeof jump), assert.AssertionError);
+    }
+  });
 });
 import {
   HISTORY_TRIGGER_PX,
@@ -115,8 +118,10 @@ it('кнопка вниз появляется за 480 px и по каждом�
     return module.exports as typeof jump;
   };
   check(load(source));
-  const wrongThreshold = source.replace('box.scrollTop + after < box.scrollHeight - box.clientHeight', 'box.scrollTop + after > box.scrollHeight - box.clientHeight');
-  assert.notEqual(wrongThreshold, source, 'пороговый мутант изменил условие');
-  assert.throws(() => check(load(wrongThreshold)), assert.AssertionError,
-    'мутант с > скрывает кнопку на расстоянии 481 px');
+  counterfact(() => {
+    const wrongThreshold = source.replace('box.scrollTop + after < box.scrollHeight - box.clientHeight', 'box.scrollTop + after > box.scrollHeight - box.clientHeight');
+    assert.notEqual(wrongThreshold, source, 'пороговый мутант изменил условие');
+    assert.throws(() => check(load(wrongThreshold)), assert.AssertionError,
+      'мутант с > скрывает кнопку на расстоянии 481 px');
+  });
 });

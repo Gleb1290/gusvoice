@@ -430,25 +430,56 @@ export function RoundRecOverlay({
   previewMs,
   recMs,
   maxMs,
+  onFlipError,
 }: {
   live: RoundRecording | null;
   previewUrl: string | null;
   previewMs: number;
   recMs: number;
   maxMs: number;
+  onFlipError?: (error: unknown) => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const [front, setFront] = useState(() => live?.front() ?? true);
-  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const [flipping, setFlipping] = useState(false);
+  const switchToken = useRef<object | null>(null);
+  const [at, setAt] = useState<{ x: number; y: number; side: number } | null>(null);
+  useEffect(() => {
+    setFront(live?.front() ?? true);
+    setFlipping(false);
+    switchToken.current = null;
+    return () => { switchToken.current = null; };
+  }, [live, previewUrl]);
   useLayoutEffect(() => {
+    const feed = document.querySelector('.messages');
+    const viewport = window.visualViewport;
     const place = () => {
-      const r = document.querySelector('.messages')?.getBoundingClientRect();
-      setAt(r && r.width > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null);
+      const r = feed?.getBoundingClientRect();
+      const left = viewport?.offsetLeft ?? 0;
+      const top = viewport?.offsetTop ?? 0;
+      const right = left + (viewport?.width ?? window.innerWidth);
+      const bottom = top + (viewport?.height ?? window.innerHeight);
+      const x0 = Math.max(left + 8, r?.left ?? left);
+      const x1 = Math.min(right - 8, r?.right ?? right);
+      const y0 = Math.max(top + 8, r?.top ?? top);
+      const y1 = Math.min(bottom - 8, r?.bottom ?? bottom);
+      // Клавиатура и низкий ландшафт уменьшают ленту. Кнопка камеры должна оставаться над полем ввода.
+      const ideal = window.innerWidth <= 760 ? Math.min(360, (x1 - x0) * 0.78) : 280;
+      setAt({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, side: Math.max(0, Math.min(ideal, y1 - y0 - 52)) });
     };
     place();
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
+    viewport?.addEventListener('resize', place);
+    viewport?.addEventListener('scroll', place);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    if (feed) observer?.observe(feed);
+    return () => {
+      window.removeEventListener('resize', place);
+      viewport?.removeEventListener('resize', place);
+      viewport?.removeEventListener('scroll', place);
+      observer?.disconnect();
+    };
   }, []);
   useEffect(() => {
     const v = ref.current;
@@ -459,12 +490,29 @@ export function RoundRecOverlay({
       v.srcObject = null;
     };
   }, [live, previewUrl]);
+  const flip = async () => {
+    if (!live || previewUrl || switchToken.current) return;
+    const token = {};
+    switchToken.current = token;
+    setFlipping(true);
+    try {
+      await live.flip();
+      if (switchToken.current === token) setFront(live.front());
+    } catch (error) {
+      if (switchToken.current === token) onFlipError?.(error);
+    } finally {
+      if (switchToken.current === token) {
+        switchToken.current = null;
+        setFlipping(false);
+      }
+    }
+  };
   const p = Math.min(1, recMs / maxMs);
   return (
     <div
       ref={boxRef}
       className="round-rec"
-      style={at ? { left: at.x, top: at.y } : undefined}
+      style={at ? { left: at.x, top: at.y, '--round': `${at.side}px` } as React.CSSProperties : undefined}
       role="group"
       aria-label="Запись видеосообщения"
     >
@@ -485,7 +533,23 @@ export function RoundRecOverlay({
           type="button"
           className="round-rec-flip"
           title="Сменить камеру"
-          onClick={() => void live.flip().then(() => setFront(live.front()))}
+          aria-label="Сменить камеру"
+          aria-busy={flipping}
+          disabled={flipping}
+          onPointerDown={(event) => event.preventDefault()}
+          onPointerUp={(event) => {
+            if (event.pointerType !== 'touch') return;
+            // Пока первый палец держит запись, WebView может не прислать click от второго.
+            // Не срабатываем при уходе с кнопки: захват указателя всё равно доставит pointerup.
+            const hit = event.currentTarget.ownerDocument.elementFromPoint(event.clientX, event.clientY);
+            if (event.currentTarget.contains(hit)) void flip();
+          }}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            // Одиночный тап может дополнительно породить click. Мышь и клавиатура идут этим путём.
+            if ('pointerType' in event.nativeEvent && event.nativeEvent.pointerType === 'touch') return;
+            void flip();
+          }}
         >
           <Icon name="rotate" size={18} />
         </button>

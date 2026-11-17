@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact, mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -28,6 +29,7 @@ describe('скорость, отметка прослушивания и сле�
       assert.equal(v.voiceBarCount(width), count);
     }
     assert.equal(v.VOICE_BAR_PITCH, 3);
+    counterfact(() => {
     for (const change of [
       (s: string) => replaceOnce(s, 'VOICE_BAR_PITCH = 3', 'VOICE_BAR_PITCH = 2'),
       (s: string) => replaceOnce(s, '(widthPx + 1)', '(widthPx)'),
@@ -35,6 +37,7 @@ describe('скорость, отметка прослушивания и сле�
       const broken = load(change);
       assert.throws(() => assert.equal(broken.voiceBarCount(152), 51), assert.AssertionError);
     }
+    });
   });
   it('R169 сужение волны сохраняет пики, расширение повторяет ближайшие, равный размер возвращает копию', () => {
     // Среднее теряет короткий пик речи; возврат исходного массива позволяет испортить вложение.
@@ -45,8 +48,10 @@ describe('скорость, отметка прослушивания и сле�
     assert.notEqual(copy, wave); assert.deepEqual(Array.from(copy), wave);
     assert.deepEqual(Array.from(v.resampleWaveform([], 4)), []);
     for (const n of [0, -1]) assert.deepEqual(Array.from(v.resampleWaveform(wave, n)), []);
+    counterfact(() => {
     const broken = load(s => replaceOnce(s, 'out.push(m);', 'out.push(wave.slice(a, b + 1).reduce((sum, x) => sum + x, 0) / (b - a + 1));'));
     assert.throws(() => assert.equal(broken.resampleWaveform(wave, 2)[0], 98), assert.AssertionError);
+    });
   });
   it('ширина волны зажимает длительность и сохраняет разные границы телефона и ПК', () => {
     // Ловит перестановку min/max телефона и скачущую ширину для повреждённой длительности.
@@ -60,12 +65,14 @@ describe('скорость, отметка прослушивания и сле�
     assert.equal(v.voiceWaveWidth(30_000, true), 152);
     assert.equal(v.voiceWaveWidth(60_000, true), 190);
     assert.equal(v.voiceWaveWidth(120_000, true), 190);
+    counterfact(() => {
     const broken = load((s) => s.replace('const min = phone ? VOICE_WAVE_W.phoneMin : VOICE_WAVE_W.min;',
       'const min = phone ? VOICE_WAVE_W.phoneMax : VOICE_WAVE_W.min;').replace(
       'const max = phone ? VOICE_WAVE_W.phoneMax : VOICE_WAVE_W.max;',
       'const max = phone ? VOICE_WAVE_W.phoneMin : VOICE_WAVE_W.max;'));
     assert.throws(() => assert.equal(broken.voiceWaveWidth(60_000, true), 190), assert.AssertionError,
       'мутант смешивает минимальную и максимальную ширину телефона');
+    });
   });
 
   it('ползунок округляет десятые и зажимает края, кнопка ПК возвращает последнее ускорение', () => {
@@ -159,7 +166,7 @@ describe('скорость, отметка прослушивания и сле�
     assert.equal(v.nextVoiceKey([], 'a'), null);
   });
 
-  it('реальные мутанты выявляют круг, собственное «прослушано» и неверный предел скорости', () => {
+  mutantTest('реальные мутанты выявляют круг, собственное «прослушано» и неверный предел скорости', () => {
     // Три соседних ошибки выглядят как нормальная кнопка скорости, но меняют очередь или серверные отметки.
     const source = readFileSync(new URL('./voicePlayback.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     const mutants = [

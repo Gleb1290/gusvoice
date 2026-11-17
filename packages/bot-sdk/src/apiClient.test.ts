@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -346,6 +347,7 @@ describe('вызовы Bot API', () => {
 describe('контрфакт SDK: повтор 429', () => {
   it('исходный модуль проходит сценарий, а удаление continue ловится именно ERR_ASSERTION', async () => {
     await retryScenario(apiSource);
+    await counterfact(async () => {
     const needle = '        continue;';
     assert.equal(apiSource.split(needle).length - 1, 1, 'мутируется ровно одна ветка повторов');
     const mutant = apiSource.replace(needle, '        /* mutant: retry falls through */');
@@ -357,6 +359,7 @@ describe('контрфакт SDK: повтор 429', () => {
       assert.equal(error.operator, 'strictEqual');
       assert.equal(error.message.split('\n')[0], 'после первой паузы запрос повторяется, а не выбрасывает старую 429');
       return true;
+    });
     });
   });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -92,12 +93,14 @@ it('R232 возврат поиска заблокированных в акка�
     return module.exports;
   };
   // VM-массивы не имеют host prototype: сравниваем одинаковые сериализованные значения по обе стороны границы.
-  const anchor = "id: 'set-g-blocked', title: 'Заблокированные', section: 'privacy'";
-  assert.equal(source.split(anchor).length - 1, 1);
   checkBlocked(load(source));
-  assert.throws(() => checkBlocked(load(source.replace(anchor, anchor.replace("section: 'privacy'", "section: 'account'")))),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R232 поиск заблокированных ведёт в конфиденциальность') &&
-      e.operator === 'strictEqual' && e.actual === 'account' && e.expected === 'privacy');
+ counterfact(() => {
+    const anchor = "id: 'set-g-blocked', title: 'Заблокированные', section: 'privacy'";
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => checkBlocked(load(source.replace(anchor, anchor.replace("section: 'privacy'", "section: 'account'")))),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R232 поиск заблокированных ведёт в конфиденциальность') &&
+        e.operator === 'strictEqual' && e.actual === 'account' && e.expected === 'privacy');
+ });
 });
 
 function checkPrivacy(nav: Pick<typeof import('./settingsNav'), 'SECTIONS' | 'SETTINGS_INDEX' | 'searchSettings' | 'visibleSections'>) {
@@ -123,8 +126,6 @@ it('R230 конфиденциальность сразу после аккаун
 it('R230 возврат поисковой записи приватности в аккаунт обнаруживается до показа неверного пути', () => {
   // Исполняется полный чистый модуль, а не повторённая в тесте копия поиска.
   const raw = readFileSync(new URL('./settingsNav.ts', import.meta.url), 'utf8');
-  const anchor = "id: 'set-g-messages-exceptions', title: 'Исключения сообщений', section: 'privacy'";
-  assert.equal(raw.split(anchor).length - 1, 1);
   const load = (text: string) => {
     const module = { exports: {} as typeof import('./settingsNav') };
     runInNewContext(ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
@@ -132,10 +133,14 @@ it('R230 возврат поисковой записи приватности �
     return module.exports;
   };
   checkPrivacy(load(raw));
-  assert.throws(() => checkPrivacy(load(raw.replace(anchor, anchor.replace("section: 'privacy'", "section: 'account'")))),
-    (e: unknown) => e instanceof assert.AssertionError &&
-    e.message.startsWith('R230 все записи приватности ведут в конфиденциальность') &&
-    e.operator === 'strictEqual' && e.actual === 'account' && e.expected === 'privacy');
+ counterfact(() => {
+    const anchor = "id: 'set-g-messages-exceptions', title: 'Исключения сообщений', section: 'privacy'";
+    assert.equal(raw.split(anchor).length - 1, 1);
+    assert.throws(() => checkPrivacy(load(raw.replace(anchor, anchor.replace("section: 'privacy'", "section: 'account'")))),
+      (e: unknown) => e instanceof assert.AssertionError &&
+      e.message.startsWith('R230 все записи приватности ведут в конфиденциальность') &&
+      e.operator === 'strictEqual' && e.actual === 'account' && e.expected === 'privacy');
+ });
 });
 it('R230 внутри Android скрывается только инструкция установки, ntfy остаётся, поиск android пуст', () => {
   // Фильтр должен питать и рельс, и поиск, не изменяя исходный реестр для других оболочек.
@@ -164,5 +169,21 @@ it('R230 подпись версии различает платформы, уд
     assert.equal(appVersionLabel(platform, '  v0.9.0  '), `${name} 0.9.0`);
     assert.equal(appVersionLabel(platform, '0.9.0'), `${name} 0.9.0`);
     for (const blank of [null, '', '   ', 'v']) assert.equal(appVersionLabel(platform, blank), name);
+  }
+});
+
+
+it('повторы уведомлений отсутствуют в настройках и поиске, личные уведомления доступны', () => {
+  for (const flags of [
+    { federation: false, desktop: false, mobile: false },
+    { federation: false, desktop: true, mobile: false },
+    { federation: false, desktop: false, mobile: true },
+  ]) {
+    const sections = visibleSections(flags);
+    const groups = sections.find((section) => section.key === 'notif')?.groups ?? [];
+    assert.equal(groups.some((group) => group.id === 'set-g-notify-repeat'), false);
+    assert.equal(groups.some((group) => group.id === 'set-g-notify-dm'), true);
+    assert.equal(searchSettings('повторять уведомления', sections).some((hit) => hit.id === 'set-g-notify-repeat'), false);
+    assert.equal(searchSettings('личные сообщения', sections).some((hit) => hit.id === 'set-g-notify-dm'), true);
   }
 });

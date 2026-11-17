@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -51,7 +52,10 @@ for (const m of [
   { label: 'замкнутое кольцо', from: 'out.push(out[0]);', to: '', check: (r: typeof rules) => { const ring = r.accuracyRing(0, 0, 10); return JSON.stringify(ring[0]) === JSON.stringify(ring.at(-1)); } },
 ]) it(`R224 контрфакт точности: ${m.label}`, () => {
   const verify = (source: string) => assert.equal(m.check(load(source)), true, `R224-accuracy-${m.label}: инвариант карты`);
-  verify(raw); assert.equal(raw.split(m.from).length - 1, 1);
+  verify(raw);
+  counterfact(() => {
+  assert.equal(raw.split(m.from).length - 1, 1);
   assert.throws(() => verify(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(`R224-accuracy-${m.label}:`)
     && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });

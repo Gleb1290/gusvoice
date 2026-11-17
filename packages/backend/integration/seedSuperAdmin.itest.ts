@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -99,16 +100,22 @@ function mutant(anchor: string, replacement: string) {
 }
 test('R188 отсутствие approvedAt в INSERT ловится до того, как bind сможет скрыть регрессию', async () => {
   // Класс ошибки: insert снова создаёт владельца с pending_approval.
-  await fresh(); await assert.rejects(fresh(mutant('    approvedAt: new Date(),', '')),
+  await fresh(); await counterfact(async () => {
+  await assert.rejects(fresh(mutant('    approvedAt: new Date(),', '')),
     e => e instanceof assert.AssertionError && e.message.includes('INSERT сразу одобряет'));
+  });
 });
 test('R188 отсутствие IS NULL ловится сохранённой датой старого одобрения', async () => {
   // Класс ошибки: повторный bind уничтожает исходную дату approval.
-  await preserved(); await assert.rejects(preserved(mutant('and(eq(users.id, userId), isNull(users.approvedAt))', 'eq(users.id, userId)')),
+  await preserved(); await counterfact(async () => {
+  await assert.rejects(preserved(mutant('and(eq(users.id, userId), isNull(users.approvedAt))', 'eq(users.id, userId)')),
     e => e instanceof assert.AssertionError && e.message.includes('прежнее одобрение'));
+  });
 });
 test('R188 UPDATE без ограничения id ловится неодобренным обычным пользователем', async () => {
   // Класс ошибки: одобрение супер-админа расширено на все аккаунты.
-  await scoped(); await assert.rejects(scoped(mutant('.where(and(eq(users.id, userId), isNull(users.approvedAt)))', '.where(sql`true`)')),
+  await scoped(); await counterfact(async () => {
+  await assert.rejects(scoped(mutant('.where(and(eq(users.id, userId), isNull(users.approvedAt)))', '.where(sql`true`)')),
     e => e instanceof assert.AssertionError && e.message.includes('обычный пользователь остаётся'));
+  });
 });

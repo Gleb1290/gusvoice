@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -38,7 +39,7 @@ it('R174 контрфакты без wasActive, сброса профиля и �
     ["view: 'server', mobileProfileOpen: false, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList", "view: 'server', mobileProfileOpen: true, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList", tabContract, 'сброс профиля'],
     ['if (inst0) rememberPlace({ instanceId: inst0, serverId });', 'if (inst0) void serverId;', openContract, 'сервер запоминается'],
   ] as const) {
-    check(); assert.equal(source.split(anchor).length - 1, 1);
-    assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(message));
+    check(); counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+    counterfact(() => assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(message)));
   }
 });

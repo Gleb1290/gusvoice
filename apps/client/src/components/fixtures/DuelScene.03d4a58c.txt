@@ -1,0 +1,944 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  DUEL_MOVE_MS,
+  DUEL_REMATCH_PAUSE_MS,
+  DUEL_ROLL_ANIM_MS,
+  DUEL_ROLL_TURN_MS,
+  GREEDY_MAX_TIMEOUTS,
+  GREEDY_TARGET,
+  RPS_WINS,
+  type DuelDto,
+  type DuelGame,
+  type RpsHand,
+} from '@gusvoice/shared';
+import { api } from '../api';
+import { isMockEconomy } from '../benchMock';
+import coinDefaultIcon from '../assets/guscoin.svg';
+import judgeUrl from '../assets/duel/judge.png';
+import {
+  DIE_FACE_ROT,
+  diceSum,
+  duelChallengeErrorText,
+  duelGameKnown,
+  duelGameTitle,
+  duelLeftMs,
+  duelPot,
+  duelReasonText,
+  duelSideOf,
+  duelTimeoutNote,
+  greedyProgress,
+  hasRolled,
+  PIP_CELLS,
+  rematchLeftMs,
+  RPS_HAND_INFO,
+  rpsLastRound,
+  shownDice,
+  shownMyHand,
+  verifyDuel,
+  verifyGreedy,
+  type DuelSide,
+  type DuelVerdict,
+  type DuelView,
+  type GreedyVerdict,
+} from '../duelRules';
+import { PRACTICE_CAPTAIN_ID, practiceMove, practiceNextAt, practiceResultText, practiceStart, practiceTick, type PracticeState } from '../duelPractice';
+import { ensureDuel } from '../economyClient';
+import { usePhoneLayout } from '../phoneLayout';
+import { playSound } from '../sounds';
+import { useStore } from '../store';
+import { clockLabel } from '../wheelRules';
+import { Avatar } from './Avatar';
+import { BottomSheet } from './BottomSheet';
+import { applyDuelReply, CountRing, duelFailText, useDuelPeople, useNowTick } from './Duel';
+import { Icon } from './Icon';
+
+/**
+ * Сцена «Гусиная дуэль» (ГусКоины 2, этап 3 — кубики; этап 4 — «Камень-ножницы-бумага» `RpsBoard` и «Жадный гусь»
+ * `GreedyBoard`, ходы — `POST …/move` с `seq`) — грузится лениво (`Activities.tsx`), вместе с ней и судья
+ * (зелёный попугай `assets/duel/judge.png`, арт R323/R324 P2).
+ *
+ * ПК — `.modal-overlay > .modal.duel-scene`, телефон (≤ 760) — `BottomSheet page`; разметка одна.
+ * Кубики — CSS 3D: куб из шести граней с точками (`PIP_CELLS`), к зрителю — грань `DIE_FACE_ROT[v]`. Свежий бросок
+ * (кости стороны только что раскрылись) кувыркается `DUEL_ROLL_ANIM_MS` обёрткой `.dc-tumble` (целые обороты — конец
+ * анимации совпадает с покоем), `prefers-reduced-motion` — без кувырка, сразу грань. Кости, раскрытые до открытия сцены,
+ * стоят молча.
+ */
+
+/**
+ * Дуэлянт — гусь-пират с саблей (`assets/duel/duelist.png`, 380×384, смотрит вправо, красный кушак), арт ГусКоинов 2.
+ * Вызвавший — слева как нарисован; соперник — справа, отражён (`scaleX(-1)`) и с кушаком другого цвета: поверх лежит
+ * слой «только кушак» (`assets/duel/duelist-sash.png`, вырезан из арта по цвету) с `hue-rotate` — крылья, клюв и лапы не перекрашиваются. Аватар игрока —
+ * значок в рамке у нижнего внешнего угла. Победитель подпрыгивает, проигравший поникает (`prefers-reduced-motion` —
+ * статично). Картинка — динамическим `import()` один раз на модуль: граница импортов сцены в проверках закрыта,
+ * а нарисованного места (`aspect-ratio`) хватает, чтобы вёрстка не прыгнула, когда картинка придёт.
+ */
+type DuelistArt = { goose: string; sash: string };
+let duelistArt: DuelistArt | null = null;
+let duelistLoad: Promise<DuelistArt | null> | null = null;
+function useDuelistArt(): DuelistArt | null {
+  const [url, setUrl] = useState(duelistArt);
+  useEffect(() => {
+    if (url) return;
+    let alive = true;
+    duelistLoad ??= Promise.all([import('../assets/duel/duelist.png'), import('../assets/duel/duelist-sash.png')]).then(
+      ([g, s]) => (duelistArt = { goose: g.default, sash: s.default }),
+      () => null,
+    );
+    void duelistLoad.then((u) => {
+      if (alive && u) setUrl(u);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [url]);
+  return url;
+}
+
+function Duelist({
+  side,
+  who,
+  phone,
+  mine,
+  won,
+  lost,
+}: {
+  side: DuelSide;
+  who: { name: string; avatar: string | null };
+  phone: boolean;
+  mine: boolean;
+  won: boolean;
+  lost: boolean;
+}) {
+  const art = useDuelistArt();
+  return (
+    <span className={`dc-figure ${side}${mine ? ' me' : ''}${won ? ' won' : ''}${lost ? ' lost' : ''}`}>
+      <span className="dc-goose" aria-hidden="true">
+        {art && <img src={art.goose} alt="" draggable={false} />}
+        {art && side === 'target' && <img className="dc-sash" src={art.sash} alt="" draggable={false} />}
+      </span>
+      <span className="dc-badge">
+        <Avatar url={who.avatar} name={who.name} size={phone ? 28 : 36} />
+      </span>
+    </span>
+  );
+}
+
+function Die({ v, rolling, stale }: { v: number | null; rolling: boolean; stale?: boolean }) {
+  return (
+    <span className={`dc-die${v === null ? ' unknown' : ''}${stale ? ' stale' : ''}`} aria-hidden="true">
+      <span className={`dc-tumble${rolling ? ' rolling' : ''}`}>
+        <span className="dc-cube" style={{ transform: DIE_FACE_ROT[v ?? 1] }}>
+          {[1, 2, 3, 4, 5, 6].map((f) => (
+            <span key={f} className={`dc-face f${f}`}>
+              {v !== null && PIP_CELLS[f].map((c) => <i key={c} className={`p${c}`} />)}
+            </span>
+          ))}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * «Тренировка с капитаном» (`practice` — игра): партия с ботом без ставки целиком на клиенте (`duelPractice.ts`). Сцена
+ * та же — доски рисуют `PracticeState.duel`, ходы идут в локальный движок вместо `POST`, капитан и сроки — по таймеру
+ * `practiceNextAt`. Ни стора дуэлей, ни снимков сервера, ни денег. Закрыл сцену — тренировка кончилась.
+ */
+function usePractice(game: DuelGame | undefined, meId: string | null) {
+  const [trainer, setTrainer] = useState<PracticeState | null>(() => (game ? practiceStart(game, meId ?? 'me', Date.now()) : null));
+  useEffect(() => {
+    if (!trainer) return;
+    const at = practiceNextAt(trainer);
+    if (at === null) return;
+    const wake = window.setTimeout(() => setTrainer((cur) => (cur ? practiceTick(cur, Date.now()) : cur)), Math.max(0, at - Date.now()) + 20);
+    return () => window.clearTimeout(wake);
+  }, [trainer]);
+  return {
+    trainer,
+    move: (m: RpsHand | 'roll' | 'stop') => setTrainer((cur) => (cur ? (practiceMove(cur, m, Date.now()) ?? cur) : cur)),
+    again: () => game && setTrainer(practiceStart(game, meId ?? 'me', Date.now())),
+  };
+}
+
+export default function DuelScene({
+  serverId,
+  channelId,
+  practice,
+  onClose,
+  onBack,
+}: {
+  serverId: string;
+  channelId: string;
+  /** Тренировка с капитаном в этой игре (без ставки, на клиенте); нет — настоящая партия канала. */
+  practice?: DuelGame;
+  onClose: () => void;
+  onBack: () => void;
+}) {
+  const phone = usePhoneLayout();
+  const storeView = useStore((s) => s.duels[channelId]);
+  const meId = useStore((s) => s.user?.id ?? null);
+  const iconUrl = useStore((s) => s.economy[serverId]?.iconUrl ?? null);
+  const inChannel = useStore((s) => s.voice?.channelId === channelId);
+  const channelPeople = useDuelPeople(channelId);
+  const now = useNowTick(250);
+  const training = usePractice(practice, meId);
+  const trainer = training.trainer;
+  const view: DuelView | null | undefined = trainer ? { duel: trainer.duel, skewMs: 0, myHand: trainer.myHand } : storeView;
+  const people: People = trainer
+    ? (id) => (id === PRACTICE_CAPTAIN_ID ? { name: 'Капитан', avatar: null } : channelPeople(id))
+    : channelPeople;
+
+  // Снимок заново при открытии и возврате фокуса: событие одним пушем могло потеряться.
+  useEffect(() => {
+    if (practice || isMockEconomy()) return;
+    ensureDuel(serverId, channelId, true);
+    const onFocus = () => ensureDuel(serverId, channelId, true);
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [serverId, channelId]);
+
+  useEffect(() => {
+    if (phone) return; // у листа свой Esc
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phone, onClose]);
+
+  const d: DuelDto | null = view?.duel ?? null;
+  const skew = view?.skewMs ?? 0;
+  const mySide = d ? duelSideOf(d, meId) : null;
+
+  // ——— Свежие броски: кувырок + стук. Ключ — «бросок:сторона»; раскрытое до открытия сцены — без анимации. ———
+  const seen = useRef<Set<string> | null>(null);
+  const [rolling, setRolling] = useState<Record<string, boolean>>({});
+  const timers = useRef<number[]>([]);
+  useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
+  useEffect(() => {
+    if (!d) return;
+    const keys: string[] = [];
+    d.rolls.forEach((r, n) => {
+      if (r.challenger) keys.push(`${d.id}:${n}:challenger`);
+      if (r.target) keys.push(`${d.id}:${n}:target`);
+    });
+    if (!seen.current) {
+      seen.current = new Set(keys);
+      return;
+    }
+    const fresh = keys.filter((k) => !seen.current!.has(k));
+    if (fresh.length === 0) return;
+    fresh.forEach((k) => seen.current!.add(k));
+    const sides: Record<string, boolean> = {};
+    for (const k of fresh) sides[k.split(':')[2]] = true;
+    if (!useStore.getState().selfDeafened) playSound('diceRoll');
+    setRolling((r) => ({ ...r, ...sides }));
+    timers.current.push(
+      window.setTimeout(
+        () =>
+          setRolling((r) => {
+            const next = { ...r };
+            for (const side of Object.keys(sides)) delete next[side];
+            return next;
+          }),
+        DUEL_ROLL_ANIM_MS,
+      ),
+    );
+  }, [d]);
+
+  // ——— Победа: звук победителю при открытой сцене (закрытая — `sockets.ts`). ———
+  const settledSeen = useRef<string | null>(d?.state === 'settled' ? d.id : null);
+  useEffect(() => {
+    if (!d || d.state !== 'settled' || settledSeen.current === d.id) return;
+    settledSeen.current = d.id;
+    if (d.winnerId && d.winnerId === meId && !useStore.getState().selfDeafened) playSound('duelWin');
+  }, [d, meId]);
+
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  async function act(action: 'roll' | 'withdraw') {
+    if (!d) return;
+    if (trainer) {
+      if (action === 'roll') training.move('roll');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      applyDuelReply(serverId, await api.duelAction(serverId, d.id, action));
+    } catch (e) {
+      setErr(duelFailText(e));
+      ensureDuel(serverId, channelId, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  /** Ход игры с выбором (этап 4): `seq` текущего раунда/действия; ответ несёт свою руку КНБ (`myHand`). */
+  async function move(m: RpsHand | 'roll' | 'stop') {
+    if (!d) return;
+    if (trainer) {
+      training.move(m);
+      return;
+    }
+    const seq = d.game === 'rps' ? d.rps?.seq : d.greedy?.seq;
+    if (seq === undefined) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      applyDuelReply(serverId, await api.duelMove(serverId, d.id, seq, m));
+    } catch (e) {
+      setErr(duelFailText(e));
+      ensureDuel(serverId, channelId, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function rematch() {
+    if (!d || !mySide) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const rival = mySide === 'challenger' ? d.targetId : d.challengerId;
+      applyDuelReply(serverId, await api.challengeDuel(serverId, { channelId, targetId: rival, game: d.game, amount: d.amount }));
+    } catch (e) {
+      const er = e as Error & { reason?: string };
+      setErr(duelChallengeErrorText(er?.reason ?? er?.message, d.game));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const coin = <img src={iconUrl || coinDefaultIcon} alt="" className="wh-coin" />;
+
+  // ——— Подпись состояния ———
+  let status: { big: string; small: string; live?: boolean } = { big: '…', small: 'Судья раскладывает кубики' };
+  if (view === null) status = { big: 'Тихо', small: 'Сейчас в канале дуэли нет' };
+  else if (d?.state === 'invited') {
+    const left = duelLeftMs(d.inviteUntil, skew, now);
+    status = { big: clockLabel(left), small: mySide === 'challenger' ? 'ждём ответа…' : 'вызов ждёт ответа', live: true };
+  } else if (d?.state === 'playing' && !duelGameKnown(d.game)) {
+    status = { big: 'Идёт', small: 'эту игру твоя версия не показывает — обнови приложение', live: true };
+  } else if (d?.state === 'playing' && d.game === 'rps') {
+    const left = duelLeftMs(d.moveUntil ?? null, skew, now);
+    const ready = mySide ? !!d.rps?.ready[mySide] : false;
+    status = {
+      big: d.moveUntil ? clockLabel(left) : 'Раз, два, три!',
+      small: !mySide ? 'гуси выбирают руку…' : ready ? 'ждём соперника — руки откроются разом' : 'выбирай руку — не успеешь, засчитают поражение',
+      live: true,
+    };
+  } else if (d?.state === 'playing' && d.game === 'greedy') {
+    const left = duelLeftMs(d.moveUntil ?? null, skew, now);
+    const turn = d.greedy?.turn;
+    const turnId = turn === 'target' ? d.targetId : d.challengerId;
+    status = {
+      big: d.moveUntil ? clockLabel(left) : 'Хватит!',
+      small: turn && turn === mySide ? 'твой ход — бросай или «Стоп»' : `ходит ${people(turnId).name}`,
+      live: true,
+    };
+  } else if (d?.state === 'playing') {
+    const left = duelLeftMs(d.turnUntil, skew, now);
+    const both = hasRolled(d, 'challenger') && hasRolled(d, 'target');
+    const none = !hasRolled(d, 'challenger') && !hasRolled(d, 'target');
+    status = both
+      ? { big: 'Бросок!', small: 'судья считает точки', live: true }
+      : d.rollNo > 0 && none
+        ? { big: 'Переброс!', small: `ничья — кидаем ещё раз · ${clockLabel(left)} на бросок`, live: true }
+        : { big: clockLabel(left), small: 'на бросок — не успел, бросит судья', live: true };
+  } else if (d?.state === 'settled' && trainer) {
+    const loserId = d.winnerId ? (d.winnerId === d.challengerId ? d.targetId : d.challengerId) : null;
+    status = d.winnerId
+      ? { big: 'Итог', small: (loserId && duelTimeoutNote(d, people(loserId).name)) || 'судья поднял флажок' }
+      : { big: 'Ничья', small: d.reason === 'draw-limit' ? 'победителя нет — сыграйте ещё раз' : 'судья развёл руками' };
+  } else if (d?.state === 'settled') {
+    const loserId = d.winnerId ? (d.winnerId === d.challengerId ? d.targetId : d.challengerId) : null;
+    status = d.winnerId
+      ? { big: 'Итог', small: (loserId && duelTimeoutNote(d, people(loserId).name)) || 'судья поднял флажок' }
+      : { big: 'Ничья', small: duelReasonText(d.reason, d.game) };
+  } else if (d?.state === 'cancelled') status = { big: 'Отбой', small: duelReasonText(d.reason, d.game) };
+
+  const player = (side: DuelSide) => {
+    if (!d) return null;
+    const id = side === 'challenger' ? d.challengerId : d.targetId;
+    const who = people(id);
+    const { dice, stale } = shownDice(d, side);
+    const mine = side === mySide;
+    const rolled = d.state === 'playing' && hasRolled(d, side);
+    const turnLeft = d.state === 'playing' ? duelLeftMs(d.turnUntil, skew, now) : 0;
+    const won = d.state === 'settled' && d.winnerId === id;
+    const lost = d.state === 'settled' && !!d.winnerId && d.winnerId !== id;
+    return (
+      <div className={`dc-player${mine ? ' me' : ''}${won ? ' won' : ''}${lost ? ' lost' : ''}`}>
+        <Duelist side={side} who={who} phone={phone} mine={mine} won={won} lost={lost} />
+        <span className="dc-name">{mine ? `${who.name} (ты)` : who.name}</span>
+        <span className="dc-dice">
+          <Die v={dice?.[0] ?? null} rolling={!!rolling[side]} stale={stale} />
+          <Die v={dice?.[1] ?? null} rolling={!!rolling[side]} stale={stale} />
+        </span>
+        <span className="dc-sum">{dice && !stale && !rolling[side] ? `= ${diceSum(dice)}` : ' '}</span>
+        {d.state === 'playing' && mine && !rolled && (
+          <button type="button" className="ew-btn ew-btn-main dc-roll" disabled={busy} onClick={() => void act('roll')}>
+            <CountRing leftMs={turnLeft} totalMs={DUEL_ROLL_TURN_MS} size={28} />
+            Бросить
+          </button>
+        )}
+        {d.state === 'playing' && !mine && !rolled && <span className="dc-wait">ждём броска…</span>}
+        {won && d.payout !== null && (
+          <span className="dc-win">
+            +{d.payout}
+            {coin}
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  const winnerName = d?.winnerId ? people(d.winnerId).name : null;
+  const rematchLeft = d ? rematchLeftMs(d, skew, now, DUEL_REMATCH_PAUSE_MS) : 0;
+  const pot = d ? duelPot(d.amount, d.feePercent) : null;
+
+  const body = (
+    <div className="dc-body">
+      <div className={`wh-timer${status.live ? ' live' : ''}`} aria-live="polite">
+        <span className="wh-timer-big">{status.big}</span>
+        <span className="wh-timer-small">{status.small}</span>
+      </div>
+
+      {d && d.game === 'rps' && d.rps && (
+        <RpsBoard view={view!} mySide={mySide} people={people} now={now} busy={busy} phone={phone} coin={coin} onMove={(m) => void move(m)} />
+      )}
+      {d && d.game === 'greedy' && d.greedy && (
+        <GreedyBoard
+          duel={d}
+          skew={skew}
+          mySide={mySide}
+          people={people}
+          now={now}
+          busy={busy}
+          phone={phone}
+          coin={coin}
+          autoBy={trainer ? 'судья' : 'капитан'}
+          onMove={(m) => void move(m)}
+        />
+      )}
+      {d && d.game === 'dice' && (
+        <div className="dc-arena">
+          {player('challenger')}
+          <div className="dc-judge">
+            <img src={judgeUrl} alt="Судья — зелёный попугай" draggable={false} />
+            <span className="dc-vs">против</span>
+          </div>
+          {player('target')}
+        </div>
+      )}
+
+      {d?.state === 'settled' && winnerName && d.payout !== null && (
+        <p className="wh-result">
+          <span className="wh-result-head">
+            <b>{d.winnerId === meId ? 'Ты' : winnerName}</b> {d.winnerId === meId ? 'забираешь' : 'забирает'} {d.payout}
+            {coin}
+          </span>
+        </p>
+      )}
+      {trainer && d?.state === 'settled' && (
+        <p className="wh-result duel-practice-result">
+          <span className="wh-result-head">
+            <b>{practiceResultText(d)}</b>
+          </span>
+        </p>
+      )}
+      {trainer && <p className="wh-hint duel-practice-note">Тренировка с капитаном — без ставки: монеты не двигаются, в таблицу игр не идёт.</p>}
+      {d && pot && !trainer && (
+        <p className="wh-hint">
+          Ставка {d.amount} с каждого · банк {pot.pot} · комиссия {d.feePercent} % сгорает · победитель получит {pot.payout}
+        </p>
+      )}
+
+      {d?.state === 'invited' && mySide === 'challenger' && (
+        <button type="button" className="ew-btn" disabled={busy} onClick={() => void act('withdraw')}>
+          Отозвать вызов
+        </button>
+      )}
+      {trainer && d?.state === 'settled' && (
+        <div className="duel-practice-actions">
+          <button type="button" className="ew-btn" onClick={onClose}>
+            Закрыть
+          </button>
+          <button type="button" className="ew-btn ew-btn-main" onClick={() => training.again()}>
+            Ещё раз
+          </button>
+        </div>
+      )}
+      {!trainer && (d?.state === 'settled' || d?.state === 'cancelled') && mySide && inChannel && (
+        <button type="button" className="ew-btn ew-btn-main" disabled={busy || rematchLeft > 0} onClick={() => void rematch()}>
+          {rematchLeft > 0 ? `Реванш через ${Math.ceil(rematchLeft / 1000)} с` : 'Реванш'}
+        </button>
+      )}
+      {err && (
+        <p className="wh-err" role="alert">
+          {err}
+        </p>
+      )}
+
+      {d && d.game !== 'rps' && !trainer && (
+        <p className="wh-commit" title={d.commit}>
+          Замок партии: <code>{d.commit.length > 16 ? `${d.commit.slice(0, 8)}…${d.commit.slice(-8)}` : d.commit}</code> —{' '}
+          {d.game === 'greedy' ? 'кто ходит первым и все броски загаданы' : 'кости загаданы'} до принятия вызова
+        </p>
+      )}
+      {d?.game === 'rps' && !trainer && (
+        <p className="wh-commit">
+          Здесь нет случая — проверять нечего: руки тайные, пока не сходят оба, и открываются разом. Свою руку видишь только ты.
+        </p>
+      )}
+      {d?.state === 'settled' && d.seed && d.game === 'dice' && <DuelFairCheck key={d.id} duel={d} />}
+      {d?.state === 'settled' && d.seed && d.game === 'greedy' && d.greedy && <GreedyFairCheck key={d.id} duel={d} />}
+    </div>
+  );
+
+  if (phone) {
+    return (
+      <BottomSheet page title={trainer ? 'Тренировка с капитаном' : 'Гусиная дуэль'} onClose={onClose} onBack={onBack}>
+        {body}
+      </BottomSheet>
+    );
+  }
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <section className="modal eco-welcome duel-scene" role="dialog" aria-modal="true" aria-labelledby="dc-title" onClick={(e) => e.stopPropagation()}>
+        <div className="ew-head">
+          <button type="button" className="wh-back" onClick={onBack}>
+            <Icon name="chevron-left" size={16} />
+            Активности
+          </button>
+          <button type="button" className="icon-close" title="Закрыть" onClick={onClose}>
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+        <h2 id="dc-title" className="ew-title">
+          {trainer ? 'Тренировка с капитаном' : 'Гусиная дуэль'} · {duelGameTitle(d?.game ?? 'dice')}
+        </h2>
+        {body}
+      </section>
+    </div>
+  );
+}
+
+/** «Проверить честность»: зерно открыто после итога — пересчитываем замок и кости каждого броска у себя. */
+function DuelFairCheck({ duel }: { duel: DuelDto }) {
+  const [verdict, setVerdict] = useState<DuelVerdict | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <details className="wh-fair">
+      <summary>Проверить честность</summary>
+      <p className="wh-fair-text">
+        Зерно партии загадано до принятия вызова, а его замок (хеш) виден с самого начала. После итога зерно открыто — из него
+        считаются и замок, и все кости по порядку бросков. Проверка идёт прямо здесь, у тебя.
+      </p>
+      <dl className="wh-fair-kv">
+        <dt>Замок</dt>
+        <dd>
+          <code>{duel.commit}</code>
+        </dd>
+        <dt>Зерно</dt>
+        <dd>
+          <code>{duel.seed}</code>
+        </dd>
+        <dt>Броски</dt>
+        <dd>
+          {duel.rolls
+            .map((r) => `${r.challenger ? r.challenger.join('+') : '?'} : ${r.target ? r.target.join('+') : '?'}`)
+            .join(' · ')}
+        </dd>
+      </dl>
+      <div className="wh-fair-row">
+        <button
+          type="button"
+          className="ew-btn"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            void verifyDuel(duel)
+              .then(setVerdict)
+              .catch(() => setVerdict({ ok: false, why: 'unavailable' }))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Проверить
+        </button>
+        {verdict && (
+          <span className={`wh-verdict${verdict.ok ? ' ok' : ' bad'}`} role="status">
+            {verdict.ok
+              ? '✓ Совпадает: зерно открывает замок, и кости те самые'
+              : verdict.why === 'unavailable'
+                ? 'Браузер здесь не умеет считать хеш (нужно защищённое соединение)'
+                : verdict.why === 'commit'
+                  ? '✗ Зерно не открывает замок партии'
+                  : verdict.why === 'no-seed'
+                    ? 'Зерно ещё не открыто'
+                    : `✗ В броске №${(verdict.at ?? 0) + 1} по зерну выходит ${verdict.got?.slice(0, 2).join('+')} : ${verdict.got?.slice(2).join('+')}`}
+          </span>
+        )}
+      </div>
+    </details>
+  );
+}
+
+type People = (id: string) => { name: string; avatar: string | null };
+
+/**
+ * Свежее событие партии (новый раунд КНБ / новый бросок гуся): номер держится `ms`, открытое до сцены — не свежее.
+ * `onFresh` может вернуть уборку — она снимается вместе с таймером (закрыли сцену или пришло следующее событие).
+ */
+function useFresh(key: string, count: number, ms: number, onFresh: () => void | (() => void)): number | null {
+  const seen = useRef<{ key: string; n: number } | null>(null);
+  const [fresh, setFresh] = useState<number | null>(null);
+  const cb = useRef(onFresh);
+  cb.current = onFresh;
+  useEffect(() => {
+    if (!seen.current || seen.current.key !== key) {
+      seen.current = { key, n: count };
+      setFresh(null);
+      return;
+    }
+    if (count <= seen.current.n) return;
+    seen.current.n = count;
+    setFresh(count);
+    const undo = cb.current();
+    const t = window.setTimeout(() => setFresh((f) => (f === count ? null : f)), ms);
+    if (undo) {
+      return () => {
+        window.clearTimeout(t);
+        undo();
+      };
+    }
+    return () => window.clearTimeout(t);
+  }, [key, count, ms]);
+  return fresh;
+}
+
+/** Сколько держится раскрытие рук КНБ ярко (потом прошлый раунд тускнеет, как старые кости). */
+const RPS_REVEAL_MS = 2_500;
+
+/**
+ * «Камень-ножницы-бумага» (этап 4): два игрока, счёт до `RPS_WINS` между ними, руки последнего раунда. Ход скрыт:
+ * у соперника до раскрытия — только «готов», своя рука — из личного ответа (`myHand`). Новый раунд в `rps.rounds` —
+ * обе руки открываются разом (`.rps-hand.reveal`, без движения при `prefers-reduced-motion`) и звук `rpsReveal`.
+ */
+function RpsBoard({
+  view,
+  mySide,
+  people,
+  now,
+  busy,
+  phone,
+  coin,
+  onMove,
+}: {
+  view: DuelView;
+  mySide: DuelSide | null;
+  people: People;
+  now: number;
+  busy: boolean;
+  phone: boolean;
+  coin: ReactNode;
+  onMove: (m: RpsHand) => void;
+}) {
+  const d = view.duel;
+  const rps = d.rps!;
+  const playing = d.state === 'playing';
+  const last = rpsLastRound(d);
+  const myHand = shownMyHand(view);
+  const fresh = useFresh(d.id, rps.rounds.length, RPS_REVEAL_MS, () => {
+    if (!useStore.getState().selfDeafened) playSound('rpsReveal');
+  });
+  const revealing = fresh !== null;
+  const left = duelLeftMs(d.moveUntil ?? null, view.skewMs, now);
+
+  const player = (side: DuelSide) => {
+    const id = side === 'challenger' ? d.challengerId : d.targetId;
+    const who = people(id);
+    const mine = side === mySide;
+    const ready = playing && rps.ready[side];
+    const won = d.state === 'settled' && d.winnerId === id;
+    const lost = d.state === 'settled' && !!d.winnerId && d.winnerId !== id;
+    // На столе: своя выбранная рука текущего раунда, иначе рука последнего раскрытого (в идущей партии после раскрытия —
+    // тускло), иначе «?» (соперник сходил — «✓»).
+    let hand: RpsHand | null = null;
+    let look: 'picked' | 'reveal' | 'stale' | '' = '';
+    if (mine && ready && myHand && !revealing) {
+      hand = myHand;
+      look = 'picked';
+    } else if (last && !(ready && !revealing)) {
+      hand = last[side];
+      look = revealing ? 'reveal' : playing ? 'stale' : '';
+    }
+    const roundWon = revealing && last?.winner === side;
+    return (
+      <div className={`dc-player rps-player${mine ? ' me' : ''}${won ? ' won' : ''}${lost ? ' lost' : ''}`}>
+        <Duelist side={side} who={who} phone={phone} mine={mine} won={won} lost={lost} />
+        <span className="dc-name">{mine ? `${who.name} (ты)` : who.name}</span>
+        <span className="rps-wins" aria-label={`побед: ${rps.wins[side]} из ${RPS_WINS}`}>
+          {Array.from({ length: RPS_WINS }, (_, i) => (
+            <i key={i} className={i < rps.wins[side] ? 'on' : ''} />
+          ))}
+        </span>
+        <span
+          key={look === 'reveal' ? `r${rps.rounds.length}` : 'h'}
+          className={`rps-hand${hand ? '' : ' unknown'}${look ? ` ${look}` : ''}${roundWon ? ' round-won' : ''}`}
+          aria-hidden="true"
+        >
+          {hand ? RPS_HAND_INFO[hand].emoji : ready ? '✓' : '?'}
+        </span>
+        <span className="rps-hand-label">{hand && look !== 'stale' ? RPS_HAND_INFO[hand].label : ' '}</span>
+        {playing && !revealing && ready && <span className="dc-wait rps-ready">{mine ? 'ход сделан' : 'соперник готов'}</span>}
+        {playing && !revealing && !ready && !mine && <span className="dc-wait">думает…</span>}
+        {won && d.payout !== null && (
+          <span className="dc-win">
+            +{d.payout}
+            {coin}
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  const canPick = playing && !!mySide && !rps.ready[mySide] && !!d.moveUntil;
+  return (
+    <>
+      <div className="dc-arena">
+        {player('challenger')}
+        <div className="dc-judge">
+          <img src={judgeUrl} alt="Судья — зелёный попугай" draggable={false} />
+          <span className="rps-score" aria-label="счёт">
+            {rps.wins.challenger} : {rps.wins.target}
+          </span>
+          <span className="dc-vs">
+            {revealing ? (last?.winner ? 'раунд взят' : 'ничья — ещё раз!') : playing ? `раунд ${rps.rounds.length + 1}` : `до ${RPS_WINS} побед`}
+          </span>
+        </div>
+        {player('target')}
+      </div>
+      {canPick && (
+        <div className="rps-picks" role="group" aria-label="Твой ход">
+          <CountRing leftMs={left} totalMs={DUEL_MOVE_MS} size={28} />
+          {RPS_PICK_ORDER.map((h) => (
+            <button key={h} type="button" className="rps-pick" disabled={busy} onClick={() => onMove(h)}>
+              <span className="rps-pick-emoji" aria-hidden="true">
+                {RPS_HAND_INFO[h].emoji}
+              </span>
+              {RPS_HAND_INFO[h].label}
+            </button>
+          ))}
+        </div>
+      )}
+      {rps.rounds.length > 0 && (
+        <ol className="rps-rounds" aria-label="Раунды">
+          {rps.rounds.map((r, i) => (
+            <li key={i} className={!r.winner ? 'draw' : r.winner === mySide ? 'mine' : mySide ? 'theirs' : ''}>
+              {RPS_HAND_INFO[r.challenger].emoji}
+              <span>:</span>
+              {RPS_HAND_INFO[r.target].emoji}
+            </li>
+          ))}
+        </ol>
+      )}
+    </>
+  );
+}
+
+/** Кнопки хода КНБ — в привычном порядке названия игры. */
+const RPS_PICK_ORDER: readonly RpsHand[] = ['rock', 'scissors', 'paper'];
+
+/**
+ * «Жадный гусь» (этап 4): счёт обоих к `GREEDY_TARGET` полосой (копилка хода — светлым продолжением у ходящего), чей ход
+ * подсвечен, кубик последнего броска (кувырок `.dc-tumble` при свежем, стук `diceRoll`), «Сгорело N!» на единице,
+ * «Бросить ещё / Стоп» с кольцом срока `moveUntil` в свой ход. Просрочки (`timeouts`) — «за тебя сходил капитан».
+ */
+function GreedyBoard({
+  duel: d,
+  skew,
+  mySide,
+  people,
+  now,
+  busy,
+  phone,
+  coin,
+  autoBy = 'капитан',
+  onMove,
+}: {
+  duel: DuelDto;
+  skew: number;
+  mySide: DuelSide | null;
+  people: People;
+  now: number;
+  busy: boolean;
+  phone: boolean;
+  coin: ReactNode;
+  /** Кто ходит за просрочившего (в тренировке капитан — соперник, за игрока ходит судья). */
+  autoBy?: string;
+  onMove: (m: 'roll' | 'stop') => void;
+}) {
+  const g = d.greedy!;
+  const playing = d.state === 'playing';
+  const fresh = useFresh(d.id, g.rolls.length, DUEL_ROLL_ANIM_MS, () => {
+    if (!useStore.getState().selfDeafened) playSound('diceRoll');
+    // Выпала «1» — копилка сгорает, когда кубик докатился (этап 7): звук в тот же миг, что и надпись о сгорании.
+    // Таймер снимается уборкой `useFresh`: сцену закрыли раньше — звука после размонтирования нет.
+    if (g.lastRoll?.die === 1) {
+      const burn = window.setTimeout(() => {
+        if (!useStore.getState().selfDeafened) playSound('greedyBurn');
+      }, DUEL_ROLL_ANIM_MS);
+      return () => window.clearTimeout(burn);
+    }
+    return undefined;
+  });
+  const rolling = fresh !== null;
+  const left = duelLeftMs(d.moveUntil ?? null, skew, now);
+  const die = g.lastRoll?.die ?? null;
+  const burnedNow = g.lastRoll?.die === 1;
+  const burnBy = g.lastRoll ? people(g.lastRoll.by === 'challenger' ? d.challengerId : d.targetId).name : '';
+
+  const player = (side: DuelSide) => {
+    const id = side === 'challenger' ? d.challengerId : d.targetId;
+    const who = people(id);
+    const mine = side === mySide;
+    const turn = playing && g.turn === side;
+    const won = d.state === 'settled' && d.winnerId === id;
+    const lost = d.state === 'settled' && !!d.winnerId && d.winnerId !== id;
+    const score = g.scores[side];
+    const bank = turn ? g.turnPoints : 0;
+    const auto = g.timeouts[side];
+    const p0 = greedyProgress(score, GREEDY_TARGET);
+    const p1 = greedyProgress(score + bank, GREEDY_TARGET);
+    return (
+      <div className={`dc-player gr-player${mine ? ' me' : ''}${turn ? ' turn' : ''}${won ? ' won' : ''}${lost ? ' lost' : ''}`}>
+        <Duelist side={side} who={who} phone={phone} mine={mine} won={won} lost={lost} />
+        <span className="dc-name">{mine ? `${who.name} (ты)` : who.name}</span>
+        <span className="gr-score">
+          {score}
+          {bank > 0 && <span className="gr-score-bank">+{bank}</span>}
+          <small>/ {GREEDY_TARGET}</small>
+        </span>
+        <span className="gr-bar" aria-hidden="true">
+          <i className="gr-bar-fill" style={{ width: `${p0 * 100}%` }} />
+          {bank > 0 && <i className="gr-bar-bank" style={{ left: `${p0 * 100}%`, width: `${(p1 - p0) * 100}%` }} />}
+        </span>
+        {turn && <span className="dc-wait gr-turn">{mine ? 'твой ход' : 'ходит'}</span>}
+        {playing && auto > 0 && (
+          <span className="gr-auto" title={`Пропусков подряд: ${auto} из ${GREEDY_MAX_TIMEOUTS}`}>
+            {mine ? `за тебя сходил ${autoBy}` : `за него сходил ${autoBy}`} · {auto}/{GREEDY_MAX_TIMEOUTS}
+          </span>
+        )}
+        {won && d.payout !== null && (
+          <span className="dc-win">
+            +{d.payout}
+            {coin}
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  const myTurn = playing && !!mySide && g.turn === mySide && !!d.moveUntil;
+  const turnName = people(g.turn === 'challenger' ? d.challengerId : d.targetId).name;
+  return (
+    <>
+      <div className="dc-arena">
+        {player('challenger')}
+        <div className="dc-judge">
+          <img src={judgeUrl} alt="Судья — зелёный попугай" draggable={false} />
+          <span className="dc-vs">до {GREEDY_TARGET}</span>
+        </div>
+        {player('target')}
+      </div>
+      <div className="gr-table">
+        <Die v={die} rolling={rolling} />
+        {playing && (
+          <span className="gr-bank">
+            <small>Копилка хода</small>
+            <b>{g.turnPoints}</b>
+          </span>
+        )}
+        {burnedNow && !rolling && (
+          <span key={g.rolls.length} className="gr-burn" role="status">
+            {g.burned > 0 ? `Сгорело ${g.burned}!` : 'Единица!'}
+            <small>{g.burned > 0 ? `${burnBy} пожадничал — ход переходит` : 'ход переходит'}</small>
+          </span>
+        )}
+      </div>
+      {myTurn && (
+        <div className="gr-actions">
+          <button type="button" className="ew-btn ew-btn-main dc-roll" disabled={busy} onClick={() => onMove('roll')}>
+            <CountRing leftMs={left} totalMs={DUEL_MOVE_MS} size={28} />
+            {g.turnPoints > 0 ? 'Бросить ещё' : 'Бросить'}
+          </button>
+          <button type="button" className="ew-btn" disabled={busy || g.turnPoints <= 0} onClick={() => onMove('stop')}>
+            {g.turnPoints > 0 ? `Стоп, забрать ${g.turnPoints}` : 'Стоп'}
+          </button>
+        </div>
+      )}
+      {playing && mySide && !myTurn && <p className="wh-hint gr-wait">Ходит {turnName} — жди своего хода.</p>}
+    </>
+  );
+}
+
+/** «Проверить честность» Жадного гуся: зерно → замок, кто ходит первым и каждый бросок по порядку — у себя. */
+function GreedyFairCheck({ duel }: { duel: DuelDto }) {
+  const [verdict, setVerdict] = useState<GreedyVerdict | null>(null);
+  const [busy, setBusy] = useState(false);
+  const g = duel.greedy!;
+  return (
+    <details className="wh-fair">
+      <summary>Проверить честность</summary>
+      <p className="wh-fair-text">
+        Зерно партии загадано до принятия вызова, а его замок (хеш) виден с самого начала. После итога зерно открыто — из него
+        считаются замок, кто ходит первым и каждый бросок по порядку. Проверка идёт прямо здесь, у тебя.
+      </p>
+      <dl className="wh-fair-kv">
+        <dt>Замок</dt>
+        <dd>
+          <code>{duel.commit}</code>
+        </dd>
+        <dt>Зерно</dt>
+        <dd>
+          <code>{duel.seed}</code>
+        </dd>
+        <dt>Первым</dt>
+        <dd>{g.first === 'challenger' ? 'вызвавший' : 'принявший вызов'}</dd>
+        <dt>Броски</dt>
+        <dd>{g.rolls.length > 0 ? g.rolls.join(' · ') : 'не было'}</dd>
+      </dl>
+      <div className="wh-fair-row">
+        <button
+          type="button"
+          className="ew-btn"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            void verifyGreedy(duel)
+              .then(setVerdict)
+              .catch(() => setVerdict({ ok: false, why: 'unavailable' }))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Проверить
+        </button>
+        {verdict && (
+          <span className={`wh-verdict${verdict.ok ? ' ok' : ' bad'}`} role="status">
+            {verdict.ok
+              ? '✓ Совпадает: зерно открывает замок, первый ход и броски те самые'
+              : verdict.why === 'unavailable'
+                ? 'Браузер здесь не умеет считать хеш (нужно защищённое соединение)'
+                : verdict.why === 'commit'
+                  ? '✗ Зерно не открывает замок партии'
+                  : verdict.why === 'no-seed'
+                    ? 'Зерно ещё не открыто'
+                    : verdict.why === 'first'
+                      ? '✗ По зерну первым ходил другой игрок'
+                      : `✗ В броске №${(verdict.at ?? 0) + 1} по зерну выходит ${verdict.got}`}
+          </span>
+        )}
+      </div>
+    </details>
+  );
+}

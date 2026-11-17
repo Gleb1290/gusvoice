@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -128,9 +129,9 @@ test('G56 пустой провод сохраняет список файлов
 });
 test('G56 контрфакт потери removedByEdit ловится несуженной реальной копией в jsonb', async () => {
   await shrinkScenario();
-  await assert.rejects(shrinkScenario(['const dropped = removedByEdit(row.attachments, w.attachments);', 'const dropped: typeof row.attachments = [];']),
+  await counterfact(() => assert.rejects(shrinkScenario(['const dropped = removedByEdit(row.attachments, w.attachments);', 'const dropped: typeof row.attachments = [];']),
     e => e instanceof assert.AssertionError && e.message.startsWith('приём убирает отсутствующий элемент копии') && e.operator === 'deepStrictEqual'
-      && JSON.stringify(e.actual) === JSON.stringify(ids) && JSON.stringify(e.expected) === JSON.stringify([ids[0], ids[2]]));
+      && JSON.stringify(e.actual) === JSON.stringify(ids) && JSON.stringify(e.expected) === JSON.stringify([ids[0], ids[2]])));
 });
 async function album(authorId = 'local', conversationId = cid) {
   await t.db.insert(schema.conversationMessages).values({ id: 'album', conversationId, authorId, sortKey: 1, content: 'Подпись', attachments: ids.map(att) });

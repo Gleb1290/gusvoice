@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -146,17 +147,22 @@ async function latePeek(raw = source) {
 it('R221 поздний peek после размонтирования освобождает файл без вложения и уведомления', () => latePeek());
 it('R221 контрфакт проверяет alive раньше метки и возвращает подтверждённую утечку', async () => {
   await latePeek(source);
-  const assignment = "token = raw && typeof raw === 'object' ? String((raw as { token?: unknown }).token ?? '') : '';";
-  const from = `${assignment}\n        if (!alive) return;`;
-  assert.equal(source.split(from).length - 1, 1, 'единственный порядок сохранения метки первого await');
-  await assert.rejects(latePeek(source.replace(from, `if (!alive) return;\n        ${assignment}`)), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R221-late-peek:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  await counterfact(async () => {
+    const assignment = "token = raw && typeof raw === 'object' ? String((raw as { token?: unknown }).token ?? '') : '';";
+    const from = `${assignment}\n        if (!alive) return;`;
+    assert.equal(source.split(from).length - 1, 1, 'единственный порядок сохранения метки первого await');
+    await assert.rejects(latePeek(source.replace(from, `if (!alive) return;\n        ${assignment}`)), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R221-late-peek:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  });
 });
 for (const [label, from, to, scenario, prefix, actual, expected] of [
   ['перепутаны канал и ЛС', "st.view === 'dm' ? st.currentDmId : st.currentChannelId", "st.view === 'dm' ? st.currentChannelId : st.currentDmId", (raw: string) => delivered('dm', raw), 'R218-keyboard-feed:', 'open-channel', 'open-dm'],
   ['ошибка забывает метку', 'if (token) void sharedDropNative(token);', 'if (false) void sharedDropNative(token);', failure, 'R218-keyboard-drop:', 'read:keyboard-token', 'drop:keyboard-token'],
 ] as const) it(`R218 контрфакт входа клавиатуры: ${label}`, async () => {
-  await scenario(source); assert.equal(source.split(from).length - 1, 1);
-  await assert.rejects(scenario(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await scenario(source);
+  await counterfact(async () => {
+    assert.equal(source.split(from).length - 1, 1);
+    await assert.rejects(scenario(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

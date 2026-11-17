@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -119,9 +120,11 @@ test('R194 HTTP выдачи требует активную связку на �
 });
 test('R194 requireActive=false отвергается адресным требованием параметра авторизации', async () => {
   // Класс ошибки: требование активности снято только у вложений.
-  await activeContract(); const raw = source('fedAtt'), anchor = "'attachment', { requireActive: true }";
+  await activeContract(); await counterfact(async () => {
+  const raw = source('fedAtt'), anchor = "'attachment', { requireActive: true }";
   assert.equal(raw.split(anchor).length - 1, 1, 'единственный якорь допуска');
   await assert.rejects(activeContract(raw.replace(anchor, "'attachment', { requireActive: false }")), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('выдача требует активную связку'));
+  });
 });
 test('R194 remote без крючка возвращает pending 503 с Retry-After 5 и не читает локальное хранилище', async () => {
   // Класс ошибки: отсутствующая копия маскируется под 404 или читается как местный объект.

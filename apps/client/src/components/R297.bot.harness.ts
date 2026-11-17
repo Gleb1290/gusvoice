@@ -19,16 +19,16 @@ export async function input(field: HTMLInputElement, value: string) {
   await React.act(async () => { reactProps(field).onChange({ target: { value } }); });
 }
 export function uiDependencies(store: unknown) {
-  const back = load<typeof import('../androidBack')>(readClient('../androidBack.ts'), {
+  const back = load<typeof import('../androidBack')>(new URL('../androidBack.ts', import.meta.url), readClient('../androidBack.ts'), {
     './hotkeys': { isAndroid: () => false }, './store': { useStore: store },
   }, { HTMLElement, Element, KeyboardEvent, setTimeout, clearTimeout });
-  const chrome = load<typeof import('../dialogChrome')>(readClient('../dialogChrome.ts'), { './androidBack': back }, { setTimeout, clearTimeout });
-  const icons = load<typeof import('./Icon')>(sourceOf('Icon'), {});
-  const lite = load<typeof import('../liteMode')>(readClient('../liteMode.ts'), {});
-  const avatar = load<typeof import('./Avatar')>(sourceOf('Avatar'), { '../liteMode': lite,
+  const chrome = load<typeof import('../dialogChrome')>(new URL('../dialogChrome.ts', import.meta.url), readClient('../dialogChrome.ts'), { './androidBack': back }, { setTimeout, clearTimeout });
+  const icons = load<typeof import('./Icon')>(new URL('./Icon.tsx', import.meta.url), sourceOf('Icon'), {});
+  const lite = load<typeof import('../liteMode')>(new URL('../liteMode.ts', import.meta.url), readClient('../liteMode.ts'), {});
+  const avatar = load<typeof import('./Avatar')>(new URL('./Avatar.tsx', import.meta.url), sourceOf('Avatar'), { '../liteMode': lite,
     '../windowCovered': { useWindowMotion: () => ({ covered: false, gameFg: false }) },
     '../firstFrame': { useFirstFrame: () => null } });
-  const toggle = load<typeof import('./Toggle')>(sourceOf('Toggle'), {});
+  const toggle = load<typeof import('./Toggle')>(new URL('./Toggle.tsx', import.meta.url), sourceOf('Toggle'), {});
   return { '@gusvoice/shared': shared, '../androidBack': back, '../dialogChrome': chrome, './Icon': icons,
     './Avatar': avatar, './Toggle': toggle, '../store': { useStore: store } };
 }

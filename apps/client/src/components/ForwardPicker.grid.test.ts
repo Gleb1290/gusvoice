@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { React, load, sourceOf, icon, noop, environment, click, reactProps, mutate } from './R171.phoneHarness';
 import * as listRules from '../dmListRules';
@@ -20,7 +21,7 @@ async function fixture(phone: boolean, mode: Mode, check: (f: {
     window.clearTimeout = ((id: number) => timers.delete(id)) as typeof window.clearTimeout;
     const drafts: string[] = [], picks: string[] = [], sends: string[][] = []; let closes = 0;
     try {
-      const cells = load<typeof Sidebar>(rawCells, {
+      const cells = load<typeof Sidebar>(new URL('./DmSidebar.tsx', import.meta.url), rawCells, {
         '../dmListRules': listRules,
         './Avatar': { Avatar: ({ size, name }: { size: number; name: string }) => React.createElement('i', { 'data-avatar': size, 'data-name': name }) },
         './SavedAvatar': { SavedAvatar: ({ size }: { size: number }) => React.createElement('i', { 'data-saved': size }) },
@@ -30,7 +31,7 @@ async function fixture(phone: boolean, mode: Mode, check: (f: {
         { id: 'saved', saved: true, otherUser: { id: 'me', username: 'me', displayName: 'Я', avatarUrl: null } }];
       const state = { dms, convActive: false, serverFeatures: [], user: { id: 'me' }, currentDmId: 'current', unreadDms: [],
         conv: { summaries: {} }, drafts: {}, outbox: {} };
-      const module = load<typeof Picker>(raw, {
+      const module = load<typeof Picker>(new URL('./ForwardPicker.tsx', import.meta.url), raw, {
         '../dialogChrome': { useDialogChrome: () => ({ current: null }) },
         '../convSyncRules': { serverSaved: () => false }, '../dmRowRules': rowRules,
         '../phoneLayout': { usePhoneLayout: () => phone },
@@ -139,7 +140,7 @@ for (const [name, anchor, replacement] of [
   ['телефон игнорируется', 'const phone = usePhoneLayout();', 'const phone = false;'],
 ] as const) it(`R171 ${name} обнаруживается тем же сценарием пересылки`, async () => {
   // Мутант должен нарушить наблюдаемое поведение, не загрузку VM.
-  await plain(); await assert.rejects(() => plain(mutate(source, anchor, replacement)), assert.AssertionError);
+  await plain(); await counterfact(() => assert.rejects(() => plain(mutate(source, anchor, replacement)), assert.AssertionError));
 });
 
 it('R171 снятие условности checkbox обнаруживается режимом выбора одного адресата', async () => {
@@ -149,9 +150,9 @@ it('R171 снятие условности checkbox обнаруживается
     assert.equal(cell.getAttribute('role'), null); assert.equal(cell.getAttribute('aria-checked'), null);
   }, source, rawCells);
   await check(cellsSource);
-  await assert.rejects(() => check(mutate(cellsSource,
+  await counterfact(() => assert.rejects(() => check(mutate(cellsSource,
     "className={`fwd-cell${picked ? ' picked' : ''}`}\n      role={selecting ? 'checkbox' : undefined}",
-    "className={`fwd-cell${picked ? ' picked' : ''}`}\n      role=\"checkbox\"")), assert.AssertionError);
+    "className={`fwd-cell${picked ? ' picked' : ''}`}\n      role=\"checkbox\"")), assert.AssertionError));
 });
 it('R171 отпускание после удержания не снимает первую выбранную ячейку share', async () => {
   // Синтетический click после touchend обязан проглотиться ровно один раз.
@@ -162,5 +163,5 @@ it('R171 отпускание после удержания не снимает 
   }, source, rawCells);
   await check(cellsSource);
   const anchor = "if (hold.current?.fired) {\n          hold.current = null;\n          return;\n        }\n        onOpen(id);";
-  await assert.rejects(() => check(mutate(cellsSource, anchor, 'onOpen(id);')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(mutate(cellsSource, anchor, 'onOpen(id);')), assert.AssertionError));
 });

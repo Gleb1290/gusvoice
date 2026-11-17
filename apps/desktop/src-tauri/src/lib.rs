@@ -1,12 +1,15 @@
 // WebView2 denies getUserMedia (mic/camera) by default — it only prompts/denies unless the host
-// grants the PermissionRequested. wry itself only auto-grants clipboard, so we add our own handler
-// that allows microphone + camera for the app's own content. Without this, voice/video is dead in
-// the Windows desktop build.
+// grants the PermissionRequested. We add our own handler that allows microphone + camera for the
+// app's own content. Without this, voice/video is dead in the Windows desktop build.
+// Clipboard read is granted here too (30.10.2026, v0.9.55): wry auto-grants it only when the window's
+// `clipboard` attribute is set, and after the Tauri 2.12 / wry 0.57 upgrade users got WebView2's
+// «Сайт http://tauri.localhost хочет просматривать буфер обмена» prompt on paste.
 #[cfg(target_os = "windows")]
 fn grant_media_permissions(window: &tauri::WebviewWindow) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
-        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW,
     };
     use webview2_com::PermissionRequestedEventHandler;
 
@@ -22,6 +25,7 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
                 args.PermissionKind(&mut kind)?;
                 if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
                     || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                    || kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
                 {
                     args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
                 }
@@ -119,6 +123,9 @@ static SAVED_FILES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex
 const SAVED_FILES_MAX: usize = 500;
 
 #[cfg(target_os = "windows")]
+mod downloaded_files;
+
+#[cfg(target_os = "windows")]
 fn remember_saved(path: &str) {
     if let Ok(mut g) = SAVED_FILES.lock() {
         let p = std::path::PathBuf::from(path);
@@ -212,11 +219,7 @@ fn gv_set_download_dir(dir: Option<String>) {
 /// this itself for the path it picked, but NOT for one we set — and silently overwriting a file the user
 /// already has is the one outcome nobody wants.
 #[cfg(target_os = "windows")]
-fn unique_in(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
+fn unique_in(dir: &std::path::Path, name: &str) -> Option<downloaded_files::Reservation> {
     let p = std::path::Path::new(name);
     let stem = p
         .file_stem()
@@ -226,10 +229,8 @@ fn unique_in(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         .extension()
         .map(|s| format!(".{}", s.to_string_lossy()))
         .unwrap_or_default();
-    (1..1000)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|c| !c.exists())
-        .unwrap_or(first)
+    let numbered = (1..1000).map(|n| dir.join(format!("{stem} ({n}){ext}")));
+    downloaded_files::reserve(dir, std::iter::once(dir.join(name)).chain(numbered))
 }
 
 // Chat attachments download through WebView2, which gives NO feedback inside our window — no download
@@ -274,7 +275,14 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                 let name = std::path::Path::new(&default_path)
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| default_path.clone());
+                    .unwrap_or_else(|| "download".into());
+                // Откуда качаем (для клиента — привязать файл к своей записи).
+                let mut uri_raw = windows::core::PWSTR::null();
+                let uri = if op.Uri(&mut uri_raw).is_ok() {
+                    take_pwstr(uri_raw)
+                } else {
+                    String::new()
+                };
 
                 // create_dir_all doubles as the reachability check: a folder on a pulled USB stick or a
                 // dead network share fails here, and we ask again rather than letting the download die
@@ -289,13 +297,10 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                     // not an option — a modal dialog on the WebView2 event-loop thread is the very wedge
                     // that froze the app in v0.5.38.
                     args.SetCancel(true)?;
-                    let mut u = windows::core::PWSTR::null();
-                    op.Uri(&mut u)?;
-                    let url = take_pwstr(u);
                     let _ = app.emit(
                         "gv-download-need-dir",
                         DownloadAsk {
-                            url,
+                            url: uri,
                             name,
                             lost: configured.is_some(),
                         },
@@ -303,7 +308,20 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                     return Ok(());
                 };
 
-                let target = unique_in(&dir, &name);
+                let Some(reservation) = unique_in(&dir, &name) else {
+                    args.SetCancel(true)?;
+                    let _ = app.emit(
+                        "gv-download-failed",
+                        DownloadInfo {
+                            name,
+                            dir: dir.to_string_lossy().into_owned(),
+                            path: String::new(),
+                            url: uri,
+                        },
+                    );
+                    return Ok(());
+                };
+                let target = &reservation.path;
                 {
                     use std::os::windows::ffi::OsStrExt;
                     let wide: Vec<u16> = target
@@ -313,13 +331,6 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                         .collect();
                     args.SetResultFilePath(windows::core::PCWSTR(wide.as_ptr()))?;
                 }
-                // Откуда качаем (для клиента — привязать файл к своей записи). Не отдал — пусто, не ошибка.
-                let mut uri_raw = windows::core::PWSTR::null();
-                let uri = if op.Uri(&mut uri_raw).is_ok() {
-                    take_pwstr(uri_raw)
-                } else {
-                    String::new()
-                };
                 let info = DownloadInfo {
                     url: uri,
                     name: target
@@ -335,6 +346,7 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                 // StateChanged fires on this same operation until it settles. One handler per download;
                 // the token is dropped with the operation once it completes.
                 let app_done = app.clone();
+                let mut reservation = Some(reservation);
                 let mut tok = 0i64;
                 let _ = op.add_StateChanged(
                     &StateChangedEventHandler::create(Box::new(move |op, _| {
@@ -343,8 +355,11 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
                         op.State(&mut st)?;
                         if st == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
                             remember_saved(&info.path);
+                            downloaded_files::remember(&info.path, &info.url);
+                            drop(reservation.take());
                             let _ = app_done.emit("gv-download-done", info.clone());
                         } else if st == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
+                            drop(reservation.take());
                             let _ = app_done.emit("gv-download-failed", info.clone());
                         }
                         Ok(())
@@ -358,6 +373,8 @@ fn wire_download_notifications(window: &tauri::WebviewWindow) {
     });
 }
 
+#[cfg(target_os = "windows")]
+mod autostart;
 #[cfg(target_os = "windows")]
 mod apps_enum;
 #[cfg(target_os = "windows")]
@@ -384,9 +401,6 @@ mod notify_conv;
 /// Свои всплывающие уведомления на ПК, как у Telegram Desktop (G38, ND-07) — окно `overlay::NOTIFY`.
 #[cfg(desktop)]
 mod notify_popup;
-/// Число непрочитанных ЛС на значке панели задач и в трее (Р1, G39).
-#[cfg(desktop)]
-mod unread_badge;
 /// Заставка при запуске (15.10): страховка «главное окно всё равно покажется» и команды окна `splash`.
 #[cfg(desktop)]
 mod splash;
@@ -407,6 +421,33 @@ mod hotkey_key;
 mod screenshare;
 #[cfg(target_os = "windows")]
 mod share_indicator;
+
+/// Actual Windows Run registration, additionally respecting Explorer's startup approval.
+#[tauri::command]
+fn gv_autostart_enabled() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        autostart::enabled()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Автозапуск доступен только в Windows.".into())
+    }
+}
+
+/// Only an explicit settings action writes to Run; application startup never calls this.
+#[tauri::command]
+fn gv_autostart_set(enabled: bool) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        autostart::set(enabled)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+        Err("Автозапуск доступен только в Windows.".into())
+    }
+}
 
 /// Счётчик запросов на закрытие и последний подтверждённый клиентом (#125). Разбор — у обработчика.
 static CLOSE_REQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -799,9 +840,18 @@ fn gv_open_external(url: String) -> Result<(), String> {
 fn gv_tray_set_state(app: tauri::AppHandle, state: String) {
     #[cfg(desktop)]
     {
-        // Значок по состоянию + счётчик непрочитанных поверх (Р1, G39) — общий путь с `gv_set_unread_badge`.
-        unread_badge::set_tray_state(&state);
-        unread_badge::refresh_tray(&app);
+        let Some(tray) = app.tray_by_id("main") else { return };
+        let (icon, tip) = match state.as_str() {
+            "speaking" => (Some(tauri::include_image!("tray-icons/speaking.png")), "GusVoice — говорите"),
+            "silent" => (Some(tauri::include_image!("tray-icons/silent.png")), "GusVoice — микрофон включён"),
+            "muted" => (Some(tauri::include_image!("tray-icons/muted.png")), "GusVoice — микрофон выключен"),
+            "deafened" => (Some(tauri::include_image!("tray-icons/deafened.png")), "GusVoice — звук выключен"),
+            _ => (app.default_window_icon().cloned(), "GusVoice"),
+        };
+        if let Some(icon) = icon {
+            let _ = tray.set_icon(Some(icon));
+        }
+        let _ = tray.set_tooltip(Some(tip));
     }
     #[cfg(not(desktop))]
     {
@@ -1331,13 +1381,25 @@ pub fn run() {
         }));
         builder = builder
             .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin({
+                // Пробный откат (`GV_UPDATE_TEST=downgrade`, `splash.rs`): с плагина 2.12 его разрешает
+                // только Rust — сравнение «версия другая» вместо «версия новее». Без переменной — как было.
+                let updater = tauri_plugin_updater::Builder::new();
+                if splash::update_test_downgrade() {
+                    updater.default_version_comparator(|current, remote| remote.version != current)
+                } else {
+                    updater
+                }
+                .build()
+            })
             .plugin(tauri_plugin_process::init())
             .plugin(tauri_plugin_notification::init())
             .plugin(tauri_plugin_dialog::init());
     }
     builder
         .invoke_handler(tauri::generate_handler![
+            gv_autostart_enabled,
+            gv_autostart_set,
             gv_take_deep_link,
             gv_audio_record_wav,
             gv_stream_audio_start,
@@ -1385,13 +1447,15 @@ pub fn run() {
             #[cfg(desktop)]
             notify_popup::gv_notify_popup_monitors,
             #[cfg(desktop)]
-            unread_badge::gv_set_unread_badge,
-            #[cfg(desktop)]
             splash::gv_splash_ping,
             #[cfg(desktop)]
             splash::gv_splash_done,
             #[cfg(desktop)]
             splash::gv_launch_splash,
+            #[cfg(desktop)]
+            splash::gv_splash_active,
+            #[cfg(desktop)]
+            splash::gv_update_log,
             #[cfg(desktop)]
             pip::gv_pip_arm,
             #[cfg(desktop)]
@@ -1418,6 +1482,8 @@ pub fn run() {
             gv_overlay_watch,
             gv_set_download_dir,
             gv_show_in_folder,
+            #[cfg(target_os = "windows")]
+            downloaded_files::gv_downloaded_file,
             gv_close_ack,
             gv_window_covered,
             gv_window_cover_pct,

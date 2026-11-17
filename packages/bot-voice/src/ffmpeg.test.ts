@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -203,7 +204,9 @@ for (const c of [
     probe: async (raw: string) => hugeThenShort(raw), message: 'R306 ffmpeg короткий чанк не выбрасывает нужную часть длинного' },
 ]) it(`R306 ffmpeg контрфакт: ${c.name}, оригинал проходит первым`, async () => {
   await c.probe(source);
+  await counterfact(async () => {
   assert.equal(source.split(c.needle).length - 1, 1, 'ffmpeg: точный уникальный якорь');
   await assert.rejects(async () => c.probe(source.replace(c.needle, c.replacement)), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.message.split('\n', 1)[0] === c.message);
+  });
 });

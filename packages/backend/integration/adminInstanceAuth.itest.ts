@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -113,6 +114,7 @@ test('R230 отсутствие токена даёт 401 на чтение и �
 for (const method of ['GET', 'PUT'] as const) test(`R230 контрфакт обычной сессии вместо super-admin ловится в ${method}`, async () => {
   // Ошибочный hook всё ещё проверяет JWT, но больше не отличает участника от держателя.
   await denied(method);
+  await counterfact(async () => {
   const anchor = "app.addHook('preHandler', requireSuperAdmin);";
   const importAnchor = "import { requireSuperAdmin } from '../auth.js';";
   assert.equal(adminSource.split(anchor).length - 1, 1);
@@ -120,4 +122,5 @@ for (const method of ['GET', 'PUT'] as const) test(`R230 контрфакт об
   const changed = adminSource.replace(importAnchor, "import { requireAuth, requireSuperAdmin } from '../auth.js';").replace(anchor, "app.addHook('preHandler', requireAuth);");
   await assert.rejects(denied(method, changed), e => e instanceof assert.AssertionError && e.message.startsWith(`R230-admin-${method}:`)
     && e.operator === 'strictEqual' && e.actual === 200 && e.expected === 403);
+  });
 });

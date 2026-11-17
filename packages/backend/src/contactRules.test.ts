@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { CONTACT_NAME_MAX } from '@gusvoice/shared';
@@ -41,9 +42,11 @@ it('проверки подписи действительно ловят отс
     assert.equal(fn('я'.repeat(63) + '🪿x'), 'я'.repeat(63) + '🪿');
   };
   oracle(make(source));
-  const variants = [source.replace(/\.trim\(\)/g, ''), source.replace('CONTACT_NAME_MAX', '63'), source.replace('[...one]', 'one').replace('.join("")', '').replace(".join('')", '')];
-  for (const mutated of variants) {
-    assert.notEqual(mutated, source, 'мутант обязан действительно изменить исходник');
-    assert.throws(() => oracle(make(mutated)), assert.AssertionError);
-  }
+  counterfact(() => {
+    const variants = [source.replace(/\.trim\(\)/g, ''), source.replace('CONTACT_NAME_MAX', '63'), source.replace('[...one]', 'one').replace('.join("")', '').replace(".join('')", '')];
+    for (const mutated of variants) {
+      assert.notEqual(mutated, source, 'мутант обязан действительно изменить исходник');
+      assert.throws(() => oracle(make(mutated)), assert.AssertionError);
+    }
+  });
 });

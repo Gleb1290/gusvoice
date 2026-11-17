@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -107,8 +108,10 @@ it('R299 контрфакт постоянного успеха принимае
     assert.equal(await load(raw).verifyWebhookSignature(secret, header, body, { nowS: now }), false, 'R299-webhook-проверяет-HMAC');
   };
   await scenario(source);
+  await counterfact(async () => {
   await assert.rejects(scenario(change('  return ok;', '  return true;')),
     error => guardFailure(error, 'R299-webhook-проверяет-HMAC', true, false));
+  });
 });
 
 it('R299 контрфакт без окна принимает старую, но правильно подписанную доставку', async () => {
@@ -117,8 +120,10 @@ it('R299 контрфакт без окна принимает старую, н�
     assert.equal(await load(raw).verifyWebhookSignature(secret, header, body, { nowS: now }), false, 'R299-webhook-отсекает-replay');
   };
   await scenario(source);
+  await counterfact(async () => {
   const mutant = change('if (Math.abs(now - sig.t) > (options.toleranceS ?? DEFAULT_TOLERANCE_S)) return false;', '/* окно удалено */');
   await assert.rejects(scenario(mutant), error => guardFailure(error, 'R299-webhook-отсекает-replay', true, false));
+  });
 });
 
 it('R299 контрфакт без Math.abs принимает подпись из слишком далёкого будущего', async () => {
@@ -127,6 +132,8 @@ it('R299 контрфакт без Math.abs принимает подпись и
     assert.equal(await load(raw).verifyWebhookSignature(secret, header, body, { nowS: now }), false, 'R299-webhook-проверяет-будущее');
   };
   await scenario(source);
+  await counterfact(async () => {
   const mutant = change('Math.abs(now - sig.t)', '(now - sig.t)');
   await assert.rejects(scenario(mutant), error => guardFailure(error, 'R299-webhook-проверяет-будущее', true, false));
+  });
 });

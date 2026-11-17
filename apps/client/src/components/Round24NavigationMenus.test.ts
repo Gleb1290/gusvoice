@@ -1,5 +1,6 @@
+import { mutantTest } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
-import { after, afterEach, before, it } from 'node:test';
+import { it, after, afterEach, before } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -190,7 +191,7 @@ it('useUserMenu.openAt открывает профиль, передаёт по�
   assert.equal(document.body.querySelector('.pcard-handle')?.textContent, '@roster-login', 'ростерный логин сильнее устаревшего target.username');
 });
 
-it('мутант без target.username не проходит реальный openAt из ЛС', async () => {
+mutantTest('мутант без target.username не проходит реальный openAt из ЛС', async () => {
   // Поле логина в шапке ЛС нужно именно когда серверный ростер ещё не загружен или собеседника в нём нет.
   const mutant = await server.ssrLoadModule('/src/components/UserContextMenu.tsx?codex-no-target-username') as MenuModule;
   await openProfile(mutant);

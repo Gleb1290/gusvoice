@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as crypto from 'node:crypto';
@@ -103,9 +104,11 @@ it('R303 контрфакт снятой проверки схемы прини�
     assert.equal(fixture(raw).auth.registerBody.safeParse({ ...human, username: 'AliceBOT' }).success, false, 'R303 поле регистрации отвергает bot');
   }
   check(authSource);
-  const needle = '.refine((u) => !humanUsernameLooksBot(u), HUMAN_BOT_USERNAME_ERROR)';
+  counterfact(() => {
+const needle = '.refine((u) => !humanUsernameLooksBot(u), HUMAN_BOT_USERNAME_ERROR)';
   assert.equal(authSource.split(needle).length - 1, 1);
   assert.throws(() => check(authSource.replace(needle, '')), (error: unknown) => error instanceof assert.AssertionError
     && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual' && error.actual === true && error.expected === false
     && error.message.split(/\r?\n/, 1)[0] === 'R303 поле регистрации отвергает bot');
+});
 });

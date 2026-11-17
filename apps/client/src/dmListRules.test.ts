@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -25,8 +26,10 @@ describe('R130 собственный срок заглушки из дней, �
       assert.equal(api.muteDurationSeconds(0, 0, 1), 60, 'ровно минута разрешена');
     };
     check(prefs);
-    assert.throws(() => check(mutantPrefs('!Number.isFinite(total) || total <= 0', '!Number.isFinite(total)')), assert.AssertionError);
-    assert.throws(() => check(mutantPrefs('if (days === null || hours === null || minutes === null) return null;', '')), assert.AssertionError);
+    counterfact(() => {
+      assert.throws(() => check(mutantPrefs('!Number.isFinite(total) || total <= 0', '!Number.isFinite(total)')), assert.AssertionError);
+      assert.throws(() => check(mutantPrefs('if (days === null || hours === null || minutes === null) return null;', '')), assert.AssertionError);
+    });
   });
 
   it('дни, часы и минуты преобразуются в секунды без перестановки единиц', () => {
@@ -38,7 +41,9 @@ describe('R130 собственный срок заглушки из дней, �
       ] as const) assert.equal(api.muteDurationSeconds(days, hours, minutes), expected);
     };
     check(prefs);
-    assert.throws(() => check(mutantPrefs('d * 86400 + h * 3600', 'd * 3600 + h * 86400')), assert.AssertionError);
+    counterfact(() => {
+      assert.throws(() => check(mutantPrefs('d * 86400 + h * 3600', 'd * 3600 + h * 86400')), assert.AssertionError);
+    });
   });
 
   it('каждое поле зажимается до 31 дня, 23 часов и 59 минут с обеих сторон границы', () => {
@@ -52,10 +57,12 @@ describe('R130 собственный срок заглушки из дней, �
       assert.equal(api.muteDurationSeconds(31, 23, 58), 2764680);
     };
     check(prefs);
-    for (const field of ['days', 'hours', 'minutes']) {
-      assert.throws(() => check(mutantPrefs(`Math.min(MUTE_DUR_MAX.${field}, Math.max(0, Math.trunc(${field})))`,
-        `Math.max(0, Math.trunc(${field}))`)), assert.AssertionError);
-    }
+    counterfact(() => {
+      for (const field of ['days', 'hours', 'minutes']) {
+        assert.throws(() => check(mutantPrefs(`Math.min(MUTE_DUR_MAX.${field}, Math.max(0, Math.trunc(${field})))`,
+          `Math.max(0, Math.trunc(${field}))`)), assert.AssertionError);
+      }
+    });
   });
 
   it('отрицательные и дробные поля нормализуются, NaN не создаёт срок, бесконечность проходит обычный зажим', () => {
@@ -101,9 +108,11 @@ describe('R130 собственный срок заглушки из дней, �
     };
     const source = readFileSync(new URL('./dmListRules.ts', import.meta.url), 'utf8');
     check(source);
-    const mutant = source.replace('const MUTE_SECONDS_MIN = 60;', 'const MUTE_SECONDS_MIN = 0;');
-    assert.notEqual(mutant, source);
-    assert.throws(() => check(mutant), assert.AssertionError);
+    counterfact(() => {
+      const mutant = source.replace('const MUTE_SECONDS_MIN = 60;', 'const MUTE_SECONDS_MIN = 0;');
+      assert.notEqual(mutant, source);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    });
   });
 });
 
@@ -134,12 +143,14 @@ describe('R115 перестановка закреплённых бесед', ()
     };
     check(prefs);
     // Clamp не даёт перейти край: строгость там делала первое и последнее место недостижимыми.
-    assert.throws(() => check(mutantPrefs('pos >= mids[j] - PIN_EDGE_EPS', 'pos > mids[j]')), assert.AssertionError);
-    assert.throws(() => check(mutantPrefs('pos <= mids[j] + PIN_EDGE_EPS', 'pos < mids[j]')), assert.AssertionError);
-    assert.throws(() => check(mutantPrefs('const PIN_EDGE_EPS = 0.5', 'const PIN_EDGE_EPS = 0')), assert.AssertionError);
-    // На внутренних строках равенство по-прежнему не меняет порядок: ряд иначе дрожит у порога.
-    assert.throws(() => check(mutantPrefs('pos > mids[j]', 'pos >= mids[j]')), assert.AssertionError);
-    assert.throws(() => check(mutantPrefs('pos < mids[j]', 'pos <= mids[j]')), assert.AssertionError);
+    counterfact(() => {
+      assert.throws(() => check(mutantPrefs('pos >= mids[j] - PIN_EDGE_EPS', 'pos > mids[j]')), assert.AssertionError);
+      assert.throws(() => check(mutantPrefs('pos <= mids[j] + PIN_EDGE_EPS', 'pos < mids[j]')), assert.AssertionError);
+      assert.throws(() => check(mutantPrefs('const PIN_EDGE_EPS = 0.5', 'const PIN_EDGE_EPS = 0')), assert.AssertionError);
+      // На внутренних строках равенство по-прежнему не меняет порядок: ряд иначе дрожит у порога.
+      assert.throws(() => check(mutantPrefs('pos > mids[j]', 'pos >= mids[j]')), assert.AssertionError);
+      assert.throws(() => check(mutantPrefs('pos < mids[j]', 'pos <= mids[j]')), assert.AssertionError);
+    });
   });
 
   it('сдвиг ограничен крайними закрепами, но внутренний и ровно граничный сдвиг разрешены', () => {
@@ -191,7 +202,9 @@ describe('R115 перестановка закреплённых бесед', ()
       assert.deepEqual(Array.from(api.pinnedGroupIds([], true)), []);
     };
     check(prefs);
-    assert.throws(() => check(mutantPrefs('&& (d.archived === true) === archived', '')), assert.AssertionError);
+    counterfact(() => {
+      assert.throws(() => check(mutantPrefs('&& (d.archived === true) === archived', '')), assert.AssertionError);
+    });
     assert.deepEqual(rows.map((d) => d.id), ['main-old', 'arch-new', 'main-new', 'arch-old', 'unpinned', 'arch-unpinned']);
   });
 });
@@ -214,7 +227,9 @@ it('выключенный звук не гасит уведомление и и
   assert.equal(prefs.muteSoundOff({ until: null, soundOnly: true }, now), true);
   assert.equal(prefs.muteSoundOff({ until: null }, now), false);
   assert.deepEqual(prefs.dmMutedDecision(decision, false, true), { ...decision, sound: false });
-  assert.throws(() => assert.equal(mutantPrefs('t > now', 't >= now').muteSoundOff(mute, now + 1), false), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => assert.equal(mutantPrefs('t > now', 't >= now').muteSoundOff(mute, now + 1), false), assert.AssertionError);
+  });
 });
 it('сроки хранят выбранный и наибольший, шкала заканчивается 93 днями', () => {
   // Повтор не должен раздувать меню и выбрасывать самый долгий выбранный срок.
@@ -237,8 +252,10 @@ it('закрепы выше свежих сообщений, новый закр
     assert.ok(api.byRecent({ ...c, lastMessageAt: null }, c) > 0, 'без сообщения используется createdAt');
   };
   check(prefs);
-  for (const [a,b] of [['pb.localeCompare(pa)', 'pa.localeCompare(pb)'], ['if (pa === null) return 1;', 'if (pa === null) return -1;']])
-    assert.throws(() => check(mutantPrefs(a,b)), assert.AssertionError);
+  counterfact(() => {
+    for (const [a,b] of [['pb.localeCompare(pa)', 'pa.localeCompare(pb)'], ['if (pa === null) return 1;', 'if (pa === null) return -1;']])
+      assert.throws(() => check(mutantPrefs(a,b)), assert.AssertionError);
+  });
 });
 
 it('мьют истекает ровно в свой срок, вечный не истекает, мусор не глушит', () => {
@@ -250,7 +267,9 @@ it('мьют истекает ровно в свой срок, вечный не
     assert.equal(api.muteActive({ until: new Date(now + 1).toISOString() }, now), true);
   };
   check(prefs);
-  assert.throws(() => check(mutantPrefs('t > now', 't >= now')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutantPrefs('t > now', 't >= now')), assert.AssertionError);
+  });
 });
 
 it('остаток мьюта округляется вверх, ближайший таймер берёт лишь будущий конечный срок', () => {
@@ -263,7 +282,9 @@ it('остаток мьюта округляется вверх, ближайш�
     assert.equal(api.nextMuteExpiry([m(-1), { until: null }], now), null);
   };
   check(prefs);
-  assert.throws(() => check(mutantPrefs('Math.ceil(left / 60_000)', 'Math.floor(left / 60_000)')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutantPrefs('Math.ceil(left / 60_000)', 'Math.floor(left / 60_000)')), assert.AssertionError);
+  });
 });
 
 it('сводка мьюта главнее старого списка, выключение звука не съедает непрочитанное', () => {
@@ -279,8 +300,10 @@ it('сводка мьюта главнее старого списка, выкл
     assert.deepEqual(JSON.parse(JSON.stringify(api.dmMutedDecision(base, true))), { ...base, sound: false, osNotify: false });
   };
   check(prefs);
-  for (const [a,b] of [['if (dm.muted !== undefined) return dm.muted;', ''], ['{ ...d, sound: false, osNotify: false }', '{ ...d, sound: false, osNotify: false, countUnread: false }']])
-    assert.throws(() => check(mutantPrefs(a,b)), assert.AssertionError);
+  counterfact(() => {
+    for (const [a,b] of [['if (dm.muted !== undefined) return dm.muted;', ''], ['{ ...d, sound: false, osNotify: false }', '{ ...d, sound: false, osNotify: false, countUnread: false }']])
+      assert.throws(() => check(mutantPrefs(a,b)), assert.AssertionError);
+  });
 });
 
 it('открытая беседа под слоем сохраняет непрочитанное и не посылает отметку чтения', () => {
@@ -292,7 +315,9 @@ it('открытая беседа под слоем сохраняет непр�
     assert.equal(api.dmIncomingDecision({ ...i, covered: false }).markRead, true);
   };
   check(prefs);
-  assert.throws(() => check(mutantPrefs('i.focused && !i.covered', 'i.focused')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutantPrefs('i.focused && !i.covered', 'i.focused')), assert.AssertionError);
+  });
 });
 describe('решение по входящему ЛС', () => {
   it('своё эхо не считается, не читается и не уведомляет', () => {

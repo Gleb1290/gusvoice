@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -13,8 +14,16 @@ type Mutation = { module: string; from: string; to: string };
 const source = (name: string) => readFileSync(new URL(`./${name}.ts`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const unused = () => assert.fail('незадействованная IO-граница сохранённых файлов');
 
-function fixture(options: { shell?: boolean; native?: boolean; reject?: boolean; mutation?: Mutation } = {}) {
+function fixture(options: {
+  shell?: boolean; native?: boolean; reject?: boolean; mutation?: Mutation; windows?: boolean;
+  fetch?: typeof fetch; pickFolder?: () => Promise<string | null>;
+  openFile?: (path: string) => Promise<'opened' | 'cancelled' | 'missing'>;
+} = {}) {
   const notices: unknown[][] = [], invokes: Array<{ command: string; args: unknown }> = [], mirrored: (string | null)[] = [];
+  const saves: string[] = [], revoked: string[] = [];
+  const handoffs: { finish: () => void; delay: number }[] = [];
+  let serial = 0;
+  const nativeResults = new Map<string, 'opened' | 'cancelled'>();
   const load = <T>(name: string, deps: Record<string, unknown>): T => {
     let raw = source(name);
     if (options.mutation?.module === name) {
@@ -26,8 +35,14 @@ function fixture(options: { shell?: boolean; native?: boolean; reject?: boolean;
     runInNewContext(ts.transpileModule(raw, { compilerOptions: {
       module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
     } }).outputText, { module, exports: module.exports, Map, Set, Date, Error, AbortController, Blob,
-      URL: { revokeObjectURL: () => {} }, window: nativeWindow, document: { createElement: unused },
-      localStorage: { getItem: (key: string) => { assert.equal(key, 'gv_download_dir'); return null; }, setItem: unused, removeItem: unused },
+      URL: { createObjectURL: () => `blob:${++serial}`, revokeObjectURL: (href: string) => revoked.push(href) },
+      window: nativeWindow, navigator: { userAgent: options.windows ? 'Windows NT 10.0' : 'Android' },
+      fetch: options.fetch ?? unused, clearTimeout,
+      setTimeout: name === 'pcDownloads' ? (finish: () => void, delay: number) => handoffs.push({ finish, delay }) : setTimeout,
+      document: { body: { appendChild() {} }, createElement: () => ({
+        href: '', click() { saves.push(this.href); }, remove() {},
+      }) },
+      localStorage: { getItem: () => null, setItem: unused, removeItem: unused },
       require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `объявленный импорт ${name}: ${id}`); return deps[id]; },
     });
     return module.exports as T;
@@ -35,9 +50,13 @@ function fixture(options: { shell?: boolean; native?: boolean; reject?: boolean;
   const core = { invoke(this: unknown, command: string, args: unknown) {
     assert.equal(this, core, 'мост вызывается с настоящим receiver');
     invokes.push({ command, args });
+    if (command === 'gv_downloaded_file') {
+      const { path } = args as { path: string };
+      return options.openFile?.(path) ?? Promise.resolve(nativeResults.get(path) ?? 'missing');
+    }
     return options.reject ? Promise.reject(new Error('missing-file')) : Promise.resolve();
   } };
-  const nativeWindow = { __TAURI__: options.shell === false ? undefined : { core } };
+  const nativeWindow = { __TAURI__: options.shell === false ? undefined : { core }, setTimeout: (fn: () => void) => fn() };
   const toast = { toast: (...args: unknown[]) => notices.push(args), toastError: unused };
   const list = load<List>('downloadList', {});
   // Только физические возможности платформы/байтовое IO заменены: filesViaNative и savedToText настоящие.
@@ -52,7 +71,7 @@ function fixture(options: { shell?: boolean; native?: boolean; reject?: boolean;
   type Handlers = Parameters<typeof import('./desktopWindow').onDownloadEvents>[0];
   let events: Handlers | undefined;
   const downloads = load<Downloads>('downloads', {
-    './desktopWindow': { onDownloadEvents: (handlers: Handlers) => { events = handlers; }, pickFolder: unused,
+    './desktopWindow': { onDownloadEvents: (handlers: Handlers) => { events = handlers; }, pickFolder: options.pickFolder ?? unused,
       setNativeDownloadDir: (dir: string | null) => mirrored.push(dir) },
     './downloadList': list, './pcDownloads': pc, './toast': toast,
   });
@@ -60,11 +79,147 @@ function fixture(options: { shell?: boolean; native?: boolean; reject?: boolean;
     const id = list.addDownload({ key, url: `/${key}`, name, type: 'text/plain', total: 1 });
     list.patchDownload(id, { state, href, path }); return id;
   };
-  return { list, actions, pc, downloads, notices, invokes, mirrored, add, events: () => { assert.ok(events); return events; } };
+  return { list, actions, pc, downloads, notices, invokes, mirrored, add, saves, revoked, nativeResults, handoffs,
+    events: () => { assert.ok(events); return events; } };
 }
 const plain = (x: unknown) => JSON.parse(JSON.stringify(x));
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 const path = 'C:/Saved/file.txt';
+
+const target = { key: 'a', name: 'file.txt', url: 'https://files.invalid/attachment', size: 4 };
+const peer = { ...target, key: 'b' }; // тот же URL и имя, другой ключ вложения
+function finish(f: ReturnType<typeof fixture>, href: string, onDisk: string, actual = target.name) {
+  f.nativeResults.set(onDisk, 'opened');
+  f.events().done!({ name: actual, dir: 'C:/Saved', path: onDisk, url: href });
+}
+
+it('готовые вложения с одинаковыми URL и именем открывают свои файлы по ключу после сохранения', async () => {
+  const fetches: string[] = [];
+  const f = fixture({ windows: true, fetch: async (url) => { fetches.push(String(url)); return new Response('data'); } });
+  f.downloads.initDownloads();
+  await f.pc.openDownloadedFile(target);
+  await f.pc.openDownloadedFile(target); // WebView2 ещё сохраняет, даже если fetch уже завершился
+  await f.pc.openDownloadedFile(peer);
+  assert.deepEqual(f.saves, ['blob:1', 'blob:2']);
+  assert.equal(f.invokes.length, 0, 'первый клик только скачивает');
+  const numbered = 'C:/Saved/file (1).txt';
+  finish(f, 'blob:2', numbered, 'file (1).txt'); // события могут прийти в обратном порядке
+  finish(f, 'blob:1', path);
+  f.list.clearDownloads();
+  await f.pc.openDownloadedFile(target);
+  await f.pc.openDownloadedFile(peer);
+  assert.deepEqual(fetches, [target.url, peer.url]);
+  assert.deepEqual(f.saves, ['blob:1', 'blob:2'], 'открытие не создаёт ещё одну копию');
+  assert.deepEqual(plain(f.invokes), [
+    { command: 'gv_downloaded_file', args: { path, source: 'blob:1' } },
+    { command: 'gv_downloaded_file', args: { path: numbered, source: 'blob:2' } },
+  ]);
+});
+
+it('удалённая копия скачивается заново и затем открывается из нового пути', async () => {
+  let fetched = 0;
+  const f = fixture({ windows: true, fetch: async () => { fetched++; return new Response('data'); } });
+  f.downloads.initDownloads();
+  await f.pc.openDownloadedFile(target);
+  finish(f, 'blob:1', path);
+  f.nativeResults.delete(path);
+  await f.pc.openDownloadedFile(target);
+  assert.deepEqual(f.saves, ['blob:1', 'blob:2']);
+  assert.equal(fetched, 2);
+  assert.deepEqual(plain(f.invokes.at(-1)?.args), { path, source: 'blob:1' });
+  finish(f, 'blob:2', path);
+  await f.pc.openDownloadedFile(target);
+  assert.deepEqual(plain(f.invokes.at(-1)?.args), { path, source: 'blob:2' });
+  assert.equal(fetched, 2);
+});
+
+it('отмена нативного подтверждения не вызывает повторную загрузку или тост', async () => {
+  const f = fixture({ windows: true, fetch: async () => new Response('data') });
+  f.downloads.initDownloads();
+  await f.pc.openDownloadedFile(target);
+  const actual = 'C:/Saved/file (1).cmd';
+  finish(f, 'blob:1', actual, 'file (1).cmd');
+  f.nativeResults.set(actual, 'cancelled');
+  await f.pc.openDownloadedFile(target);
+  assert.equal(f.pc.isOpeningDownloadedFile(target.key), false);
+  assert.deepEqual(plain(f.invokes), [{ command: 'gv_downloaded_file', args: { path: actual, source: 'blob:1' } }]);
+  assert.deepEqual(f.saves, ['blob:1']);
+  assert.deepEqual(f.notices.map(n => n[0]), ['success']);
+});
+
+it('открытие сразу отмечается, а клики до появления окна Windows не запускают файл повторно', async () => {
+  let opened!: (result: 'opened') => void;
+  const os = new Promise<'opened'>(resolve => { opened = resolve; });
+  const f = fixture({ windows: true, fetch: async () => new Response('data'), openFile: () => os });
+  f.downloads.initDownloads();
+  await f.pc.openDownloadedFile(target);
+  finish(f, 'blob:1', path);
+  const states: boolean[] = [];
+  const unsubscribe = f.pc.subscribeDownloadedFileOpening(() => states.push(f.pc.isOpeningDownloadedFile(target.key)));
+  const first = f.pc.openDownloadedFile(target);
+  assert.equal(f.pc.isOpeningDownloadedFile(target.key), true);
+  assert.equal(f.pc.isOpeningDownloadedFile(peer.key), false);
+  await f.pc.openDownloadedFile(target);
+  assert.equal(f.invokes.length, 1);
+  opened('opened');
+  await first;
+  await f.pc.openDownloadedFile(target);
+  f.pc.startDownload(target);
+  assert.equal(f.invokes.length, 1);
+  assert.deepEqual(f.saves, ['blob:1']);
+  assert.deepEqual(states, [true]);
+  const handoff = f.handoffs.shift();
+  assert.ok(handoff && handoff.delay >= 1000);
+  handoff.finish();
+  assert.deepEqual(states, [true, false]);
+  unsubscribe();
+  await f.pc.openDownloadedFile(target);
+  assert.equal(f.invokes.length, 2, 'позже файл можно открыть снова');
+});
+
+it('повторный клик во время запроса отменяет загрузку без дубликата', async () => {
+  let signal: AbortSignal | null | undefined;
+  let fetches = 0;
+  const f = fixture({ windows: true, fetch: (_url, options) => {
+    fetches++;
+    signal = options?.signal;
+    return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal?.reason)));
+  } });
+  const first = f.pc.openDownloadedFile(target);
+  await f.pc.openDownloadedFile(target);
+  await first;
+  assert.equal(signal?.aborted, true);
+  assert.equal(fetches, 1);
+  assert.deepEqual(f.saves, []);
+  assert.equal(f.list.downloadsSnapshot()[0]?.state, 'cancelled');
+});
+
+it('отмена выбора папки освобождает вложение для новой попытки и удаляет невостребованный blob', async () => {
+  const f = fixture({ windows: true, fetch: async () => new Response('data'), pickFolder: async () => null });
+  f.downloads.initDownloads();
+  await f.pc.openDownloadedFile(target);
+  f.list.clearDownloads();
+  assert.deepEqual(f.revoked, []);
+  f.events().needDir!({ url: 'blob:1', name: target.name, lost: false });
+  await settle();
+  assert.deepEqual(f.revoked, ['blob:1']);
+  await f.pc.openDownloadedFile(target);
+  assert.deepEqual(f.saves, ['blob:1', 'blob:2']);
+  finish(f, 'blob:2', path);
+});
+
+it('подстановка пути по имени или обычному URL не выдаёт право открыть файл', async () => {
+  const f = fixture({ windows: true, fetch: async () => new Response('data') });
+  f.downloads.initDownloads();
+  f.add(target.key, 'done', 'blob:old', undefined, target.name);
+  finish(f, target.url, path);
+  finish(f, 'blob:unknown', 'C:/Saved/file (1).txt');
+  assert.equal(f.list.savedPathOf(target.key), 'C:/Saved/file (1).txt', 'показ папки сохранил прежний подбор по имени');
+  await f.pc.openDownloadedFile(target);
+  assert.deepEqual(f.invokes, []);
+  assert.deepEqual(f.saves, ['blob:1']);
+  finish(f, 'blob:1', path);
+});
 
 it('R214 готовый файл связывается по href, а одинаковое имя не перехватывает чужую сетевую ссылку', () => {
   const f = fixture(); f.add('first', 'done', 'blob:first'); f.add('second', 'done', 'blob:second');
@@ -194,7 +349,9 @@ for (const [name, from, to, scenario, prefix, actual, expected] of [
     'R214-cap:', '/saved/0.txt', undefined],
 ] as const) it(`R214 контрфакт сохранённых путей: ${name}`, () => {
   scenario(fixture());
-  const mutant = fixture({ mutation: { module: 'downloadList', from, to } });
-  assert.throws(() => scenario(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
+  counterfact(() => {
+    const mutant = fixture({ mutation: { module: 'downloadList', from, to } });
+    assert.throws(() => scenario(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
+  });
 });

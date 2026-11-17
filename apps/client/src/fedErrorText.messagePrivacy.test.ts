@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -45,7 +46,9 @@ for (const [label, from, to, scenario, prefix, actual] of [
   ['privacy теряется среди причин федерации', "if (reason === 'privacy') return messagePrivacyText();", "if (reason === 'other') return messagePrivacyText();", remote, 'R212-fed-text:', policy],
 ] as const) it(`R212 контрфакт текста: ${label}`, () => {
   scenario(raw);
-  assert.equal(raw.split(from).length - 1, 1, 'один якорь в целом fedErrorText');
-  assert.throws(() => scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === generic);
+  counterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1, 'один якорь в целом fedErrorText');
+    assert.throws(() => scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === generic);
+  });
 });

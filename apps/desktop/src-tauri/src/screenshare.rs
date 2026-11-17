@@ -2636,6 +2636,12 @@ pub async fn stats() -> Option<ShareStats> {
 mod tests {
     use super::*;
 
+    fn counterfact(run: impl FnOnce()) {
+        if matches!(std::env::var("GV_MUTANTS").as_deref(), Ok("1")) {
+            run();
+        }
+    }
+
     #[test]
     fn смена_родного_размера_переопубликует_только_строго_за_двойной_площадью() {
         // Сравнивается площадь, не каждая сторона: 100x100 -> 200x100 ровно x2.
@@ -2799,18 +2805,20 @@ mod tests {
                 "R312 dynacast: gpu_planned={gpu_planned}, layers={layers}");
         }
 
-        // Контрфакты формулы используют ту же таблицу: проверяем конкретные несовпавшие входы,
-        // а не просто то, что заведомо другая функция вернула какое-нибудь иное значение.
-        let mutants: [(&str, fn(bool, bool) -> bool, Vec<(bool, bool)>); 2] = [
-            ("!gpu_planned без layers", |gpu, _layers| !gpu, vec![(false, false)]),
-            ("!gpu_planned || layers", |gpu, layers| !gpu || layers, vec![(false, false), (true, true)]),
-        ];
-        for (name, mutant, expected_failures) in mutants {
-            let failures: Vec<_> = cases.iter().filter_map(|&(gpu, layers, expected)| {
-                (mutant(gpu, layers) != expected).then_some((gpu, layers))
-            }).collect();
-            assert_eq!(failures, expected_failures, "R312 контрфакт формулы: {name}");
-        }
+        counterfact(|| {
+            // Контрфакты формулы используют ту же таблицу: проверяем конкретные несовпавшие входы,
+            // а не просто то, что заведомо другая функция вернула какое-нибудь иное значение.
+            let mutants: [(&str, fn(bool, bool) -> bool, Vec<(bool, bool)>); 2] = [
+                ("!gpu_planned без layers", |gpu, _layers| !gpu, vec![(false, false)]),
+                ("!gpu_planned || layers", |gpu, layers| !gpu || layers, vec![(false, false), (true, true)]),
+            ];
+            for (name, mutant, expected_failures) in mutants {
+                let failures: Vec<_> = cases.iter().filter_map(|&(gpu, layers, expected)| {
+                    (mutant(gpu, layers) != expected).then_some((gpu, layers))
+                }).collect();
+                assert_eq!(failures, expected_failures, "R312 контрфакт формулы: {name}");
+            }
+        });
     }
 
     fn start_использует_правило_dynacast(source: &str) -> bool {
@@ -2834,15 +2842,17 @@ mod tests {
     fn start_передаёт_правилу_dynacast_настоящий_layers_а_не_константу() {
         let source = include_str!("screenshare.rs");
         assert!(start_использует_правило_dynacast(source), "R312 start: dynacast берётся из правила с layers");
-        let production = source.split("\n#[cfg(test)]").next().unwrap();
-        let anchor = "room_opts.dynacast = share_dynacast(gpu_planned, layers);";
-        assert_eq!(production.matches(anchor).count(), 1, "R312 единственный production-якорь dynacast");
-        for value in ["share_dynacast(gpu_planned, true)", "!gpu_planned", "!gpu_planned || layers"] {
-            // Правильный вызов оставлен в комментарии: страж обязан найти настоящее присваивание.
-            let replacement = format!("// {anchor}\n    room_opts.dynacast = {value};");
-            let mutant = production.replacen(anchor, &replacement, 1);
-            assert!(!start_использует_правило_dynacast(&mutant), "R312 контрфакт start: {value}");
-        }
+        counterfact(|| {
+            let production = source.split("\n#[cfg(test)]").next().unwrap();
+            let anchor = "room_opts.dynacast = share_dynacast(gpu_planned, layers);";
+            assert_eq!(production.matches(anchor).count(), 1, "R312 единственный production-якорь dynacast");
+            for value in ["share_dynacast(gpu_planned, true)", "!gpu_planned", "!gpu_planned || layers"] {
+                // Правильный вызов оставлен в комментарии: страж обязан найти настоящее присваивание.
+                let replacement = format!("// {anchor}\n    room_opts.dynacast = {value};");
+                let mutant = production.replacen(anchor, &replacement, 1);
+                assert!(!start_использует_правило_dynacast(&mutant), "R312 контрфакт start: {value}");
+            }
+        });
     }
 
     #[test]

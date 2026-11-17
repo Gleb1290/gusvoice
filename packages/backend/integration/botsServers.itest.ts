@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { and, asc, eq } from 'drizzle-orm';
@@ -370,8 +371,10 @@ test('R303 original-first контрфакты приватности, ауди�
       finally { await f.clean(); }
     };
     await check();
+    await counterfact(async () => {
     await assert.rejects(check({ file: 'bots/botChannel', from: m.from, to: m.to }), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
       && e.operator === 'deepStrictEqual' && e.message.startsWith('R303 запрещённые получатели отсутствуют в SQL'));
+    });
   }
 });
 test('R303 original-first мутант публичности не маскируется под ошибку фикстуры', async () => {
@@ -384,9 +387,11 @@ test('R303 original-first мутант публичности не маскир�
     } finally { await f.clean(); }
   };
   await check();
+  await counterfact(async () => {
   await assert.rejects(check({ file: 'routes/serverBots', from: 'if (!found.bot.public && found.bot.ownerId !== me)', to: 'if (false)' }),
     e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
       && e.message.startsWith('R303 чужой приватный бот не добавляется') && e.actual === 201 && e.expected === 403);
+  });
 });
 test('R303 original-first мутант снятого FK оставляет роль после кика и пойман на SQL', async () => {
   const check = async (removeFk: boolean) => {
@@ -408,6 +413,8 @@ test('R303 original-first мутант снятого FK оставляет ро
     } finally { await f.clean(); }
   };
   await check(false);
+  await counterfact(async () => {
   await assert.rejects(check(true), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
     && e.message.startsWith('R303 роль уходит вместе с членством по FK') && e.actual === 1 && e.expected === 0);
+  });
 });

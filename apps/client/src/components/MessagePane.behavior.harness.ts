@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { MessagePort } from 'node:worker_threads';
 import { spawn } from 'node:child_process';
 import { before, after, afterEach, it } from 'node:test';
+import { counterfact, mutantsEnabled } from '../../../../packages/shared/test/counterfacts.js';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { createServer, type ViteDevServer } from 'vite';
 import { createElement, Fragment, act, type ComponentProps } from 'react';
@@ -15,7 +16,7 @@ import type { MessagePane as PaneType } from './MessagePane';
 export type Props = ComponentProps<typeof PaneType>;
 type UiClock = { runTimers(): void; runFrame(): void; restore(): void };
 // Один изолированный worker на тематический файл; helper сам не регистрирует тестов.
-export function setupHarness(entrypoint: string) {
+export function setupHarness(entrypoint: string, options: { tinyEmojiFixture?: boolean } = {}) {
     let server: ViteDevServer;
     let Pane: typeof PaneType;
     let ConfirmHost: typeof import('./ConfirmHost').ConfirmHost;
@@ -54,6 +55,21 @@ export function setupHarness(entrypoint: string) {
         finally {
             host?.remove();
             uiClock?.restore();
+        }
+    }
+    function cleanupGestures() {
+        // Только между независимыми фикстурами, НЕ внутри unmount: сценарии
+        // проверяют, что само размонтирование снимает оконные слушатели жеста.
+        window.dispatchEvent(new Event('touchcancel', { bubbles: true }));
+        // Раньше guard успевал истечь за время дочернего процесса мутанта. Без
+        // GV_MUTANTS он глотал первый настоящий клик следующего сценария.
+        // Старое дерево уже снято: нейтральный click не запускает его действия,
+        // только потребляет оставшиеся одноразовые guards, без ожидания 400 мс.
+        for (let step = 0; ; step++) {
+            assert.ok(step < 16, 'уборка capture-guards жеста ограничена 16 кликами');
+            const click = new MouseEvent('click', { cancelable: true });
+            window.dispatchEvent(click);
+            if (!click.defaultPrevented) break;
         }
     }
     function controlUiClock(): UiClock {
@@ -136,7 +152,8 @@ export function setupHarness(entrypoint: string) {
     let originalUa: string;
     let originalMatchMedia: typeof window.matchMedia;
     let resetStore: (() => void) | undefined;
-    const delay = (ms = 20) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    // HappyDOM aliases window to globalThis: UI fake clocks must not freeze harness waits.
+    const delay = (ms = 20) => new Promise<void>((resolve) => nodeTimeout(resolve, ms));
     const now = Date.now();
     const msg = (id: string, author = 'me', ago = 0, sortKey = 10): Message & {
         sortKey?: number;
@@ -162,9 +179,11 @@ export function setupHarness(entrypoint: string) {
         }
         Object.assign(globalThis, { WebSocket: ClosedSocket });
         Object.assign(globalThis, { __testRowRendered: (id: string) => rendered.push(id) });
-        if (!process.env.GUSVOICE_PANE_MUTANT) {
-            const textMutation = process.env.GUSVOICE_TEXTSEL_MUTANT;
-            server = await paneServer(textMutation ? (source) => mutateTextSelectionSource(source, textMutation) : undefined, textMutation ? 'TextSelection' : 'MessagePane');
+        if (!mutantsEnabled() || !process.env.GUSVOICE_PANE_MUTANT) {
+            const textMutation = mutantsEnabled() ? process.env.GUSVOICE_TEXTSEL_MUTANT : undefined;
+            server = textMutation
+                ? (await counterfact(() => paneServer((source) => mutateTextSelectionSource(source, textMutation), 'TextSelection'), { timeoutMs: 60_000 }))!
+                : await paneServer();
             const module = await server.ssrLoadModule('/src/components/MessagePane.tsx');
             Pane = module.MessagePane;
             ConfirmHost = (await server.ssrLoadModule('/src/components/ConfirmHost.tsx')).ConfirmHost;
@@ -187,7 +206,7 @@ export function setupHarness(entrypoint: string) {
         assert.notEqual(changed, source, `мутант «${name}» изменил целевой контракт`);
         return changed;
     }
-    async function paneServer(change?: (source: string) => string, target = 'MessagePane', tinyEmojiFixture = false) {
+    async function paneServer(change?: (source: string) => string, target = 'MessagePane', tinyEmojiFixture = options.tinyEmojiFixture ?? false) {
         return createServer({ root: fileURLToPath(new URL('../../', import.meta.url)), configFile: false, envFile: false,
             cacheDir: mkdtempSync(join(tmpdir(), 'gusvoice-pane-test-')), optimizeDeps: { noDiscovery: true, include: [] },
             plugins: [
@@ -227,6 +246,7 @@ export function setupHarness(entrypoint: string) {
             server: { middlewareMode: true, hmr: false, watch: null, ws: false }, appType: 'custom', logLevel: 'error' });
     }
     async function mountTextSelLayer(props: ComponentProps<typeof TextSelLayer>) {
+        cleanupGestures();
         host = document.createElement('div');
         document.body.append(host);
         root = createRoot(host);
@@ -266,23 +286,27 @@ export function setupHarness(entrypoint: string) {
         };
     }
     async function textSelMutantTest(name: string, scenario: () => Promise<void> | void, expectedFailure?: string) {
-        it(name, async () => {
-            if (process.env.GUSVOICE_TEXTSEL_MUTANT === name) {
-                await assert.rejects(async () => { await scenario(); }, (e: unknown) => e instanceof assert.AssertionError && (!expectedFailure || e.message.includes(expectedFailure)));
-                return;
+        it(name, { timeout: 60_000 }, async () => {
+            if (mutantsEnabled() && process.env.GUSVOICE_TEXTSEL_MUTANT === name) {
+                return counterfact(async () => {
+                    await assert.rejects(async () => { await scenario(); }, (e: unknown) => e instanceof assert.AssertionError && (!expectedFailure || e.message.includes(expectedFailure)));
+                }, { timeoutMs: 60_000 });
             }
             await scenario();
-            const env: NodeJS.ProcessEnv = { ...process.env, GUSVOICE_TEXTSEL_MUTANT: name };
-            delete env.GUSVOICE_PANE_MUTANT;
-            delete env.NODE_TEST_CONTEXT;
-            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const output = await isolatedProcess(['--import', 'tsx', '--test-reporter', 'tap', '--test-name-pattern', `^${escaped}$`, fileURLToPath(entrypoint)], env, name);
-            assert.match(output, /# pass 1(?:\r?\n|$)/, 'дочерний процесс выполнил ровно этот проверочный сценарий');
+            return counterfact(async () => {
+                const env: NodeJS.ProcessEnv = { ...process.env, GUSVOICE_TEXTSEL_MUTANT: name };
+                delete env.GUSVOICE_PANE_MUTANT;
+                delete env.NODE_TEST_CONTEXT;
+                const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const output = await isolatedProcess(['--import', 'tsx', '--test-reporter', 'tap', '--test-name-pattern', `^${escaped}$`, fileURLToPath(entrypoint)], env, name);
+                assert.match(output, /# pass 1(?:\r?\n|$)/, 'дочерний процесс выполнил ровно этот проверочный сценарий');
+            }, { timeoutMs: 60_000 });
         });
     }
     afterEach(async () => {
         try {
             unmount();
+            cleanupGestures();
         }
         finally {
             try {
@@ -330,6 +354,7 @@ export function setupHarness(entrypoint: string) {
         }
     });
     async function mount(p: Partial<Props> = {}, component = Pane) {
+        cleanupGestures();
         host = document.createElement('div');
         document.body.append(host);
         root = createRoot(host);
@@ -387,46 +412,52 @@ export function setupHarness(entrypoint: string) {
         // Assert остаётся в сценарии: мутант обязан упасть на конкретном ожидании фокуса, не на таймауте.
     }
     async function rejectMutant(change: (s: string) => string, check: (component: typeof Pane, confirm?: typeof ConfirmHost, answer?: () => void, runtime?: ViteDevServer) => Promise<void>, expectedFailure?: string) {
-        let extra: ViteDevServer | undefined;
-        try {
-            if (!process.env.GUSVOICE_PANE_MUTANT) {
+        if (!mutantsEnabled() || !process.env.GUSVOICE_PANE_MUTANT) {
+            try {
                 const { useConfirmDialog } = await server.ssrLoadModule('/src/confirm.ts') as typeof import('../confirm');
                 await bounded('оригинальный сценарий', () => check(Pane, ConfirmHost, () => useConfirmDialog.getState().answer(true), server));
-                return;
-            }
-            extra = await bounded('создание Vite мутанта', () => paneServer(change));
-            const { MessagePane } = await bounded('импорт мутанта', () => extra!.ssrLoadModule('/src/components/MessagePane.tsx'));
-            const { ConfirmHost: mutantConfirm } = await bounded('импорт окна мутанта', () => extra!.ssrLoadModule('/src/components/ConfirmHost.tsx'));
-            const { useConfirmDialog: mutantConfirmDialog } = await bounded('импорт подтверждения мутанта', () => extra!.ssrLoadModule('/src/confirm.ts'));
-            assert.equal(typeof MessagePane, 'function', 'импортирована функция MessagePane-мутанта');
-            assert.equal(typeof mutantConfirm, 'function', 'импортирована ConfirmHost из той же Vite-сборки, что и мутант MessagePane');
-            // Таймаут — Error, не AssertionError: зависание не выдаётся за пойманную регрессию.
-            await assert.rejects(() => bounded('сценарий мутанта', () => check(MessagePane, mutantConfirm, () => mutantConfirmDialog.getState().answer(true), extra)), (error: unknown) => error instanceof assert.AssertionError && (!expectedFailure || error.message.includes(expectedFailure)));
+            } finally { unmount(); }
+            return;
         }
-        finally {
+        return counterfact(async () => {
+            let extra: ViteDevServer | undefined;
             try {
-                unmount();
+                extra = await bounded('создание Vite мутанта', () => paneServer(change));
+                const { MessagePane } = await bounded('импорт мутанта', () => extra!.ssrLoadModule('/src/components/MessagePane.tsx'));
+                const { ConfirmHost: mutantConfirm } = await bounded('импорт окна мутанта', () => extra!.ssrLoadModule('/src/components/ConfirmHost.tsx'));
+                const { useConfirmDialog: mutantConfirmDialog } = await bounded('импорт подтверждения мутанта', () => extra!.ssrLoadModule('/src/confirm.ts'));
+                assert.equal(typeof MessagePane, 'function', 'импортирована функция MessagePane-мутанта');
+                assert.equal(typeof mutantConfirm, 'function', 'импортирована ConfirmHost из той же Vite-сборки, что и мутант MessagePane');
+                // Таймаут — Error, не AssertionError: зависание не выдаётся за пойманную регрессию.
+                await assert.rejects(() => bounded('сценарий мутанта', () => check(MessagePane, mutantConfirm, () => mutantConfirmDialog.getState().answer(true), extra)), (error: unknown) => error instanceof assert.AssertionError && (!expectedFailure || error.message.includes(expectedFailure)));
             }
             finally {
-                if (extra)
-                    await bounded('Vite мутанта.close', () => extra!.close());
+                try {
+                    unmount();
+                }
+                finally {
+                    if (extra)
+                        await bounded('Vite мутанта.close', () => extra!.close());
+                }
             }
-        }
+        }, { timeoutMs: 60_000 });
     }
     function mutantTest(name: string, scenario: () => Promise<void>) {
-        it(name, async () => {
-            if (process.env.GUSVOICE_PANE_MUTANT === name)
-                return scenario();
+        it(name, { timeout: 60_000 }, async () => {
+            if (mutantsEnabled() && process.env.GUSVOICE_PANE_MUTANT === name)
+                return counterfact(() => scenario(), { timeoutMs: 60_000 });
             // Тот же сценарий сначала обязан пройти на оригинале; в child грузится ТОЛЬКО мутант.
             await scenario();
-            // Генерация ошибки assert в Node 20 может заблокировать event loop; внутренний таймер не спасёт.
-            // Каждый мутант получает свежий процесс; внешний watchdog видит и такое зависание.
-            const env: NodeJS.ProcessEnv = { ...process.env, GUSVOICE_PANE_MUTANT: name };
-            delete env.NODE_TEST_CONTEXT;
-            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // Без --test: node:test работает в этом процессе, без ещё одного дочернего worker.
-            const output = await isolatedProcess(['--import', 'tsx', '--test-reporter', 'tap', '--test-name-pattern', `^${escaped}$`, fileURLToPath(entrypoint)], env, name);
-            assert.match(output, /# pass 1(?:\r?\n|$)/, 'в child действительно выполнен один сценарий, а не пропущено всё');
+            return counterfact(async () => {
+                // Генерация ошибки assert в Node 20 может заблокировать event loop; внутренний таймер не спасёт.
+                // Каждый мутант получает свежий процесс; внешний watchdog видит и такое зависание.
+                const env: NodeJS.ProcessEnv = { ...process.env, GUSVOICE_PANE_MUTANT: name };
+                delete env.NODE_TEST_CONTEXT;
+                const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                // Без --test: node:test работает в этом процессе, без ещё одного дочернего worker.
+                const output = await isolatedProcess(['--import', 'tsx', '--test-reporter', 'tap', '--test-name-pattern', `^${escaped}$`, fileURLToPath(entrypoint)], env, name);
+                assert.match(output, /# pass 1(?:\r?\n|$)/, 'в child действительно выполнен один сценарий, а не пропущено всё');
+            }, { timeoutMs: 60_000 });
         });
     }
     async function isolatedProcess(args: string[], env: NodeJS.ProcessEnv, label: string, ms = 45000) {

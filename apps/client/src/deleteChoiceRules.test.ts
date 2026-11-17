@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -11,14 +12,16 @@ it('ПК помнит только выбор «у себя», телефон в
   rules.rememberDeleteChoice(false, io); assert.equal(rules.deleteBothDefault(false, io), false);
   rules.rememberDeleteChoice(true, io); assert.equal(rules.deleteBothDefault(false, io), true);
   assert.equal(rules.deleteRememberAvailable(false), true); assert.equal(rules.deleteRememberAvailable(true), false);
-  const source = readFileSync(new URL('./deleteChoiceRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  assert.ok(source.includes('if (phone) return false;'));
-  const module = { exports: {} as Record<string, unknown> };
-  runInNewContext(ts.transpileModule(source.replace('if (phone) return false;', 'if (phone) return true;'),
-    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
-  const phoneDefaultMutant = module.exports as typeof rules;
-  assert.throws(() => assert.equal(phoneDefaultMutant.deleteBothDefault(true, io), false), assert.AssertionError,
-    'мутант включает отзыв сообщения у собеседника на телефоне по умолчанию');
+  counterfact(() => {
+    const source = readFileSync(new URL('./deleteChoiceRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.ok(source.includes('if (phone) return false;'));
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace('if (phone) return false;', 'if (phone) return true;'),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+    const phoneDefaultMutant = module.exports as typeof rules;
+    assert.throws(() => assert.equal(phoneDefaultMutant.deleteBothDefault(true, io), false), assert.AssertionError,
+      'мутант включает отзыв сообщения у собеседника на телефоне по умолчанию');
+  });
 });
 
 it('«Запомнить выбор» появляется только когда галочка изменилась от исходной', () => {
@@ -26,12 +29,14 @@ it('«Запомнить выбор» появляется только когд
   assert.equal(rules.rememberRowVisible({ checked: false, remember: true }, false), false);
   assert.equal(rules.rememberRowVisible({ checked: true }, false), false);
   assert.equal(rules.rememberRowVisible(undefined, true), false);
-  const source = readFileSync(new URL('./deleteChoiceRules.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes('current !== spec.checked'));
-  const module = { exports: {} as Record<string, unknown> };
-  runInNewContext(ts.transpileModule(source.replace('current !== spec.checked', 'true'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports });
-  const broken = module.exports as typeof rules;
-  assert.throws(() => assert.equal(broken.rememberRowVisible({ checked: false, remember: true }, false), false), assert.AssertionError,
-    'мутант показывает запоминание, хотя человек оставил галочку в состоянии по умолчанию');
+  counterfact(() => {
+    const source = readFileSync(new URL('./deleteChoiceRules.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes('current !== spec.checked'));
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace('current !== spec.checked', 'true'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports });
+    const broken = module.exports as typeof rules;
+    assert.throws(() => assert.equal(broken.rememberRowVisible({ checked: false, remember: true }, false), false), assert.AssertionError,
+      'мутант показывает запоминание, хотя человек оставил галочку в состоянии по умолчанию');
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -24,13 +25,15 @@ it('откат отказа лимита и ранний расход попыт
     }
   };
   await contract(load(raw));
-  for (const [from, to] of [
-    ['if (retryAfter > 0)', 'if (false)'],
-    ["if (verdict === 'no-shared-server' || verdict === 'peer-unreachable')", "if (verdict === 'no-shared-server')"],
-  ]) {
-    assert.ok(raw.includes(from), 'найден якорь отказа');
-    await assert.rejects(() => contract(load(raw.replace(from, to))), assert.AssertionError);
-  }
+  await counterfact(async () => {
+    for (const [from, to] of [
+      ['if (retryAfter > 0)', 'if (false)'],
+      ["if (verdict === 'no-shared-server' || verdict === 'peer-unreachable')", "if (verdict === 'no-shared-server')"],
+    ]) {
+      assert.ok(raw.includes(from), 'найден якорь отказа');
+      await assert.rejects(() => contract(load(raw.replace(from, to))), assert.AssertionError);
+    }
+  });
 });
 
 it('anyone разрешает новую ограниченную беседу только с доступным собеседником', () => {

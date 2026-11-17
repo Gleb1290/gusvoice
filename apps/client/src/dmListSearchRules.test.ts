@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -56,7 +57,7 @@ it('названный будущий день уходит в прошлый г
   const now = new Date(2026, 1, 10, 12);
   const check = (api: typeof rules) => assert.equal(api.parseDateQuery('5 марта', now)?.since, new Date(2025, 2, 5).toISOString());
   check(rules);
-  assert.throws(() => check(mutant('yy -= 1', 'yy += 1')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('yy -= 1', 'yy += 1')), assert.AssertionError));
   for (const word of ['май', 'мая']) assert.equal(rules.parseDateQuery(word, now)?.since, new Date(2025, 4, 1).toISOString());
   assert.equal(rules.parseDateQuery('март', now)?.until, new Date(2025, 3, 1).toISOString());
   assert.equal(rules.parseDateQuery('2025', now)?.until, new Date(2026, 0, 1).toISOString());
@@ -94,8 +95,8 @@ it('вкладки областей поиска появляются тольк
     ["servers: scope !== 'dm'", 'servers: true'],
     ["serversFull: scope === 'servers'", 'serversFull: true'],
   ] as const) {
-    assert.throws(() => check(mutant(from, to)), assert.AssertionError,
-      `мутант ${from} нарушает feature/chip/область/полную выдачу`);
+    counterfact(() => assert.throws(() => check(mutant(from, to)), assert.AssertionError,
+      `мутант ${from} нарушает feature/chip/область/полную выдачу`));
   }
 });
 
@@ -106,10 +107,10 @@ it('люди сортируются по свежести, включая арх
   check(rules);
   const archiveSource = ".filter((d) => !d.otherUser.id.startsWith('gone:'))";
   check(mutant(archiveSource, archiveSource));
-  assert.throws(() => check(mutant(".filter((d) => !d.otherUser.id.startsWith('gone:'))", ".filter((d) => !d.archived && !d.otherUser.id.startsWith('gone:'))")), assert.AssertionError,
-    'мутант снова скрывает архивные частые беседы');
-  assert.throws(() => check(mutant(".filter((d) => !d.otherUser.id.startsWith('gone:'))", '.filter(() => true)')), assert.AssertionError,
-    'мутант показывает удалённую запись как живого человека');
+  counterfact(() => assert.throws(() => check(mutant(".filter((d) => !d.otherUser.id.startsWith('gone:'))", ".filter((d) => !d.archived && !d.otherUser.id.startsWith('gone:'))")), assert.AssertionError,
+    'мутант снова скрывает архивные частые беседы'));
+  counterfact(() => assert.throws(() => check(mutant(".filter((d) => !d.otherUser.id.startsWith('gone:'))", '.filter(() => true)')), assert.AssertionError,
+    'мутант показывает удалённую запись как живого человека'));
   assert.deepEqual(rules.peopleStrip(xs, 1).map((x) => x.id), ['new']);
   assert.deepEqual(rules.personSuggestions(xs, 'Ста'), [{ convId: 'old', name: 'Старый' }]);
   assert.deepEqual(rules.personSuggestions(xs, 'new'), [{ convId: 'new', name: 'Новый' }]);
@@ -127,17 +128,17 @@ it('подсказки контактов ищут и по профилю, и п
     assert.deepEqual(api.personSuggestions(peers, 'Бета', 3, nameOf), [{ convId: 'peer-b', name: 'Профиль Бета' }]);
   };
   check(rules);
-  assert.throws(() => check(mutant('matchDmName(nameOf(d.otherUser.id, d.otherUser.displayName), q) ||', 'false ||')), assert.AssertionError,
-    'мутант ищет только по исходному профилю и не находит знакомую подпись');
-  assert.throws(() => check(mutant('matchDmName(d.otherUser.displayName, q) ||', 'false ||')), assert.AssertionError,
-    'мутант ищет только по подписи и теряет совпадение с именем профиля');
+  counterfact(() => assert.throws(() => check(mutant('matchDmName(nameOf(d.otherUser.id, d.otherUser.displayName), q) ||', 'false ||')), assert.AssertionError,
+    'мутант ищет только по исходному профилю и не находит знакомую подпись'));
+  counterfact(() => assert.throws(() => check(mutant('matchDmName(d.otherUser.displayName, q) ||', 'false ||')), assert.AssertionError,
+    'мутант ищет только по подписи и теряет совпадение с именем профиля'));
 });
 
 it('фрагмент находит ё как е, сохраняет исходную букву и ограничивает хвост', () => {
   // Ловит отсутствие подсветки ё и переносы строк, разбивающие найденную фразу.
   const check = (api: typeof rules) => assert.equal(api.hitSnippet('  Ёж\nидёт ', 'еж').hit, 'Ёж');
   check(rules);
-  assert.throws(() => check(mutant("s.toLowerCase().replace(/ё/g, 'е')", 's.toLowerCase()')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant("s.toLowerCase().replace(/ё/g, 'е')", 's.toLowerCase()')), assert.AssertionError));
   assert.deepEqual(rules.hitSnippet('abc', ''), { pre: '', hit: '', post: 'abc' });
   assert.deepEqual(rules.hitSnippet('abcdef', 'нет', 5), { pre: '', hit: '', post: 'abcd…' });
   assert.ok(rules.hitSnippet('x'.repeat(30) + 'ёж' + 'z'.repeat(100), 'еж', 32).pre.startsWith('…'));
@@ -174,8 +175,8 @@ it('API поиска передаёт chip `kind` вместе с пустым �
     assert.deepEqual(f.requests, [{ method: 'GET', url: 'https://search.invalid/api/conv/search?q=&conversationId=c&since=2026-10-01&until=2026-10-08&kind=media&before=cursor&limit=20' }], 'старые query-поля и kind сохранены');
   };
   await check(source);
-  await assert.rejects(check(uniqueChange(source, "    if (a.kind) p.set('kind', a.kind);\n", '')),
-    e => e instanceof assert.AssertionError && e.message.includes('старые query-поля'));
+  await counterfact(() => assert.rejects(check(uniqueChange(source, "    if (a.kind) p.set('kind', a.kind);\n", '')),
+    e => e instanceof assert.AssertionError && e.message.includes('старые query-поля')));
 });
 
 it('R183 вкладки поиска начинаются Чатами и содержат GIF вместо отсутствующей Музыки', () => {
@@ -206,7 +207,7 @@ for (const [name, from, to, target] of [
   ['без запрета чипа', "return (open || q.trim() !== '') && !chips.kind;", "return open || q.trim() !== '';", 'чип вида'],
 ] as const) it(`R185 мутант ${name} обнаруживается матрицей открытого поля и чипов`, () => {
   // Проверяются обе стороны признака, не только один разрешённый ввод.
-  tabsShown(rules); assert.throws(() => tabsShown(mutant(from, to)), e => e instanceof assert.AssertionError && e.message.includes(target));
+  tabsShown(rules); counterfact(() => assert.throws(() => tabsShown(mutant(from, to)), e => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 for (const [name, from, to] of [
   ['Музыка вместо GIF', "['chats', 'media', 'link', 'file', 'gif', 'voice']", "['chats', 'media', 'link', 'file', 'music', 'voice']"],
@@ -218,7 +219,7 @@ for (const [name, from, to] of [
     assert.equal(Array.from(api.PHONE_SEARCH_TABS).join('|'), 'chats|media|link|file|gif|voice', 'порядок и виды вкладок');
     assert.equal(api.phoneSearchTabLabel('chats'), 'Чаты', 'подпись первой вкладки');
   };
-  check(rules); assert.throws(() => check(mutant(from, to)), e => e instanceof assert.AssertionError && /вклад/.test(e.message));
+  check(rules); counterfact(() => assert.throws(() => check(mutant(from, to)), e => e instanceof assert.AssertionError && /вклад/.test(e.message)));
 });
 async function fullSearch(raw?: string) {
   const f = searchApi(raw); const args = { q: 'отчёт & фото', kind: 'file' as const, full: true, conversationId: 'c', since: 's', until: 'u', before: 'x', limit: 1 };
@@ -245,8 +246,8 @@ for (const [flag, target] of [['names', 'поиск по именам'], ['full'
   it(`R183 потеря ${flag} обнаруживается вызовом целого API`, async () => {
     // Контрфакт меняет реальную обёртку, а не склеенный для теста метод.
     await fullSearch(); const source = readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
-    await assert.rejects(fullSearch(uniqueChange(source, `p.set('${flag}', '1');`, '')),
-      e => e instanceof assert.AssertionError && e.message.includes(target));
+    await counterfact(() => assert.rejects(fullSearch(uniqueChange(source, `p.set('${flag}', '1');`, '')),
+      e => e instanceof assert.AssertionError && e.message.includes(target)));
   });
 
 it('вкладка «Все» сливает два курсора по времени и показывает только строки не глубже общего горизонта', () => {
@@ -266,8 +267,8 @@ it('вкладка «Все» сливает два курсора по врем
   check(rules);
   check(mutant('const horizon = dmTail === null ? srvTail : srvTail === null ? dmTail : Math.max(dmTail, srvTail);',
     'const horizon = dmTail === null ? srvTail : srvTail === null ? dmTail : Math.max(dmTail, srvTail);'));
-  assert.throws(() => check(mutant('Math.max(dmTail, srvTail)', 'Math.min(dmTail, srvTail)')), assert.AssertionError,
-    'мутант выбирает минимальный хвост и преждевременно показывает старые строки');
-  assert.throws(() => check(mutant('horizon === null || at(r.hit.createdAt) >= horizon', 'true')), assert.AssertionError,
-    'мутант игнорирует горизонт и выдаёт страницы разных глубин вперемешку');
+  counterfact(() => assert.throws(() => check(mutant('Math.max(dmTail, srvTail)', 'Math.min(dmTail, srvTail)')), assert.AssertionError,
+    'мутант выбирает минимальный хвост и преждевременно показывает старые строки'));
+  counterfact(() => assert.throws(() => check(mutant('horizon === null || at(r.hit.createdAt) >= horizon', 'true')), assert.AssertionError,
+    'мутант игнорирует горизонт и выдаёт страницы разных глубин вперемешку'));
 });

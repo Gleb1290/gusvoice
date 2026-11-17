@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { ConvGroupMember, ConvSummary, DmChannel, User } from '@gusvoice/shared';
@@ -86,7 +87,7 @@ async function withInfo(options: Options, check: (view: View) => Promise<void>, 
       return options.reply ? options.reply(op, args) : { ok: true };
     };
     const useStore = Object.assign((select: (s: State) => unknown) => select(state), { getState: () => state });
-    const dialogs = load<typeof Dialogs>(raw, {
+    const dialogs = load<typeof Dialogs>(new URL('./GroupDialogs.tsx', import.meta.url), raw, {
       '../api': { api: {
         convRenameGroup: (...args: unknown[]) => request('rename', args),
         convAddMembers: (...args: unknown[]) => request('add', args),
@@ -405,24 +406,30 @@ function hostAssertion(message: string, actual: unknown, expected: unknown) {
 // Контрфакт ловит потерю именно запрета по доступности хоста, а не случайный предел заполненной группы.
 it('R206 потеря hostDown у group-add обнаруживается запретом кнопки в настоящем окне', async () => {
   await downControls('member');
-  const mutant = mutate(source, 'disabled={group.members.length >= group.limit || hostDown}',
-    'disabled={group.members.length >= group.limit}');
-  await assert.rejects(() => downControls('member', mutant),
-    hostAssertion('hostDown запрещает group-add даже ниже предела', false, true));
+  await counterfact(async () => {
+    const mutant = mutate(source, 'disabled={group.members.length >= group.limit || hostDown}',
+      'disabled={group.members.length >= group.limit}');
+    await assert.rejects(() => downControls('member', mutant),
+      hostAssertion('hostDown запрещает group-add даже ниже предела', false, true));
+  });
 });
 // Контрфакт доказывает реальное открытие выбора файла, а не только изменение title/aria-disabled.
 it('R206 потеря locked у фото обнаруживается фактом открытия выбора файла чужой группы', async () => {
   await photo(true);
-  const mutant = mutate(source, 'locked={fedHost ? fedGroupPhotoHint(hostLabel) : undefined}', 'locked={undefined}');
-  await assert.rejects(() => photo(true, mutant),
-    hostAssertion('фото чужого дома не открывает файловый выбор', 1, 0));
+  await counterfact(async () => {
+    const mutant = mutate(source, 'locked={fedHost ? fedGroupPhotoHint(hostLabel) : undefined}', 'locked={undefined}');
+    await assert.rejects(() => photo(true, mutant),
+      hostAssertion('фото чужого дома не открывает файловый выбор', 1, 0));
+  });
 });
 // Контрфакт проверяет исчезнувший тост после успешного API, а не ошибки загрузки компонента.
 it('R206 потеря groupOpPending в run обнаруживается отсутствием информационного тоста, не ошибкой VM', async () => {
   await successfulOperation('rename', true);
-  const mutant = mutate(source,
-    "      after?.();\n      if (groupOpPending(r)) toast('info', fedGroupPendingText(hostLabel));",
-    '      after?.();');
-  await assert.rejects(() => successfulOperation('rename', true, mutant),
-    hostAssertion('pending run сообщает ровно один информационный тост', 0, 1));
+  await counterfact(async () => {
+    const mutant = mutate(source,
+      "      after?.();\n      if (groupOpPending(r)) toast('info', fedGroupPendingText(hostLabel));",
+      '      after?.();');
+    await assert.rejects(() => successfulOperation('rename', true, mutant),
+      hostAssertion('pending run сообщает ровно один информационный тост', 0, 1));
+  });
 });

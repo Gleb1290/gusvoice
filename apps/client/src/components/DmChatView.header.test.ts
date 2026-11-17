@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
@@ -57,9 +59,9 @@ for (const [name, anchor, replacement, width, target] of [
   ['ложная проверка несовпадения полной формы', 'const shortForms = phone && seenForms.length > 1;', 'const shortForms = phone && seenForms.length > 1 && seenText !== seenForms[0];', 360, 'формы только'],
 ] as const) it(`R182 мутант «${name}» обнаруживается настоящей шапкой`, async () => {
   // Не исполняем куски JSX: весь модуль проходит исходный сценарий перед адресной мутацией.
-  await statusFormsScene(width, 'today'); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
-  await assert.rejects(statusFormsScene(width, 'today', source.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await statusFormsScene(width, 'today'); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь'));
+  await counterfact(() => assert.rejects(statusFormsScene(width, 'today', source.replace(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 const noView = () => null;
 const unused = () => assert.fail('действие вне проверяемого контракта шапки');
@@ -86,16 +88,16 @@ for (const [name, anchor, replacement, target] of [
   ['запрос времени без проверки', 'const lastSeen = useLastSeen(group || saved || !presenceOn ? null : dm.otherUser.id);', 'const lastSeen = useLastSeen(group || saved ? null : dm.otherUser.id);', 'lastSeen запрашивается только'],
   ['typing соседу без возможности', "saved || (peerHome && !serverFedPresence(features)) ? undefined : (action)", 'saved ? undefined : (action)', 'typing отправляется только'],
 ] as const) it(`R197 мутант «${name}» обнаруживается настоящей шапкой и пропсами`, async () => {
-  await fedPresence(true, false, false); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь presence');
-  await assert.rejects(fedPresence(true, false, false, source.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await fedPresence(true, false, false); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь presence'));
+  await counterfact(() => assert.rejects(fedPresence(true, false, false, source.replace(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 it('R200 мутант rawOnline вместо gatedOnline обнаруживается живым, но неподдержанным соседом', async () => {
   await fedPresence(true, false, true);
   const anchor = 'const online = dmDot(gatedOnline, lastSeen?.exact, features, localOnline);';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь гейта online');
-  await assert.rejects(fedPresence(true, false, true, source.replace(anchor, anchor.replace('gatedOnline', 'rawOnline'))),
-    e => e instanceof assert.AssertionError && e.message.includes('шапка не выдумывает онлайн'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь гейта online'));
+  await counterfact(() => assert.rejects(fedPresence(true, false, true, source.replace(anchor, anchor.replace('gatedOnline', 'rawOnline'))),
+    e => e instanceof assert.AssertionError && e.message.includes('шапка не выдумывает онлайн')));
 });
 async function viaBar(remote: boolean, down: boolean, ready: boolean, raw = source) {
   const enabled = remote && down && ready;
@@ -116,9 +118,9 @@ for (const [name, anchor, replacement, ready, target] of [
   ['показ без готовой сессии', '&& !!s.fedVia.ready?.includes(dm.id)', '', false, 'плашка обхода только'],
   ['файлы открыты в обходе', 'viaOn ? FED_VIA_TEXT_ONLY : fedFilesHint(', 'fedFilesHint(', true, 'обход закрывает файлы'],
 ] as const) it(`R200 DmChatView мутант «${name}» ловится реальным состоянием и пропсами MessagePane`, async () => {
-  await viaBar(true, true, ready); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь обходного UI');
-  await assert.rejects(viaBar(true, true, ready, source.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await viaBar(true, true, ready); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь обходного UI'));
+  await counterfact(() => assert.rejects(viaBar(true, true, ready, source.replace(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 async function staleNotice(remote: boolean, stale: boolean, broken: boolean, raw = source) {
   const notice = remote && stale && !broken; const archive = remote && broken;
@@ -153,9 +155,9 @@ it('R208 DmChatView проводит обход группы чужого хос
   for (const kind of ['group', 'saved'] as const) for (const foreign of [false, true])
     for (const down of [false, true]) for (const ready of [false, true]) await groupViaBar(kind, foreign, down, ready);
   const anchor = '(!!peerHome || !!groupHostId) && s.fedVia?.down === true';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(groupViaBar('group', true, true, true, source.replace(anchor, '!!peerHome && s.fedVia?.down === true')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('обход группы включается только') && e.actual === false && e.expected === true);
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(groupViaBar('group', true, true, true, source.replace(anchor, '!!peerHome && s.fedVia?.down === true')),
+    e => e instanceof assert.AssertionError && e.message.startsWith('обход группы включается только') && e.actual === false && e.expected === true));
 });
 
 async function viaSelfName(raw = source) {
@@ -174,20 +176,20 @@ it('R208 DmChatView предпочитает selfInstanceName и сохраня�
 // Класс ошибки: перестановка приоритета даёт правдоподобную, но неверную подпись своего дома.
 it('R208 мутант приоритета своего дома обнаруживается текстом настоящей плашки группы', async () => {
   await viaSelfName();
-  const anchor = 'const viaSelf = selfInstanceName || viaSelfLocal;'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(viaSelfName(source.replace(anchor, 'const viaSelf = viaSelfLocal || selfInstanceName;')),
+  const anchor = 'const viaSelf = selfInstanceName || viaSelfLocal;'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(viaSelfName(source.replace(anchor, 'const viaSelf = viaSelfLocal || selfInstanceName;')),
     e => e instanceof assert.AssertionError && e.message.startsWith('плашка предпочитает имя своего инстанса') &&
       e.actual === 'Инстанс «Локальная сессия» недоступен — пишем через «Сосед»' &&
-      e.expected === 'Инстанс «Наш инстанс» недоступен — пишем через «Сосед»');
+      e.expected === 'Инстанс «Наш инстанс» недоступен — пишем через «Сосед»'));
 });
 it('R201 DmChatView передаёт composerNotice при fedStale, текст остаётся доступен, broken и местный чат без notice', async () => {
   for (const remote of [false, true]) for (const stale of [false, true]) for (const broken of [false, true]) await staleNotice(remote, stale, broken);
 });
 it('R201 мутант без проверки дома показывает ложную задержку местному чату', async () => {
   await staleNotice(false, true, false);
-  const anchor = '!!peerHome && fedLinkStale(s.conv.summaries[dm.id])'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(staleNotice(false, true, false, source.replace(anchor, 'fedLinkStale(s.conv.summaries[dm.id])')),
-    e => e instanceof assert.AssertionError && e.message.includes('плашка задержки только'));
+  const anchor = '!!peerHome && fedLinkStale(s.conv.summaries[dm.id])'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1));
+  await counterfact(() => assert.rejects(staleNotice(false, true, false, source.replace(anchor, 'fedLinkStale(s.conv.summaries[dm.id])')),
+    e => e instanceof assert.AssertionError && e.message.includes('плашка задержки только')));
 });
 
 async function groupDownNotice(options: {
@@ -240,9 +242,9 @@ it('R206 DmChatView мутант без проверки бывшей групп
     former: { at: '2026-10-12T12:00:00.000Z', removed: false } };
   await groupDownNotice(options);
   const anchor = 'groupDownText && !former ? (';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь notice бывшей группы');
-  await assert.rejects(groupDownNotice(options, source.replace(anchor, 'groupDownText ? (')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('плашка дома только действующей группе'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь notice бывшей группы'));
+  await counterfact(() => assert.rejects(groupDownNotice(options, source.replace(anchor, 'groupDownText ? (')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('плашка дома только действующей группе')));
 });
 async function filesCapability(remote: boolean, enabled: boolean, refused: boolean, raw = source) {
   const hint = remote ? !enabled ? convRules.FED_FILES_LATER_HINT : refused ? convRules.FED_FILES_PEER_HINT : undefined : undefined;
@@ -265,9 +267,9 @@ for (const [name, anchor, replacement, enabled, refused, target] of [
   ['сводка fedNoFiles игнорируется', 'fedNoFiles ? { fedNoFiles: true } : null', 'null', true, true, 'совместимость файлов определяет скрепку'],
 ] as const) it(`R194 контрфакт «${name}» обнаруживается реальными пропсами MessagePane`, async () => {
   // Класс ошибки: один из способов отправки расходится с двусторонним разрешением файлов.
-  await filesCapability(true, enabled, refused); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь файлов');
-  await assert.rejects(filesCapability(true, enabled, refused, source.replace(anchor, replacement)),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes(target));
+  await filesCapability(true, enabled, refused); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь файлов'));
+  await counterfact(() => assert.rejects(filesCapability(true, enabled, refused, source.replace(anchor, replacement)),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 async function fedComposer(features: string[], remote = true, width = 360, raw = source) {
   await fixture(width, false, async f => {
@@ -313,18 +315,18 @@ it('R190 возврат плашки Э1 обнаруживается насто
   // Контрфакт прежний; отказ ограничен scalar oracle, а не форматированием циклического DOM-графа.
   await fedComposer(['fedm2']);
   const anchor = '        ) : undefined\n      }\n      /* Как у Telegram Android: просто «Сообщение»';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный fallback замены поля');
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный fallback замены поля'));
   const replacement = '        ) : peerHome ? <div data-testid="fed-dm-write-off">Переписка пока недоступна</div> : undefined\n      }\n      /* Как у Telegram Android: просто «Сообщение»';
-  await assert.rejects(fedComposer(['fedm2'], true, 360, source.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes('устаревшая плашка Э1'));
+  await counterfact(() => assert.rejects(fedComposer(['fedm2'], true, 360, source.replace(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes('устаревшая плашка Э1')));
 });
 it('R189 контрфакт потерянного дома обнаруживается значком настоящей шапки DmChatView', async () => {
   // Класс ошибки: данные дома пришли, но ветка шапки больше их не отображает.
   await fedHeader();
   const anchor = "const peerHomeLabel = peerHome ? peerHome.name?.trim() || peerHome.domain || 'другой инстанс' : null;";
-  assert.equal(source.split(anchor).length - 1, 1, 'единственная подпись дома');
-  await assert.rejects(fedHeader(source.replace(anchor, 'const peerHomeLabel = null;')),
-    e => e instanceof assert.AssertionError && e.message.includes('шапка показывает дом собеседника'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственная подпись дома'));
+  await counterfact(() => assert.rejects(fedHeader(source.replace(anchor, 'const peerHomeLabel = null;')),
+    e => e instanceof assert.AssertionError && e.message.includes('шапка показывает дом собеседника')));
 });
 
 it('R192 человек соседа получает запрет файлов, голосового, GIF и кружка; местному те же признаки оставляют действия', async () => {
@@ -373,17 +375,17 @@ for (const [name, anchor, replacement, remote, target] of [
     'трубка отсутствует у удалённого архива'],
 ] as const) it(`R192 контрфакт «${name}» ловится реальным DmChatView`, async () => {
   // Класс ошибки: весь модуль исполняется, а мутант ломает именно выбранное полномочие архива.
-  await archiveContract(remote); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь архива');
-  await assert.rejects(archiveContract(remote, true, source.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await archiveContract(remote); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь архива'));
+  await counterfact(() => assert.rejects(archiveContract(remote, true, source.replace(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 it('R192 удаление запрета контактов человека соседа обнаруживается пунктом настоящего меню', async () => {
   // Класс ошибки: несуществующая серверная возможность появляется после снятия одной клиентской проверки дома.
   await contactContract(true);
   const anchor = "useStore((s) => serverContacts(s.serverFeatures)) && !user?.homeInstance && !dm.group && !dm.saved && !peerHome;";
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный контракт контактов');
-  await assert.rejects(contactContract(true, source.replace(anchor, anchor.replace(' && !peerHome;', ';'))),
-    e => e instanceof assert.AssertionError && e.message.includes('добавление в контакты возможно только'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'единственный контракт контактов'));
+  await counterfact(() => assert.rejects(contactContract(true, source.replace(anchor, anchor.replace(' && !peerHome;', ';'))),
+    e => e instanceof assert.AssertionError && e.message.includes('добавление в контакты возможно только')));
 });
 
 // MessagePane — граница теста: рисует переданные JSX, но не копирует правил шапки/меню/закрепления.
@@ -422,7 +424,7 @@ async function fixture(width: number, pinned: boolean, check: (f: {
   render(): Promise<void>; currentDm(): DmChannel; pane(): PaneProps;
   seenIds(): Array<string | null>;
 }) => Promise<void>, raw = source, presence?: { online: boolean; lastSeen: UserLastSeen | null },
-  options: { kind?: 'direct' | 'group' | 'saved'; muteMenu?: boolean; muted?: boolean;
+  options: { kind?: 'direct' | 'group' | 'saved'; muteMenu?: boolean; muted?: boolean; muteUntil?: string | null;
   recent?: number[]; soundMenu?: boolean; prefs?: boolean; realItems?: boolean; realMenu?: boolean; statusForms?: boolean;
   peerHome?: DmChannel['otherUser']['homeInstance']; features?: string[]; inspectIcons?: boolean; fedLink?: 'broken' | 'ok'; fedNoFiles?: boolean;
   fedVia?: { down: boolean; ready: string[]; self: string }; fedStale?: boolean; selfInstanceName?: string;
@@ -437,7 +439,7 @@ async function fixture(width: number, pinned: boolean, check: (f: {
       pinnedAt: pinned ? '2026-10-08T00:00:00.000Z' : null, archived: false } as DmChannel;
     if (options.kind === 'group') dm = { ...dm, group: { title: 'Группа', avatarUrl: null, ownerId: 'me', members: options.groupMembers ?? [], limit: 5 } };
     if (options.kind === 'saved') dm = { ...dm, saved: true };
-    if (options.muted) dm = { ...dm, muted: { until: null } };
+    if (options.muted) dm = { ...dm, muted: { until: options.muteUntil ?? null } };
     if (options.peerHome) dm = { ...dm, otherUser: { ...dm.otherUser, homeInstance: options.peerHome } };
     const pinCalls: Array<[string, boolean]> = []; const callIds: string[] = [];
     const muteCalls: unknown[][] = []; const savedMute: number[] = [];
@@ -472,9 +474,7 @@ async function fixture(width: number, pinned: boolean, check: (f: {
       './StickerCatalogPanel': { StickerCatalogPanel: noView },
       '../channelVisit': { useChannelVisit: () => ({ newSince: null, readKey: 0, visitKey: 'visit', started: true }) },
       '../api': { api: { convSearch: unused } }, '../effectsBus': { fireEffect: unused },
-      '../chatSearchRules': { SEARCH_PAGE: 50 }, '../uploadProgress': {
-        setUploadDone: unused, setUploadProgress: unused, uploadAborted: unused, uploadSignal: unused,
-      },
+      '../chatSearchRules': { SEARCH_PAGE: 50 },
       '../confirm': { confirmAction: unused }, '../strangerBarRules': { serverStranger: () => false, strangerBarShown: () => false },
       '../contactRules': contactRules,
       '../contacts': { useContactList: () => [], useContacts: { getState: unused } },
@@ -508,8 +508,8 @@ async function fixture(width: number, pinned: boolean, check: (f: {
       '../convStore': { feedWindowSwitch: () => true, toOutboxRef: unused }, '../convSyncRules': convRules,
       '../notifyExceptionsRules': { notifyAlwaysAction: () => null }, '../dmListRules': listRules,
       '../muteRecent': { loadMuteRecent: () => options.recent ?? (options.muteMenu ? [900, 93 * 86400] : []),
-        saveMuteRecent: (seconds: number) => { savedMute.push(seconds); } }, '../dmBubbles': { dmBubblesSwitch: () => false },
-      '../phoneLayout': phoneLayout, '../historyPage': { hasMoreOlder: unused, olderCursor: unused },
+        saveMuteRecent: (seconds: number) => { savedMute.push(seconds); } },
+      '../phoneLayout': phoneLayout,
     };
     if (options.realItems || options.realMenu) {
       if (options.realMenu) {
@@ -523,15 +523,10 @@ async function fixture(width: number, pinned: boolean, check: (f: {
       runInNewContext(ts.transpileModule(readFileSync(new URL('./ContextMenu.tsx', import.meta.url), 'utf8'), {
         compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
       }).outputText, { module: menu, exports: menu.exports, window, document, HTMLElement, Element, Node, Event, DOMRect,
-        getComputedStyle, require: (id: string) => {
-        if (id === 'react') return React;
-        if (id === 'react-dom') return ReactDOM;
-        if (id === 'react/jsx-runtime') return jsx;
-        if (id === './Icon') return { Icon: noView };
-        if (id === '../popover') return popover;
-        if (id === '../imageViewer') return { useImageViewerOpen: () => false };
-        return new Proxy({}, { get: (_t, key) => { throw new Error(`Неописанная граница меню ${id}.${String(key)}`); } });
-      } });
+        getComputedStyle, require: testVmImports(new URL('./ContextMenu.tsx', import.meta.url), {
+          react: React, 'react-dom': ReactDOM, 'react/jsx-runtime': jsx, './Icon': { Icon: noView },
+          '../popover': popover, '../imageViewer': { useImageViewerOpen: () => false },
+        }) });
       dependencies['./ContextMenu'] = { ContextMenu: options.realMenu ? menu.exports.ContextMenu : MenuBoundary,
         MenuItem: menu.exports.MenuItem, MenuDivider: menu.exports.MenuDivider };
     }
@@ -539,10 +534,7 @@ async function fixture(width: number, pinned: boolean, check: (f: {
     runInNewContext(ts.transpileModule(raw, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
     }).outputText, { module, exports: module.exports, window, document, DOMRect, requestAnimationFrame,
-      require: (id: string) => {
-        assert.ok(Object.hasOwn(dependencies, id), `неожиданная зависимость ${id}`);
-        return dependencies[id];
-      } });
+      require: testVmImports(new URL('./DmChatView.tsx', import.meta.url), dependencies) });
     const render = async () => { await React.act(async () => root.render(options.muteMenu
       ? React.createElement(module.exports.DmMuteMenuItems, { peerId: 'peer', mute: null, now: 0, onDone: () => {} })
       : React.createElement(module.exports.DmChatView, { dm }))); };
@@ -656,6 +648,20 @@ it('R170 сервер без сроков сохраняет прямой Отк
     assert.equal(!!f.host.querySelector('[role="menu"]'), false);
   }, source, undefined, { realItems: true, prefs: false });
 });
+it('шапка показывает конечный срок заглушки как справку и убирает срок бессрочной', async () => {
+  const finite = new Date(Date.now() + 3 * 3_600_000).toISOString();
+  for (const muteUntil of [finite, null]) await fixture(390, false, async f => {
+    await click(f.host, 'button[title="Меню беседы"]');
+    const item = [...f.host.querySelectorAll('[role="menuitem"]')].find(el =>
+      el.querySelector('.ctx-label-main')?.textContent === 'Включить уведомления');
+    assert.ok(item, 'заглушённая беседа предлагает включить уведомления прямо в меню шапки');
+    if (muteUntil) {
+      assert.equal(item.querySelector('.ctx-shortcut.ctx-note')?.textContent, '3 ч');
+    } else {
+      assert.equal(item.querySelector('.ctx-shortcut'), null, 'у бессрочной заглушки нет выдуманного остатка');
+    }
+  }, source, undefined, { realItems: true, muted: true, muteUntil });
+});
 async function instantUnmute(raw = source) {
   await fixture(390, false, async f => {
     await click(f.host, 'button[title="Меню беседы"]');
@@ -693,8 +699,8 @@ for (const [name, anchor, replacement, check] of [
   ['телефонная подпись на компьютере', "prefsOn ? 'Выключить уведомления…' : 'Отключить уведомления'", "prefsOn ? 'Уведомления' : 'Отключить уведомления'", desktopNotifications],
 ] as const) it(`R170 контрфакт ${name} обнаруживается настоящим кликом и DOM`, async () => {
   // Проверяем тот же сценарий на оригинале: отказ неизвестной VM-границы не считается ловлей мутанта.
-  await check(source); assert.equal(source.split(anchor).length - 1, 1, 'один точный якорь мутации');
-  await assert.rejects(() => check(source.replace(anchor, replacement)), assert.AssertionError);
+  await check(source); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'один точный якорь мутации'));
+  await counterfact(() => assert.rejects(() => check(source.replace(anchor, replacement)), assert.AssertionError));
 });
 
 for (const viaKeys of [false, true]) {
@@ -728,9 +734,9 @@ for (const [name, anchor, replacement, failure] of [
       await click(f.host, 'button[title="Меню беседы"]'); checkPhoneMenu(f.host);
     }, raw);
     await check(source);
-    assert.equal(source.split(anchor).length - 1, 1, 'один точный якорь мутации');
-    await assert.rejects(() => check(source.replace(anchor, replacement)),
-      (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure));
+    counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'один точный якорь мутации'));
+    await counterfact(() => assert.rejects(() => check(source.replace(anchor, replacement)),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure)));
   });
 }
 
@@ -773,6 +779,7 @@ for (const [name, anchor, replacement, expectedFailure] of [
 ] as const) {
   it(`R139 контрфакт: ${name} отвергается настоящей шапкой`, async () => {
     await checkOnlineAvatar(760);
+    await counterfact(async () => {
     assert.ok(source.includes(anchor), 'мутант меняет существующий контракт настоящего компонента');
     const mutant = source.replaceAll(anchor, replacement);
     assert.notEqual(mutant, source);
@@ -780,6 +787,7 @@ for (const [name, anchor, replacement, expectedFailure] of [
       assert.ok(error instanceof assert.AssertionError, 'отказ вызван ожиданием DOM, а не ошибкой загрузки');
       assert.ok(error.message.includes(expectedFailure), 'отказ относится к изменённому поведению');
       return true;
+    });
     });
   });
 }
@@ -791,9 +799,11 @@ for (const kind of ['direct', 'group', 'saved'] as const) {
       assert.equal(f.host.querySelector('textarea')?.getAttribute('placeholder'), 'Сообщение');
     }, raw, undefined, { kind });
     await check(source);
+    await counterfact(async () => {
     const mutant = source.replace('placeholder="Сообщение"', 'placeholder={`Сообщение для ${peerName}`}');
     assert.notEqual(mutant, source);
     await assert.rejects(() => check(mutant), assert.AssertionError);
+    });
   });
 }
 
@@ -812,10 +822,12 @@ it('R125 подменю сохраняет старые сроки, а окно 
     assert.deepEqual(f.muteCalls, [['dm_user', 'peer', true, 86400, undefined]]);
   }, raw, undefined, { muteMenu: true });
   await check(source);
+  await counterfact(async () => {
   const mutant = source.replace('{DM_MUTE_PRESETS.map((p)', '{DM_MUTE_PERIODS.map((p)')
     .replace('import { DM_MUTE_PRESETS,', 'import { DM_MUTE_PRESETS, DM_MUTE_PERIODS,');
   assert.notEqual(mutant, source);
   await assert.rejects(() => check(mutant), assert.AssertionError);
+  });
 });
 
 async function phoneCheck(width: number, pinned: boolean, raw = source) {
@@ -901,21 +913,25 @@ it('R117 шапка сразу заменяет устаревший online сн
     }, raw, row);
   };
   await check(source);
+  await counterfact(async () => {
   const old = "lastSeen.online ? [lastSeen.exact ? 'был(а) только что' : 'был(а) недавно']";
   assert.equal(source.split(old).length - 1, 1, 'единственный актуальный якорь устаревшего снимка');
   const mutant = source.replace(old, 'lastSeen.online ? []'); assert.notEqual(mutant, source);
   await assert.rejects(() => check(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('статус не исчезает'));
+  });
 });
 
 for (const [name, mutate, expectedFailure] of mutations) {
   it(`контрфакт шапки: ${name}`, async () => {
     await phoneCheck(760, false);
+    await counterfact(async () => {
     const changed = mutate(source);
     assert.notEqual(changed, source, 'изменён настоящий JSX-контракт');
     await assert.rejects(() => phoneCheck(760, false, changed), (error: unknown) => {
       assert.ok(error instanceof assert.AssertionError);
       assert.match(error.message, new RegExp(`^${expectedFailure}`));
       return true;
+    });
     });
   });
 }
@@ -968,7 +984,7 @@ it('R179 тап мимо настоящего меню на любом уров�
 // Класс ошибки: удаление back с Назад превращает выход из mute в закрытие всего меню.
 it('R179 мутант без back у Назад обнаруживается именно потерей уровня общего меню', async () => {
   const anchor = '<MenuItem icon="chevron-left" label="Назад" back onClick={onBack} />';
-  assert.equal(source.split(anchor).length - 1, 1); await menuBackLevels();
-  await assert.rejects(() => menuBackLevels(source.replace(anchor, anchor.replace(' back ', ' '))),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('Назад из mute сначала возвращает главное меню'));
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1)); await menuBackLevels();
+  await counterfact(() => assert.rejects(() => menuBackLevels(source.replace(anchor, anchor.replace(' back ', ' '))),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('Назад из mute сначала возвращает главное меню')));
 });

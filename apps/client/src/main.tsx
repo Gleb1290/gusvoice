@@ -24,7 +24,7 @@ import './components/PhoneProfile';
 import './styles.css';
 import { applyTheme, getTheme } from './theme';
 import { applyUiPrefs, applyUiScale, getUiScale } from './uiPrefs';
-import { installAndroidBack } from './androidBack';
+import { installAndroidBack, installBrowserBack } from './androidBack';
 import { installNativeSafeArea } from './nativeSafeArea';
 import { installNativeMicActions } from './nativeMicActions';
 import { installViewerRotation } from './viewerRotation';
@@ -45,6 +45,10 @@ import { dmChunkedUploads } from './attachRules';
 import { CHUNK_FROM_BYTES, uploadInChunks } from './chunkedUpload';
 import { clearUploadProgress, setUploadDone, setUploadProgress } from './uploadProgress';
 import { installAttLinkRenewal } from './attLinks';
+// Записи звуков игр (`assets/sounds/*.mp3`) подменяют синтез — регистрация побочным импортом до первого звука.
+import './builtinSounds';
+import { installPredictionOpenSound } from './predictionSounds';
+import { installExternalLinks } from './externalLinks';
 
 // До любого подключения к комнате: иначе первые дорожки успеют запустить вечный цикл отрисовки.
 installLivekitTweaks();
@@ -53,6 +57,8 @@ applyUiPrefs();
 applyLiteMode();
 // Системная «назад» на Android: без этого жест выбрасывал из приложения с любого экрана (#157).
 installAndroidBack();
+// «Назад» во вкладке браузера телефона — тот же шаг `stepBack` через запись-страж в истории, а не уход с сайта (androidBack.ts).
+installBrowserBack();
 // Android: системные панели в CSS-переменные — старый WebView не кладёт их в env(safe-area-inset-*) (nativeSafeArea.ts).
 installNativeSafeArea();
 // Android: кнопки микрофона в уведомлении голоса и состояние микрофона нативу (#156, nativeMicActions.ts).
@@ -61,6 +67,10 @@ installNativeMicActions();
 installViewerRotation();
 // Файлы ЛС: истёкшая ссылка (аудит #236, п.6) у картинки/видео/звука в документе — новая ссылка и повтор (attLinks.ts).
 installAttLinkRenewal();
+// Ставки на события: чайка вместе с тостом «Новое событие» (predictionSounds.ts).
+installPredictionOpenSound();
+// Десктоп: ссылки «в новой вкладке» и на чужие адреса — в системный браузер (в WebView2 они молча не работали, externalLinks.ts).
+installExternalLinks();
 
 const root = createRoot(document.getElementById('root')!);
 

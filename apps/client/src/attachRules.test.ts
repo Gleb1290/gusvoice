@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -32,6 +33,7 @@ it('вложения берутся в порядке выбора только 
   assert.deepEqual(fitAttachments(0, incoming, 3), { taken: incoming.slice(0, 3), dropped: 9 });
   assert.match(droppedAttachText(), /10/);
   assert.match(droppedAttachText(), /лишние не добавлены/);
+  counterfact(() => {
   const original = readFileSync(new URL('./attachRules.ts', import.meta.url), 'utf8');
   const changed = original.replace('dropped: incoming.length - taken.length', 'dropped: 0');
   assert.notEqual(changed, original, 'реальный модуль считает отброшенный хвост');
@@ -44,6 +46,7 @@ it('вложения берутся в порядке выбора только 
   const mutant = mod.exports as typeof import('./attachRules');
   assert.throws(() => assert.deepEqual(mutant.fitAttachments(8, incoming.slice(0, 5)), { taken: incoming.slice(0, 2), dropped: 3 }), assert.AssertionError,
     'мутант, который скрывает число потерянных файлов, обязан провалить тот же контракт');
+  });
 });
 
 it('снятие выбора перенумеровывает следующие файлы даже при заполненном листе', () => {
@@ -210,9 +213,11 @@ it('контракт мягкого предела убивает игнорир
     ['return bytes >= softLimit;', 'return bytes >= VIDEO_SOFT_LIMIT;', (rules: typeof import('./attachRules')) => assert.equal(rules.recordingFull(24 * mib, 1023 * mib), false)],
     ['max - 1024 * 1024', 'max', (rules: typeof import('./attachRules')) => assert.equal(rules.videoSoftLimit(1024 * mib), 1023 * mib)],
   ] as const) {
-    assert.equal(source.split(before).length - 1, 1, 'мутация имеет единственную точку приложения');
     check(loadRules(source));
-    assert.throws(() => check(loadRules(source.replace(before, after))), assert.AssertionError);
+    counterfact(() => {
+      assert.equal(source.split(before).length - 1, 1, 'мутация имеет единственную точку приложения');
+      assert.throws(() => check(loadRules(source.replace(before, after))), assert.AssertionError);
+    });
   }
 });
 

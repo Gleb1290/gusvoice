@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -101,10 +102,12 @@ it('подсказка слова целиком принимает только
     return (module.exports as typeof import('./emojiSearch.js')).exactEmoji;
   };
   check(mutant('export function exactEmoji(', 'export function exactEmoji('));
-  assert.throws(() => check(mutant('e.label.toLowerCase() === q', 'e.label.toLowerCase().startsWith(q)')), assert.AssertionError,
-    'мутант превращает точную подсказку в список префиксов');
-  assert.throws(() => check(mutant('return [...byName, ...byTag].slice(0, limit);', 'return [...byTag, ...byName].slice(0, limit);')), assert.AssertionError,
-    'мутант ставит совпадение по тегу выше названия');
+  counterfact(() => {
+    assert.throws(() => check(mutant('e.label.toLowerCase() === q', 'e.label.toLowerCase().startsWith(q)')), assert.AssertionError,
+      'мутант превращает точную подсказку в список префиксов');
+    assert.throws(() => check(mutant('return [...byName, ...byTag].slice(0, limit);', 'return [...byTag, ...byName].slice(0, limit);')), assert.AssertionError,
+      'мутант ставит совпадение по тегу выше названия');
+  });
 });
 
 describe('рукописные алиасы поверх таблицы', () => {

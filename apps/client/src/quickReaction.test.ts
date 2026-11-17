@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -24,7 +25,9 @@ it('неизвестный режим даёт реакцию, пробелы и
     assert.equal(api.parseQuickReaction(' 🔥 '), '🔥');
   };
   check(load());
-  assert.throws(() => check(load("DOUBLE_CLICK_DEFAULT: DoubleClickAction = 'react'", "DOUBLE_CLICK_DEFAULT: DoubleClickAction = 'reply'")), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(load("DOUBLE_CLICK_DEFAULT: DoubleClickAction = 'react'", "DOUBLE_CLICK_DEFAULT: DoubleClickAction = 'reply'")), assert.AssertionError);
+  });
 });
 it('быстрая реакция первая, чужая вытесняет хвост, исходный набор не меняется', () => {
   // Нельзя расширить полосу или потерять выбранную реакцию на следующем открытии.
@@ -36,6 +39,8 @@ it('быстрая реакция первая, чужая вытесняет х
     assert.deepEqual(Array.from(api.quickBarOrder([], '🙂')), ['🙂']);
   };
   check(load());
-  assert.throws(() => check(load('[quick, ...rest]', '[...rest, quick]')), assert.AssertionError);
-  assert.throws(() => check(load('.slice(0, Math.max(set.length, 1))', '')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(load('[quick, ...rest]', '[...rest, quick]')), assert.AssertionError);
+    assert.throws(() => check(load('.slice(0, Math.max(set.length, 1))', '')), assert.AssertionError);
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact, mutantTest } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { before, beforeEach, after, test } from 'node:test';
@@ -112,10 +113,10 @@ test('R131 контрфакты JOIN, уборки, удаления загру�
     ['isNull(conversationMembers.leftAt),','sql`true`,',verifyLeft],
     ['sql`greatest(${attachmentUploads.createdAt}, ${attachmentUploads.lastPartAt}, ${attachmentUploads.completingAt}) < ${cutoff.toISOString()}::timestamptz`','sql`${attachmentUploads.createdAt} < ${cutoff.toISOString()}::timestamptz`',verifyActivity],
     [deletion,'const gone = [{ id: row.id }];',async(mod:typeof big)=>{const id=await full();assert.ok('id' in await mod.completeUpload('a','group',id));assert.equal(await count('attachment_uploads',id),0);}]
-  ] as const){await seed();await verify(big);await seed();const mutant=await moduleOf<typeof big>('../src/bigUploads.ts',from,to);await assert.rejects(()=>verify(mutant),assert.AssertionError,from);}
-  await seed();const groups=await import('../src/convGroups.js');await verifyDrop(groups);await seed();const mutant=await moduleOf<typeof groups>('../src/convGroups.ts','await dropUploadsOfMember(tx, conversationId, targetId);','');await assert.rejects(()=>verifyDrop(mutant),assert.AssertionError);
+  ] as const){await seed();await verify(big);await counterfact(async()=>{await seed();const mutant=await moduleOf<typeof big>('../src/bigUploads.ts',from,to);await assert.rejects(()=>verify(mutant),assert.AssertionError,from);});}
+  await seed();const groups=await import('../src/convGroups.js');await verifyDrop(groups);await counterfact(async()=>{await seed();const mutant=await moduleOf<typeof groups>('../src/convGroups.ts','await dropUploadsOfMember(tx, conversationId, targetId);','');await assert.rejects(()=>verifyDrop(mutant),assert.AssertionError);});
 });
-test('R131 мутант без условного забора запускает вторую сборку и ловится барьером S3',async()=>{
+mutantTest('R131 мутант без условного забора запускает вторую сборку и ловится барьером S3',async()=>{
   // Завершаем все обещания даже у мутанта, чтобы красная проверка не оставляла зависший тест.
   const from='or(isNull(attachmentUploads.completingAt), lt(attachmentUploads.completingAt, sql`now() - ${`${ASSEMBLY_CLAIM_STALE_MS} milliseconds`}::interval`))';
   const mutant=await moduleOf<typeof big>('../src/bigUploads.ts',from,'sql`true`');
@@ -123,13 +124,13 @@ test('R131 мутант без условного забора запускае�
   const first=mutant.completeUpload('a','group',id).catch(e=>e);await until(()=>completeCalls===1);const second=mutant.completeUpload('a','group',id).catch(e=>e);
   try{await until(()=>completeCalls===2);assert.throws(()=>assert.equal(completeCalls,1),assert.AssertionError);}finally{hold.resolve();await Promise.all([first,second]);}
 });
-test('R131 мутант вставки вложения до complete делает несобранный файл видимым и ловится до отпускания барьера',async()=>{
+mutantTest('R131 мутант вставки вложения до complete делает несобранный файл видимым и ловится до отпускания барьера',async()=>{
   // Контрфакт возвращает раннюю вставку старого порядка, ещё до вызова S3.
   const injected='await insertPendingRow({ id: row.id, storageKey: row.storageKey, ownerId, conversationId, name: row.name, contentType: row.declaredType, size: row.size });\n  const claimed = await db';
   const mutant=await moduleOf<typeof big>('../src/bigUploads.ts','const claimed = await db',injected);const id=await full();const hold=deferred();onComplete=()=>hold.promise;const pending=mutant.completeUpload('a','group',id).catch(e=>e);await until(()=>completeCalls===1);
   try{await assert.rejects(async()=>assert.equal(await count('attachments',id),0),assert.AssertionError);}finally{hold.resolve();await pending;}
 });
-test('R131 мутант пересылки без assertDailyRoom пропускает все десять копий вместо восьми',async()=>{
+mutantTest('R131 мутант пересылки без assertDailyRoom пропускает все десять копий вместо восьми',async()=>{
   // Проверяется квота именно копий, не только числа startUpload.
   const mutant=await moduleOf<typeof att>('../src/attachments.ts','await assertDailyRoom(input.ownerId, total, tx);','');mutant.setAttachmentStoreForTests(store);await assert.rejects(()=>verifyForward(mutant),assert.AssertionError);
 });
@@ -142,7 +143,7 @@ test('R131 AST-страж держит суточную проверку вну�
     const locks=all(callback.body,ts.isTaggedTemplateExpression).filter(node=>node.getText(sf).includes('pg_advisory_xact_lock'));assert.equal(locks.length,1,`${name}: замок в callback`);
     const quotas=all(callback.body,ts.isCallExpression).filter(call=>ts.isIdentifier(call.expression)&&call.expression.text==='assertDailyRoom');assert.equal(quotas.length,1,`${name}: суточная проверка в callback`);assert.ok(locks[0].pos<quotas[0].pos,`${name}: замок до проверки`);assert.equal(quotas[0].arguments[2]?.getText(sf),'tx');
   }};
-  verify(source);const from='await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`att-pending:${input.ownerId}`}))`);';assert.ok(source.includes(from));assert.throws(()=>verify(source.replaceAll(from,'')),assert.AssertionError);
+  verify(source);counterfact(()=>{const from='await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`att-pending:${input.ownerId}`}))`);';assert.ok(source.includes(from));assert.throws(()=>verify(source.replaceAll(from,'')),assert.AssertionError);});
 });
 
 async function routeApp(mutant=false){const gate=createUploadGate();let readBytes=0;let beforeParse=0;const mod=await moduleOf<typeof import('../src/routes/uploads.js')>('../src/routes/uploads.ts',mutant?'onRequest: admitPart':undefined,'preValidation: admitPart',{'../uploadGate.js':{uploadGate:gate}});const target=Fastify();await target.register(async scope=>{await mod.uploadRoutes(scope);scope.addHook('preParsing',async(_req,_reply,payload)=>{beforeParse++;return payload;});scope.removeContentTypeParser('application/octet-stream');scope.addContentTypeParser('application/octet-stream',{parseAs:'buffer'},(_req,bytes,done)=>{readBytes+=(bytes as Buffer).length;done(null,bytes);});});await target.ready();return {target,gate,reads:()=>({readBytes,beforeParse})};}
@@ -150,7 +151,7 @@ const routeHeaders={'authorization':`Bearer placeholder`,'content-type':'applica
 async function verifyBeforeRead(mutant=false){const {target,reads}=await routeApp(mutant);const id=await full();try{const response=await target.inject({method:'PUT',url:`/conv/group/uploads/${id}/parts/1`,headers:{...routeHeaders,authorization:`Bearer ${token}`,'content-length':'2'},payload:Buffer.from('ab')});assert.equal(response.statusCode,400,response.body);assert.equal(reads().readBytes,0);assert.equal(reads().beforeParse,0);}finally{await target.close();}}
 test('R131 PUT неправильного Content-Length отвергается до preParsing и чтения, preValidation-мутант читает тело',async()=>{
   // Счётчик настоящего content-type parser отличает ранний отказ от такого же HTTP-кода после буферизации.
-  await verifyBeforeRead();await assert.rejects(()=>verifyBeforeRead(true),assert.AssertionError);
+  await verifyBeforeRead();await counterfact(()=>assert.rejects(()=>verifyBeforeRead(true),assert.AssertionError));
 });
 test('R131 PUT без длины даёт 411, неверный тип 415, случайный id 404 без прочитанных байт',async()=>{
   // Защищаем память и от отсутствующей длины, и от выдуманного UUID, а не только неверного размера.

@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { messageLinks, sharedMediaKindOf } from './sharedMedia.js';
@@ -20,7 +21,9 @@ it('голосовое требует одновременно аудиотип 
   assert.equal(sharedMediaKindOf({ contentType: 'audio/ogg' }), 'file');
   assert.equal(sharedMediaKindOf({ contentType: 'image/png', waveform: [1] }), 'media');
   assert.equal(sharedMediaKindOf({ contentType: '', waveform: [1] }), 'file');
-  assert.throws(() => assert.equal(mutant(" && ct.startsWith('audio/')", '').sharedMediaKindOf({ contentType: 'image/png', waveform: [1] }), 'media'), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant(" && ct.startsWith('audio/')", '').sharedMediaKindOf({ contentType: 'image/png', waveform: [1] }), 'media'), assert.AssertionError);
+  });
 });
 
 it('голосовое главнее GIF, а GIF главнее режима файла', () => {
@@ -29,7 +32,9 @@ it('голосовое главнее GIF, а GIF главнее режима ф
   assert.equal(sharedMediaKindOf({ contentType: 'video/mp4', gif: true, asFile: true }), 'gif');
   assert.equal(sharedMediaKindOf({ contentType: 'image/gif' }), 'media');
   assert.equal(sharedMediaKindOf({ contentType: 'image/gif', gif: true }), 'gif');
-  assert.throws(() => assert.equal(mutant("if (a.gif === true) return 'gif';", '').sharedMediaKindOf({ contentType: 'video/mp4', gif: true, asFile: true }), 'gif'), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant("if (a.gif === true) return 'gif';", '').sharedMediaKindOf({ contentType: 'video/mp4', gif: true, asFile: true }), 'gif'), assert.AssertionError);
+  });
 });
 
 it('медиа как файл попадают в файлы, отсутствие типа не становится картинкой', () => {
@@ -39,14 +44,18 @@ it('медиа как файл попадают в файлы, отсутств�
     assert.equal(sharedMediaKindOf({ contentType, asFile: true }), 'file');
   }
   for (const contentType of ['', 'application/pdf', 'audio/mp3']) assert.equal(sharedMediaKindOf({ contentType }), 'file');
-  assert.throws(() => assert.equal(mutant(' && a.asFile !== true', '').sharedMediaKindOf({ contentType: 'image/png', asFile: true }), 'file'), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant(' && a.asFile !== true', '').sharedMediaKindOf({ contentType: 'image/png', asFile: true }), 'file'), assert.AssertionError);
+  });
 });
 
 it('ссылки сохраняют порядок, снимают хвостовую пунктуацию и затем убирают повторы', () => {
   // Ловит дубли одного адреса из-за точки или скобки в конце предложения.
   assert.deepEqual(messageLinks('https://a.test/x.,;:!?) ] HTTPS://b.test/y https://a.test/x!'), ['https://a.test/x', 'HTTPS://b.test/y']);
   assert.deepEqual(messageLinks('https://a.test/x?y=1 https://a.test/x?y=2'), ['https://a.test/x?y=1', 'https://a.test/x?y=2']);
-  assert.throws(() => assert.equal(mutant(' && !out.includes(url)', '').messageLinks('https://a.test https://a.test').length, 1), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant(' && !out.includes(url)', '').messageLinks('https://a.test https://a.test').length, 1), assert.AssertionError);
+  });
 });
 
 it('пустой текст, голые схемы и чужие протоколы не создают ссылки', () => {
@@ -62,14 +71,17 @@ it('кружок относится к голосовым раньше обыч�
   assert.equal(sharedMediaKindOf({ ...round, gif: true, asFile: true }), 'voice');
   assert.equal(sharedMediaKindOf({ contentType: 'video/webm' }), 'media');
   assert.equal(sharedMediaKindOf({ contentType: 'image/png', round: true }), 'media');
-  const branch = "if (a.round === true && ct.startsWith('video/')) return 'voice';";
-  assert.throws(() => assert.equal(mutant(branch, '').sharedMediaKindOf(round), 'voice'), assert.AssertionError);
-  const middle = [
-    "if (Array.isArray(a.waveform) && a.waveform.length > 0 && ct.startsWith('audio/')) return 'voice';",
-    "if (a.gif === true) return 'gif';",
-    "if ((ct.startsWith('image/') || ct.startsWith('video/')) && a.asFile !== true) return 'media';",
-  ].join('\n  ');
-  assert.throws(() => assert.equal(mutant(`${branch}\n  ${middle}`, `${middle}\n  ${branch}`).sharedMediaKindOf(round), 'voice'), assert.AssertionError,
-    'перенос round после обычного видео отправляет кружок не в голосовые');
-  assert.throws(() => assert.equal(mutant("a.round === true && ct.startsWith('video/')", 'a.round === true').sharedMediaKindOf({ contentType: 'image/png', round: true }), 'media'), assert.AssertionError);
+
+  runCounterfact(() => {
+    const branch = "if (a.round === true && ct.startsWith('video/')) return 'voice';";
+    assert.throws(() => assert.equal(mutant(branch, '').sharedMediaKindOf(round), 'voice'), assert.AssertionError);
+    const middle = [
+      "if (Array.isArray(a.waveform) && a.waveform.length > 0 && ct.startsWith('audio/')) return 'voice';",
+      "if (a.gif === true) return 'gif';",
+      "if ((ct.startsWith('image/') || ct.startsWith('video/')) && a.asFile !== true) return 'media';",
+    ].join('\n  ');
+    assert.throws(() => assert.equal(mutant(`${branch}\n  ${middle}`, `${middle}\n  ${branch}`).sharedMediaKindOf(round), 'voice'), assert.AssertionError,
+      'перенос round после обычного видео отправляет кружок не в голосовые');
+    assert.throws(() => assert.equal(mutant("a.round === true && ct.startsWith('video/')", 'a.round === true').sharedMediaKindOf({ contentType: 'image/png', round: true }), 'media'), assert.AssertionError);
+  });
 });

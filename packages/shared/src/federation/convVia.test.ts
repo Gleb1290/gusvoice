@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -83,7 +84,11 @@ for (const [name, anchor, replacement, check, target] of [
   ['сравнение отчёта с самим собой', 'input.claimHash === input.wireHash', 'input.claimHash === input.claimHash', hashContract, 'пересчитанный отпечаток не совпал'],
   ['убран час после отчёта', 'input.sinceReportMs !== null && input.sinceReportMs >= FED_VIA_LIMITS.reportGraceMs', 'input.sinceReportMs !== null', graceContract, 'остальным устройствам остаётся час'],
 ] as const) it(`R198 мутант «${name}» ломает адресный контракт целого via-модуля`, () => {
-  check(rules); check(load(source)); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
-  const mutant = load(source.replace(anchor, replacement));
-  assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(target));
+  check(rules); check(load(source));
+
+  runCounterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
+    const mutant = load(source.replace(anchor, replacement));
+    assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });

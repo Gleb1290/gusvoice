@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
-const source = readFileSync(new URL('./androidBack.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+import { testVmImports } from './testVmImports.js';
+
+const sourceUrl = new URL('./androidBack.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 function check(raw = source) {
   for (const [view, currentServerId, serverListOpen, expected, expectedCalls] of [
     ['server', 's', false, true, ['servers:true']],
@@ -23,11 +27,9 @@ function check(raw = source) {
     const module = { exports: {} as typeof import('./androidBack') };
     runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
       { module, exports: module.exports, document: { querySelector: () => null },
-        require: (id: string) => {
-          if (id === './hotkeys') return { isAndroid: () => false };
-          if (id === './store') return { useStore: { getState: () => state } };
-          assert.fail(`неописанная граница ${id}`);
-        } });
+        require: testVmImports(sourceUrl, {
+          './store': { useStore: { getState: () => state } },
+        }) });
     assert.equal(module.exports.stepBack(), expected, 'назад из каналов сервера');
     assert.deepEqual(calls, expectedCalls, 'R232 каналы открывают серверы, корень серверов открывает сообщения, корень ЛС уходит системе');
   }
@@ -38,17 +40,22 @@ it('R174 назад из каналов открывает серверы, с к
 });
 it('R174 контрфакт потерянного шага каналы → серверы отвергается', () => {
   // Whole-module VM сохраняет реальные порядок слоёв и обработчиков.
-  check(); const anchor = "s.view === 'server' && s.currentServerId && !s.serverListOpen"; assert.equal(source.split(anchor).length - 1, 1);
+  check();
+  counterfact(() => {
+  const anchor = "s.view === 'server' && s.currentServerId && !s.serverListOpen"; assert.equal(source.split(anchor).length - 1, 1);
   assert.throws(() => check(source.replace(anchor, 'false')), (e: unknown) => e instanceof assert.AssertionError &&
     e.message.startsWith('R232 каналы открывают серверы') && e.operator === 'deepStrictEqual' &&
     JSON.stringify(e.actual) === '["view:dm","loadDms","pane:list"]' && JSON.stringify(e.expected) === '["servers:true"]');
+  });
 });
 it('R232 удаление перехода с корня серверов на сообщения ловится на настоящем stepBack', () => {
   check();
+  counterfact(() => {
   const anchor = "  if (s.view === 'server') {\n    toChatsTab(s);\n    return true;\n  }";
   assert.equal(source.split(anchor).length - 1, 1);
   assert.throws(() => check(source.replace(anchor, '')), (e: unknown) => e instanceof assert.AssertionError &&
     e.message.startsWith('назад из каналов сервера') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });
 
 function checkProfile(raw = source) {
@@ -64,11 +71,9 @@ function checkProfile(raw = source) {
     };
     const module = { exports: {} as typeof import('./androidBack') };
     runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
-      { module, exports: module.exports, document: { querySelector: () => null }, require: (id: string) => {
-        if (id === './hotkeys') return { isAndroid: () => false };
-        if (id === './store') return { useStore: { getState: () => state } };
-        assert.fail(`Неописанный импорт ${id}`);
-      } });
+      { module, exports: module.exports, document: { querySelector: () => null }, require: testVmImports(sourceUrl, {
+        './store': { useStore: { getState: () => state } },
+      }) });
     assert.equal(module.exports.stepBack(), true);
     assert.deepEqual(calls, view === 'dm' ? ['profile:false', 'loadDms', 'pane:list'] :
       ['profile:false', 'view:dm', 'loadDms', 'pane:list'], 'R230 профиль возвращает в список сообщений в правильном порядке');
@@ -82,10 +87,12 @@ it('R230 потеря перехода на сообщения после зак
   // Оригинал обязателен: произвольная ошибка загрузки не может засчитать мутант пойманным.
   checkProfile();
   // Другие корневые вкладки тоже смогут вызвать toChatsTab: мутируем только ветку профиля, не все вызовы файла.
+  counterfact(() => {
   const anchor = '  if (s.mobileProfileOpen) {\n    s.setMobileProfileOpen(false);\n    toChatsTab(s);\n    return true;\n  }';
   assert.equal(source.split(anchor).length - 1, 1);
   assert.throws(() => checkProfile(source.replace(anchor, anchor.replace('    toChatsTab(s);\n', ''))), (e: unknown) => e instanceof assert.AssertionError &&
     e.message.startsWith('R230 профиль возвращает в список сообщений в правильном порядке') &&
     e.operator === 'deepStrictEqual' && JSON.stringify(e.actual) === '["profile:false"]' &&
     JSON.stringify(e.expected) === '["profile:false","view:dm","loadDms","pane:list"]');
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import * as rules from '../botRules';
@@ -23,7 +24,7 @@ async function fixture(check: (f: Scene) => Promise<void>, options: Options = {}
     };
     const deps = uiDependencies({ getState: () => ({ openDmWith: () => assert.fail('здесь не открываем беседу') }) });
     const chrome = deps['../dialogChrome'];
-    const { MyBotsSettings } = load<typeof import('./MyBotsSettings')>(source, { ...deps, '../api': { api },
+    const { MyBotsSettings } = load<typeof import('./MyBotsSettings')>(new URL('./MyBotsSettings.tsx', import.meta.url), source, { ...deps, '../api': { api },
       '../botRules': { ...rules, ...(options.docsUrl !== undefined ? { BOT_DOCS_URL: options.docsUrl } : {}) },
       '../toast': { toast: () => {}, toastError: () => assert.fail('неожиданная ошибка API') },
       '../confirm': { confirmAction: async (request: Record<string, unknown>) => { confirmations.push(request); return await (options.confirm ?? true); } },
@@ -132,13 +133,17 @@ it('R297 другая клавиша не закрывает окно токен
 });
 it('R297 контрфакт: Esc токена без preventDefault закрывает также настройки', async () => {
   await escapeProbe();
-  await assert.rejects(() => escapeProbe(mutate(raw, 'e.preventDefault();\n          onClose();', 'onClose();')),
-    assertion('R297-token-escape', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => escapeProbe(mutate(raw, 'e.preventDefault();\n          onClose();', 'onClose();')),
+      assertion('R297-token-escape', false, true));
+  });
 });
 it('R297 контрфакт: объяснение запрета заменено кнопкой создания', async () => {
   await offProbe();
-  await assert.rejects(() => offProbe(mutate(raw, '(block ? (', '(false ? (')),
-    assertion('R297-off-create', 1, 0));
+  await counterfact(async () => {
+    await assert.rejects(() => offProbe(mutate(raw, '(block ? (', '(false ? (')),
+      assertion('R297-off-create', 1, 0));
+  });
 });
 
 function docsProbe(host: ParentNode, docs: string | null, llms: string | null) {
@@ -189,5 +194,7 @@ it('R300 контрфакт: ссылка нейронке потеряна, н�
   const llms = 'https://guest.example.test/api/bot/v1/llms.txt';
   const probe = (source = raw) => fixture(async f => { docsProbe(f.host, rules.BOT_DOCS_URL, llms); }, { llmsUrl: llms }, source);
   await probe();
-  await assert.rejects(() => probe(mutate(raw, '{llms && (', '{false && (')), assertion('R300-docs-link-count', 1, 2));
+  await counterfact(async () => {
+    await assert.rejects(() => probe(mutate(raw, '{llms && (', '{false && (')), assertion('R300-docs-link-count', 1, 2));
+  });
 });

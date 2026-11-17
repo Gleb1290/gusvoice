@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -48,9 +49,11 @@ it('R208 локализация группы оставляет неизвест
 // Снятый гейт неоднозначности ошибочно присваивает сообщение первому из одноимённых людей.
 it('R208 контрфакт локализации группы угадывает первого при двух одинаковых именах', () => {
   groupAuthors(rules);
-  assert.throws(() => groupAuthors(load(mutation('return same.length === 1 ?', 'return same.length > 0 ?'))),
-    e => e instanceof assert.AssertionError && e.message.startsWith('два одноимённых участника не угадываются')
-      && e.operator === 'strictEqual' && authorId(e.actual) === 'group-peer' && authorId(e.expected) === 'host-id');
+  counterfact(() => {
+    assert.throws(() => groupAuthors(load(mutation('return same.length === 1 ?', 'return same.length > 0 ?'))),
+      e => e instanceof assert.AssertionError && e.message.startsWith('два одноимённых участника не угадываются')
+        && e.operator === 'strictEqual' && authorId(e.actual) === 'group-peer' && authorId(e.expected) === 'host-id');
+  });
 });
 const sha = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
 for (const text of ['', 'x'.repeat(55), 'x'.repeat(56), 'x'.repeat(64), 'x'.repeat(1000), 'Гусиная переписка', '🪶🙂']) {
@@ -71,7 +74,9 @@ function hashes(api: typeof rules) {
 it('R200 viaPayloadHash совпадает с настоящим backend payloadHash для текста и ответа', () => hashes(rules));
 it('R200 потеря trim меняет отпечаток, который дом пересчитывает по копии', () => {
   hashes(load(source));
-  assert.throws(() => hashes(load(mutation('content.trim()', 'content'))), e => e instanceof assert.AssertionError && e.message.includes('совпадает с домом'));
+  counterfact(() => {
+    assert.throws(() => hashes(load(mutation('content.trim()', 'content'))), e => e instanceof assert.AssertionError && e.message.includes('совпадает с домом'));
+  });
 });
 const now = 2_000_000_000_000;
 const creds = (expiresAt: number): rules.ViaCreds => ({ instanceId: 'home', apiBase: 'https://peer.invalid/api', userId: 'shadow', token: 'synthetic-session', expiresAt });
@@ -117,7 +122,9 @@ function clear(api: typeof rules) {
 it('R200 claimsClear удаляет ушедшие строки, но сохраняет добавленные во время запроса и другой дом', () => clear(rules));
 it('R200 очистка всей очереди после отчёта ловится добавленной во время запроса строкой', () => {
   clear(load(source));
-  assert.throws(() => clear(load(mutation('return list.filter((x) => !(x.home === home && gone.has(x.clientId)));', 'return [];'))), e => e instanceof assert.AssertionError && e.message.includes('новые строки и другой дом остаются'));
+  counterfact(() => {
+    assert.throws(() => clear(load(mutation('return list.filter((x) => !(x.home === home && gone.has(x.clientId)));', 'return [];'))), e => e instanceof assert.AssertionError && e.message.includes('новые строки и другой дом остаются'));
+  });
 });
 it('R200 parseCreds и parseClaims отбрасывают повреждённое и сохраняют нормальный результат без чужих полей', () => {
   // Ловит молчаливую потерю корректного диска и использование полей неверного типа.
@@ -147,6 +154,8 @@ function localize(api: typeof rules) {
 it('R204 «через»: автор соседа становится моим id, остальные — id собеседника, прочие данные не меняются', () => localize(rules));
 it('R204 перестановка веток автора соседа и собеседника ловится на исходном сообщении', () => {
   localize(rules);
-  assert.throws(() => localize(load(mutation('const id = from === viaUserId ? selfId : peerId;', 'const id = from === viaUserId ? peerId : selfId;'))),
-    e => e instanceof assert.AssertionError && e.message.includes('теневой автор соседа отображается моим id'));
+  counterfact(() => {
+    assert.throws(() => localize(load(mutation('const id = from === viaUserId ? selfId : peerId;', 'const id = from === viaUserId ? peerId : selfId;'))),
+      e => e instanceof assert.AssertionError && e.message.includes('теневой автор соседа отображается моим id'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -136,7 +137,10 @@ const mutants: Array<{ title: string; file: string; anchor: string; replacement:
     replacement: 'callsOn && !isSelf', marker: 'R306_CALL:', probe: call },
 ];
 for (const m of mutants) it(`R306 исходниковый контрфакт: ${m.title} обнаруживается целевым стражем`, () => {
-  const raw = sources[m.file]; assert.equal(raw.split(m.anchor).length - 1, 1, 'уникальный якорь'); m.probe(raw);
-  assert.throws(() => m.probe(raw.replace(m.anchor, m.replacement)),
-    e => e instanceof assert.AssertionError && e.message.startsWith(m.marker));
+  const raw = sources[m.file]; m.probe(raw);
+  counterfact(() => {
+    assert.equal(raw.split(m.anchor).length - 1, 1, 'уникальный якорь');
+    assert.throws(() => m.probe(raw.replace(m.anchor, m.replacement)),
+      e => e instanceof assert.AssertionError && e.message.startsWith(m.marker));
+  });
 });

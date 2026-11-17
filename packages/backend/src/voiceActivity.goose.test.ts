@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -140,7 +141,7 @@ describe('мутации offerGoose', () => {
     const mutants = [
       {
         name: 'удалённый повторный push',
-        source: changeOnce(source, publish, '      /* мутант: повторный push удалён */'),
+        source: () => changeOnce(source, publish, '      /* мутант: повторный push удалён */'),
         options: { claimResult: null, currentOfferId: 'old-offer' },
         peers: 1,
         verify: (h: ReturnType<typeof makeHarness>) => {
@@ -153,7 +154,7 @@ describe('мутации offerGoose', () => {
       },
       {
         name: 'подмена висящего id новым',
-        source: changeOnce(source, publish, publish.replace('offerId: hanging', 'offerId')),
+        source: () => changeOnce(source, publish, publish.replace('offerId: hanging', 'offerId')),
         options: { claimResult: null, currentOfferId: 'old-offer' },
         peers: 1,
         verify: (h: ReturnType<typeof makeHarness>) => {
@@ -163,7 +164,7 @@ describe('мутации offerGoose', () => {
       },
       {
         name: 'жетон на повторе',
-        source: changeOnce(source, currentRead, `${currentRead}\n      await redisPub.set(gooseTokenKey(serverId, userId, hanging ?? offerId), '1', 'PX', gooseTokenTtlMs());`),
+        source: () => changeOnce(source, currentRead, `${currentRead}\n      await redisPub.set(gooseTokenKey(serverId, userId, hanging ?? offerId), '1', 'PX', gooseTokenTtlMs());`),
         options: { claimResult: null, currentOfferId: 'old-offer' },
         peers: 1,
         verify: (h: ReturnType<typeof makeHarness>) => {
@@ -174,7 +175,7 @@ describe('мутации offerGoose', () => {
       },
       {
         name: 'пропуск cooldown',
-        source: changeOnce(source, cooldownGuard, '    /* мутант: проверка cooldown пропущена */'),
+        source: () => changeOnce(source, cooldownGuard, '    /* мутант: проверка cooldown пропущена */'),
         options: { cooldownActive: true },
         peers: 1,
         verify: (h: ReturnType<typeof makeHarness>) => {
@@ -186,7 +187,7 @@ describe('мутации offerGoose', () => {
       },
       {
         name: 'пропуск peers',
-        source: changeOnce(source, peersGuard, '  /* мутант: проверка peers пропущена */'),
+        source: () => changeOnce(source, peersGuard, '  /* мутант: проверка peers пропущена */'),
         options: {},
         peers: 0,
         verify: (h: ReturnType<typeof makeHarness>) => {
@@ -202,7 +203,8 @@ describe('мутации offerGoose', () => {
       assert.deepEqual(original.errors, [], `${mutant.name}: исходник не логирует ошибку`);
       mutant.verify(original);
 
-      const mutated = makeHarness(mutant.options, mutant.source);
+      await counterfact(async () => {
+      const mutated = makeHarness(mutant.options, mutant.source());
       await mutated.offerGoose('server', 'user', { gooseBonus: 1, gooseMinutes: 1 }, { peers: mutant.peers });
       assert.deepEqual(mutated.errors, [], `${mutant.name}: мутант должен доходить до адресного инварианта, не падать внутри`);
       assert.throws(
@@ -210,6 +212,7 @@ describe('мутации offerGoose', () => {
         (error: unknown) => error instanceof assert.AssertionError && error.message.includes(mutant.failure),
         `${mutant.name}: мутант обязан упасть именно на «${mutant.failure}»`,
       );
+      });
     }
   });
 });

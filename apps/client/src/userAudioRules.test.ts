@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -32,8 +33,10 @@ it('личная громкость видна только не себе и п�
   check(rules);
   const source = readFileSync(new URL('./userAudioRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   check(load(source));
+  counterfact(() => {
   assert.throws(() => check(mutant('if (opts.isSelf) return false;', '')), assert.AssertionError);
   assert.throws(() => check(mutant('opts.hasParticipant || ', '')), assert.AssertionError);
   assert.throws(() => check(mutant('|| !!opts.voiceChannelId ', '')), assert.AssertionError);
   assert.throws(() => check(mutant('|| opts.inPresence', '')), assert.AssertionError);
+  });
 });

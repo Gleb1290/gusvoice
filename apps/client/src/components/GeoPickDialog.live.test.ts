@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -98,9 +99,9 @@ for (const m of [
   { label: 'оба гейта', from: '!!live && phone', to: '!!live || phone', check: featurePhone, prefix: 'R225-pick-gate:', actual: 1, expected: 0 },
   { label: 'вид отправки', from: "kind: 'geolive'", to: "kind: 'geo'", check: (source: string) => sendPeriod(900, source), prefix: 'R225-pick-kind:', actual: 'geo', expected: 'geolive' },
 ]) it(`R225 контрфакт выбора места: ${m.label}`, async () => {
-  await m.check(raw); assert.equal(raw.split(m.from).length - 1, 1);
-  await assert.rejects(() => m.check(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
-    && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === m.expected);
+  await m.check(raw); counterfact(() => assert.equal(raw.split(m.from).length - 1, 1));
+  await counterfact(() => assert.rejects(() => m.check(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
+    && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === m.expected));
 });
 const chat = read('./DmChatView.tsx'), expression = 'geoLiveFeature && !peerHome && !groupHostId && !viaOn';
 function chatGate(source: string) {
@@ -111,7 +112,11 @@ function chatGate(source: string) {
 }
 it('R225 AST DmChatView передаёт geoLive только локальной беседе без чужого хоста и через', () => chatGate(chat));
 for (const term of ['!peerHome', '!groupHostId', '!viaOn']) it(`R225 контрфакт AST гейта: отсутствует ${term}`, () => {
-  chatGate(chat); assert.equal(chat.split(expression).length - 1, 1); const mutated = expression.replace(` && ${term}`, '');
-  assert.throws(() => chatGate(chat.replace(expression, mutated)), e => e instanceof assert.AssertionError && e.message.startsWith('R225-chat-live-gate:')
-    && e.operator === 'strictEqual' && e.actual === mutated && e.expected === expression);
+  chatGate(chat);
+  counterfact(() => {
+    assert.equal(chat.split(expression).length - 1, 1);
+    const mutated = expression.replace(` && ${term}`, '');
+    assert.throws(() => chatGate(chat.replace(expression, mutated)), e => e instanceof assert.AssertionError && e.message.startsWith('R225-chat-live-gate:')
+      && e.operator === 'strictEqual' && e.actual === mutated && e.expected === expression);
+  });
 });

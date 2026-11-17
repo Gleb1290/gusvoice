@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -113,7 +114,10 @@ it('R224 отключённый путь даёт 404, недоступный а
   await fixture(async (app, headers) => { const res = await app.inject({ url: '/api/maps/info', headers }); assert.equal(res.statusCode, 503); assert.deepEqual(res.json(), { error: 'map unavailable' }); }, raw, missingPath);
 });
 it('R224 контрфакт заголовок gzip без настоящего сжатия убивается проверкой тела', async () => {
-  await compressedTile(raw); const from = 'await gzipAsync(tile.data, { level: 6 })'; assert.equal(raw.split(from).length - 1, 1);
+  await compressedTile(raw);
+  await counterfact(async () => {
+  const from = 'await gzipAsync(tile.data, { level: 6 })'; assert.equal(raw.split(from).length - 1, 1);
   await assert.rejects(() => compressedTile(raw.replace(from, 'tile.data')), e => e instanceof assert.AssertionError && e.message.startsWith('R224-gzip-body:')
     && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });

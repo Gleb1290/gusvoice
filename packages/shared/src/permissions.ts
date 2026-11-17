@@ -84,6 +84,15 @@ export const Permission = {
    * `@everyone`/«Гостям» и ролям с управлением ролями или администратором (раньше роли звали именно они).
    */
   MENTION_EVERYONE: 1n << 29n,
+  /**
+   * «Проводить ставки» (ГусКоины 2, события): заводить события, закрывать приём и отменять ЧУЖИЕ события с возвратом
+   * (`routes/gamePredictions.ts`). То же умеют `MANAGE_ECONOMY` и владелец/администратор; итог подводит по-прежнему
+   * ТОЛЬКО создатель события.
+   *
+   * ⚠️ Отдельным правом, а не только `MANAGE_ECONOMY` (решение владельца 29.10): вести события на стримах и матчах —
+   * работа ведущего, ползунки экономики и выдача монет ему не нужны. Новый бит у старых ролей выключен.
+   */
+  MANAGE_PREDICTIONS: 1n << 30n,
 } as const;
 
 export type PermissionName = keyof typeof Permission;
@@ -171,6 +180,14 @@ export function isAdmin(perms: bigint): boolean {
 /** True if `perms` grants `perm` (ADMINISTRATOR grants everything). */
 export function has(perms: bigint, perm: bigint): boolean {
   return isAdmin(perms) || (perms & perm) === perm;
+}
+
+/**
+ * Может ли «проводить ставки» на события: `MANAGE_PREDICTIONS` ИЛИ `MANAGE_ECONOMY` (владелец и администратор — через
+ * `ALL_PERMISSIONS`/`has`). Заводить, закрывать приём, отменять чужие; итог — только создатель (`gamePredictions.ts`).
+ */
+export function canRunPredictions(perms: bigint): boolean {
+  return has(perms, Permission.MANAGE_PREDICTIONS) || has(perms, Permission.MANAGE_ECONOMY);
 }
 
 /** Union of every role's permissions for a member. ADMINISTRATOR short-circuits to all. */

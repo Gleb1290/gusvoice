@@ -27,14 +27,12 @@ export interface DeferredPush {
   uid: string;
   payload: PushPayload;
   source?: PushSource;
-  /** Пуш личной беседы 1:1 (`sendPushToUsers` `opts.private`): к нему применяются «Личные сообщения» и повтор. */
+  /** Пуш личной беседы 1:1 (`sendPushToUsers` `opts.private`): чтит «Личные сообщения». */
   private?: true;
-  /** Номер повтора (G38, `push3`): у пуша из очереди «повторить через N минут» — сколько раз он уже повторён. */
+  /** @deprecated Legacy reminders are drained without delivery. */
   repeat?: number;
   /**
-   * Когда ушёл первый пуш этой цепочки повторов (мс, `Date.now()`; ревью Codex 08.10): по нему `push.ts` держит окно «сутки от
-   * первого пуша» (`notifyRepeatInWindow`) и при переносах за ПК. Поле добавлено позже — у старых записей очереди его нет,
-   * такой повтор считается от текущего такта.
+   * @deprecated Timestamp of the former reminder chain, accepted in old queue records.
    */
   firstAt?: number;
 }
@@ -59,39 +57,6 @@ export async function deferPush(item: DeferredPush, now = Date.now()): Promise<v
     .multi()
     .hset(HKEY, id, JSON.stringify(item))
     .zadd(ZKEY, now + PUSH_DEFER_MS, id)
-    .exec();
-}
-
-/**
- * Поставить повтор пуша висящей беседы через `minutes` (G38, `push3`, Android «Повторять уведомления»). Ключ — «получатель ×
- * беседа»: новое сообщение ПЕРЕПИСЫВАЕТ ещё не отправленный повтор (один повтор на беседу за интервал, с самым свежим
- * сообщением) и сдвигает срок. Прочитанное снимает `runPushDeferTick`. Ошибка Redis не мешает — повтор просто не будет.
- */
-export async function scheduleRepeatPush(item: DeferredPush, minutes: number, now = Date.now()): Promise<void> {
-  const id = `rep:${item.uid}:${item.payload.dmId ?? ''}`;
-  try {
-    await redis
-      .multi()
-      .hset(HKEY, id, JSON.stringify(item))
-      .zadd(ZKEY, now + minutes * 60_000, id)
-      .exec();
-  } catch {
-    /* повтор — удобство, не гарантия */
-  }
-}
-
-/**
- * Отложить повтор, пока получатель за ПК (08.10, решение владельца 14; `push.ts` `sendPushToUsers` с `opts.repeat`): тот же ключ
- * `rep:<uid>:<беседа>`, срок — `PUSH_DEFER_MS`, как у первого пуша при живом ПК; такт проверит снова (прочитано — снимет). Не
- * перезаписывает: если новое сообщение уже поставило свежий повтор этой беседы, остаётся он (`HSETNX` + `ZADD NX`). Ошибка
- * Redis — наверх: вызывающий пошлёт повтор сразу, как раньше.
- */
-export async function postponeRepeatPush(item: DeferredPush, now = Date.now(), delayMs = PUSH_DEFER_MS): Promise<void> {
-  const id = `rep:${item.uid}:${item.payload.dmId ?? ''}`;
-  await redis
-    .multi()
-    .hsetnx(HKEY, id, JSON.stringify(item))
-    .zadd(ZKEY, 'NX', now + delayMs, id)
     .exec();
 }
 
@@ -155,13 +120,15 @@ export async function runPushDeferTick(
   for (const id of due) {
     // Забирает тот, кому скрипт вернул пуш: второй такт (или второй процесс) его уже не пошлёт, перепоставленный — не тронут.
     const raw = await claimDue(id, now);
-    if (!raw) continue;
+    if (!raw || id.startsWith('rep:')) continue;
     let item: DeferredPush;
     try {
       item = JSON.parse(raw) as DeferredPush;
     } catch {
       continue;
     }
+    // Drain legacy reminders without delivery or a database lookup; ordinary deferred pushes keep their read checks.
+    if ((item?.repeat ?? 0) > 0 || (item?.payload?.repeat ?? 0) > 0) continue;
     try {
       if ((await alreadyRead(item)) || (await messageGone(item))) {
         read++;

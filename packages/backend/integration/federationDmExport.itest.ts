@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -125,8 +126,10 @@ test('R191 HTTP скрывает чужую беседу, группу и кур
 test('R191 контрфакт без home_instance_id ловится HTTP раскрытием чужой беседы', async () => {
   // Класс ошибки: авторизация общей беседы снята.
   await authorization();
-  await assert.rejects(authorization(mutate(source('federation/convChanges'), "AND c.kind = 'direct' AND u.home_instance_id = ${instanceId} LIMIT 1", "AND c.kind = 'direct' LIMIT 1")),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('чужая беседа не раскрывается'));
+  await counterfact(async () => {
+    await assert.rejects(authorization(mutate(source('federation/convChanges'), "AND c.kind = 'direct' AND u.home_instance_id = ${instanceId} LIMIT 1", "AND c.kind = 'direct' LIMIT 1")),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('чужая беседа не раскрывается'));
+  });
 });
 test('R191 ровно сто сообщений завершают экспорт, сто первое переносится после id сотого с read и pin', async () => {
   // Класс ошибки: граница страницы съедает сообщение, квитанции или закрепы.
@@ -164,8 +167,10 @@ test('R191 экспорт отдаёт своё и чужое надгробие
 test('R191 контрфакт выдачи живой чужой копии ловится id сообщения в экспортной странице', async () => {
   // Класс ошибки: проверка deletedAt чужого автора снята.
   await foreign();
-  await assert.rejects(foreign(mutate(source('federation/convChanges'), 'else if (m.home === instanceId && m.deletedAt)', 'else if (m.home === instanceId)')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('живая чужая копия не экспортируется'));
+  await counterfact(async () => {
+    await assert.rejects(foreign(mutate(source('federation/convChanges'), 'else if (m.home === instanceId && m.deletedAt)', 'else if (m.home === instanceId)')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('живая чужая копия не экспортируется'));
+  });
 });
 type Request = Parameters<typeof import('../src/federation/peerClient.js').getSignedFromPeer>[0];
 type Answer = Awaited<ReturnType<typeof import('../src/federation/peerClient.js').getSignedFromPeer>>;
@@ -230,8 +235,10 @@ for (const [status, name] of [[503, 'недоступный сосед'], [200, 
 test('R191 контрфакт подтверждения головы после failed export ловится возвращённым и SQL-курсором', async () => {
   // Класс ошибки: неудача полного прохода игнорируется.
   await failed(503);
-  await assert.rejects(failed(503, mutate(source('federation/convAccept'),
-    'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) return since;',
-    'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) { await db.insert(fedConvCursor).values({ instanceId, since: head }).onConflictDoUpdate({ target: fedConvCursor.instanceId, set: { since: head } }); return head; }')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('неудачный полный проход не подтверждает голову'));
+  await counterfact(async () => {
+    await assert.rejects(failed(503, mutate(source('federation/convAccept'),
+      'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) return since;',
+      'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) { await db.insert(fedConvCursor).values({ instanceId, since: head }).onConflictDoUpdate({ target: fedConvCursor.instanceId, set: { since: head } }); return head; }')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('неудачный полный проход не подтверждает голову'));
+  });
 });

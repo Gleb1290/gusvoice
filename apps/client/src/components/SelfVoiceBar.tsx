@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { STATUS_LABEL } from '../status';
 import { useStore } from '../store';
-import { toggleSelfDeafen, toggleSelfMute } from '../voiceSelf';
+import { toggleSelfDeafen } from '../voiceSelf';
 import { Avatar } from './Avatar';
 import { useAnimatedAvatarsEnabled } from '../avatarAnimation';
+import { usePttMicButton } from '../usePttMicButton';
 import { Icon } from './Icon';
 import { StatusDot } from './StatusDot';
 import { StatusPicker } from './StatusPicker';
@@ -15,6 +16,7 @@ import { StatusPicker } from './StatusPicker';
  * apply effect carries the intent into the room. Also a quick settings shortcut.
  */
 export function SelfVoiceBar() {
+  const micButton = usePttMicButton();
   const user = useStore((s) => s.user);
   const selfMuted = useStore((s) => s.selfMuted);
   const selfDeafened = useStore((s) => s.selfDeafened);
@@ -75,8 +77,7 @@ export function SelfVoiceBar() {
         <button
           type="button"
           className={`self-ctl ${selfMuted ? 'off' : ''}`}
-          title={selfMuted ? 'Включить микрофон' : 'Выключить микрофон'}
-          onClick={toggleSelfMute}
+          {...micButton}
         >
           <Icon name={selfMuted ? 'mic-off' : 'mic'} size={18} />
         </button>

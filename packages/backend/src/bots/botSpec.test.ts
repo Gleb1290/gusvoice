@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { BOT_API_FEATURES, BOT_API_VERSION, BOT_UPDATE_TYPES } from './botRules.js';
@@ -46,9 +47,13 @@ const mutants: { title: string; edit: Edit; check(s: typeof spec): void; marker:
   { title: 'событие голоса потеряно', edit: { from: "  { type: 'voice_state', since: 4, schema: wireVoiceState },", to: '' }, check: events, marker: 'R307 реестр событий полон' },
 ];
 for (const m of mutants) it(`R307 контрфакт реестра: ${m.title}`, () => {
-  m.check(spec); m.check(loadSpec()); assert.throws(() => m.check(loadSpec(m.edit)), assertion(m.marker));
+  m.check(spec); m.check(loadSpec()); counterfact(() => {
+    assert.throws(() => m.check(loadSpec(m.edit)), assertion(m.marker));
+  });
 });
 it('R307 контрфакт: настоящий метод добавлен без записи в реестре', () => {
   parity();
-  assert.throws(() => parity(spec, { from: "  joinvoice: voiceMethod('voiceJoin'),", to: "  unlisted: voiceMethod('voiceJoin'),\n  joinvoice: voiceMethod('voiceJoin')," }), assertion('R307 реестр равен реальным методам'));
+  counterfact(() => {
+    assert.throws(() => parity(spec, { from: "  joinvoice: voiceMethod('voiceJoin'),", to: "  unlisted: voiceMethod('voiceJoin'),\n  joinvoice: voiceMethod('voiceJoin')," }), assertion('R307 реестр равен реальным методам'));
+  });
 });

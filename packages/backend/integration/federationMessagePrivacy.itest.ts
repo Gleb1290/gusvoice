@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
@@ -255,6 +256,6 @@ for (const [label, mutation, check, prefix, actual, expected] of [
   ['копия не скрывается', { file: 'federation/convAccept', from: 'messageGate !== null && !(await messageGate(author.id, recipients[0]!.id))', to: 'false && messageGate !== null && !(await messageGate(author.id, recipients[0]!.id))' }, withheld, 'R212-copy-privacy:', false, true],
   ['служебная запись скрывается', { file: 'federation/convAccept', from: 'recipients.length === 1 && !w.service && messageGate', to: 'recipients.length === 1 && messageGate' }, (m?: Mutation) => visible(true, m), 'R212-call-service:', true, false],
 ] as const) test(`R212 строгий контрфакт федерации: ${label}`, async () => {
-  await check(); await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await check(); await counterfact(() => assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected));
 });

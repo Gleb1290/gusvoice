@@ -1,8 +1,10 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import * as rules from '../dmListSearchRules';
@@ -20,13 +22,12 @@ const kindSource = readFileSync(new URL('./DmSearchKinds.tsx', import.meta.url),
 const chipSource = readFileSync(new URL('./DmListSearch.tsx', import.meta.url), 'utf8');
 const scopeSource = readFileSync(new URL('./DmServerSearch.tsx', import.meta.url), 'utf8');
 type Query = Parameters<typeof import('../api').api.convSearchAll>[0];
-function unused(name: string) { return new Proxy({}, { get: (_target, key) => key === '__esModule' ? true : () => assert.fail(`неожиданная граница ${name}.${String(key)}`) }); }
-function whole<T>(raw: string, deps: Record<string, unknown>): T {
+function whole<T>(sourceURL: URL, raw: string, deps: Record<string, unknown>): T {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
     { module, exports: module.exports, window, document, Date, Element, IntersectionObserver: undefined,
       setTimeout: (fn: () => void, ms?: number) => window.setTimeout(fn, ms), clearTimeout: (id: number) => window.clearTimeout(id),
-      require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `явный импорт ${id}`); return deps[id]; } });
+      require: testVmImports(sourceURL, deps) });
   return module.exports as T;
 }
 interface Scene {
@@ -60,11 +61,10 @@ async function scene(check: (s: Scene) => Promise<void>, raw = source, phone = t
       '../dmListSearchRules': rules, '../dmListRules': lists, '../dmRowRules': rowRules, '../sharedMediaRules': media,
       '../store': { useStore }, '../toast': { toast: noop, toastError: () => assert.fail('поиск не должен падать') },
       './Avatar': { Avatar: nil }, './Icon': { Icon: nil } };
-    const list = whole<typeof import('./DmListSearch')>(chipSource, { ...common, '../feedJump': unused('feedJump'), './ContextMenu': loadMenu() });
-    const kinds = whole<typeof import('./DmSearchKinds')>(kindSource, { ...common, './DmListSearch': list,
-      './SharedMedia': unused('SharedMedia rows'), './Lightbox': unused('Lightbox') });
-    const scopes = whole<typeof import('./DmServerSearch')>(scopeSource, { ...common,
-      '@gusvoice/shared': { SERVER_SEARCH_MIN_CHARS: 2 }, '../feedJump': unused('feedJump'), '../sockets': unused('sockets') });
+    const list = whole<typeof import('./DmListSearch')>(new URL('./DmListSearch.tsx', import.meta.url), chipSource, { ...common, './ContextMenu': loadMenu() });
+    const kinds = whole<typeof import('./DmSearchKinds')>(new URL('./DmSearchKinds.tsx', import.meta.url), kindSource, { ...common, './DmListSearch': list });
+    const scopes = whole<typeof import('./DmServerSearch')>(new URL('./DmServerSearch.tsx', import.meta.url), scopeSource, { ...common,
+      '@gusvoice/shared': { SERVER_SEARCH_MIN_CHARS: 2 } });
     const deps: Record<string, unknown> = { ...common,
       react: { ...React, memo: () => (p: { dm: { id: string } }) => React.createElement('div', { className: 'dm-row', 'data-conversation': p.dm.id }) },
       '../hotkeys': { isMobile: () => phone, isTauri: () => false }, '../phoneLayout': { usePhoneLayout: () => phone },
@@ -85,8 +85,6 @@ async function scene(check: (s: Scene) => Promise<void>, raw = source, phone = t
       './SettingsShell': { SettingsSearch: (p: { inputRef: React.Ref<HTMLInputElement> } & React.InputHTMLAttributes<HTMLInputElement>) => {
         const { inputRef, ...rest } = p; return React.createElement('input', { ...rest, ref: inputRef }); } },
       './GroupDialogs': { GroupDialogHost: nil }, './SharedMedia': { SharedMediaHost: nil }, './SelfVoiceBar': { SelfVoiceBar: nil } };
-    for (const id of ['../useContactSeen', '../dialogChrome', '../channelRules', '../chatKeysRules', '../typing', '../contactRules', '../contacts',
-      './SavedAvatar', '../groupChatRules', '../cornerButtonsRules', '../dragOut', '../filesDrop', './Goose', './StatusDot', './VoicePanel', './BottomSheet']) deps[id] = unused(id);
     const timers = new Map<number, () => void>(); let timerId = 0;
     const set = window.setTimeout, clear = window.clearTimeout;
     const scroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTo');
@@ -95,7 +93,7 @@ async function scene(check: (s: Scene) => Promise<void>, raw = source, phone = t
     window.setTimeout = ((fn: () => void) => { const id = ++timerId; timers.set(id, fn); return id; }) as typeof window.setTimeout;
     window.clearTimeout = ((id: number) => { timers.delete(id); }) as typeof window.clearTimeout;
     try {
-      const sidebar = whole<typeof import('./DmSidebar')>(raw, deps);
+      const sidebar = whole<typeof import('./DmSidebar')>(new URL('./DmSidebar.tsx', import.meta.url), raw, deps);
       const render = async () => React.act(async () => root.render(React.createElement(sidebar.DmSidebar)));
       const input = () => host.querySelector<HTMLInputElement>('.dm-find input')!;
       const click = async (selector: string) => { const button = host.querySelector<HTMLButtonElement>(selector);
@@ -192,5 +190,9 @@ for (const [name, anchor, replacement, check, message] of [
   ['область ПК на телефоне', "scopeView(phone ? 'all' : scope, q, chips, !!srvSearch)", 'scopeView(scope, q, chips, !!srvSearch)', scopeCarry, 'телефон игнорирует прежнюю серверную область ПК'],
 ] as const) it(`R183/185 контрфакт «${name}» обнаруживается реальным Sidebar`, async () => {
   // Оригинал и мутант проходят один сценарий; ошибка загрузки VM не считается убийством мутанта.
-  await check(); const mutant = replace(anchor, replacement); await assert.rejects(check(mutant), targeted(message));
+  await check();
+  await counterfact(async () => {
+    const mutant = replace(anchor, replacement);
+    await assert.rejects(check(mutant), targeted(message));
+  });
 });

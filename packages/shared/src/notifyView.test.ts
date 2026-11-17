@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { maskNotice, normalizeNotifyRepeat, normalizeNotifyView, notifyRepeatAllowed, notifyRepeatInWindow, NOTIFY_REPEAT_GRACE_MS, NOTIFY_REPEAT_MAX, NOTIFY_REPEAT_WINDOW_MIN, notifyRepeatLabel, notifyShowsName, notifyShowsText, notifyViewOf } from './notifyView.js';
@@ -34,10 +35,12 @@ it('окно повторов включает 11 и весь 22-й час, но
     return module.exports.notifyRepeatWaitMs;
   };
   check(load(source));
-  for (const [from, to] of [['hour <= NOTIFY_REPEAT_TO_HOUR', 'hour < NOTIFY_REPEAT_TO_HOUR'], ['hour >= NOTIFY_REPEAT_FROM_HOUR', 'hour >= 10'], ['const now = localHourIn(tz, at)', "const now = localHourIn('UTC', at)"]]) {
-    assert.ok(source.includes(from));
-    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
-  }
+  runCounterfact(() => {
+    for (const [from, to] of [['hour <= NOTIFY_REPEAT_TO_HOUR', 'hour < NOTIFY_REPEAT_TO_HOUR'], ['hour >= NOTIFY_REPEAT_FROM_HOUR', 'hour >= 10'], ['const now = localHourIn(tz, at)', "const now = localHourIn('UTC', at)"]]) {
+      assert.ok(source.includes(from));
+      assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+    }
+  });
 });
 
 it('галочка текста включает имя, но выключенные обе скрывают всё', () => {
@@ -99,10 +102,12 @@ it('повтор ограничен одновременно числом нап
     return module.exports.notifyRepeatAllowed;
   };
   check(load(source));
-  for (const guard of ['n <= NOTIFY_REPEAT_MAX', 'n * minutes <= NOTIFY_REPEAT_WINDOW_MIN']) {
-    assert.ok(source.includes(guard));
-    assert.throws(() => check(load(source.replace(guard, 'true'))), assert.AssertionError);
-  }
+  runCounterfact(() => {
+    for (const guard of ['n <= NOTIFY_REPEAT_MAX', 'n * minutes <= NOTIFY_REPEAT_WINDOW_MIN']) {
+      assert.ok(source.includes(guard));
+      assert.throws(() => check(load(source.replace(guard, 'true'))), assert.AssertionError);
+    }
+  });
 });
 
 it('реальное окно повтора включает сутки и минуту задержки, но не лишнюю миллисекунду', () => {
@@ -129,12 +134,14 @@ it('реальное окно повтора включает сутки и ми
     return module.exports.notifyRepeatInWindow;
   };
   check(load(source));
-  for (const [from, to] of [
-    ['NOTIFY_REPEAT_GRACE_MS = 60_000', 'NOTIFY_REPEAT_GRACE_MS = 0'],
-    ['at - firstAt <=', 'at - firstAt <'],
-    ['at - firstAt <= NOTIFY_REPEAT_WINDOW_MIN * 60_000 + NOTIFY_REPEAT_GRACE_MS', 'true'],
-  ]) {
-    assert.ok(source.includes(from), 'якорь мутанта окна найден');
-    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
-  }
+  runCounterfact(() => {
+    for (const [from, to] of [
+      ['NOTIFY_REPEAT_GRACE_MS = 60_000', 'NOTIFY_REPEAT_GRACE_MS = 0'],
+      ['at - firstAt <=', 'at - firstAt <'],
+      ['at - firstAt <= NOTIFY_REPEAT_WINDOW_MIN * 60_000 + NOTIFY_REPEAT_GRACE_MS', 'true'],
+    ]) {
+      assert.ok(source.includes(from), 'якорь мутанта окна найден');
+      assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+    }
+  });
 });

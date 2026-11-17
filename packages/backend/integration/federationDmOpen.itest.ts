@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { randomUUID } from 'node:crypto';
@@ -257,7 +258,7 @@ async function profileScenario(mutation?: Mutation) {
 test('R189 потеря to обнаруживается при настоящем создании теневого без профиля в кеше', async () => {
   // Класс ошибки совместимости: успешный ответ соседа обязан передать профиль в ensureShadowUser.
   await profileScenario();
-  await assert.rejects(profileScenario(['answer.to ?? null', 'null']), e => e instanceof assert.AssertionError && e.message.includes('профиль to открывает'));
+  await counterfact(() => assert.rejects(profileScenario(['answer.to ?? null', 'null']), e => e instanceof assert.AssertionError && e.message.includes('профиль to открывает')));
 });
 async function lockScenario(mutation?: Mutation) {
   const f = await fixture({ policy: 'anyone', holdRate: true, mutation });
@@ -287,8 +288,8 @@ test('R189 одновременные входящие запросы одной
 test('R189 удаление замка пары запускает второе чтение до завершения первого запроса', async () => {
   // Класс ошибки гонки: мутант исполняется целым модулем и падает адресным AssertionError, не SQL/TypeError.
   await lockScenario();
-  await assert.rejects(lockScenario(['const prev = pairLocks.get(key) ?? Promise.resolve();', 'const prev = Promise.resolve();']),
-    e => e instanceof assert.AssertionError && e.message.includes('замок пары не запускает второе чтение'));
+  await counterfact(() => assert.rejects(lockScenario(['const prev = pairLocks.get(key) ?? Promise.resolve();', 'const prev = Promise.resolve();']),
+    e => e instanceof assert.AssertionError && e.message.includes('замок пары не запускает второе чтение')));
 });
 
 async function acceptRefreshScenario(mutation?: Mutation) {
@@ -318,8 +319,8 @@ test('R197 входящий conv.open без dm1 обновляет визитк
 });
 test('R197 удалённое фоновое обновление conv.open поймано точным счётчиком capabilities', async () => {
   await acceptRefreshScenario();
-  await assert.rejects(acceptRefreshScenario(['void refreshCapabilities(link, Date.now(), { force: true }).catch(() => {});', 'void Promise.resolve();']),
-    e => e instanceof assert.AssertionError && e.message.includes('входящий conv.open обновляет возможности'));
+  await counterfact(() => assert.rejects(acceptRefreshScenario(['void refreshCapabilities(link, Date.now(), { force: true }).catch(() => {});', 'void Promise.resolve();']),
+    e => e instanceof assert.AssertionError && e.message.includes('входящий conv.open обновляет возможности')));
 });
 test('R197 ошибка фонового обновления не превращает корректный conv.open в отказ сервера', async () => {
   for (const fail of ['throw', 'reject'] as const) {
@@ -402,6 +403,6 @@ for (const [label, from, check] of [
   ['восстановление из строки', 'convOpened?.(target.id, peer);', rowHook],
 ] as const) test(`R235 контрфакт convOpened: забыто уведомление в ${label}`, async () => {
   await check();
-  await assert.rejects(() => check([from, '']), e => e instanceof assert.AssertionError && e.message.startsWith('R235-open-hook:')
-    && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  await counterfact(() => assert.rejects(() => check([from, '']), e => e instanceof assert.AssertionError && e.message.startsWith('R235-open-hook:')
+    && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1));
 });

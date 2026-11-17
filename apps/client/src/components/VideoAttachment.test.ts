@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
@@ -96,8 +97,10 @@ for (const [name, anchor, replacement, check, failure] of [
 ] as [string, string, string, Case, string][]) {
   it(`видео: исходниковый мутант «${name}» ловится после зелёного оригинала`, async () => {
     await check(load());
-    await assert.rejects(() => check(load(source => { assert.equal(source.split(anchor).length, 2, 'якорь мутанта уникален'); return source.replace(anchor, replacement); })),
-      (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure));
+    await counterfact(async () => {
+      await assert.rejects(() => check(load(source => { assert.equal(source.split(anchor).length, 2, 'якорь мутанта уникален'); return source.replace(anchor, replacement); })),
+        (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure));
+    });
   });
 }
 
@@ -119,11 +122,13 @@ it('остаток видео округляется вниз в миллисе�
 // Транспилируется весь TSX, зависимости подменены в прежнем whole-module fixture.
 async function withMutant(from: string, to: string, check: (module: Loaded) => Promise<void> | void) {
   await check(load());
-  const mutant = load(source => {
-    assert.equal(source.split(from).length, 2, 'якорь мутанта уникален');
-    return source.replace(from, to);
+  await counterfact(async () => {
+    const mutant = load(source => {
+      assert.equal(source.split(from).length, 2, 'якорь мутанта уникален');
+      return source.replace(from, to);
+    });
+    await assert.rejects(async () => check(mutant), assert.AssertionError);
   });
-  await assert.rejects(async () => check(mutant), assert.AssertionError);
 }
 
 for (const [name, from, to] of [

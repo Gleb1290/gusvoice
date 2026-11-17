@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -66,8 +67,10 @@ describe('R304 боты не участники экономики', () => {
         assert.equal(JSON.stringify(rows.map(c => [c.channelId, c.participants.map(p => p.userId)])),
           JSON.stringify([['bot', ['alice']]]), 'пустой канал исчезает, люди не фильтруются по id канала');
       };
-      check(source); assert.equal(source.split(from).length, 2, 'уникальный якорь');
-      assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.includes('пустой канал исчезает'));
+      check(source); counterfact(() => {
+        assert.equal(source.split(from).length, 2, 'уникальный якорь');
+        assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.includes('пустой канал исчезает'));
+      });
     });
   }
 });

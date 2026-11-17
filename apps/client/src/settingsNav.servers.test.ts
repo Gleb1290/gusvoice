@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -18,8 +19,11 @@ it('R174 приложения телефона обещают Android и обн�
 });
 it('R174 контрфакт телефонной подписи приложений на ПК отвергается', () => {
   // Мутируем настоящий модуль, а не повторяем его условие в тесте.
-  check(); const anchor = "phoneUi && section.key === 'apps'"; assert.equal(source.split(anchor).length - 1, 1);
-  const module = { exports: {} as typeof nav };
-  runInNewContext(ts.transpileModule(source.replace(anchor, "section.key === 'apps'"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
-  assert.throws(() => check(module.exports), e => e instanceof assert.AssertionError && e.message.includes('подпись ПК'));
+  check();
+  counterfact(() => {
+    const anchor = "phoneUi && section.key === 'apps'"; assert.equal(source.split(anchor).length - 1, 1);
+    const module = { exports: {} as typeof nav };
+    runInNewContext(ts.transpileModule(source.replace(anchor, "section.key === 'apps'"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
+    assert.throws(() => check(module.exports), e => e instanceof assert.AssertionError && e.message.includes('подпись ПК'));
+  });
 });

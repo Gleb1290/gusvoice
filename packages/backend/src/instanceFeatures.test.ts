@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -10,6 +11,32 @@ import * as threats from './linkThreatsRules.js';
 type FeatureApi = Pick<typeof features, 'INSTANCE_FEATURES' | 'FED_DM_FEATURES' | 'instanceFeatures'>;
 const source = readFileSync(new URL('./instanceFeatures.ts', import.meta.url), 'utf8');
 const fedNames = ['fedm1', 'fedm2', 'fedm3', 'fedm4', 'fedm5', 'fedcall1', 'fedm6'];
+
+it('R333 игры с выбором объявляют duel2 ровно раз независимо от включения ЛС между серверами', () => {
+  // Маршрут уже принимает КНБ/гуся, но без признака клиент никогда не покажет эти игры.
+  const check = (api: FeatureApi) => {
+    assert.equal(shared.FEATURE_DUEL2, 'duel2', 'R333 duel2: точное wire-имя возможности не переименовано');
+    for (const enabled of [false, true]) {
+      assert.equal(Array.from(api.instanceFeatures(enabled)).filter(name => name === 'duel2').length,
+        1, 'R333 duel2: работающие игры с выбором объявлены ровно раз');
+    }
+    assert.equal(Array.from(api.FED_DM_FEATURES).includes('duel2'), false,
+      'R333 duel2: локальные игры не зависят от федерации');
+  };
+  check(load());
+gatedCounterfact(() => {
+  const tree = ts.createSourceFile('instanceFeatures.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = tree.statements.filter(ts.isVariableStatement).flatMap(statement => [...statement.declarationList.declarations])
+    .find(node => ts.isIdentifier(node.name) && node.name.text === 'INSTANCE_FEATURES');
+  assert.ok(declaration?.initializer && ts.isArrayLiteralExpression(declaration.initializer), 'R333 setup: реальный список признаков');
+  const entries = declaration.initializer.elements.filter(node => ts.isIdentifier(node) && node.text === 'FEATURE_DUEL2');
+  assert.equal(entries.length, 1, 'R333 setup: один адресный элемент duel2');
+  const element = entries[0];
+  const mutant = source.slice(0, element.getStart(tree)) + '...[]' + source.slice(element.end);
+  assert.throws(() => check(load(mutant)), error => error instanceof assert.AssertionError && error.message.startsWith('R333 duel2:'));
+});
+  check(load());
+});
 
 function load(raw = source, env: Record<string, string> = {}): FeatureApi {
   const module = { exports: {} as FeatureApi };
@@ -74,6 +101,7 @@ it('R290 runtime-флаг работает при пустом и противо
 it('R290 контрфакт переноса признаков ЛС в постоянный список обнаруживает ложное объявление при выключении', () => {
   const original = load();
   checkDisabled(original); checkEnabled(original);
+gatedCounterfact(() => {
   const tree = ts.createSourceFile('instanceFeatures.ts', source, ts.ScriptTarget.Latest, true);
   const array = (name: string) => {
     const declarations = tree.statements.filter(ts.isVariableStatement).flatMap(statement => statement.declarationList.declarations)
@@ -91,14 +119,17 @@ it('R290 контрфакт переноса признаков ЛС в пост
   assert.throws(() => checkDisabled(load(mutant)), error => error instanceof assert.AssertionError
     && error.operator === 'deepStrictEqual' && error.message.startsWith('R290-static-dm:'));
 });
+});
 
 it('R290 контрфакт всегда постоянного списка ловится именно при включении ЛС', () => {
   const original = load();
   checkDisabled(original); checkEnabled(original);
+gatedCounterfact(() => {
   const from = 'return fedDmEnabled ? [...INSTANCE_FEATURES, ...FED_DM_FEATURES] : [...INSTANCE_FEATURES];';
   assert.equal(source.split(from).length - 1, 1, 'контрфакт адресует действующий возврат функции');
   const mutant = load(source.replace(from, 'return [...INSTANCE_FEATURES];'));
   checkDisabled(mutant);
   assert.throws(() => checkEnabled(mutant), error => error instanceof assert.AssertionError
     && error.operator === 'deepStrictEqual' && error.message.startsWith('R290-dm-enabled:'));
+});
 });

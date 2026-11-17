@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { React, load, sourceOf, icon, environment, click, mutate } from './R171.phoneHarness';
@@ -10,8 +11,8 @@ const backSource = readFileSync(new URL('../androidBack.ts', import.meta.url), '
 async function keyboard(back: boolean, system: boolean, raw = source) {
   await environment(async (_host, render) => {
     let backs = 0, closes = 0;
-    const { BottomSheet } = load<typeof Sheet>(raw, { './Icon': { Icon: icon } });
-    const { stepBack } = load<typeof Back>(backSource, {
+    const { BottomSheet } = load<typeof Sheet>(new URL('./BottomSheet.tsx', import.meta.url), raw, { './Icon': { Icon: icon } });
+    const { stepBack } = load<typeof Back>(new URL('../androidBack.ts', import.meta.url), backSource, {
       './hotkeys': { isAndroid: () => true }, './store': { useStore: { getState: () => ({}) } },
     }, { KeyboardEvent: window.KeyboardEvent });
     await render(React.createElement(BottomSheet, { title: 'Лист', children: 'Тело',
@@ -31,7 +32,7 @@ async function keyboard(back: boolean, system: boolean, raw = source) {
 async function check(back: boolean, raw = source) {
   await environment(async (_host, render) => {
     let backs = 0, closes = 0;
-    const { BottomSheet } = load<typeof Sheet>(raw, { './Icon': { Icon: icon } });
+    const { BottomSheet } = load<typeof Sheet>(new URL('./BottomSheet.tsx', import.meta.url), raw, { './Icon': { Icon: icon } });
     await render(React.createElement(BottomSheet, { title: 'Новая группа', onClose: () => closes++,
       onBack: back ? () => backs++ : undefined, children: 'Тело' }));
     assert.equal(!!document.querySelector('.sheet-back-dock'), back);
@@ -58,12 +59,16 @@ it('R171 лист без onBack не рисует стрелку, с onBack до
 it('R171 безусловная стрелка обнаруживается листом без обработчика возврата', async () => {
   // Парный случай защищает все одношаговые листы от мёртвой кнопки.
   await check(false);
-  await assert.rejects(() => check(false, mutate(source, '{onBack && (', '{true && (')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => check(false, mutate(source, '{onBack && (', '{true && (')), assert.AssertionError);
+  });
 });
 it('R171 потеря вызова onBack обнаруживается нажатием настоящей стрелки', async () => {
   // Наличие значка само по себе не доказывает рабочий возврат.
   await check(true);
-  await assert.rejects(() => check(true, mutate(source, 'onClick={onBack}', 'onClick={() => {}}')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => check(true, mutate(source, 'onClick={onBack}', 'onClick={() => {}}')), assert.AssertionError);
+  });
 });
 for (const system of [false, true]) it(`R179 ${system ? 'системная Назад' : 'Esc'} возвращает уровень, а без onBack закрывает лист`, async () => {
   // Ошибка приоритета закрыла бы весь мастер; отсутствие fallback заперло бы одношаговый лист.
@@ -72,10 +77,14 @@ for (const system of [false, true]) it(`R179 ${system ? 'системная На
 it('R179 безусловное закрытие листа вместо возврата обнаруживается Esc', async () => {
   // Обязательный контрфакт: видимая стрелка не гарантирует правильную клавиатурную проводку.
   await keyboard(true, false);
-  await assert.rejects(() => keyboard(true, false, mutate(source, '(onBack ?? onClose)();', 'onClose();')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => keyboard(true, false, mutate(source, '(onBack ?? onClose)();', 'onClose();')), assert.AssertionError);
+  });
 });
 it('R179 потеря запасного закрытия обнаруживается системной Назад одношагового листа', async () => {
   // Без onBack optional-call должен дать именно ошибку поведения, не TypeError.
   await keyboard(false, true);
-  await assert.rejects(() => keyboard(false, true, mutate(source, '(onBack ?? onClose)();', 'onBack?.();')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => keyboard(false, true, mutate(source, '(onBack ?? onClose)();', 'onBack?.();')), assert.AssertionError);
+  });
 });

@@ -33,6 +33,14 @@ export interface EconomySettings {
   companyPercent: number;
   /** Максимум монет за сутки. 0 — без потолка. */
   dailyCap: number;
+  /**
+   * Максимум монет за сутки за время, когда человек в канале ОДИН. 0 — без порога (как у `dailyCap`).
+   *
+   * 🔴 Появился вместе с правилом «одному затухание не бьёт» (28.10). Затухание больше не считает
+   * время в одиночку, и без отдельного порога одиночный фарм шёл бы весь день по полной «одиночной»
+   * ставке. Порог держит его ниже прежнего (умолчание 90 против ~146 монет в сутки по боевым данным).
+   */
+  aloneCap: number;
   /** После скольких минут в голосе за сутки ставка начинает резаться. 0 — не резать. */
   decayAfterMinutes: number;
   /** Во сколько процентов превращается ставка на каждом следующем таком отрезке. */
@@ -93,10 +101,25 @@ export interface AccrualState {
   deltaPresenceMilli: number;
   deltaCompanyMilli: number;
   deltaDecayMilli: number;
-  /** Сколько секунд в голосе уже засчитано за эти сутки (для затухания). */
+  /**
+   * Секунды для ЗАТУХАНИЯ за эти сутки — только время в КОМПАНИИ (`peers >= 1`).
+   *
+   * 🔴 С 28.10 это не «всё время в голосе». Раньше сюда шло и ожидание одному, и тот, кто днём часами
+   * ждал компанию, к вечеру был уже подбит: в компании он получал ~40 % от пришедших сразу. Время
+   * одному теперь сдерживает свой порог `aloneCap`, а не затухание. Имя поля (и колонка
+   * `seconds_today`) оставлены прежними ради совместимости строк кошелька.
+   */
   secondsToday: number;
   /** Сколько монет уже начислено за эти сутки (для потолка). */
   earnedToday: number;
+  /**
+   * Ценность, набранная за сутки в одиночку, в тысячных монеты (для порога `aloneCap`).
+   *
+   * ⚠️ Копится ЦЕННОСТЬ срезов до выплаты, а не выплаченные монеты: выплата смешивает срезы одному и
+   * в компании, и по ней уже не понять, сколько пришлось на ожидание. Сбрасывается в полночь вместе
+   * с остальными суточными счётчиками (`rollPeriods`).
+   */
+  aloneEarnedMilli: number;
 }
 
 /**
@@ -235,6 +258,15 @@ export function payoutPeriodS(s: EconomySettings): number {
 }
 
 /**
+ * Каким правилом считать срез. `v2` — действующее с 28.10 (один в канале затухание не тратит).
+ * 🔴 `legacy` — правило ДО 28.10 (затухание и для одного, без особого случая «один + не слышу», без
+ * `aloneCap`). Нужно ТОЛЬКО разовому перерасчёту сезона (`aloneRecount.ts`): разница «по новому минус
+ * по старому» на одних и тех же срезах — доплата тем, кого старое правило урезало. Живое начисление,
+ * панель и ретро его не используют.
+ */
+export type AccrualRule = 'v2' | 'legacy';
+
+/**
  * Посчитать начисление за один срез.
  *
  * Срез снимается раз в минуту, а ВЫПЛАТА происходит раз в `payoutMinutes` присутствия. Между
@@ -249,11 +281,26 @@ export function payoutPeriodS(s: EconomySettings): number {
  * конце — суточный потолок. Потолок последний намеренно: он предохранитель, а не участник формулы.
  *
  * ⚠️ `secondsToday` растёт ДАЖЕ когда монет не начислили (мьют, потолок, ноль по компании). Это не
- * оплошность: затухание меряет, сколько человек провёл в канале, а не сколько заработал. Иначе
+ * оплошность: затухание меряет, сколько человек провёл в КОМПАНИИ, а не сколько заработал. Иначе
  * посидевший три часа в мьюте возвращался бы к полной ставке, будто только зашёл.
+ *
+ * 🔴 **Один в канале — затухание не бьёт (решение 28.10).** Изъян прежнего правила: затухание
+ * считало всё время в голосе, и кто днём ждал компанию один, к вечеру в компании получал ~40 % от
+ * пришедших сразу. Теперь срез одному (`peers <= 0`):
+ *  - идёт без затухания и НЕ двигает `secondsToday`;
+ *  - с «не слышу» (в т.ч. вместе с «отошёл») не стоит ничего — сидеть одному, заткнув уши, значит
+ *    просто держать процесс запущенным;
+ *  - ограничен своим суточным порогом `aloneCap`: когда он выбран, срез одному даёт ноль и тоже не
+ *    двигает затухание. Порог проверяется ДО среза — перебор меньше одного среза допустим и проще,
+ *    чем резать срез и объяснять, в какую дельту ушёл обрезок.
+ * Компания считается ровно как раньше; суточный потолок `dailyCap` — по-прежнему последним.
  */
-export function accrue(sample: AccrualSample, state: AccrualState, s: EconomySettings): AccrualResult {
+export function accrue(sample: AccrualSample, state: AccrualState, s: EconomySettings, rule: AccrualRule = 'v2'): AccrualResult {
   const seconds = Math.max(0, Math.floor(sample.seconds));
+  // По прежнему правилу (`legacy`) особого случая «один» нет вовсе: время одному тратит затухание,
+  // «не слышу» одному не обнуляет, порога `aloneCap` нет. Множитель компании (`alonePercent`) —
+  // общий для обоих правил, он считается из `peers` ниже.
+  const alone = rule === 'v2' && sample.peers <= 0;
   const next: AccrualState = {
     pendingMilli: state.pendingMilli,
     pendingSeconds: state.pendingSeconds,
@@ -261,8 +308,10 @@ export function accrue(sample: AccrualSample, state: AccrualState, s: EconomySet
     deltaPresenceMilli: state.deltaPresenceMilli,
     deltaCompanyMilli: state.deltaCompanyMilli,
     deltaDecayMilli: state.deltaDecayMilli,
-    secondsToday: state.secondsToday + seconds,
+    // Время одному в счётчик затухания не идёт (28.10, см. выше).
+    secondsToday: state.secondsToday + (alone ? 0 : seconds),
     earnedToday: state.earnedToday,
+    aloneEarnedMilli: state.aloneEarnedMilli,
   };
   if (seconds === 0) return { coins: 0, next };
 
@@ -270,10 +319,18 @@ export function accrue(sample: AccrualSample, state: AccrualState, s: EconomySet
   // вывалилось бы одной кучей ровно в полночь, когда потолок сбросится.
   if (s.dailyCap > 0 && state.earnedToday >= s.dailyCap) return { coins: 0, next };
 
+  // Один и «не слышу» — ноль, и в выплату это время не копится: объяснять в журнале нечего.
+  if (alone && sample.deafened) return { coins: 0, next };
+  // Порог одному выбран — дальше ожидание не оплачивается до полуночи (по той же логике, что и потолок
+  // суток: не копим впрок). Затухание при этом тоже не двигается — `secondsToday` выше уже без него.
+  if (alone && s.aloneCap > 0 && state.aloneEarnedMilli >= s.aloneCap * MILLI) return { coins: 0, next };
+
   const rateMilli = Math.round((seconds * s.ratePer5min * MILLI) / RATE_PERIOD_S);
   const withPresence = Math.floor((rateMilli * presencePercent(sample, s)) / 100);
   const withCompany = Math.floor((withPresence * companyPercent(sample.peers, s)) / 100);
-  const withDecay = Math.floor((withCompany * decayPercent(state.secondsToday, s)) / 100);
+  // Одному — без затухания: дельта затухания у такого среза честно нулевая.
+  const withDecay = alone ? withCompany : Math.floor((withCompany * decayPercent(state.secondsToday, s)) / 100);
+  if (alone) next.aloneEarnedMilli = state.aloneEarnedMilli + withCompany;
 
   next.pendingMilli = state.pendingMilli + withDecay;
   next.pendingSeconds = state.pendingSeconds + seconds;
@@ -563,7 +620,9 @@ export function shouldSpendToggle(compensated: number): boolean {
   return compensated > 0;
 }
 
-export const EARNED_REASONS = ['voice', 'retro', 'goose', 'streak'] as const;
+// `recount` — разовый перерасчёт сезона по правилу «один — затухание не бьёт» (28.10, `aloneRecount.ts`):
+// это доплата за уже отсиженное время, то есть заработок — в сезон и в звания, как ретро.
+export const EARNED_REASONS = ['voice', 'retro', 'goose', 'streak', 'recount'] as const;
 
 export const SEASON_LABEL: Record<string, string> = {
   winter: 'Зима',
@@ -602,7 +661,9 @@ export function seasonName(id: string): string {
  * собственным тиком и до тех пор висел бы весной в топе. Запрос топа обязан фильтровать по текущему
  * `season_id` (поймал Codex).
  */
-export function rollPeriods<T extends { day: string; seasonId: string; secondsToday: number; earnedToday: number; seasonEarned: number }>(
+export function rollPeriods<
+  T extends { day: string; seasonId: string; secondsToday: number; earnedToday: number; aloneEarnedMilli: number; seasonEarned: number },
+>(
   state: T,
   now: Date,
   length: SeasonLength = 'quarter',
@@ -614,6 +675,8 @@ export function rollPeriods<T extends { day: string; seasonId: string; secondsTo
     next.day = day;
     next.secondsToday = 0;
     next.earnedToday = 0;
+    // Порог ожидания одному — суточный, как потолок и затухание (28.10).
+    next.aloneEarnedMilli = 0;
     // 🔴 `pendingMilli` и `pendingSeconds` полночь НЕ трогает. Раньше здесь обнулялись дроби — они
     // стоили меньше монеты. Теперь это накопленная ценность недосиженного отрезка, и обнулить её
     // значит отнять у человека до десяти минут заработанного за то, что он сидел на границе суток.
@@ -711,6 +774,8 @@ export interface EconomyTotals {
   retro: number;
   rescale: number;
   granted: number;
+  /** Разовый перерасчёт сезона по новому правилу затухания (28.10, `aloneRecount.ts`). */
+  recount: number;
   /** Чистая эмиссия за период: сколько монет в мире стало больше. */
   minted: number;
 }
@@ -743,6 +808,7 @@ export function economyTotals(rows: ReasonTotal[]): EconomyTotals {
     retro: by('retro')?.total ?? 0,
     rescale: by('rescale')?.total ?? 0,
     granted: by('grant')?.total ?? 0,
+    recount: by('recount')?.total ?? 0,
     minted: rows.reduce((sum, r) => sum + r.total, 0),
   };
 }
@@ -789,7 +855,7 @@ export interface ReplayTotal {
  * перемешанный ввод посчитает и потолок, и затухание неправильно. Сортирует вызывающая сторона —
  * это её запрос к базе, и лишняя сортировка здесь стоила бы на ровном месте.
  */
-export function replay(samples: ReplaySample[], s: EconomySettings): ReplayTotal[] {
+export function replay(samples: ReplaySample[], s: EconomySettings, rule: AccrualRule = 'v2'): ReplayTotal[] {
   interface Acc extends AccrualState {
     day: string;
     coins: number;
@@ -801,7 +867,7 @@ export function replay(samples: ReplaySample[], s: EconomySettings): ReplayTotal
     const day = dayKey(sample.at);
     let acc = byUser.get(sample.userId);
     if (!acc) {
-      acc = { pendingMilli: 0, pendingSeconds: 0, baseMilli: 0, deltaPresenceMilli: 0, deltaCompanyMilli: 0, deltaDecayMilli: 0, secondsToday: 0, earnedToday: 0, day, coins: 0, seconds: 0 };
+      acc = { pendingMilli: 0, pendingSeconds: 0, baseMilli: 0, deltaPresenceMilli: 0, deltaCompanyMilli: 0, deltaDecayMilli: 0, secondsToday: 0, earnedToday: 0, aloneEarnedMilli: 0, day, coins: 0, seconds: 0 };
       byUser.set(sample.userId, acc);
     }
     if (acc.day !== day) {
@@ -811,8 +877,9 @@ export function replay(samples: ReplaySample[], s: EconomySettings): ReplayTotal
       acc.day = day;
       acc.secondsToday = 0;
       acc.earnedToday = 0;
+      acc.aloneEarnedMilli = 0;
     }
-    const { coins, next } = accrue(sample, acc, s);
+    const { coins, next } = accrue(sample, acc, s, rule);
     acc.pendingMilli = next.pendingMilli;
     acc.pendingSeconds = next.pendingSeconds;
     acc.baseMilli = next.baseMilli;
@@ -821,6 +888,7 @@ export function replay(samples: ReplaySample[], s: EconomySettings): ReplayTotal
     acc.deltaDecayMilli = next.deltaDecayMilli;
     acc.secondsToday = next.secondsToday;
     acc.earnedToday = next.earnedToday;
+    acc.aloneEarnedMilli = next.aloneEarnedMilli;
     acc.coins += coins;
     acc.seconds += Math.max(0, Math.floor(sample.seconds));
   }

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -38,11 +39,13 @@ function loadQualityModule(raw: string): QualityRules {
 function rejectMenuMutation(from: string, to: string, verify: (api: QualityRules) => void, message: string): void {
   const source = readFileSync(new URL('./streamQuality.ts', import.meta.url), 'utf8');
   verify(loadQualityModule(source));
+  counterfact(() => {
   assert.equal(source.split(from).length - 1, 1, 'точка мутации меню единственная');
   const mutant = loadQualityModule(source.replace(from, to));
   // Загрузка мутанта вне assert.throws: синтаксическая ошибка не доказывает защиту поведения.
   assert.throws(() => verify(mutant),
     (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
+  });
 }
 
 describe('R278 повтор слоя после новой подписки', () => {
@@ -265,11 +268,13 @@ describe('выбор слоя чужого показа', () => {
       assert.equal(api.wantedLayer('auto', { windowHidden: true, watched: true, inPip: false }), 'low');
     };
     verify(load(source));
+    counterfact(() => {
     const from = 'if (!ctx.inPip && (ctx.windowHidden || !ctx.watched))';
     assert.equal(source.split(from).length - 1, 1, 'точка мутации единственная');
     const mutant = load(source.replace(from, 'if (ctx.windowHidden || !ctx.watched)'));
     assert.throws(() => verify(mutant),
       (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
+    });
   });
 
   it('слои распознаются и по simulcast, и по нескольким слоям SVC', () => {

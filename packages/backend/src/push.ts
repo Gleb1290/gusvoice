@@ -3,11 +3,7 @@ import {
   canMentionRole,
   mentionedHandles,
   mentionedRoleIds,
-  normalizeNotifyRepeat,
   normalizeNotifyView,
-  notifyRepeatAllowed,
-  notifyRepeatInWindow,
-  notifyRepeatWaitMs,
   validTimeZone,
   type NotifyView,
 } from '@gusvoice/shared';
@@ -18,8 +14,17 @@ import { db } from './db/index.js';
 import { memberRoles, pushAlways, pushDevices, pushMutes, roles, serverMembers, users } from './db/schema.js';
 import { env } from './env.js';
 import { encryptWebPush, type WebPushKeys } from './pushCrypto.js';
-import { deferPush, postponeRepeatPush, recipientActive, scheduleRepeatPush } from './pushDefer.js';
-import { endpointAllowed, maskPushPayload, redactPushPayload, shouldDeferPush } from './pushRules.js';
+import { deferPush, recipientActive } from './pushDefer.js';
+import {
+  endpointAllowed,
+  FCM_RELAY_BODY_MAX,
+  fcmRelayEndpointAllowed,
+  fitPushPayload,
+  maskPushPayload,
+  redactPushPayload,
+  shouldDeferPush,
+  WEB_PUSH_OVERHEAD,
+} from './pushRules.js';
 import { id } from './util.js';
 
 // Чистые правила — в `pushRules.ts`. Реэкспорт, чтобы роуты продолжали брать `contentPreview`
@@ -78,10 +83,7 @@ export interface PushPayload {
   callId?: string;
   video?: true;
   /**
-   * Номер повтора «Повторять уведомления» (D10, 08.10; G38, `push3`): есть только у пуша из очереди повторов
-   * (`sendPushToUsers` `opts.repeat`). Повтор несёт то же сообщение (`mid`), и приложение считало его повторной доставкой и
-   * молча отбрасывало (`ConversationNotifier.onMessage`); с этим полем оно снимает уведомление беседы и показывает его снова
-   * со звуком, как Telegram (`NotificationsController.repeatNotificationMaybe`). Только добавление: старое приложение поле не знает.
+   * @deprecated Retained only to recognize and discard legacy reminder payloads.
    */
   repeat?: number;
 }
@@ -119,10 +121,43 @@ const REDACT_KEYLESS = true;
 
 const NTFY_BASE = env.ntfy.baseUrl; // e.g. https://ntfy.example.com
 const NTFY_TOKEN = env.ntfy.token;
+/** Шлюз FCM (#247, `PUSH_FCM_RELAY`): его эндпоинты `<база>/api/push/fcm/<токен>` разрешены наравне с ntfy. */
+// `?.` — обвязки тестов подставляют свой env без `fcm`; там шлюза нет.
+const FCM_RELAY_BASE = env.fcm?.relayBase ?? '';
+/** Есть куда слать пуши своим: наш ntfy с токеном или шлюз FCM (Play-сборка без ntfy). */
+const PUSH_ON = (!!NTFY_BASE && !!NTFY_TOKEN) || !!FCM_RELAY_BASE;
 
-/** `endpointAllowed` с нашей базой ntfy — единственный заслон от SSRF (endpoint приходит с устройства). */
+/**
+ * Единственный заслон от SSRF (endpoint приходит с устройства): наш ntfy (`endpointAllowed`) или шлюз FCM
+ * (`fcmRelayEndpointAllowed`: тот же origin, https, путь строго `/api/push/fcm/<токен>`).
+ */
 export function pushEndpointAllowed(endpoint: string): boolean {
-  return endpointAllowed(endpoint, NTFY_BASE);
+  return endpointAllowed(endpoint, NTFY_BASE) || (!!FCM_RELAY_BASE && fcmRelayEndpointAllowed(endpoint, FCM_RELAY_BASE));
+}
+
+/** Эндпоинт — шлюз FCM (а не наш ntfy): у него предел тела `FCM_RELAY_BODY_MAX`, а 413 от него устройство не снимает. */
+function isFcmRelayEndpoint(endpoint: string): boolean {
+  return !!FCM_RELAY_BASE && fcmRelayEndpointAllowed(endpoint, FCM_RELAY_BASE);
+}
+
+/**
+ * Снять ли регистрацию по ответу эндпоинта: 3xx (подозрительно), 404/410 (тема/токен мёртв, RFC 8030), 413 — только от
+ * ntfy. 🔴 413 от шлюза FCM — это длинный пуш, а не мёртвое устройство (нагрузка подгоняется заранее, `fitPushPayload`).
+ */
+function dropDevice(res: { type: string; status: number }, endpoint: string): boolean {
+  const redirected = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
+  return redirected || res.status === 404 || res.status === 410 || (res.status === 413 && !isFcmRelayEndpoint(endpoint));
+}
+
+/**
+ * Заголовок входа к эндпоинту: токен публикации ntfy — ТОЛЬКО нашему ntfy. 🔴 Шлюз FCM может быть чужим инстансом
+ * (`PUSH_FCM_RELAY`), и токен ntfy утёк бы ему; шлюзу вход не нужен (он открыт, как ntfy на чтение). Сверка по origin
+ * мало: ntfy и шлюз могут жить на одном хосте (R330) — поэтому путь шлюза исключается явно.
+ */
+function endpointAuth(endpoint: string): Record<string, string> {
+  return NTFY_TOKEN && endpointAllowed(endpoint, NTFY_BASE) && !isFcmRelayEndpoint(endpoint)
+    ? { Authorization: `Bearer ${NTFY_TOKEN}` }
+    : {};
 }
 
 /**
@@ -177,22 +212,16 @@ export async function sendPushToUsers(
   source?: PushSource,
   /**
    * `noDefer` — пуш из очереди отложенных (`pushDefer.ts`): второй раз не откладывать. `private` (G38, `push3`) — пуш
-   * личной беседы 1:1: чтит «Личные сообщения» получателя и ставит повтор («Повторять уведомления»); `repeat` — сколько раз
-   * этот пуш уже повторён (из очереди повторов); `firstAt` — когда ушёл первый пуш этой цепочки повторов (мс; у записи
-   * очереди без него — от текущего такта). `burst` (решение владельца 39) — тихая досылка пачки (`authGuard.pushBurst`): тело
+   * личной беседы 1:1: чтит «Личные сообщения» получателя. `repeat`/`firstAt` оставлены для старых записей очереди:
+   * повторные уведомления отключены, такие отправки отбрасываются. `burst` — тихая досылка пачки (`authGuard.pushBurst`): тело
    * уже с `silent: true`; гостю через дом не уходит (дом будит телефон своим пушем без текста — досылка там лишний звонок).
    */
   opts: { noDefer?: boolean; private?: boolean; repeat?: number; firstAt?: number; burst?: boolean } = {},
 ): Promise<void> {
+  // Retired reminder jobs must never alert again, even with a saved nonzero preference or legacy caller.
+  if ((opts.repeat ?? 0) > 0 || (payload.repeat ?? 0) > 0) return;
   let ids = [...new Set(recipientIds)];
   if (ids.length === 0) return;
-  /**
-   * Окно повторов «сутки от первого пуша» (`notifyRepeatInWindow`) — по настоящему времени, до отправки и до переноса за ПК:
-   * перенос номер не растит, и без этой проверки повтор, просроченный на 48 ч, всё равно уходил (ревью Codex 08.10).
-   */
-  const now = Date.now();
-  const firstAt = opts.repeat && typeof opts.firstAt === 'number' ? opts.firstAt : now;
-  if (opts.repeat && !notifyRepeatInWindow(firstAt, now)) return;
   /** «Выключить звук» (07.10, `conv13`): им пуш уходит, но с `silent` — уведомление без звука и вибрации. */
   const quiet = new Set<string>();
   if (source) {
@@ -230,13 +259,10 @@ export async function sendPushToUsers(
       homeUserId: users.homeUserId,
       notifyView: users.notifyView,
       notifyDm: users.notifyDm,
-      notifyRepeat: users.notifyRepeat,
     })
     .from(users)
     .where(inArray(users.id, ids));
   // «Личные сообщения» выключены (G38, `push3`): пуш личной беседы 1:1 такому получателю не уходит (группы — `notifyGroups`).
-  // Повтор из очереди (`opts.repeat`), а человек уже выключил «Повторять уведомления» — не шлём (ревью 08.10: стоявший в
-  // очереди повтор уходил после выключения).
   // Исключение «Уведомления включены» (решение владельца 38, `push4`, `push_always`): эта беседа уведомляет и при выключенных
   // «Личных» — как Telegram `notify2_<did>` = 0 поверх выключенных «Личные чаты». Запрос — только если кто-то выключил «Личные».
   const always =
@@ -246,10 +272,7 @@ export async function sendPushToUsers(
           source.targetId,
         )
       : new Set<string>();
-  const rows = allRows.filter(
-    (r) =>
-      (!opts.private || r.notifyDm !== false || always.has(r.id)) && (!opts.repeat || normalizeNotifyRepeat(r.notifyRepeat) > 0),
-  );
+  const rows = allRows.filter((r) => !opts.private || r.notifyDm !== false || always.has(r.id));
   if (rows.length < allRows.length) {
     const keep = new Set(rows.map((r) => r.id));
     ids = ids.filter((uid) => keep.has(uid));
@@ -280,7 +303,7 @@ export async function sendPushToUsers(
 
   // Своим — как раньше, напрямую через наш ntfy. ⚠️ Проверка настройки стоит ЗДЕСЬ, а не в начале:
   // инстанс без своих пушей всё равно обязан разбудить гостя через его дом.
-  if (!NTFY_BASE || !NTFY_TOKEN) return;
+  if (!PUSH_ON) return;
   /**
    * Отложенный пуш (G38, `push2`, `pushDefer.ts`): получатель сейчас за другим устройством (кадр шлюза `active`) — пуш
    * ЛС ждёт 30 с и уходит, только если сообщение не прочитали. Redis не ответил — шлём сразу, как раньше.
@@ -301,87 +324,21 @@ export async function sendPushToUsers(
       if (ids.length === 0) return;
     }
   }
-  /**
-   * Повтор «Повторять уведомления» не уходит, пока человек за ПК (решение владельца 08.10, вопрос 14): телефон не звенит
-   * повтором, когда беседа открыта на соседнем экране. Повтор ждёт, как первый пуш при живом ПК (`PUSH_DEFER_MS`), и
-   * проверяется снова; номер повтора при этом не растёт. Redis не ответил — повтор уходит как раньше.
-   */
-  if (opts.repeat) {
-    const atPc = ids.filter((uid) => recipientActive(uid));
-    if (atPc.length > 0) {
-      const held = new Set<string>();
-      await Promise.all(
-        atPc.map((uid) =>
-          postponeRepeatPush({ uid, payload, ...(source ? { source } : {}), private: true, repeat: opts.repeat, firstAt }).then(
-            () => void held.add(uid),
-            () => {},
-          ),
-        ),
-      );
-      ids = ids.filter((uid) => !held.has(uid));
-      if (ids.length === 0) return;
-    }
-  }
-  let all = await db.select().from(pushDevices).where(inArray(pushDevices.userId, ids));
-  /**
-   * Повтор — только днём (09.10, сверка с Telegram: `repeatNotificationMaybe`, часы 11..22 по местному времени). Получателю,
-   * у которого сейчас ночь по поясу его устройства (`push_devices.tz`), повтор не уходит: встаёт в очередь на начало окна (тот
-   * же ключ, не перезаписывая более свежий; номер повтора и `firstAt` прежние — сутки от первого пуша не продлеваются).
-   * Пояса нет (старое приложение) — окна нет, как раньше.
-   */
-  if (opts.repeat && all.length > 0) {
-    const night = new Set<string>();
-    for (const uid of new Set(all.map((d) => d.userId))) {
-      const mine = all.filter((d) => d.userId === uid && d.tz);
-      const tz = mine.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]?.tz;
-      const wait = notifyRepeatWaitMs(tz, now);
-      if (wait <= 0) continue;
-      night.add(uid);
-      if (notifyRepeatInWindow(firstAt, now + wait)) {
-        void postponeRepeatPush(
-          { uid, payload, ...(source ? { source } : {}), private: true, repeat: opts.repeat, firstAt },
-          now,
-          wait,
-        ).catch(() => {});
-      }
-    }
-    if (night.size > 0) {
-      all = all.filter((d) => !night.has(d.userId));
-      if (all.length === 0) return;
-    }
-  }
   /*
    * Входящий звонок (`calls3`) — только приложениям, которые умеют его снять (`read1`, тот же признак, что у
    * `sendReadSyncPush`; снятие шлёт `calls.unringPush`). Ревью 08.10: приложение без `read1` (все выпущенные APK по v0.8.21)
    * строило из него обычное уведомление «Входящий звонок», и после ответа на ПК или отклонения оно оставалось висеть —
    * снятия ему не приходит. Пропущенный звонок такое приложение по-прежнему узнаёт обычным пушем ЛС.
    */
+  const all = await db.select().from(pushDevices).where(inArray(pushDevices.userId, ids));
   const devices = payload.type === 'call' ? all.filter((d) => (d.caps ?? '').includes('read1')) : all;
   if (devices.length === 0) return;
-  /**
-   * «Повторять уведомления» (G38, `push3`): пуш личной беседы с ключом сообщения уходит — если человек выбрал интервал,
-   * повтор встаёт в очередь (`pushDefer.scheduleRepeatPush`) и уйдёт, пока беседа не прочитана (как Telegram), в пределах
-   * защитного потолка `notifyRepeatAllowed` (24 раза и сутки от первого пуша по плану) и окна `notifyRepeatInWindow` (те же
-   * сутки по настоящему времени: срок следующего повтора за окном — не ставим). Беззвучный пуш («без звука» отправителя, «Выключить звук» беседы) не повторяется.
-   */
-  if (opts.private && payload.type === 'dm' && payload.dmId && typeof payload.key === 'number' && !payload.silent) {
-    const n = (opts.repeat ?? 0) + 1;
-    const minutesOf = new Map(rows.map((r) => [r.id, normalizeNotifyRepeat(r.notifyRepeat)]));
-    for (const uid of new Set(devices.map((d) => d.userId))) {
-      const min = minutesOf.get(uid) ?? 0;
-      if (notifyRepeatAllowed(n, min) && notifyRepeatInWindow(firstAt, now + min * 60_000) && !quiet.has(uid)) {
-        void scheduleRepeatPush({ uid, payload, ...(source ? { source } : {}), private: true, repeat: n, firstAt }, min);
-      }
-    }
-  }
   /**
    * Входящий звонок (`calls3`) — высокий приоритет: `Urgency: high` (RFC 8030, Web Push) и `Priority: 5` (ntfy, «срочно»),
    * чтобы телефон в доze получил его сразу, как `phoneCallRequested` у Telegram через FCM. Остальным пушам — как было.
    */
   const urgent: Record<string, string> = payload.type === 'call' ? { Urgency: 'high', Priority: '5' } : {};
-  // Повтор из очереди (D10): номер повтора — в тело пуша, чтобы приложение не приняло его за повторную доставку того же сообщения.
-  // В очередь (`scheduleRepeatPush` выше) уходит исходная нагрузка без поля: номер ставится заново на каждой отправке.
-  const sent: PushPayload = opts.repeat ? { ...payload, repeat: opts.repeat } : payload;
+  const sent: PushPayload = payload;
   const variant = (p: PushPayload) => ({
     payload: p,
     plain: Buffer.from(JSON.stringify(p), 'utf8'),
@@ -414,17 +371,25 @@ export async function sendPushToUsers(
         body: v.redacted,
         headers: { 'Content-Type': 'application/json' },
       };
+      /**
+       * Открытый текст для шифра: с `uid` (приложению с `reply1`) или общий `v.plain`. Шлюз FCM (#247): шифр длиннее
+       * `FCM_RELAY_BODY_MAX` он отверг бы 413 — нагрузка заранее облегчается (`fitPushPayload`: короче текст, группа,
+       * заголовок; крайний случай — безличная). ntfy получает как было, байт в байт.
+       */
+      const devicePlain = (withUid: (PushPayload & { uid: string }) | null): Buffer => {
+        const plain = withUid ? Buffer.from(JSON.stringify(withUid), 'utf8') : v.plain;
+        if (plain.length + WEB_PUSH_OVERHEAD <= FCM_RELAY_BODY_MAX || !isFcmRelayEndpoint(d.endpoint)) return plain;
+        return Buffer.from(JSON.stringify(fitPushPayload<PushPayload>(withUid ?? v.payload, FCM_RELAY_BODY_MAX)), 'utf8');
+      };
       if (d.p256dh && d.auth) {
         try {
           wire = {
             // `uid` (Р1, G17) — получатель: им приложение выбирает инстанс и токен для «Ответить» / «Прочитано» из
             // шторки. Только внутри шифра и только приложению с `reply1`; остальным тело прежнее, байт в байт.
-            body: encryptWebPush(
-              d.caps?.split(',').includes('reply1')
-                ? Buffer.from(JSON.stringify({ ...v.payload, uid: d.userId }), 'utf8')
-                : v.plain,
-              { p256dh: d.p256dh, auth: d.auth },
-            ),
+            body: encryptWebPush(devicePlain(d.caps?.split(',').includes('reply1') ? { ...v.payload, uid: d.userId } : null), {
+              p256dh: d.p256dh,
+              auth: d.auth,
+            }),
             headers: {
               'Content-Type': 'application/octet-stream',
               'Content-Encoding': 'aes128gcm',
@@ -445,14 +410,13 @@ export async function sendPushToUsers(
       try {
         const res = await fetch(d.endpoint, {
           method: 'POST',
-          headers: { ...wire.headers, ...urgent, Authorization: `Bearer ${NTFY_TOKEN}` },
+          headers: { ...wire.headers, ...urgent, ...endpointAuth(d.endpoint) },
           body: wire.body,
           redirect: 'manual', // SSRF (P2-5): NEVER follow a 3xx into the internal network
         });
-        // A redirect (3xx) from a push endpoint is anomalous/malicious — don't follow it, drop the
-        // device. Topic gone / payload too large (404/413) => stale registration, also drop.
-        const redirected = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
-        if (redirected || res.status === 404 || res.status === 413) {
+        // A redirect (3xx) from a push endpoint is anomalous/malicious — don't follow it, drop the device. Topic/token gone
+        // (404/410) => stale registration, also drop; 413 — only from ntfy (`dropDevice`).
+        if (dropDevice(res, d.endpoint)) {
           await db.delete(pushDevices).where(eq(pushDevices.id, d.id)).catch(() => {});
         }
       } catch {
@@ -471,7 +435,7 @@ export async function sendPushToUsers(
  * само «прочитано» уже записано и разослано по сокетам.
  */
 export async function sendReadSyncPush(userId: string, conversationId: string, key: number | null): Promise<void> {
-  if (!NTFY_BASE || !NTFY_TOKEN) return;
+  if (!PUSH_ON) return;
   const devices = await db
     .select()
     .from(pushDevices)
@@ -488,13 +452,12 @@ export async function sendReadSyncPush(userId: string, conversationId: string, k
             'Content-Type': 'application/octet-stream',
             'Content-Encoding': 'aes128gcm',
             'X-UnifiedPush': '1',
-            Authorization: `Bearer ${NTFY_TOKEN}`,
+            ...endpointAuth(d.endpoint),
           },
           body: encryptWebPush(plain, { p256dh: d.p256dh, auth: d.auth }),
           redirect: 'manual', // SSRF (P2-5), как у `sendPushToUsers`
         });
-        const redirected = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
-        if (redirected || res.status === 404 || res.status === 413) {
+        if (dropDevice(res, d.endpoint)) {
           await db.delete(pushDevices).where(eq(pushDevices.id, d.id)).catch(() => {});
         }
       } catch {

@@ -1,0 +1,90 @@
+diff --git a/dist/esm/helpers.mjs b/dist/esm/helpers.mjs
+index edac39c3021fe1596e4aa2453fb5a9073a48792a..8e547bc6d53b0620d22e619da308c2cc8ecdcf4a 100644
+--- a/dist/esm/helpers.mjs
++++ b/dist/esm/helpers.mjs
+@@ -1,6 +1,6 @@
+ import * as fs from "fs";
+ import * as path from "path";
+-import * as querystring from 'query-string';
++import querystring from 'query-string';
+ import * as errors from "./errors.mjs";
+ import { getEncryptionHeaders, isEmpty, isEmptyObject, isNumber, isObject, isString, isValidBucketName, isValidObjectName } from "./internal/helper.mjs";
+ import { RETENTION_MODES } from "./internal/type.mjs";
+diff --git a/dist/esm/internal/client.mjs b/dist/esm/internal/client.mjs
+index e9f96697e7156a43c46a35dd446c0b50501fbcdc..17c4c8dacef4093527049eaa9da315a155deab12 100644
+--- a/dist/esm/internal/client.mjs
++++ b/dist/esm/internal/client.mjs
+@@ -8,7 +8,7 @@ import * as async from 'async';
+ import BlockStream2 from 'block-stream2';
+ import { isBrowser } from 'browser-or-node';
+ import _ from 'lodash';
+-import * as qs from 'query-string';
++import qs from 'query-string';
+ import xml2js from 'xml2js';
+ import { CredentialProvider } from "../CredentialProvider.mjs";
+ import * as errors from "../errors.mjs";
+diff --git a/dist/main/helpers.js b/dist/main/helpers.js
+index bea5b04b15cd8497e00421aa6aa1767fc73641db..d19b46c45be1d72cfa17ff03d3a195255b1abe70 100644
+--- a/dist/main/helpers.js
++++ b/dist/main/helpers.js
+@@ -6,7 +6,7 @@ Object.defineProperty(exports, "__esModule", {
+ exports.removeDirAndFiles = removeDirAndFiles;
+ var fs = _interopRequireWildcard(require("fs"), true);
+ var path = _interopRequireWildcard(require("path"), true);
+-var querystring = _interopRequireWildcard(require("query-string"), true);
++var querystring = require("query-string").default;
+ var errors = _interopRequireWildcard(require("./errors.js"), true);
+ var _helper = require("./internal/helper.js");
+ var _type = require("./internal/type.js");
+diff --git a/dist/main/internal/client.js b/dist/main/internal/client.js
+index 5ab16ff7ddd5985cddc0904b8ec6540a7ee27834..306b58683d94f4c5ed81e9187b3b5b4505abee0b 100644
+--- a/dist/main/internal/client.js
++++ b/dist/main/internal/client.js
+@@ -13,7 +13,7 @@ var async = _interopRequireWildcard(require("async"), true);
+ var _blockStream = require("block-stream2");
+ var _browserOrNode = require("browser-or-node");
+ var _lodash = require("lodash");
+-var qs = _interopRequireWildcard(require("query-string"), true);
++var qs = require("query-string").default;
+ var _xml2js = require("xml2js");
+ var _CredentialProvider = require("../CredentialProvider.js");
+ var errors = _interopRequireWildcard(require("../errors.js"), true);
+diff --git a/dist/esm/notification.mjs b/dist/esm/notification.mjs
+index 2fe075b7..a07da8dd 100644
+--- a/dist/esm/notification.mjs
++++ b/dist/esm/notification.mjs
+@@ -17,3 +17,3 @@
+ import { EventEmitter } from 'eventemitter3';
+-import jsonLineParser from 'stream-json/jsonl/Parser.js';
++import jsonLineParser from 'stream-json/jsonl/parser.js';
+ import { DEFAULT_REGION } from "./helpers.mjs";
+@@ -178,3 +178,3 @@ export class NotificationPoller extends EventEmitter {
+     }, '', [200], region).then(response => {
+-      const asm = jsonLineParser.make();
++      const asm = jsonLineParser.asStream();
+       pipesetup(response, asm).on('data', data => {
+diff --git a/dist/main/notification.js b/dist/main/notification.js
+index 8d8e8b38..1028cfd1 100644
+--- a/dist/main/notification.js
++++ b/dist/main/notification.js
+@@ -6,3 +6,3 @@ Object.defineProperty(exports, "__esModule", {
+ var _eventemitter = require("eventemitter3");
+-var _Parser = require("stream-json/jsonl/Parser.js");
++let jsonLineParser;
+ var _helpers = require("./helpers.js");
+@@ -174,2 +174,10 @@ class NotificationPoller extends _eventemitter.EventEmitter {
+     }
++    // stream-json 3 is ESM; load it before opening the response stream.
++    if (!jsonLineParser) {
++      import('stream-json/jsonl/parser.js').then(({ default: parser }) => {
++        jsonLineParser = parser;
++        this.checkForChanges();
++      }, e => this.emit('error', e));
++      return;
++    }
+     const method = 'GET';
+@@ -198,3 +206,3 @@ class NotificationPoller extends _eventemitter.EventEmitter {
+     }, '', [200], region).then(response => {
+-      const asm = _Parser.make();
++      const asm = jsonLineParser.asStream();
+       (0, _helper.pipesetup)(response, asm).on('data', data => {

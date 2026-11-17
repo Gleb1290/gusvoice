@@ -1,8 +1,10 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { before, after, it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -80,15 +82,11 @@ async function scene(phone: boolean, check: (host: HTMLDivElement, unmount: () =
     } },
     './Icon': { Icon: nil }, './GroupDialogs': { GroupDialogHost: nil }, './SharedMedia': { SharedMediaHost: nil }, './SelfVoiceBar': { SelfVoiceBar: nil },
   };
-  const unused = ['../useContactSeen', '../dialogChrome', '../channelRules', '../chatKeysRules', '../typing',
-    '../contactRules', '../contacts', './SavedAvatar', '../groupChatRules', '../cornerButtonsRules', './DmServerSearch',
-    '../dragOut', '../filesDrop', './Goose', './StatusDot', './VoicePanel', './BottomSheet'];
-  for (const id of unused) deps[id] = new Proxy({}, { get(_t, key) { assert.fail(`неожиданная граница ${id}.${String(key)}`); } });
   const module = { exports: {} as { DmSidebar: React.ComponentType } };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
     { module, exports: module.exports, window, document, Date, Element,
-      require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `неописанный импорт ${id}`); return deps[id]; } });
+      require: testVmImports(new URL('./DmSidebar.tsx', import.meta.url), deps) });
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   let mounted = true;
   const unmount = async () => { if (mounted) { await React.act(async () => root.unmount()); mounted = false; } };
@@ -169,23 +167,29 @@ it('R170 свёрнутое поле открывается значком, а �
 it('R170 контрфакт забытой очистки корневого класса отвергается при закрытии поиска', async () => {
   // Мутация целого модуля, с исходным сценарием перед ней, а не eval отдельного effect.
   await scene(true, lifecycle);
-  const mutant = replaceOnce("return () => root.classList.remove('gv-listsearch');", 'return () => {};');
-  await assert.rejects(scene(true, lifecycle, mutant), e => e instanceof assert.AssertionError && e.message.includes('закрытие снимает'));
+  await counterfact(async () => {
+    const mutant = replaceOnce("return () => root.classList.remove('gv-listsearch');", 'return () => {};');
+    await assert.rejects(scene(true, lifecycle, mutant), e => e instanceof assert.AssertionError && e.message.includes('закрытие снимает'));
+  });
 });
 it('R170 контрфакт поля вне телефонной ленты отвергается по реальной вложенности', async () => {
   // Возвращение старого внешнего поля оставило бы поиск неподвижным при прокрутке списка.
   const check = async (host: HTMLDivElement) => { assert.equal(field(host).closest('.dm-list') !== null, true, 'поле внутри телефонной ленты'); };
   await scene(true, check);
-  const moved = replaceOnce('{!phone && findZone}', '{findZone}').replace('{findZone}\n          </div>', '{null}\n          </div>');
-  assert.equal(source.split('{findZone}\n          </div>').length - 1, 1);
-  await assert.rejects(scene(true, check, moved), e => e instanceof assert.AssertionError && e.message.includes('поле внутри'));
+  await counterfact(async () => {
+    const moved = replaceOnce('{!phone && findZone}', '{findZone}').replace('{findZone}\n          </div>', '{null}\n          </div>');
+    assert.equal(source.split('{findZone}\n          </div>').length - 1, 1);
+    await assert.rejects(scene(true, check, moved), e => e instanceof assert.AssertionError && e.message.includes('поле внутри'));
+  });
 });
 it('R170 контрфакт значка в режиме выбора отвергается после выбора настоящей беседы', async () => {
   // Возвращение кнопки поиска в режим выбора добавляет чужое действие поверх панели выбранных бесед.
   await scene(true, async host => selection(host));
-  const anchor = '{!selecting && !(inArchive && phone) && folderUi.bar}';
-  const mutant = replaceOnce(anchor, `${anchor}\n      {phone && selecting && <button className="dm-find-btn" />}`);
-  await assert.rejects(scene(true, async host => selection(host), mutant), e => e instanceof assert.AssertionError && e.message.includes('выбор не показывает'));
+  await counterfact(async () => {
+    const anchor = '{!selecting && !(inArchive && phone) && folderUi.bar}';
+    const mutant = replaceOnce(anchor, `${anchor}\n      {phone && selecting && <button className="dm-find-btn" />}`);
+    await assert.rejects(scene(true, async host => selection(host), mutant), e => e instanceof assert.AssertionError && e.message.includes('выбор не показывает'));
+  });
 });
 
 async function enterQuery(host: HTMLDivElement, value: string) {
@@ -244,15 +248,17 @@ for (const [name, anchor, replacement, phone, users, query, target] of [
 ] as const) it(`R181 мутант «${name}» отвергается настоящим поиском`, async () => {
   // Целый модуль, original-first и целевая проверка отделяют регрессию от сбоя VM.
   await searchScene(phone, users, false, source, query);
-  // В этом модуле два поисковых компонента имеют одну строку: уникален полный контекст глобального блока.
-  const unique = anchor.startsWith('const searchQuery')
-    ? '  const searchQuery = searchOn ? userSearchQuery(q) : null;\n  useEffect(() => {\n    const mine = ++round.current;'
-    : anchor;
-  const change = anchor.startsWith('const searchQuery')
-    ? '  const searchQuery = userSearchQuery(q);\n  useEffect(() => {\n    const mine = ++round.current;'
-    : replacement;
-  await assert.rejects(searchScene(phone, users, false, replaceOnce(unique, change), query),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await counterfact(async () => {
+    // В этом модуле два поисковых компонента имеют одну строку: уникален полный контекст глобального блока.
+    const unique = anchor.startsWith('const searchQuery')
+      ? '  const searchQuery = searchOn ? userSearchQuery(q) : null;\n  useEffect(() => {\n    const mine = ++round.current;'
+      : anchor;
+    const change = anchor.startsWith('const searchQuery')
+      ? '  const searchQuery = userSearchQuery(q);\n  useEffect(() => {\n    const mine = ++round.current;'
+      : replacement;
+    await assert.rejects(searchScene(phone, users, false, replaceOnce(unique, change), query),
+      e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 
 async function archiveScene(phone: boolean, raw = source, onlyUnmount = false) {
@@ -279,12 +285,16 @@ it('R181 архив телефона скрывает FAB и помечает к
 it('R181 потеря cleanup архива обнаруживается размонтированием открытого архива', async () => {
   // Не ограничиваемся выходом: приложение может снять список без смены локального состояния.
   await archiveScene(true, source, true);
-  await assert.rejects(archiveScene(true, replaceOnce("return () => root.classList.remove('gv-listarchive');", 'return () => {};'), true),
-    e => e instanceof assert.AssertionError && e.message.includes('unmount снимает'));
+  await counterfact(async () => {
+    await assert.rejects(archiveScene(true, replaceOnce("return () => root.classList.remove('gv-listarchive');", 'return () => {};'), true),
+      e => e instanceof assert.AssertionError && e.message.includes('unmount снимает'));
+  });
 });
 it('R181 потеря запрета FAB в архиве обнаруживается входом в архив', async () => {
   // Карандаш не относится к отдельному экрану архива и не должен появляться под его шапкой.
   await archiveScene(true);
-  await assert.rejects(archiveScene(true, replaceOnce('phone && !dmOff && !selecting && !inArchive &&', 'phone && !dmOff && !selecting &&')),
-    e => e instanceof assert.AssertionError && e.message.includes('в архиве нет FAB'));
+  await counterfact(async () => {
+    await assert.rejects(archiveScene(true, replaceOnce('phone && !dmOff && !selecting && !inArchive &&', 'phone && !dmOff && !selecting &&')),
+      e => e instanceof assert.AssertionError && e.message.includes('в архиве нет FAB'));
+  });
 });

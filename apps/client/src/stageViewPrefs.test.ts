@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports';
 
-const source = readFileSync(new URL('./stageViewPrefs.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const sourceUrl = new URL('./stageViewPrefs.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 const key = 'gv_stage_hide_novideo';
 function load(initial?: string, broken = false, raw = source) {
   const values = new Map(initial === undefined ? [] : [[key, initial]]);
@@ -17,7 +20,9 @@ function load(initial?: string, broken = false, raw = source) {
     onHideNoVideo(fn: () => void): () => void; useHideNoVideo(): boolean } };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { module, exports: module.exports, localStorage: storage,
-      require: (id: string) => { assert.equal(id, 'react'); return { useSyncExternalStore: (_subscribe: unknown, snapshot: () => boolean) => snapshot() }; } });
+      require: testVmImports(sourceUrl, {
+        react: { useSyncExternalStore: (_subscribe: unknown, snapshot: () => boolean) => snapshot() },
+      }) });
   return { ...module.exports, values };
 }
 it('R163 без сохранённого выбора показываются все участники', () => {
@@ -47,6 +52,9 @@ it('R163 исключение слушателя изолировано, отп�
   offGood(); f.setHideNoVideo(false); assert.deepEqual(events, [true]); offBad();
 });
 it('R163 мутант без удаления ключа обнаруживается поведением сохранённого выбора', () => {
-  const anchor = 'else localStorage.removeItem(KEY);'; assert.equal(source.split(anchor).length - 1, 1);
-  roundTrip(); assert.throws(() => roundTrip(source.replace(anchor, 'else {}')), assert.AssertionError);
+  roundTrip();
+  counterfact(() => {
+    const anchor = 'else localStorage.removeItem(KEY);'; assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => roundTrip(source.replace(anchor, 'else {}')), assert.AssertionError);
+  });
 });

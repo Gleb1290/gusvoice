@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -215,13 +216,17 @@ test('R210 группа с автором, своим и теневым пуши
 });
 test('R210 снятие фильтра чужого дома ловится вызовом настоящего пуша теневому', async () => {
   await fanoutScenario();
-  await assert.rejects(fanoutScenario({ file: 'convSendFanout', from: 'if (elsewhere.has(id)) continue;', to: '' }),
-    strictFailure('групповой пуш вызывается только своему участнику', [['local'], ['shadow']], [['local']]));
+  await counterfact(async () => {
+    await assert.rejects(fanoutScenario({ file: 'convSendFanout', from: 'if (elsewhere.has(id)) continue;', to: '' }),
+      strictFailure('групповой пуш вызывается только своему участнику', [['local'], ['shadow']], [['local']]));
+  });
 });
 test('R210 перевёрнутый home ловится реальным SQL, а не падением загрузчика', async () => {
   await fanoutScenario();
-  await assert.rejects(fanoutScenario({ file: 'convSendFanout', from: 'rows.filter((r) => r.home !== null)', to: 'rows.filter((r) => r.home === null)' }),
-    strictFailure('другой дом определяется по ненулевому home', ['author', 'local'], ['shadow']));
+  await counterfact(async () => {
+    await assert.rejects(fanoutScenario({ file: 'convSendFanout', from: 'rows.filter((r) => r.home !== null)', to: 'rows.filter((r) => r.home === null)' }),
+      strictFailure('другой дом определяется по ненулевому home', ['author', 'local'], ['shadow']));
+  });
 });
 async function addedScenario(onlyShadows = false, mutation?: Mutation) {
   const f = await fixture(mutation), added = onlyShadows ? ['shadow', 'shadow2'] : ['local', 'shadow'];
@@ -238,13 +243,17 @@ test('R210 HTTP создания смешанной группы пушит до
 });
 test('R210 передача added вместо local ловится настоящей рассылкой теневому после создания группы', async () => {
   await addedScenario();
-  await assert.rejects(addedScenario(false, { file: 'routes/convGroups', from: 'await sendPushToUsers(\n    local,', to: 'await sendPushToUsers(\n    added,' }),
-    strictFailure('добавление будит только местных и не вызывает пустую рассылку', [['local', 'shadow']], [['local']]));
+  await counterfact(async () => {
+    await assert.rejects(addedScenario(false, { file: 'routes/convGroups', from: 'await sendPushToUsers(\n    local,', to: 'await sendPushToUsers(\n    added,' }),
+      strictFailure('добавление будит только местных и не вызывает пустую рассылку', [['local', 'shadow']], [['local']]));
+  });
 });
 test('R210 потеря раннего выхода при всех теневых ловится вызовом с пустым списком получателей', async () => {
   await addedScenario(true);
-  await assert.rejects(addedScenario(true, { file: 'routes/convGroups', from: 'if (local.length === 0) return;', to: '' }),
-    strictFailure('добавление будит только местных и не вызывает пустую рассылку', [[]], []));
+  await counterfact(async () => {
+    await assert.rejects(addedScenario(true, { file: 'routes/convGroups', from: 'if (local.length === 0) return;', to: '' }),
+      strictFailure('добавление будит только местных и не вызывает пустую рассылку', [[]], []));
+  });
 });
 test('R210 сквозная запись хоста звонит соседу сразу: настоящий ringDoorbell и sendEventTo дают sent без guest.notify впереди', async () => {
   const f = await fixture(); const made = await f.send(true);

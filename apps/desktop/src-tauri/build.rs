@@ -22,5 +22,16 @@ fn main() {
             println!("cargo:rustc-link-arg=delayimp.lib");
         }
     }
+    // Android: страницы памяти 16 KB (Google Play требует для targetSdk 35+ с 01.02.2027, #247).
+    // У каждого LOAD-сегмента нашей `.so` выравнивание должно быть не меньше 0x4000, иначе на
+    // устройствах с 16-КБ страницами библиотека не загрузится. NDK r27c сам линкует с 0x1000
+    // (умолчание 16 KB — с r28), libwebrtc вшит статически — значит, решает наша линковка.
+    // Флаг ставится ЗДЕСЬ, а не в `[target.*].rustflags` apps/desktop/.cargo/config.toml: сборка
+    // Android (cargo-mobile2 внутри tauri-cli) отдаёт свои rustflags через переменную окружения,
+    // а она целиком перекрывает rustflags из config.toml (проверено пробной сборкой 28.10).
+    // Страж — шаг «Нативка выровнена на 16 KB» в .gitea/workflows/android.yaml.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
+    }
     tauri_build::build();
 }

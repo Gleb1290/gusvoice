@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -489,6 +490,7 @@ describe('R301 Bot — callbackQuery и явная публикация кома
   ]) {
     it(`контрфакт ${mutation.title}: полный оригинал проходит первым`, async () => {
       await mutation.scenario(source);
+      await counterfact(async () => {
       const mutant = replaceOnce(mutation.from, mutation.to);
       await assert.rejects(mutation.scenario(mutant), error => {
         assert.ok(error instanceof assert.AssertionError, 'поймана регрессия поведения, не VM/импорт');
@@ -498,6 +500,7 @@ describe('R301 Bot — callbackQuery и явная публикация кома
         assert.equal(error.actual, mutation.actual);
         assert.equal(error.expected, mutation.expected);
         return true;
+      });
       });
     });
   }
@@ -590,9 +593,11 @@ it('R303 getUpdates 409 фатален: исходная ошибка возвр
 });
 it('R303 контрфакт общего fatal-400 ловится на отсутствии паузы, оригинал проходит первым', async () => {
   await polling400();
+  await counterfact(async () => {
   const mutant = replaceOnce('return isFatal(e) && e.code !== 400;', 'return isFatal(e);');
   await assert.rejects(polling400(mutant), e => e instanceof assert.AssertionError && e.operator === 'strictEqual'
     && e.message.split(/\r?\n/, 1)[0] === 'R303-poll-400-планирует-повтор' && e.actual === 0 && e.expected === 1);
+  });
 });
 it('R303 WS 4009 при перехвате другим потребителем сообщает именно terminated, не webhook', async () => {
   const h = harness(); const run = h.bot.start(); outcome(run);
@@ -679,6 +684,7 @@ describe('Bot — адресные контрфакты на полном мод
   for (const mutation of mutations) {
     it(mutation.title, async () => {
       await mutation.invariant(source);
+      await counterfact(async () => {
       const mutant = replaceOnce(mutation.from, mutation.to);
       await assert.rejects(mutation.invariant(mutant), (error: unknown) => {
         assert.ok(error instanceof assert.AssertionError, 'mutant: падение — host assertion, не ошибка VM/импорта/таймера');
@@ -688,6 +694,7 @@ describe('Bot — адресные контрфакты на полном мод
         assert.deepEqual(error.actual, mutation.actual, 'mutant: конкретный наблюдаемый контрфакт');
         assert.deepEqual(error.expected, mutation.expected, 'mutant: конкретное нарушенное ожидание');
         return true;
+      });
       });
     });
   }

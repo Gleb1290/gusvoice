@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -342,8 +343,6 @@ describe('shownDownloadFraction — границы полосы', () => {
 describe('контрфакты: поведенческие сценарии ловят регрессии модуля', () => {
   it('оригинал проходит, а удаление holdUntil нарушает минимум этапа checking', async () => {
     const original = loadWholeModule(SOURCE);
-    const mutantSource = replaceOnce(SOURCE, 'if (left > 0) await deps.sleep(left);', '/* ожидание удалено */');
-    const mutant = loadWholeModule(mutantSource);
     const scenario = async (api: typeof original) => {
       const clock = new FakeClock();
       const h = basicDeps(clock, async () => null);
@@ -361,13 +360,15 @@ describe('контрфакты: поведенческие сценарии ло
       }
     };
     await scenario(original);
-    await assert.rejects(scenario(mutant), (e: unknown) => isFailedOkAssertion(e, 'checking выдерживает минимум'));
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(SOURCE, 'if (left > 0) await deps.sleep(left);', '/* ожидание удалено */');
+      const mutant = loadWholeModule(mutantSource);
+      await assert.rejects(scenario(mutant), (e: unknown) => isFailedOkAssertion(e, 'checking выдерживает минимум'));
+    });
   });
 
   it('оригинал проходит, а игнорирование byTime даёт 100% раньше downloadMin', async () => {
     const original = loadWholeModule(SOURCE);
-    const mutantSource = replaceOnce(SOURCE, 'Math.min(1, byTime, realPart)', 'Math.min(1, realPart)');
-    const mutant = loadWholeModule(mutantSource);
     const scenario = async (api: typeof original) => {
       const clock = new FakeClock();
       const update: SplashUpdate = { version: 'v', download: (emit) => { emit({ event: 'Finished' }); return Promise.resolve(); }, install: async () => undefined };
@@ -382,13 +383,15 @@ describe('контрфакты: поведенческие сценарии ло
       assert.ok(one && one.at - dl[0]!.at >= fastTiming.downloadMinMs, '100% только после downloadMin');
     };
     await scenario(original);
-    await assert.rejects(scenario(mutant), (e: unknown) => isFailedOkAssertion(e, '100% только после downloadMin'));
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(SOURCE, 'Math.min(1, byTime, realPart)', 'Math.min(1, realPart)');
+      const mutant = loadWholeModule(mutantSource);
+      await assert.rejects(scenario(mutant), (e: unknown) => isFailedOkAssertion(e, '100% только после downloadMin'));
+    });
   });
 
   it('оригинал проходит, а перестановка install перед beforeInstall ломает порядок', async () => {
     const original = loadWholeModule(SOURCE);
-    const mutantSource = replaceOnce(SOURCE, 'await deps.beforeInstall(version);\n    marked = true;\n    await holdUntil(t2 + t.installMinMs);\n    deps.ping();\n    await update.install();', 'await update.install();\n    await deps.beforeInstall(version);\n    marked = true;\n    await holdUntil(t2 + t.installMinMs);\n    deps.ping();');
-    const mutant = loadWholeModule(mutantSource);
     const scenario = async (api: typeof original) => {
       const clock = new FakeClock();
       const order: string[] = [];
@@ -402,16 +405,18 @@ describe('контрфакты: поведенческие сценарии ло
       assert.deepEqual(order.slice(0, 2), ['beforeInstall', 'install'], 'метка предшествует install');
     };
     await scenario(original);
-    await assert.rejects(scenario(mutant), (e: unknown) => e instanceof assert.AssertionError
-      && e.message.includes('метка предшествует install') && e.operator === 'deepStrictEqual'
-      && JSON.stringify(e.actual) === JSON.stringify(['install', 'beforeInstall'])
-      && JSON.stringify(e.expected) === JSON.stringify(['beforeInstall', 'install']));
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(SOURCE, 'await deps.beforeInstall(version);\n    marked = true;\n    await holdUntil(t2 + t.installMinMs);\n    deps.ping();\n    await update.install();', 'await update.install();\n    await deps.beforeInstall(version);\n    marked = true;\n    await holdUntil(t2 + t.installMinMs);\n    deps.ping();');
+      const mutant = loadWholeModule(mutantSource);
+      await assert.rejects(scenario(mutant), (e: unknown) => e instanceof assert.AssertionError
+        && e.message.includes('метка предшествует install') && e.operator === 'deepStrictEqual'
+        && JSON.stringify(e.actual) === JSON.stringify(['install', 'beforeInstall'])
+        && JSON.stringify(e.expected) === JSON.stringify(['beforeInstall', 'install']));
+    });
   });
 
   it('оригинал проходит, а пропуск done после ошибки обновления оставляет окно без завершения', async () => {
     const original = loadWholeModule(SOURCE);
-    const mutantSource = replaceOnce(SOURCE, 'await deps.done();\n    return \'started\';', 'return \'started\';');
-    const mutant = loadWholeModule(mutantSource);
     const scenario = async (api: typeof original) => {
       const clock = new FakeClock();
       const update: SplashUpdate = { version: 'v', download: () => Promise.reject(new Error('network')), install: async () => undefined };
@@ -424,9 +429,13 @@ describe('контрфакты: поведенческие сценарии ло
       assert.equal(h.doneCount, 1, 'ошибка обновления всё равно открывает главное окно');
     };
     await scenario(original);
-    await assert.rejects(scenario(mutant), (e: unknown) => e instanceof assert.AssertionError
-      && e.message.startsWith('ошибка обновления всё равно открывает главное окно')
-      && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(SOURCE, 'await deps.done();\n    return \'started\';', 'return \'started\';');
+      const mutant = loadWholeModule(mutantSource);
+      await assert.rejects(scenario(mutant), (e: unknown) => e instanceof assert.AssertionError
+        && e.message.startsWith('ошибка обновления всё равно открывает главное окно')
+        && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+    });
   });
 });
 
@@ -619,37 +628,45 @@ describe('R295 заставка без повторной видимой про�
 describe('R295 адресные контрфакты полного модуля', () => {
   it('удаление раннего justUpdated даёт лишний check, а оригинал запускается без него', async () => {
     await r295JustUpdated(loadWholeModule(SOURCE));
-    const mutant = replaceOnce(SOURCE, "if (intent.kind === 'justUpdated') return start();", '/* ранний выход удалён */');
-    await assert.rejects(r295JustUpdated(loadWholeModule(mutant)),
-      error => r295Assertion(error, 'R295-justUpdated-без-check', 1, 0));
+    await counterfact(async () => {
+      const mutant = replaceOnce(SOURCE, "if (intent.kind === 'justUpdated') return start();", '/* ранний выход удалён */');
+      await assert.rejects(r295JustUpdated(loadWholeModule(mutant)),
+        error => r295Assertion(error, 'R295-justUpdated-без-check', 1, 0));
+    });
   });
 
   it('checking в ветке update ловится лишним видимым этапом, а не ошибкой загрузки модуля', async () => {
     await r295Update(loadWholeModule(SOURCE));
-    const mutant = replaceOnce(SOURCE,
-      "deps.show({ stage: 'downloading', version: intent.version, progress: 0 });",
-      "deps.show({ stage: 'checking', version: intent.version, progress: 0 });");
-    // В check только записываем наблюдение: бросок assert внутри него был бы проглочен checkFeed.
-    await assert.rejects(r295Update(loadWholeModule(mutant)),
-      error => r295Assertion(error, 'R295-update-без-checking', 1, 0));
+    await counterfact(async () => {
+      const mutant = replaceOnce(SOURCE,
+        "deps.show({ stage: 'downloading', version: intent.version, progress: 0 });",
+        "deps.show({ stage: 'checking', version: intent.version, progress: 0 });");
+      // В check только записываем наблюдение: бросок assert внутри него был бы проглочен checkFeed.
+      await assert.rejects(r295Update(loadWholeModule(mutant)),
+        error => r295Assertion(error, 'R295-update-без-checking', 1, 0));
+    });
   });
 
   it('возврат checkMin в update ловится лишней задержкой до реального скачивания', async () => {
     await r295Update(loadWholeModule(SOURCE));
-    const timed = replaceOnce(SOURCE, "if (intent.kind === 'update') {", "if (intent.kind === 'update') {\n    const t0 = deps.now();");
-    const mutant = replaceOnce(timed, 'update = await checkFeed();\n  } else {',
-      'update = await checkFeed();\n    await holdUntil(t0 + t.checkMinMs);\n  } else {');
-    await assert.rejects(r295Update(loadWholeModule(mutant)),
-      error => r295Assertion(error, 'R295-update-без-checkMin', fastTiming.checkMinMs, 0));
+    await counterfact(async () => {
+      const timed = replaceOnce(SOURCE, "if (intent.kind === 'update') {", "if (intent.kind === 'update') {\n    const t0 = deps.now();");
+      const mutant = replaceOnce(timed, 'update = await checkFeed();\n  } else {',
+        'update = await checkFeed();\n    await holdUntil(t0 + t.checkMinMs);\n  } else {');
+      await assert.rejects(r295Update(loadWholeModule(mutant)),
+        error => r295Assertion(error, 'R295-update-без-checkMin', fastTiming.checkMinMs, 0));
+    });
   });
 
   it('без сравнения installed с current чужая установка ошибочно отключает проверку', () => {
     const scenario = (api: R295Api) => assert.equal(api.splashIntent({ installed: r295Target, relaunch: null }, r295Current, r295Now).kind,
       'normal', 'R295-installed-должна-совпасть');
     scenario(loadWholeModule(SOURCE));
-    const mutant = replaceOnce(SOURCE, ' && m.installed === current', '');
-    assert.throws(() => scenario(loadWholeModule(mutant)),
-      error => r295Assertion(error, 'R295-installed-должна-совпасть', 'justUpdated', 'normal'));
+    counterfact(() => {
+      const mutant = replaceOnce(SOURCE, ' && m.installed === current', '');
+      assert.throws(() => scenario(loadWholeModule(mutant)),
+        error => r295Assertion(error, 'R295-installed-должна-совпасть', 'justUpdated', 'normal'));
+    });
   });
 
   it('без TTL застрявшая метка снова начинает скачивание, оригинал идёт обычным запуском', () => {
@@ -657,17 +674,21 @@ describe('R295 адресные контрфакты полного модуля
       relaunch: r295Marker(r295Target, RELAUNCH_UPDATE_TTL_MS + 1) }, r295Current, r295Now).kind,
     'normal', 'R295-просроченная-метка-игнорируется');
     scenario(loadWholeModule(SOURCE));
-    const mutant = replaceOnce(SOURCE, 'age >= 0 && age <= RELAUNCH_UPDATE_TTL_MS', 'age >= 0');
-    assert.throws(() => scenario(loadWholeModule(mutant)),
-      error => r295Assertion(error, 'R295-просроченная-метка-игнорируется', 'update', 'normal'));
+    counterfact(() => {
+      const mutant = replaceOnce(SOURCE, 'age >= 0 && age <= RELAUNCH_UPDATE_TTL_MS', 'age >= 0');
+      assert.throws(() => scenario(loadWholeModule(mutant)),
+        error => r295Assertion(error, 'R295-просроченная-метка-игнорируется', 'update', 'normal'));
+    });
   });
 
   it('без сравнения relaunch с current уже установленная версия начинает update заново', () => {
     const scenario = (api: R295Api) => assert.equal(api.splashIntent({ installed: null,
       relaunch: r295Marker(r295Current) }, r295Current, r295Now).kind, 'normal', 'R295-свою-версию-не-качать');
     scenario(loadWholeModule(SOURCE));
-    const mutant = replaceOnce(SOURCE, 'relaunch && relaunch !== current', 'relaunch');
-    assert.throws(() => scenario(loadWholeModule(mutant)),
-      error => r295Assertion(error, 'R295-свою-версию-не-качать', 'update', 'normal'));
+    counterfact(() => {
+      const mutant = replaceOnce(SOURCE, 'relaunch && relaunch !== current', 'relaunch');
+      assert.throws(() => scenario(loadWholeModule(mutant)),
+        error => r295Assertion(error, 'R295-свою-версию-не-качать', 'update', 'normal'));
+    });
   });
 });

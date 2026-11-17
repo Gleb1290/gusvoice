@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { EFFECT_MS, featherCount, type EffectConditions, type EffectPlan } from '../effects';
 import { SHAKE_MS } from '../uiShake';
 import { playSound } from '../sounds';
-import { mockEconomyView, setMockChip, setMockEconomy } from '../benchMock';
+import { MOCK_CHOICE_DUELS, mockChoiceDuelSnapshot, mockDuelSnapshot, mockEconomyView, mockPredictionsSnapshot, mockWheelSnapshot, setMockChip, setMockEconomy } from '../benchMock';
 import { currentConditions, planNow, pulseChip } from '../effectsDom';
 import { fireEffect } from '../effectsBus';
 import { useStore } from '../store';
@@ -236,6 +236,130 @@ export function EffectsBench({ onClose }: { onClose: () => void }) {
           <span>Приветствие экономики</span>
           <small>7 слайдов для обычного человека; закрытие ставит «видел»</small>
         </button>
+      </div>
+
+      {/* Колесо гусей-пиратов (ГусКоины 2): сцена без сервера — снимок-макет в стор и открыть «Активности». Нужен
+          «макет экономики» (игры включены в нём), иначе кнопки в доке нет, а сцена не знает баланса. */}
+      <div className="bench-group">
+        {(['open', 'locked', 'result'] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            className="bench-fire"
+            onClick={() => {
+              const st = useStore.getState();
+              const sid = st.bootstrap?.server.id;
+              if (!sid) return;
+              st.setWheel(sid, mockWheelSnapshot(sid, k, st.user?.id));
+              st.openActivities({ serverId: sid, view: 'wheel' });
+            }}
+          >
+            <span>Колесо: {k === 'open' ? 'идут ставки' : k === 'locked' ? 'крутится' : 'итог'}</span>
+            <small>макет снимка, без сервера</small>
+          </button>
+        ))}
+      </div>
+
+      {/* Гусиная дуэль (ГусКоины 2, этап 3): снимок-макет партии в канал голоса (без голоса — в текущий) и сцена; «вызов
+          мне» — карточка «Принять», «тост» — полка внизу по центру. Нужен «макет экономики». */}
+      <div className="bench-group">
+        {(['invite', 'waiting', 'playing', 'draw', 'settled', 'toast'] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            className="bench-fire"
+            onClick={() => {
+              const st = useStore.getState();
+              const sid = st.bootstrap?.server.id;
+              const cid = st.voice?.channelId ?? st.currentChannelId;
+              if (!sid || !cid) return;
+              if (k === 'toast') {
+                st.setGameToast({ id: 'bench-duel', serverId: sid, channelId: cid, challengerId: st.user?.id ?? 'me', targetId: 'bench-goose-1', amount: 100, until: Date.now() + 10_000 });
+                return;
+              }
+              st.setDuelSnapshot(sid, cid, mockDuelSnapshot(sid, cid, k, st.user?.id));
+              if (k !== 'invite') st.openActivities({ serverId: sid, view: 'duel', channelId: cid });
+            }}
+          >
+            <span>
+              Дуэль:{' '}
+              {k === 'invite' ? 'вызов мне' : k === 'waiting' ? 'жду ответа' : k === 'playing' ? 'бросок' : k === 'draw' ? 'переброс' : k === 'settled' ? 'итог' : 'тост'}
+            </span>
+            <small>макет снимка, без сервера</small>
+          </button>
+        ))}
+        {/* Этап 4: «Камень-ножницы-бумага» и «Жадный гусь» — те же правила стенда. */}
+        {(Object.keys(MOCK_CHOICE_DUELS) as (keyof typeof MOCK_CHOICE_DUELS)[]).map((k) => (
+          <button
+            key={k}
+            type="button"
+            className="bench-fire"
+            onClick={() => {
+              const st = useStore.getState();
+              const sid = st.bootstrap?.server.id;
+              const cid = st.voice?.channelId ?? st.currentChannelId;
+              if (!sid || !cid) return;
+              st.setDuelSnapshot(sid, cid, mockChoiceDuelSnapshot(sid, cid, k, st.user?.id));
+              st.openActivities({ serverId: sid, view: 'duel', channelId: cid });
+            }}
+          >
+            <span>Дуэль: {MOCK_CHOICE_DUELS[k]}</span>
+            <small>макет снимка, без сервера</small>
+          </button>
+        ))}
+      </div>
+
+      {/* Ставки на события (ГусКоины 2, этап 5): лента-макет в стор и открыть её; «тост» — «Новое событие» и «Ты угадал» на полке. */}
+      <div className="bench-group">
+        {(['open', 'locked', 'settled', 'cancelled', 'empty', 'toast'] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            className="bench-fire"
+            onClick={() => {
+              const st = useStore.getState();
+              const sid = st.bootstrap?.server.id;
+              if (!sid) return;
+              if (k === 'toast') {
+                st.setPredictionToast({ id: 'bench-pr', serverId: sid, eventId: 'bench-ev-1', kind: 'new', title: 'Финал вечернего турнира', amount: 0, until: Date.now() + 10_000 });
+                window.setTimeout(
+                  () => useStore.getState().setPredictionToast({ id: 'bench-pr-win', serverId: sid, eventId: 'bench-ev-1', kind: 'win', title: 'Финал вечернего турнира', amount: 143, until: Date.now() + 8_000 }),
+                  4_000,
+                );
+                return;
+              }
+              st.setPredictions(sid, mockPredictionsSnapshot(sid, k, st.user?.id));
+              st.openActivities({ serverId: sid, view: 'events' });
+            }}
+          >
+            <span>
+              События:{' '}
+              {k === 'open' ? 'приём ставок' : k === 'locked' ? 'ждём итога' : k === 'settled' ? 'итог' : k === 'cancelled' ? 'отмена' : k === 'empty' ? 'пусто' : 'тосты'}
+            </span>
+            <small>макет ленты, без сервера</small>
+          </button>
+        ))}
+      </div>
+
+      {/* Таблица игр, звания и «Итоги» (ГусКоины 2, этап 6): макеты `benchMock` теми же компонентами. Нужен «макет экономики». */}
+      <div className="bench-group">
+        {(['board', 'games', 'economy', 'preview'] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            className="bench-fire"
+            onClick={() => {
+              const st = useStore.getState();
+              const sid = st.bootstrap?.server.id;
+              if (!sid) return;
+              if (k === 'board') st.openActivities({ serverId: sid, view: 'board' });
+              else st.openRecap({ serverId: sid, kind: k === 'economy' ? 'economy' : 'games', preview: k === 'preview' });
+            }}
+          >
+            <span>{k === 'board' ? 'Таблица и звания' : k === 'games' ? 'Итоги месяца игр' : k === 'economy' ? 'Итоги сезона' : 'Итоги: черновик'}</span>
+            <small>макет, без сервера</small>
+          </button>
+        ))}
       </div>
 
       <div className="bench-group bench-overrides">

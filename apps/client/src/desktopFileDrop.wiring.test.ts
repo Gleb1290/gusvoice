@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -76,11 +77,13 @@ it('R286 true и отсутствие dragDropEnabled в любом конфиг
   for (const name of configNames) for (const missing of [false, true]) {
     const original = configs.get(name)!;
     mainDrop(original, name);
-    const mutant = JSON.parse(JSON.stringify(original)) as Config;
-    const main = mutant.app.windows.find(window => window.label === 'main')!;
-    if (missing) delete main.dragDropEnabled;
-    else main.dragDropEnabled = true;
-    assert.throws(() => mainDrop(mutant, name), failsAt(configMarker(name)));
+    counterfact(() => {
+      const mutant = JSON.parse(JSON.stringify(original)) as Config;
+      const main = mutant.app.windows.find(window => window.label === 'main')!;
+      if (missing) delete main.dragDropEnabled;
+      else main.dragDropEnabled = true;
+      assert.throws(() => mainDrop(mutant, name), failsAt(configMarker(name)));
+    });
   }
 });
 
@@ -95,16 +98,18 @@ it('R286 production-клиент использует HTML5 drop без onDragDr
 it('R286 возврат метода или любого события броска Tauri обнаруживается в настоящем клиентском исходнике', () => {
   // Контрфакты валидны синтаксически; ошибка парсинга или посторонний assert не считается доказательством стража.
   noNativeDrop(sources);
-  const subscriptions = [
-    'import { getCurrentWebview as r286Webview } from "@tauri-apps/api/webview"; void r286Webview().onDragDropEvent(() => {});',
-    'import { getCurrentWebview as r286Webview } from "@tauri-apps/api/webview"; void r286Webview()["onDragDropEvent"](() => {});',
-    'import { listen as r286Listen } from "@tauri-apps/api/event"; const r286Kind = "drop"; void r286Listen(`tauri://drag-${r286Kind}`, () => {});',
-    ...['enter', 'over', 'drop', 'leave'].map(kind =>
-      `import { listen as r286Listen } from "@tauri-apps/api/event"; void r286Listen("tauri://drag-${kind}", () => {});`),
-  ];
-  for (const subscription of subscriptions) {
-    const mutant = new Map(sources);
-    mutant.set('main.tsx', sources.get('main.tsx')! + '\n' + subscription);
-    assert.throws(() => noNativeDrop(mutant), failsAt(clientMarker('main.tsx')));
-  }
+  counterfact(() => {
+    const subscriptions = [
+      'import { getCurrentWebview as r286Webview } from "@tauri-apps/api/webview"; void r286Webview().onDragDropEvent(() => {});',
+      'import { getCurrentWebview as r286Webview } from "@tauri-apps/api/webview"; void r286Webview()["onDragDropEvent"](() => {});',
+      'import { listen as r286Listen } from "@tauri-apps/api/event"; const r286Kind = "drop"; void r286Listen(`tauri://drag-${r286Kind}`, () => {});',
+      ...['enter', 'over', 'drop', 'leave'].map(kind =>
+        `import { listen as r286Listen } from "@tauri-apps/api/event"; void r286Listen("tauri://drag-${kind}", () => {});`),
+    ];
+    for (const subscription of subscriptions) {
+      const mutant = new Map(sources);
+      mutant.set('main.tsx', sources.get('main.tsx')! + '\n' + subscription);
+      assert.throws(() => noNativeDrop(mutant), failsAt(clientMarker('main.tsx')));
+    }
+  });
 });

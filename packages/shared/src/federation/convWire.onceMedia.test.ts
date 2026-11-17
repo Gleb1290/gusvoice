@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as fields from './fieldRules.js';
 import * as wire from './convWire.js';
+import { counterfact } from '../../test/counterfacts.js';
 
 const attachment = (onceTtl?: number): wire.FedConvAttachmentWire => ({
   id: 'once-photo', name: 'photo.jpg', contentType: 'image/jpeg', size: 10,
@@ -47,15 +48,17 @@ it('R262 историческое once без таймера остаётся о
 
 it('R262 потеря once_ttl ловится на значении провода, а не ошибке загрузки модуля', () => {
   roundTrip(60);
-  const raw = readFileSync(new URL('./convWire.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const anchor = '...(a.once && a.onceTtl ? { once_ttl: a.onceTtl } : {}),';
-  assert.equal(raw.split(anchor).length - 1, 1);
-  const module = { exports: {} };
-  runInNewContext(ts.transpileModule(raw.replace(anchor, ''), { compilerOptions: {
-    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
-  } }).outputText, { module, exports: module.exports,
-    require(id: string) { assert.equal(id, './fieldRules'); return fields; },
+  counterfact(() => {
+    const raw = readFileSync(new URL('./convWire.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const anchor = '...(a.once && a.onceTtl ? { once_ttl: a.onceTtl } : {}),';
+    assert.equal(raw.split(anchor).length - 1, 1);
+    const module = { exports: {} };
+    runInNewContext(ts.transpileModule(raw.replace(anchor, ''), { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+    } }).outputText, { module, exports: module.exports,
+      require(id: string) { assert.equal(id, './fieldRules'); return fields; },
+    });
+    assert.throws(() => roundTrip(60, module.exports as typeof wire),
+      error => error instanceof assert.AssertionError && error.message.includes('R262_WIRE_TTL'));
   });
-  assert.throws(() => roundTrip(60, module.exports as typeof wire),
-    error => error instanceof assert.AssertionError && error.message.includes('R262_WIRE_TTL'));
 });

@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -204,11 +205,14 @@ describe('провод синхронизации ЛС между инстанс
     assert.equal(FED_DM_LATE_MS, 5 * 60_000);
     const original = loadConvSync(readFileSync(new URL('./convSync.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n'));
     check(original);
-    const mutant = mutatedConvSync('export const FED_DM_LATE_MS = 5 * 60_000;', 'export const FED_DM_LATE_MS = 2 * 60_000;');
-    assert.throws(
-      () => check(mutant),
-      (error: unknown) => error instanceof assert.AssertionError && error.message.includes('5 минут − 1 мс'),
-      'мутант с порогом две минуты должен провалить именно границу 5 минут − 1 мс',
-    );
+
+    runCounterfact(() => {
+      const mutant = mutatedConvSync('export const FED_DM_LATE_MS = 5 * 60_000;', 'export const FED_DM_LATE_MS = 2 * 60_000;');
+      assert.throws(
+        () => check(mutant),
+        (error: unknown) => error instanceof assert.AssertionError && error.message.includes('5 минут − 1 мс'),
+        'мутант с порогом две минуты должен провалить именно границу 5 минут − 1 мс',
+      );
+    });
   });
 });

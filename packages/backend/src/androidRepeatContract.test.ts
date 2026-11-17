@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mutantTest } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
@@ -32,7 +33,7 @@ test('R112 Android звонкий повтор обновляет уведомл
   checkRepeatContract(source);
 });
 
-test('R112 страж Android ловит звонок обычного или тихого дубля, отсутствие cancel и повторное добавление истории', () => {
+mutantTest('R112 страж Android ловит звонок обычного или тихого дубля, отсутствие cancel и повторное добавление истории', () => {
   const mutants = [
     source.replace('payload.optInt("repeat", 0) > 0', 'true'),
     source.replace(' > 0 && !payload.optBoolean("silent")', ' > 0'),

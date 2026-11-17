@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -81,8 +82,10 @@ it('R251 старый литерал AudioSettings без micBubble по-пре�
 // Класс ошибки: случайная смена дефолта включает overlay у всех без пользовательского выбора.
 it('R251 контрфакт включённого по умолчанию пузыря обнаруживается на чистой установке', () => {
   bubbleDefault();
+  counterfact(() => {
   const anchor = '  micBubble: false,';
   assert.equal(settingsSource.split(anchor).length - 1, 1);
   assert.throws(() => bubbleDefault(settingsSource.replace(anchor, '  micBubble: true,')),
     error => error instanceof assert.AssertionError && error.message.startsWith('R251 bubble-default:'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -143,7 +144,9 @@ for (const [name, anchor, replacement, features, maxPick] of [
   ['сосед ошибочно допускается без fedm6', 'groupPickable(u, fedGroups)', 'groupPickable(u, true)', [], undefined],
 ] as const) it(`R206 PeoplePicker мутант «${name}» отвергается тем же сценарием после оригинала`, async () => {
   await checkEligibility([...features], maxPick);
-  assert.equal(source.split(anchor).length - 1, 1, 'один точный якорь мутации целого GroupDialogs');
-  await assert.rejects(checkEligibility([...features], maxPick, source.replace(anchor, replacement)),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('сосед виден только при fedm6 без maxPick'));
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1, 'один точный якорь мутации целого GroupDialogs');
+    await assert.rejects(checkEligibility([...features], maxPick, source.replace(anchor, replacement)),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('сосед виден только при fedm6 без maxPick'));
+  });
 });

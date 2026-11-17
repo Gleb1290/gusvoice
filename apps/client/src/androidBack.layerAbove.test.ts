@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -58,8 +59,10 @@ it('Esc-модалка молчит при соседнем листе, но н�
     };
     const original = layerSource();
     check(load(original));
+    counterfact(() => {
     assert.throws(() => check(mutant('if (el && l.contains(el)) continue;', '')), assert.AssertionError);
     assert.throws(() => check(mutant('document.querySelectorAll(TOP_LAYERS)', "document.querySelectorAll('.modal-overlay')")), assert.AssertionError);
+    });
   } finally {
     GlobalRegistrator.unregister();
   }

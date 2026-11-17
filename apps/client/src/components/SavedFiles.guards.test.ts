@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -105,15 +106,17 @@ it('R214 событие COMPLETED запоминает путь до done, а Do
 it('R214 Android выбирает Movies для видео, Music для звука и Downloads для остальных', () => kotlinTargets(kotlin));
 it('R214 контрфакт перестановки веток не предлагает папку только несохранённому файлу', () => {
   viewerGate(viewer);
-  const file = tree(viewer), property = all(file, node => ts.isPropertyAssignment(node) && node.name.getText(file) === 'id'
-    && flat(node.initializer.getText(file)) === "'folder'asconst")[0];
-  assert.ok(property);
-  const conditional = ancestor(property, ts.isConditionalExpression) as ts.ConditionalExpression;
-  const from = conditional.getText(file);
-  const to = `${conditional.condition.getText(file)} ? [] : ${conditional.whenTrue.getText(file)}`;
-  assert.equal(viewer.split(from).length - 1, 1, 'изменяется одна полная ветка построения меню');
-  assert.throws(() => viewerGate(viewer.replace(from, to)), (e: unknown) => e instanceof assert.AssertionError
-    && e.message.startsWith('R214-viewer-branch:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  counterfact(() => {
+    const file = tree(viewer), property = all(file, node => ts.isPropertyAssignment(node) && node.name.getText(file) === 'id'
+      && flat(node.initializer.getText(file)) === "'folder'asconst")[0];
+    assert.ok(property);
+    const conditional = ancestor(property, ts.isConditionalExpression) as ts.ConditionalExpression;
+    const from = conditional.getText(file);
+    const to = `${conditional.condition.getText(file)} ? [] : ${conditional.whenTrue.getText(file)}`;
+    assert.equal(viewer.split(from).length - 1, 1, 'изменяется одна полная ветка построения меню');
+    assert.throws(() => viewerGate(viewer.replace(from, to)), (e: unknown) => e instanceof assert.AssertionError
+      && e.message.startsWith('R214-viewer-branch:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });
 
 for (const [name, raw, from, to, check, prefix, actual, expected] of [
@@ -128,7 +131,10 @@ for (const [name, raw, from, to, check, prefix, actual, expected] of [
   ['Android кладёт видео в Downloads', kotlin, 'MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_MOVIES)',
     'MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_DOWNLOADS)', kotlinTargets, 'R214-video-target:', false, true],
 ] as const) it(`R214 контрфакт показа папки: ${name}`, () => {
-  check(raw); assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь контрфакта поверхности');
-  assert.throws(() => check(raw.replace(from, to)), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
+  check(raw);
+  counterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь контрфакта поверхности');
+    assert.throws(() => check(raw.replace(from, to)), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
+  });
 });

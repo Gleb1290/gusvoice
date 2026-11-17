@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact, mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
@@ -17,13 +18,15 @@ describe('жест удержания голосового сообщения', 
       assert.equal(rules.VOICE_DESKTOP.holdDelayMs, 120, 'задержка ПК не изменилась');
     };
     check(raw);
+    counterfact(() => {
     for (const value of [0, 120]) {
       const changed = raw.replace('startDelayMs: 150', `startDelayMs: ${value}`);
       assert.notEqual(changed, raw);
       assert.throws(() => check(changed), assert.AssertionError);
     }
+    });
   });
-  it('контрфакты строгости порогов и полной доли отмены отвергаются теми же границами', () => {
+  mutantTest('контрфакты строгости порогов и полной доли отмены отвергаются теми же границами', () => {
     // Ловит незаметное изменение включённости границы и возврат отмены только на полном пути.
     const raw = readFileSync(new URL('./voiceHold.ts', import.meta.url), 'utf8');
     const load = (from: string, to: string) => {

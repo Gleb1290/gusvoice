@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import ts from 'typescript';
@@ -55,17 +56,21 @@ function wiring(raw = source) {
 // Класс ошибки: правильное правило остаётся неиспользованным, а error немедленно повторяет subscribe.
 it('R264 sockets error передаёт причину правилу и отправляет подписку только по таймеру с его delay и gen', () => wiring());
 it('R264 страж проводки ловит немедленный subscribe и потерю таймера после original-first', () => {
+  wiring();
+  counterfact(() => {
   const anchor = 'for (const id of onRetryDue(subs, serverId, retry.gen)) sendSubscribe(id);';
   assert.equal(source.split(anchor).length - 1, 1);
   assert.equal(source.split('if (retry) {').length - 1, 1);
-  wiring();
   const immediate = source.replace('if (retry) {', 'if (retry) { sendSubscribe(serverId);');
   // В этом мутанте два send: не принимаем любое падение/парсинг как доказательство.
   assert.throws(() => wiring(immediate),
     e => e instanceof assert.AssertionError && e.message.startsWith('R264 проводка: единственная отправка подписки находится в таймере'));
+  });
+  wiring();
+  counterfact(() => {
   const timer = 'setTimeout(() => {\n            for (const id of onRetryDue(subs, serverId, retry.gen)) sendSubscribe(id);\n          }, retry.delayMs);';
   assert.equal(source.split(timer).length - 1, 1);
-  wiring();
   assert.throws(() => wiring(source.replace(timer, '/* таймер потерян */')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R264 проводка: временный отказ назначает один таймер'));
+  });
 });

@@ -1,27 +1,32 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports';
 import * as layoutRules from './stageLayoutRules';
 
 type Rules = typeof layoutRules;
-const source = readFileSync(new URL('./stageLayoutRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const sourceUrl = new URL('./stageLayoutRules.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 function load(raw: string): Rules {
   const module = { exports: {} as Rules };
   const js = ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  runInNewContext(js, { module, exports: module.exports, require: (id: string) => { throw Error(`Неизвестный импорт ${id}`); } });
+  runInNewContext(js, { module, exports: module.exports, require: testVmImports(sourceUrl, {}) });
   return module.exports;
 }
 function mutation(anchor: string, replacement: string, check: (rules: Rules) => void, marker?: string): void {
-  assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта должен однозначно обозначать реальный код');
   check(layoutRules); // сначала выполняем тот же контракт на оригинальном модуле.
+  counterfact(() => {
+  assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта должен однозначно обозначать реальный код');
   assert.throws(
     () => check(load(source.replace(anchor, replacement))),
     (error: unknown) => error instanceof assert.AssertionError && error.operator === 'strictEqual'
       && (marker === undefined || error.message.startsWith(marker)),
     'мутант должен ломать именно ожидаемое равенство, а не падать по посторонней причине',
   );
+  });
 }
 
 // Класс ошибки: неизвестное сохранённое значение вместо безопасного «Авто» ломает сцену.

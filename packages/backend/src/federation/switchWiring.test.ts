@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -17,6 +18,7 @@ zod:ZodError
 ./cleanup.js:startAttachmentSweeper,startDailyCleanup
 ./steam.js:startSteamPoller
 ./voiceActivity.js:startVoiceActivityCollector
+./aloneRecount.js:runAloneRecount
 ./db/index.js:runMigrations
 ./env.js:env
 ./federation/devPeers.js:configureDevPeers
@@ -61,9 +63,11 @@ zod:ZodError
 ./mailer.js:verifyMailer
 ./seed.js:bindSuperAdmin,seedSuperAdmin
 ./superAdminRules.js:bootstrapIdentity
-./storage.js:ensureMediaBucket,ensurePrivateBucket
+./storage.js:ensureMediaBucket,ensurePrivateBucket,removeSoundboardObject
 ./corsOrigins.js:corsOriginCheck,refreshPeerOrigins
 ./routes/admin.js:adminRoutes
+./routes/adminSoundboard.js:adminSoundboardRoutes,startSoundboardCleanup
+./routes/adminStorage.js:adminStorageRoutes
 ./routes/appinfo.js:appInfoRoutes
 ./routes/audit.js:auditRoutes
 ./routes/auth.js:authRoutes
@@ -81,6 +85,7 @@ zod:ZodError
 ./routes/gifs.js:gifFileRoutes,gifRoutes
 ./attachmentRules.js:redactLogUrl
 ./routes/economy.js:economyRoutes
+./routes/gameWheel.js:gameWheelRoutes
 ./routes/diag.js:diagRoutes
 ./routes/invites.js:inviteRoutes
 ./routes/linkPreview.js:linkPreviewRoutes
@@ -177,6 +182,7 @@ async function boot(raw = source) {
   }
   replace('./federation/switch.js', 'onFederationSwitch', (fn: () => void) => { switched = fn; });
   replace('./env.js', 'env', { port: 0, federation: flags });
+  replace('./aloneRecount.js', 'runAloneRecount', async () => {});
   replace('./federation/instance.js', 'federation', { identity: () => ({ instanceId: 'fixture' }) });
   const app = {
     register: async () => {}, addHook: () => {}, get: () => {}, addContentTypeParser: () => {}, setErrorHandler: () => {},
@@ -255,11 +261,13 @@ it('R257 каждый из тридцати крючков ЛС включает
 
 it('R257 страж подписок отвергает удаление if (subscribe), сначала проверив оригинал', async () => {
   await subscriptions();
+await gatedCounterfact(async () => {
   const anchor = 'if (subscribe) fedDmSubs.push(onLinksChanged';
   assert.equal(source.split(anchor).length, 2);
   await assert.rejects(subscriptions(source.replace(anchor, 'fedDmSubs.push(onLinksChanged')), (e: unknown) =>
     e instanceof assert.AssertionError && e.message.startsWith('повтор wire не умножает подписки') &&
     JSON.stringify(e.actual) === '[2,2,1]' && JSON.stringify(e.expected) === '[2,1,1]');
+});
 });
 
 it('R257 пропуск любого отдельного сброса в unwire обнаруживается после настоящего включения', async () => {
@@ -271,10 +279,12 @@ it('R257 пропуск любого отдельного сброса в unwire
   };
   for (const name of dmSetters) {
     await check(source, name);
+await gatedCounterfact(async () => {
     const anchor = `  ${name}(null);`;
     assert.equal(source.split(anchor).length, 2, `единственный сброс ${name}`);
     await assert.rejects(check(source.replace(anchor, ''), name), (e: unknown) =>
       e instanceof assert.AssertionError && e.message.startsWith(`${name}: должен быть снят`) &&
       e.operator === 'strictEqual' && e.expected === null && e.actual != null);
+});
   }
 });

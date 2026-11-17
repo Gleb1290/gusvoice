@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -34,9 +35,11 @@ it('исключения включают вечную заглушку и sound
   assert.equal(rules.notifyExceptionLabel({ soundOnly: true, left: '3 ч' }), 'Звук выключен · ещё 3 ч');
   assert.equal(rules.notifyExceptionLabel({ soundOnly: false, left: '' }), 'Уведомления выключены · навсегда');
   assert.equal(rules.notifyExceptionsTitle(0), 'Исключения'); assert.equal(rules.notifyExceptionsTitle(3), 'Исключения · 3');
-  const broken = mutant('if (!full && !sound) continue;', 'if (!full) continue;');
-  assert.throws(() => assert.equal(broken.notifyExceptions(rows as never, [], {}, now).length, 3), assert.AssertionError,
-    'мутант выбрасывает беседы, где выключен только звук');
+  counterfact(() => {
+    const broken = mutant('if (!full && !sound) continue;', 'if (!full) continue;');
+    assert.throws(() => assert.equal(broken.notifyExceptions(rows as never, [], {}, now).length, 3), assert.AssertionError,
+      'мутант выбрасывает беседы, где выключен только звук');
+  });
 });
 
 it('включённая беседа появляется в исключениях, беззвучность сохраняется, а полная заглушка главнее', () => {
@@ -55,9 +58,11 @@ it('включённая беседа появляется в исключени
   assert.equal(rules.notifyExceptionLabel(list[3]!), 'Уведомления включены');
   assert.deepEqual(rules.notifyExceptions(rows as never, [], {}, now).map((e) => e.convId), ['quiet', 'blocked'],
     'без always прежняя форма списка не меняется');
-  const broken = mutant('if (!full && always.includes(d.otherUser.id))', 'if (always.includes(d.otherUser.id))');
-  assert.throws(() => assert.equal(broken.notifyExceptions(rows as never, [], {}, now, undefined, always)
-    .find((e) => e.convId === 'blocked')?.enabled, undefined, 'полная заглушка главнее включения'), assert.AssertionError);
+  counterfact(() => {
+    const broken = mutant('if (!full && always.includes(d.otherUser.id))', 'if (always.includes(d.otherUser.id))');
+    assert.throws(() => assert.equal(broken.notifyExceptions(rows as never, [], {}, now, undefined, always)
+      .find((e) => e.convId === 'blocked')?.enabled, undefined, 'полная заглушка главнее включения'), assert.AssertionError);
+  });
 });
 
 it('действие включения учитывает push4 и общий выключатель своего вида беседы', () => {
@@ -75,7 +80,9 @@ it('действие включения учитывает push4 и общий �
     assert.equal(api.notifyAlwaysAction('peer', { push4: true, notifyDm: true, notifyGroups: false, always: [] }), null);
   };
   check(rules);
-  const broken = mutant('const off = groupOfMuteTarget(target) !== null ? o.notifyGroups === false : o.notifyDm === false;',
-    'const off = o.notifyDm === false;');
-  assert.throws(() => check(broken), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('пункт управляет только'));
+  counterfact(() => {
+    const broken = mutant('const off = groupOfMuteTarget(target) !== null ? o.notifyGroups === false : o.notifyDm === false;',
+      'const off = o.notifyDm === false;');
+    assert.throws(() => check(broken), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('пункт управляет только'));
+  });
 });

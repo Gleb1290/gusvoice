@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -120,16 +121,20 @@ for (const kind of ['photo', 'video'] as const) test(`R262 ${kind}: чужой �
 
 for (const kind of ['photo', 'video'] as const) test(`R262 возврат isListenable вместо поддержки${kind} обнаруживается на оригинале`, async () => {
   await spentScenario(kind);
-  await assert.rejects(spentScenario(kind, true, true, [
-    'm.attachments.some((a) => (a.once === true && isListenable(a)) || onceMediaHere(a))',
-    'm.attachments.some((a) => a.once === true && isListenable(a))',
-  ]), error => error instanceof assert.AssertionError && error.message.includes('R262_FED_SPEND'));
+  await counterfact(async () => {
+    await assert.rejects(spentScenario(kind, true, true, [
+      'm.attachments.some((a) => (a.once === true && isListenable(a)) || onceMediaHere(a))',
+      'm.attachments.some((a) => a.once === true && isListenable(a))',
+    ]), error => error instanceof assert.AssertionError && error.message.includes('R262_FED_SPEND'));
+  });
 });
 
 test('R262 потеря spent не даёт незавершённому просмотру сжечь одноразовое фото', async () => {
   await spentScenario('photo', true, false);
-  await assert.rejects(spentScenario('photo', true, false, ['w.spent === true && want.size > 0', 'want.size > 0']),
-    error => error instanceof assert.AssertionError && error.message.includes('R262_FED_SPEND'));
+  await counterfact(async () => {
+    await assert.rejects(spentScenario('photo', true, false, ['w.spent === true && want.size > 0', 'want.size > 0']),
+      error => error instanceof assert.AssertionError && error.message.includes('R262_FED_SPEND'));
+  });
 });
 
 async function featureScenario(mutation?: Mutation) {
@@ -143,8 +148,10 @@ async function featureScenario(mutation?: Mutation) {
 test('R262 сосед с dm2once принимает голосовое, но фото/видео открываются только после dm2ttl', () => featureScenario());
 test('R262 потеря различия dm2ttl и dm2once обнаруживается реальными признаками связки', async () => {
   await featureScenario();
-  await assert.rejects(featureScenario(['media ? FED_FEATURES.dm2ttl : FED_FEATURES.dm2once', 'FED_FEATURES.dm2once']),
-    error => error instanceof assert.AssertionError && error.message.includes('R262_DM2TTL'));
+  await counterfact(async () => {
+    await assert.rejects(featureScenario(['media ? FED_FEATURES.dm2ttl : FED_FEATURES.dm2once', 'FED_FEATURES.dm2once']),
+      error => error instanceof assert.AssertionError && error.message.includes('R262_DM2TTL'));
+  });
 });
 
 for (const kind of ['photo', 'video'] as const) for (const ttl of [1, 60])

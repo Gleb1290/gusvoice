@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
@@ -144,9 +145,11 @@ it('R306 PlaybackGate: ожидание снимает abort-listener после
 });
 it('R306 queue контрфакт: finish старого трека больше не защищён, оригинал проходит первым', async () => {
   await oldFinish(load(source));
+  await counterfact(async () => {
   const needle = 'if (this.cur !== track) return false;';
   assert.equal(source.split(needle).length - 1, 1, 'queue: точный уникальный якорь');
   await assert.rejects(() => oldFinish(load(source.replace(needle, '/* мутант: принимаем чужой finish */'))), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.message.split('\n', 1)[0] === 'R306 queue старый finish после skip игнорируется'
     && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  });
 });

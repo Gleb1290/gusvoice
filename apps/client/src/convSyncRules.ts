@@ -61,6 +61,7 @@ import type {
   GatewayServerMessage,
 } from '@gusvoice/shared';
 import { byRecent } from './dmListRules';
+import type { FeedPlace } from './feedWindowRules';
 
 /**
  * ЛС, этап 2 (шаг 2а): беседы `/api/conv/*` на клиенте — чистые правила догонки и слияния (`docs/dm/STAGE2.md`).
@@ -107,6 +108,8 @@ export interface ConvState {
   summaries: Record<string, ConvSummary>;
   summaryPts: Record<string, number>;
   windows: Record<string, ConvWindow>;
+  /** Явный выбор позиции в этом сеансе: запоздалое открытие не перебивает чтение истории/цитату. В кеш не входит. */
+  positionRev?: Record<string, number>;
   msgPts: Record<string, number>;
   /** id сообщений, которых для меня больше нет, — навсегда. */
   gone: Record<string, true>;
@@ -203,6 +206,24 @@ export function drainPlan(
   return { apply, rest: [], gap: false };
 }
 
+/** Место прошлого визита годится, пока прочитанное не ушло вперёд. Старое место без cursor не держит уже прочитанную историю. */
+export function placeForRead(place: FeedPlace | null | undefined, readKey: number | null): FeedPlace | null {
+  if (!place || readKey === null) return null;
+  return readKey !== (place.readKey ?? 0) ? null : place;
+}
+
+/** Ответ старого запроса не откатывает уже известное прочитанное того же диалога. */
+function keepReadKey(prev: ConvSummary | undefined, next: ConvSummary): ConvSummary {
+  const lastReadKey = Math.max(prev?.lastReadKey ?? 0, next.lastReadKey);
+  const readTail = !!next.lastMessage && next.lastMessage.sortKey <= lastReadKey;
+  if (lastReadKey === next.lastReadKey && (!readTail || (next.unread === 0 && !next.unreadMentions))) return next;
+  return {
+    ...next, lastReadKey,
+    // Число новых после cursor знает сервер. Упоминания считаются тем же cursor, реакции — отдельными отметками.
+    ...(readTail ? { unread: 0, ...(next.unreadMentions !== undefined ? { unreadMentions: 0 } : {}) } : {}),
+  };
+}
+
 // ─── Сводки бесед ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -219,7 +240,7 @@ export function applyList(state: ConvState, res: ConvListResponse): ConvState {
       summaries[c.id] = state.summaries[c.id];
       summaryPts[c.id] = own;
     } else {
-      summaries[c.id] = c;
+      summaries[c.id] = keepReadKey(state.summaries[c.id], c);
       summaryPts[c.id] = res.pts;
     }
   }
@@ -254,7 +275,7 @@ export function applySummary(
     const { [s.id]: _w, ...windows } = state.windows;
     return { state: { ...state, summaries, windows, summaryPts: { ...state.summaryPts, [s.id]: P } }, dropped: s.id };
   }
-  const next = keepChatPrefs(state.summaries[s.id], s);
+  const next = keepReadKey(state.summaries[s.id], keepChatPrefs(state.summaries[s.id], s));
   return {
     state: { ...state, summaries: { ...state.summaries, [s.id]: next }, summaryPts: { ...state.summaryPts, [s.id]: P } },
     dropped: null,

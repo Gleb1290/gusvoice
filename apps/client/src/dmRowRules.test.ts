@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dmRowTime, rowShowsDraft, rowActivityAt } from './dmRowRules';
@@ -6,15 +7,15 @@ import ts from 'typescript';
 import * as rules from './dmRowRules';
 import * as shared from '@gusvoice/shared';
 import * as bubbleRules from './bubbleRules';
+import { testVmImports } from './testVmImports';
 
 function loadDmRowRules(source: string): typeof rules {
   const module = { exports: {} as typeof rules };
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  runInNewContext(code, { module, exports: module.exports, require: (id: string) => {
-    if (id === '@gusvoice/shared') return shared;
-    if (id === './bubbleRules') return bubbleRules;
-    assert.fail(`неожиданная зависимость ${id}`);
-  } });
+  runInNewContext(code, { module, exports: module.exports,
+    require: testVmImports(new URL('./dmRowRules.ts', import.meta.url), {
+      '@gusvoice/shared': shared, './bubbleRules': bubbleRules,
+    }) });
   return module.exports;
 }
 
@@ -55,20 +56,26 @@ function callMutant(from: string, to: string) {
 }
 it('R159 инверсия направления звонка обнаруживается на обоих читателях', () => {
   checkCallPreview();
-  assert.throws(() => checkCallPreview(callMutant('last.authorId === p.meId', 'last.authorId !== p.meId')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => checkCallPreview(callMutant('last.authorId === p.meId', 'last.authorId !== p.meId')), assert.AssertionError);
+  });
 });
 it('R159 потеря признака видео обнаруживается в превью', () => {
   const check = (r = rules) => assert.deepEqual({ ...r.dmRowPreview({ typing: false, last: callLast({ reason: 'hangup', duration: 61, video: true }), meId: 'caller' }) }, { kind: 'text', text: 'Исходящий видеозвонок, 1 мин' });
   check();
-  assert.throws(() => check(callMutant('callServiceText(last.call,', 'callServiceText({ ...last.call, video: false },')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(callMutant('callServiceText(last.call,', 'callServiceText({ ...last.call, video: false },')), assert.AssertionError);
+  });
 });
 it('R159 перенос звонка перед вложением обнаруживается', () => {
   checkCallPriority();
-  const branch = "if (last.call && p.meId) return { kind: 'text', text: callServiceText(last.call, last.authorId === p.meId) };";
-  const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
-  assert.equal(source.split(branch).length - 1, 1);
-  const changed = source.replace(branch, '').replace('const att = dmAttachmentPreview(last);', `${branch}\n  const att = dmAttachmentPreview(last);`);
-  assert.throws(() => checkCallPriority(loadDmRowRules(changed)), assert.AssertionError);
+  counterfact(() => {
+    const branch = "if (last.call && p.meId) return { kind: 'text', text: callServiceText(last.call, last.authorId === p.meId) };";
+    const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
+    assert.equal(source.split(branch).length - 1, 1);
+    const changed = source.replace(branch, '').replace('const att = dmAttachmentPreview(last);', `${branch}\n  const att = dmAttachmentPreview(last);`);
+    assert.throws(() => checkCallPriority(loadDmRowRules(changed)), assert.AssertionError);
+  });
 });
 
 it('строка сохраняет часы 19:59 назад, меняет их после 20 часов и отделяет неделю от года', () => {
@@ -129,11 +136,13 @@ it('слова одиночного вложения в строке бесед�
   check(rules);
   const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   check(loadDmRowRules(source));
-  const from = "return { icon: 'camera', label: attachmentWords({ kind: 'file', video: true, round: true }) };";
-  assert.ok(source.includes(from), 'найдена реальная ветка слов для кружка');
-  const changed = source.replace(from, "return { icon: 'camera', label: 'Видео' };");
-  assert.notEqual(changed, source, 'мутант действительно изменил исходник');
-  assert.throws(() => check(loadDmRowRules(changed)), assert.AssertionError, 'расхождение списка и цитаты поймано');
+  counterfact(() => {
+    const from = "return { icon: 'camera', label: attachmentWords({ kind: 'file', video: true, round: true }) };";
+    assert.ok(source.includes(from), 'найдена реальная ветка слов для кружка');
+    const changed = source.replace(from, "return { icon: 'camera', label: 'Видео' };");
+    assert.notEqual(changed, source, 'мутант действительно изменил исходник');
+    assert.throws(() => check(loadDmRowRules(changed)), assert.AssertionError, 'расхождение списка и цитаты поймано');
+  });
 });
 
 it('логин беседы ищется по префиксу без регистра и одного @, не по подстроке', () => {
@@ -230,10 +239,10 @@ it('GIF в списке называется GIF, смешанный альбо�
     assert.equal(api.dmAttachmentPreview({ text: '', attachments: 1, attachmentKind: 'photo' })?.label, 'Фото');
   };
   check(rules);
-  const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes('if (last.attachmentGif === true)'), 'GIF-ветка найдена');
-  const module = { exports: {} as Record<string, unknown> };
-  runInNewContext(ts.transpileModule(source.replace('if (last.attachmentGif === true)', 'if (false)'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, require: (id: string) => id === '@gusvoice/shared' ? shared : (id === './bubbleRules' ? bubbleRules : {}) });
-  assert.throws(() => check(module.exports as typeof rules), assert.AssertionError, 'мутант молча переименовывает GIF в фото/файл');
+  counterfact(() => {
+    const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes('if (last.attachmentGif === true)'), 'GIF-ветка найдена');
+    const mutant = loadDmRowRules(source.replace('if (last.attachmentGif === true)', 'if (false)'));
+    assert.throws(() => check(mutant), assert.AssertionError, 'мутант молча переименовывает GIF в фото/файл');
+  });
 });

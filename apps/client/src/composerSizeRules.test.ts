@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -11,16 +12,18 @@ it('R117 поле растёт до 35 процентов окна, не выш�
       assert.equal(fn(h), expected, `доступная высота ${h}`);
   };
   check(composerMaxPx);
-  const source = readFileSync(new URL('./composerSizeRules.ts', import.meta.url), 'utf8');
-  for (const [old, next] of [['= 0.35', '= 0.5'],
-    ['Math.min(COMPOSER_MAX_PX, Math.max(COMPOSER_MIN_CAP_PX, Math.round(availH * COMPOSER_MAX_SHARE)))',
-      'Math.max(COMPOSER_MIN_CAP_PX, Math.round(availH * COMPOSER_MAX_SHARE))']]) {
-    assert.ok(source.includes(old));
-    const module = { exports: {} as { composerMaxPx: typeof composerMaxPx } };
-    runInNewContext(ts.transpileModule(source.replace(old, next), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
-      { module, exports: module.exports });
-    assert.throws(() => check(module.exports.composerMaxPx), assert.AssertionError);
-  }
+  counterfact(() => {
+    const source = readFileSync(new URL('./composerSizeRules.ts', import.meta.url), 'utf8');
+    for (const [old, next] of [['= 0.35', '= 0.5'],
+      ['Math.min(COMPOSER_MAX_PX, Math.max(COMPOSER_MIN_CAP_PX, Math.round(availH * COMPOSER_MAX_SHARE)))',
+        'Math.max(COMPOSER_MIN_CAP_PX, Math.round(availH * COMPOSER_MAX_SHARE))']]) {
+      assert.ok(source.includes(old));
+      const module = { exports: {} as { composerMaxPx: typeof composerMaxPx } };
+      runInNewContext(ts.transpileModule(source.replace(old, next), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+        { module, exports: module.exports });
+      assert.throws(() => check(module.exports.composerMaxPx), assert.AssertionError);
+    }
+  });
 });
 
 it('R117 список закрепов ограничен местом от его реального верха до безопасного низа', () => {
@@ -31,10 +34,12 @@ it('R117 список закрепов ограничен местом от ег
       assert.ok(s.includes(`${target}.${method}EventListener('resize', fit)`));
   };
   check(source);
-  for (const old of ['roomBelow(toLayoutRect(el.getBoundingClientRect()).top, viewportSafe())', "window.visualViewport?.addEventListener('resize', fit);"]) {
-    assert.ok(source.includes(old));
-    assert.throws(() => check(source.replace(old, '')), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const old of ['roomBelow(toLayoutRect(el.getBoundingClientRect()).top, viewportSafe())', "window.visualViewport?.addEventListener('resize', fit);"]) {
+      assert.ok(source.includes(old));
+      assert.throws(() => check(source.replace(old, '')), assert.AssertionError);
+    }
+  });
 });
 
 it('R117 настоящее поле пересчитывает потолок на повороте и клавиатуре и снимает слушателей', () => {
@@ -66,15 +71,17 @@ it('R117 настоящее поле пересчитывает потолок �
     assert.match(s, /Math\.min\(full, cap\)/);
   };
   check(source);
-  const effect = composerEffect(source);
-  // Второй onViewport принадлежит B9 и может остаться: он не компенсирует потерю пересчёта поля.
-  for (const target of ['window', 'window.visualViewport?']) for (const method of ['add', 'remove']) {
-    const old = `${target}.${method}EventListener('resize', onViewport);`;
-    assert.equal(effect.split(old).length - 1, 1, 'контрфакт имеет один якорь внутри эффекта поля');
-    assert.equal(source.split(effect).length - 1, 1);
-    assert.throws(() => check(source.replace(effect, effect.replace(old, ''))), assert.AssertionError);
-  }
-  const cap = 'composerMaxPx(safe.vh - (safe.top ?? 0))';
-  assert.equal(source.split(cap).length - 1, 1);
-  assert.throws(() => check(source.replace(cap, '')), assert.AssertionError);
+  counterfact(() => {
+    const effect = composerEffect(source);
+    // Второй onViewport принадлежит B9 и может остаться: он не компенсирует потерю пересчёта поля.
+    for (const target of ['window', 'window.visualViewport?']) for (const method of ['add', 'remove']) {
+      const old = `${target}.${method}EventListener('resize', onViewport);`;
+      assert.equal(effect.split(old).length - 1, 1, 'контрфакт имеет один якорь внутри эффекта поля');
+      assert.equal(source.split(effect).length - 1, 1);
+      assert.throws(() => check(source.replace(effect, effect.replace(old, ''))), assert.AssertionError);
+    }
+    const cap = 'composerMaxPx(safe.vh - (safe.top ?? 0))';
+    assert.equal(source.split(cap).length - 1, 1);
+    assert.throws(() => check(source.replace(cap, '')), assert.AssertionError);
+  });
 });

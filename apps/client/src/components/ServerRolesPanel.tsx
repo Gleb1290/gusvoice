@@ -62,6 +62,11 @@ export const PERMS: { key: PermissionName; label: string; hint: string }[] = [
     hint: 'Создавать и удалять вебхуки текстовых каналов — адреса, по которым внешние программы пишут в канал. Настройки канала → Вебхуки.',
   },
   {
+    key: 'MANAGE_PREDICTIONS',
+    label: 'Проводить ставки',
+    hint: 'Заводить события для ставок ГусКоинами, закрывать приём и отменять чужие события с возвратом ставок. Итог события подводит только тот, кто его завёл. Ползунки экономики и выдачу монет право не даёт.',
+  },
+  {
     key: 'MANAGE_EMOJIS',
     label: 'Управление эмодзи',
     hint: 'Загружать и удалять свои эмодзи сервера. Настройки сервера → Эмодзи.',
@@ -193,6 +198,9 @@ export function ServerRolesPanel({
   // Защищённые права (MOVE_ANYONE) выдаёт ТОЛЬКО владелец сервера или супер-админ — бэкенд их иначе
   // просто не примет (`clampGrant` оставит прежнее значение), поэтому и тумблер здесь заперт.
   const canGrantProtected = useStore((s) => !!s.user && (s.user.superAdmin || s.user.id === ownerId));
+  // Право «Проводить ставки» — часть игр: пока игры показываем только супер-админу (раздел «Игры», 30.10), строки нет и
+  // у остальных. Скрыта только строка: уже выданный бит роли не трогается — сохранение меняет лишь переключённые права.
+  const gamesShown = useStore((s) => s.user?.superAdmin === true);
 
   const refreshTree = () => useStore.getState().openServer(serverId);
 
@@ -508,7 +516,7 @@ export function ServerRolesPanel({
               </div>
 
               <div className="perm-grid2">
-                {PERMS.map(({ key, label, hint }) => (
+                {PERMS.filter(({ key }) => gamesShown || key !== 'MANAGE_PREDICTIONS').map(({ key, label, hint }) => (
                   <div key={key} className="perm-toggle-row">
                     <span>
                       {label}

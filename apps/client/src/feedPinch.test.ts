@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -78,9 +79,11 @@ it('пальцы на разных фотографиях не создают о
     } finally { detach(); list.remove(); }
   };
   check(loadAttach());
-  const mutant = loadAttach(source => source.replace(
-    'if (!img || photoOf(b) !== img) return;',
-    'if (!img) return; if (photoOf(b) !== img) { onStart?.(); return; }',
-  ));
-  assert.throws(() => check(mutant), assert.AssertionError, 'исполняемый мутант принимает пальцы с разных изображений');
+  counterfact(() => {
+    const mutant = loadAttach(source => source.replace(
+      'if (!img || photoOf(b) !== img) return;',
+      'if (!img) return; if (photoOf(b) !== img) { onStart?.(); return; }',
+    ));
+    assert.throws(() => check(mutant), assert.AssertionError, 'исполняемый мутант принимает пальцы с разных изображений');
+  });
 });

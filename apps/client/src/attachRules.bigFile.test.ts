@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -33,7 +34,7 @@ it('R127 большой предел действует только с bigfile1
     assert.equal(JSON.stringify(api.dmFileLimitFrom(['bigfile1'], legacy + 1)), JSON.stringify({ chunked: true, max: legacy + 1 }));
   };
   check(rules);
-  assert.throws(() => check(changed('!!features?.includes(FEATURE_BIGFILE1) && ', 'true && ')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(changed('!!features?.includes(FEATURE_BIGFILE1) && ', 'true && ')), assert.AssertionError));
 });
 it('R127 признак без числа, нулевой размер и ровно 25 МиБ остаются на одиночной загрузке', () => {
   // Новая возможность без корректного предела не должна обещать 1 ГиБ человеку.

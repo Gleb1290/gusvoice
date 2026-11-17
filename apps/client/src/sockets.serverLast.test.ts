@@ -1,3 +1,4 @@
+import { counterfact } from "../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -154,8 +155,11 @@ function resyncGuard(raw = storeSource) {
 }
 it('R180 resyncAfterReconnect запрашивает loadServers вне условия открытого сервера, отказ не ломает остальное', () => {
   // AST целого стора не подменяет action-копией: это страж проводки, не прогон живого API.
-  resyncGuard(); const anchor = 'void get().loadServers().catch(() => {});'; assert.equal(storeSource.split(anchor).length - 1, 1);
-  assert.throws(() => resyncGuard(storeSource.replace(anchor, '')), assert.AssertionError);
+  resyncGuard();
+  counterfact(() => {
+    const anchor = 'void get().loadServers().catch(() => {});'; assert.equal(storeSource.split(anchor).length - 1, 1);
+    assert.throws(() => resyncGuard(storeSource.replace(anchor, '')), assert.AssertionError);
+  });
 });
 for (const [name, anchor, replacement, check, target] of [
   ['нет create превью', 'applyServerMessageCreate(store.servers, msg.serverId, serverLastFromMessage(msg.message, msg.channelId, chName))', 'store.servers', create, 'create обновляет последнее'],
@@ -163,8 +167,11 @@ for (const [name, anchor, replacement, check, target] of [
   ['reload при любом delete', 'if (isServerLastMessage(store.servers, msg.messageId)) void store.loadServers();', 'void store.loadServers();', remove, 'delete перечитывает серверы'],
 ] as const) it(`R180 контрфакт ${name} обнаруживается настоящим обработчиком кадра`, () => {
   // Оригинал перед мутацией; ошибки импортов/VM не заменяют адресную проверку эффекта сообщения.
-  check(); assert.equal(source.split(anchor).length - 1, 1);
-  assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(target));
+  check();
+  counterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 
 function broadcastFrame(content: string, flag: boolean | null | undefined, raw = source) {
@@ -205,8 +212,11 @@ it('R279 запрет массового пинга не глушит личны
 });
 it('R279 потеря серверного запрета массового пинга обнаруживается настоящим основным шлюзом', () => {
   // Мутант сохраняет всё сообщение, но заставляет mentionsMe снова будить everyone вопреки серверу.
-  silentBroadcast(); const from = 'msg.message.mentionEveryone !== false';
-  assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => silentBroadcast(source.replace(from, 'true')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 основной шлюз не звенит'));
+  silentBroadcast();
+  counterfact(() => {
+    const from = 'msg.message.mentionEveryone !== false';
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => silentBroadcast(source.replace(from, 'true')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 основной шлюз не звенит'));
+  });
 });

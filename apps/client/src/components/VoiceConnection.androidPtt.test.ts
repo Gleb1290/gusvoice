@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -225,10 +226,12 @@ for (const [label, mutate, check] of mutations) {
   // Класс ошибки: соответствующий страж обязан замечать сломанный порядок, условия, гонку или обработку отказа.
   it(`R253 контрфакт: ${label}`, () => {
     check(source); // Оригинал проходит прежде, чем строится контрфакт; код компонента не исполняется.
-    const changed = mutate(source);
-    const parsed = ts.createSourceFile('mutant.tsx', changed, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    // Синтаксическая ошибка не считается доказательством чувствительности стража.
-    assert.equal((parsed as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics.length, 0);
-    assert.throws(() => check(changed), assert.AssertionError);
+    counterfact(() => {
+      const changed = mutate(source);
+      const parsed = ts.createSourceFile('mutant.tsx', changed, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      // Синтаксическая ошибка не считается доказательством чувствительности стража.
+      assert.equal((parsed as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics.length, 0);
+      assert.throws(() => check(changed), assert.AssertionError);
+    });
   });
 }

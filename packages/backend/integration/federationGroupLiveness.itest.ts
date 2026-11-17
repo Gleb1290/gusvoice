@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -141,8 +142,10 @@ async function downBoundary(mutation?: Mutation) {
 it('R208 сеть: до, ровно и после десяти минут; здоровый дом, broken и stale не заражаются', async () => { await downBoundary(); });
 it('R208 нулевой порог обнаруживается именно преждевременным silent, а не ошибкой обвязки', async () => {
   await downBoundary();
-  await assert.rejects(downBoundary(['const STALE_AFTER_MS = 10 * 60_000;', 'const STALE_AFTER_MS = 0;']),
-    killed('R208 граница: мгновенный сетевой сбой не объявляет хост лежащим', true, false));
+  await counterfact(async () => {
+    await assert.rejects(downBoundary(['const STALE_AFTER_MS = 10 * 60_000;', 'const STALE_AFTER_MS = 0;']),
+      killed('R208 граница: мгновенный сетевой сбой не объявляет хост лежащим', true, false));
+  });
 });
 
 async function serverError(mutation?: Mutation) {
@@ -156,8 +159,10 @@ async function serverError(mutation?: Mutation) {
 it('R208 ровно 500 начинает молчание, повторный 599 не отодвигает начало', async () => { await serverError(); });
 it('R208 > 500 вместо >= 500 обнаруживается отсутствием накопленного срока', async () => {
   await serverError();
-  await assert.rejects(serverError(['if (status === null || status >= 500) {', 'if (status === null || status > 500) {']),
-    killed('R208 500: повторные 5xx сохраняют начало молчания', false, true));
+  await counterfact(async () => {
+    await assert.rejects(serverError(['if (status === null || status >= 500) {', 'if (status === null || status > 500) {']),
+      killed('R208 500: повторные 5xx сохраняют начало молчания', false, true));
+  });
 });
 
 async function clearDown(mutation?: Mutation, status = 499) {
@@ -175,8 +180,10 @@ async function clearDown(mutation?: Mutation, status = 499) {
 for (const status of [199, 200, 401, 429, 499]) it(`R208 ответ ${status} оживляет хост; новый сбой начинает новый срок`, async () => { await clearDown(undefined, status); });
 it('R208 забытое снятие отметки обнаруживается ответом 499', async () => {
   await clearDown();
-  await assert.rejects(clearDown(['pullDownSince.delete(instanceId);', '/* мутант: молчание не снято */']),
-    killed('R208 ответ: ниже 500 снимает молчание', true, false));
+  await counterfact(async () => {
+    await assert.rejects(clearDown(['pullDownSince.delete(instanceId);', '/* мутант: молчание не снято */']),
+      killed('R208 ответ: ниже 500 снимает молчание', true, false));
+  });
 });
 
 it('R208 404 и ошибка часов оживляют сеть, но старый stale позднее тоже включает silent', async () => {
@@ -230,8 +237,10 @@ async function summaryDown(convMutation?: Mutation) {
 it('R208 реальная сводка ставит down только молчащему чужому хосту и снимает после ответа', async () => { await summaryDown(); });
 it('R208 удаление silent из сводки обнаруживается при всё ещё активной связке', async () => {
   await summaryDown();
-  await assert.rejects(summaryDown(['groupHostsDown.has(r.origin_instance_id) || groupHostsSilent.has(r.origin_instance_id)', 'groupHostsDown.has(r.origin_instance_id)']),
-    killed('R208 сводка: молчание включает down без broken', undefined, true));
+  await counterfact(async () => {
+    await assert.rejects(summaryDown(['groupHostsDown.has(r.origin_instance_id) || groupHostsSilent.has(r.origin_instance_id)', 'groupHostsDown.has(r.origin_instance_id)']),
+      killed('R208 сводка: молчание включает down без broken', undefined, true));
+  });
 });
 
 it('R208 сверка знает один origin группы без 1:1 и рассылает журнал + conv.change на обеих переменах silent', async () => {
@@ -267,4 +276,3 @@ it('R208 пауза и возврат связки тоже обновляют �
   await f.link.refreshFedLinks(); assert.equal(f.events.length, 2); assert.equal((await summary(f)).fedGroupHost?.down, undefined);
   assert.deepEqual(f.warns, []);
 });
-

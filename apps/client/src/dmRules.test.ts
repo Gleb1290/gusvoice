@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -51,9 +52,12 @@ for (const [name, anchor, replacement, check, target] of [
   ['группа или Избранное задают дом', '!d.group && !d.saved && d.otherUser.id === userId', 'd.otherUser.id === userId', homeContract, 'только домашний инстанс'],
 ] as const) it(`R197 мутант «${name}» ломает целый модуль dmRules`, () => {
   const original = readFileSync(new URL('./dmRules.ts', import.meta.url), 'utf8');
-  check(loadDmRules(original)); assert.equal(original.split(anchor).length - 1, 1, 'единственный якорь');
+  check(loadDmRules(original));
+  counterfact(() => {
+  assert.equal(original.split(anchor).length - 1, 1, 'единственный якорь');
   const mutant = loadDmRules(original.replace(anchor, replacement));
   assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 for (const [label, features, expected] of compatibilityCases) {
   it(`ЛС требуют обновления сервера: ${label} → ${expected ? 'да' : 'нет'}`, () => {
@@ -62,6 +66,7 @@ for (const [label, features, expected] of compatibilityCases) {
 }
 it('инверсия совместимости ЛС обнаруживается той же таблицей реального модуля', () => {
   for (const [, features, expected] of compatibilityCases) assert.equal(dmNeedsServerUpdate(features), expected);
+  counterfact(() => {
   const original = readFileSync(new URL('./dmRules.ts', import.meta.url), 'utf8');
   const changed = original.replace('return !(features.includes(CAP_CONV1)', 'return (features.includes(CAP_CONV1)');
   assert.notEqual(changed, original);
@@ -73,6 +78,7 @@ it('инверсия совместимости ЛС обнаруживаетс�
   assert.throws(() => {
     for (const [, features, expected] of compatibilityCases) assert.equal(bad.dmNeedsServerUpdate(features), expected);
   }, assert.AssertionError);
+  });
 });
 
 it('серверный поиск требует users1 и паузы 300 мс, старый сервер не получает ручку', () => {

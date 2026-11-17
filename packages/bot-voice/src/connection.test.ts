@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -247,7 +248,9 @@ for (const mutant of [
   { name: 'allow не запускает немедленную пробу', from: 'else if (can === true && this.isMuted) void this.probe();', to: 'else if (false) void this.probe();', check: allowAgain, marker: 'R309 refreshed allow немедленно публикует новую дорожку', actual: 1, expected: 2 },
 ]) it(`R309 connection контрфакт: ${mutant.name}, оригинал проходит первым`, async () => {
   await mutant.check(source);
+  await counterfact(async () => {
   await assert.rejects(mutant.check(replaceOnce(mutant.from, mutant.to)), (error: unknown) => error instanceof assert.AssertionError
     && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual' && error.message.split('\n', 1)[0] === mutant.marker
     && error.actual === mutant.actual && error.expected === mutant.expected);
+  });
 });

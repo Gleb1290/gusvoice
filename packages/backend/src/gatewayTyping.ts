@@ -1,4 +1,4 @@
-import { FEATURE_TYPING2, parseTypingAction, typingActionField, typingActionFor, type GatewayServerMessage } from '@gusvoice/shared';
+import { FEATURE_TYPING2, FEATURE_TYPING3, parseTypingAction, typingActionField, typingActionFor, type GatewayServerMessage } from '@gusvoice/shared';
 import { reachesPeer } from './blockRules.js';
 import { typingRoute } from './gatewayRules.js';
 
@@ -80,9 +80,18 @@ export async function relayTyping<S>(
       ]);
       return;
     }
+    if (extra.action === 'round_upload') {
+      await Promise.all([
+        publish(userId, { t: 'typing', dmId, userId: uid, ...extra }, { cap: FEATURE_TYPING3 }),
+        publish(userId, { t: 'typing', dmId, userId: uid, ...typingActionField(typingActionFor(extra.action, undefined)) }, { notCap: FEATURE_TYPING3 }),
+      ]);
+      return;
+    }
     await publish(userId, { t: 'typing', dmId, userId: uid, ...extra });
   };
-  const extraFor = (caps: ReadonlySet<string> | undefined) => (extra.action === 'round' ? typingActionField(typingActionFor('round', caps)) : extra);
+  const extraFor = (caps: ReadonlySet<string> | undefined) => extra.action === 'round' || extra.action === 'round_upload'
+    ? typingActionField(typingActionFor(extra.action, caps))
+    : extra;
   if (await deps.rateHit(`typing:${uid}`, 20, 10)) return; // честный клиент шлёт ≤1 / 2.5с
   const peerId = msg.dmId ? await deps.dmPeerOf(msg.dmId, uid) : null;
   // Группа (`groups1`): «Имя печатает» каждому участнику в сети, кроме заблокировавших отправителя (#212). Имя клиент
@@ -136,10 +145,12 @@ export async function relayTyping<S>(
   // было бы «печатать» в канал, который сам не видишь.
   const audience = await deps.getChannelAudience(route.channelId);
   if (!audience || audience.serverId !== route.serverId || !audience.userIds.includes(uid)) return;
+  const channelFrame: TypingMessage = { t: 'typing', channelId: route.channelId, userId: uid, ...extra };
+  if (channelFrame.action === 'round_upload') channelFrame.action = 'video';
   await deps.publishToChannel(
     route.serverId,
     route.channelId,
-    { t: 'typing', channelId: route.channelId, userId: uid, ...extra },
+    channelFrame,
     audience.userIds.filter((id) => id !== uid), // себе «печатает…» не показываем
   );
 }

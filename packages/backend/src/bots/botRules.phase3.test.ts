@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import * as crypto from 'node:crypto';
 import { it } from 'node:test';
@@ -110,16 +111,21 @@ it('R303 контрфакты приватности и HTML убиваются 
   ];
   for (const m of cases) {
     m.check(rules); m.check(load<typeof rules>(source));
+    counterfact(() => {
     assert.equal(source.split(m.from).length - 1, 1, 'единственный якорь');
     assert.throws(() => m.check(load<typeof rules>(source.replace(m.from, m.to))), e => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION'
       && e.message.split(/\r?\n/, 1)[0] === m.marker && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === m.expected);
+    });
   }
 });
 it('R303 контрфакт ADMINISTRATOR от владельца пойман на полном модуле прав', () => {
   const raw = readFileSync(new URL('../roleRules.ts', import.meta.url), 'utf8');
   const anchor = 'return clampGrant(requested, actor, owner) & ~Permission.ADMINISTRATOR;';
   const check = (r: typeof roles) => assert.strictEqual(r.botGrant(shared.Permission.ADMINISTRATOR, shared.ALL_PERMISSIONS, true), 0n, 'бот никогда не администратор');
-  check(roles); check(load<typeof roles>(raw)); assert.equal(raw.split(anchor).length - 1, 1);
+  check(roles); check(load<typeof roles>(raw));
+  counterfact(() => {
+  assert.equal(raw.split(anchor).length - 1, 1);
   assert.throws(() => check(load<typeof roles>(raw.replace(anchor, 'return clampGrant(requested, actor, owner);'))), e => e instanceof assert.AssertionError
     && e.message.startsWith('бот никогда не администратор') && e.operator === 'strictEqual' && e.actual === shared.Permission.ADMINISTRATOR && e.expected === 0n);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -14,9 +15,11 @@ function load(raw = source): typeof rules {
   return module.exports as typeof rules;
 }
 function killed(from: string, to: string, check: (api: typeof rules) => void, prefix: string, actual: unknown, expected: unknown) {
-  check(load()); assert.equal(source.split(from).length - 1, 1, 'один якорь карты');
+  check(load()); counterfact(() => {
+assert.equal(source.split(from).length - 1, 1, 'один якорь карты');
   assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
     && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+});
 }
 it('R220 ключ карты включён только при непустом содержимом, пробелы не объявляют возможность', () => {
   for (const key of [undefined, '', ' \t\n ']) assert.equal(rules.mapsStaticEnabled(key), false);

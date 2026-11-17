@@ -68,7 +68,8 @@ function dayFields(r: {
   next: { day: string; seasonId: string; seasonEarned: number };
 }) {
   return {
-    ...(r.rolled ? { day: r.next.day, secondsToday: 0, earnedToday: 0 } : {}),
+    // Порог ожидания одному (28.10) — суточный наравне с затуханием и потолком: катится вместе с ними.
+    ...(r.rolled ? { day: r.next.day, secondsToday: 0, earnedToday: 0, aloneEarnedMilli: 0 } : {}),
     ...(r.seasonRolled ? { seasonId: r.next.seasonId, seasonEarned: 0 } : {}),
   };
 }
@@ -88,7 +89,7 @@ export async function transferCoins(i: TransferInput): Promise<TransferResult> {
     // дедлока, когда двое типают друг друга одновременно.
     const locked = await tx.execute(sql`
       SELECT user_id, balance, given_today, received_today, recognition_today,
-             day, season_id, seconds_today, earned_today, season_earned
+             day, season_id, seconds_today, earned_today, alone_earned_milli, season_earned
         FROM coin_balances
        WHERE server_id = ${i.serverId}
          AND user_id IN (${i.fromUserId}, ${i.toUserId})
@@ -106,6 +107,7 @@ export async function transferCoins(i: TransferInput): Promise<TransferResult> {
       season_id: string;
       seconds_today: number;
       earned_today: number;
+      alone_earned_milli: number;
       season_earned: number;
     }
     const rows = (locked.rows ?? []) as unknown as LockedRow[];
@@ -128,6 +130,7 @@ export async function transferCoins(i: TransferInput): Promise<TransferResult> {
           seasonId: r.season_id,
           secondsToday: r.seconds_today,
           earnedToday: r.earned_today,
+          aloneEarnedMilli: r.alone_earned_milli,
           seasonEarned: r.season_earned,
         },
         i.now,
@@ -182,12 +185,17 @@ export async function transferCoins(i: TransferInput): Promise<TransferResult> {
     // `if (i.dailyPair > 0)`, и при выключенном потолке `pairCountToday` оставался нулём — то есть
     // признание (ниже) начислялось бы за КАЖДЫЙ тип одного и того же человека, а не за первый.
     // Ползунок, выключающий чужую защиту, — классическая форма этой ошибки.
+    // 🔴 Лазейка перевода (ГусКоины 2, этап 1): выигрыш ДУЭЛИ у этого же человека идёт в тот же суточный предел пары
+    // наравне с `tip.in` — иначе «проиграть дуэль нарочно» стало бы переводом в обход пределов. Считается чистый
+    // перевод от соперника (`data.net` = выплата − своя ставка, `gameMoney.payStake`); строки без него — всей суммой.
+    // ⚠️ Признание (`n`) — только по типам: дуэль не благодарность.
     const paired = await tx.execute(sql`
-      SELECT COALESCE(SUM(amount), 0)::int AS total, COUNT(*)::int AS n
+      SELECT COALESCE(SUM(CASE WHEN reason = 'duel.win' THEN GREATEST(COALESCE((data->>'net')::int, amount), 0) ELSE amount END), 0)::int AS total,
+             COUNT(*) FILTER (WHERE reason = 'tip.in')::int AS n
         FROM coin_ledger
        WHERE server_id = ${i.serverId}
          AND user_id = ${i.toUserId}
-         AND reason = 'tip.in'
+         AND reason IN ('tip.in', 'duel.win')
          AND ref_user_id = ${i.fromUserId}
          AND created_at >= ${dayStart(i.now)}
     `);

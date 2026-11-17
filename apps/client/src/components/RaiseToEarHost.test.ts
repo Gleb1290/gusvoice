@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -128,7 +129,9 @@ for (const [label, from, to, scenario, prefix] of [
   ['пауза считается воспроизведением', 'playing: player.playing', 'playing: true', pause, 'R216-host-pause:'],
 ] as const) it(`R216 Host контрфакт: ${label}`, async () => {
   await scenario(hostSource);
-  assert.equal(hostSource.split(from).length - 1, 1, 'единственный якорь в настоящем целом Host');
-  await assert.rejects(scenario(hostSource.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === '[true]' && error.expected === '[true,false]');
+  await counterfact(async () => {
+    assert.equal(hostSource.split(from).length - 1, 1, 'единственный якорь в настоящем целом Host');
+    await assert.rejects(scenario(hostSource.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === '[true]' && error.expected === '[true,false]');
+  });
 });

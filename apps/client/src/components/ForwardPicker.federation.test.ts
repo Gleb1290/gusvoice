@@ -1,8 +1,10 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { before, after, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import { act } from 'react';
 import * as jsx from 'react/jsx-runtime';
@@ -43,14 +45,13 @@ async function scene(phone: boolean, files: boolean, selection: 'remote' | 'loca
     '../dmOnline': { useVisibleOnline: () => new Set<string>() }, '../dialogChrome': { useDialogChrome: () => React.useRef(null) },
     './BottomSheet': { BottomSheet: (p: { children: React.ReactNode }) => React.createElement('section', { className: 'fixture-sheet' }, p.children) },
     './DmSidebar': { DmRow: row, ForwardCell: cell, ForwardAva: () => null }, './Icon': { Icon: () => null },
-    './SchedPick': { SchedPick: unused }, './ContextMenu': { ContextMenu: unused, MenuItem: unused }, './ShareChannelRow': { ShareChannelRow: unused },
   };
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   try {
     const module = { exports: {} };
     runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
       { module, exports: module.exports, window, document, navigator,
-        require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `явный импорт ${id}`); return deps[id]; } });
+        require: testVmImports(new URL('./ForwardPicker.tsx', import.meta.url), deps) });
     const Component = (module.exports as { ForwardPicker: React.ComponentType<ForwardPickerProps> }).ForwardPicker;
     await act(async () => root.render(React.createElement(Component, { count: 1, hasFiles: files,
       initial: selection === 'none' ? [] : [selection], onSend: unused, onClose: () => {} })));
@@ -88,14 +89,18 @@ for (const [files, selection, name] of [[false, 'remote', 'текст удалё
 it('R192 контрфакт снятого hasFiles ловится предупреждением при пересылке одного текста', async () => {
   // Класс ошибки: предупреждение файлов применяется к тексту.
   await scene(false, false, 'remote', 'quiet');
-  await assert.rejects(scene(false, false, 'remote', 'quiet', mutate('() => (hasFiles ? dms.filter', '() => (true ? dms.filter')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('без файлов или удалённого выбора предупреждения нет'));
+  await counterfact(async () => {
+    await assert.rejects(scene(false, false, 'remote', 'quiet', mutate('() => (hasFiles ? dms.filter', '() => (true ? dms.filter')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('без файлов или удалённого выбора предупреждения нет'));
+  });
 });
 it('R192 контрфакт снятого broken-фильтра ловится появлением архивной цели в DOM', async () => {
   // Класс ошибки: разорванная связка допускается как цель пересылки.
   await scene(false, true, 'local', 'broken');
-  await assert.rejects(scene(false, true, 'local', 'broken', mutate(" && (summaries[d.id] as { fedLink?: string } | undefined)?.fedLink !== 'broken'", '')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('архив разорванной связки исключён'));
+  await counterfact(async () => {
+    await assert.rejects(scene(false, true, 'local', 'broken', mutate(" && (summaries[d.id] as { fedLink?: string } | undefined)?.fedLink !== 'broken'", '')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('архив разорванной связки исключён'));
+  });
 });
 for (const [fedm3, fedNoFiles, selection, warning] of [[true, false, 'remote', false], [true, true, 'remote', true], [false, false, 'remote', true], [true, true, 'local', false]] as const) {
   it(`R194 пересылка файлов: fedm3=${fedm3}, отказ соседа=${fedNoFiles}, выбран ${selection}`, async () => {
@@ -110,7 +115,9 @@ for (const [name, anchor, replacement, fedm3, fedNoFiles] of [
   it(`R194 контрфакт пересылки «${name}» ловится настоящим предупреждением`, async () => {
     // Класс ошибки: несовместимый адресат допускает файлы без предупреждения.
     await scene(false, true, 'remote', 'warn', raw, fedm3, fedNoFiles);
-    await assert.rejects(scene(false, true, 'remote', 'warn', mutate(anchor, replacement), fedm3, fedNoFiles),
-      (e: unknown) => e instanceof assert.AssertionError && e.message.includes('файлы для выбранного удалённого адресата предупреждают'));
+    await counterfact(async () => {
+      await assert.rejects(scene(false, true, 'remote', 'warn', mutate(anchor, replacement), fedm3, fedNoFiles),
+        (e: unknown) => e instanceof assert.AssertionError && e.message.includes('файлы для выбранного удалённого адресата предупреждают'));
+    });
   });
 }

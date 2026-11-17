@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -77,8 +78,11 @@ it('R304 контрфакт принятой v1 ловится отказом с
   };
   const probe = (r: typeof rules) => assert.equal(r.attSigExpValid(key, id, viewer, 2, rules.attSig(key, id, viewer, 2), now), false,
     'R304 бессрочная подпись не открывает ЛС');
-  probe(rules); probe(load(source)); const needle = 'if (dot !== 32) return false;'; assert.equal(source.split(needle).length - 1, 1);
+  probe(rules); probe(load(source));
+  counterfact(() => {
+  const needle = 'if (dot !== 32) return false;'; assert.equal(source.split(needle).length - 1, 1);
   assert.throws(() => probe(load(source.replace(needle, 'if (dot !== 32) return attSigValid(key, attId, viewerId, tokenGen, sig);'))),
     (e: unknown) => e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
       && e.message.split(/\r?\n/, 1)[0] === 'R304 бессрочная подпись не открывает ЛС' && e.actual === true && e.expected === false);
+  });
 });

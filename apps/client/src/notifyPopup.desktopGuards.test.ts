@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -95,7 +96,9 @@ it('R233 потеря масштаба отступа одного края ил
   ] as const;
   for (const [anchor, replacement, prefix, actual, expected] of cases) {
     checkOffsets();
-    assert.throws(() => checkOffsets(replaceOnce(rust, anchor, replacement) + `\n// ${anchor}`), exactFailure(prefix, actual, expected));
+    counterfact(() => {
+      assert.throws(() => checkOffsets(replaceOnce(rust, anchor, replacement) + `\n// ${anchor}`), exactFailure(prefix, actual, expected));
+    });
   }
 });
 
@@ -124,20 +127,22 @@ it('R233 Windows после первого показа читает насто�
 it('R233 потеря повторной постановки её охраны порядка или безопасных флагов обнаруживается по точной причине', () => {
   const cases: [string, string, string, unknown, unknown][] = [
     [retryCall, '', 'R233-retry-count:', 1, 2],
-    [retryCall, retryCall.replace('SWP_NOACTIVATE', 'SWP_SHOWWINDOW'), 'R233-retry-flags:',
+    [retryCall, (counterfact(() => retryCall.replace('SWP_NOACTIVATE', 'SWP_SHOWWINDOW')) ?? ''), 'R233-retry-flags:',
       'SetWindowPos(hwnd,Some(HWND_TOPMOST),x,y,w,h,SWP_SHOWWINDOW);', 'SetWindowPos(hwnd,Some(HWND_TOPMOST),x,y,w,h,SWP_NOACTIVATE);'],
-    [retryCall, retryCall.replace('SWP_NOACTIVATE', 'SWP_NOACTIVATE | SWP_SHOWWINDOW'), 'R233-retry-flags:',
+    [retryCall, (counterfact(() => retryCall.replace('SWP_NOACTIVATE', 'SWP_NOACTIVATE | SWP_SHOWWINDOW')) ?? ''), 'R233-retry-flags:',
       'SetWindowPos(hwnd,Some(HWND_TOPMOST),x,y,w,h,SWP_NOACTIVATE|SWP_SHOWWINDOW);', 'SetWindowPos(hwnd,Some(HWND_TOPMOST),x,y,w,h,SWP_NOACTIVATE);'],
-    [rectCondition, rectCondition.replace('.is_ok()', '.is_err()'), 'R233-retry-condition:',
-      compact(rectCondition.replace('.is_ok()', '.is_err()')), compact(rectCondition)],
-    [rectCondition, rectCondition.replace(' || r.bottom - r.top != h', ''), 'R233-retry-condition:',
-      compact(rectCondition.replace(' || r.bottom - r.top != h', '')), compact(rectCondition)],
+    [rectCondition, (counterfact(() => rectCondition.replace('.is_ok()', '.is_err()')) ?? ''), 'R233-retry-condition:',
+      compact((counterfact(() => rectCondition.replace('.is_ok()', '.is_err()')) ?? '')), compact(rectCondition)],
+    [rectCondition, (counterfact(() => rectCondition.replace(' || r.bottom - r.top != h', '')) ?? ''), 'R233-retry-condition:',
+      compact((counterfact(() => rectCondition.replace(' || r.bottom - r.top != h', '')) ?? '')), compact(rectCondition)],
     [`if ${rectCondition} {\n            ${retryCall}\n        }`, `${retryCall}\n        if ${rectCondition} {}`, 'R233-retry-scope:', false, true],
     [retryCall, `${retryCall}\n            let _ = win.show();`, 'R233-retry-focus:', true, false],
   ];
   for (const [anchor, replacement, prefix, actual, expected] of cases) {
     checkRectRetry();
-    assert.throws(() => checkRectRetry(replaceOnce(rust, anchor, replacement)), exactFailure(prefix, actual, expected));
+    counterfact(() => {
+      assert.throws(() => checkRectRetry(replaceOnce(rust, anchor, replacement)), exactFailure(prefix, actual, expected));
+    });
   }
 });
 
@@ -189,19 +194,25 @@ it('R233 комментарий внешний или мёртвый вызов 
     const anchor = `${apply}(${get}());`;
     // Стартовый applyTheme тоже есть в файле: уникально адресуем строку callback с его ключом.
     const line = `    if (e.key === null || e.key === '${apply === 'applyTheme' ? 'gv_theme' : 'gv_ui_scale'}') ${anchor}`;
-    for (const replacement of [line.replace(anchor, `/* ${anchor} */ {}`), line.replace(anchor, `{ function unused() { ${anchor} } }`)]) {
+    for (const replacement of [(counterfact(() => line.replace(anchor, `/* ${anchor} */ {}`)) ?? ''), (counterfact(() => line.replace(anchor, `{ function unused() { ${anchor} } }`)) ?? '')]) {
       checkNotifyStorage();
-      assert.throws(() => checkNotifyStorage(replaceOnce(main, line, replacement) + `\n${anchor}`),
-        exactFailure(`R233-storage-call: ${apply}`, 0, 1));
+      counterfact(() => {
+        assert.throws(() => checkNotifyStorage(replaceOnce(main, line, replacement) + `\n${anchor}`),
+          exactFailure(`R233-storage-call: ${apply}`, 0, 1));
+      });
     }
   }
   checkNotifyStorage();
-  assert.throws(() => checkNotifyStorage(replaceOnce(main, "window.addEventListener('storage', (e) => {", "window.addEventListener('resize', (e) => {")),
-    exactFailure('R233-storage-listener:', 0, 1));
+  counterfact(() => {
+    assert.throws(() => checkNotifyStorage(replaceOnce(main, "window.addEventListener('storage', (e) => {", "window.addEventListener('resize', (e) => {")),
+      exactFailure('R233-storage-listener:', 0, 1));
+  });
   for (const key of ['gv_theme', 'gv_ui_scale']) {
     const anchor = `e.key === null || e.key === '${key}'`;
     checkNotifyStorage();
-    assert.throws(() => checkNotifyStorage(replaceOnce(main, anchor, `e.key === '${key}'`)),
-      exactFailure(`R233-storage-key: ${key}`, 0, 1));
+    counterfact(() => {
+      assert.throws(() => checkNotifyStorage(replaceOnce(main, anchor, `e.key === '${key}'`)),
+        exactFailure(`R233-storage-key: ${key}`, 0, 1));
+    });
   }
 });

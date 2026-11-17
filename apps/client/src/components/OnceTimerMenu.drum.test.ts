@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
@@ -222,15 +223,19 @@ it('R265 стрелки и PageUp/PageDown двигают по строке и �
 
 it('R265 контрфакт знака настоящего pointermove падает на направлении, оригинал проходит первым', async () => {
   await dragContract();
-  const mutant = replaceOnce(drumSource, 'pos.current - (e.clientY - d.lastY) / DRUM_ITEM_HEIGHT',
-    'pos.current + (e.clientY - d.lastY) / DRUM_ITEM_HEIGHT');
-  await assert.rejects(() => dragContract({ drum: mutant }), error =>
-    error instanceof assert.AssertionError && error.message.includes('R265:перетаскивание-вниз-уменьшает-индекс'));
+  await counterfact(async () => {
+    const mutant = replaceOnce(drumSource, 'pos.current - (e.clientY - d.lastY) / DRUM_ITEM_HEIGHT',
+      'pos.current + (e.clientY - d.lastY) / DRUM_ITEM_HEIGHT');
+    await assert.rejects(() => dragContract({ drum: mutant }), error =>
+      error instanceof assert.AssertionError && error.message.includes('R265:перетаскивание-вниз-уменьшает-индекс'));
+  });
 });
 
 it('R265 контрфакт Готово → null падает на результате клика, оригинал проходит первым', async () => {
   await doneContract();
-  const mutant = replaceOnce(menuSource, 'const done = () => onChoose(pick + 1);', 'const done = () => onChoose(null);');
-  await assert.rejects(() => doneContract({ menu: mutant }), error =>
-    error instanceof assert.AssertionError && error.message.includes('R265:Готово-отправляет-выбранное-не-null'));
+  await counterfact(async () => {
+    const mutant = replaceOnce(menuSource, 'const done = () => onChoose(pick + 1);', 'const done = () => onChoose(null);');
+    await assert.rejects(() => doneContract({ menu: mutant }), error =>
+      error instanceof assert.AssertionError && error.message.includes('R265:Готово-отправляет-выбранное-не-null'));
+  });
 });

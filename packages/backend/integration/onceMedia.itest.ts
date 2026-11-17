@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
@@ -233,7 +234,7 @@ test('R269 контрфакты отсутствующего и скопиров
     ['serverNow: new Date().toISOString()', 'serverNow: res.openedAt.toISOString()', 'R269:serverNow-время-ответа-а-не-первого-открытия'],
   ] as const) {
     await serverClockScenario();
-    await assert.rejects(serverClockScenario({ module: 'routes/conv', from, to }), failure(marker));
+    await counterfact(() => assert.rejects(serverClockScenario({ module: 'routes/conv', from, to }), failure(marker)));
   }
 });
 
@@ -495,5 +496,5 @@ const mutations: readonly [string, Mutation, (mutation?: Mutation) => Promise<un
 ];
 for (const [label, mutation, scenario, marker] of mutations) test(`R262 контрфакт: ${label} ловится адресным утверждением, не ошибкой VM/SQL/HTTP500`, async () => {
   await scenario();
-  await assert.rejects(scenario(mutation), failure(marker));
+  await counterfact(() => assert.rejects(scenario(mutation), failure(marker)));
 });

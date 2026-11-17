@@ -5,6 +5,7 @@ import {
   attachments,
   channelReads,
   coinBalances,
+  coinRecounts,
   conversationMessages,
   conversationScheduled,
   diagReports,
@@ -38,7 +39,10 @@ import {
  * настоящем Postgres в проверке, не поднимая бэкенд. Сеть и события — в `accountDelete.ts`.
  *
  * Что НЕ трогается и почему: `messages`, `message_reactions`, `audit_log`, `coin_ledger`, `season_results`,
- * `poll_votes`, `bans` — это переписка и история, ради которой строка и остаётся (`accountRules.ts`).
+ * `poll_votes`, `bans`, `game_stakes`, `game_rounds.created_by`, итоги игр этапа 6 (`game_month_results`, `game_titles_awarded`,
+ * `season_recaps` — личная строка без ссылки на `users`, читать её обезличенному некому) — это переписка и история, ради которой строка и остаётся
+ * (`accountRules.ts`). Незакрытые ставки игр возвращает `accountDelete.ts` (`refundOpenStakesOf`) ДО этой функции: здесь
+ * без `db`, а возврат — движение денег.
  * Из `conversation_messages` меняется
  * только имя в снимках «Переслано от» (ниже), сами сообщения остаются. Отложенные (`conversation_scheduled`, С4) —
  * ещё не переписка, а неотправленное личное: удаляются, и их файлы (`attachments` в состоянии `scheduled`, `conv10`) —
@@ -88,6 +92,8 @@ export async function anonymizeAccountRows(tx: PgDatabase<any, any, any>, userId
   await tx.delete(memberRoles).where(eq(memberRoles.userId, userId));
   await tx.delete(serverMembers).where(eq(serverMembers.userId, userId));
   await tx.delete(coinBalances).where(eq(coinBalances.userId, userId));
+  // Карточка доначисления сезона (0159) — личная строка, как кошелёк: обезличенному аккаунту показывать её некому.
+  await tx.delete(coinRecounts).where(eq(coinRecounts.userId, userId));
   await tx.delete(pushDevices).where(eq(pushDevices.userId, userId));
   await tx.delete(pushMutes).where(eq(pushMutes.userId, userId));
   await tx.delete(pushAlways).where(eq(pushAlways.userId, userId));

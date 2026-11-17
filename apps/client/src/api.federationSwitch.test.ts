@@ -1,21 +1,22 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports.js';
 import type { FederationSwitchPatch, FederationSwitchView } from '@gusvoice/shared';
 
-const source = readFileSync(new URL('./api.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const sourceUrl = new URL('./api.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 const view: FederationSwitchView = { enabled: true, source: 'panel', dmEnabled: false, dmSource: 'off', status: 'ready', problem: null };
 type ApiModule = typeof import('./api');
 function fixture(body: unknown = view, status = 200, raw = source) {
   const requests: { url: string; init: RequestInit }[] = [];
   const unexpected = () => assert.fail('Неожиданная IO-граница API переключателя');
   const dependencies: Record<string, unknown> = {
-    './bgGateways': { mirrorToBg: unexpected },
     './config': { config: { apiUrl: 'https://api.example.test' }, activeInstance: () => null, activeInstanceId: () => null,
       instances: () => [], updateActiveInstance: unexpected, updateInstance: unexpected },
-    './imageSize': { measureMediaFile: unexpected },
   };
   const module = { exports: {} as ApiModule };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: {
@@ -26,7 +27,7 @@ function fixture(body: unknown = view, status = 200, raw = source) {
       requests.push({ url, init });
       return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     },
-    require: (id: string) => { assert.ok(Object.hasOwn(dependencies, id), `Неописанный импорт API: ${id}`); return dependencies[id]; },
+    require: testVmImports(sourceUrl, dependencies),
   });
   return { api: module.exports.api, requests };
 }
@@ -81,8 +82,10 @@ it('R257 API отличает 404 старого сервера от серве�
 
 it('R257 контрфакт POST вместо PATCH обнаруживается после проверки настоящего транспорта', async () => {
   await patchProbe();
+  await counterfact(async () => {
   const anchor = "req<FederationSwitchView>('PATCH', '/admin/federation/switch', patch)";
   assert.equal(source.split(anchor).length - 1, 1, 'единственное изменение переключателя');
   await assert.rejects(() => patchProbe(source.replace(anchor, "req<FederationSwitchView>('POST', '/admin/federation/switch', patch)")),
     (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R257 изменение переключателя посылается PATCH'));
+  });
 });

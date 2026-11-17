@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -83,9 +84,12 @@ for (const [name, anchor, replacement, check, label, actual, expected] of [
   ['потерян кеш по API', '  if (askedFor === key) return;', '', once, 'один запрос названия на адрес API', 3, 1],
   ['ошибка не разрешает повтор', "if (askedFor === key) askedFor = '';", 'void key;', retry, 'сбой позволяет повторить запрос имени', 1, 2],
 ] as const) it(`R208 контрфакт имени дома: ${name}`, async () => {
-  await check(); assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(label)
-    && e.actual === actual && e.expected === expected);
+  await check();
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(label)
+      && e.actual === actual && e.expected === expected);
+  });
 });
 
 async function federationName(raw = source) {
@@ -106,8 +110,10 @@ it('R210 имя для соседей главнее имени вкладки, 
 // Правдоподобное локальное название не должно скрыть официальное имя из федеративной визитки.
 it('R210 перестановка fedName и name обнаруживается неверной подписью своего дома', async () => {
   await federationName();
-  const anchor = 'info.fedName?.trim() || info.name?.trim()'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(federationName(source.replace(anchor, 'info.name?.trim() || info.fedName?.trim()')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('подпись своего дома предпочитает федеративное имя')
-      && e.operator === 'strictEqual' && e.actual === 'Вкладка' && e.expected === 'Для соседей');
+  await counterfact(async () => {
+    const anchor = 'info.fedName?.trim() || info.name?.trim()'; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(federationName(source.replace(anchor, 'info.name?.trim() || info.fedName?.trim()')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('подпись своего дома предпочитает федеративное имя')
+        && e.operator === 'strictEqual' && e.actual === 'Вкладка' && e.expected === 'Для соседей');
+  });
 });

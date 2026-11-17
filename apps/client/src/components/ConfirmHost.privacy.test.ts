@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import { createRoot } from 'react-dom/client';
@@ -14,31 +16,28 @@ import * as deleteChoice from '../deleteChoiceRules';
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const hostSource = read('./ConfirmHost.tsx'), confirmSource = read('../confirm.ts');
 type ConfirmApi = typeof import('../confirm');
-function load<T>(raw: string, deps: Record<string, unknown>, unexpected: string[]): T {
+function load<T>(raw: string, deps: Record<string, unknown>, path: string): T {
   const module = { exports: {} as T };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
     { module, exports: module.exports, window, document, setTimeout, clearTimeout,
-      require(id: string) {
-        if (!Object.hasOwn(deps, id)) { unexpected.push(`require:${id}`); assert.fail(`Неописанный импорт ${id}`); }
-        return deps[id];
-      } });
+      require: testVmImports(new URL(path, import.meta.url), deps) });
   return module.exports;
 }
 async function withDialog(check: (api: ConfirmApi, host: HTMLDivElement) => Promise<void>, rawHost = hostSource, rawConfirm = confirmSource) {
   GlobalRegistrator.register({ url: 'http://localhost/' });
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  const unexpected: string[] = [], host = document.createElement('div'); document.body.append(host);
+  const host = document.createElement('div'); document.body.append(host);
   const root = createRoot(host);
   let api: ConfirmApi | undefined;
   try {
-    api = load<ConfirmApi>(rawConfirm, { zustand: { create } }, unexpected);
+    api = load<ConfirmApi>(rawConfirm, { zustand: { create } }, '../confirm.ts');
     const component = load<typeof import('./ConfirmHost')>(rawHost, {
       react: React, 'react/jsx-runtime': jsx, '../confirm': api, '../confirmRules': rules, '../deleteChoiceRules': deleteChoice,
       // Проверяем разметку окна и контракт значка, не геометрию SVG или раскладку happy-dom.
       '../focusTrap': { useFocusTrap() {} },
       './Icon': { Icon: ({ name }: { name: string }) => React.createElement('i', { 'data-icon': name }) },
-    }, unexpected);
+    }, './ConfirmHost.tsx');
     await React.act(async () => { root.render(React.createElement(component.ConfirmHost)); });
     await check(api, host);
   } finally {
@@ -47,7 +46,6 @@ async function withDialog(check: (api: ConfirmApi, host: HTMLDivElement) => Prom
       host.remove(); await GlobalRegistrator.unregister();
       if (previous) Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', previous);
       else Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
-      assert.deepEqual(unexpected, [], 'R238 границы ConfirmHost не проглочены обработчиком ошибки');
     }
   }
 }
@@ -76,13 +74,14 @@ async function checkKeys(raw = hostSource) {
 }
 it('R238 alertDialog без подсказки клавиш, обычное и опасное подтверждения сохраняют Esc и верный смысл Enter', () => checkKeys());
 it('R238 удаление или инверсия hasCancel у подсказки ловятся по появлению ложных клавиш в справке', async () => {
-  const anchor = '{hasCancel(pending) && (\n          <div className="confirm-keys">';
-  assert.equal(hostSource.split(anchor).length - 1, 1);
   for (const condition of ['true', '!hasCancel(pending)']) {
-    await checkKeys();
+    await counterfact(async () => {
+    const anchor = '{hasCancel(pending) && (\n          <div className="confirm-keys">';
+    assert.equal(hostSource.split(anchor).length - 1, 1);
     await assert.rejects(() => checkKeys(hostSource.replace(anchor, anchor.replace('hasCancel(pending)', condition))),
       e => e instanceof assert.AssertionError && e.message.startsWith('R238 keys-info:') &&
         e.operator === 'strictEqual' && e.actual === 1 && e.expected === 0);
+    });
   }
 });
 async function checkIcon(raw = confirmSource) {
@@ -103,9 +102,10 @@ async function checkIcon(raw = confirmSource) {
 }
 it('R238 alertDialog передаёт ban, а без опций оставляет прежний signal и кнопку Понятно', () => checkIcon());
 it('R238 проигнорированные opts alertDialog обнаруживаются по значку реально отрисованного окна', async () => {
-  await checkIcon();
+  await counterfact(async () => {
   const anchor = ", ...(opts?.icon ? { icon: opts.icon } : {})";
   assert.equal(confirmSource.split(anchor).length - 1, 1);
   await assert.rejects(() => checkIcon(confirmSource.replace(anchor, '')), e => e instanceof assert.AssertionError &&
     e.message.startsWith('R238 alert-icon:') && e.operator === 'strictEqual' && e.actual === 'signal' && e.expected === 'ban');
+  });
 });

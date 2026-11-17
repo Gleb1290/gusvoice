@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import ts from 'typescript';
@@ -84,12 +85,14 @@ it('R119 страж частых ловит архивный пропуск, н�
     assert.match(body, /for\s*\(const it of items\)/);
   };
   check(raw);
-  for (const [from, to] of [
-    ['d.archived === true || ', ''],
-    ['Date.parse(it.lastAt) > Date.parse(h)', 'Date.parse(it.lastAt) >= Date.parse(h)'],
-    ['for (const it of items)', 'for (const it of items.slice().sort((a, b) => Date.parse(b.lastAt) - Date.parse(a.lastAt)))'],
-  ]) {
-    assert.ok(raw.includes(from!), 'якорь настоящего контрфакта найден');
-    assert.throws(() => check(raw.replace(from!, to!)), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of [
+      ['d.archived === true || ', ''],
+      ['Date.parse(it.lastAt) > Date.parse(h)', 'Date.parse(it.lastAt) >= Date.parse(h)'],
+      ['for (const it of items)', 'for (const it of items.slice().sort((a, b) => Date.parse(b.lastAt) - Date.parse(a.lastAt)))'],
+    ]) {
+      assert.ok(raw.includes(from!), 'якорь настоящего контрфакта найден');
+      assert.throws(() => check(raw.replace(from!, to!)), assert.AssertionError);
+    }
+  });
 });

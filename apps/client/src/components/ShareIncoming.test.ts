@@ -1,5 +1,6 @@
-import assert from 'node:assert/strict';
 import { it } from 'node:test';
+import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { act } from 'react';
 import type { ViteDevServer } from 'vite';
 import { setupHarness } from './MessagePane.behavior.harness';
@@ -82,9 +83,11 @@ for (const [name, change, failure] of [
 ] as const) {
   it(`R118 мутант ${name} отвергается поведением компонента`, async () => {
     await scene(h.server, 'choose');
-    const server = await h.paneServer(change, name === 'исключение текущей беседы' ? 'ForwardPicker' : 'ShareIncoming');
-    try { await assert.rejects(() => scene(server, 'choose'), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure)); }
-    finally { await server.close(); }
+    await counterfact(async () => {
+      const server = await h.paneServer(change, name === 'исключение текущей беседы' ? 'ForwardPicker' : 'ShareIncoming');
+      try { await assert.rejects(() => scene(server, 'choose'), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure)); }
+      finally { await server.close(); }
+    }, { timeoutMs: 60000 });
   });
 }
 
@@ -128,7 +131,9 @@ for (const mode of ['choose', 'close', 'files'] as const) {
 }
 it('R119 D22 мутант без sharedTextDrop отвергается выбором legacy текста', async () => {
   await legacyScene(h.server, 'choose');
-  const server = await h.paneServer(s => s.replace('legacyShare()?.sharedTextDrop(token);', 'void token;'), 'ShareIncoming');
-  try { await assert.rejects(() => legacyScene(server, 'choose'), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('legacy заказ удаляется без открытия файлов')); }
-  finally { await server.close(); }
+  await counterfact(async () => {
+    const server = await h.paneServer(s => s.replace('legacyShare()?.sharedTextDrop(token);', 'void token;'), 'ShareIncoming');
+    try { await assert.rejects(() => legacyScene(server, 'choose'), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('legacy заказ удаляется без открытия файлов')); }
+    finally { await server.close(); }
+  }, { timeoutMs: 60000 });
 });

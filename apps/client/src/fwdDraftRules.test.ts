@@ -4,6 +4,7 @@ import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as rules from './fwdDraftRules';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 function load(source: string): typeof rules {
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -38,7 +39,9 @@ it('имена пересылки считают уникальных исход
   check(rules);
   const unchangedSource = readFileSync(new URL('./fwdDraftRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   check(load(unchangedSource));
+  counterfact(() => {
   assert.throws(() => check(mutant('names.length - 1', 'names.length')), assert.AssertionError);
   assert.throws(() => check(mutant('m.forwardedFrom ? m.forwardedFrom.userId : m.author.id', 'm.author.id')), assert.AssertionError);
   assert.throws(() => check(mutant('if (seen.has(id)) continue;', 'if (false) continue;')), assert.AssertionError);
+  });
 });

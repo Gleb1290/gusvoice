@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -202,25 +203,31 @@ it('R291 поиск по началу: текущий флаг добавляе�
 
 it('R291 контрфакт: process.env вместо общего runtime-флага ломает именно включённый поиск по явному адресу', async () => {
   await checkHandles();
-  const mutant = `import { fedDmEnabledFromEnv } from '@gusvoice/shared';\n${replaceOnce(usersSource,
+  await counterfact(async () => {
+const mutant = `import { fedDmEnabledFromEnv } from '@gusvoice/shared';\n${replaceOnce(usersSource,
     'const fedDm = env.federation.dmEnabled;', 'const fedDm = fedDmEnabledFromEnv(process.env);')}`;
   await assert.rejects(() => checkHandles(mutant), preciseFailure(handleMarker, 400, 200));
+});
 });
 
 it('R291 контрфакт: то же чтение пустого process.env отдельно ловится реальным prefix-поиском', async () => {
   await checkPrefixes();
-  const mutant = `import { fedDmEnabledFromEnv } from '@gusvoice/shared';\n${replaceOnce(usersSource,
+  await counterfact(async () => {
+const mutant = `import { fedDmEnabledFromEnv } from '@gusvoice/shared';\n${replaceOnce(usersSource,
     'const fedDm = env.federation.dmEnabled;', 'const fedDm = fedDmEnabledFromEnv(process.env);')}`;
   await assert.rejects(() => checkPrefixes(mutant), preciseFailure(prefixMarker, 0, 1));
+});
 });
 
 it('R291 контрфакт: кеширование общего флага при регистрации ломает оба пути после включения без restart', async () => {
   await checkHandles();
   await checkPrefixes();
-  const cached = replaceOnce(usersSource,
+  await counterfact(async () => {
+const cached = replaceOnce(usersSource,
     'export async function userRoutes(app: FastifyInstance): Promise<void> {',
     'export async function userRoutes(app: FastifyInstance): Promise<void> {\n  const cachedFedDm = env.federation.dmEnabled;');
   const mutant = replaceOnce(cached, 'const fedDm = env.federation.dmEnabled;', 'const fedDm = cachedFedDm;');
   await assert.rejects(() => checkHandles(mutant), preciseFailure(handleMarker, 400, 200));
   await assert.rejects(() => checkPrefixes(mutant), preciseFailure(prefixMarker, 0, 1));
+});
 });

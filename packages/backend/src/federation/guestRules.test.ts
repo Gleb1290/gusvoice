@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -77,14 +78,16 @@ describe('правила допуска федеративного гостя', 
     assert.equal(mergeReportReason('a b', 'a'), 'a b');
     assert.equal(mergeReportReason('a', 'b'), 'a\nb');
     assert.equal(mergeReportReason('first', 'second', 8), 'first\nse');
-    const original = readFileSync(new URL('./guestRules.ts', import.meta.url), 'utf8');
-    const changed = original.replace('return `${a}\\n${b}`.slice(0, max);', 'return b.slice(0, max);');
-    assert.notEqual(changed, original, 'реальный модуль соединяет две разные причины');
-    const mod = { exports: {} as Record<string, unknown> };
-    runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { module: mod, exports: mod.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return {}; } });
-    const mutant = mod.exports as typeof import('./guestRules.js');
-    assert.throws(() => assert.equal(mutant.mergeReportReason('a', 'b'), 'a\nb'), assert.AssertionError,
-      'мутант заменяет первую причину новой и должен быть пойман');
+    counterfact(() => {
+      const original = readFileSync(new URL('./guestRules.ts', import.meta.url), 'utf8');
+      const changed = original.replace('return `${a}\\n${b}`.slice(0, max);', 'return b.slice(0, max);');
+      assert.notEqual(changed, original, 'реальный модуль соединяет две разные причины');
+      const mod = { exports: {} as Record<string, unknown> };
+      runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+        { module: mod, exports: mod.exports, require: (id: string) => { assert.equal(id, '@gusvoice/shared'); return {}; } });
+      const mutant = mod.exports as typeof import('./guestRules.js');
+      assert.throws(() => assert.equal(mutant.mergeReportReason('a', 'b'), 'a\nb'), assert.AssertionError,
+        'мутант заменяет первую причину новой и должен быть пойман');
+    });
   });
 });

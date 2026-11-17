@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -57,9 +58,11 @@ it('R206 телефонный тост из открытой шторки име
 // Возврат прежнего 1000 обнаруживается сравнением слоёв, а не браузерной эмуляцией env()/раскладки.
 it('R206 CSS-контрфакт: прежний z-index 1000 прячет тост под шторкой', () => {
   toastAboveSheet(source);
+  counterfact(() => {
   const anchor = /body:has\(\.sheet-scrim\)\s+\.toast-stack\s*\{\s*z-index:\s*1251;\s*\}/g;
   assert.equal([...source.matchAll(anchor)].length, 1, 'единственный якорь слоя тоста при шторке');
   const mutant = source.replace(anchor, `${selector} { z-index: 1000; }`);
   assert.throws(() => toastAboveSheet(mutant),
     (error: unknown) => error instanceof assert.AssertionError && error.message === 'телефонный тост над открытой шторкой');
+  });
 });

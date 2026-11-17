@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -24,12 +25,14 @@ it('ширина списка проходит обе стороны порог�
   assert.equal(api.effectiveListWidth(72, false, 240), 240);
   assert.equal(api.effectiveListWidth(300, false, 240), 300);
   const source = readFileSync(new URL('./dmListView.ts', import.meta.url), 'utf8');
-  const atInclusive = load(source.replace('raw < LIST_NARROW_BELOW', 'raw <= LIST_NARROW_BELOW'));
-  assert.throws(() => assert.equal(atInclusive.snapListWidth(130, true, 180, 480), 180), assert.AssertionError,
-    'мутант сворачивает список уже на самом пороге 130');
-  const channelNarrow = load(source.replace('allowNarrow && raw <', 'raw <'));
-  assert.throws(() => assert.equal(channelNarrow.snapListWidth(129, false, 180, 480), 180), assert.AssertionError,
-    'мутант включает режим аватаров у канала, где его нет');
+  counterfact(() => {
+    const atInclusive = load(source.replace('raw < LIST_NARROW_BELOW', 'raw <= LIST_NARROW_BELOW'));
+    assert.throws(() => assert.equal(atInclusive.snapListWidth(130, true, 180, 480), 180), assert.AssertionError,
+      'мутант сворачивает список уже на самом пороге 130');
+    const channelNarrow = load(source.replace('allowNarrow && raw <', 'raw <'));
+    assert.throws(() => assert.equal(channelNarrow.snapListWidth(129, false, 180, 480), 180), assert.AssertionError,
+      'мутант включает режим аватаров у канала, где его нет');
+  });
 });
 
 it('настройка двух/трёх строк читает и пишет локальное значение с заводским fallback', () => {

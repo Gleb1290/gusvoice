@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -87,8 +88,10 @@ for (const [title, check, anchor, replacement, prefix, actual, expected] of [
 ] as const) it(`R230 контрфакт ${title} обнаруживается настоящим модулем правил`, () => {
   // Класс ошибки: зелёный положительный пример не доказывает отсутствие ложной классификации.
   check(isMusicFile); check(musicRules(musicRulesSource).isMusicFile);
-  assert.throws(() => check(musicRules(musicChange(anchor, replacement)).isMusicFile), (e: unknown) =>
-    e instanceof assert.AssertionError && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  runCounterfact(() => {
+    assert.throws(() => check(musicRules(musicChange(anchor, replacement)).isMusicFile), (e: unknown) =>
+      e instanceof assert.AssertionError && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });
 
 it('R125 предел голосового равен тридцати минутам, а не прежним пяти', () => {
@@ -215,14 +218,16 @@ it('слова вложения не добавляют длительность
   // nosemgrep: gv-no-eval — тест исполняет свой attachmentWords.toString(), нормализованный регуляркой, и фиксированные мутанты; чужого ввода нет.
   const load = (s: string): typeof attachmentWords => new Function(`return (${s})`)(); // nosemgrep: gv-no-eval
   check(load(source));
-  for (const [from, to] of [
-    ['Голосовое сообщение', 'Голосовое сообщение · 0:42'],
-    ['f.round?', 'false?'],
-    ['?flat:', '?"Файл: "+flat:'],
-  ]) {
-    assert.ok(source.includes(from), 'якорь словарного мутанта найден');
-    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
-  }
+  runCounterfact(() => {
+    for (const [from, to] of [
+      ['Голосовое сообщение', 'Голосовое сообщение · 0:42'],
+      ['f.round?', 'false?'],
+      ['?flat:', '?"Файл: "+flat:'],
+    ]) {
+      assert.ok(source.includes(from), 'якорь словарного мутанта найден');
+      assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+    }
+  });
 });
 
 it('имя файла ровно в 200 знаков сохраняется, длиннее обрезается целыми кодовыми точками', () => {
@@ -238,8 +243,10 @@ it('имя файла ровно в 200 знаков сохраняется, д�
   // nosemgrep: gv-no-eval — тест исполняет свой attachmentWords.toString() с фиксированными граничными мутантами; чужого ввода нет.
   const load = (s: string): typeof attachmentWords => new Function(`return (${s})`)(); // nosemgrep: gv-no-eval
   check(load(source));
-  for (const [from, to] of [['chars.length<=200', 'chars.length<200'], ['[...flat]', 'flat.split("")']]) {
-    assert.ok(source.includes(from), 'якорь граничного мутанта найден');
-    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
-  }
+  runCounterfact(() => {
+    for (const [from, to] of [['chars.length<=200', 'chars.length<200'], ['[...flat]', 'flat.split("")']]) {
+      assert.ok(source.includes(from), 'якорь граничного мутанта найден');
+      assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+    }
+  });
 });

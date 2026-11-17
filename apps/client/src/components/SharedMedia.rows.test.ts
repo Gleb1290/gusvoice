@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -27,6 +28,7 @@ function load(raw = source): typeof import('./SharedMedia') {
     '../api': unused, '../convSyncRules': unused, '../dialogChrome': unused, '../feedJump': unused,
     '../fileActions': { openAttachmentFile: fail, sizeText: (size: number) => `${size} Б` },
     '../mediaViewerRules': { viewerDate: () => '12 октября' }, '../phoneLayout': unused,
+    '../pcDownloads': { desktopFileOpenAvailable: () => false, subscribeDownloadedFileOpening: () => () => {} },
     '../peerName': { usePeerName: () => (_id: string, name: string) => name },
     '../store': { useStore: (pick: (s: { user: { id: string } }) => unknown) => pick({ user: { id: 'self' } }) },
     '../toast': unused, './BottomSheet': { BottomSheet: nil }, './Icon': { Icon: nil }, './Lightbox': { Lightbox: nil },
@@ -98,7 +100,7 @@ it('R183 контрфакты обязательного source обнаружи
     ['{source && source !== author ? `${source} · ${viewerDate(m.createdAt)}` : viewerDate(m.createdAt)}',
       '{`${source} · ${viewerDate(m.createdAt)}`}', voiceWithoutSource, 'старое голосовое'],
   ] as const) {
-    check(); assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь строки');
-    assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(target));
+    check(); counterfact(() => assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь строки'));
+    counterfact(() => assert.throws(() => check(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.includes(target)));
   }
 });

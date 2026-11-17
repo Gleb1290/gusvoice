@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -60,7 +61,7 @@ async function fixture(edit?: Edit) {
   };
   const files = new Set(['coins', 'coinRules', 'streakRules', 'seasons', 'economyDefaults', 'gooseRules',
     'voiceActivityRules', 'levelRules', 'shopRules', 'tipRules', 'pokeRules', 'voiceRules', 'transferCoins',
-    'routes/economy', 'routes/voice', 'voiceActivity']);
+    'gameMoney', 'gameMoneyRules', 'routes/economy', 'routes/voice', 'voiceActivity']);
   const modules = new Map<string, any>();
   function load(name: string): any {
     if (Object.hasOwn(values, name)) return values[name];
@@ -126,7 +127,9 @@ for (const kind of ['voice', 'retro', 'goose'] as const) {
   test(`R304 ${kind}: бот без кошелька и журнала, человек получает монеты`, () => walletScenario(kind));
   for (const [name, edit] of walletEdits) test(`R304 ${kind}: контрфакт ${name}`, async () => {
     await walletScenario(kind);
+    await counterfact(async () => {
     await assert.rejects(walletScenario(kind, edit), e => e instanceof assert.AssertionError && /боту|человеку/.test(e.message));
+    });
   });
 }
 
@@ -176,7 +179,9 @@ for (const kind of ['leaderboard', 'crown', 'retro', 'raise'] as const) {
   test(`R304 ${kind}: выборка исключает бота с большей суммой и сохраняет человека`, () => selectionScenario(kind));
   test(`R304 ${kind}: контрфакт убран фильтр users.bot`, async () => {
     await selectionScenario(kind);
+    await counterfact(async () => {
     await assert.rejects(selectionScenario(kind, selectionEdits[kind]), e => e instanceof assert.AssertionError && /бота|только человека/.test(e.message));
+    });
   });
 }
 
@@ -200,8 +205,10 @@ async function tipScenario(edit?: Edit) {
 test('R304 HTTP тип боту: 403 без баланса, журнала и кулдауна; человеку проходит', () => tipScenario());
 test('R304 HTTP тип: контрфакт бот не входит в targetOptedOut', async () => {
   await tipScenario();
+  await counterfact(async () => {
   await assert.rejects(tipScenario({ file: 'routes/voice', from: 'theirs.optedOut || theirs.tipsOptOut || targetIsBot',
     to: 'theirs.optedOut || theirs.tipsOptOut' }), e => e instanceof assert.AssertionError && e.message.includes('тип боту запрещён'));
+  });
 });
 
 async function collectorScenario(edit?: Edit) {
@@ -217,8 +224,10 @@ async function collectorScenario(edit?: Edit) {
 test('R304 настоящий сборщик пишет двух людей с peers=1 и ни одной строки бота', () => collectorScenario());
 test('R304 контрфакт: фильтр ботов после planSamples уже завысил peers людям', async () => {
   await collectorScenario();
+  await counterfact(async () => {
   await assert.rejects(collectorScenario({ file: 'voiceActivity',
     from: 'const { samples, cursors: nextCursors, duplicates } = planSamples(channelSnapshots, cursors, now, away);',
     to: 'const planned = planSamples(rawSnapshots, cursors, now, away);\n  const { cursors: nextCursors, duplicates } = planned;\n  const samples = planned.samples.filter(s => !bots.has(s.userId));' }),
     e => e instanceof assert.AssertionError && e.message.includes('фильтр до planSamples'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -116,13 +117,18 @@ it('R174 openServer и openChannel выполняют настоящий сбр�
 });
 it('R174 реальные мутанты wasActive и сброса профиля отвергаются действиями Zustand', () => {
   // VM исполняет целиком мутированный store; исходный сценарий проходит до каждой ошибки.
-  for (const [anchor, replacement, message] of [
-    ['const toList = wasActive &&', 'const toList =', 'список открывается'],
-    ["view: 'server', mobileProfileOpen: false, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList", "view: 'server', mobileProfileOpen: true, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList", 'профиль сброшен'],
-  ]) { tabStates(); const raw = replaceOnce(anchor, replacement); assert.throws(() => tabStates(raw), e => e instanceof assert.AssertionError && e.message.includes(message)); }
+  tabStates();
+  counterfact(() => {
+    for (const [anchor, replacement, message] of [
+      ['const toList = wasActive &&', 'const toList =', 'список открывается'],
+      ["view: 'server', mobileProfileOpen: false, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList", "view: 'server', mobileProfileOpen: true, mobilePane: 'list', mobileMembersOpen: false, serverListOpen: toList", 'профиль сброшен'],
+    ]) { tabStates(); const raw = replaceOnce(anchor, replacement); assert.throws(() => tabStates(raw), e => e instanceof assert.AssertionError && e.message.includes(message)); }
+  });
 });
 it('R174 реальный мутант без немедленного запоминания сервера отвергается после его открытия', async () => {
   // Запоминание канала позже не может компенсировать отсутствующее сохранение сервера на телефоне.
-  await rememberScenario(); const raw = replaceOnce('if (inst0) rememberPlace({ instanceId: inst0, serverId });', 'if (inst0) void serverId;');
-  await assert.rejects(rememberScenario(raw), e => e instanceof assert.AssertionError && e.message.includes('запоминает сервер сразу'));
+  await rememberScenario(); await counterfact(async () => {
+    const raw = replaceOnce('if (inst0) rememberPlace({ instanceId: inst0, serverId });', 'if (inst0) void serverId;');
+    await assert.rejects(rememberScenario(raw), e => e instanceof assert.AssertionError && e.message.includes('запоминает сервер сразу'));
+  });
 });

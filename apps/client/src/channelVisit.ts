@@ -5,6 +5,15 @@ import { windowFocused } from './notifications';
 import { useStore } from './store';
 
 /**
+ * Раскладка телефона — список и лента РАЗНЫЕ экраны: приложение на телефоне (`isMobile()`) или окно не шире 760 px (граница
+ * `PHONE_LAYOUT_QUERY`, `phoneLayout.ts`): вкладка браузера телефона, узкое окно ПК. 🔴 29.10: здесь был только `isMobile()`,
+ * и вкладка Chrome на телефоне считала ленту видимой, когда человек уже ушёл в список, — отмечала прочитанным и прятала число.
+ */
+function phonePanes(): boolean {
+  return isMobile() || (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches);
+}
+
+/**
  * «Визит в ленту» — когда человек ВИДИТ канал, а не когда компонент смонтирован.
  *
  * 🔴 Почему понадобилось (20.09, поймано на живом телефоне). На компьютере лента и список стоят
@@ -26,9 +35,16 @@ export function useChannelVisit(
   kind: 'channel' | 'dm' = 'channel',
 ): { newSince: number | null; readKey: number | null; visitKey: string; started: boolean } {
   const mobilePane = useStore((s) => s.mobilePane);
+  const instanceEpoch = useStore((s) => s.instanceEpoch);
   const readChannelNow = useStore((s) => s.readChannelNow);
   const readDmNow = useStore((s) => s.readDmNow);
-  const viewing = !isMobile() || mobilePane === 'content';
+  const [pageVisible, setPageVisible] = useState(() => typeof document === 'undefined' || document.visibilityState !== 'hidden');
+  useEffect(() => {
+    const changed = () => setPageVisible(document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
+  }, []);
+  const viewing = pageVisible && (!phonePanes() || mobilePane === 'content');
   const [newSince, setNewSince] = useState<number | null>(null);
   const [readKey, setReadKey] = useState<number | null>(null);
   const [visit, setVisit] = useState(0);
@@ -38,57 +54,70 @@ export function useChannelVisit(
   useEffect(() => {
     if (!viewing) return;
     setNewSince(lastSeenAt(id));
-    /* Ключ прочитанного беседы (ЛС, шаг 2г) — до «прочитано» ниже: ответ на него меняет ключ, и снимок позже показал
-       бы черту «Новые» уже после прочитанного (на локальном стенде ответ успевает раньше перерисовки). */
-    const summary = kind === 'dm' ? useStore.getState().conv.summaries[id] : undefined;
-    if (kind === 'dm') setReadKey(summary?.lastReadKey ?? null);
-    setKnown(kind !== 'dm' || !!summary);
+    let left = false;
+    let touched = false;
+    let offSummary: (() => void) | undefined;
+    const entry = useStore.getState();
+    const initialRead = kind === 'dm' ? entry.conv.summaries[id]?.lastReadKey ?? null : null;
+    const waiting = kind === 'dm' && entry.convActive && entry.conv.phase !== 'live';
+    setReadKey(initialRead);
+    setKnown(kind !== 'dm' || (!!entry.conv.summaries[id] && !waiting));
     setVisit((n) => n + 1);
-    /* Беседа снова на глазах — дочитана (#212). После починки Б2 письма в ПОСЛЕДНЮЮ беседу, пока
-       человек в сервере, горят непрочитанным; а вернуться к ней можно не через `selectDm`, а кнопкой
-       «Личные сообщения» в рейле (`setView`), которая ничего не гасит. Без этого значок висел бы,
-       пока человек читает. Каналы гасятся своим `openChannel`. */
-    if (kind === 'dm' && windowFocused()) readDmNow(id);
+    const sameInstance = () => {
+      const current = useStore.getState();
+      return current.instanceEpoch === entry.instanceEpoch && current.convCacheKey === entry.convCacheKey;
+    };
+    const entryPosition = entry.conv.positionRev?.[id] ?? 0;
+    const touch = (event: Event) => {
+      if (touched || !sameInstance() || !(event.target as Element | null)?.closest?.('.messages')) return;
+      touched = true;
+      entry.convKeepPosition(id);
+    };
+    // Снимок после догонки можно переставить только до первого действия человека; события прочитанного во время
+    // дальнейшего чтения истории вообще не переснимают визит. Смена инстанса/беседы отменяет ожидающий снимок.
+    const inputs = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+    if (waiting) for (const event of inputs) document.addEventListener(event, touch, true);
+    const take = (s: ReturnType<typeof useStore.getState>, renew: boolean) => {
+      if (left || !sameInstance()) return false;
+      if ((s.conv.positionRev?.[id] ?? 0) !== entryPosition) touched = true;
+      const summary = kind === 'dm' ? s.conv.summaries[id] : undefined;
+      if (kind === 'dm' && !summary) return false;
+      if (!touched || initialRead === null) setReadKey(summary?.lastReadKey ?? null);
+      setKnown(true);
+      if (renew && !touched) setVisit((n) => n + 1);
+      return true;
+    };
+    const settle = () => {
+      if (left || !sameInstance()) return;
+      if (!take(useStore.getState(), true))
+        offSummary = useStore.subscribe((s) => { if (take(s, true)) offSummary?.(); });
+    };
+    if (waiting) void entry.convEnsureList().then(settle, settle);
+    else if (!take(entry, false))
+      offSummary = useStore.subscribe((s) => { if (take(s, true)) offSummary?.(); });
+    if (kind === 'dm' && !waiting && windowFocused()) readDmNow(id);
     /* 🔴 Перезагрузка, закрытие окна и выгрузка свёрнутого приложения уборку эффекта НЕ зовут: метка оставалась от
        прошлого визита, и следующий запуск ставил ленту к черте «Новые» над уже прочитанным (стенд 2г, 01.10). Черту
        ЭТОГО визита метка не двигает — она снята выше, при его начале. */
-    const onLeave = () => markChannelSeen(id);
+    const onLeave = () => { if (sameInstance()) markChannelSeen(id); };
     const onHidden = () => {
-      if (document.visibilityState === 'hidden') markChannelSeen(id);
+      if (sameInstance() && document.visibilityState === 'hidden') markChannelSeen(id);
     };
     window.addEventListener('pagehide', onLeave);
     document.addEventListener('visibilitychange', onHidden);
     return () => {
+      left = true;
+      offSummary?.();
+      for (const event of inputs) document.removeEventListener(event, touch, true);
       window.removeEventListener('pagehide', onLeave);
       document.removeEventListener('visibilitychange', onHidden);
+      if (!sameInstance()) return;
       markChannelSeen(id);
       // Ушёл из ленты — значит прочитал: гасим счётчик, который до сих пор прятался за «текущим».
       if (kind === 'dm') readDmNow(id);
       else readChannelNow(id);
     };
-  }, [id, viewing, kind, readChannelNow, readDmNow]);
-
-  /**
-   * Беседа открылась раньше, чем пришёл список бесед (запуск сразу в последнюю беседу): ключа прочитанного ещё нет — ни
-   * черты «Новые», ни права читать по видимому (лента стоит внизу и «прочла» бы всё). Сводка пришла — это новый визит со
-   * своим снимком: лента встанет к черте (G26) и только потом начнёт отмечать увиденное (G09).
-   */
-  useEffect(() => {
-    if (kind !== 'dm' || !viewing || known) return;
-    const take = (s: ReturnType<typeof useStore.getState>) => {
-      const summary = s.conv.summaries[id];
-      if (!summary) return false;
-      setReadKey(summary.lastReadKey);
-      setKnown(true);
-      setVisit((n) => n + 1);
-      return true;
-    };
-    if (take(useStore.getState())) return;
-    const off = useStore.subscribe((s) => {
-      if (take(s)) off();
-    });
-    return off;
-  }, [id, viewing, kind, known]);
+  }, [id, viewing, kind, instanceEpoch, readChannelNow, readDmNow]);
 
   /**
    * Вернулся в окно — дочитал то, что пришло, пока оно было свёрнуто (#212).
@@ -98,8 +127,10 @@ export function useChannelVisit(
    */
   useEffect(() => {
     if (!viewing) return;
+    const cacheKey = useStore.getState().convCacheKey;
     const onBack = () => {
-      if (!windowFocused()) return;
+      const current = useStore.getState();
+      if (current.instanceEpoch !== instanceEpoch || current.convCacheKey !== cacheKey || !windowFocused()) return;
       if (kind === 'dm') readDmNow(id);
       else readChannelNow(id);
     };
@@ -109,7 +140,7 @@ export function useChannelVisit(
       window.removeEventListener('focus', onBack);
       document.removeEventListener('visibilitychange', onBack);
     };
-  }, [id, viewing, kind, readChannelNow, readDmNow]);
+  }, [id, viewing, kind, instanceEpoch, readChannelNow, readDmNow]);
 
   /* `started` — визит начался (эффект выше отработал) и у беседы был ключ прочитанного: до этого `readKey` — не снимок, и лента не вправе
      сообщать увиденное (G09, `MessagePane.onSeen`) — она стоит внизу до прыжка к черте и «прочла» бы всё. */

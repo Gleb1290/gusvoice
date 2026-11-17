@@ -10,7 +10,7 @@ import {
   type SplashUpdate,
   type SplashView,
 } from '../splashFlow';
-import { endShareBeforeExit, markJustUpdated, peekSplashMarkers, takeSplashMarkers, unmarkJustUpdated } from '../updater';
+import { endShareBeforeExit, markJustUpdated, peekSplashMarkers, takeSplashMarkers, unmarkJustUpdated, updateLog } from '../updater';
 import { isDesktop } from '../hotkeys';
 import { appVersion } from '../desktopWindow';
 
@@ -44,18 +44,25 @@ function call(cmd: string): Promise<unknown> {
   return core()?.invoke(cmd).catch(() => null) ?? Promise.resolve(null);
 }
 
-/** Проверка фида. `GV_UPDATE_TEST=downgrade` (только пробная сборка, `splash.rs`) — с `allowDowngrades`. */
+/**
+ * Проверка фида. `GV_UPDATE_TEST=downgrade` (только пробная сборка, `splash.rs`) — откат на выпущенную версию.
+ * С plugin-updater 2.12 `allowDowngrades` у `check()` убран: разрешает откат сам Rust при сборке плагина
+ * (`lib.rs`, `default_version_comparator`), здесь режим только пишется в журнал.
+ */
 async function checkFeed(): Promise<SplashUpdate | null> {
   const testMode = (await call('gv_update_test_mode')) as string | null;
   const { check } = await import('@tauri-apps/plugin-updater');
-  const update = await check(testMode === 'downgrade' ? { allowDowngrades: true } : undefined);
+  const update = await check();
+  updateLog('splash', `check${testMode === 'downgrade' ? ' (downgrade test)' : ''}: ${update?.available ? `found v${update.version}` : 'none'}`);
   return update?.available ? update : null;
 }
 
 /** Разметка запуска: метки снимаются сразу (один раз на запуск), версия — установленная сборка. */
 async function launchIntent(): Promise<SplashIntent> {
   const markers = takeSplashMarkers();
-  return splashIntent(markers, await appVersion(), Date.now());
+  const intent = splashIntent(markers, await appVersion(), Date.now());
+  updateLog('splash', `intent ${JSON.stringify(intent)} markers ${JSON.stringify(markers)}`);
+  return intent;
 }
 
 function tauriDeps(): SplashDeps {
@@ -69,9 +76,16 @@ function tauriDeps(): SplashDeps {
     beforeInstall: async (version) => {
       await endShareBeforeExit();
       markJustUpdated(version);
+      updateLog('splash', `install v${version}`);
     },
-    installFailed: unmarkJustUpdated,
-    done: () => call('gv_splash_done').then(() => undefined),
+    installFailed: () => {
+      updateLog('splash', 'install failed');
+      unmarkJustUpdated();
+    },
+    done: () => {
+      updateLog('splash', 'done');
+      return call('gv_splash_done').then(() => undefined);
+    },
   };
 }
 

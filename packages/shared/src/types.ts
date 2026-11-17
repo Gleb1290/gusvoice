@@ -499,6 +499,8 @@ export const AUDIT_ACTIONS = [
   'economy.settings',
   'economy.shop',
   'economy.retro',
+  // «Запустить игры» (ГусКоины 2, 29.10): разовая отметка + подарок сидевшим в голосе.
+  'economy.games-launch',
   'economy.icon',
   'member.kick',
   'member.ban',
@@ -1885,6 +1887,47 @@ export interface AdminInstanceSettings extends InstanceInfo {
   fedDmPolicy?: 'shared' | 'anyone';
 }
 
+export interface SoundboardPolicy {
+  mode: 'off' | 'all' | 'selected';
+  serverIds: string[];
+  legacyLimit: number;
+}
+
+export interface AdminSoundboardSettings extends SoundboardPolicy {
+  servers: Array<{
+    id: string;
+    name: string;
+    perUserLimit: number;
+    eligibleEditors: number;
+    clipCount: number;
+    projectedClipCount: number;
+  }>;
+}
+
+export interface SoundboardQuota {
+  mode: 'legacy' | 'per-user';
+  limit: number;
+  used: number;
+  canConfigure: boolean;
+}
+
+export interface AdminStorageReport {
+  measuredAt: string | null;
+  servers: Array<{
+    id: string;
+    name: string;
+    totalBytes: number;
+    soundboardBytes: number;
+    eventSoundsBytes: number;
+    channelAttachmentsBytes: number;
+    appearanceBytes: number;
+    soundboardClips: number;
+    soundboardAuthors: Array<{ userId: string | null; name: string | null; clips: number; bytes: number }>;
+  }>;
+  instance: { directMessagesBytes: number; avatarsBytes: number; unassignedBytes: number; totalBytes: number };
+  totalBytes: number;
+}
+
 /**
  * Шаг обновления инстанса из админ-панели (О2б): что сейчас делает `update.sh --from-panel` на хосте.
  * Порядок: файлы стека → образы → копия базы → перезапуск → ожидание здорового бэкенда.
@@ -1991,6 +2034,9 @@ export interface VoiceTokenResponse {
   url: string; // external LiveKit wss:// URL
   token: string; // LiveKit access JWT
   room: string; // room name = channel_<channelId>
+  /** Разовый перенос. Имя нужно для экрана голосовой сессии, даже если канал скрыт в списке. */
+  temporary?: true;
+  channelName?: string;
 }
 
 /** Bootstrap payload returned by GET /servers/:id with full channel tree. */

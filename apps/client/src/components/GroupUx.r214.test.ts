@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { before, after, it } from 'node:test';
@@ -117,7 +118,7 @@ for (const [label, source, from, to, check, prefix, actual, expected] of [
     '[["вы покинули группу","вы покинули группу"],["Вас исключили из группы.","Вы покинули группу."]]',
     '[["вас исключили из группы","вы покинули группу"],["Вас исключили из группы.","Вы покинули группу."]]'],
 ] as const) it(`R214 UI исходный контрфакт: ${label}`, () => {
-  check(source); assert.throws(() => check(replaceOne(source, from, to)), failure(prefix, actual, expected));
+  check(source); counterfact(() => assert.throws(() => check(replaceOne(source, from, to)), failure(prefix, actual, expected)));
 });
 
 function moduleOf<T>(source: string, dependencies: Record<string, unknown>): T {
@@ -171,14 +172,16 @@ it('R214 B7 настоящий каталог передаёт sender, а тап
 it('R214 B7 без открытой беседы набор просматривается, тап не шлёт и не закрывает', () => stickers(false));
 it('R214 B7 контрфакт снятого send ловится настоящей панелью и окном', async () => {
   await stickers(true);
+  await counterfact(async () => {
   const changed = replaceOne(catalogRaw, 'send: useDmStickers.getState().sender ?? undefined', 'send: undefined');
   // Сравнивается один host callback по идентичности; метаданные убийства — точно false / true.
   await assert.rejects(stickers(true, changed), failure('B7-sender:', false, true));
+  });
 });
 it('R214 B7 контрфакт незакрытого окна ловится порядком перед реальной отправкой', async () => {
   await stickers(true);
-  await assert.rejects(stickers(true, catalogRaw, replaceOne(modalRaw, '                  close();\n                  send(st);', '                  send(st);')),
-    failure('B7-send:', '[["send","sticker",false]]', '[["send","sticker",true]]'));
+  await counterfact(() => assert.rejects(stickers(true, catalogRaw, replaceOne(modalRaw, '                  close();\n                  send(st);', '                  send(st);')),
+    failure('B7-send:', '[["send","sticker",false]]', '[["send","sticker",true]]')));
 });
 
 type Navigation = 'dm' | 'current-channel' | 'other-channel';
@@ -231,6 +234,6 @@ it('R214 H11 один открытый профиль закрывается б�
 it('R214 H11 отмена входящего выбора не закрывает панели и не начинает навигацию', () => share('dm', 'all', shareRaw, true));
 it('R214 H11 контрфакт оставленного профиля ловится его состоянием при настоящем pick', async () => {
   await share('dm');
-  await assert.rejects(share('dm', 'all', replaceOne(shareRaw, '      if (st.mobileProfileOpen) st.setMobileProfileOpen(false);', '')),
-    failure('H11-order:', 'shared,admin:false,settings:false,dm:target:100,drop', 'shared,admin:false,settings:false,profile:false,dm:target:000,drop'));
+  await counterfact(() => assert.rejects(share('dm', 'all', replaceOne(shareRaw, '      if (st.mobileProfileOpen) st.setMobileProfileOpen(false);', '')),
+    failure('H11-order:', 'shared,admin:false,settings:false,dm:target:100,drop', 'shared,admin:false,settings:false,profile:false,dm:target:000,drop')));
 });

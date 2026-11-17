@@ -134,11 +134,17 @@ services:
       LINK_THREATS_ENABLED: ${LINK_THREATS_ENABLED:-true}
       LINK_THREATS_URLS: ${LINK_THREATS_URLS:-}
       ECONOMY_ENABLED: ${ECONOMY_ENABLED:-false}
+      # Mini-games lock until the owner signs them off. OFF (default) = only the instance super-admin can switch games on
+      # for a server (the "Games" toggle and "Launch games"); economy managers can still switch them off. See .env.example.
+      GAMES_OPEN: ${GAMES_OPEN:-false}
       # Closed preview of the economy: comma-separated user IDs it is visible to while the feature is
       # under wraps. EMPTY = no restriction (normal behaviour) -- a forgotten variable must mean "as
       # before", never "hide it from everyone". Backend only: the client learns it from its own
       # profile, so the list is never published to the browser.
       ECONOMY_PREVIEW_USERS: ${ECONOMY_PREVIEW_USERS:-}
+      # DEV/TEST INSTANCES ONLY: 1 = every settling wheel round hits the jackpot (for recording/acceptance).
+      # Such rounds are flagged "forced" in the result and the fairness check says so. Empty = off; never set it in prod.
+      WHEEL_FORCE_JACKPOT: ${WHEEL_FORCE_JACKPOT:-}
       # Voice-presence statistics (GusCoins economy, step 0). Records raw seconds spent in voice --
       # no coins are granted and nothing is shown to users. Default OFF for the same reason as
       # DIAG_ENABLED: this is data about how long your people sit in voice, and an instance must not
@@ -168,6 +174,11 @@ services:
       # endpoints (validated to be on NTFY_BASE_URL) with NTFY_TOKEN. Empty => push disabled. Values in .env.
       NTFY_BASE_URL: ${NTFY_BASE_URL:-}
       NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # FCM relay (#247, Google Play build). FCM_SERVICE_ACCOUNT_B64 = base64 of the Firebase service-account JSON:
+      # set => this instance IS the relay (POST /api/push/fcm/<token>), empty => no route. PUSH_FCM_RELAY = public
+      # base URL of the relay this instance may push to (<base>/api/push/fcm/<token>), empty => ntfy only.
+      FCM_SERVICE_ACCOUNT_B64: ${FCM_SERVICE_ACCOUNT_B64:-}
+      PUSH_FCM_RELAY: ${PUSH_FCM_RELAY:-}
       # Steam game-activity source (#40 Phase 1B). STEAM_API_KEY from steamcommunity.com/dev (empty =>
       # feature OFF). STEAM_API_PUBLIC_URL = the API's own public origin (where Steam OpenID returns) —
       # defaults to the client-facing VITE_API_URL. Values in .env.

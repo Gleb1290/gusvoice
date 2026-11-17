@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import type { BotInfo } from '@gusvoice/shared';
 import { botCreateBlock, botStateLine, BOTS_OFF_TEXT, isBotUser, botsUnsupported, botAccessLabel,
@@ -60,8 +61,9 @@ for (const [label, from, to, probe, actual, expected] of [
   // Исполняется весь настоящий модуль с одной точечной мутацией, не копия его условий.
   await environment(async () => {
     const message = 'R297-client-rule';
-    const check = (source: string) => assert.equal(probe(load<typeof import('./botRules')>(source, { '@gusvoice/shared': shared })), expected, message);
-    check(raw); assert.throws(() => check(mutate(raw, from, to)), assertion(message, actual, expected));
+    const check = (source: string) => assert.equal(probe(load<typeof import('./botRules')>(new URL('./botRules.ts', import.meta.url), source, { '@gusvoice/shared': shared })), expected, message);
+    check(raw);
+    counterfact(() => assert.throws(() => check(mutate(raw, from, to)), assertion(message, actual, expected)));
   });
 });
 
@@ -133,8 +135,8 @@ for (const [label, from, to, probe, actual, expected] of [
 ] as const) it(`R300 контрфакт доставки: ${label}`, async () => {
   await environment(async () => {
     const message = `R300-delivery-${label}`;
-    const check = (source: string) => assert.equal(probe(load<typeof import('./botRules')>(source, { '@gusvoice/shared': shared })), expected, message);
+    const check = (source: string) => assert.equal(probe(load<typeof import('./botRules')>(new URL('./botRules.ts', import.meta.url), source, { '@gusvoice/shared': shared })), expected, message);
     check(raw);
-    assert.throws(() => check(mutate(raw, from, to)), assertion(message, actual, expected));
+    counterfact(() => assert.throws(() => check(mutate(raw, from, to)), assertion(message, actual, expected)));
   });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -117,19 +118,25 @@ describe('R148 локальные списки опасных ссылок', () 
   it('контрфакт выбора второго поля для любой строки теряет обычный домен', () => {
     const check = (r: typeof rules) => assert.deepEqual([...r.parseThreatList('plain.example explanation.example\n127.0.0.1 hosts.example')], ['plain.example', 'hosts.example']);
     check(load(source));
+counterfact(() => {
     const mutant = load(replaceOnce(source, "parts.length >= 2 && IPV4.test(parts[0]!) ? parts[1]! : parts[0]!", "parts[1]!"));
     assert.throws(() => check(mutant), assert.AssertionError);
+});
   });
   it('контрфакт суффикса без точки ошибочно объявляет notevil.com опасным', () => {
     hostBoundary(load(source));
+counterfact(() => {
     const mutant = load(replaceOnce(source, 'for (const c of chain) if (list.has(c)) return true;', 'for (const c of chain) for (const entry of list) if (c.endsWith(entry)) return true;'));
     assert.throws(() => hostBoundary(mutant), assert.AssertionError);
+});
   });
   it('контрфакты без нижнего регистра теряют угрозу как при разборе списка, так и при сверке', () => {
     const checkParse = (r: typeof rules) => assert.deepEqual([...r.parseThreatList('EVIL.COM')], ['evil.com']);
     const checkMatch = (r: typeof rules) => assert.equal(r.isThreatHost([new Set(['evil.com'])], 'EVIL.COM'), true);
     checkParse(load(source)); checkMatch(load(source));
+counterfact(() => {
     assert.throws(() => checkParse(load(replaceOnce(source, 'let h = raw.trim().toLowerCase();', 'let h = raw.trim();'))), assert.AssertionError);
     assert.throws(() => checkMatch(load(replaceOnce(source, "const h = host.trim().toLowerCase().replace(/\\.+$/, '');", "const h = host.trim().replace(/\\.+$/, '');"))), assert.AssertionError);
+});
   });
 });

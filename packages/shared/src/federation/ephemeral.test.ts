@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -100,7 +101,11 @@ for (const [name, anchor, replacement, check, target] of [
   ['online без проверки типа', " || typeof r.online !== 'boolean'", '', onlineContract, 'presence требует настоящий boolean'],
   ['отсутствующий kind считается unknown', "return typeof r.kind === 'string' ? 'unknown' : null;", "return 'unknown';", kindContract, 'без строкового kind'],
 ] as const) it(`R197 мутант «${name}» отвергается адресным контрактом целого модуля`, () => {
-  check(rules); check(load(source)); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
-  const mutant = load(source.replace(anchor, replacement));
-  assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(target));
+  check(rules); check(load(source));
+
+  runCounterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
+    const mutant = load(source.replace(anchor, replacement));
+    assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });

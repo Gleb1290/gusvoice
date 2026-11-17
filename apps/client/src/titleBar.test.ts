@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -130,13 +131,17 @@ for (const button of [1, 2]) {
 it('R268 страж отличает двойной щелчок от первого на original-first мутанте', () => {
   // detail первого щелчка не должен максимизировать окно вместо возможности потянуть его.
   doubleClick();
-  const mutant = changed(source, 'e.detail === 2', 'e.detail === 1');
-  assert.throws(() => doubleClick(mutant), e => e instanceof assert.AssertionError &&
-    e.message.startsWith('R268:разворачивает-только-второй-щелчок'));
+  counterfact(() => {
+    const mutant = changed(source, 'e.detail === 2', 'e.detail === 1');
+    assert.throws(() => doubleClick(mutant), e => e instanceof assert.AssertionError &&
+      e.message.startsWith('R268:разворачивает-только-второй-щелчок'));
+  });
 });
 it('R268 страж ловит левую координату вместо правого отступа на original-first мутанте', () => {
   rightEdge();
-  const mutant = changed(source, 'viewportWidth - (rect.left + rect.width)', 'rect.left');
-  assert.throws(() => rightEdge(mutant), e => e instanceof assert.AssertionError &&
-    e.message.startsWith('R268:координаты-от-правого-края'));
+  counterfact(() => {
+    const mutant = changed(source, 'viewportWidth - (rect.left + rect.width)', 'rect.left');
+    assert.throws(() => rightEdge(mutant), e => e instanceof assert.AssertionError &&
+      e.message.startsWith('R268:координаты-от-правого-края'));
+  });
 });

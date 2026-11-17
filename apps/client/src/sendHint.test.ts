@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -13,13 +14,15 @@ it('подсказка ждёт пять знаков и полные сутки
   assert.equal(rules.sendHintDue({ shows: 1, at: 1000 }, 1000 + day, 10), true);
   assert.equal(rules.sendHintDue({ shows: 3, at: 0 }, day * 20, 10), false);
   const source = readFileSync(new URL('./sendHint.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes('now - s.at >= SEND_HINT_GAP_MS'));
-  const module = { exports: {} as Record<string, unknown> };
-  runInNewContext(ts.transpileModule(source.replace('now - s.at >= SEND_HINT_GAP_MS', 'now - s.at > SEND_HINT_GAP_MS'),
-    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
-  const mutant = module.exports as typeof rules;
-  assert.throws(() => assert.equal(mutant.sendHintDue({ shows: 1, at: 1000 }, 1000 + day, 10), true), assert.AssertionError,
-    'мутант пропускает точную границу суток');
+  counterfact(() => {
+    assert.ok(source.includes('now - s.at >= SEND_HINT_GAP_MS'));
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace('now - s.at >= SEND_HINT_GAP_MS', 'now - s.at > SEND_HINT_GAP_MS'),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
+    const mutant = module.exports as typeof rules;
+    assert.throws(() => assert.equal(mutant.sendHintDue({ shows: 1, at: 1000 }, 1000 + day, 10), true), assert.AssertionError,
+      'мутант пропускает точную границу суток');
+  });
 });
 
 it('битое хранилище безопасно сбрасывается, корректные счётчики нормализуются, показ записывается', () => {

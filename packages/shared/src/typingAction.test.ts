@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact, mutantTest } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -33,9 +34,21 @@ it('кружок сохраняет ранг записи и передаётс�
     return module.exports;
   };
   check(load(source));
-  for (const [from, to] of [["if (action === 'round') return 3", "if (action === 'round') return 2"], ["!caps?.has(FEATURE_TYPING2)", 'false'], ["!features?.includes(FEATURE_TYPING2)", 'false']]) {
-    assert.ok(source.includes(from));
-    assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+  runCounterfact(() => {
+    for (const [from, to] of [["if (action === 'round') return 3", "if (action === 'round') return 2"], ["!caps?.has(FEATURE_TYPING2)", 'false'], ["!features?.includes(FEATURE_TYPING2)", 'false']]) {
+      assert.ok(source.includes(from));
+      assert.throws(() => check(load(source.replace(from, to))), assert.AssertionError);
+    }
+  });
+});
+
+it('отправка кружка сохраняет подпись на новых версиях и становится отправкой видео на старых', () => {
+  assert.equal(parseTypingAction('round_upload'), 'round_upload');
+  assert.equal(typingActionRank('round_upload'), typingActionRank('round'));
+  for (const features of [undefined, ['typing2'], ['typing2', 'typing3']]) {
+    const expected = features?.includes('typing3') ? 'round_upload' : 'video';
+    assert.equal(typingActionFor('round_upload', features && new Set(features)), expected);
+    assert.equal(typingActionToServer('round_upload', features), expected);
   }
 });
 
@@ -70,7 +83,7 @@ describe('вид действия в кадре typing', () => {
     }
   });
 
-  it('контракт отсекает мутации whitelist, legacy-поля и порядка рангов', () => {
+  mutantTest('контракт отсекает мутации whitelist, legacy-поля и порядка рангов', () => {
     // Неизвестный сигнал приходит от старого/будущего клиента, а явный typing нарушает wire-совместимость.
     const source = readFileSync(fileURLToPath(new URL('./typingAction.ts', import.meta.url)), 'utf8');
     const load = (code: string) => {

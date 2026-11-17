@@ -1,7 +1,9 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import ts from 'typescript';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
@@ -12,19 +14,6 @@ import * as settingsNav from '../settingsNav';
 
 const source = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const noop = () => {};
-// Закрытый перечень включает и неиспользуемые панели: новый импорт не становится разрешённой границей молча.
-const dormantImports = [
-  './DmFolderBar', './DataStorageSettings', './DmFolderSettings', 'react-dom', '../androidBack',
-  '../settingsAnchor', '../settingsSeen', '../audioSettings', '../micProcessorRules', '../desktopWindow',
-  '../dialogChrome', '../downloads', '../phoneLayout', '../notifications', '../updater', '../theme',
-  '../uiPrefs', './AvatarCropModal', './NotifyExceptions', './Select', './SettingsShell', '../settingsChanged',
-  '../settingsSnapshot', './GuestPlacesPanel', './InstancesPanel', '../federationClient', './OverlaySettingsPanel',
-  './ToastSettingsPanel', './NotifyPopupSetting', './SoundSettingsPanel', './StreamQualityPanel', '../streamSettings',
-  './Toggle', '../avatarAnimation', '../liteMode', './LinkPreview', '../sendMode', '../emojiSuggest', '../dmListView',
-  './DmListSwipe', '../quickReaction', './ContextMenu', './EmojiPicker', './DiagConsent', '../lastSeenText',
-  './LastSeenExceptions', './MessagePrivacySetting', '../lastSeenExceptionsRules', '../callView', '../convSyncRules',
-  './MicBubbleSetting', './MyBotsSettings',
-];
 
 async function renderPanel(component: 'AndroidInstallTab' | 'AccountTab', android: boolean,
   check: (host: HTMLDivElement, fdroidCalls: number) => void, raw = source) {
@@ -49,22 +38,18 @@ async function renderPanel(component: 'AndroidInstallTab' | 'AccountTab', androi
     './Icon': { Icon: () => React.createElement('i') },
     './Avatar': { Avatar: () => React.createElement('i', { 'data-avatar': true }) },
   };
-  for (const id of dormantImports) deps[id] = new Proxy({}, { get: (_target, key) => {
-    const message = `Неописанная граница ${id}.${String(key)}`;
-    unexpected.push(message); throw new Error(message);
-  } });
+  const imports = testVmImports(new URL('./UserSettingsModal.tsx', import.meta.url), deps);
   try {
     const module = { exports: {} as Record<string, React.ComponentType<any>> };
     // Дополнительный export не подменяет тело панели; весь модуль исполняется одним и тем же загрузчиком.
     runInNewContext(ts.transpileModule(raw + '\nexport { AndroidInstallTab, AccountTab };', {
       compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
     }).outputText, { module, exports: module.exports, window, document, navigator,
-      require: (id: string) => {
-        if (!Object.hasOwn(deps, id)) {
-          const message = `Неописанный импорт ${id}`; unexpected.push(message); throw new Error(message);
-        }
-        return deps[id];
-      } });
+      // Сохраняем сигнал об ошибке mock, даже если панель перехватит её как ошибку API.
+      require: (id: string) => new Proxy(imports(id) as object, { get(target, key) {
+        try { return Reflect.get(target, key); }
+        catch (error) { unexpected.push(`${id}.${String(key)}`); throw error; }
+      } }) });
     await React.act(async () => root.render(React.createElement(module.exports[component], { onClose: noop })));
     check(host, fdroidCalls);
   } finally {
@@ -107,11 +92,13 @@ it('R230 вне Android инструкция Droid-ify запрашивает р
 it('R230 контрфакт запроса репозитория из установленного Android ловится по числу запросов', async () => {
   // Тот же загрузчик и DOM-сценарий сначала проходят на оригинале; убирается ровно охрана сетевого запроса.
   await checkAndroid();
-  const anchor = 'if (inApp) return;';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(checkAndroid(source.replace(anchor, '')), (e: unknown) => e instanceof assert.AssertionError &&
-    e.message.startsWith('R230 Android не запрашивает установочный репозиторий') &&
-    e.operator === 'strictEqual' && e.actual === 1 && e.expected === 0);
+  await counterfact(async () => {
+    const anchor = 'if (inApp) return;';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(checkAndroid(source.replace(anchor, '')), (e: unknown) => e instanceof assert.AssertionError &&
+      e.message.startsWith('R230 Android не запрашивает установочный репозиторий') &&
+      e.operator === 'strictEqual' && e.actual === 1 && e.expected === 0);
+  });
 });
 
 it('R230 аккаунт сохраняет редактирование личного имени без поля отображаемого имени сервера', async () => {
@@ -168,14 +155,16 @@ it('R230 единственная строка версии размещена �
 
 it('R230 удаление версии и перенос в неиспользуемый рельс не заменяют строку живого окна настроек', () => {
   // Глобальный обход AST ошибочно принимал мёртвую функцию с SettingsRail за настоящий интерфейс.
-  const anchor = '<div className="settings-app-version">{appVersionLabel(androidApp ? \'android\' : isTauri() ? \'desktop\' : \'web\', appVer)}</div>';
-  assert.equal(source.split(anchor).length - 1, 1);
-  for (const dormant of ['', `\nfunction UnusedVersionRail() { return <SettingsRail>${anchor}</SettingsRail>; }`]) {
-    checkVersionRail(source);
-    assert.throws(() => checkVersionRail(source.replace(anchor, '') + dormant), (e: unknown) => e instanceof assert.AssertionError &&
-      e.message.startsWith('R230 версия находится в живом rail окна UserSettingsModal') &&
-      e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
-  }
+  checkVersionRail(source);
+  counterfact(() => {
+    const anchor = '<div className="settings-app-version">{appVersionLabel(androidApp ? \'android\' : isTauri() ? \'desktop\' : \'web\', appVer)}</div>';
+    assert.equal(source.split(anchor).length - 1, 1);
+    for (const dormant of ['', `\nfunction UnusedVersionRail() { return <SettingsRail>${anchor}</SettingsRail>; }`]) {
+      assert.throws(() => checkVersionRail(source.replace(anchor, '') + dormant), (e: unknown) => e instanceof assert.AssertionError &&
+        e.message.startsWith('R230 версия находится в живом rail окна UserSettingsModal') &&
+        e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+    }
+  });
 });
 
 function checkBlockedPanel(raw = source) {
@@ -212,17 +201,19 @@ it('R232 заблокированные завершают живой разде
   checkBlockedPanel();
 });
 it('R232 перенос панели заблокированных в аккаунт или мёртвую разметку не подменяет её конфиденциальность', () => {
-  const anchor = '            <BlockedUsersSetting />';
-  const account = '            <SecurityTab />';
-  assert.equal(source.split(anchor).length - 1, 1);
-  assert.equal(source.split(account).length - 1, 1);
-  for (const [mutant, actual] of [
-    [source.replace(anchor, '').replace(account, `${account}\n${anchor}`), '["account"]'],
-    [source.replace(anchor, '') + '\nfunction UnusedBlockedPanel() { return <BlockedUsersSetting />; }', '[]'],
-  ]) {
-    checkBlockedPanel();
-    assert.throws(() => checkBlockedPanel(mutant), (e: unknown) => e instanceof assert.AssertionError &&
-      e.message.startsWith('R232 панель заблокированных размещена только в живой конфиденциальности') &&
-      e.operator === 'strictEqual' && e.actual === actual && e.expected === '["privacy"]');
-  }
+  checkBlockedPanel();
+  counterfact(() => {
+    const anchor = '            <BlockedUsersSetting />';
+    const account = '            <SecurityTab />';
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.equal(source.split(account).length - 1, 1);
+    for (const [mutant, actual] of [
+      [source.replace(anchor, '').replace(account, `${account}\n${anchor}`), '["account"]'],
+      [source.replace(anchor, '') + '\nfunction UnusedBlockedPanel() { return <BlockedUsersSetting />; }', '[]'],
+    ]) {
+      assert.throws(() => checkBlockedPanel(mutant), (e: unknown) => e instanceof assert.AssertionError &&
+        e.message.startsWith('R232 панель заблокированных размещена только в живой конфиденциальности') &&
+        e.operator === 'strictEqual' && e.actual === actual && e.expected === '["privacy"]');
+    }
+  });
 });

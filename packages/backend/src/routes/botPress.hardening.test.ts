@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -51,13 +52,15 @@ it('R303 предел человека останавливает callback до 
 it('R303 предел бота допускает только загрузку доступа, но не бота и сообщения', () => checkLimit(source, 'cbqbot:bot-one'));
 it('R303 контрфакт переноса пользовательского лимита за SQL ловит лишнюю выборку', async () => {
   await checkLimit(source, 'cbq:person');
-  const anchor = '      if (await tooMany(reply, `cbq:${me}`, CALLBACK_USER_RATE)) return reply;';
+  await counterfact(async () => {
+const anchor = '      if (await tooMany(reply, `cbq:${me}`, CALLBACK_USER_RATE)) return reply;';
   // В модуле два входа: канал и ЛС. Мутируем только последний, проверяемый маршрут ЛС.
   const at = source.lastIndexOf(anchor); assert.ok(at >= 0);
   const changed = source.slice(0, at) + source.slice(at).replace(anchor, `      await directAccess(req.params.id, me);\n${anchor}`);
   await assert.rejects(checkLimit(changed, 'cbq:person'), (error: unknown) => error instanceof assert.AssertionError
     && error.message.split(/\r?\n/, 1)[0] === 'R303 предел нажатий срабатывает до лишних выборок'
     && JSON.stringify(error.actual) === '["loadAccess"]' && JSON.stringify(error.expected) === '[]');
+});
 });
 
 it('R303 контрфакт инверсии владельца ловится на разрешённом владельце приватного бота', () => {
@@ -77,7 +80,9 @@ it('R303 контрфакт инверсии владельца ловится �
     assert.equal(api.botUnavailableFor({ ...bot, disabledAt: new Date() }, true, 'owner'), 'disabled');
   };
   check(raw);
-  const anchor = 'bot.ownerId !== me'; assert.equal(raw.split(anchor).length, 2);
+  counterfact(() => {
+const anchor = 'bot.ownerId !== me'; assert.equal(raw.split(anchor).length, 2);
   assert.throws(() => check(raw.replace(anchor, 'bot.ownerId === me')), (error: unknown) => error instanceof assert.AssertionError
     && error.message.split(/\r?\n/, 1)[0] === 'R303 владелец приватного бота проходит' && error.actual === 'private' && error.expected === null);
+});
 });

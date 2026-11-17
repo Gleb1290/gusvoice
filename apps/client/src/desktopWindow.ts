@@ -226,3 +226,26 @@ export async function gpuAccelSet(on: boolean): Promise<void> {
   if (!isDesktop() || !c) return;
   await c.invoke('gv_gpu_accel_set', { on });
 }
+
+/** Автозапуск доступен только Windows-оболочке; ошибки нативной команды видны вызывающему коду. */
+function windowsDesktop(): boolean {
+  return isDesktop() && /Windows/i.test(navigator.userAgent || '');
+}
+
+export async function autostartGet(): Promise<boolean | null> {
+  if (!windowsDesktop()) return null;
+  const c = core();
+  if (!c) throw new Error('Нативный вызов недоступен');
+  const value = await c.invoke('gv_autostart_enabled');
+  if (typeof value !== 'boolean') throw new Error('Некорректный ответ автозапуска');
+  return value;
+}
+
+export async function autostartSet(enabled: boolean): Promise<boolean> {
+  if (!windowsDesktop()) throw new Error('Автозапуск доступен только в Windows');
+  const c = core();
+  if (!c) throw new Error('Нативный вызов недоступен');
+  const value = await c.invoke('gv_autostart_set', { enabled });
+  if (typeof value !== 'boolean') throw new Error('Некорректный ответ автозапуска');
+  return value;
+}

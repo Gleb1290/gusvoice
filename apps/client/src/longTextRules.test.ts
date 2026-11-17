@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -91,7 +92,7 @@ it('R132 мутанты обрезки подписи, hasFiles, предела 
     ['if (hasFiles && t.length > 0 && t.length <= limit)', 'if (t.length > 0 && t.length <= limit)', noFiles],
     ['const cap = limit * 8;', 'const cap = Infinity;', cap],
     ['const c = pieces(comment);', "const c = comment.trim() ? [comment.trim()] : [];", comment],
-  ] as const) { check(rules); assert.throws(() => check(mutant(from, to)), assert.AssertionError); }
+  ] as const) { check(rules); counterfact(() => assert.throws(() => check(mutant(from, to)), assert.AssertionError)); }
 });
 
 function mutant(from: string, to: string): typeof rules {
@@ -124,7 +125,7 @@ it('файл предлагается только длинному тексту
   };
   check(rules);
   for (const [from, to] of [['>= limit * 8', '> limit * 8'], ['Math.abs(selEnd - selStart)', '(selEnd - selStart)'], ['pasted >= limit * 8', 'pasted >= limit'], ['!editing && length > limit', 'length > limit']]) {
-    assert.throws(() => check(mutant(from, to)), assert.AssertionError);
+    counterfact(() => assert.throws(() => check(mutant(from, to)), assert.AssertionError));
   }
 });
 
@@ -146,7 +147,7 @@ it('пустая строка во второй половине лучше пр
   const text = 'a\n\n' + 'b'.repeat(5000);
   const check = (api: typeof rules) => assert.ok(api.splitLongText(text)[0].length >= 2000, 'ранний абзац вне окна не выбран');
   check(rules);
-  assert.throws(() => check(mutant('Math.max(1, Math.floor(limit / 2))', '1')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('Math.max(1, Math.floor(limit / 2))', '1')), assert.AssertionError));
 });
 
 it('разрез внутри слова не разрывает пару UTF-16 даже при нечётном пределе', () => {
@@ -161,7 +162,7 @@ it('разрез внутри слова не разрывает пару UTF-16
     }
   };
   check(rules);
-  assert.throws(() => check(mutant('const lowSurrogate = code >= 0xdc00 && code <= 0xdfff;', 'const lowSurrogate = false;')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('const lowSurrogate = code >= 0xdc00 && code <= 0xdfff;', 'const lowSurrogate = false;')), assert.AssertionError));
 });
 
 it('короткий спойлер у границы переносится целиком, соседний текст не пропадает', () => {
@@ -183,7 +184,7 @@ it('подпись 4096 ещё отправляется, 4097 отказывае
   assert.equal(rules.sendTextPlan('x'.repeat(4097), false).kind, 'split');
   assert.equal(rules.sendTextPlan('x'.repeat(32768), false).kind, 'split');
   assert.deepEqual(rules.sendTextPlan('x'.repeat(32769), false), { kind: 'too-long', over: 1, caption: false });
-  assert.throws(() => check(mutant('if (hasFiles) return', 'if (false) return')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('if (hasFiles) return', 'if (false) return')), assert.AssertionError));
 });
 
 it('счётчик жёсткого поля появляется ровно за 100 знаков и показывает ноль и перебор', () => {

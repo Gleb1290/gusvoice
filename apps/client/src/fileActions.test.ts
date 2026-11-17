@@ -1,3 +1,4 @@
+import { counterfact, mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -165,14 +166,16 @@ function checkRussianMegabytes(api: typeof import('./fileActions')) {
 }
 it('R232 возврат десятичной точки в мегабайтах обнаруживается на настоящем форматтере', () => {
   checkRussianMegabytes(fixture().api);
-  const anchor = ".toFixed(1).replace('.', ',')";
-  const mutant = fixture(source => {
-    assert.equal(source.split(anchor).length - 1, 1);
-    return source.replace(anchor, '.toFixed(1)');
+  counterfact(() => {
+    const anchor = ".toFixed(1).replace('.', ',')";
+    const mutant = fixture(source => {
+      assert.equal(source.split(anchor).length - 1, 1);
+      return source.replace(anchor, '.toFixed(1)');
+    });
+    assert.throws(() => checkRussianMegabytes(mutant.api), (e: unknown) => e instanceof assert.AssertionError &&
+      e.message.startsWith('R232 размер мегабайтов использует русскую десятичную запятую') &&
+      e.operator === 'strictEqual' && e.actual === '1.0 МБ' && e.expected === '1,0 МБ');
   });
-  assert.throws(() => checkRussianMegabytes(mutant.api), (e: unknown) => e instanceof assert.AssertionError &&
-    e.message.startsWith('R232 размер мегабайтов использует русскую десятичную запятую') &&
-    e.operator === 'strictEqual' && e.actual === '1.0 МБ' && e.expected === '1,0 МБ');
 });
 
 it('повторное нажатие отменяет открытую загрузку без системного тоста', async () => {
@@ -281,7 +284,7 @@ it('пункты меню запускают общий job по ключу фа
   assert.equal(held.shareCalls.length, 0, 'отменённый job не открывает Android share sheet');
 });
 
-it('контракт общего job отвергает мутант, запускающий два открытия одного вложения', async () => {
+mutantTest('контракт общего job отвергает мутант, запускающий два открытия одного вложения', async () => {
   // Один ключ означает одну карточку загрузки; двойное меню не должно качать те же байты параллельно.
   const source = readFileSync(new URL('./fileActions.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const mutate = (s: string) => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -371,8 +372,10 @@ for (const kind of ['правка', 'удаление', 'реакция'] as con
 /** Регрессия считается пойманной только ожидаемым host AssertionError с известными actual/expected. */
 async function killed(run: (mutation?: Mutation) => Promise<void>, mutation: Mutation, label: string, actual: unknown, expected: unknown) {
   await run();
-  await assert.rejects(() => run(mutation), (err: unknown) => err instanceof assert.AssertionError && err.message.startsWith(label)
-    && JSON.stringify(err.actual) === JSON.stringify(actual) && JSON.stringify(err.expected) === JSON.stringify(expected));
+  await counterfact(async () => {
+    await assert.rejects(() => run(mutation), (err: unknown) => err instanceof assert.AssertionError && err.message.startsWith(label)
+      && JSON.stringify(err.actual) === JSON.stringify(actual) && JSON.stringify(err.expected) === JSON.stringify(expected));
+  });
 }
 it('R208 контрфакт: через группы не заменяет dmgroup2 старым dmgroup1', async () => {
   await killed(gateFeatures, ['!(await hasFeature(groupLink, FED_FEATURES.dmgroup2, Date.now()))', '!(await hasFeature(groupLink, FED_FEATURES.dmgroup1, Date.now()))'], 'C: группе нужен dmgroup2 для через', { instanceId: M.instanceId }, 'refused');

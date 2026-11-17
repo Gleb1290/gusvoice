@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -8,6 +9,7 @@ import * as jsx from 'react/jsx-runtime';
 import * as ReactDOM from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as attachRules from '../attachRules';
 import * as longTextRules from '../longTextRules';
 import type { GalleryPerm } from '../attachRules';
@@ -106,7 +108,6 @@ async function fixture(perm: GalleryPerm, count: number, check: (f: Fixture) => 
   const dependencies: Record<string, unknown> = {
     react: React, 'react/jsx-runtime': jsx, 'react-dom': ReactDOM,
     '../attachRules': attachRules, '../longTextRules': longTextRules,
-    '../api': { api: { attachmentDownloadUrl: unused } },
     '../cameraCapture': cameraDeps,
     '../nativeMedia': {
       cameraPermissionNative: async () => {
@@ -141,27 +142,24 @@ async function fixture(perm: GalleryPerm, count: number, check: (f: Fixture) => 
     '../toast': { toast: () => { assert.ok(options.skipMiddle, 'предупреждение только о намеренно пропущенном файле'); } },
     '../confirm': { confirmAction: async (args: Fixture['confirmations'][number]) => { confirmations.push(args); return options.confirm ?? false; } },
     './BottomSheet': { BottomSheet: ({ children, onClose }: { children: React.ReactNode; onClose: () => void }) => { topClose = onClose; return React.createElement('section', null, children); } },
-    './ContextMenu': { MenuItem: noView }, './Icon': { Icon: noView }, './SchedPick': { SchedPick: noView },
+    './Icon': { Icon: noView },
   };
   class QuietObserver { observe() {} disconnect() {} unobserve() {} }
-  function load<T>(rawModule: string): T {
+  function load<T>(sourceUrl: URL, rawModule: string): T {
     const module = { exports: {} as T };
     runInNewContext(ts.transpileModule(rawModule, { compilerOptions: {
       module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022,
     } }).outputText, { module, exports: module.exports, window, document, File,
       URL: { createObjectURL: () => 'blob:shot', revokeObjectURL: () => {} }, DOMException,
-      IntersectionObserver: QuietObserver, require: (id: string) => {
-        assert.ok(Object.hasOwn(dependencies, id), `неожиданная зависимость ${id}`);
-        return dependencies[id];
-      } });
+      IntersectionObserver: QuietObserver, require: testVmImports(sourceUrl, dependencies) });
     return module.exports;
   }
   try {
-    dependencies['./CameraScreen'] = load<typeof Camera>(cameraSource);
+    dependencies['./CameraScreen'] = load<typeof Camera>(new URL('./CameraScreen.tsx', import.meta.url), cameraSource);
     dependencies['./MediaPickViewer'] = options.readyViewer
       ? { MediaPickViewer: (props: MediaPickViewerProps) => { viewer = props; return null; } }
-      : load<typeof import('./MediaPickViewer')>(viewerSource);
-    const { MediaSheet, GalleryCell } = load<typeof Sheet & { GalleryCell: React.ComponentType<Record<string, unknown>> }>(`${raw}\nexport { GalleryCell };`);
+      : load<typeof import('./MediaPickViewer')>(new URL('./MediaPickViewer.tsx', import.meta.url), viewerSource);
+    const { MediaSheet, GalleryCell } = load<typeof Sheet & { GalleryCell: React.ComponentType<Record<string, unknown>> }>(new URL('./MediaSheet.tsx', import.meta.url), `${raw}\nexport { GalleryCell };`);
     await React.act(async () => root.render(React.createElement(MediaSheet, {
       native: true, room: 10, caption: ' подпись ', onSend: (files, caption, how) => sends.push({ files, caption, how }), onAttach: unused, onSystemPick: unused, onClose: () => closed++,
     })));
@@ -286,9 +284,11 @@ async function checkLoadingCamera(raw = source) {
 }
 async function mutant(check: (s?: string) => Promise<void>, from: string, to: string) {
   await check(source);
-  assert.equal(source.split(from).length - 1, 1, 'один точный якорь мутации');
-  const changed = source.replace(from, to); assert.notEqual(changed, source);
-  await assert.rejects(() => check(changed), assert.AssertionError);
+  await counterfact(async () => {
+    assert.equal(source.split(from).length - 1, 1, 'один точный якорь мутации');
+    const changed = source.replace(from, to); assert.notEqual(changed, source);
+    await assert.rejects(() => check(changed), assert.AssertionError);
+  });
 }
 it('R150 partial не имеет собственной плашки и читается как разрешённый доступ', () => checkEmpty());
 it('R150 возвращение hidden→visible проверяет доступ без повторной загрузки неизменившегося набора', () => checkReturn());

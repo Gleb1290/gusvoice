@@ -1,7 +1,7 @@
 import type { Channel, ServerBootstrap } from '@gusvoice/shared';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { isMobile } from '../hotkeys';
-import { useStore } from '../store';
+import { useStore, voiceIsHere } from '../store';
 import { withoutArchived } from '../dmArchiveRules';
 import { AdminPanel } from './AdminPanel';
 import { ChannelSidebar } from './ChannelSidebar';
@@ -12,6 +12,10 @@ import { DmChatView } from './DmChatView';
 import { DmSidebar } from './DmSidebar';
 import { PhoneServerList } from './PhoneServerList';
 import { EconomyWelcome } from './EconomyWelcome';
+import { ActivitiesHost } from './Activities';
+import { RecountNotice } from './RecountNotice';
+import { ensureRecaps, recapStorage } from '../gameBoardClient';
+import { readRecapSeen, recapAutoQueue } from '../gameBoardRules';
 import { FeatherLayer } from './FeatherLayer';
 import { BigReactionLayer } from './BigReactionLayer';
 import { EffectsBench } from './EffectsBench';
@@ -44,6 +48,10 @@ import { UserSettingsModal } from './UserSettingsModal';
 import { VoiceChannelView } from './VoiceChannelView';
 import { VoiceConnection } from './VoiceConnection';
 import { feedNavKey, feedNavTarget } from '../feedNavRules';
+
+/** «Итоги» (этап 6) — ленивый кусок: слайды и их картинки не в основном бандле. */
+const RecapScene = lazy(() => import('./RecapScene'));
+const GamesLaunchHost = lazy(() => import('./GamesLaunchNotice'));
 
 /** Channels in sidebar order (uncategorized first, then categories by position), text only. */
 function orderedTextChannels(b: ServerBootstrap): Channel[] {
@@ -99,6 +107,54 @@ export function MainLayout() {
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const welcomeOpen =
     welcomeRequested || (economyEnabledHere && !!me && !me.economyWelcomeSeen && !welcomeDismissed);
+  /**
+   * Карточка перерасчёта сезона (28.10, `RecountNotice.tsx`): снимок экономики текущего сервера несёт
+   * `recount` — значит, есть непросмотренная доплата. Закрытие ставит отметку на сервере (сама карточка по
+   * `markSeenOn`, `api.markRecountSeen`) и убирает поле из снимка в сторе; `recountDismissed` — страховка на сессию,
+   * если запрос не дошёл (как `welcomeDismissed`). Ворота показа — ниже, рядом с гусем.
+   */
+  const recountServerId = useStore((s) => s.bootstrap?.server.id ?? null);
+  const recountView = useStore((s) => (s.bootstrap ? s.economy[s.bootstrap.server.id] : undefined));
+  const [recountDismissed, setRecountDismissed] = useState<string[]>([]);
+  const recount =
+    recountServerId && recountView?.enabled && recountView.recount && !recountDismissed.includes(recountServerId)
+      ? recountView.recount
+      : null;
+  /**
+   * «Итоги» месяца игр и сезона экономики (ГусКоины 2, этап 6, `RecapScene.tsx`, ленивая). Последние замороженные грузит
+   * `ensureRecaps`; сами всплывают ОДИН раз на период (отметка в `localStorage` — удобство, не данные) и только тому, у кого
+   * есть личная часть; по одному — сначала экономика, потом игры. Вручную — `recapOpen` в сторе (кошелёк, «Активности»,
+   * черновик управляющего в панели экономики). `recapSkipped` — страховка на сессию, если хранилище недоступно.
+   */
+  const recapCache = useStore((s) => (recountServerId ? s.recaps[recountServerId] : undefined));
+  const recapRequested = useStore((s) => s.recapOpen);
+  const activitiesOpen = useStore((s) => !!s.activitiesOpen);
+  const openRecap = useStore((s) => s.openRecap);
+  const [recapSkipped, setRecapSkipped] = useState<string[]>([]);
+  useEffect(() => {
+    if (recountServerId && economyEnabledHere) ensureRecaps(recountServerId);
+  }, [recountServerId, economyEnabledHere]);
+  const recapAutoKind = recountServerId
+    ? recapAutoQueue(recapCache, (k) => readRecapSeen(recapStorage(), recountServerId, k), Date.now()).find(
+        (k) => !recapSkipped.includes(`${recountServerId}:${k}`),
+      )
+    : undefined;
+  /**
+   * Карточка «Игры пришли в голос» (29.10, `GamesLaunchNotice.tsx`, ленивая): по событию `games.launched` (`sockets.ts` →
+   * `gamesLaunchNotice` в сторе) или при входе на запущенный сервер (снимок экономики несёт `gamesLaunch`). Что именно и
+   * когда (один раз, пока не «видел»; повтор из «Активностей») решает сам ленивый хост — с 29.10 это сцена «БУМ»
+   * (`GamesLaunchScene.tsx`); здесь — только «может понадобиться» и ворота показа ниже.
+   */
+  const launchRequested = useStore((s) => s.gamesLaunchNotice);
+  const launchMaybe = !!launchRequested || !!(recountView?.enabled && recountView.gamesEnabled && recountView.gamesLaunch);
+  const closeRecount = () => {
+    if (!recountServerId) return;
+    const serverId = recountServerId;
+    setRecountDismissed((list) => [...list, serverId]);
+    const st = useStore.getState();
+    const cur = st.economy[serverId];
+    if (cur?.recount) st.setEconomy(serverId, { ...cur, recount: undefined });
+  };
 
   /* Раунд 12: лента ЛС в режиме выделения (`dmSelection.ts`) — «назад» на телефоне становится крестиком «Выйти из
      выделения». Без выделения кнопка прежняя. */
@@ -175,7 +231,12 @@ export function MainLayout() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const channel = bootstrap?.channels.find((c) => c.id === currentChannelId) ?? null;
+  const temporaryChannel: Channel | null =
+    voice?.temporary && voiceIsHere(voice) && voice.channelId === currentChannelId && voice.serverId === currentServerId
+      ? { id: voice.channelId, serverId: voice.serverId ?? '', categoryId: null, name: voice.channelName, type: 'voice',
+        position: 0, topic: null, syncedToCategory: false, icon: null, isPrivate: true, generalUserId: null, sounds: {}, voiceBitrate: null }
+      : null;
+  const channel = bootstrap?.channels.find((c) => c.id === currentChannelId) ?? temporaryChannel;
   const dm = dms.find((d) => d.id === currentDmId) ?? null;
   const isDm = view === 'dm';
   // Число непрочитанного в ДРУГИХ беседах на «Назад» открытой беседы (телефон, G06): тот же источник, что у строк списка.
@@ -271,7 +332,25 @@ export function MainLayout() {
   if (!isDm && !profileShown) appClass.push('m-srvlist');
   // Ворота показа: гусь не лезет поверх настроек, админки, шпаргалки и тыка — и только в голосе,
   // потому что предложение выдаётся ровно сидящим в канале.
+  // Карточка перерасчёта — не поверх другого окна (настройки, админка, шпаргалка, приветствие, тык, стенд).
+  const recountOpen =
+    !!recount && !welcomeOpen && !settingsOpen && !adminOpen && !cheatOpen && !benchOpen && !incomingPoke;
+  // «Итоги» сами — не поверх другого окна, перерасчёта и открытых «Активностей»; вручную — всегда.
+  const recapAutoAllowed =
+    !recount && !welcomeOpen && !settingsOpen && !adminOpen && !cheatOpen && !benchOpen && !incomingPoke && !activitiesOpen;
+  const recapShown =
+    recapRequested ??
+    (recapAutoKind && recountServerId && recapAutoAllowed ? { serverId: recountServerId, kind: recapAutoKind, auto: true } : null);
+  const closeRecap = () => {
+    if (recapShown?.auto) setRecapSkipped((list) => [...list, `${recapShown.serverId}:${recapShown.kind}`]);
+    openRecap(null);
+  };
+  // Карточка запуска игр — не поверх другого окна, перерасчёта, «Итогов» и открытых «Активностей».
+  const launchHosted = launchMaybe && recapAutoAllowed && !recapShown;
   const goosePresentationAllowed =
+    !recountOpen &&
+    !recapShown &&
+    !launchRequested &&
     !!voice &&
     !settingsOpen &&
     !adminOpen &&
@@ -352,11 +431,33 @@ export function MainLayout() {
           }}
         />
       )}
+      {recountOpen && recount && (
+        <RecountNotice
+          amount={recount.amount}
+          currencyName={recountView?.currencyName || 'ГусКоины'}
+          iconUrl={recountView?.iconUrl ?? null}
+          seasonName={recountView?.season?.id === recount.seasonId ? recountView.season.name : undefined}
+          markSeenOn={recountServerId ?? undefined}
+          onClose={closeRecount}
+        />
+      )}
+      {recapShown && (
+        <Suspense fallback={null}>
+          <RecapScene key={`${recapShown.serverId}:${recapShown.kind}:${recapShown.periodId ?? ''}:${recapShown.preview ? 1 : 0}`} open={recapShown} onClose={closeRecap} />
+        </Suspense>
+      )}
+      {launchHosted && (
+        <Suspense fallback={null}>
+          <GamesLaunchHost />
+        </Suspense>
+      )}
       {/* Тык — поверх ВСЕГО, включая открытые настройки: его смысл в том, чтобы заметили сразу. */}
       <PokeModal />
       {/* Звонок 1:1 в ЛС (С5, `calls1`): входящий и экран звонка — поверх всего, как тык; медиа звонка живёт здесь же. */}
       <CallLayer />
       <GooseBonusHost presentationAllowed={goosePresentationAllowed} />
+      {/* «Активности» голоса и сцена колеса гусей-пиратов (ГусКоины 2): открытое живёт в сторе, кнопки — в доке голоса. */}
+      <ActivitiesHost />
       {/* ⚠️ Здесь, а НЕ в оверлее: оверлей висит поверх чужой игры, и осыпание там — оплаченная
           помеха человеку в бою. Оверлей рендерит свой корень, поэтому граница держится структурно. */}
       <FeatherLayer />

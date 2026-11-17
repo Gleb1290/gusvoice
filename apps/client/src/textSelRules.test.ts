@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -12,8 +13,10 @@ it('без Segmenter касание любой половины emoji выбир
     Object.defineProperty(Intl, 'Segmenter', { value: undefined, configurable: true });
     for (const at of [0, 1]) assert.deepEqual(rules.wordBounds('🙂', at), [0, 2]);
     for (const at of [1, 2]) assert.deepEqual(rules.wordBounds('a🙂b', at), [1, 3]);
-    const old = mutant('return [start, snapOffset(text, i + 1)];', 'return [i, snapOffset(text, i + 1)];');
-    assert.throws(() => assert.deepEqual(Array.from(old.wordBounds('🙂', 1)), [0, 2]), assert.AssertionError);
+    counterfact(() => {
+      const old = mutant('return [start, snapOffset(text, i + 1)];', 'return [i, snapOffset(text, i + 1)];');
+      assert.throws(() => assert.deepEqual(Array.from(old.wordBounds('🙂', 1)), [0, 2]), assert.AssertionError);
+    });
   } finally {
     if (descriptor) Object.defineProperty(Intl, 'Segmenter', descriptor);
     else Reflect.deleteProperty(Intl, 'Segmenter');
@@ -39,7 +42,7 @@ it('слово под пальцем сохраняется целиком, пр
     assert.deepEqual(Array.from(api.wordBounds('раз', 99)), [0, 3]);
   };
   check(rules);
-  assert.throws(() => check(mutant('if (l > 0) i = l - 1;', 'if (l > 0) i = r;')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('if (l > 0) i = l - 1;', 'if (l > 0) i = r;')), assert.AssertionError));
 });
 
 it('пунктуация и emoji выделяются отдельно, дефис не теряет соседние кириллические сегменты', () => {
@@ -78,7 +81,7 @@ it('перекрещённые и выходящие за текст марке�
     assert.deepEqual(Array.from(api.orderedRange(0, 0, 0)), [0, 0]);
   };
   check(rules);
-  assert.throws(() => check(mutant('if (e <= s)', 'if (e < s)')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('if (e <= s)', 'if (e < s)')), assert.AssertionError));
 });
 
 it('полное выделение игнорирует только краевые пробелы, оставшаяся буква требует «Выделить всё»', () => {
@@ -91,7 +94,7 @@ it('полное выделение игнорирует только краев
     assert.equal(api.selectsAll(0, 0, ''), true);
   };
   check(rules);
-  assert.throws(() => check(mutant("text.slice(0, start).trim()", "text.slice(0, start)")), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant("text.slice(0, start).trim()", "text.slice(0, start)")), assert.AssertionError));
 });
 
 it('смещение внутри суррогатной пары выбирает заданную сторону, обычные края не меняются', () => {
@@ -105,5 +108,5 @@ it('смещение внутри суррогатной пары выбирае
     assert.equal(api.snapOffset('', 99), 0);
   };
   check(rules);
-  assert.throws(() => check(mutant('forward ? o + 1 : o - 1', 'forward ? o - 1 : o + 1')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('forward ? o + 1 : o - 1', 'forward ? o - 1 : o + 1')), assert.AssertionError));
 });

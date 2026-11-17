@@ -14,7 +14,7 @@
  * означала бы, что «назад» закрывает окно ПОД открытым листом.
  */
 
-import { isAndroid } from './hotkeys';
+import { isAndroid, isTauri } from './hotkeys';
 import { useStore } from './store';
 
 type Native = { exitApp?: () => void };
@@ -247,4 +247,157 @@ export function installAndroidBack(): void {
     if (committing || phase === 'invoked') return;
     sink?.(phase, Number(progress) || 0, Number(edge) || 0, Number(y) || 0);
   };
+}
+
+/** Метка записи-стража в `history.state` (запасной путь `installBrowserBack` — браузер без `CloseWatcher`). */
+const BACK_GUARD_KEY = 'gvBackGuard';
+
+/**
+ * Заберёт ли `stepBack` следующую «назад» — тот же порядок, что в `stepBack`, но БЕЗ действия. Перехватчик без `peek` считаем
+ * забирающим (ошибка в эту сторону стоит одной проглоченной «назад» на корне, её ловит `installBrowserBack`).
+ */
+export function canStepBack(): boolean {
+  if (topLayer()) return true;
+  for (let i = handlers.length - 1; i >= 0; i--) {
+    const peek = peeks.get(handlers[i]!);
+    if (!peek || peek()) return true;
+  }
+  const s = useStore.getState();
+  if (s.adminOpen || s.settingsOpen || s.mobileProfileOpen || s.mobileMembersOpen) return true;
+  if (s.mobilePane === 'content') return true;
+  return s.view === 'server';
+}
+
+/** `CloseWatcher` (Chrome 120+): системная «назад» Android и Esc закрывают его вместо шага по истории. В lib.dom TS 5.9 его нет. */
+type CloseWatcherLike = { destroy(): void; onclose: ((ev: Event) => void) | null };
+type CloseWatcherCtor = new () => CloseWatcherLike;
+
+/**
+ * Системная «назад» во вкладке браузера телефона (29.10). У приложения её ловит оболочка (`__gvBack` выше), а у вкладки
+ * Chrome «назад» — это шаг по истории: история у клиента одна запись, и любой жест «назад» — из канала, из настроек,
+ * из открытого листа — уводил с сайта (а голос рвался).
+ *
+ * 🔴 Приёмка 29.10 (S20, Chrome): первая версия держала над записью истории запись-страж и после шага клала её заново в
+ * `popstate`. Это добавление БЕЗ действия человека, и Chrome (history manipulation intervention, `NavigationControllerImpl`:
+ * запись, с которой страница без жеста добавила новую, помечается «пропускаемой на назад/вперёд») на второй «назад» подряд
+ * перескакивал и стража, и исходную запись — вкладка, открытая извне, закрывалась целиком.
+ *
+ * Как устроено теперь: основной путь — `CloseWatcher` (HTML, «close requests»; Chrome 120+, на Android «назад» — это запрос
+ * закрытия, он достаётся последнему наблюдателю раньше истории). Один наблюдатель без действия человека разрешён всегда
+ * (`allowed number of groups` = 1), а закрытый «назад» освобождает место — так держится сколько угодно «назад» подряд без
+ * касаний. Наблюдатель стоит, только пока `canStepBack()`: на корне его нет, и «назад» уходит с сайта/сворачивает Chrome
+ * обычным путём. Наличие пересчитывается по стору, касаниям, клавишам и порталам в `body`.
+ * Esc на ПК тоже закрывает наблюдатель — тогда шаг НЕ делаем: Esc слои ловят сами (`stepBack` и так шлёт Esc).
+ *
+ * Запасной путь (браузер без `CloseWatcher`): запись-страж по касанию (`pointerdown` — с действием человека), `popstate` →
+ * `stepBack`; заново страж кладёт только следующее касание, не `popstate`.
+ *
+ * Только телефонная раскладка браузера (окно ≤ 760 px, граница `PHONE_LAYOUT_QUERY` из `phoneLayout.ts`): на ПК «назад»
+ * браузера остаётся обычной; в оболочках Tauri истории нет.
+ */
+export function installBrowserBack(): void {
+  if (isTauri() || typeof window === 'undefined' || typeof history === 'undefined' || typeof history.pushState !== 'function') return;
+  const CW = (window as unknown as { CloseWatcher?: CloseWatcherCtor }).CloseWatcher;
+  if (typeof CW === 'function') {
+    installCloseWatcherBack(CW);
+    return;
+  }
+  let leaving = false;
+  const armed = () => (history.state as Record<string, unknown> | null)?.[BACK_GUARD_KEY] === true;
+  const arm = () => {
+    if (leaving || armed() || !phoneWidth()) return;
+    const state = history.state && typeof history.state === 'object' ? (history.state as Record<string, unknown>) : {};
+    history.pushState({ ...state, [BACK_GUARD_KEY]: true }, '');
+  };
+  window.addEventListener('pointerdown', arm, { capture: true, passive: true });
+  window.addEventListener('popstate', () => {
+    // «Вперёд» на стража — не наш шаг.
+    if (armed() || !phoneWidth()) return;
+    // Стража НЕ кладём заново здесь: без действия человека Chrome пометит запись пропускаемой (см. выше).
+    if (stepBack()) return;
+    leaving = true;
+    // Прошлой записи нет (вкладка открыта сразу на клиенте) — `back()` ничего не делает; через секунду страж снова можно класть.
+    window.setTimeout(() => {
+      leaving = false;
+    }, 1000);
+    history.back();
+  });
+}
+
+/** Основной путь `installBrowserBack`: один `CloseWatcher`, пока есть что закрыть. */
+function installCloseWatcherBack(CW: CloseWatcherCtor): void {
+  let watcher: CloseWatcherLike | null = null;
+  let lastEsc = Number.NEGATIVE_INFINITY;
+  // «Назад» пришла, а шагать оказалось некуда (перехватчик без `peek` отказался) — не ставим наблюдатель до касания/клавиши,
+  // иначе он проглатывал бы каждую «назад» на корне.
+  let stuck = false;
+  let pending = false;
+  const drop = () => {
+    const w = watcher;
+    watcher = null;
+    if (w) {
+      w.onclose = null;
+      w.destroy();
+    }
+  };
+  const onClose = () => {
+    watcher = null;
+    // Esc (клавиатура) тоже запрос закрытия: его слои уже поймали сами — шага нет, наблюдатель вернём.
+    if (performance.now() - lastEsc < 300 || !phoneWidth()) {
+      schedule();
+      return;
+    }
+    if (stepBack()) {
+      schedule();
+      return;
+    }
+    stuck = true;
+    history.back();
+  };
+  const sync = () => {
+    pending = false;
+    const want = !stuck && phoneWidth() && canStepBack();
+    if (want && !watcher) {
+      try {
+        const w = new CW();
+        w.onclose = onClose;
+        watcher = w;
+      } catch {
+        watcher = null;
+      }
+    } else if (!want && watcher) drop();
+  };
+  // Пересчёт — после того, как обработчики касания/стора дорисовали слой (лист, меню открываются в том же такте или следующем).
+  const schedule = () => {
+    if (pending) return;
+    pending = true;
+    window.setTimeout(sync, 0);
+  };
+  const touched = () => {
+    stuck = false;
+    schedule();
+  };
+  window.addEventListener('pointerdown', touched, { capture: true, passive: true });
+  window.addEventListener('pointerup', schedule, { capture: true, passive: true });
+  window.addEventListener('click', schedule, { capture: true, passive: true });
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.isTrusted && e.key === 'Escape') lastEsc = performance.now();
+      else if (e.isTrusted) stuck = false;
+    },
+    { capture: true },
+  );
+  window.addEventListener('keyup', schedule, { capture: true, passive: true });
+  window.addEventListener('resize', schedule, { passive: true });
+  window.addEventListener('popstate', schedule);
+  useStore.subscribe(schedule);
+  // Листы, меню, просмотрщик — порталы прямо в `body` (только дети `body`, без поддерева: лента не будит пересчёт).
+  if (typeof MutationObserver === 'function' && document.body) new MutationObserver(schedule).observe(document.body, { childList: true });
+  schedule();
+}
+
+/** Окно в раскладке телефона (≤ 760 px, `PHONE_LAYOUT_QUERY` в `phoneLayout.ts`). */
+function phoneWidth(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
 }

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -22,8 +23,10 @@ it('подпись контакта важнее имени профиля, а n
   const check = (api: typeof rules) => assert.equal(api.contactLabel({ name: 'Коллега', displayName: 'Иван' }), 'Коллега');
   check(rules);
   check(mutant('return c.name ?? c.displayName;', 'return c.name ?? c.displayName;'));
-  assert.throws(() => check(mutant('return c.name ?? c.displayName;', 'return c.displayName;')), assert.AssertionError,
-    'мутант игнорирует пользовательскую подпись контакта');
+  counterfact(() => {
+    assert.throws(() => check(mutant('return c.name ?? c.displayName;', 'return c.displayName;')), assert.AssertionError,
+      'мутант игнорирует пользовательскую подпись контакта');
+  });
 });
 
 it('поиск контакта учитывает русские регистры, Unicode-ё и логин с начальным @', () => {
@@ -37,8 +40,10 @@ it('поиск контакта учитывает русские регистр
   const check = (api: typeof rules) => assert.equal(api.contactMatches(c, '@USE'), true);
   check(rules);
   check(mutant("replace(/^@/, '')", "replace(/^@/, '')"));
-  assert.throws(() => check(mutant("replace(/^@/, '')", "replace(/^#/, '')")), assert.AssertionError,
-    'мутант оставляет @ в поисковой строке и теряет совпадение с логином');
+  counterfact(() => {
+    assert.throws(() => check(mutant("replace(/^@/, '')", "replace(/^#/, '')")), assert.AssertionError,
+      'мутант оставляет @ в поисковой строке и теряет совпадение с логином');
+  });
 });
 
 it('сначала идут онлайн-контакты, затем имена сортируются по пользовательской подписи', () => {
@@ -55,12 +60,16 @@ it('сначала идут онлайн-контакты, затем имена
     'Number(onlineSet.has(b.id)) - Number(onlineSet.has(a.id))'));
   check(mutant('return contactLabel(a).localeCompare(contactLabel(b), \'ru\');',
     'return contactLabel(a).localeCompare(contactLabel(b), \'ru\');'));
-  assert.throws(() => check(mutant('Number(onlineSet.has(b.id)) - Number(onlineSet.has(a.id))',
-    'Number(onlineSet.has(a.id)) - Number(onlineSet.has(b.id))')), assert.AssertionError,
-    'мутант отправляет активных контактов вниз');
-  assert.throws(() => check(mutant('return contactLabel(a).localeCompare(contactLabel(b), \'ru\');',
-    "return a.displayName.localeCompare(b.displayName, 'ru');")), assert.AssertionError,
-    'мутант сортирует по имени профиля, а не по пользовательской подписи');
+  counterfact(() => {
+    assert.throws(() => check(mutant('Number(onlineSet.has(b.id)) - Number(onlineSet.has(a.id))',
+      'Number(onlineSet.has(a.id)) - Number(onlineSet.has(b.id))')), assert.AssertionError,
+      'мутант отправляет активных контактов вниз');
+  });
+  counterfact(() => {
+    assert.throws(() => check(mutant('return contactLabel(a).localeCompare(contactLabel(b), \'ru\');',
+      "return a.displayName.localeCompare(b.displayName, 'ru');")), assert.AssertionError,
+      'мутант сортирует по имени профиля, а не по пользовательской подписи');
+  });
 });
 
 it('незагруженный список не объявляет человека контактом', () => {
@@ -86,6 +95,8 @@ it('подпись контакта после trim побеждает, а пу�
     }).outputText, { module, exports: module.exports, require: () => ({ FEATURE_CONTACTS1: 'contacts1' }) });
     return module.exports as typeof rules;
   };
-  assert.throws(() => assert.equal(evaluate("?.name?.trim();")
-    .personLabel(contacts, 'peer-a', 'Профиль А'), 'Сосед по мастерской'), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => assert.equal(evaluate("?.name?.trim();")
+      .personLabel(contacts, 'peer-a', 'Профиль А'), 'Сосед по мастерской'), assert.AssertionError);
+  });
 });

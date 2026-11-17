@@ -1,7 +1,9 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -10,34 +12,28 @@ import ts from 'typescript';
 const source = readFileSync(new URL('./VoiceChannelView.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 type Person = { userId: string; bot?: boolean };
 type Props = { channel: { id: string; name: string }; connected?: boolean };
-// Как в существующих stage/watchFit-харнессах, исполняется ЦЕЛЫЙ модуль и перечень границ закрыт.
+// Исполняется ЦЕЛЫЙ модуль; неиспользуемые импорты разрешаются без выполнения.
 // SSR достаточен для неприсоединённого канала: он не подписывается на LiveKit и не использует DOM.
-const dormant = new Set(`@livekit/components-react livekit-client ../api ../hotkeys ../cameraSettings
-../memberName ../economyClient ../streamAudioRules ../streamPipRules ../streamCardRules ../toast
-../tipMode ../tipGesture ../voiceSelf ./Avatar ./Crown ../avatarAnimation ./BottomSheet
-./UserContextMenu ./VoiceParticipants ../localUserAudio ./StreamTipFeed ./StreamVolumeControl ./StreamPipView
-../pendingWatch ../streamCue ../watchGrace ../streamQuality ../windowCovered ../badPicture ./ContextMenu
-../stageGridRules ../stageViewPrefs ../stageLayoutPrefs ../stageLayoutRules ../voiceRules ../useStageSpeaker ./StageLayoutPicker
-../phoneLayout ../stageAutoShowRules ../useStageAutoShow ../stageOrderRules ../stageOrderPrefs ../useStageDrag`.split(/\s+/));
 function render(participants?: Person[], raw = source) {
   const unexpected: string[] = [];
   const state: { presence: Record<string, Person[]>; joinVoice(): Promise<void> } = {
     presence: participants ? { lounge: participants } : {}, joinVoice: async () => {},
   };
   const deps: Record<string, unknown> = {
+    './Activities': { ActivitiesButton: () => null, ActivitiesHost: () => null, DuelCard: () => null },
     react: React, 'react/jsx-runtime': jsx,
     '../store': { useStore: (select: (state: { presence: Record<string, Person[]>; joinVoice(): Promise<void> }) => unknown) => select(state) },
     './Goose': { Goose: ({ pose }: { pose: string }) => React.createElement('i', { 'data-goose-pose': pose }) },
     './Icon': { ChannelGlyph: () => null },
   };
+  const imports = testVmImports(new URL('./VoiceChannelView.tsx', import.meta.url), deps);
   const module = { exports: {} as { VoiceChannelView: React.ComponentType<Props> } };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, { module, exports: module.exports, require(id: string) {
-    if (Object.hasOwn(deps, id)) return deps[id];
-    assert.equal(dormant.has(id), true, `Неописанная граница голосового канала ${id}`);
-    return new Proxy({}, { get: (_object, key) => {
-      const boundary = `${id}.${String(key)}`; unexpected.push(boundary); throw Error(`Неожиданный вызов ${boundary}`);
+    return new Proxy(imports(id) as object, { get(target, key) {
+      try { return Reflect.get(target, key); }
+      catch (error) { unexpected.push(`${id}.${String(key)}`); throw error; }
     } });
   } });
   const html = renderToStaticMarkup(React.createElement(module.exports.VoiceChannelView,
@@ -80,9 +76,12 @@ it('R306 без ботов неприсоединённый голосовой �
 });
 
 function mutant(anchor: string, replacement: string, contract: (raw?: string) => void, marker: string) {
-  assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь'); contract();
-  assert.throws(() => contract(source.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.startsWith(marker));
+  contract();
+  counterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь');
+    assert.throws(() => contract(source.replace(anchor, replacement)),
+      e => e instanceof assert.AssertionError && e.message.startsWith(marker));
+  });
 }
 it('R306 контрфакт participants.length для пустоты канала отвергается настоящим компонентом', () =>
   mutant('humans.length === 0', 'participants.length === 0', emptyContract, 'R306_IDLE_EMPTY:'));

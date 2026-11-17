@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -95,15 +96,20 @@ describe('выключенная федерация неотличима от о
   });
 
   it('контрфакт: пустой JSON вместо callNotFound разоблачает закрытый маршрут', async () => {
-    const anchor = 'reply.callNotFound();';
-    assert.equal(source.split(anchor).length - 1, 2, 'оба крючка проходят через not-found Fastify');
-    // Меняем обе ветки, чтобы одинаковый контракт проверял и общий флаг, и ЛС.
-    const mutant = loadGates({ enabled: false, dmEnabled: false }, source.replaceAll(anchor, 'reply.code(404).send({});'));
     const original = loadGates({ enabled: false, dmEnabled: false });
+    const mutant = counterfact(() => {
+      const anchor = 'reply.callNotFound();';
+      assert.equal(source.split(anchor).length - 1, 2, 'оба крючка проходят через not-found Fastify');
+      // Меняем обе ветки, чтобы одинаковый контракт проверял и общий флаг, и ЛС.
+      return loadGates({ enabled: false, dmEnabled: false }, source.replaceAll(anchor, 'reply.code(404).send({});'));
+    });
     for (const name of ['federationGate', 'federationDmGate'] as const) {
       await same404(original[name]);
-      await assert.rejects(() => same404(mutant[name]), (e: unknown) => e instanceof assert.AssertionError
-        && e.message.startsWith('закрытый маршрут не выдаёт наличие федерации телом ответа'));
+      await counterfact(async () => {
+        assert.ok(mutant);
+        await assert.rejects(() => same404(mutant[name]), (e: unknown) => e instanceof assert.AssertionError
+          && e.message.startsWith('закрытый маршрут не выдаёт наличие федерации телом ответа'));
+      });
     }
   });
 });

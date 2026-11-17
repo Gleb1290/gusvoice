@@ -8,6 +8,9 @@ import type { DmFolder } from './dmFolders';
 import type { ContactRow, SavedGif, StickerLists } from './types';
 import type { TypingAction } from './typingAction';
 import type { DmCall } from './calls';
+import type { DuelDto } from './duel';
+import type { PredictionEventDto } from './prediction';
+import type { WheelResultDto, WheelRoundDto } from './wheel';
 
 // ===== Backend gateway =====================================================
 
@@ -766,7 +769,7 @@ export type GatewayServerMessage =
   | { t: 'user.activity'; userId: string; activity: GameActivity | null }
   // A moderator moved this user to another voice channel — their client reconnects there.
   // (Client-driven because the self-hosted LiveKit may not implement MoveParticipant.)
-  | { t: 'voice.move'; channelId: string }
+  | { t: 'voice.move'; channelId: string; fromChannelId?: string; moveTicket?: string }
   // Direct messages — routed to each participant's own connections (channelId = DM channel id).
   | { t: 'dm.channel'; channel: DmChannel }
   | { t: 'dm.create'; channelId: string; message: Message }
@@ -905,6 +908,35 @@ export type GatewayServerMessage =
    */
   | { t: 'goose.offer'; serverId: string; offerId: string }
   /**
+   * Колесо гусей-пиратов (ГусКоины 2, этап 2) — всем членам сервера: ставка, блокировка с сектором, отмена (`round` null).
+   * Событие одним пушем теряется ⇒ клиент на `ready`/открытии сцены берёт снимок `GET /servers/:id/wheel`. Старый клиент пропускает.
+   */
+  | { t: 'wheel.state'; serverId: string; round: WheelRoundDto | null; jackpot: number; serverNow: string }
+  /** Итог раунда колеса: сектор, зерно (для проверки честности), выигрыши. Личный баланс доезжает `economy.wallet`. */
+  | { t: 'wheel.result'; serverId: string; last: WheelResultDto; jackpot: number; cooldownUntil: string | null; serverNow: string }
+  /**
+   * Гусиная дуэль (ГусКоины 2, этап 3): состояние партии канала. Вызов (`invited`) и его отмена — лично обоим игрокам;
+   * партия и итог — сидящим в голосовом канале и обоим игрокам (`publishToChannel` с явной аудиторией). Зерно — только у
+   * `settled`. `duel: null` — в канале партии нет. Событие одним пушем теряется ⇒ снимок `GET /servers/:id/duel?channelId=`
+   * на `ready`/входе в канал/открытии сцены. Старый клиент пропускает.
+   */
+  | { t: 'duel.state'; serverId: string; channelId: string; duel: DuelDto | null; serverNow: string }
+  /**
+   * Ставки на события (ГусКоины 2, этап 5) — всем членам сервера: новое событие, ставка (доли по вариантам), закрытие,
+   * итог, отмена. Пуш одного события — не чаще раза в секунду (`PREDICTION_PUSH_MIN_MS`, последнее состояние доезжает
+   * хвостовым пушем). `event.questions[].mine` здесь всегда null — свою ставку клиент берёт из `bets`. `event: null` —
+   * события `eventId` больше нет. Событие одним пушем теряется ⇒ снимок `GET /servers/:id/predictions` на `ready`/открытии.
+   * Старый клиент пропускает.
+   */
+  | { t: 'prediction.state'; serverId: string; eventId: string; event: PredictionEventDto | null; serverNow: string }
+  /**
+   * «Запустить игры» (ГусКоины 2, решение 29.10, пп. 8–9) — всем членам сервера, один раз за жизнь сервера: игры
+   * включены, `gift` монет подарено каждому из `giftedUserIds` (сидели в голосе в момент запуска). Клиент показывает
+   * карточку «Игры пришли в голос». Событие одним пушем теряется ⇒ снимок экономики несёт `gamesLaunch` (карточка при
+   * входе, ≤ 7 суток). Старый клиент пропускает — включённые игры он увидит по `server.invalidate`.
+   */
+  | { t: 'games.launched'; serverId: string; at: string; gift: number; giftedUserIds: string[] }
+  /**
    * Папки бесед изменились (07.10, #211, G40, признак `folders1`): все папки человека целиком, в его порядке — только его
    * устройствам. Старый клиент событие не знает и пропускает.
    */
@@ -991,6 +1023,11 @@ const SERVER_MESSAGE_TYPES: Record<GatewayServerMessage['t'], true> = {
   'mega-poke': true,
   soundboard: true,
   'goose.offer': true,
+  'wheel.state': true,
+  'wheel.result': true,
+  'duel.state': true,
+  'prediction.state': true,
+  'games.launched': true,
   'dmFolders.update': true,
   'contacts.update': true,
   'stickers.update': true,
@@ -1094,6 +1131,18 @@ export const FEATURE_FEDCALL1 = 'fedcall1';
  * `POST /conv/:id/members` с id его теневой строки (как у беседы 1:1). Только при `FEDERATION_DM_ENABLED`.
  */
 export const FEATURE_FEDM6 = 'fedm6';
+
+/**
+ * ГусКоины 2, этап 4 (28.10, `duel2`): клиент умеет дуэли с выбором — «Камень-ножницы-бумага» и «Жадный гусь» (`DuelDto.rps`,
+ * `DuelDto.greedy`, `moveUntil`, `POST /servers/:id/duels/:duelId/move`). Сервер объявляет его в `/auth/me features`; клиент шлёт
+ * тот же признак в `identify.caps`. 🔴 Вызвать на `rps`/`greedy` можно только того, у кого сейчас есть соединение шлюза с этим
+ * признаком (fail-closed: нет — `target_unavailable`): старый клиент выборную игру не покажет и проиграет её по сроку хода.
+ */
+export const FEATURE_DUEL2 = 'duel2';
+/** Добровольная серия дуэлей: два явных согласия, lease видимых сцен, серверный счёт. */
+export const FEATURE_DUEL_SERIES1 = 'duel-series1';
+/** «21»: два стартовых кубика и независимые попытки, скрытые до завершения обеих. */
+export const FEATURE_DUEL21 = 'duel21';
 
 /**
  * ЛС между инстансами, этап Э3 часть 1 (#141, `fedm3`): файлы в беседе с человеком другого инстанса — загрузка и пересылка

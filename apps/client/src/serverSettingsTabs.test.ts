@@ -1,5 +1,10 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+import * as shared from '@gusvoice/shared';
 import { Permission } from '@gusvoice/shared';
 import { canOpenServerSettings, serverSettingsHas, serverSettingsTabs } from './serverSettingsTabs.js';
 
@@ -65,12 +70,12 @@ describe('вкладки настроек сервера', () => {
   });
 
   it('оба права на «Основное» не двоят вкладку', () => {
-    assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_CHANNELS), ['general', 'integrations']);
+    assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_CHANNELS), ['general', 'soundboard', 'integrations']);
   });
 
   it('несколько прав дают несколько вкладок в объявленном порядке', () => {
     assert.deepEqual(keys(Permission.MANAGE_SOUNDS | Permission.MANAGE_EMOJIS), ['emoji', 'sounds']);
-    assert.deepEqual(keys(Permission.VIEW_AUDIT_LOG | Permission.MANAGE_SERVER), ['general', 'integrations', 'audit']);
+    assert.deepEqual(keys(Permission.VIEW_AUDIT_LOG | Permission.MANAGE_SERVER), ['general', 'soundboard', 'integrations', 'audit']);
   });
 
   it('администратор видит все вкладки', () => {
@@ -115,9 +120,66 @@ describe('вкладки настроек сервера', () => {
 });
 
 it('R303 управление сервером открывает Интеграции без права вебхуков, оба права не дублируют дверь', () => {
-  assert.deepEqual(keys(Permission.MANAGE_SERVER), ['general', 'integrations']);
+  assert.deepEqual(keys(Permission.MANAGE_SERVER), ['general', 'soundboard', 'integrations']);
   assert.equal(serverSettingsHas(Permission.MANAGE_SERVER, 'integrations'), true);
   assert.deepEqual(keys(Permission.MANAGE_WEBHOOKS), ['integrations']);
-  assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_WEBHOOKS), ['general', 'integrations']);
+  assert.deepEqual(keys(Permission.MANAGE_SERVER | Permission.MANAGE_WEBHOOKS), ['general', 'soundboard', 'integrations']);
   assert.equal(serverSettingsHas(Permission.MANAGE_CHANNELS, 'integrations'), false);
 });
+
+type Tabs = typeof import('./serverSettingsTabs');
+const tabsSource = readFileSync(new URL('./serverSettingsTabs.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const tabsActual: Tabs = { serverSettingsTabs, serverSettingsHas, canOpenServerSettings };
+const P = 'R363/tabs/check/';
+function loadTabs(raw: string): Tabs {
+  const module = { exports: {} };
+  // Исполняется весь чистый модуль с настоящими has/Permission, не вырезанный фильтр вкладок.
+  runInNewContext(ts.transpileModule(raw, { compilerOptions: {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+  } }).outputText, { module, exports: module.exports, require(name: string) {
+    assert.equal(name, '@gusvoice/shared', 'R363/tabs/setup/закрытый-импорт'); return shared;
+  } }, { timeout: 1000 });
+  return module.exports as Tabs;
+}
+function tabsProof(check: (module: Tabs) => void, edit?: [string, string]): void {
+  check(tabsActual);
+  check(loadTabs(tabsSource));
+  if (!edit) return;
+  counterfact(() => {
+    const [from, to] = edit;
+    assert.equal(tabsSource.split(from).length - 1, 1, 'R363/tabs/setup/единственный-якорь');
+    const mutant = loadTabs(tabsSource.replace(from, to));
+    assert.throws(() => check(mutant), error => error instanceof assert.AssertionError && error.message.startsWith(P),
+      'мутант падает на поведении, не на загрузке или лимите VM');
+  });
+  check(loadTabs(tabsSource));
+}
+
+it('R363 право на экономику открывает Монеты и Игры в этом порядке только с явными обоими флагами', () => tabsProof(module => {
+  const features = { economy: true, games: true };
+  assert.deepEqual(Array.from(module.serverSettingsTabs(Permission.MANAGE_ECONOMY, features), tab => tab.key), ['economy', 'games'], P + 'явные-обе-вкладки');
+  assert.equal(module.serverSettingsHas(Permission.MANAGE_ECONOMY, 'games', features), true, P + 'дверь-игр-открыта');
+  assert.equal(module.canOpenServerSettings(Permission.MANAGE_ECONOMY, features), true, P + 'меню-открыто');
+  assert.deepEqual(Array.from(module.serverSettingsTabs(0n, features), tab => tab.key), [], P + 'флаги-не-заменяют-право');
+}));
+
+it('R363 отсутствующий или false games оставляет только Монеты даже при праве управления экономикой', () => tabsProof(module => {
+  for (const features of [{ economy: true }, { economy: true, games: false }]) {
+    assert.deepEqual(Array.from(module.serverSettingsTabs(Permission.MANAGE_ECONOMY, features), tab => tab.key), ['economy'], P + 'games-только-явно-true');
+    assert.equal(module.serverSettingsHas(Permission.MANAGE_ECONOMY, 'games', features), false, P + 'дверь-игр-скрыта');
+    assert.equal(module.serverSettingsHas(Permission.MANAGE_ECONOMY, 'economy', features), true, P + 'монеты-не-потеряны');
+  }
+}));
+
+it('R363 games true без экономики не создаёт ни вкладок, ни пустой двери настроек', () => tabsProof(module => {
+  const features = { economy: false, games: true };
+  assert.deepEqual(Array.from(module.serverSettingsTabs(Permission.MANAGE_ECONOMY, features), tab => tab.key), [], P + 'нет-игр-без-монет');
+  assert.equal(module.canOpenServerSettings(Permission.MANAGE_ECONOMY, features), false, P + 'нет-пустого-меню');
+  assert.equal(module.serverSettingsHas(Permission.MANAGE_ECONOMY, 'games', features), false, P + 'нет-отдельной-двери');
+}, ["if (t.key === 'games') return features.economy && features.games === true;", "if (t.key === 'games') return features.games === true;"]));
+
+it('R363 умолчание старых вызовов не включает Игры, включая полный набор прав администратора', () => tabsProof(module => {
+  assert.deepEqual(Array.from(module.serverSettingsTabs(Permission.MANAGE_ECONOMY), tab => tab.key), ['economy'], P + 'games-нет-в-умолчании');
+  assert.equal(module.serverSettingsHas(Permission.ADMINISTRATOR, 'games'), false, P + 'админ-не-обходит-флаг');
+  assert.equal(module.serverSettingsHas(Permission.MANAGE_ECONOMY, 'economy'), true, P + 'экономика-в-умолчании-сохранена');
+}, ['const ALL_FEATURES: ServerSettingsFeatures = { economy: true };', 'const ALL_FEATURES: ServerSettingsFeatures = { economy: true, games: true };']));

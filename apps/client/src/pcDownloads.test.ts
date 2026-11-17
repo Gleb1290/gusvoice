@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -124,11 +125,13 @@ it('готовый файл повторно сохраняется из сох�
   const h = harness(); h.setDone(target.key, 'blob:ready');
   h.api.startDownload(target);
   assert.equal(h.fetches, 0); assert.deepEqual(h.saved, ['click']);
-  const source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes('if (done) {'));
-  const mutant = harness(source.replace('if (done) {', 'if (done && false) {'));
-  mutant.setDone(target.key, 'blob:ready'); mutant.api.startDownload(target);
-  assert.equal(mutant.fetches, 1, 'мутант снова идёт в сеть вместо готового объекта');
+  counterfact(() => {
+    const source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes('if (done) {'));
+    const mutant = harness(source.replace('if (done) {', 'if (done && false) {'));
+    mutant.setDone(target.key, 'blob:ready'); mutant.api.startDownload(target);
+    assert.equal(mutant.fetches, 1, 'мутант снова идёт в сеть вместо готового объекта');
+  });
 });
 
 it('ошибка HTTP помечает запись failed и показывает причину, а не успех', async () => {
@@ -161,10 +164,12 @@ it('старый WebView сохраняет через мост, не скачи
   const denied = harness(undefined, { legacyBridge: true, bridgeResult: 'denied' }); denied.api.startDownload(target);
   assert.ok(denied.toasts.includes('Не удалось скачать файл'), 'отказ моста не выглядит как успешное скачивание');
 
-  const alwaysOpen = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8')
-    .replace("legacyDownloadWithToast(t.url, t.name, t.type, 'save');", "legacyDownloadWithToast(t.url, t.name, t.type, 'open');");
-  assert.notEqual(alwaysOpen, readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8'), 'мутант меняет then');
-  assert.throws(() => check(harness(alwaysOpen, { legacyBridge: true })), assert.AssertionError, 'тест ловит мутант then=open');
+  counterfact(() => {
+    const alwaysOpen = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8')
+      .replace("legacyDownloadWithToast(t.url, t.name, t.type, 'save');", "legacyDownloadWithToast(t.url, t.name, t.type, 'open');");
+    assert.notEqual(alwaysOpen, readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8'), 'мутант меняет then');
+    assert.throws(() => check(harness(alwaysOpen, { legacyBridge: true })), assert.AssertionError, 'тест ловит мутант then=open');
+  });
 });
 
 it('современный WebView не вызывает устаревший мост, даже если тот объявлен', () => {
@@ -175,8 +180,10 @@ it('современный WebView не вызывает устаревший м
   };
   check(harness(undefined, { filesViaNative: true, legacyBridge: true }));
 
-  const source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8');
-  const withoutGate = source.replace('  if (filesViaNative()) return false;\n', '');
-  assert.notEqual(withoutGate, source, 'мутант убирает проверку filesViaNative');
-  assert.throws(() => check(harness(withoutGate, { filesViaNative: true, legacyBridge: true })), assert.AssertionError, 'тест ловит удалённую проверку');
+  counterfact(() => {
+    const source = readFileSync(new URL('./pcDownloads.ts', import.meta.url), 'utf8');
+    const withoutGate = source.replace('  if (filesViaNative()) return false;\n', '');
+    assert.notEqual(withoutGate, source, 'мутант убирает проверку filesViaNative');
+    assert.throws(() => check(harness(withoutGate, { filesViaNative: true, legacyBridge: true })), assert.AssertionError, 'тест ловит удалённую проверку');
+  });
 });

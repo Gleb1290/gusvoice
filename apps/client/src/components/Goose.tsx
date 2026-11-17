@@ -5,7 +5,7 @@
  * than approximating it in JSX geometry or cropping a shared sprite at runtime, keeps each
  * surface predictable and lets Vite cache only the pose it needs.
  */
-export type GoosePose = 'mini' | 'nap' | 'look' | 'wave' | 'honk' | 'peek' | 'head' | 'head-sleepy' | 'admin';
+export type GoosePose = 'mini' | 'nap' | 'look' | 'wave' | 'honk' | 'peek' | 'head' | 'head-sleepy' | 'admin' | 'sorry';
 
 type PoseAsset = { src: string; width: number; height: number };
 
@@ -23,17 +23,21 @@ import headPng from '../assets/mascot/head.png';
 import headSleepyPng from '../assets/mascot/head-sleepy.png';
 // «Гусь-админ» (15.10, Codex R241, выбор владельца): сидит с ноутбуком, подключённым в серверную стойку — заставка обновления.
 import adminPng from '../assets/mascot/admin.png';
+// «Гусь извиняется» (28.10) — карточка перерасчёта сезона `RecountNotice.tsx`. ⚠️ Пока ЗАГЛУШКА: копия `head.png`
+// (те же пропорции); настоящую картинку рисует Codex отдельно — при замене поправить ширину/высоту ниже.
+import sorryPng from '../assets/mascot/sorry.png';
 
 const POSES: Record<GoosePose, PoseAsset> = {
-  mini: { src: miniPng, width: 192, height: 210 },
+  mini: { src: miniPng, width: 214, height: 320 },
   look: { src: lookPng, width: 168, height: 210 },
   wave: { src: wavePng, width: 186, height: 250 },
   honk: { src: honkPng, width: 183, height: 220 },
   nap: { src: napPng, width: 220, height: 151 },
-  peek: { src: peekPng, width: 164, height: 180 },
+  peek: { src: peekPng, width: 256, height: 384 },
   head: { src: headPng, width: 104, height: 104 },
   'head-sleepy': { src: headSleepyPng, width: 220, height: 220 },
   admin: { src: adminPng, width: 380, height: 320 },
+  sorry: { src: sorryPng, width: 186, height: 250 },
 };
 
 export function Goose({ pose = 'mini', size = 96, className }: { pose?: GoosePose; size?: number; className?: string }) {

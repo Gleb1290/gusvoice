@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
@@ -183,12 +184,18 @@ test('R235 повтор clientId не создаёт вторую read, собы
   } finally { await f.app.close(); assert.deepEqual(ioFailures, [], 'неожиданный IO не скрыт catch'); }
 });
 test('R235 мутант без markRead после отправки убит ключом отправителя, не ошибкой загрузки', async () => {
-  await replyReads(); const expected = { key: 0 };
+  await replyReads();
+  await counterfact(async () => {
+  const expected = { key: 0 };
   await assert.rejects(replyReads(['const read = await markRead(me, access, res.row.sortKey);', "const read = { kind: 'bad-key' as const };"], expected),
     e => e instanceof assert.AssertionError && e.message.startsWith('R235 send-read:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === expected.key && expected.key > 0);
+  });
 });
 test('R235 мутант без withheld-условия убит сдвигом read заблокированного отправителя', async () => {
-  await withheldDoesNotRead(); const expected = { key: 0 };
+  await withheldDoesNotRead();
+  await counterfact(async () => {
+  const expected = { key: 0 };
   await assert.rejects(withheldDoesNotRead(['if (!access.saved && !plan.withheld) {', 'if (!access.saved) {'], expected),
     e => e instanceof assert.AssertionError && e.message.startsWith('R235 withheld:') && e.operator === 'strictEqual' && e.actual === expected.key && expected.key > 0 && e.expected === 0);
+  });
 });

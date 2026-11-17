@@ -1,7 +1,9 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import ts from 'typescript';
 
 type Mutation = readonly [string, string];
@@ -17,7 +19,13 @@ function forbidden(label: string): never {
   violations.push(label);
   throw new Error(`непредметная граница ${label}`);
 }
-const dormant = (label: string) => new Proxy({}, { get: (_target, key) => forbidden(`${label}.${String(key)}`) });
+function importsFor(source: URL, mocks: Record<string, unknown>) {
+  const imports = testVmImports(source, mocks);
+  return (id: string) => new Proxy(imports(id) as object, { get(target, key) {
+    try { return Reflect.get(target, key); }
+    catch (error) { violations.push(`${source.pathname}:${id}.${String(key)}`); throw error; }
+  } });
+}
 const compile = (raw: string) => ts.transpileModule(raw, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
 } }).outputText;
@@ -34,7 +42,7 @@ function fixture(env: Environment = 'android-app', mutation?: Mutation,
   const hotModule = { exports: {} as { isMobile(): boolean } };
   // Определение среды не копируется в тест: выполняется весь настоящий hotkeys.ts.
   runInNewContext(compile(hotkeys), { module: hotModule, exports: hotModule.exports, window, navigator,
-    require: (id: string) => forbidden(`hotkeys import ${id}`) });
+    require: importsFor(new URL('../hotkeys.ts', import.meta.url), {}) });
   assert.equal(hotModule.exports.isMobile(), env === 'android-app', 'настоящий isMobile различает оболочку и браузер');
 
   let attempts = 0, nextTimer = 0;
@@ -74,10 +82,9 @@ function fixture(env: Environment = 'android-app', mutation?: Mutation,
         stop: (time: number) => { assert.ok(note, 'нота началась до остановки'); note.end = time; } };
     }
   }
-  const deps: Record<string, unknown> = { '../hotkeys': hotModule.exports };
-  for (const id of ['react/jsx-runtime', '@gusvoice/shared', 'livekit-client', 'react', '../androidBack',
-    '../audioSettings', '../cameraSettings', '../callStore', '../callView', '../nativeCallAudio', '../phoneLayout',
-    '../store', '../streamSettings', '../toast', './Avatar', './BottomSheet', './Icon']) deps[id] = dormant(id);
+  // У shared нет require-входа; любой доступ к его экспортам запрещён загрузчиком.
+  const deps: Record<string, unknown> = { '../hotkeys': hotModule.exports,
+    '@gusvoice/shared': { __esModule: true } };
   const module = { exports: {} as { __testRingPattern: (kind: 'incoming' | 'outgoing') => () => void } };
   // Открывается ссылка после ЦЕЛОГО модуля, а не вырезанный регуляркой фрагмент функции.
   runInNewContext(compile(raw + '\nmodule.exports.__testRingPattern = ringPattern;\n'), {
@@ -85,7 +92,7 @@ function fixture(env: Environment = 'android-app', mutation?: Mutation,
     setInterval(callback: () => void, ms: number) { const id = ++nextTimer; timers.set(id, { callback, ms }); return id; },
     clearInterval(id: number) { assert.equal(timers.delete(id), true, 'остановка снимает свой живой интервал'); cleared.push(id); },
     setTimeout: () => forbidden('timeout'), fetch: () => forbidden('fetch'),
-    require(id: string) { if (!Object.hasOwn(deps, id)) return forbidden(`import ${id}`); return deps[id]; },
+    require: importsFor(new URL('./CallLayer.tsx', import.meta.url), deps),
   });
   return { ring: module.exports.__testRingPattern, contexts, timers, cleared, attempts: () => attempts };
 }
@@ -157,8 +164,10 @@ function isolated(mutation?: Mutation) {
 }
 it('R237 контрфакт общего ringCtx на телефоне ловится вторым звонком после остановки первого', () => {
   isolated();
-  assert.throws(() => isolated([contextAnchor, 'ac = (ringCtx ??= new AudioContext());']),
-    killed('R237-ring-isolated:', 1, 2));
+  counterfact(() => {
+    assert.throws(() => isolated([contextAnchor, 'ac = (ringCtx ??= new AudioContext());']),
+      killed('R237-ring-isolated:', 1, 2));
+  });
 });
 
 function defaultLatency(mutation?: Mutation) {
@@ -171,9 +180,11 @@ function defaultLatency(mutation?: Mutation) {
 }
 it('R237 контрфакт playback у рингтона ловится аргументом настоящего создания AudioContext', () => {
   defaultLatency();
-  assert.throws(() => defaultLatency([contextAnchor,
-    "ac = own ? new AudioContext({ latencyHint: 'playback' }) : (ringCtx ??= new AudioContext());"]),
-  killed('R237-ring-latency:', 'playback', undefined));
+  counterfact(() => {
+    assert.throws(() => defaultLatency([contextAnchor,
+      "ac = own ? new AudioContext({ latencyHint: 'playback' }) : (ringCtx ??= new AudioContext());"]),
+    killed('R237-ring-latency:', 'playback', undefined));
+  });
 });
 
 function closed(mutation?: Mutation) {
@@ -184,6 +195,8 @@ function closed(mutation?: Mutation) {
 }
 it('R237 контрфакт пропущенного close рингтона ловится на границе контекста, а не только снятия интервала', () => {
   closed();
-  assert.throws(() => closed(['    if (own) void ac.close().catch(() => {});', '    // close рингтона удалён']),
-    killed('R237-ring-close:', 0, 1));
+  counterfact(() => {
+    assert.throws(() => closed(['    if (own) void ac.close().catch(() => {});', '    // close рингтона удалён']),
+      killed('R237-ring-close:', 0, 1));
+  });
 });

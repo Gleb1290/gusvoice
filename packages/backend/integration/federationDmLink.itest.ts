@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -192,10 +193,12 @@ async function ordinaryError(mutation?: Mutation) {
 test('R191 считать любые 4xx и 5xx отказом обнаруживается настоящим решением brokenHomes', async () => {
   // Класс ошибки классификации: временная недоступность превращается в постоянный запрет переписки.
   await ordinaryError();
-  await assert.rejects(ordinaryError([
-    "if (status === null || status < 400 || status >= 500 || !body) return;",
-    "if (status === null || status < 400) return; refusedBy.set(instanceId, 'any-http-error'); return;",
-  ]), e => e instanceof assert.AssertionError && e.message.includes('обычный сбой не ломает связку'));
+  await counterfact(async () => {
+    await assert.rejects(ordinaryError([
+      "if (status === null || status < 400 || status >= 500 || !body) return;",
+      "if (status === null || status < 400) return; refusedBy.set(instanceId, 'any-http-error'); return;",
+    ]), e => e instanceof assert.AssertionError && e.message.includes('обычный сбой не ломает связку'));
+  });
 });
 async function emergencyPause(mutation?: Mutation) {
   const f = await fixture({ linkMutation: mutation });
@@ -212,8 +215,10 @@ async function emergencyPause(mutation?: Mutation) {
 test('R191 аварийная пауза закрывает удалённую пару, удаление её проверки обнаруживается SQL-решением', async () => {
   // Класс ошибки аварийного выключателя: active связка не отменяет общую паузу федерации.
   await emergencyPause();
-  await assert.rejects(emergencyPause(['if ((await readInstanceMeta(q)).paused) return new Set(uniq);', '// аварийная пауза проигнорирована']),
-    e => e instanceof assert.AssertionError && e.message.includes('аварийная пауза ломает'));
+  await counterfact(async () => {
+    await assert.rejects(emergencyPause(['if ((await readInstanceMeta(q)).paused) return new Set(uniq);', '// аварийная пауза проигнорирована']),
+      e => e instanceof assert.AssertionError && e.message.includes('аварийная пауза ломает'));
+  });
 });
 async function uploadGuard(mutation?: Mutation) {
   const f = await fixture({ routeMutation: mutation });
@@ -226,8 +231,10 @@ async function uploadGuard(mutation?: Mutation) {
 test('R191 пропуск route guard загрузки обнаруживается отличием 400 от обязательного 403', async () => {
   // Класс ошибки порядка guard: ограничение вложений не заменяет запрет сломанной связки.
   await uploadGuard();
-  await assert.rejects(uploadGuard([
-    "if (await fedLinkRefused(reply, access)) return;\n    if (await fedFilesRefused(reply, access.peerId)) return;\n    return acceptDmUpload",
-    "if (await fedFilesRefused(reply, access.peerId)) return;\n    return acceptDmUpload",
-  ]), e => e instanceof assert.AssertionError && e.message.includes('guard загрузки возвращает'));
+  await counterfact(async () => {
+    await assert.rejects(uploadGuard([
+      "if (await fedLinkRefused(reply, access)) return;\n    if (await fedFilesRefused(reply, access.peerId)) return;\n    return acceptDmUpload",
+      "if (await fedFilesRefused(reply, access.peerId)) return;\n    return acceptDmUpload",
+    ]), e => e instanceof assert.AssertionError && e.message.includes('guard загрузки возвращает'));
+  });
 });

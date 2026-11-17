@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -107,7 +108,9 @@ for (const [name, change, failure] of [
 ] as [string, Change, string][]) {
   it(`шлюз: исходниковый мутант «${name}» пойман`, async () => {
     await checkHidden();
+await gatedCounterfact(async () => {
     await assert.rejects(() => checkHidden(change), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure));
+});
   });
 }
 it('планировщик получает пробу присутствия ЛС, а мутант сокетного онлайна ловится', async () => {
@@ -120,8 +123,8 @@ it('планировщик получает пробу присутствия Л
     runInNewContext(code, { startScheduledWorker: (deps: { isOnline: typeof probe }) => { probe = deps.isOnline; }, isUserDmPresent: gate.isUserDmPresent, isUserOnline: gate.isUserOnline });
     assert.equal(probe('subject'), false, 'планировщик не считает скрытый сокет присутствием');
   };
-  check(call); const mutant = call.replace('isUserDmPresent', 'isUserOnline'); assert.notEqual(mutant, call);
-  assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('планировщик не считает')); socket.close();
+  check(call); gatedCounterfact(() => { const mutant = call.replace('isUserDmPresent', 'isUserOnline'); assert.notEqual(mutant, call);
+  assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('планировщик не считает')); }); socket.close();
 });
 
 async function remotePresenceScenario(change?: Change) {
@@ -189,7 +192,9 @@ for (const [name, change, check, failure] of [
 ] as [string, Change, (change?: Change) => Promise<void>, string][]) {
   it(`R197 мутант «${name}» останавливается адресной проверкой присутствия`, async () => {
     await check();
+    await gatedCounterfact(async () => {
     await assert.rejects(check(change), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    });
   });
 }
 
@@ -209,6 +214,8 @@ async function remoteGuestScenario(change?: Change) {
 it('R201 гостевой сокет сохраняет серверный онлайн, но presence ЛС тени задаётся только домом', async () => { await remoteGuestScenario(); });
 it('R201 мутант гостевого присутствия пойман живым identify без отметки дома', async () => {
   await remoteGuestScenario();
+  await gatedCounterfact(async () => {
   await assert.rejects(remoteGuestScenario({ file: 'gateway.ts', from: 'if (fedHooks?.isRemote?.(userId)) return false;', to: '// guest socket counted' }),
     e => e instanceof assert.AssertionError && e.message.includes('гостевой сокет не объявляет'));
+});
 });

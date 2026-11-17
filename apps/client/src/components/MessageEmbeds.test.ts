@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -113,10 +114,12 @@ test('R281 фильтрация не изменяет readonly-вложения 
 test('R281 потеря учёта thumbnail ловится адресным AssertionError после проверки оригинала', () => {
   // Класс ошибки: контрфакт должен доказать повтор миниатюры, а не сломанный setup/import/синтаксис.
   thumbnailContract(rules);
-  const from = 'if (e.thumbnail?.url) inCards.add(e.thumbnail.url);';
-  assert.equal(source.split(from).length - 1, 1, 'R281 ровно один исполняемый якорь thumbnail');
-  // Загрузка целого изменённого модуля вне assert.throws: ошибка загрузчика не считается пойманной регрессией.
-  const mutated = load(source.replace(from, ''));
-  assert.throws(() => thumbnailContract(mutated),
-    (error: unknown) => error instanceof assert.AssertionError && error.message === thumbnailMarker);
+  counterfact(() => {
+    const from = 'if (e.thumbnail?.url) inCards.add(e.thumbnail.url);';
+    assert.equal(source.split(from).length - 1, 1, 'R281 ровно один исполняемый якорь thumbnail');
+    // Загрузка целого изменённого модуля вне assert.throws: ошибка загрузчика не считается пойманной регрессией.
+    const mutated = load(source.replace(from, ''));
+    assert.throws(() => thumbnailContract(mutated),
+      (error: unknown) => error instanceof assert.AssertionError && error.message === thumbnailMarker);
+  });
 });

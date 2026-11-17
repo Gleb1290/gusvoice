@@ -1,0 +1,12 @@
+.sb-admin { margin: 24px 0; display: grid; gap: 10px; min-width: 0; }
+.sb-admin h2, .sb-admin h3, .sb-admin p { margin: 0; }
+.sb-admin-modes { display: flex; flex-wrap: wrap; gap: 10px 18px; border: 0; padding: 0; }
+.sb-admin-modes legend { font-weight: 600; margin-bottom: 8px; }
+.sb-admin-limit { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sb-admin-limit input { width: 90px; }
+.sb-admin-list { display: grid; gap: 6px; min-width: 0; }
+.sb-admin-row, .sb-admin-storage, .sb-admin-projection { border: 1px solid var(--border, #555); border-radius: 8px; padding: 10px; overflow-wrap: anywhere; }
+.sb-admin-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.sb-admin-storage summary { cursor: pointer; }
+.sb-admin > button { justify-self: start; }
+@media (max-width: 600px) { .sb-admin-row { align-items: flex-start; flex-direction: column; } .sb-admin-modes { flex-direction: column; } }

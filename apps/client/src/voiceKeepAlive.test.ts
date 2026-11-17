@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -249,12 +250,16 @@ for (const [name, from, to, marker, scenario] of [
 ] as const) {
   it(`контрфакт: ${name}`, async () => {
     await scenario(source);
-    const mutant = replace(source, from, to);
-    await assert.rejects(async () => scenario(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(marker));
+    await counterfact(async () => {
+      const mutant = replace(source, from, to);
+      await assert.rejects(async () => scenario(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(marker));
+    });
   });
 }
 it('контрфакт: игнорирование общего нуля действительно включает вывод', () => {
   disabled(source);
-  const mutant = replace(rulesSource, "if (read(KEEPALIVE_FLAG_KEY) === '0') return false;", '');
-  assert.throws(() => disabled(source, mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('R273:master-zero'));
+  counterfact(() => {
+    const mutant = replace(rulesSource, "if (read(KEEPALIVE_FLAG_KEY) === '0') return false;", '');
+    assert.throws(() => disabled(source, mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('R273:master-zero'));
+  });
 });

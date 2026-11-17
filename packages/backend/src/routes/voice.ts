@@ -16,7 +16,14 @@ import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
 import { coinBalances, channels, serverMembers, users } from '../db/schema.js';
 import { env } from '../env.js';
-import { createScreenShareToken, createVoiceToken, disconnectUser, removeFromOtherRooms, serverMute } from '../livekit.js';
+import {
+  activeVoiceParticipantSid,
+  createScreenShareToken,
+  createVoiceToken,
+  disconnectUser,
+  removeFromOtherRooms,
+  serverMute,
+} from '../livekit.js';
 import { getChannelPermissions, getMemberContext } from '../permissions.js';
 import { publishToChannel, publishToUser, redisPub, streamPreviewKey, voiceServerMuteKey } from '../realtime.js';
 import { pushWallet } from '../coins.js';
@@ -37,6 +44,7 @@ import { economySeenBy, isBotUser, moveCoins, walletOf } from '../coins.js';
 import { TIP_BLOCK_TEXT, TIP_COOLDOWN_MS, tipBlock, tipCooldownKey, tipSplit , MAX_TIPPERS_PER_DAY } from '../tipRules.js';
 import { buyItem } from '../purchase.js';
 import { receivedToday, shopFor } from '../shop.js';
+import { id } from '../util.js';
 import {
   BUY_BLOCK_TEXT,
   BUY_COOLDOWN_MS,
@@ -82,27 +90,63 @@ async function voiceHierarchyBlock(
 /** Тычок и покупка награды для бота (#232, ТЗ §1.4) — 400 с этим текстом. */
 const BOTS_DONT_ACCEPT = "Bad Request: bots don't accept this";
 
+const VOICE_JOIN = Permission.VIEW_CHANNEL | Permission.CONNECT;
+const TEMPORARY_PUBLISH = Permission.SPEAK | Permission.VIDEO | Permission.SHARE_SCREEN | Permission.STREAM;
+const MOVE_TICKET_TTL_S = 20;
+// VIEW_CHANNEL may be denied on its own; CONNECT must not open a hidden room via a direct request.
+const NO_VOICE_ACCESS = 'У вас нет доступа к этому голосовому каналу';
+
+type TemporaryVoiceMove = { fromChannelId: string; sourceSid: string };
+
+function voiceMoveTicketKey(userId: string, channelId: string, ticket: string): string {
+  // Bind the lookup to the recipient and the destination before deleting anything.
+  return 'voice:move:' + JSON.stringify([userId, channelId, ticket]);
+}
+
+async function consumeVoiceMove(
+  userId: string,
+  channelId: string,
+  ticket: string,
+): Promise<boolean> {
+  // Redis GETDEL is atomic across backend processes, so only one caller can mint a token.
+  const raw = await redisPub.getdel(voiceMoveTicketKey(userId, channelId, ticket));
+  if (!raw) return false;
+  const move = JSON.parse(raw) as TemporaryVoiceMove;
+  const currentSid = await activeVoiceParticipantSid(roomForChannel(move.fromChannelId), userId);
+  return currentSid !== null && currentSid === move.sourceSid;
+}
+
 export async function voiceRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
   // Issue a LiveKit access token to join a voice channel's room.
   app.post('/channels/:id/voice/token', async (req, reply) => {
     const { id: channelId } = z.object({ id: z.string() }).parse(req.params);
+    const { moveTicket } = z.object({ moveTicket: z.string().uuid().optional() }).parse(req.body ?? {});
+    const userId = req.user!.sub;
 
     const [channel] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
     if (!channel) return reply.code(404).send({ error: 'not found' });
     if (channel.type !== 'voice') return reply.code(400).send({ error: 'not a voice channel' });
 
-    const perms = await getChannelPermissions(channelId, req.user!.sub);
+    const perms = await getChannelPermissions(channelId, userId);
     if (!perms) return reply.code(404).send({ error: 'not a member' });
-    if (!has(perms.permissions, Permission.CONNECT)) return reply.code(403).send({ error: 'cannot connect' });
 
-    const [user] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
+    const canJoin = has(perms.permissions, VOICE_JOIN);
+    if (!canJoin && !moveTicket) return reply.code(403).send({ error: NO_VOICE_ACCESS });
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user) return reply.code(404).send({ error: 'Участник не найден' });
+    let move = false;
+    if (!canJoin) {
+      if (moveTicket && !user.bot) move = await consumeVoiceMove(userId, channelId, moveTicket);
+      if (!move) return reply.code(403).send({ error: 'Допуск к переносу истёк или больше не действует' });
+    }
 
     const room = roomForChannel(channelId);
-    // Single-channel presence: drop the user from any OTHER voice room before they join this one, so a
-    // quick move→switch can't leave a ghost showing them in two channels at once. Best-effort.
-    await removeFromOtherRooms(user.id, room);
+    // A temporary move keeps the source alive until the client receives this token and switches.
+    // Server-side removal here could make the client process a disconnect before it can switch.
+    if (!move) await removeFromOtherRooms(userId, room);
     // Carry an active server-mute into the token so it survives reconnects / token refreshes
     // (otherwise a re-mint would hand the muted user a fresh mic grant).
     const serverMuted = (await redisPub.sismember(voiceServerMuteKey(channelId), user.id)) === 1;
@@ -110,12 +154,18 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       identity: user.id,
       name: user.displayName,
       room,
-      permissions: perms.permissions,
+      permissions: move ? perms.permissions & TEMPORARY_PUBLISH : perms.permissions,
       avatarUrl: user.avatarUrl,
       serverMuted,
+      // Bound the validity of the initial JWT; self-hosted LiveKit does not revoke it on leave.
+      // The SFU can refresh the JWT for reconnects. The API itself won't issue a second move token.
+      ...(move ? { ttl: '30s' } : {}),
     });
 
-    const res: VoiceTokenResponse = { url: env.livekit.urlExternal, token, room };
+    const res: VoiceTokenResponse = {
+      url: env.livekit.urlExternal, token, room,
+      ...(move ? { temporary: true, channelName: channel.name } : {}),
+    };
     return res;
   });
 
@@ -131,7 +181,7 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
 
     const perms = await getChannelPermissions(channelId, req.user!.sub);
     if (!perms) return reply.code(404).send({ error: 'not a member' });
-    if (!has(perms.permissions, Permission.CONNECT)) return reply.code(403).send({ error: 'cannot connect' });
+    if (!has(perms.permissions, VOICE_JOIN)) return reply.code(403).send({ error: NO_VOICE_ACCESS });
     if (!canPublishScreen(perms.permissions)) return reply.code(403).send({ error: 'cannot share screen' });
 
     const [user] = await db.select().from(users).where(eq(users.id, req.user!.sub)).limit(1);
@@ -156,7 +206,10 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     if (!targetPerms) return reply.code(404).send({ error: 'target not a member' });
     // Бот (#232): своя ветка — мьют/размьют не возвращает ему слух, камеру и экран (`botVoicePermission`).
     const targetIsBot = await isBotUser(db, userId);
-    await serverMute(roomForChannel(channelId), userId, muted, targetPerms.permissions, { bot: targetIsBot });
+    const publishPermissions = targetIsBot || has(targetPerms.permissions, VOICE_JOIN)
+      ? targetPerms.permissions
+      : targetPerms.permissions & TEMPORARY_PUBLISH;
+    await serverMute(roomForChannel(channelId), userId, muted, publishPermissions, { bot: targetIsBot });
     // Track who's server-muted so presence can distinguish it from self-mute.
     if (muted) await redisPub.sadd(voiceServerMuteKey(channelId), userId);
     else await redisPub.srem(voiceServerMuteKey(channelId), userId);
@@ -185,21 +238,21 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(204).send();
   });
 
-  // Move a participant to another voice channel (MOVE_MEMBERS here; the user needs CONNECT there).
+  // Move a participant to another voice channel (MOVE_MEMBERS here; the actor can join there).
   app.post('/channels/:id/voice/:userId/move', async (req, reply) => {
     const { id: channelId, userId } = z.object({ id: z.string(), userId: z.string() }).parse(req.params);
     const { toChannelId } = z.object({ toChannelId: z.string() }).parse(req.body);
     const perms = await getChannelPermissions(channelId, req.user!.sub);
-    if (!perms) return reply.code(404).send({ error: 'not found' });
-    if (!has(perms.permissions, Permission.MOVE_MEMBERS)) return reply.code(403).send({ error: 'forbidden' });
+    if (!perms) return reply.code(404).send({ error: 'Исходный канал недоступен' });
+    if (!has(perms.permissions, Permission.MOVE_MEMBERS)) return reply.code(403).send({ error: 'У вас нет права перемещать участников из этого канала' });
     // ⚠️ `isMove` — единственное место, где щит по старшинству может быть снят правом MOVE_ANYONE.
     // Базовое MOVE_MEMBERS выше всё равно обязательно: право снимает иерархию, а не заменяет допуск.
     const hblock = await voiceHierarchyBlock(perms.serverId, req.user!.sub, userId, true);
     if (hblock) return reply.code(403).send({ error: hblock });
     const [target] = await db.select().from(channels).where(eq(channels.id, toChannelId)).limit(1);
-    if (!target || target.type !== 'voice') return reply.code(400).send({ error: 'target is not a voice channel' });
+    if (!target || target.type !== 'voice') return reply.code(400).send({ error: 'Канал назначения не голосовой' });
     // The target channel must be on THIS server (P3-2) — no cross-server move (server isolation).
-    if (target.serverId !== perms.serverId) return reply.code(400).send({ error: 'target channel is on another server' });
+    if (target.serverId !== perms.serverId) return reply.code(400).send({ error: 'Перемещать можно только между каналами одного сервера' });
     // Бот (#232): переносит не клиент, а SDK — по `voice_state { left, move_to }`; права бота в целевом канале — как у `joinVoice`.
     if (await isBotUser(db, userId)) {
       const [from] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
@@ -215,15 +268,36 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       });
       return reply.code(204).send();
     }
-    const targetPerms = await getChannelPermissions(toChannelId, userId);
-    if (!targetPerms || !has(targetPerms.permissions, Permission.CONNECT)) {
-      return reply.code(400).send({ error: 'user cannot connect to the target channel' });
+    const [actorDestination, targetPerms] = await Promise.all([
+      getChannelPermissions(toChannelId, req.user!.sub),
+      getChannelPermissions(toChannelId, userId),
+    ]);
+    if (!actorDestination || !has(actorDestination.permissions, VOICE_JOIN)) {
+      return reply.code(403).send({ error: 'У вас нет доступа к голосовому каналу назначения' });
     }
-    // The self-hosted LiveKit (edition 0) doesn't implement MoveParticipant, so we drive the
-    // move from the target's own client: tell it to reconnect to the new channel's room.
-    // Server-muted state is per-room, so clear it for the source channel.
-    await redisPub.srem(voiceServerMuteKey(channelId), userId);
-    await publishToUser(userId, { t: 'voice.move', channelId: toChannelId });
+    if (!targetPerms) return reply.code(400).send({ error: 'Пользователь не является активным участником сервера' });
+
+    // Self-hosted LiveKit doesn't move the participant for us; the recipient's client switches rooms.
+    let moveTicket: string | undefined;
+    if (!has(targetPerms.permissions, VOICE_JOIN)) {
+      const [from] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
+      if (from?.type !== 'voice' || channelId === toChannelId) {
+        return reply.code(400).send({ error: 'Для переноса нужен другой исходный голосовой канал' });
+      }
+      const sourceSid = await activeVoiceParticipantSid(roomForChannel(channelId), userId);
+      if (!sourceSid) return reply.code(400).send({ error: 'Пользователь уже не находится в исходном голосовом канале' });
+
+      moveTicket = id();
+      const move: TemporaryVoiceMove = { fromChannelId: channelId, sourceSid };
+      await redisPub.set(voiceMoveTicketKey(userId, toChannelId, moveTicket), JSON.stringify(move), 'EX', MOVE_TICKET_TTL_S);
+    } else {
+      // Preserve the old path for a normal move.
+      await redisPub.srem(voiceServerMuteKey(channelId), userId);
+    }
+    const event = moveTicket
+      ? { t: 'voice.move' as const, channelId: toChannelId, fromChannelId: channelId, moveTicket }
+      : { t: 'voice.move' as const, channelId: toChannelId };
+    await publishToUser(userId, event);
     await writeAudit(perms.serverId, req.user!.sub, 'voice.move', {
       targetType: 'member',
       targetId: userId,

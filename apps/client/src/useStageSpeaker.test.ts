@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -173,9 +174,11 @@ async function unmountCleanup(raw = source) {
 it('R248 размонтирование снимает единственный отложенный пересчёт говорящего', () => unmountCleanup());
 
 async function mutant(anchor: string, replacement: string, probe: (raw?: string) => Promise<void>, prefix: string) {
-  assert.equal(source.split(anchor).length - 1, 1, 'якорь хука уникален');
   await probe();
-  await assert.rejects(() => probe(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix));
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь хука уникален');
+    await assert.rejects(() => probe(source.replace(anchor, replacement)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix));
+  });
 }
 // Класс ошибки: таймер существует формально, но не пересчитывает выбор, либо каждый tick заново начинает речь.
 it('R248 контрфакты пустого callback и сброса since на каждом эффекте отвергаются настоящим хуком', async () => {

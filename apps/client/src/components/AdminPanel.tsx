@@ -24,6 +24,7 @@ import { Icon } from './Icon';
 import { DmReports } from './DmReports';
 import { FederationPanel } from './FederationPanel';
 import { InstanceSettingsPanel } from './InstanceSettingsForms';
+import { SoundboardAdmin } from './SoundboardAdmin';
 import { PeerServersGroup, PeerUsersGroup, ServerFederationCell } from './AdminPeerGroups';
 import { SmtpForm } from './SmtpForm';
 import { RailItem, SettingsHead, SettingsRail, SettingsWindow } from './SettingsShell';
@@ -203,6 +204,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
         {tab === 'instance' ? (
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-instance">
             <InstanceSettingsPanel />
+            <SoundboardAdmin />
           </div>
         ) : tab === 'reports' ? (
           <div className="admin-scroll" id="admin-panel-body" role="tabpanel" aria-labelledby="admin-tab-reports">
@@ -787,7 +789,8 @@ function EconomyTab() {
                 обязаны совпадать с `REF` в economyStats.ts — там же разбор, почему это важно. */}
             <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>
               Оценка по умолчаниям сервера (одиночка 25 %, вдвоём 100 %, трое и больше 150 %,
-              затухание вдвое каждые 2 часа, потолок 800 монет в день). У серверов свои ползунки —
+              затухание вдвое каждые 2 часа в компании, одному без затухания до 90 монет в день, потолок
+              800 монет в день). У серверов свои ползунки —
               числа сдвинутся, порядок останется. Гусь — не оценка, а факт: сколько его реально
               наклацали за это окно.
             </div>

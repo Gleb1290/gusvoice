@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -160,6 +161,8 @@ for (const [name, mutation, scenario, failure] of [
   ['сокращён active max', ["remoteTimer(r.call.id, FED_CALL_ACTIVE_MAX_MS, 'disconnect')", "remoteTimer(r.call.id, 1000, 'disconnect')"], timerScenario, 'весь active max'],
 ] as [string, Mutation, (mutation?: Mutation) => Promise<void>, string][]) {
   test(`R200 мутант calls «${name}» пойман действительным событием или таймером`, async () => {
-    await scenario(); await assert.rejects(scenario(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    await scenario(); await counterfact(async () => {
+      await assert.rejects(scenario(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    });
   });
 }

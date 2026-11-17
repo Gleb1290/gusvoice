@@ -8,6 +8,15 @@ import { purgeDeletedOf } from './attachments.js';
 import { forgetTokenGeneration, hashPassword } from './auth.js';
 import { deliverMany, journalForwardedFrom } from './conversations.js';
 import { db } from './db/index.js';
+import {
+  announceCancelledDuels,
+  announceCancelledPredictions,
+  cancelDuelsOf,
+  cancelPredictionsOf,
+  refundOpenStakesOf,
+  type CancelledDuel,
+  type CancelledPrediction,
+} from './gameMoney.js';
 import { announceUser } from './federation/directoryEvents.js';
 import { revokeAccountEverywhere } from './federation/guestRevocation.js';
 import { bots, users } from './db/schema.js';
@@ -49,9 +58,26 @@ export async function anonymizeAccount(userId: string, opts: { displayName?: str
     });
   }
   let gifKeys: string[] = [];
+  let duels: CancelledDuel[] = [];
+  let predictions: CancelledPrediction[] = [];
   const memberOf = await db.transaction(async (tx) => {
+    // Тот же глобальный замок человека, что у вызова и продолжения серии. Берём ДО
+    // сканирования live-дуэлей и кошельков: иначе в паузе сканирование не найдёт партий,
+    // а новый оплаченный раунд успеет появиться перед обезличиванием/удалением баланса.
+    // Продолжение уже держит anchor, поэтому использует try-lock и уступает удалению;
+    // здесь порядок: человек → live-раунды → кошельки → личные строки.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`duel-user:${userId}`}))`);
     // «Мои GIF» (0104, `gifs1`): ключи файлов — до удаления строк, сами файлы — после фиксации.
     gifKeys = await savedGifKeysOf(tx, userId);
+    // Мини-игры (ГусКоины 2): незакрытые ставки — вернуть ДО обезличивания (оно стирает кошельки), в этой же транзакции.
+    // Иначе эскроу повис бы навсегда, а раунд нельзя было бы закрыть честно. Сами ставки и раунды остаются историей.
+    // 🔴 Живые дуэли — СНАЧАЛА (этап 3): возврат ОБОИМ и отмена партии. Иначе ниже вернулась бы только его ставка, а такт
+    // заплатил бы сопернику банк, половины которого уже нет.
+    duels = await cancelDuelsOf(tx, userId);
+    // Ставки на события (этап 5): его живые события — отмена с возвратом ВСЕМ (итог подводит только он, без него эскроу
+    // висел бы до автоотмены). Тоже до `refundOpenStakesOf`.
+    predictions = await cancelPredictionsOf(tx, userId);
+    await refundOpenStakesOf(tx, userId);
     const servers = await anonymizeAccountRows(tx, userId, unusable, new Date());
     await tx
       .update(users)
@@ -78,6 +104,10 @@ export async function anonymizeAccount(userId: string, opts: { displayName?: str
     ...memberOf.map((serverId) => publishToServer(serverId, { t: 'server.invalidate', serverId })),
     // Боты бывших серверов (#231): `chat_member left`; если удалён бот — `my_chat_member` ему не нужен (он и так мёртв).
     Promise.resolve().then(() => memberChanged(memberOf.map((serverId) => ({ serverId, userId, actorId: userId, from: 'member' as const, to: 'left' as const })))),
+    // Соперник по отменённой дуэли: вернувшаяся ставка в кошельке и `duel.state` (сцена закрывается с причиной).
+    announceCancelledDuels(duels, userId),
+    // Поставившие на отменённые события создателя: вернувшиеся ставки и `prediction.state`.
+    announceCancelledPredictions(predictions, userId),
     removeUserAvatars(userId),
     // Файлы его отложенных сообщений (`conv10`): транзакция пометила их «удалено» — стереть из хранилища сейчас.
     purgeDeletedOf(userId),

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -94,20 +95,26 @@ test('звонят только принятые собеседники: общ�
     assert.notEqual(changed, source, `якорь контрфакта найден: ${from}`);
     return runInNewContext(`(${changed})`, { db: dbModule.db, sql }) as typeof isAcceptedPeer;
   };
+  await counterfact(async () => {
   const noDeleted = mutant('AND sx.deleted_at IS NULL', '');
   await assert.rejects(async () => assert.equal(await noDeleted('a','c'), false), assert.AssertionError,
     'мутант принимает удалённый ответ хозяина');
+  });
   await t.raw.exec(`UPDATE conversation_messages SET deleted_at=NULL,service='{"kind":"call"}'::jsonb WHERE id='owner-reply'`);
   assert.equal(await isAcceptedPeer('a','c'), false, 'служебная строка не является ответом');
+  await counterfact(async () => {
   const noService = mutant('AND sx.service IS NULL', '');
   await assert.rejects(async () => assert.equal(await noService('a','c'), false), assert.AssertionError,
     'мутант принимает служебную строку как ответ');
+  });
 
   await t.raw.exec("INSERT INTO user_blocks(blocker_id,blocked_id) VALUES ('a','d')");
   assert.equal(await isAcceptedPeer('a','d'), false, 'блокировка хозяина сильнее контакта');
+  await counterfact(async () => {
   const noBlocks = mutant('SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM user_blocks ub', 'SELECT 1 WHERE TRUE OR EXISTS (SELECT 1 FROM user_blocks ub');
   await assert.rejects(async () => assert.equal(await noBlocks('a','d'), false), assert.AssertionError,
     'мутант пропускает контакт при блокировке');
+  });
   await t.raw.exec("DELETE FROM user_blocks WHERE blocker_id='a' AND blocked_id='d'; INSERT INTO user_blocks(blocker_id,blocked_id) VALUES ('d','a')");
   assert.equal(await isAcceptedPeer('a','d'), false, 'обратная блокировка тоже закрывает звонок');
 });

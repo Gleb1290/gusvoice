@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -284,5 +285,5 @@ for (const [name, anchor, replacement, check] of [
   ['плотность без ограничения', 'return Math.min(3, dpr);', 'return dpr;', checkDpr],
 ] as const) it(`R176 контрфакт ${name} обнаруживается проверкой того же математического поведения`, () => {
   // Оригинал проверен до точной мутации целого модуля; принимаем только AssertionError от числового oracle.
-  check(rules); const module = mutated(anchor, replacement); assert.throws(() => check(module), assert.AssertionError);
+  check(rules); counterfact(() => { const module = mutated(anchor, replacement); assert.throws(() => check(module), assert.AssertionError); });
 });

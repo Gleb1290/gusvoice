@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
@@ -130,10 +131,12 @@ function checkInputRejections(input: string): void {
 
 function rejectsMutation(target: string, replacement: string, check: (input: string) => void): void {
   check(source); // Original-first: demonstrate the actual implementation satisfies the guard.
+  counterfact(() => {
   assert.equal(source.split(target).length - 1, 1, 'мутант затрагивает ровно один исходный фрагмент');
   const mutant = source.replace(target, replacement);
   assert.notEqual(mutant, source);
   assert.throws(() => check(mutant), assert.AssertionError, 'удаление защиты должно покраснить страж');
+  });
 }
 
 describe('R133 Android: исходниковые стражи LegacyDownloads', () => {

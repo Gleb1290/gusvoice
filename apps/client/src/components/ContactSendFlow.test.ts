@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -13,17 +14,18 @@ import * as dmRules from '../dmRules';
 import * as convRules from '../convSyncRules';
 import * as contactRules from '../contactRules';
 import * as listRules from '../dmListRules';
+import { testVmImports } from '../testVmImports';
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const raw = read('./ContactSendFlow.tsx');
 const unused = () => assert.fail('IO вне выбора и подтверждения контакта');
-function load<T>(source: string, deps: Record<string, unknown>): T {
+function load<T>(source: string, deps: Record<string, unknown>, path = './ContactSendFlow.tsx'): T {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     module, exports: module.exports, window, document, HTMLElement, Element, Node, Event, KeyboardEvent, MouseEvent,
     requestAnimationFrame, cancelAnimationFrame, localStorage, performance, Error,
-    require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `импорт целого ContactSendFlow/списка/оболочки: ${id}`); return deps[id]; },
+    require: testVmImports(new URL(path, import.meta.url), deps),
   }); return module.exports as T;
 }
 type Scene = {
@@ -49,15 +51,15 @@ async function fixture(phone: boolean, work: (f: Scene) => Promise<void>, source
   const useStore = Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state });
   const common = { react: React, 'react-dom': ReactDOM, 'react/jsx-runtime': jsx };
   const platform = { isMobile: () => phone, isTauri: () => false, isAndroid: () => phone };
-  const icon = load<typeof import('./Icon')>(read('./Icon.tsx'), common);
-  const phoneLayout = load<typeof import('../phoneLayout')>(read('../phoneLayout.ts'), { ...common, './hotkeys': platform });
-  const androidBack = load<typeof import('../androidBack')>(read('../androidBack.ts'), { './hotkeys': platform, './store': { useStore } });
-  const chrome = load<typeof import('../dialogChrome')>(read('../dialogChrome.ts'), { ...common, './androidBack': androidBack });
-  const lite = load<typeof import('../liteMode')>(read('../liteMode.ts'), common);
+  const icon = load<typeof import('./Icon')>(read('./Icon.tsx'), common, './Icon.tsx');
+  const phoneLayout = load<typeof import('../phoneLayout')>(read('../phoneLayout.ts'), { ...common, './hotkeys': platform }, '../phoneLayout.ts');
+  const androidBack = load<typeof import('../androidBack')>(read('../androidBack.ts'), { './hotkeys': platform, './store': { useStore } }, '../androidBack.ts');
+  const chrome = load<typeof import('../dialogChrome')>(read('../dialogChrome.ts'), { ...common, './androidBack': androidBack }, '../dialogChrome.ts');
+  const lite = load<typeof import('../liteMode')>(read('../liteMode.ts'), common, '../liteMode.ts');
   const avatar = load<typeof import('./Avatar')>(read('./Avatar.tsx'), { ...common, '../liteMode': lite,
     '../windowCovered': { useWindowMotion: () => ({ covered: false, gameFg: false }) },
-    '../firstFrame': { useFirstFrame: (url: string | null) => { assert.equal(url, null, 'у тестового контакта нет анимированного изображения'); return null; } } });
-  const bottom = load<typeof import('./BottomSheet')>(read('./BottomSheet.tsx'), { ...common, './Icon': icon });
+    '../firstFrame': { useFirstFrame: (url: string | null) => { assert.equal(url, null, 'у тестового контакта нет анимированного изображения'); return null; } } }, './Avatar.tsx');
+  const bottom = load<typeof import('./BottomSheet')>(read('./BottomSheet.tsx'), { ...common, './Icon': icon }, './BottomSheet.tsx');
   const deps: Record<string, unknown> = { ...common, '../store': { useStore }, '../dmRules': dmRules,
     '../convSyncRules': convRules, '../contactRules': contactRules, '../dmListRules': listRules,
     '../api': { api: { searchUsers: unused } }, '../dmOnline': { useVisibleOnline: () => new Set() },
@@ -66,14 +68,8 @@ async function fixture(phone: boolean, work: (f: Scene) => Promise<void>, source
     '../dmCompose': { closeDmCompose: unused }, '../contacts': { useContactList: () => [] },
     '../peerName': { usePeerName: () => (_id: string, fallback: string) => fallback },
     './Avatar': avatar, './Icon': icon, './BottomSheet': bottom };
-  // Эти импорты относятся к другим экспортам DmSidebar. Их поведения здесь нет и не подменяется.
-  for (const id of ['../channelRules', '../chatKeysRules', '../dmArchiveRules', '../dmRowRules', '../typing', '../androidBack', '../connState',
-    './SavedAvatar', './GroupDialogs', '../groupChatRules', './DmRowMenu', './DmFolderBar', '../dmFolderView', '../dmFolders',
-    '../cornerButtonsRules', '../dmListSearchRules', './DmServerSearch', './DmAllSearch', './DmListSearch', './DmArchive',
-    '../dragOut', '../dmListView', '../uiPrefs', '../filesDrop', './DmListSwipe', './DmPinDrag', '../chatSwipe', './Goose',
-    './SelfVoiceBar', './SettingsShell', './SharedMedia', './StatusDot', './VoicePanel', '../voiceDrafts']) deps[id] = {};
   try {
-    const sidebar = load<typeof import('./DmSidebar')>(read('./DmSidebar.tsx'), deps);
+    const sidebar = load<typeof import('./DmSidebar')>(read('./DmSidebar.tsx'), deps, './DmSidebar.tsx');
     const Flow = load<typeof import('./ContactSendFlow')>(source, { ...common, '../dialogChrome': chrome, '../phoneLayout': phoneLayout,
       '../toast': deps['../toast'], './Avatar': avatar, './BottomSheet': bottom, './DmSidebar': sidebar, './Icon': icon }).ContactSendFlow;
     function Parent() {
@@ -154,17 +150,21 @@ for (const phone of [false, true]) {
 }
 it('R220 контрфакт: отправка по выбору ловится настоящим списком и потоком', async () => {
   await selection(false, raw);
-  const from = 'onPick={(userId, info) => setWho({ userId, info })}';
-  assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь выбора в целом ContactSendFlow');
-  const changed = raw.replace(from, "onPick={(userId, info) => { void onSend({ kind: 'contact', userId }); setWho({ userId, info }); }}");
-  await assert.rejects(selection(false, changed), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith('R220-select:') && error.operator === 'strictEqual' && error.actual === 1 && error.expected === 0);
+  await counterfact(async () => {
+    const from = 'onPick={(userId, info) => setWho({ userId, info })}';
+    assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь выбора в целом ContactSendFlow');
+    const changed = raw.replace(from, "onPick={(userId, info) => { void onSend({ kind: 'contact', userId }); setWho({ userId, info }); }}");
+    await assert.rejects(selection(false, changed), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith('R220-select:') && error.operator === 'strictEqual' && error.actual === 1 && error.expected === 0);
+  });
 });
 it('R220 контрфакт: Отмена отправляет вместо закрытия', async () => {
   await cancellation(false, raw);
-  const from = 'className="link" disabled={busy} onClick={onClose}';
-  assert.equal(raw.split(from).length - 1, 1, 'однозначная кнопка Отмена в целом ContactSendFlow');
-  await assert.rejects(cancellation(false, raw.replace(from, 'className="link" disabled={busy} onClick={send}')),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R220-cancel:')
-      && error.operator === 'strictEqual' && error.actual === 1 && error.expected === 0);
+  await counterfact(async () => {
+    const from = 'className="link" disabled={busy} onClick={onClose}';
+    assert.equal(raw.split(from).length - 1, 1, 'однозначная кнопка Отмена в целом ContactSendFlow');
+    await assert.rejects(cancellation(false, raw.replace(from, 'className="link" disabled={busy} onClick={send}')),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R220-cancel:')
+        && error.operator === 'strictEqual' && error.actual === 1 && error.expected === 0);
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -354,14 +355,17 @@ function replaceOnce(source: string, anchor: string, replacement: string) {
 test('R257 контрфакт без envEnabled-защиты ловится реальным 409, после принятого оригинала', async () => {
   // Мутант оставляет runtime включённым: только проверка ответа заметит незаконное принятие патча.
   await envLock();
+  await counterfact(async () => {
   const changed = replaceOnce(switchSource,
     "if (patch.enabled === false && env.federation.envEnabled) return 'env_locked';", '');
   await assert.rejects(envLock(changed), e => e instanceof assert.AssertionError && e.message.startsWith('R257-env-lock:'));
+  });
 });
 
 test('R257 контрфакт генерации пароля при непустом .env ловится отсутствием строки базы', async () => {
   // Лишний секрет в дампе — регрессия даже тогда, когда федерация всё ещё успешно запускается.
   await envPassphrase();
+  await counterfact(async () => {
   await t.db.delete(schema.instanceSettings).where(orm.eq(schema.instanceSettings.key, passphraseKey));
   instance.federation.stop();
   env.federation.enabled = false;
@@ -369,21 +373,26 @@ test('R257 контрфакт генерации пароля при непус�
     "if (env.federation.keyPassphrase) useFederationPassphrase(env.federation.keyPassphrase, 'env');",
     "if (env.federation.keyPassphrase) { await passphraseFromBase(); useFederationPassphrase(env.federation.keyPassphrase, 'env'); }");
   await assert.rejects(envPassphrase(changed), e => e instanceof assert.AssertionError && e.message.startsWith('R257-env-no-base:'));
+  });
 });
 
 test('R257 контрфакт удаления пароля при выключении ловится до повторного запуска', async () => {
   // Иначе тест мог бы лишь увидеть key-error и не доказать причину потери личности.
   await identityCycle();
+  await counterfact(async () => {
   const changed = replaceOnce(switchSource, 'federation.stop();',
     'federation.stop(); await db.delete(instanceSettings).where(eq(instanceSettings.key, FED_PASSPHRASE_KEY));');
   await assert.rejects(identityCycle(changed), e => e instanceof assert.AssertionError && e.message.startsWith('R257-passphrase-kept:'));
+  });
 });
 
 test('R257 контрфакт пароля в view ловится сравнением с реальным значением базы', async () => {
   // Вредная добавка сохраняет все легальные поля: нельзя ловить её лишь поломанной формой ответа.
   await secretResponses();
+  await counterfact(async () => {
   const passphrase = await storedPassphrase();
   const changed = replaceOnce(switchSource, 'problem: federation.problem(),',
     `problem: federation.problem(), passphrase: ${JSON.stringify(passphrase)},`);
   await assert.rejects(secretResponses(changed), e => e instanceof assert.AssertionError && e.message.startsWith('R257-no-secret:'));
+  });
 });

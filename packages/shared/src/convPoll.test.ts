@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -133,7 +134,10 @@ for (const [name, from, to, check, prefix, actual, expected] of [
   ['отмена ответа викторины разрешена', "if (poll.quiz) return { ok: false, error: 'ответ в викторине отменить нельзя', code: 403 };", '', quizCancel, 'R219-quiz-cancel:', true, false],
   ['викторина стала multi', '!quiz && input.multi === true', 'input.multi === true', quiz, 'R219-quiz-single:', true, false],
 ] as const) it(`R219 контрфакт правил опроса: ${name}`, () => {
-  check(load(source)); assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  check(load(source));
+  runCounterfact(() => {
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => check(load(source.replace(from, to))), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

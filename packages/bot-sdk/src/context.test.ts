@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -65,8 +66,10 @@ it('R299 контрфакт без проверки адресата перед�
     assert.equal(load(raw).parseCommand('/x@other', 'PanelBot') === null, true, 'R299-command-проверяет-адресата');
   };
   scenario(source);
+  counterfact(() => {
   const mutant = change('if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;', '/* нет проверки адресата */');
   assert.throws(() => scenario(mutant), error => guardFailure(error, 'R299-command-проверяет-адресата', false, true));
+  });
 });
 
 it('R299 контрфакт без нижнего регистра теряет обработчик команды Status', () => {
@@ -74,8 +77,10 @@ it('R299 контрфакт без нижнего регистра теряет 
     assert.equal(load(raw).parseCommand('/Status')?.command, 'status', 'R299-command-нижний-регистр');
   };
   scenario(source);
+  counterfact(() => {
   const mutant = change('command: m[1].toLowerCase()', 'command: m[1]');
   assert.throws(() => scenario(mutant), error => guardFailure(error, 'R299-command-нижний-регистр', 'Status', 'status'));
+  });
 });
 
 const me: BotUser = { id: 'bot-id', username: 'PanelBot', display_name: 'Панель', bot: true, description: '', about: '', public: true };
@@ -239,9 +244,11 @@ it('R301 контрфакт корневого callback.chat теряет чат
     assert.equal(ctx.chat?.id, 'panel-chat', 'R301-callback-чат-из-панели');
   };
   scenario(source);
+  counterfact(() => {
   const mutant = change('if (this.update.callback_query) return this.update.callback_query.message.chat;',
     'if (this.update.callback_query) return (this.update.callback_query as unknown as { chat: Chat }).chat;');
   assert.throws(() => scenario(mutant), error => guardFailure(error, 'R301-callback-чат-из-панели', undefined, 'panel-chat'));
+  });
 });
 
 const channelMessage: Message = { ...message, chat: { id: 'text-channel', type: 'channel', server_id: 'server', title: 'Общий' } };
@@ -307,9 +314,11 @@ it('R303 контрфакт: чат реакции из message не подме�
     assert.equal(ctx.chat?.id, 'text-channel', 'R303-реакция-берёт-свой-чат');
   };
   scenario(source);
+  counterfact(() => {
   const mutant = change('return (this.update[this.type] as { chat: Chat }).chat;',
     "if (this.type === 'message_reaction') return this.update.message?.chat as Chat; return (this.update[this.type] as { chat: Chat }).chat;");
   assert.throws(() => scenario(mutant), e => guardFailure(e, 'R303-реакция-берёт-свой-чат', undefined, 'text-channel'));
+  });
 });
 it('R303 контрфакт: отсутствие проверки @other ловится именно в контексте канала', () => {
   const scenario = (raw: string) => {
@@ -317,6 +326,8 @@ it('R303 контрфакт: отсутствие проверки @other лов
     assert.equal(ctx.command, undefined, 'R303-чужая-команда-канала-не-наша');
   };
   scenario(source);
+  counterfact(() => {
   const mutant = change('if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;', '/* mutant: чужой адресат разрешён */');
   assert.throws(() => scenario(mutant), e => guardFailure(e, 'R303-чужая-команда-канала-не-наша', 'status', undefined));
+  });
 });

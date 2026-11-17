@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { before, beforeEach, afterEach, after, test } from 'node:test';
@@ -220,24 +221,32 @@ const assertion = (marker: string) => (error: unknown) => error instanceof asser
 // Класс ошибки: тесты не чувствительны к удалению реального фильтра аудитории.
 test('R266 мутант без пересечения роли с аудиторией пойман адресным AssertionError после original-first', async () => {
   await recipients();
+  await counterfact(async () => {
   const mutant = pushModule([['inArray(memberRoles.userId, audience.userIds),', '']]);
   await assert.rejects(() => recipients(mutant), assertion('R266 аудитория:'));
+  });
 });
 test('R266 мутант без canMentionRole пойман на закрытой роли после original-first', async () => {
   await permissionGate();
+  await counterfact(async () => {
   const mutant = pushModule([['mentionedRoleIds(content, rows).filter((rid) => canMentionRole(byId.get(rid)!, authorPerms))', 'mentionedRoleIds(content, rows)']]);
   await assert.rejects(() => permissionGate(mutant), assertion('R266 право:'));
+  });
 });
 const sqlRoles = 'OR m.mention_roles && ARRAY(SELECT mr.role_id FROM member_roles mr WHERE mr.user_id = ${userId})';
 test('R266 мутант unread без ролевой ветки SQL пойман счётчиком, а не ошибкой синтаксиса', async () => {
   await history(); await counts();
+  await counterfact(async () => {
   const mutant = unreadModule([[sqlRoles, 'OR FALSE']]);
   await assert.rejects(() => counts(mutant), assertion('R266 SQL роли:'));
+  });
 });
 test('R266 парный мутант bootstrap без ролевой ветки SQL пойман настоящим reads после original-first', async () => {
   await history(); await bootstrapCounts();
+  await counterfact(async () => {
   const mutant = serverModule([[sqlRoles, 'OR FALSE']]);
   await assert.rejects(() => bootstrapCounts(mutant), assertion('R266 bootstrap:'));
+  });
 });
 
 const exactAssertion = (message: string) => (error: unknown) => error instanceof assert.AssertionError && error.message === message;
@@ -354,7 +363,6 @@ test('R280 старые доменные сообщения остаются н�
 
 // Класс ошибки: тест регулярки зелёный, но возврат старого SQL-хвоста не замечен реальными счётчиками истории.
 test('R280 возврат собаки в доменный SQL-пинг пойман обоими настоящими бейджами после original-first', async () => {
-  const anchor = "const tail = '(?![A-Za-z0-9_@]|[.-]+[A-Za-z0-9_])';";
   const load = (changes: readonly Change[] = []): typeof shared => ({
     ...shared,
     ...moduleFrom<typeof import('../../shared/src/mentions.js')>('../../shared/src/mentions.ts', {
@@ -363,23 +371,34 @@ test('R280 возврат собаки в доменный SQL-пинг пойм
   });
   const original = load();
   await domainBroadcastBadges(unreadModule([], original), serverModule([], original));
-  const mutant = load([[anchor, anchor.replace('0-9_@', '0-9_')]]);
+  let mutant: typeof shared;
+  await counterfact(async () => {
+  const anchor = "const tail = '(?![A-Za-z0-9_@]|[.-]+[A-Za-z0-9_])';";
+  mutant = load([[anchor, anchor.replace('0-9_@', '0-9_')]]);
   await assert.rejects(() => domainBroadcastBadges(unreadModule([], mutant)),
     exactAssertion('R280:unread-домен-не-наращивает-бейдж'));
+  });
   await domainBroadcastBadges(unreadModule([], original), serverModule([], original));
+  await counterfact(async () => {
   await assert.rejects(() => domainBroadcastBadges(unread, serverModule([], mutant)),
     exactAssertion('R280:bootstrap-домен-не-наращивает-бейдж'));
+  });
 });
 
 // Класс ошибки: удалённая проверка сохранённого false снова раздувает бейдж после перезагрузки.
 test('R279 мутанты unread и bootstrap без IS DISTINCT FROM false пойманы счётчиком после original-first', async () => {
   await broadcastHistory(); await broadcastCounts();
+  await counterfact(async () => {
   const anchor = 'm.mention_everyone IS DISTINCT FROM false AND ';
   await assert.rejects(() => broadcastCounts(unreadModule([[anchor, '']])),
     exactAssertion('R279:unread-отсекает-false-но-считает-true-null-и-личное'));
+  });
   await broadcastCounts();
+  await counterfact(async () => {
+  const anchor = 'm.mention_everyone IS DISTINCT FROM false AND ';
   await assert.rejects(() => broadcastCounts(unread, serverModule([[anchor, '']])),
     exactAssertion('R279:bootstrap-отсекает-false-но-считает-true-null-и-личное'));
+  });
 });
 
 async function messageApp(changes: readonly Change[] = []) {
@@ -470,9 +489,11 @@ test('R279 настоящий POST сохраняет false/true/null, текс�
 // Класс ошибки: даже правильный push по умолчанию разбудит всех, если POST не передаст allowBroadcast.
 test('R279 мутант POST без allowBroadcast пойман реальной отправкой после original-first', async () => {
   await postBroadcast();
+  await counterfact(async () => {
   await assert.rejects(() => postBroadcast([[
     'channelId, mentionRoleIds, mentionEveryone !== false)', 'channelId, mentionRoleIds)',
   ]]), exactAssertion('R279:POST-без-права-не-будит-пуш'));
+  });
 });
 
 const migration0152 = readFileSync(new URL('../drizzle/0152_mention_everyone.sql', import.meta.url), 'utf8');
@@ -505,8 +526,10 @@ test('R279 миграция 0152 выдаёт бит everyone, гостям, у�
 // Класс ошибки: без is_everyone миграция зелёная на модераторе, но обычные пользователи теряют привычный пинг.
 test('R279 мутант миграции без is_everyone пойман настоящим SQL после original-first', async () => {
   await migrateBroadcast();
+  await counterfact(async () => {
   const anchor = 'is_everyone OR ';
   assert.equal(migration0152.split(anchor).length - 1, 1);
   await assert.rejects(() => migrateBroadcast(migration0152.replace(anchor, '')),
     exactAssertion('R279:миграция-выдаёт-бит-everyone'));
+  });
 });

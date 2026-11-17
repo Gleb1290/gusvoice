@@ -23,6 +23,7 @@ import {
   botsUnsupported,
 } from '../botRules';
 import { confirmAction } from '../confirm';
+import { openLink } from '../linkGuard';
 import { useDialogChrome } from '../dialogChrome';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
@@ -189,19 +190,25 @@ export function MyBotsSettings({ onClose }: { onClose: () => void }) {
 /**
  * Ссылки под списком и в карточке: инструкция для людей (`BOT_DOCS_URL`) и «Справка для нейронки» — `llms.txt` СВОЕГО
  * инстанса (та версия Bot API, что на нём стоит; `api.botLlmsUrl`). Подмена `api` без неё (тесты) — второй ссылки нет.
+ * Открытие — `openLink`: в десктопе `target="_blank"` в WebView2 молча ничего не делает (30.10, «обе кнопки не работают»).
  */
+function openDoc(e: React.MouseEvent, url: string) {
+  e.preventDefault();
+  openLink(url);
+}
+
 function BotDocsLinks() {
   const llms = typeof api.botLlmsUrl === 'function' ? api.botLlmsUrl() : null;
   if (!BOT_DOCS_URL && !llms) return null;
   return (
     <div className="bot-docs">
       {BOT_DOCS_URL && (
-        <a className="link" href={BOT_DOCS_URL} target="_blank" rel="noreferrer">
+        <a className="link" href={BOT_DOCS_URL} target="_blank" rel="noreferrer" onClick={(e) => openDoc(e, BOT_DOCS_URL)}>
           Как написать своего бота
         </a>
       )}
       {llms && (
-        <a className="link" href={llms} target="_blank" rel="noreferrer" title="Вставьте этот файл в чат с нейросетью — она напишет бота по нему">
+        <a className="link" href={llms} target="_blank" rel="noreferrer" onClick={(e) => openDoc(e, llms)} title="Вставьте этот файл в чат с нейросетью — она напишет бота по нему">
           Справка для нейронки
         </a>
       )}

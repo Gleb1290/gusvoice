@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -20,9 +21,11 @@ it('свайп начинает слой только вправо и почти
   assert.equal(rules.swipeBackIntent(-10, 0), 'other');
   assert.equal(rules.swipeBackIntent(10, 20), 'other');
   assert.equal(rules.swipeBackIntent(23, 0), 'wait');
-  const mutant = loadMutant('dx > SWIPE_BACK_RATIO * ay', 'dx >= SWIPE_BACK_RATIO * ay');
-  assert.throws(() => assert.equal(mutant.swipeBackIntent(24, 8), 'wait'), assert.AssertionError,
-    'мутант захватывает жест ровно на границе отношения 3 к 1');
+  counterfact(() => {
+    const mutant = loadMutant('dx > SWIPE_BACK_RATIO * ay', 'dx >= SWIPE_BACK_RATIO * ay');
+    assert.throws(() => assert.equal(mutant.swipeBackIntent(24, 8), 'wait'), assert.AssertionError,
+      'мутант захватывает жест ровно на границе отношения 3 к 1');
+  });
 });
 
 it('возврат завершается на границе трети или броске 1350 px/с, offset зажат в ширину', () => {

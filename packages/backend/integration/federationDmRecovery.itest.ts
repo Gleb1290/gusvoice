@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -153,11 +154,13 @@ async function routeBudget(path: 'changes' | 'export', mutation?: Mutation) {
 }
 for (const path of ['changes', 'export'] as const) it(`R201 ${path} разрешает 1200-й convPull, 1201-й закрывает; directory-мутант обнаружен`, async () => {
   await routeBudget(path);
-  const name = path === 'changes' ? '/fed/v1/conv/changes' : '/fed/v1/conv/:id/export';
-  const raw = source('routes/federation'), ast = ts.createSourceFile('routes/federation', raw, ts.ScriptTarget.Latest, true), bodies: ts.Node[] = [];
-  function visit(n: ts.Node) { if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'get' && ts.isStringLiteral(n.arguments[0]) && n.arguments[0].text === name) bodies.push(n.arguments[n.arguments.length - 1]); ts.forEachChild(n, visit); }
-  visit(ast); assert.equal(bodies.length, 1); const body = bodies[0].getText(ast), anchor = "admitPeer(req, reply, q.instance_id, 'convPull')"; assert.equal(body.split(anchor).length - 1, 1);
-  await assert.rejects(routeBudget(path, [body, body.replace(anchor, "admitPeer(req, reply, q.instance_id, 'directory')")]), killed('догонка расходует свой convPull'));
+  await counterfact(async () => {
+    const name = path === 'changes' ? '/fed/v1/conv/changes' : '/fed/v1/conv/:id/export';
+    const raw = source('routes/federation'), ast = ts.createSourceFile('routes/federation', raw, ts.ScriptTarget.Latest, true), bodies: ts.Node[] = [];
+    function visit(n: ts.Node) { if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'get' && ts.isStringLiteral(n.arguments[0]) && n.arguments[0].text === name) bodies.push(n.arguments[n.arguments.length - 1]); ts.forEachChild(n, visit); }
+    visit(ast); assert.equal(bodies.length, 1); const body = bodies[0].getText(ast), anchor = "admitPeer(req, reply, q.instance_id, 'convPull')"; assert.equal(body.split(anchor).length - 1, 1);
+    await assert.rejects(routeBudget(path, [body, body.replace(anchor, "admitPeer(req, reply, q.instance_id, 'directory')")]), killed('догонка расходует свой convPull'));
+  });
 });
 
 async function rowRetries(mutation?: Mutation) {
@@ -171,7 +174,10 @@ async function rowRetries(mutation?: Mutation) {
 }
 it('R201 отсутствующая беседа держит курсор seq−1, частые повторы не считаются; на пятой разнесённой попытке пропуск', async () => { await rowRetries(); });
 for (const [name, anchor, replacement] of [['ранний курсор', 'stopAt = item.seq - 1;', 'stopAt = parsed.seq;'], ['одна попытка', 'const ROW_TRIES = 5;', 'const ROW_TRIES = 1;']] as const) it(`R201 ${name} не маскирует потерянную строку зелёным курсором`, async () => {
-  await rowRetries(); await assert.rejects(rowRetries([anchor, replacement]), killed('курсор останавливается перед неприменённой строкой'));
+  await rowRetries();
+  await counterfact(async () => {
+    await assert.rejects(rowRetries([anchor, replacement]), killed('курсор останавливается перед неприменённой строкой'));
+  });
 });
 it('R201 ошибка применения dm2-копии держит курсор четыре попытки, на пятой создаётся единственная заглушка', async () => {
   const f = await fixture(), w = wire(); w.content = ''; w.attachments = [{ id: 'file', name: 'a.txt', contentType: 'text/plain', size: 2, width: null, height: null, durationMs: null, waveform: null, asFile: false, spoiler: false, sha256: null }];
@@ -190,7 +196,10 @@ async function policy(mutation?: Mutation) {
   assert.equal((await t.db.select().from(schema.conversations))[0].id, cid);
 }
 it('R201 строка conv соблюдает shared/anyone; принудительное anyone вместо политики обнаруживается', async () => {
-  await policy(); await assert.rejects(policy(inFunction('federation/convOpen', 'acceptConvRow', "policy: mine ? 'anyone' : await fedDmPolicy(),", "policy: 'anyone',")), killed('политика дома действует на незапрошенную беседу'));
+  await policy();
+  await counterfact(async () => {
+    await assert.rejects(policy(inFunction('federation/convOpen', 'acceptConvRow', "policy: mine ? 'anyone' : await fedDmPolicy(),", "policy: 'anyone',")), killed('политика дома действует на незапрошенную беседу'));
+  });
 });
 it('R201 отказ conv пропускает её сообщения без пяти повторов и не тормозит курсор следующей строки', async () => {
   const f = await fixture({}, false);
@@ -249,10 +258,13 @@ async function passResume(mutation?: Mutation) {
   assert.equal(await f.cursor(), 10, 'голова курсора взята в начале прохода, не в ответе после паузы');
 }
 it('R201 export 429 сохраняет after и начальную голову reset; сброс passProgress при неудаче краснеет', async () => {
-  await passResume(); await assert.rejects(passResume([
-    'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) return since;',
-    'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) { passProgress.delete(instanceId); return since; }',
-  ]), killed('полный проход продолжает ту же страницу после 429'));
+  await passResume();
+  await counterfact(async () => {
+    await assert.rejects(passResume([
+      'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) return since;',
+      'if (!(await fullPass(instanceId, self.instanceId, link.apiBase, host, key))) { passProgress.delete(instanceId); return since; }',
+    ]), killed('полный проход продолжает ту же страницу после 429'));
+  });
 });
 
 it('R201 changesForPeer возвращает reset с головой при будущем since; отсутствие sync означает голову 0', async () => {
@@ -274,7 +286,10 @@ async function reads(mutation?: Mutation) {
   const noRead = await f.changes.changesForPeer(peer, 0, 100, self); assert.ok('items' in noRead); assert.equal(shared.parseConvReadsWire(noRead.items[0].entity)?.reads.length, 0);
 }
 it('R201 read ссылается на последнее сообщение именно соседа, возврат своего автора в SQL обнаружен', async () => {
-  await reads(); await assert.rejects(reads(['AND a.home_instance_id = ${peerInstanceId}', 'AND (a.home_instance_id IS NULL OR a.home_instance_id = ${peerInstanceId})']), killed('своё сообщение читателя не уходит квитанцией соседу'));
+  await reads();
+  await counterfact(async () => {
+    await assert.rejects(reads(['AND a.home_instance_id = ${peerInstanceId}', 'AND (a.home_instance_id IS NULL OR a.home_instance_id = ${peerInstanceId})']), killed('своё сообщение читателя не уходит квитанцией соседу'));
+  });
 });
 async function listens(mutation?: Mutation) {
   const f = await fixture({ changes: mutation });
@@ -291,7 +306,10 @@ async function listens(mutation?: Mutation) {
   }
 }
 it('R201 listen закрыт без dm2once в журнале и export, разрешён с ним; снятый KIND_FEATURE краснеет', async () => {
-  await listens(); await assert.rejects(listens(['[FED_CONV_CHANGE_E2.listen]: FED_FEATURES.dm2once,', '[FED_CONV_CHANGE_E2.listen]: undefined,']), killed('listen журнала требует dm2once'));
+  await listens();
+  await counterfact(async () => {
+    await assert.rejects(listens(['[FED_CONV_CHANGE_E2.listen]: FED_FEATURES.dm2once,', '[FED_CONV_CHANGE_E2.listen]: undefined,']), killed('listen журнала требует dm2once'));
+  });
 });
 
 it('R201 staleHomes проверяет десять минут с обеих сторон, незабранный seq и действительную общую беседу', async () => {
@@ -310,7 +328,10 @@ async function ack(mutation?: Mutation) {
   const [row] = await t.db.select().from(schema.fedConvSync); assert.equal(row.ackedSeq, 5, 'подтверждённый курсор не возвращается назад'); assert.equal(row.ackedAt?.getTime(), f.clock.now);
 }
 it('R201 notePeerPull подтверждает только вперёд; удаление GREATEST обнаруживается реальной строкой sync', async () => {
-  await ack(); await assert.rejects(ack(['.set({ ackedSeq: sql`GREATEST(${fedConvSync.ackedSeq}, ${since})`, ackedAt: new Date() })', '.set({ ackedSeq: since, ackedAt: new Date() })']), killed('подтверждённый курсор не возвращается назад'));
+  await ack();
+  await counterfact(async () => {
+    await assert.rejects(ack(['.set({ ackedSeq: sql`GREATEST(${fedConvSync.ackedSeq}, ${since})`, ackedAt: new Date() })', '.set({ ackedSeq: since, ackedAt: new Date() })']), killed('подтверждённый курсор не возвращается назад'));
+  });
 });
 for (const [status, error] of [[401, 'clock-skew'], [401, 'expired'], [404, 'not-found']] as const) it(`R201 ${status} ${error} становится stale после десяти минут, не broken; успешный забор снимает`, async () => {
   const f = await fixture(); f.link.notePeerAnswer(peer, status, JSON.stringify({ error })); f.clock.now += 600_000;
@@ -340,7 +361,9 @@ it('R202 пустой или отсутствующий body у 404 копит �
 });
 it('R202 мутант раннего отказа при пустом body теряет stale от 404 без исходящих сообщений', async () => {
   await emptyNotFound();
-  await assert.rejects(emptyNotFound(['if (status === 404 && !body) {', 'if (false) {']), killed('404 без тела включает stale'));
+  await counterfact(async () => {
+    await assert.rejects(emptyNotFound(['if (status === 404 && !body) {', 'if (false) {']), killed('404 без тела включает stale'));
+  });
 });
 it('R201 сеть и 5xx не ставят stale сами по себе; сводка fedStale есть лишь без fedLink', async () => {
   const f = await fixture(); f.link.notePeerAnswer(peer, null, null); f.link.notePeerAnswer(peer, 503, '{"error":"clock-skew"}'); f.clock.now += 600_001;

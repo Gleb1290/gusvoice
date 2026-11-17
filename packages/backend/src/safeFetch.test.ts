@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
@@ -527,14 +528,16 @@ describe('пределы больших бинарных файлов сосед
     await assert.rejects(() => request(original, { attachment: true }), /ответ соседа больше предела/);
     assert.equal(deadlines.at(-1), FILE_DEADLINE_MS, 'attachment без binary не получает срок вложения');
 
-    const anchor = 'const att = req.binary === true && req.attachment === true;';
+    await counterfact(async () => {
+const anchor = 'const att = req.binary === true && req.attachment === true;';
     assert.equal(source.split(anchor).length - 1, 1, 'якорь парного флага attachment/binary должен быть уникальным');
     const mutant = loadSafeFetchWithTransport(
       () => bodyLength, [], [], source.replace(anchor, 'const att = req.attachment === true;'),
     );
     const nonBinaryMustReject = async (api: typeof original) => {
       let rejected = false;
-      try { await request(api, { attachment: true }); } catch { rejected = true; }
+      try { await request(api, { attachment: true });
+ } catch { rejected = true; }
       assert.equal(rejected, true, 'attachment без binary должен сохранить шестимегабайтный предел');
     };
     await assert.rejects(
@@ -542,5 +545,7 @@ describe('пределы больших бинарных файлов сосед
       (error: unknown) => error instanceof assert.AssertionError && error.message.includes('attachment без binary должен сохранить шестимегабайтный предел'),
       'мутант, который разрешает 25 МиБ только по attachment, обязан проиграть цели по старому пределу',
     );
-  });
+
+});
+});
 });

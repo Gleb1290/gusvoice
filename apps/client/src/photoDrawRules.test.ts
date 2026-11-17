@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -22,9 +23,11 @@ function mutation(changes: readonly (readonly [string, string])[]) {
 }
 function killed(changes: readonly (readonly [string, string])[], scenario: (api: Api) => void, prefix: string, actual: unknown, expected: unknown) {
   scenario(load());
-  const mutant = load(mutation(changes));
-  assert.throws(() => scenario(mutant), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  counterfact(() => {
+    const mutant = load(mutation(changes));
+    assert.throws(() => scenario(mutant), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 }
 function close(actual: number, expected: number, label: string) { assert.equal(Math.abs(actual - expected) < 1e-10, true, `${label}: ${actual} ≈ ${expected}`); }
 const transforms = [

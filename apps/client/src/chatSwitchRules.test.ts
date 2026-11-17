@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -24,8 +25,10 @@ it('окно начинается только с Ctrl+Tab без Alt и Meta; �
   assert.equal(rules.chatSwitchAction({ code: 'KeyQ', shiftKey: false, altKey: true }), null);
   checkMeta(rules);
   checkMeta(mutated('!e.metaKey', '!e.metaKey'));
+  counterfact(() => {
   assert.throws(() => checkMeta(mutated('!e.metaKey', 'true')), assert.AssertionError,
     'мутант пропускает Meta+Ctrl, которое принадлежит системной клавише');
+  });
 });
 
 it('недавние не дублируются и ограничены 14 плитками, текущая и неизвестные беседы обрабатываются отдельно', () => {
@@ -36,17 +39,21 @@ it('недавние не дублируются и ограничены 14 пл
   };
   checkRecent(rules);
   checkRecent(mutated('recent.filter((x) => x !== id)', 'recent.filter((x) => x !== id)'));
+  counterfact(() => {
   assert.throws(() => checkRecent(mutated('recent.filter((x) => x !== id)', 'recent')), assert.AssertionError,
     'мутант оставляет дубликат выбранной беседы');
   assert.throws(() => checkRecent(mutated('.slice(0, max)', '.slice(0, max + 1)')), assert.AssertionError,
     'мутант оставляет пятнадцатую плитку');
+  });
   const checkList = (api: typeof rules) => assert.equal(api.chatSwitchList(['gone', 'b', 'a', 'b'], ['a', 'b', 'c'], 'c', 2).join(','), 'c,b');
   checkList(rules);
   checkList(mutated('id && known.has(id) && !out.includes(id)', 'id && known.has(id) && !out.includes(id)'));
+  counterfact(() => {
   assert.throws(() => checkList(mutated('id && known.has(id) && !out.includes(id)', 'id && !out.includes(id)')), assert.AssertionError,
     'мутант добавляет удалённую беседу, которой уже нет в списке');
   assert.throws(() => checkList(mutated('return out.slice(0, max);', 'return out;')), assert.AssertionError,
     'мутант игнорирует предел плиток после объединения недавних и всех бесед');
+  });
   assert.deepEqual(rules.chatSwitchList(['gone', 'b', 'a', 'b'], ['a', 'b', 'c'], 'c'), ['c', 'b', 'a']);
   assert.deepEqual(rules.chatSwitchLayout(1), { rows: 1, perRow: 1 });
   assert.deepEqual(rules.chatSwitchLayout(7), { rows: 1, perRow: 7 });
@@ -65,6 +72,8 @@ it('переключение и удаление плитки не зацикл�
   const check = (api: typeof rules) => assert.equal(api.stepNext(2, 3), 0);
   check(rules);
   check(mutated('selected + 1 >= count', 'selected + 1 >= count'));
+  counterfact(() => {
   assert.throws(() => check(mutated('selected + 1 >= count', 'selected + 1 > count')), assert.AssertionError,
     'мутант уходит за последнюю плитку вместо возврата к первой');
+  });
 });

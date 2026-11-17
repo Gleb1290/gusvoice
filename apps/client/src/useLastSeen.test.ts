@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
@@ -120,13 +121,17 @@ for (const exact of [true, false]) it(`первый кадр онлайн → о
 
 it('перенос goneAt в пассивный эффект обнаруживается по первому кадру, даже если следующий уже исправлен', async () => {
   await checkTransition(source, true);
-  const mutant = mutate('  if (prevOnline !== online) {\n    setPrevOnline(online);\n    setGoneAt(online ? null : Date.now());\n  }',
-    '  useEffect(() => {\n    if (prevOnline !== online) {\n      setPrevOnline(online);\n      setGoneAt(online ? null : Date.now());\n    }\n  }, [online, prevOnline]);');
-  await assert.rejects(checkTransition(mutant, true), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('первый кадр выхода'));
+  await counterfact(async () => {
+    const mutant = mutate('  if (prevOnline !== online) {\n    setPrevOnline(online);\n    setGoneAt(online ? null : Date.now());\n  }',
+      '  useEffect(() => {\n    if (prevOnline !== online) {\n      setPrevOnline(online);\n      setGoneAt(online ? null : Date.now());\n    }\n  }, [online, prevOnline]);');
+    await assert.rejects(checkTransition(mutant, true), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('первый кадр выхода'));
+  });
 });
 
 it('удаление got < goneAt обнаруживается: свежий REST должен заменить локальную отметку выхода', async () => {
   await checkTransition(source, true);
-  const mutant = mutate(' && view.got < goneAt', '');
-  await assert.rejects(checkTransition(mutant, true), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('ответ после выхода'));
+  await counterfact(async () => {
+    const mutant = mutate(' && view.got < goneAt', '');
+    await assert.rejects(checkTransition(mutant, true), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('ответ после выхода'));
+  });
 });

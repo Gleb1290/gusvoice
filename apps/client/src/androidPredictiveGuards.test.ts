@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
@@ -31,8 +32,10 @@ function body(source: string, name: string): string {
 
 function rejects(source: string, target: string, replacement: string, check: (value: string) => void): void {
   check(source);
+  counterfact(() => {
   assert.equal(source.split(target).length - 1, 1, 'контрфакт изменяет ровно одно место');
   assert.throws(() => check(source.replace(target, replacement)), assert.AssertionError);
+  });
 }
 
 function searchHandler(source: string): { call: ts.CallExpression; file: ts.SourceFile } {
@@ -119,8 +122,10 @@ describe('R121 нативная предиктивная «назад»: стр�
     check(manifest);
     const attribute = 'android:enableOnBackInvokedCallback="true"';
     rejects(manifest, attribute, '', check);
+    counterfact(() => {
     const moved = manifest.replace(attribute, '').replace('<application', `<application ${attribute}`);
     assert.throws(() => check(moved), assert.AssertionError);
+    });
   });
 
   it('поиск сообщает peek без сброса запроса: скрытый поиск не блокирует выход из беседы', () => {
@@ -139,11 +144,13 @@ describe('R121 нативная предиктивная «назад»: стр�
       assert.equal(returned, "!(st.mobilePane==='content'||st.settingsOpen||st.adminOpen||st.mobileProfileOpen)");
     };
     check(sidebar);
+    counterfact(() => {
     const { call, file } = searchHandler(sidebar);
     const peek = call.arguments[1]!;
     const removed = sidebar.slice(0, call.arguments[0]!.end) + sidebar.slice(peek.end);
     assert.throws(() => check(removed), assert.AssertionError, 'обработчик без peek краснит страж');
     const changed = sidebar.slice(0, peek.getStart(file)) + '() => true' + sidebar.slice(peek.end);
     assert.throws(() => check(changed), assert.AssertionError, 'безусловное поглощение назад краснит страж');
+    });
   });
 });

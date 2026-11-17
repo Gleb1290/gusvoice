@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -24,9 +25,11 @@ function load(raw: string): typeof rules {
 
 function kill(from: string, to: string, verify: (api: typeof rules) => void, message: string): void {
   verify(load(source)); // Сначала тот же сценарий обязан пройти на исходном модуле.
-  assert.equal(source.split(from).length - 1, 1, 'точка мутации единственная');
-  const mutant = load(source.replace(from, to)); // Ошибки загрузки не засчитываются за пойманную регрессию.
-  assert.throws(() => verify(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(message));
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1, 'точка мутации единственная');
+    const mutant = load(source.replace(from, to)); // Ошибки загрузки не засчитываются за пойманную регрессию.
+    assert.throws(() => verify(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(message));
+  });
 }
 
 it('R250 пять известных команд принимаются без изменения', () => {

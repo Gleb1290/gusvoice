@@ -16,12 +16,13 @@ import type { VoiceRecording, VoiceTake } from './voiceRecorder';
 export interface RoundRecording extends VoiceRecording {
   /** Квадратный поток для круглого предпросмотра (без звука). */
   preview: MediaStream;
-  /** Передняя камера — предпросмотр зеркалим, как Telegram (запись не зеркальная). */
+  /** Фактическая передняя камера — предпросмотр зеркалим, запись не зеркальная. */
   front: () => boolean;
-  /** Сменить камеру (передняя ↔ задняя); нет второй — молча остаётся прежняя. */
+  /** Только во время записи; параллельные вызовы разделяют попытку. Ошибка — после восстановления старой камеры. */
   flip: () => Promise<void>;
 }
 
+type Facing = 'user' | 'environment';
 const FPS = 30;
 const VIDEO_BPS = 1_000_000;
 const AUDIO_BPS = 64_000;
@@ -40,168 +41,253 @@ function pickMime(): string {
   return candidates.find((t) => MediaRecorder.isTypeSupported?.(t)) ?? '';
 }
 
-function cameraConstraints(facing: 'user' | 'environment'): MediaTrackConstraints {
+function cameraConstraints(facing: Facing): MediaTrackConstraints {
   return { facingMode: facing, width: { ideal: 640 }, height: { ideal: 640 }, frameRate: { ideal: FPS } };
 }
 
+function labelFacing(label: string): Facing | undefined {
+  if (/front|user|facetime|передн|фронт/i.test(label)) return 'user';
+  if (/back|rear|environment|задн|тылов/i.test(label)) return 'environment';
+  return undefined;
+}
+
+function trackFacing(track: MediaStreamTrack, devices: MediaDeviceInfo[] = []): Facing | undefined {
+  const settings = track.getSettings();
+  if (settings.facingMode === 'user' || settings.facingMode === 'environment') return settings.facingMode;
+  return labelFacing(track.label) ?? labelFacing(devices.find((d) => d.deviceId === settings.deviceId)?.label ?? '');
+}
+
 export async function startRoundRecording(): Promise<RoundRecording> {
-  let facing: 'user' | 'environment' = 'user';
-  const cam = await navigator.mediaDevices.getUserMedia({
-    video: cameraConstraints(facing),
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-  let videoTrack = cam.getVideoTracks()[0] ?? null;
-  const audioTracks = cam.getAudioTracks();
-
-  const video = document.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.srcObject = new MediaStream(videoTrack ? [videoTrack] : []);
-  await video.play().catch(() => {});
-
-  const canvas = document.createElement('canvas');
-  canvas.width = ROUND_SIDE;
-  canvas.height = ROUND_SIDE;
-  const g = canvas.getContext('2d');
-  const draw = () => {
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    if (!g || !vw || !vh) return;
-    // Квадрат по центру кадра (Android `InstantCameraView` режет так же — по меньшей стороне).
-    const s = Math.min(vw, vh);
-    g.drawImage(video, (vw - s) / 2, (vh - s) / 2, s, s, 0, 0, ROUND_SIDE, ROUND_SIDE);
-  };
-  draw();
-  // Таймер, а не `requestAnimationFrame`: кадры идут и в свёрнутом окне (rAF там встаёт, и кружок замер бы).
-  const frames = window.setInterval(draw, Math.round(1000 / FPS));
-  const canvasStream = canvas.captureStream(FPS);
-  const preview = new MediaStream(canvasStream.getVideoTracks());
-  const recStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks]);
-
-  const mime = pickMime();
-  const rec = new MediaRecorder(recStream, {
-    ...(mime ? { mimeType: mime } : {}),
-    videoBitsPerSecond: VIDEO_BPS,
-    audioBitsPerSecond: AUDIO_BPS,
-  });
-  const chunks: Blob[] = [];
-  rec.ondataavailable = (e) => {
-    if (e.data.size) chunks.push(e.data);
-  };
-  // Куски раз в секунду: снимок паузы и остановка не ждут весь файл одним куском.
-  rec.start(1000);
-  const startedAt = Date.now();
-  let activeMs = 0;
-  let runFrom: number | null = startedAt;
-  const elapsed = () => Math.min(activeMs + (runFrom === null ? 0 : Date.now() - runFrom), ROUND_MAX_MS);
-
-  // Уровень микрофона — для таймера/полосы, как у голосового.
-  const ctx = new AudioContext();
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 512;
-  if (audioTracks.length) ctx.createMediaStreamSource(new MediaStream(audioTracks)).connect(analyser);
-  const buf = new Float32Array(analyser.fftSize);
-
+  let facing: Facing = 'user';
+  let deviceId: string | undefined;
+  let videoTrack: MediaStreamTrack | null = null;
+  let video: HTMLVideoElement | undefined;
+  let rec: MediaRecorder | undefined;
+  let ctx: AudioContext | undefined;
+  let frames: number | undefined;
+  let limit: ReturnType<typeof setTimeout> | undefined;
   let released = false;
+  let done = false;
+  let switching: Promise<void> | undefined;
+  const owned = new Set<MediaStreamTrack>();
+  const own = (stream: MediaStream) => { for (const t of stream.getTracks()) owned.add(t); return stream; };
+  const release = (tracks: MediaStreamTrack[]) => {
+    for (const t of tracks) {
+      if (owned.delete(t)) t.stop();
+    }
+  };
+  const ended = () => done || released;
   const cleanup = () => {
     if (released) return;
     released = true;
     clearInterval(frames);
-    for (const t of [...cam.getTracks(), ...(videoTrack ? [videoTrack] : []), ...canvasStream.getTracks()]) t.stop();
-    video.srcObject = null;
-    void ctx.close().catch(() => {});
+    clearTimeout(limit);
+    release([...owned]);
+    if (video) video.srcObject = null;
+    if (ctx) void ctx.close().catch(() => {});
   };
-  rec.addEventListener('stop', cleanup);
 
-  let done = false;
-  let limit = setTimeout(() => {
-    if (!done && rec.state === 'recording') rec.stop();
-  }, ROUND_MAX_MS);
-
-  const fileOf = (): File => {
-    const type = rec.mimeType || mime || 'video/webm';
-    const ext = type.includes('mp4') ? 'mp4' : 'webm';
-    return new File([new Blob(chunks, { type })], `round-${startedAt}.${ext}`, { type: type.split(';')[0] });
+  const devices = async () => {
+    try { return await navigator.mediaDevices.enumerateDevices(); } catch { return []; }
   };
-  const take = (): VoiceTake => ({ file: fileOf(), durationMs: elapsed(), waveform: [], round: { side: ROUND_SIDE } });
 
-  return {
-    startedAt,
-    elapsed,
-    preview,
-    front: () => facing === 'user',
-    flip: async () => {
-      if (released) return;
-      const next = facing === 'user' ? 'environment' : 'user';
-      let s: MediaStream;
+  try {
+    const cam = own(await navigator.mediaDevices.getUserMedia({
+      video: cameraConstraints(facing),
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    }));
+    videoTrack = cam.getVideoTracks()[0] ?? null;
+    if (!videoTrack || videoTrack.readyState === 'ended') throw new Error('Камера не передаёт видео');
+    facing = trackFacing(videoTrack) ?? trackFacing(videoTrack, await devices()) ?? facing;
+    deviceId = videoTrack.getSettings().deviceId;
+    const audioTracks = cam.getAudioTracks();
+    // Принимаем только используемые дорожки, в том числе у нестандартного getUserMedia.
+    release(cam.getTracks().filter((t) => t !== videoTrack && !audioTracks.includes(t)));
+
+    video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = new MediaStream([videoTrack]);
+    await video.play();
+
+    const canvas = document.createElement('canvas');
+    canvas.width = ROUND_SIDE;
+    canvas.height = ROUND_SIDE;
+    const g = canvas.getContext('2d');
+    if (!g) throw new Error('Не удалось создать холст записи');
+    const draw = () => {
+      if (!video || !videoTrack || videoTrack.readyState === 'ended' || video.readyState < 2) return;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return;
+      const s = Math.min(vw, vh);
+      g.drawImage(video, (vw - s) / 2, (vh - s) / 2, s, s, 0, 0, ROUND_SIDE, ROUND_SIDE);
+    };
+    draw();
+    // Между камерами холст держит последний кадр; микрофон и encoder продолжают работать.
+    frames = window.setInterval(draw, Math.round(1000 / FPS));
+    const canvasStream = own(canvas.captureStream(FPS));
+    const preview = new MediaStream(canvasStream.getVideoTracks());
+    const recStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks]);
+    const mime = pickMime();
+    const recorder = rec = new MediaRecorder(recStream, {
+      ...(mime ? { mimeType: mime } : {}),
+      videoBitsPerSecond: VIDEO_BPS,
+      audioBitsPerSecond: AUDIO_BPS,
+    });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+
+    const audioContext = ctx = new AudioContext();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 512;
+    if (audioTracks.length) audioContext.createMediaStreamSource(new MediaStream(audioTracks)).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    recorder.start(1000);
+    const startedAt = Date.now();
+    let activeMs = 0;
+    let runFrom: number | null = startedAt;
+    const elapsed = () => Math.min(activeMs + (runFrom === null ? 0 : Date.now() - runFrom), ROUND_MAX_MS);
+    const freeze = () => {
+      activeMs = elapsed();
+      runFrom = null;
+    };
+    recorder.addEventListener('stop', () => { freeze(); cleanup(); });
+    const armLimit = () => setTimeout(() => {
+      if (!ended() && recorder.state === 'recording') { freeze(); recorder.stop(); cleanup(); }
+    }, ROUND_MAX_MS - elapsed());
+    limit = armLimit();
+
+    const attach = async (stream: MediaStream, expected: Facing, previousId?: string) => {
+      const track = stream.getVideoTracks()[0];
       try {
-        s = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints(next) });
-      } catch {
-        return;
-      }
-      const t = s.getVideoTracks()[0];
-      if (!t || released) {
-        for (const x of s.getTracks()) x.stop();
-        return;
-      }
-      videoTrack?.stop();
-      videoTrack = t;
-      facing = next;
-      video.srcObject = new MediaStream([t]);
-      await video.play().catch(() => {});
-    },
-    pause: async () => {
-      if (rec.state === 'recording') {
-        if (runFrom !== null) activeMs += Date.now() - runFrom;
-        runFrom = null;
-        clearTimeout(limit);
-        const flushed = new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, 1000);
-          rec.addEventListener('dataavailable', () => { clearTimeout(t); resolve(); }, { once: true });
-        });
-        rec.pause();
-        try {
-          rec.requestData();
-          await flushed;
-        } catch {
-          /* старый движок без requestData на паузе — показываем то, что уже пришло */
+        if (ended()) { release(stream.getTracks()); return; }
+        if (!track || track.readyState === 'ended') throw new Error('Камера не передаёт видео');
+        let actual = trackFacing(track);
+        if (!actual) actual = trackFacing(track, await devices());
+        if (ended()) { release(stream.getTracks()); return; }
+        const id = track.getSettings().deviceId;
+        if ((actual && actual !== expected) || (previousId && id === previousId)) {
+          throw new Error('Браузер вернул прежнюю камеру');
         }
+        // Без facingMode и отличающегося deviceId переключение не подтверждено.
+        if (!actual && (!id || (previousId && id === previousId))) {
+          throw new Error('Не удалось определить камеру');
+        }
+        release(stream.getTracks().filter((t) => t !== track));
+        video!.srcObject = new MediaStream([track]);
+        await video!.play();
+        if (ended()) { release(stream.getTracks()); return; }
+        videoTrack = track;
+        facing = actual ?? expected;
+        deviceId = id;
+      } catch (error) {
+        release(stream.getTracks());
+        if (video) video.srcObject = null;
+        throw error;
       }
-      return take();
-    },
-    resume: () => {
-      if (done || rec.state !== 'paused') return;
-      rec.resume();
-      runFrom = Date.now();
-      limit = setTimeout(() => {
-        if (!done && rec.state === 'recording') rec.stop();
-      }, ROUND_MAX_MS - elapsed());
-    },
-    level: () => {
-      if (released || runFrom === null || !audioTracks.length) return 0;
-      analyser.getFloatTimeDomainData(buf);
-      let peak = 0;
-      for (const v of buf) peak = Math.max(peak, Math.abs(v));
-      return Math.min(1, peak);
-    },
-    cancel: () => {
-      done = true;
-      clearTimeout(limit);
-      if (rec.state !== 'inactive') rec.stop();
-      cleanup();
-    },
-    stop: () =>
-      new Promise<VoiceTake>((resolve, reject) => {
+    };
+    const open = async (constraints: MediaTrackConstraints, target: Facing, previousId?: string) => {
+      const stream = own(await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false }));
+      await attach(stream, target, previousId);
+    };
+    const switchCamera = async () => {
+      const previousFacing = facing;
+      const previousId = deviceId;
+      const next: Facing = facing === 'user' ? 'environment' : 'user';
+      if (videoTrack) release([videoTrack]);
+      videoTrack = null;
+      video!.srcObject = null;
+      try {
+        try {
+          await open({ ...cameraConstraints(next), facingMode: { exact: next } }, next, previousId);
+        } catch (error) {
+          if (ended()) return;
+          // WebView может игнорировать facingMode. После разрешения deviceId обычно доступен.
+          const cameras = (await devices()).filter((d) => d.kind === 'videoinput' && d.deviceId !== previousId);
+          if (ended()) return;
+          const labelled = cameras.find((d) => labelFacing(d.label) === next);
+          const candidate = labelled ?? cameras.find((d) => !labelFacing(d.label));
+          if (!candidate) throw error;
+          await open({ ...cameraConstraints(next), deviceId: { exact: candidate.deviceId }, facingMode: undefined }, next, previousId);
+        }
+      } catch (error) {
+        if (ended()) return;
+        try {
+          await open({
+            ...cameraConstraints(previousFacing),
+            ...(previousId ? { deviceId: { exact: previousId }, facingMode: undefined } : { facingMode: { exact: previousFacing } }),
+          }, previousFacing);
+        } catch (recoveryError) {
+          if (ended()) return;
+          throw new AggregateError([error, recoveryError], 'Не удалось переключить и восстановить камеру');
+        }
+        if (!ended()) throw error;
+      }
+    };
+
+    const fileOf = (): File => {
+      const type = recorder.mimeType || mime || 'video/webm';
+      const ext = type.includes('mp4') ? 'mp4' : 'webm';
+      return new File([new Blob(chunks, { type })], `round-${startedAt}.${ext}`, { type: type.split(';')[0] });
+    };
+    const take = (): VoiceTake => ({ file: fileOf(), durationMs: elapsed(), waveform: [], round: { side: ROUND_SIDE } });
+    return {
+      startedAt, elapsed, preview,
+      front: () => facing === 'user',
+      flip: () => {
+        if (ended() || recorder.state !== 'recording') return Promise.resolve();
+        if (switching) return switching;
+        switching = switchCamera().finally(() => { switching = undefined; });
+        return switching;
+      },
+      pause: async () => {
+        if (!ended() && recorder.state === 'recording') {
+          freeze();
+          clearTimeout(limit);
+          const flushed = new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, 1000);
+            recorder.addEventListener('dataavailable', () => { clearTimeout(t); resolve(); }, { once: true });
+          });
+          recorder.pause();
+          try { recorder.requestData(); await flushed; } catch { /* старый движок: уже накопленные куски */ }
+        }
+        return take();
+      },
+      resume: () => {
+        if (ended() || recorder.state !== 'paused') return;
+        recorder.resume();
+        runFrom = Date.now();
+        limit = armLimit();
+      },
+      level: () => {
+        if (released || runFrom === null || !audioTracks.length) return 0;
+        analyser.getFloatTimeDomainData(buf);
+        let peak = 0;
+        for (const v of buf) peak = Math.max(peak, Math.abs(v));
+        return Math.min(1, peak);
+      },
+      cancel: () => {
+        done = true;
+        freeze();
+        clearTimeout(limit);
+        if (recorder.state !== 'inactive') recorder.stop();
+        cleanup();
+      },
+      stop: () => new Promise<VoiceTake>((resolve, reject) => {
         if (done) return reject(new Error('запись уже завершена'));
         done = true;
+        freeze();
         clearTimeout(limit);
-        rec.onstop = () => {
-          cleanup();
-          // Длина — по часам и не больше потолка (как у голосового: у WebM из MediaRecorder длительности в заголовке нет).
-          resolve(take());
-        };
-        if (rec.state !== 'inactive') rec.stop();
-        else rec.onstop?.(new Event('stop'));
+        recorder.onstop = () => { cleanup(); resolve(take()); };
+        if (recorder.state !== 'inactive') recorder.stop();
+        else recorder.onstop?.(new Event('stop'));
+        cleanup();
       }),
-  };
+    };
+  } catch (error) {
+    if (rec && rec.state !== 'inactive') rec.stop();
+    cleanup();
+    throw error;
+  }
 }

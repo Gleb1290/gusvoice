@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -40,25 +41,33 @@ it('R156 обе активности фиксируют портрет до supe
   for (const activity of activities) check(activity.source);
 });
 it('R156 контрфакты <=600 и >600 нарушают телефонную границу в каждой активности', () => {
-  for (const activity of activities) for (const comparison of ['<=', '>']) {
+  for (const activity of activities) {
     check(activity.source);
+    counterfact(() => {
+    for (const comparison of ['<=', '>']) {
     const mutant = replaceOnce(activity.source, 'smallestScreenWidthDp < 600', `smallestScreenWidthDp ${comparison} 600`);
     assert.throws(() => check(mutant), assert.AssertionError);
+    }
+    });
   }
 });
 it('R156 контрфакт переноса блокировки после super обнаруживается в каждой активности', () => {
   // Ранняя установка нужна до создания окна/WebView, не после раскладки первого экрана.
   for (const activity of activities) {
     check(activity.source);
+    counterfact(() => {
     const block = '    if (resources.configuration.smallestScreenWidthDp < 600) {\n      requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT\n    }\n';
     const moved = replaceOnce(activity.source, block, '');
     const mutant = replaceOnce(moved, '    super.onCreate(savedInstanceState)\n', `    super.onCreate(savedInstanceState)\n${block}`);
     assert.throws(() => check(mutant), assert.AssertionError);
+    });
   }
 });
 it('R156 манифест не фиксирует ориентацию для планшетов и TV, контрфакт portrait отвергается', () => {
   const checkManifest = (source: string) => assert.doesNotMatch(source.replace(/<!--[\s\S]*?-->/g, ''), /\b(?:android:)?screenOrientation\s*=/);
   checkManifest(manifest);
+  counterfact(() => {
   const mutant = replaceOnce(manifest, 'android:name=".MainActivity"', 'android:name=".MainActivity" android:screenOrientation="portrait"');
   assert.throws(() => checkManifest(mutant), assert.AssertionError);
+  });
 });

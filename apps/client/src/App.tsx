@@ -38,12 +38,14 @@ import { onBgVoiceEvent, syncBgGateways } from './bgGateways';
 import { connectGateway, connectPresence } from './sockets';
 import { consumeDeepLink, startPushRegistration } from './nativeUnifiedPush';
 import { useStore, voiceIsHere } from './store';
+import { afterSplash } from './splashGate';
+import { captureStartupVoiceSession } from './voiceSession';
 import { setNotifyAlwaysProbe } from './notifications';
 import { clearConvCacheWipe, deleteConvCache, finishConvCacheWipes, readConvCache } from './convCache';
 import { convCacheKey } from './convCacheRules';
 import { onConvCacheFlushed, startConvCacheWriter } from './convCacheWriter';
 import { initVoiceTray } from './voiceTray';
-import { initUnreadBadge } from './unreadBadge';
+import { initDesktopConvNotifications } from './desktopConvNotifications';
 import { initNotifyPopups } from './notifyPopupHost';
 import { initOverlay } from './overlay';
 import { initTipToast } from './tipToast';
@@ -57,6 +59,15 @@ import { CloseToTrayPrompt } from './components/CloseToTrayPrompt';
 import { LastCrashNotice } from './components/LastCrashNotice';
 import { UpdatePanel } from './components/UpdatePanel';
 import { setDmFileLimit } from './attachRules';
+
+/**
+ * Раскладка телефона — список и лента РАЗНЫЕ экраны: приложение на телефоне (`isMobile()`) или окно не шире 760 px (граница
+ * `PHONE_LAYOUT_QUERY`, `phoneLayout.ts`): вкладка браузера телефона, узкое окно ПК. 🔴 29.10: здесь был только `isMobile()`,
+ * и вкладка Chrome на телефоне считала ленту видимой, когда человек уже ушёл в список, — отмечала прочитанным и прятала число.
+ */
+function phonePanes(): boolean {
+  return isMobile() || (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches);
+}
 
 /**
  * Всплывашка беседы при выключенных «Личных» / группах (решение владельца 38, `push4`): исключение «Уведомления включены»
@@ -249,6 +260,9 @@ export function App() {
 
   /** `stale` — заход устарел: человек уже ушёл в другой инстанс (переход больше не прячет экран, 01.10). */
   async function bootstrap(stale: () => boolean = () => false) {
+    if (stale()) return;
+    // Admission and stale-intent cleanup precede both async loading and gateway reconnects.
+    const startupVoice = captureStartupVoiceSession();
     await decideConvMode(stale);
     if (stale()) return;
     await loadServers();
@@ -277,7 +291,15 @@ export function App() {
     void import('./geoLiveSharing').then((m) => m.resumeGeoLive(), () => {});
     // Reconnect-grace restore (#11): if we dropped from a voice channel within the grace window
     // (crash / quick restart), rejoin it now — mute/deafen come back from the persisted self state.
-    void restoreVoiceSession();
+    // На десктопе — только после заставки (28.10, `splashGate.ts`): иначе прежняя версия заходила в канал, пока
+    // заставка ставит обновление, и новая версия — ещё раз.
+    void afterSplash(() => {
+      if (!stale()) startupVoice?.touch();
+    }).then(() => {
+      if (stale()) return;
+      const session = startupVoice?.current();
+      if (session) return restoreVoiceSession(session);
+    });
     // Android push deep-link (#118): a cold start from a notification tap has a pending target — jump to it.
     // Забрали ссылку из пуша — «последнее место» ниже её не перебивает: переход идёт асинхронно, и в режиме бесед
     // (список из кеша, без сети) сервер из прошлого места открывался раньше беседы и затирал её.
@@ -346,7 +368,7 @@ export function App() {
       } else if (place?.serverId) {
         await useStore.getState().openServer(place.serverId).catch(explainClosedServer(place.serverId)).catch(() => {});
         if (stale()) return;
-        if (place.channelId && !isMobile() && useStore.getState().currentServerId === place.serverId) {
+        if (place.channelId && !phonePanes() && useStore.getState().currentServerId === place.serverId) {
           await useStore.getState().openChannel(place.channelId).catch(() => {});
         }
       }
@@ -397,8 +419,7 @@ export function App() {
     void finishConvCacheWipes();
     // Desktop tray mirror (mute/deafen/speaking bubble) — self-gates to Tauri builds, no-op on web.
     initVoiceTray();
-    // Десктоп: число непрочитанных ЛС на значке панели задач и в трее (Р1, G39); снятие тостов прочитанной беседы.
-    initUnreadBadge();
+    initDesktopConvNotifications();
     // Десктоп: свои всплывающие окна уведомлений, как у Telegram Desktop (G38, ND-07); веб и Android — без изменений.
     initNotifyPopups();
     // Desktop in-game overlay controller — pushes the voice roster to the overlay window; no-op on web.
@@ -527,10 +548,14 @@ export function App() {
           if (!v.serverId || v.serverId === msg.serverId) s.leaveVoice();
           return;
         }
-        playSound('move', msg.channelId);
+        if (msg.moveTicket && v.channelId !== msg.fromChannelId) return;
         void s
-          .moveVoiceTo(msg.channelId)
-          .then(() => toast('info', 'Вас переместили в другой канал'))
+          .moveVoiceTo(msg.channelId, msg.moveTicket)
+          .then(() => {
+            if (msg.moveTicket && useStore.getState().voice?.channelId !== msg.channelId) return;
+            playSound('move', msg.channelId);
+            toast('info', 'Вас переместили в другой канал');
+          })
           .catch((e) => toastError(e, 'Не удалось переместиться'));
       }),
     [],

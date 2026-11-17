@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -296,26 +297,30 @@ test('R225 неизвестное, удалённое и обычное сооб
 });
 test('R225 контрфакт: снят автор update — чужой получает 200', async () => {
   await authorUpdate();
-  await assert.rejects(() => authorUpdate(mutation('convGeoLives', "if (p.authorId !== me) return { kind: 'refused', code: 403, error: 'точку обновляет только автор' };", '', 'updateConvGeoLive')),
-    killed('чужой не обновляет трансляцию', 200, 403));
+  await counterfact(() => assert.rejects(() => authorUpdate(mutation('convGeoLives', "if (p.authorId !== me) return { kind: 'refused', code: 403, error: 'точку обновляет только автор' };", '', 'updateConvGeoLive')),
+    killed('чужой не обновляет трансляцию', 200, 403)));
 });
 test('R225 контрфакт: снят автор stop — чужой получает 200', async () => {
   await authorStop();
-  await assert.rejects(() => authorStop(mutation('convGeoLives', "if (p.authorId !== me) return { kind: 'refused', code: 403, error: 'остановить трансляцию может только автор' };", '', 'stopConvGeoLive')),
-    killed('чужой не останавливает трансляцию', 200, 403));
+  await counterfact(() => assert.rejects(() => authorStop(mutation('convGeoLives', "if (p.authorId !== me) return { kind: 'refused', code: 403, error: 'остановить трансляцию может только автор' };", '', 'stopConvGeoLive')),
+    killed('чужой не останавливает трансляцию', 200, 403)));
 });
 test('R225 контрфакт: update ставит editedAt — геопозиция получает ложную правку', async () => {
   await editedJournal();
-  const edit = mutation('convGeoLives', '.set({ media: res.media })', '.set({ media: res.media, editedAt: new Date(now) })', 'updateConvGeoLive');
   // Фикстура заново берёт Date.now, поэтому сравниваем известный вид результата, не часы между двумя прогонами.
   const scenario = async (m?: Mutation) => run(async f => {
     const message = await create(f); clock += 3000; await update(f, message.id);
     assert.equal((await row(message.id)).editedAt !== null, false, 'у геопозиции отсутствует editedAt');
   }, m);
-  await scenario(); await assert.rejects(() => scenario(edit), killed('у геопозиции отсутствует editedAt', true, false));
+  await scenario();
+  await counterfact(async () => {
+  const edit = mutation('convGeoLives', '.set({ media: res.media })', '.set({ media: res.media, editedAt: new Date(now) })', 'updateConvGeoLive');
+  await assert.rejects(() => scenario(edit), killed('у геопозиции отсутствует editedAt', true, false));
+  });
 });
 test('R225 контрфакт: update вызывает настоящий sendPushToUsers — запрет пуша ловится наблюдаемой границей', async () => {
   await editedJournal();
+  await counterfact(async () => {
   const raw = source('convGeoLives'), anchor = "import { eq } from 'drizzle-orm';";
   const action = mutation('convGeoLives', 'return db.transaction(async (tx): Promise<ConvGeoLiveActResult> => {',
     'const result = await db.transaction(async (tx): Promise<ConvGeoLiveActResult> => {', 'updateConvGeoLive');
@@ -325,4 +330,5 @@ test('R225 контрфакт: update вызывает настоящий sendPu
   assert.equal(raw.split(anchor).length, 2); assert.equal(raw.split(action.from).length, 2);
   const edit = { file: 'convGeoLives', from: raw, to: raw.replace(action.from, to).replace(anchor, `${anchor}\nimport { sendPushToUsers } from './push.js';`) };
   await assert.rejects(() => editedJournal(edit), killed('обновление геопозиции не вызывает пуш', 1, 0));
+  });
 });

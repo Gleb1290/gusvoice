@@ -44,7 +44,9 @@ import {
   type StreamSettings,
 } from '../streamSettings';
 import { toast, toastError } from '../toast';
-import { toggleSelfDeafen, toggleSelfMute } from '../voiceSelf';
+import { toggleSelfDeafen, toggleSelfMute as toggleMic } from '../voiceSelf';
+import { ActivitiesButton } from './Activities';
+import { usePttMicButton } from '../usePttMicButton';
 import { Icon } from './Icon';
 import { ScreenShareDialog, type ShareSwitchTarget } from './ScreenShareDialog';
 import { SoundboardPicker } from './SoundboardPicker';
@@ -109,7 +111,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     const eco = sid ? s.economy[sid] : undefined;
     return eco?.enabled ? eco.shop?.find((e) => e.item === 'soundboard') : undefined;
   });
-  const toggleMic = toggleSelfMute;
+  const micButton = usePttMicButton();
   const toggleDeafen = toggleSelfDeafen;
 
   // Start the share with the user's saved quality (resolution / fps / codec / bitrate).
@@ -787,6 +789,12 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
     </button>
   ) : null;
 
+  /**
+   * «Активности» (ГусКоины 2, этап 2: колесо гусей-пиратов) — объявлена ОДИН раз и стоит в ОБЕИХ ветках ниже (урок
+   * 05.09: во время показа рисуется другая ветка). Видимость решает сама кнопка (голос сервера + игры включены).
+   */
+  const activitiesButton = <ActivitiesButton variant={wide ? 'wide' : 'dock'} />;
+
   const soundboardButton =
     sbEntry?.enabled && voiceChannelId ? (
       <span className="sb-wrap">
@@ -831,8 +839,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
           <button
             type="button"
             className={`ctl ${micOff ? 'off' : ''}`}
-            title={micOff ? 'Включить микрофон' : 'Выключить микрофон'}
-            onClick={toggleMic}
+            {...micButton}
           >
             <Icon name={micOff ? 'mic-off' : 'mic'} size={20} />
           </button>
@@ -878,6 +885,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
                 случайный промах по краю не обрывал показ. */}
             {switchButton}
             {soundboardButton}
+            {activitiesButton}
             <button type="button" className="ctl ss-btn ss-stop" title="Завершить показ экрана" onClick={toggleScreen}>
               <Icon name="close" size={16} />
               <span className="ss-label">Завершить стрим</span>
@@ -896,6 +904,7 @@ export function VoiceControls({ screenOnly = false, wide = false }: { screenOnly
                 {wide && <span className="ss-label">{sharing ? 'Идёт показ экрана' : 'Показать экран'}</span>}
               </button>
               {soundboardButton}
+              {activitiesButton}
             </div>
             {/* Mute the OUTGOING stream sound (compact dock, non-wide): only while a share with audio is live. */}
             {sharing && streamAudioPub && (

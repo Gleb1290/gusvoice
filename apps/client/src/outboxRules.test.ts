@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -26,9 +27,11 @@ it('фрагмент ответа хранится только вместе с 
   const withoutReply = newOutboxItem('c', { key: 'plain', content: 'ответ', files: [], replyToId: null, replyQuote: quote }, 10);
   assert.deepEqual(withReply.replyQuote, quote);
   assert.equal(Object.hasOwn(withoutReply, 'replyQuote'), false);
-  const mutant = mutateQuote('input.replyQuote && input.replyToId ?', 'input.replyQuote ?');
-  assert.throws(() => assert.equal(Object.hasOwn(mutant.newOutboxItem('c', { key: 'plain', content: 'ответ', files: [], replyToId: null, replyQuote: quote }, 10), 'replyQuote'), false), assert.AssertionError,
-    'мутант передаёт цитату без replyToId');
+  counterfact(() => {
+    const mutant = mutateQuote('input.replyQuote && input.replyToId ?', 'input.replyQuote ?');
+    assert.throws(() => assert.equal(Object.hasOwn(mutant.newOutboxItem('c', { key: 'plain', content: 'ответ', files: [], replyToId: null, replyQuote: quote }, 10), 'replyQuote'), false), assert.AssertionError,
+      'мутант передаёт цитату без replyToId');
+  });
 });
 
 it('маркеры спойлера и подписи сверху встают только при включённых опциях', () => {

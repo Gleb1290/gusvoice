@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -253,9 +254,11 @@ it('R297 контрфакт только первого DNS-адреса про�
     assert.equal(error !== null, true, 'R297-hook-все-DNS-адреса');
   };
   await scenario(source);
-  const mutant = change('const bad = list.find((a) => hookAddressBlocked(a.address, allowInternal));',
+  await counterfact(async () => {
+const mutant = change('const bad = list.find((a) => hookAddressBlocked(a.address, allowInternal));',
     'const bad = list.slice(0, 1).find((a) => hookAddressBlocked(a.address, allowInternal));');
   await assert.rejects(scenario(mutant), error => guardFailure(error, 'R297-hook-все-DNS-адреса', false, true));
+});
 });
 
 it('R297 контрфакт внутреннего тумблера без never-списка открывает адрес метаданных', () => {
@@ -265,9 +268,11 @@ it('R297 контрфакт внутреннего тумблера без never
     h.checkIO();
   };
   scenario(source);
-  const mutant = change('return allowInternal ? isNeverTargetAddress(ip) : isBlockedAddress(ip);',
+  counterfact(() => {
+const mutant = change('return allowInternal ? isNeverTargetAddress(ip) : isBlockedAddress(ip);',
     'return allowInternal ? false : isBlockedAddress(ip);');
   assert.throws(() => scenario(mutant), error => guardFailure(error, 'R297-hook-never-сильнее-тумблера', false, true));
+});
 });
 
 it('R303 контрфакт старого разрешения loopback при тумблере ловится отдельно от LAN', () => {
@@ -278,8 +283,10 @@ it('R303 контрфакт старого разрешения loopback при 
     h.checkIO();
   };
   check(source);
-  const changed = change("const NEVER_V4 = ['0.0.0.0/8', '127.0.0.0/8',", "const NEVER_V4 = ['0.0.0.0/8',");
+  counterfact(() => {
+const changed = change("const NEVER_V4 = ['0.0.0.0/8', '127.0.0.0/8',", "const NEVER_V4 = ['0.0.0.0/8',");
   assert.throws(() => check(changed), error => guardFailure(error, 'R303 loopback закрыт при разрешённой LAN', false, true));
+});
 });
 
 it('R297 контрфакт следования Location ловится вторым POST, а не посторонней ошибкой транспорта', async () => {
@@ -290,7 +297,8 @@ it('R297 контрфакт следования Location ловится вто�
     assert.equal(h.requests.length, 1, 'R297-hook-без-редиректа');
   };
   await scenario(source);
-  const mutant = change('  return { status: res.status, body: res.body };\n}',
+  await counterfact(async () => {
+const mutant = change('  return { status: res.status, body: res.body };\n}',
     `  if (res.status >= 300 && res.status < 400 && res.location) {
     const next = await once(new URL(res.location, parsed.url), headers, testLookup ?? hookLookup(opts.allowInternal), {
       method: 'POST', body, maxBytes: opts.maxBytes, deadlineMs: opts.deadlineMs,
@@ -300,4 +308,5 @@ it('R297 контрфакт следования Location ловится вто�
   return { status: res.status, body: res.body };
 }`);
   await assert.rejects(scenario(mutant), error => guardFailure(error, 'R297-hook-без-редиректа', 2, 1));
+});
 });

@@ -19,6 +19,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { incomingCallPush, ringPushOver } from './callRules.js';
 
 it('пачка пушей: четыре сочетания окон, пять тихих досылок и мутант quiet/drop', () => {
@@ -31,11 +32,14 @@ it('пачка пушей: четыре сочетания окон, пять т
   check(pushBurstMode);
   const source = readFileSync(new URL('./pushRules.ts', import.meta.url), 'utf8');
   const body = source.match(/export function pushBurstMode\([^]*?\n\}/)?.[0]; assert.ok(body);
-  const anchor = "quietTaken ? 'drop' : 'quiet'"; assert.equal(body.split(anchor).length, 2);
   const load = (code: string) => { const module = { exports: {} as { pushBurstMode: typeof pushBurstMode } };
     runInNewContext(ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports }); return module.exports.pushBurstMode; };
-  check(load(body)); const changed = body.replace(anchor, "quietTaken ? 'quiet' : 'drop'"); assert.notEqual(changed, body);
-  assert.throws(() => check(load(changed)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('режим пачки'));
+  check(load(body));
+  counterfact(() => {
+    const anchor = "quietTaken ? 'drop' : 'quiet'"; assert.equal(body.split(anchor).length, 2);
+    const changed = body.replace(anchor, "quietTaken ? 'quiet' : 'drop'"); assert.notEqual(changed, body);
+    assert.throws(() => check(load(changed)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('режим пачки'));
+  });
 });
 
 it('пуш снимает формат, закрывает спойлер и называет стикер даже без emoji', () => {

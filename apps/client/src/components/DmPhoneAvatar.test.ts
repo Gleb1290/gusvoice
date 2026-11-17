@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -83,15 +84,19 @@ it('R159 B3 обычное исходящее сообщение сохраня�
 });
 it('R159 B3 потеря meId в вызове превью обнаруживается реальной строкой', () => {
   checkCallRows();
-  const raw = replaceOne(sources.sidebar,
-    'dmRowPreview({ typing, draft: draftShown ? draft : null, last, meId })',
-    'dmRowPreview({ typing, draft: draftShown ? draft : null, last })');
-  assert.throws(() => checkCallRows(raw), assert.AssertionError);
+  counterfact(() => {
+    const raw = replaceOne(sources.sidebar,
+      'dmRowPreview({ typing, draft: draftShown ? draft : null, last, meId })',
+      'dmRowPreview({ typing, draft: draftShown ? draft : null, last })');
+    assert.throws(() => checkCallRows(raw), assert.AssertionError);
+  });
 });
 it('R159 B3 возврат sent/read у звонка обнаруживается реальной строкой', () => {
   checkCallRows();
-  const raw = replaceOne(sources.sidebar, 'last?.service || last?.call || dm.saved', 'last?.service || dm.saved');
-  assert.throws(() => checkCallRows(raw), assert.AssertionError);
+  counterfact(() => {
+    const raw = replaceOne(sources.sidebar, 'last?.service || last?.call || dm.saved', 'last?.service || dm.saved');
+    assert.throws(() => checkCallRows(raw), assert.AssertionError);
+  });
 });
 
 function size(kind: Kind, phone: boolean, raw = sources[kind], saved = false, collapsed = false): number {
@@ -131,24 +136,28 @@ for (const kind of ['sidebar', 'archive'] as const) {
     it(`${kind}: возврат телефонного аватара к ${old} ловится отрисовкой`, () => {
       assert.equal(size(kind, true), 52);
       assert.equal(size(kind, false), 46);
-      const raw = replaceOne(sources[kind], 'const DM_ROW_AVA_PHONE = 52;', `const DM_ROW_AVA_PHONE = ${old};`);
-      assert.equal(size(kind, true, raw), old);
-      assert.throws(() => assert.equal(size(kind, true, raw), 52), assert.AssertionError);
-      assert.equal(size(kind, false, raw), 46, 'контрфакт не трогает ПК');
+      counterfact(() => {
+        const raw = replaceOne(sources[kind], 'const DM_ROW_AVA_PHONE = 52;', `const DM_ROW_AVA_PHONE = ${old};`);
+        assert.equal(size(kind, true, raw), old);
+        assert.throws(() => assert.equal(size(kind, true, raw), 52), assert.AssertionError);
+        assert.equal(size(kind, false, raw), 46, 'контрфакт не трогает ПК');
+      });
     });
   }
   it(`${kind}: потеря телефонного условия у реального аватара обнаруживается`, () => {
     assert.equal(size(kind, true), 52);
     assert.equal(size(kind, false), 46);
-    const before = kind === 'sidebar'
-      ? '<Avatar name={name} url={dm.otherUser.avatarUrl} size={phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA} />'
-      : 'const side = collapsed ? 28 : phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA;';
-    const after = kind === 'sidebar'
-      ? '<Avatar name={name} url={dm.otherUser.avatarUrl} size={DM_ROW_AVA} />'
-      : 'const side = collapsed ? 28 : DM_ROW_AVA;';
-    const raw = replaceOne(sources[kind], before, after);
-    assert.equal(size(kind, true, raw), 46);
-    assert.throws(() => assert.equal(size(kind, true, raw), 52), assert.AssertionError);
-    assert.equal(size(kind, false, raw), 46);
+    counterfact(() => {
+      const before = kind === 'sidebar'
+        ? '<Avatar name={name} url={dm.otherUser.avatarUrl} size={phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA} />'
+        : 'const side = collapsed ? 28 : phone ? DM_ROW_AVA_PHONE : DM_ROW_AVA;';
+      const after = kind === 'sidebar'
+        ? '<Avatar name={name} url={dm.otherUser.avatarUrl} size={DM_ROW_AVA} />'
+        : 'const side = collapsed ? 28 : DM_ROW_AVA;';
+      const raw = replaceOne(sources[kind], before, after);
+      assert.equal(size(kind, true, raw), 46);
+      assert.throws(() => assert.equal(size(kind, true, raw), 52), assert.AssertionError);
+      assert.equal(size(kind, false, raw), 46);
+    });
   });
 }

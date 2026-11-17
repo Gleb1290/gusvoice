@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -27,8 +28,10 @@ it('группировка зависит от совместимых сосед
       assert.equal(api.hasGroupOption(fs), true);
   };
   check(rules);
-  assert.throws(() => check(mutant('if (files.length < 2) return false;', 'return files.length >= 2;')), assert.AssertionError);
-  assert.throws(() => check(mutant("if (f.type.startsWith('video/')) return 'video';", "if (f.type.startsWith('video/')) return 'file';")), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutant('if (files.length < 2) return false;', 'return files.length >= 2;')), assert.AssertionError);
+    assert.throws(() => check(mutant("if (f.type.startsWith('video/')) return 'video';", "if (f.type.startsWith('video/')) return 'file';")), assert.AssertionError);
+  });
 });
 
 it('медиа идут первыми, подпись единственная, исходный список не переставляется', () => {

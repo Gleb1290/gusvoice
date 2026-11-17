@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -184,6 +185,15 @@ async function forward(mutation?: Mutation) {
   assert.equal(f.posts.length, 2, 'C: ровно 2.5 секунды допускают пересылку');
 }
 it('R208 пересылка хоста идёт только третьему дому с исходным автором и отдельной границей 2.5 с', async () => { await forward(); });
+it('хост пересылает отправку кружка третьему дому с учётом его версии', async () => {
+  for (const typing3 of [false, true]) {
+    const features = [F.dm3, F.dmgroup1, F.dmgroup2, ...(typing3 ? [F.typing3] : [])];
+    const f = await fixture({ features });
+    await f.group.forwardGroupTyping(await f.link(M), wire(M, 'm-user', cid, 'round_upload'), 'm');
+    assert.deepEqual(hosts(f), ['e.invalid']);
+    assert.equal(f.posts[0]?.payload.action, typing3 ? 'round_upload' : 'video');
+  }
+});
 async function forwardMembership(mutation?: Mutation) {
   const f = await fixture({ group: mutation });
   await t.db.delete(schema.conversationMembers).where(orm.eq(schema.conversationMembers.userId, 'm'));
@@ -295,8 +305,10 @@ it('R208 гостевые сокеты теневого отправителя �
 /** Падение другого класса (в том числе VM/таймер/загрузка) не доказывает обнаружение регрессии. */
 async function killed(run: (mutation?: Mutation) => Promise<void>, mutation: Mutation, label: string, actual: unknown, expected: unknown) {
   await run();
-  await assert.rejects(() => run(mutation), (err: unknown) => err instanceof assert.AssertionError && err.message.startsWith(label)
-    && JSON.stringify(err.actual) === JSON.stringify(actual) && JSON.stringify(err.expected) === JSON.stringify(expected));
+  await counterfact(async () => {
+    await assert.rejects(() => run(mutation), (err: unknown) => err instanceof assert.AssertionError && err.message.startsWith(label)
+      && JSON.stringify(err.actual) === JSON.stringify(actual) && JSON.stringify(err.expected) === JSON.stringify(expected));
+  });
 }
 it('R208 контрфакт: dmgroup1 не заменяет dmgroup2 у получателя хостовой рассылки', async () => {
   await killed(hostFeatures, ['[FED_FEATURES.dm3, FED_FEATURES.dmgroup2]);\n    if (link) await post(link, wire);', '[FED_FEATURES.dm3, FED_FEATURES.dmgroup1]);\n    if (link) await post(link, wire);'], 'C: хосту для рассылки нужен dmgroup2', 2, 0);

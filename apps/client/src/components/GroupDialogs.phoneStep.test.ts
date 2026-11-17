@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { React, load, sourceOf, icon, noop, environment, click, reactProps, mutate } from './R171.phoneHarness';
@@ -12,7 +13,7 @@ const source = sourceOf('GroupDialogs');
 const backSource = readFileSync(new URL('../androidBack.ts', import.meta.url), 'utf8');
 const person = { id: 'peer', username: 'dmtest_a', displayName: 'Участник A', avatarUrl: null };
 function modules(phone: boolean, raw: string, calls: boolean[]) {
-  const { BottomSheet } = load<typeof Sheets>(sourceOf('BottomSheet'), { './Icon': { Icon: icon } });
+  const { BottomSheet } = load<typeof Sheets>(new URL('./BottomSheet.tsx', import.meta.url), sourceOf('BottomSheet'), { './Icon': { Icon: icon } });
   const deps = {
     '../api': { api: { searchUsers: async () => ({ users: [] }) } }, '../confirm': { confirmAction: async () => false },
     '../dialogChrome': { useDialogChrome: () => ({ current: null }) },
@@ -29,7 +30,7 @@ function modules(phone: boolean, raw: string, calls: boolean[]) {
     '../toast': { toast: noop, toastError: noop }, './Icon': { Icon: icon },
     './Avatar': { Avatar: () => React.createElement('i') }, './BottomSheet': { BottomSheet },
   };
-  return load<typeof Dialogs & { NewGroupDialog: React.ComponentType }>(raw + '\nexport { NewGroupDialog };', deps);
+  return load<typeof Dialogs & { NewGroupDialog: React.ComponentType }>(new URL('./GroupDialogs.tsx', import.meta.url), raw + '\nexport { NewGroupDialog };', deps);
 }
 async function people(phone: boolean, raw = source) {
   await environment(async (host, render) => {
@@ -55,7 +56,10 @@ for (const [name, anchor, replacement, phone] of [
   ['ветка статуса вместо логина на ПК', 'seenText.get(u.id) ? (', "(seenText.get(u.id) || 'в сети') ? (", false],
 ] as const) it(`R171 ${name} обнаруживается настоящим выбором участников`, async () => {
   // Оригинал и мутант проходят один сценарий; ошибка загрузки не считается регрессией поведения.
-  await people(phone); await assert.rejects(() => people(phone, mutate(source, anchor, replacement)), assert.AssertionError);
+  await people(phone);
+  await counterfact(async () => {
+    await assert.rejects(() => people(phone, mutate(source, anchor, replacement)), assert.AssertionError);
+  });
 });
 
 async function step(phone: boolean, raw = source, escape: boolean | 'system' = false) {
@@ -81,7 +85,7 @@ async function step(phone: boolean, raw = source, escape: boolean | 'system' = f
     if (phone) {
       assert.equal(!!document.querySelector('.sheet-drag .sheet-back'), false);
       if (escape === 'system') {
-        const { stepBack } = load<typeof AndroidBack>(backSource, {
+        const { stepBack } = load<typeof AndroidBack>(new URL('../androidBack.ts', import.meta.url), backSource, {
           './hotkeys': { isAndroid: () => true }, './store': { useStore: { getState: () => ({}) } },
         }, { KeyboardEvent: window.KeyboardEvent });
         await React.act(async () => assert.equal(stepBack(), true));
@@ -103,15 +107,19 @@ it('R171 второй шаг телефона имеет Создать и ст�
 it('R171 потеря передачи onBack в лист обнаруживается возвратом второго шага', async () => {
   // Проверяем связь мастера с настоящим BottomSheet, а не наличие кнопки в моковой оболочке.
   await step(true);
-  await assert.rejects(() => step(true, mutate(source, 'onClose={closeGroupDialog} onBack={onBack}',
-    'onClose={closeGroupDialog}')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => step(true, mutate(source, 'onClose={closeGroupDialog} onBack={onBack}',
+      'onClose={closeGroupDialog}')), assert.AssertionError);
+  });
 });
 it('R171 снятие disabled у пустого названия обнаруживается до создания группы', async () => {
   // Не нажимаем submit/API: проверяем запрет ошибочного действия на самом экране.
   await step(true);
-  await assert.rejects(() => step(true, mutate(source,
-    'aria-label="Создать" title="Создать" disabled={busy || !title.trim()}',
-    'aria-label="Создать" title="Создать" disabled={busy}')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => step(true, mutate(source,
+      'aria-label="Создать" title="Создать" disabled={busy || !title.trim()}',
+      'aria-label="Создать" title="Создать" disabled={busy}')), assert.AssertionError);
+  });
 });
 for (const escape of [true, 'system'] as const) it(`R179 ${escape === true ? 'Esc' : 'системная Назад'} во втором шаге новой группы возвращает выбор с участником и чипом`, async () => {
   // Ошибка связи onBack потеряла бы шаг и выбранного человека при закрытии мастера.
@@ -120,6 +128,8 @@ for (const escape of [true, 'system'] as const) it(`R179 ${escape === true ? 'Es
 it('R179 потеря onBack мастера обнаруживается Esc, а не только нажатием стрелки', async () => {
   // Проверяется тот же настоящий лист и сохранение состояния, не один атрибут JSX.
   await step(true, source, true);
-  await assert.rejects(() => step(true, mutate(source, 'onClose={closeGroupDialog} onBack={onBack}',
-    'onClose={closeGroupDialog}'), true), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => step(true, mutate(source, 'onClose={closeGroupDialog} onBack={onBack}',
+      'onClose={closeGroupDialog}'), true), assert.AssertionError);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -91,8 +92,10 @@ it('R238 успешный звонок и другие отказы не зам�
 for (const [name, check] of [['explainCallPrivacy', explain], ['start 403', denied]] as const)
   it(`R238 потеря значка в ${name} обнаруживается через настоящий confirm store`, async () => {
     await check();
-    const anchor = 'alertDialog(n.title, n.body, { icon: n.icon })';
-    assert.equal(source.split(anchor).length - 1, 1);
-    await assert.rejects(async () => check(source.replace(anchor, 'alertDialog(n.title, n.body)')), e => e instanceof assert.AssertionError &&
-      e.message.startsWith('R238 privacy-icon:') && e.operator === 'strictEqual' && e.actual === undefined && e.expected === 'ban');
+    await counterfact(async () => {
+      const anchor = 'alertDialog(n.title, n.body, { icon: n.icon })';
+      assert.equal(source.split(anchor).length - 1, 1);
+      await assert.rejects(async () => check(source.replace(anchor, 'alertDialog(n.title, n.body)')), e => e instanceof assert.AssertionError &&
+        e.message.startsWith('R238 privacy-icon:') && e.operator === 'strictEqual' && e.actual === undefined && e.expected === 'ban');
+    });
   });

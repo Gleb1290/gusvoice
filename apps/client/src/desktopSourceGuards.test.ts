@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
@@ -108,6 +109,7 @@ describe('стражи исходников оболочки', () => {
       assert.equal(rule.replace(/\s/g, '') === '!gpu_planned&&layers', true, ruleMarker);
     }
     check(production);
+    counterfact(() => {
     for (const [from, to, marker] of [
       ['share_dynacast(gpu_planned, layers)', 'share_dynacast(!gpu_planned, layers)', callMarker],
       ['share_dynacast(gpu_planned, layers)', 'share_dynacast(gpu_planned, true)', callMarker],
@@ -120,5 +122,6 @@ describe('стражи исходников оболочки', () => {
         && error.message.startsWith(marker) && error.operator === 'strictEqual' && error.actual === false && error.expected === true,
       `R313 контрфакт ${to} падает на адресном контракте`);
     }
+    });
   });
 });

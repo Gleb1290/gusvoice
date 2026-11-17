@@ -33,6 +33,7 @@ const settings = (patch: Partial<EconomySettings> = {}): EconomySettings => ({
   alonePercent: 25,
   companyPercent: 75,
   dailyCap: 0,
+  aloneCap: 0,
   decayAfterMinutes: 0,
   decayPercent: 100,
   mutedPercent: 100,
@@ -64,6 +65,7 @@ const emptyState = (patch: Partial<AccrualState> = {}): AccrualState => ({
   deltaDecayMilli: 0,
   secondsToday: 0,
   earnedToday: 0,
+  aloneEarnedMilli: 0,
   ...patch,
 });
 
@@ -131,6 +133,7 @@ describe('затухание и один срез', () => {
         deltaDecayMilli: -2,
         secondsToday: 61,
         earnedToday: 0,
+        aloneEarnedMilli: 0,
       },
     });
   });
@@ -145,9 +148,9 @@ describe('затухание и один срез', () => {
     assert.equal(result.coins, 2);
   });
 
-  it('время растёт даже когда нулевая компания, мьют или потолок не дают монет', () => {
+  it('в компании время растёт даже когда нулевой множитель, мьют или потолок не дают монет', () => {
     // Иначе можно было бы пересидеть затухание без дохода и вернуться к полной ставке как будто только зашёл.
-    const companyZero = accrue(sample({ seconds: 60, peers: 0 }), emptyState(), settings({ alonePercent: 0 }));
+    const companyZero = accrue(sample({ seconds: 60, peers: 2 }), emptyState(), settings({ companyPercent: 0 }));
     const mutedZero = accrue(sample({ seconds: 60, muted: true }), emptyState(), settings({ mutedPercent: 0 }));
     const capped = accrue(sample({ seconds: 60 }), emptyState({ earnedToday: 1 }), settings({ dailyCap: 1 }));
     assert.equal(companyZero.next.secondsToday, 60);
@@ -169,6 +172,7 @@ describe('затухание и один срез', () => {
       deltaDecayMilli: 0,
       secondsToday: 300,
       earnedToday: 5,
+      aloneEarnedMilli: 0,
     });
     // Потолок обязан попасть в разбор: это самая непонятная для человека причина «получил меньше».
     assert.equal(result.breakdown?.cappedByDaily, true);
@@ -187,6 +191,7 @@ describe('затухание и один срез', () => {
         deltaDecayMilli: 0,
         secondsToday: 42,
         earnedToday: 3,
+        aloneEarnedMilli: 0,
       },
     });
   });
@@ -213,6 +218,7 @@ describe('границы календаря', () => {
       seasonId: 'summer-2026',
       secondsToday: 4_200,
       earnedToday: 9,
+      aloneEarnedMilli: 0,
       pendingMilli: 500,
       pendingSeconds: 240,
       seasonEarned: 50,
@@ -684,7 +690,7 @@ describe('сводка движения монет (#124, К4)', () => {
     // Сводка открывается и утром, когда ещё ничего не происходило: она обязана показать нули, а не
     // рассыпаться на `undefined`.
     const t = economyTotals([]);
-    assert.deepEqual(t, { accrued: 0, tipped: 0, tips: 0, burned: 0, retro: 0, rescale: 0, granted: 0, minted: 0 });
+    assert.deepEqual(t, { accrued: 0, tipped: 0, tips: 0, burned: 0, retro: 0, rescale: 0, granted: 0, recount: 0, minted: 0 });
   });
 
   it('незнакомая причина не теряется из чистой эмиссии', () => {
@@ -795,7 +801,7 @@ describe('помесячная разбивка сезонов (запрос 03.
 
   it('перекат сезона слушается разбивки', () => {
     // Тот же момент времени: при помесячной разбивке сезон уже другой, при квартальной — тот же.
-    const state = { day: '2026-09-01', seasonId: 'm2026-08', secondsToday: 5, earnedToday: 5, seasonEarned: 100 };
+    const state = { day: '2026-09-01', seasonId: 'm2026-08', secondsToday: 5, earnedToday: 5, aloneEarnedMilli: 0, seasonEarned: 100 };
     const now = new Date('2026-09-15T12:00:00Z');
     assert.equal(rollPeriods({ ...state }, now, 'month').seasonEarned, 0, 'месяц сменился — счётчик обнулён');
     assert.equal(rollPeriods({ ...state, seasonId: 'autumn-2026' }, now, 'quarter').seasonEarned, 100, 'сезон тот же');

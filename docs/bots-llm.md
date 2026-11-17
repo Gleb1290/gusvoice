@@ -15,6 +15,10 @@ receives that person's messages as **updates** and replies with `sendMessage`. A
 Bots cannot start a DM: they can only reply in a conversation a person opened. A new bot is private (only its
 owner can message it) until the owner enables "Available to everyone"; this is checked on every send (a non-owner gets 403
 and the bot gets no update).
+What a bot sees: in its own DM — everything the person does there (messages, edits, deletions, reactions, button presses,
+open/delete/block). On a server it was added to — by default only channel messages addressed to it (commands, `@bot`
+mention, bot-role mention, replies to the bot); with "Read all messages" (a server admin's checkbox) — every channel
+message (§8a). Never: conversations between people, group conversations, other bots' messages.
 
 The base URL is the instance API address, written below as `$GV_API` (for example `https://chat.example.com`).
 Never hardcode a real address or token in code — read them from environment variables.
@@ -198,6 +202,8 @@ displayed, other https URLs are shown as a plain link; `attachment://<file name>
 - Journal: kept 24 h, max 1000 per bot (10 000 for a "Read all messages" bot; dropped ones are counted in
   `dropped_update_count`), acknowledged ones deleted.
 - Servers and voice add `message_reaction`, `chat_member`, `voice_state` and `my_chat_member` with `chat.type === 'server'` (§8a, §8b).
+- ONE consumer per bot: a new getUpdates or WebSocket with the same token replaces the previous one (waiting getUpdates → 409,
+  open WebSocket → close 4009). Run one process per token.
 - "Read" ✓✓ appears for the person when the bot TAKES the update (getUpdates returned it / ack / webhook 2xx), not when it replies.
 
 ## 6. WebSocket (alternative to polling)
@@ -272,7 +278,7 @@ function verify(secret, header, rawBody, tolerance = 300) {
 | requests per bot | 30 / s |
 | send+edit per conversation | 5 per 5 s |
 | getUpdates + WS connects | 30 per 10 s per bot |
-| WS per bot | 3 |
+| consumers per bot | 1 (a new getUpdates/WS replaces the old one: 409 / 4009) |
 | body JSON/form | 64 KB |
 | files per message / size | 10 / 25 MB |
 | text | 4096 chars |
@@ -288,7 +294,8 @@ function verify(secret, header, rawBody, tolerance = 300) {
 
 ## 8a. Bots on servers (API 3, `features` contains `servers`)
 - `chat.type` is `dm` | `channel` | `server` | `voice` (API 4); ALWAYS branch on it. Channel and voice chats carry `server_id` and `title`.
-- Without "Read all messages" a channel bot only gets commands (`/cmd`, `/cmd@this_bot`), `@this_bot` mentions, mentions of its role and replies to its messages. Never rely on seeing ordinary chatter.
+- Without "Read all messages" a channel bot only gets commands (`/cmd`, `/cmd@this_bot`; `/cmd@other_bot` is not for it), `@this_bot` mentions (`@everyone`/`@here` do not count), mentions of its role and replies to its messages. Never rely on seeing ordinary chatter. In its DM there is no such filter.
+- "Read all messages" is set per server by an admin with "Manage server". It adds all channel messages, webhook messages, `message_deleted` and `message_reaction` for other people's messages; `getChatHistory` needs it plus "Read history". Edits are filtered by the NEW text. Only channels where the bot role has "View channel".
 - Other bots' messages never arrive. Guests from other instances carry `from.instance_domain`; authorize by `from.id` and roles (`getChatMember(server_id, user_id).role_ids` / `status === 'creator'`), never by username.
 - New updates: `message_reaction` (`old_reaction`/`new_reaction`), `chat_member` (`from` = actor, `user` = subject), `my_chat_member` with `chat.type === 'server'`. Statuses: `creator|member|left|kicked`.
 - Server methods are listed in §2 (`[3]`). Server-scoped methods take the server id (or one of its channels) as `chat_id`; `getChatHistory` — read-all bots only.
@@ -303,6 +310,22 @@ function verify(secret, header, rawBody, tolerance = 300) {
 - Update `voice_state`: `{chat (type 'voice'), user, action: 'joined'|'left', date, move_to?}` — to every bot of the server that sees the channel, also about itself. `move_to` = a moderator moved the bot.
 - The server drops the bot when it is alone in the channel for 5 minutes, disabled, removed from the server, or lost Connect/Speak. Never auto-rejoin in a loop after a removal; rejoin on a person's `voice_state joined` if needed.
 - Only play audio the user has rights to; validate URLs from chat (ffmpeg fetches them on the bot's machine).
+
+## 8c. Official SDKs (optional; plain HTTP is the default, see §9 rule 10)
+Published, MIT, version 0.1.0 — these are the ONLY official packages, do not invent others:
+- npm `@gusvoice/bot` (TypeScript, no dependencies; Node 22+, Bun, Deno; Node 18–21: `mode: 'polling'` or pass the `ws`
+  package as `WebSocket`). `new Bot(token, { baseUrl })` (`baseUrl` = instance site; the SDK reads `<site>/config.json`
+  for the API address, `discover: false` = `baseUrl` already is the API). `bot.command('name', ctx => …)` (`ctx.args`),
+  `bot.on('message' | 'callback_query' | …, ctx => …)` (`ctx.text`, `ctx.chat`, `ctx.from`, `ctx.reply(text, opts)`),
+  `bot.callbackQuery('data' | /re/, ctx => …)`, `new InlineKeyboard().text(label, data).row().url(label, url)`,
+  `bot.api.<method>(…)` / `bot.api.call(method, params)`, `bot.webhookHandler({ secret })`, `await bot.start()` (WebSocket;
+  `{ mode: 'polling' }` = long polling), `bot.stop()`. Fatal (start rejects): 401, 403, 409 / 4009.
+- npm `@gusvoice/bot-voice` — voice add-on for `@gusvoice/bot` (§8b), needs ffmpeg.
+- PyPI `gusvoice-bot` (Python 3.9+, standard library only; no WebSocket, no voice): `from gusvoice_bot import Client`,
+  `Client(token, site_url)`, snake_case methods (`send_message(chat_id, text, reply_markup=…)`, `answer_callback_query(…)`,
+  `call("sendMessage", {...})`), `run_polling(handler)` (handler gets the raw Update dict; 401/403/404/409 raise
+  `GusVoiceApiError`), `verify_signature(secret, header, raw_body)`, `webhook_handler(secret, on_update)`, `InlineKeyboard`.
+- Install: `npm i @gusvoice/bot` · `npm i @gusvoice/bot-voice` · `pip install gusvoice-bot` (pin `==0.1.0` / exact version).
 
 ## 9. Rules for generating a bot (follow ALL of them)
 
@@ -327,8 +350,8 @@ function verify(secret, header, rawBody, tolerance = 300) {
 9. Webhook receivers: verify the signature on the RAW body first, answer 200 fast (do work after answering or in a queue),
    answer 401 on a bad signature.
 10. Provide: complete runnable code, dependency list with pinned versions, `.env.example` (placeholders only), a systemd unit
-    or Dockerfile/compose, and a 3-step "how to run" text. Use `requests` for Python or built-in `fetch` (Node 18+). No
-    invented SDK imports.
+    or Dockerfile/compose, and a 3-step "how to run" text. Use `requests` for Python or built-in `fetch` (Node 18+); use
+    an official SDK from §8c only if the user asks for it. No other SDK imports.
 11. Use `https://chat.example.com` only as an obvious placeholder in comments; real values come from env.
 12. **Buttons:** check `from.id` on EVERY `callback_query` too (the press comes from the person's client); re-validate any
     value parsed from `data` (service names, ids) against the allow-list; never put secrets in `callback_data` (≤64 bytes —

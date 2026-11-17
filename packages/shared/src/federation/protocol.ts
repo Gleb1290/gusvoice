@@ -13,6 +13,7 @@
  */
 
 import { FED_FIELD_LIMITS, fedDomain, fedHash, fedHttpUrl, fedId, fedOptionalText } from './fieldRules';
+import { FEATURE_TYPING3 } from '../typingAction';
 
 /** Версия протокола, которую этот код умеет. `min` — самая старая, с которой ещё говорим. */
 export const FED_PROTOCOL = { min: 1, max: 1 } as const;
@@ -68,6 +69,8 @@ export const FED_FEATURES = {
    * Объявляется только при `FEDERATION_DM_ENABLED`, вместе с `dm1`.
    */
   dm3: 'dm3',
+  /** Понимает отправку кружка в мгновенном канале ЛС. */
+  typing3: FEATURE_TYPING3,
   /**
    * ЛС между инстансами, этап Э5 часть 1 (#141, `docs/dm/FEDERATION.md` §1.5, §4 п. 1 (б)): «мой дом лежит — пишу через инстанс
    * собеседника». Инстанс с признаком принимает по долгой (гостевой) сессии человека соседа сообщения в беседу 1:1 с нашим

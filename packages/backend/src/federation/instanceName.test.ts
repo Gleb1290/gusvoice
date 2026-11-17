@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -112,10 +113,12 @@ it('R279 новое локальное название видно в следу
 
 it('R279 потеря обрезки обнаруживается настоящим loadInstanceMeta после проверки оригинала', async () => {
   // Мутант корректен синтаксически и загружается: ошибкой считается именно слишком длинная визитка.
-  await truncatedName(); const from = 'own.slice(0, NEIGHBOR_NAME_MAX)';
-  assert.equal(source.split(from).length - 1, 1);
-  await assert.rejects(() => truncatedName(source.replace(from, 'own')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 визитка обрезает'));
+  await truncatedName(); await counterfact(async () => {
+    const from = 'own.slice(0, NEIGHBOR_NAME_MAX)';
+    assert.equal(source.split(from).length - 1, 1);
+    await assert.rejects(() => truncatedName(source.replace(from, 'own')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R279 визитка обрезает'));
+  });
 });
 
 async function whitespaceName(raw = source) {
@@ -140,9 +143,11 @@ it('R280 пробелы в имени для соседей подставляю
 it('R280 удаление trim обнаруживается настоящим loadInstanceMeta после проверки оригинала', async () => {
   // Чистая neighborVisibleName уже делает trim; важно поймать потерю чтения локального имени в обвязке.
   await whitespaceName();
-  const from = "const fedName = typeof meta.name === 'string' && meta.name.trim().length > 0 ? meta.name : null;";
-  assert.equal(source.split(from).length - 1, 1);
-  await assert.rejects(() => whitespaceName(source.replace(from, from.replace('meta.name.trim().length', 'meta.name.length'))),
-    (e: unknown) => e instanceof assert.AssertionError
-      && e.message.split('\n')[0] === 'R280 пробельное имя использует обычное название инстанса');
+  await counterfact(async () => {
+    const from = "const fedName = typeof meta.name === 'string' && meta.name.trim().length > 0 ? meta.name : null;";
+    assert.equal(source.split(from).length - 1, 1);
+    await assert.rejects(() => whitespaceName(source.replace(from, from.replace('meta.name.trim().length', 'meta.name.length'))),
+      (e: unknown) => e instanceof assert.AssertionError
+        && e.message.split('\n')[0] === 'R280 пробельное имя использует обычное название инстанса');
+  });
 });

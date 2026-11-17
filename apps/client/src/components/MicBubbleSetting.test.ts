@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -247,7 +248,9 @@ for (const [label, anchor, replacement, scenario, message] of [
     'R251 неподдерживаемая платформа не предлагает пузырь'],
 ] as const) it(`R251 контрфакт «${label}» ловится AssertionError по поведению целого компонента`, async () => {
   await scenario();
-  assert.equal(source.split(anchor).length - 1, 1, 'R251 мутант меняет ровно одно место');
-  await assert.rejects(scenario(source.replace(anchor, replacement)), (error: unknown) =>
-    error instanceof assert.AssertionError && error.message.startsWith(message) && error.operator === 'strictEqual');
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1, 'R251 мутант меняет ровно одно место');
+    await assert.rejects(scenario(source.replace(anchor, replacement)), (error: unknown) =>
+      error instanceof assert.AssertionError && error.message.startsWith(message) && error.operator === 'strictEqual');
+  });
 });

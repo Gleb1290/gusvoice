@@ -16,7 +16,6 @@ const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
 const sockets = readFileSync(new URL('./sockets.ts', import.meta.url), 'utf8');
 const dmChat = readFileSync(new URL('./components/DmChatView.tsx', import.meta.url), 'utf8');
 const chat = readFileSync(new URL('./components/ChatView.tsx', import.meta.url), 'utf8');
-const channelVisit = readFileSync(new URL('./channelVisit.ts', import.meta.url), 'utf8');
 const store = readFileSync(new URL('./store.ts', import.meta.url), 'utf8');
 const nativePush = readFileSync(new URL('./nativeUnifiedPush.ts', import.meta.url), 'utf8');
 const pushKeysSource = readFileSync(new URL('./pushKeys.ts', import.meta.url), 'utf8');
@@ -157,13 +156,6 @@ describe('провода компонентов, не требующие React-�
       assert.match(source, /emptyState=\{failed\s*\?/);
     }
     assert.match(dmChat, /onLoadOlder=\{\(\)\s*=>\s*loadOlderDmMessages\(dm\.id\)\}/);
-  });
-
-  it('визит в ЛС читает её при входе и симметрично снимает обе оконные подписки', () => {
-    // Ловит лишнюю отметку канала как ЛС и утечку слушателей при каждом переходе между лентами.
-    assert.match(channelVisit, /if \(kind === 'dm' && windowFocused\(\)\) readDmNow\(id\)/);
-    assert.match(channelVisit, /addEventListener\('focus', onBack\)[\s\S]*?removeEventListener\('focus', onBack\)/);
-    assert.match(channelVisit, /addEventListener\('visibilitychange', onBack\)[\s\S]*?removeEventListener\('visibilitychange', onBack\)/);
   });
 
   it('ошибка блокировки откатывает оптимистичный список, а push-ключи безопасно разбираются', () => {

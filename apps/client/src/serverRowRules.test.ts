@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -30,9 +31,12 @@ it('R174 контрфакты двойного счёта и раскрытия 
   for (const [anchor, replacement] of [
     ['s.unread - s.mentions', 's.unread'], ["if (s.closed) return 'Закрыт держателем';", "if (false) return 'Закрыт держателем';"],
   ]) {
-    check(); assert.equal(source.split(anchor).length - 1, 1);
-    const mutant = vm(source.replace(anchor, replacement));
-    assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes('строка серверных'));
+    check();
+    counterfact(() => {
+      assert.equal(source.split(anchor).length - 1, 1);
+      const mutant = vm(source.replace(anchor, replacement));
+      assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes('строка серверных'));
+    });
   }
 });
 
@@ -139,7 +143,10 @@ for (const [name, anchor, replacement, scenario, message] of [
   ['игнорирование возраста сообщения', 'if (s.lastMessage && Date.parse(s.lastMessage.createdAt) > Date.parse(last.createdAt)) return servers;', 'if (false) return servers;', dates, 'старое не вытесняет'],
 ] as const) it(`R180 мутант «${name}» отвергается поведением целого модуля`, () => {
   // Original-first и целевой AssertionError не принимают сломанную загрузку за обнаружение регрессии.
-  scenario(); assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
-  assert.throws(() => scenario(vm(source.replace(anchor, replacement))),
-    e => e instanceof assert.AssertionError && e.message.includes(message));
+  scenario();
+  counterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь');
+    assert.throws(() => scenario(vm(source.replace(anchor, replacement))),
+      e => e instanceof assert.AssertionError && e.message.includes(message));
+  });
 });

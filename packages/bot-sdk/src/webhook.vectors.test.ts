@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -84,7 +85,10 @@ for (const c of [
   { name: 'нет нормализации hex', from: 'v1.push(v.toLowerCase())', to: 'v1.push(v)', check: uppercase, marker: 'R307 uppercase HMAC принимается' },
   { name: 'обычное равенство вместо полного сравнения', from: safeEqualBody, to: '  return expected === got;', check: constantTime, marker: 'R307 HMAC сравнивает все 64 символа обеих строк' },
 ]) it(`R307 подпись контрфакт: ${c.name}, оригинал проходит первым`, async () => {
-  await c.check(source); assert.equal(source.split(c.from).length - 1, 1, 'R307 подпись: уникальный якорь');
+  await c.check(source);
+  await counterfact(async () => {
+  assert.equal(source.split(c.from).length - 1, 1, 'R307 подпись: уникальный якорь');
   await assert.rejects(c.check(source.replace(c.from, c.to)), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' && e.message.split('\n', 1)[0] === c.marker);
+  });
 });

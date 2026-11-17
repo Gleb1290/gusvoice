@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -27,8 +28,8 @@ for (const [name, anchor, replacement, target] of [
   ['fedm4 не проверяется', 'return !!features?.includes(FEATURE_FEDM4);', 'return !!features;', 'только точный fedm4'],
 ] as const) it(`R197 мутант «${name}» ловится таблицей обеих копий presence`, () => {
   presenceCapability(prefs); presenceCapability(mutantSync(anchor, anchor));
-  assert.throws(() => presenceCapability(mutantSync(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  counterfact(() => { assert.throws(() => presenceCapability(mutantSync(anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target)); });
 });
 
 function homeDownContract(api: typeof prefs) {
@@ -43,8 +44,8 @@ it('R200 мутант 500 как недоступный дом отвергае�
   homeDownContract(prefs);
   const anchor = 'return x.status === 502 || x.status === 503 || x.status === 504;';
   homeDownContract(mutantSync(anchor, anchor));
-  assert.throws(() => homeDownContract(mutantSync(anchor, 'return x.status >= 500;')),
-    e => e instanceof assert.AssertionError && e.message.includes('явный отказ живого дома'));
+  counterfact(() => { assert.throws(() => homeDownContract(mutantSync(anchor, 'return x.status >= 500;')),
+    e => e instanceof assert.AssertionError && e.message.includes('явный отказ живого дома')); });
 });
 function viaItemContract(api: typeof prefs) {
   const plain = { content: '  текст  ', fileNames: [] };
@@ -58,8 +59,8 @@ it('R200 обход допускает непустой текст, но не ф
 it('R200 мутант обхода с replyQuote ловится допустимым текстом и запрещённым фрагментом', () => {
   viaItemContract(prefs); const anchor = ' && !it.replyQuote;';
   viaItemContract(mutantSync(anchor, anchor));
-  assert.throws(() => viaItemContract(mutantSync(anchor, ';')),
-    e => e instanceof assert.AssertionError && e.message.includes('цитата фрагмента не уходит'));
+  counterfact(() => { assert.throws(() => viaItemContract(mutantSync(anchor, ';')),
+    e => e instanceof assert.AssertionError && e.message.includes('цитата фрагмента не уходит')); });
 });
 it('R200 fallback нужен только человеку соседа с fedm5 и неразорванной связкой, плашка имеет честные имена', () => {
   for (const features of [null, undefined, [], ['fedm4'], ['FEDM5'], ['fedm5']] as const)
@@ -94,8 +95,8 @@ it('R200 applyViaPage без окна, списка или у старой ст�
 it('R200 мутант чужого msgPts обнаруживается неизвестным сообщением при домашнем pts=99', () => {
   viaPageContract(prefs); const anchor = 'msgPts[m.id] = msgPts[m.id] ?? 0;';
   viaPageContract(mutantSync(anchor, anchor));
-  assert.throws(() => viaPageContract(mutantSync(anchor, 'msgPts[m.id] = state.pts;')),
-    e => e instanceof assert.AssertionError && e.message.includes('чужой pts не попадает'));
+  counterfact(() => { assert.throws(() => viaPageContract(mutantSync(anchor, 'msgPts[m.id] = state.pts;')),
+    e => e instanceof assert.AssertionError && e.message.includes('чужой pts не попадает')); });
 });
 it('R201 только boolean fedStale включает плашку, текст называет дом или инстанс собеседника', () => {
   for (const summary of [null, undefined, {}, { fedStale: false }, { fedStale: 1 }, { fedStale: 'true' }, { fedLink: 'broken' }]) assert.equal(prefs.fedLinkStale(summary), false);
@@ -120,8 +121,8 @@ it('R194 контрфакт игнорирования fedNoFiles ловится
   // Тот же whole-module адаптер сначала исполняет исходный код: ошибка его импортов не считается отказом мутанта.
   const anchor = 'return summary?.fedNoFiles ? FED_FILES_PEER_HINT : null;';
   check(mutantSync(anchor, anchor));
-  assert.throws(() => check(mutantSync(anchor, 'return null;')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('сосед без файлов закрыт'));
+  counterfact(() => { assert.throws(() => check(mutantSync(anchor, 'return null;')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('сосед без файлов закрыт')); });
 });
 
 describe('R115 локальный порядок закрепов', () => {
@@ -144,8 +145,8 @@ describe('R115 локальный порядок закрепов', () => {
       assert.equal(state.summaries.a.pinnedAt, a.pinnedAt);
     };
     check(prefs);
-    assert.throws(() => check(mutantSync(' || (at !== null && !s.pinnedAt)', '')), assert.AssertionError,
-      'ответ перестановки не должен воскрешать снятый на другом устройстве закреп');
+    counterfact(() => { assert.throws(() => check(mutantSync(' || (at !== null && !s.pinnedAt)', '')), assert.AssertionError,
+      'ответ перестановки не должен воскрешать снятый на другом устройстве закреп'); });
   });
 
   it('пустая и повторная перестановка сохраняют состояние, null снимает существующий закреп', () => {
@@ -166,9 +167,9 @@ describe('R115 локальный порядок закрепов', () => {
 
 function mutantSync(from: string, to: string): typeof prefs {
   const source = readFileSync(new URL('./convSyncRules.ts', import.meta.url), 'utf8');
-  assert.equal(source.split(from).length - 1, 1, 'единственный якорь существующего правила');
+  if (from !== to) assert.equal(source.split(from).length - 1, 1, 'единственный якорь существующего правила');
   const module = { exports: {} };
-  runInNewContext(ts.transpileModule(source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+  runInNewContext(ts.transpileModule(from === to ? source : source.replace(from, to), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { module, exports: module.exports, require: (id: string) => { if (id === '@gusvoice/shared') return shared; assert.equal(id, './dmListRules'); return dmList; } });
   return module.exports as typeof prefs;
 }
@@ -236,10 +237,10 @@ it('«Избранное» получает служебного собесед�
     assert.equal(api.serverServersSearch(['srvsearch1']), true);
     assert.equal(api.serverServersSearch(['gsearch1']), false);
   };
-  assert.throws(() => check(mutantSync("? { id: `saved:${s.id}`, username: '', displayName: SAVED_NAME, avatarUrl: null }", "? { id: s.id, username: '', displayName: SAVED_NAME, avatarUrl: null }")), assert.AssertionError,
-    'мутант стирает служебный id и ломает особую беседу');
-  assert.throws(() => check(mutantSync('return !!features?.includes(FEATURE_SRVSEARCH1);', 'return !!features?.includes(FEATURE_GSEARCH1);')), assert.AssertionError,
-    'мутант включает поиск по серверам capability поиска по личным беседам');
+  counterfact(() => { assert.throws(() => check(mutantSync("? { id: `saved:${s.id}`, username: '', displayName: SAVED_NAME, avatarUrl: null }", "? { id: s.id, username: '', displayName: SAVED_NAME, avatarUrl: null }")), assert.AssertionError,
+    'мутант стирает служебный id и ломает особую беседу'); });
+  counterfact(() => { assert.throws(() => check(mutantSync('return !!features?.includes(FEATURE_SRVSEARCH1);', 'return !!features?.includes(FEATURE_GSEARCH1);')), assert.AssertionError,
+    'мутант включает поиск по серверам capability поиска по личным беседам'); });
 });
 it('архив переносится в DM, переживает старую сводку и повтор без изменения сохраняет identity', () => {
   // Ловит самопроизвольный возврат из архива после ответа сервера без нового поля.
@@ -255,8 +256,8 @@ it('архив переносится в DM, переживает старую �
     assert.equal(api.serverArchive(['archive1']), true);
     assert.equal(api.serverArchive(['conv13']), false); assert.equal(api.serverArchive(null), false);
   }; check(prefs);
-  assert.throws(() => check(mutantSync('...(s.archived ? { archived: true } : {}),', '')), assert.AssertionError);
-  assert.throws(() => check(mutantSync('return !!features?.includes(FEATURE_ARCHIVE1);', 'return !features?.includes(FEATURE_ARCHIVE1);')), assert.AssertionError);
+  counterfact(() => { assert.throws(() => check(mutantSync('...(s.archived ? { archived: true } : {}),', '')), assert.AssertionError); });
+  counterfact(() => { assert.throws(() => check(mutantSync('return !!features?.includes(FEATURE_ARCHIVE1);', 'return !features?.includes(FEATURE_ARCHIVE1);')), assert.AssertionError); });
 });
 it('пометка непрочитанного передаётся только при true, прочитать все уважает only и identity', () => {
   // Пометка без числа не должна застрять после чтения или исчезнуть в соседней беседе.
@@ -302,7 +303,7 @@ it('отсутствующие поля события сохраняют нас
     assert.equal(api.applySummary(state, cleared, 2).state.summaries.c.pinnedAt, null);
   };
   check(prefs);
-  assert.throws(() => check(mutantSync('if (!prev || (', 'if (prev) return prev; if (!prev || (')), assert.AssertionError);
+  counterfact(() => { assert.throws(() => check(mutantSync('if (!prev || (', 'if (prev) return prev; if (!prev || (')), assert.AssertionError); });
 });
 
 it('оптимистичный закреп меняет только цель, мьют — только совместимые сводки нужного собеседника', () => {
@@ -332,7 +333,7 @@ it('прочтение прижимается к увиденному, паке�
     assert.equal(api.seenFlushDelay(10, null), 3000); assert.equal(api.seenFlushDelay(10, undefined), 3000);
   };
   check(prefs);
-  assert.throws(() => check(mutantSync('Math.min(loadedKey, seenKey)', 'Math.max(loadedKey, seenKey)')), assert.AssertionError);
+  counterfact(() => { assert.throws(() => check(mutantSync('Math.min(loadedKey, seenKey)', 'Math.max(loadedKey, seenKey)')), assert.AssertionError); });
 });
 
 it('очистка чата включается только conv12, уход убирает окно и новая сводка возвращает строку', () => {
@@ -569,12 +570,12 @@ it('мутанты длительности и префикса не возвр�
     assert.equal(api.pinPreview(file), 'report.pdf');
   };
   check(mutantSync("if (m.attachmentVideo === true) return 'Видео';", "if (m.attachmentVideo === true) return 'Видео';"));
-  assert.throws(() => check(mutantSync("if (m.attachmentVideo === true) return 'Видео';", "if (m.attachmentVideo === true) return 'Видео · 0:42';")), assert.AssertionError,
-    'возврат времени в видео меняет реальный pinPreview');
-  assert.throws(() => check(mutantSync("return 'Голосовое сообщение';", "return 'Голосовое сообщение · 0:42';")), assert.AssertionError,
-    'возврат времени в голосовое меняет реальный pinPreview');
-  assert.throws(() => check(mutantSync("return name || 'Файл';", "return name ? `Файл: ${name}` : 'Файл';")), assert.AssertionError,
-    'возврат префикса меняет реальный pinPreview');
+  counterfact(() => { assert.throws(() => check(mutantSync("if (m.attachmentVideo === true) return 'Видео';", "if (m.attachmentVideo === true) return 'Видео · 0:42';")), assert.AssertionError,
+    'возврат времени в видео меняет реальный pinPreview'); });
+  counterfact(() => { assert.throws(() => check(mutantSync("return 'Голосовое сообщение';", "return 'Голосовое сообщение · 0:42';")), assert.AssertionError,
+    'возврат времени в голосовое меняет реальный pinPreview'); });
+  counterfact(() => { assert.throws(() => check(mutantSync("return name || 'Файл';", "return name ? `Файл: ${name}` : 'Файл';")), assert.AssertionError,
+    'возврат префикса меняет реальный pinPreview'); });
 });
 
 describe('догонка бесед', () => {
@@ -699,8 +700,8 @@ describe('догонка бесед', () => {
     };
     check(prefs);
     check(mutantSync('if (isConvLeft(s) && s.former?.former && s.former.id === s.id)', 'if (isConvLeft(s) && s.former?.former && s.former.id === s.id)'));
-    assert.throws(() => check(mutantSync('if (isConvLeft(s) && s.former?.former && s.former.id === s.id)', 'if (false)')), assert.AssertionError,
-      'мутант обрабатывает выход бывшего участника как удаление беседы');
+    counterfact(() => { assert.throws(() => check(mutantSync('if (isConvLeft(s) && s.former?.former && s.former.id === s.id)', 'if (false)')), assert.AssertionError,
+      'мутант обрабатывает выход бывшего участника как удаление беседы'); });
   });
 
   it('опоздавшее сообщение старше снимка не вставляется, но новое попадает в окно', () => {

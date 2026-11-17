@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -315,29 +316,34 @@ it('R256 плитка убирает только себя, а возврат в
   });
 });
 
-async function rejectMutation(raw: string, probe: (raw: string) => Promise<void>, message: string) {
+async function rejectMutation(raw: () => string, probe: (raw: string) => Promise<void>, message: string) {
   await probe(source);
-  // Ошибка загрузки/импорта не засчитывается: каждый свидетель требует свою адресную ошибку assert.
-  await assert.rejects(() => probe(raw), (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
+  await counterfact(async () => {
+    const mutated = raw();
+    // Ошибка загрузки/импорта не засчитывается: каждый свидетель требует свою адресную ошибку assert.
+    await assert.rejects(() => probe(mutated), (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
+  });
 }
 it('R256 контрфакт первого id вместо pipGone теряет ушедший второй показ', async () => {
-  let raw = mutate(source, 'isInPip, pipGone, pipLayout, type PipCell', 'isInPip, pipGone, pipShouldClose, pipLayout, type PipCell');
-  raw = mutate(raw, "for (const id of pipGone(pipKey ? pipKey.split(',') : [], live)) removeFromStreamPip(id);",
-    "if (pipShouldClose(pips[0], live, true)) closeStreamPip();");
-  await rejectMutation(raw, hostGoneProbe, 'ушедший второй показ удалён отдельно');
+  await rejectMutation(() => {
+    let raw = mutate(source, 'isInPip, pipGone, pipLayout, type PipCell', 'isInPip, pipGone, pipShouldClose, pipLayout, type PipCell');
+    raw = mutate(raw, "for (const id of pipGone(pipKey ? pipKey.split(',') : [], live)) removeFromStreamPip(id);",
+      "if (pipShouldClose(pips[0], live, true)) closeStreamPip();");
+    return raw;
+  }, hostGoneProbe, 'ушедший второй показ удалён отдельно');
 });
 it('R256 контрфакт без исключения кнопки качества закрывает меню при касании иконки', async () => {
-  await rejectMutation(mutate(source, ' && !at.contains(t)', ''), gearProbe, 'кнопка качества и её иконка не являются щелчком мимо');
+  await rejectMutation(() => mutate(source, ' && !at.contains(t)', ''), gearProbe, 'кнопка качества и её иконка не являются щелчком мимо');
 });
 it('R256 контрфакт без применения качества не проходит настоящую строку меню', async () => {
-  await rejectMutation(mutate(source, 'setStreamQuality(q);', '/* выбор потерян */'), selectionProbe,
+  await rejectMutation(() => mutate(source, 'setStreamQuality(q);', '/* выбор потерян */'), selectionProbe,
     'выбор пункта передан общему регулятору качества');
 });
 it('R256 контрфакт потерянного Escape не закрывает открытое меню', async () => {
-  await rejectMutation(mutate(source, "if (e.key === 'Escape') onClose();", "if (e.key === 'NeverEscape') onClose();"), escapeProbe,
+  await rejectMutation(() => mutate(source, "if (e.key === 'Escape') onClose();", "if (e.key === 'NeverEscape') onClose();"), escapeProbe,
     'Escape закрывает меню качества');
 });
 it('R256 контрфакт глобального документа перехватывает события не того окна', async () => {
-  await rejectMutation(mutate(source, 'const doc = ref.current?.ownerDocument;', 'const doc = document;'), ownerDocumentProbe,
+  await rejectMutation(() => mutate(source, 'const doc = ref.current?.ownerDocument;', 'const doc = document;'), ownerDocumentProbe,
     'главный документ не закрывает меню другого окна');
 });

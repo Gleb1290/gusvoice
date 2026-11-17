@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -133,10 +134,12 @@ describe('R148 локальные списки угроз и серверные 
     const check = (serialize: ReturnType<typeof serializer>) =>
       assert.equal(Object.hasOwn(serialize.serializeMessage(message('https://safe.example')), 'dangerousLinks'), false);
     check(serializer(threats));
+counterfact(() => {
     const source = readFileSync(new URL('./serialize.ts', import.meta.url), 'utf8');
     const target = '...(dangerous.length ? { dangerousLinks: dangerous } : {})';
     assert.equal(source.split(target).length - 1, 1);
     assert.throws(() => check(serializer(threats, source.replace(target, 'dangerousLinks: dangerous'))), assert.AssertionError);
+});
   });
 
   it('два файла обновляются независимо: отказ второго сохраняет его прежний набор и убирает удалённый источник', async () => {

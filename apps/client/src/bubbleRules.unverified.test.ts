@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import * as shared from '@gusvoice/shared';
 import * as imageSize from './imageSize';
@@ -14,6 +15,7 @@ it('R304 контрфакт: доверие неподтверждённой п�
   const source = sourceOf('bubbleRules');
   const check = (raw: string) => assert.equal(load<typeof Bubble>(raw, { '@gusvoice/shared': shared, './imageSize': imageSize })
     .forwardedAuthorOpenable({ unverified: true }), false, 'неподтверждённый автор не открывается');
-  check(source); assert.throws(() => check(mutate(source, 'from.deleted !== true && from.unverified !== true', 'from.deleted !== true')),
-    e => e instanceof assert.AssertionError && e.message.includes('неподтверждённый автор не открывается'));
+  check(source);
+  counterfact(() => assert.throws(() => check(mutate(source, 'from.deleted !== true && from.unverified !== true', 'from.deleted !== true')),
+    e => e instanceof assert.AssertionError && e.message.includes('неподтверждённый автор не открывается')));
 });

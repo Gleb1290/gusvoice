@@ -1,7 +1,6 @@
 import type { Attachment } from '@gusvoice/shared';
 import { api } from './api';
-import { addDownload, doneHrefOf, patchDownload } from './downloadList';
-import { savedPathOf } from './downloadList';
+import { addDownload, beginNativeSave, doneHrefOf, nativeSavePending, patchDownload, savedDownloadOf, savedPathOf } from './downloadList';
 import {
   attachmentKey,
   attachmentMime,
@@ -67,7 +66,13 @@ export function saveObjectUrl(href: string, name: string): void {
   }, 0);
 }
 
+function saveDownload(t: DownloadTarget, href: string): void {
+  if (desktopFileOpenAvailable()) beginNativeSave(t.key, href);
+  saveObjectUrl(href, t.name);
+}
+
 async function runDownload(t: DownloadTarget): Promise<void> {
+  if (desktopFileOpenAvailable() && nativeSavePending(t.key)) return;
   const job = trackFileJob(t.key, 'download', t.size || 0);
   if (!job) return;
   const type = t.type || 'application/octet-stream';
@@ -91,7 +96,7 @@ async function runDownload(t: DownloadTarget): Promise<void> {
     // Тип — от вложения: «Открыть» в списке смотрит на него, а выдача публичных его не знает.
     const href = URL.createObjectURL(blob.slice(0, blob.size, type));
     patchDownload(rec, { state: 'done', loaded: blob.size, total: blob.size, href });
-    saveObjectUrl(href, t.name);
+    saveDownload(t, href);
   } catch (e) {
     if (job.signal.aborted) {
       patchDownload(rec, { state: 'cancelled' });
@@ -116,9 +121,10 @@ export function startDownload(t: DownloadTarget): void {
     legacyDownloadWithToast(t.url, t.name, t.type, 'save');
     return;
   }
+  if (desktopFileOpenAvailable() && (nativeSavePending(t.key) || isOpeningDownloadedFile(t.key))) return;
   const done = doneHrefOf(t.key);
   if (done) {
-    saveObjectUrl(done, t.name);
+    saveDownload(t, done);
     return;
   }
   void runDownload(t);
@@ -128,6 +134,60 @@ export function startDownload(t: DownloadTarget): void {
 export function toggleDownload(t: DownloadTarget): void {
   if (cancelFileJob(t.key)) return;
   startDownload(t);
+}
+
+function desktopDownloadInvoke() {
+  if (typeof navigator === 'undefined' || !/Windows NT/i.test(navigator.userAgent) || legacyBridge()) return null;
+  return shellInvoke();
+}
+
+export function desktopFileOpenAvailable(): boolean {
+  return desktopDownloadInvoke() !== null;
+}
+
+const openingDownloads = new Set<string>();
+const openingListeners = new Set<() => void>();
+// Windows confirms the launch before the associated app has drawn its window.
+const OPEN_HANDOFF_MS = 1500;
+
+export function isOpeningDownloadedFile(key: string): boolean {
+  return openingDownloads.has(key);
+}
+
+export function subscribeDownloadedFileOpening(listener: () => void): () => void {
+  openingListeners.add(listener);
+  return () => { openingListeners.delete(listener); };
+}
+
+function setDownloadedFileOpening(key: string, opening: boolean): void {
+  if (opening) openingDownloads.add(key);
+  else openingDownloads.delete(key);
+  for (const listener of openingListeners) listener();
+}
+
+/** Клик в Windows: отмена активной загрузки, скачивание отсутствующей копии или открытие готовой. */
+export async function openDownloadedFile(t: DownloadTarget): Promise<void> {
+  const invoke = desktopDownloadInvoke();
+  if (!invoke || isOpeningDownloadedFile(t.key) || cancelFileJob(t.key) || nativeSavePending(t.key)) return;
+  const saved = savedDownloadOf(t.key);
+  if (!saved) {
+    await runDownload(t);
+    return;
+  }
+  setDownloadedFileOpening(t.key, true);
+  let result: unknown;
+  try {
+    result = await invoke('gv_downloaded_file', saved);
+  } catch {
+    toast('error', 'Не удалось открыть файл', t.name);
+  } finally {
+    if (result === 'opened') {
+      setTimeout(() => setDownloadedFileOpening(t.key, false), OPEN_HANDOFF_MS);
+    } else {
+      setDownloadedFileOpening(t.key, false);
+    }
+  }
+  if (result === 'missing') await runDownload(t);
 }
 
 /** Есть ли у браузера системное «Поделиться» файлом (`navigator.canShare({ files })`: Edge и Chrome на Windows, телефоны). */
@@ -250,6 +310,7 @@ export function legacyDownloadWithToast(url: string, name: string, mime: string 
 type ShellBridge = { core?: { invoke?: (cmd: string, args?: unknown) => Promise<unknown> } };
 
 function shellInvoke(): ((cmd: string, args?: unknown) => Promise<unknown>) | null {
+  if (typeof window === 'undefined') return null;
   const t = (window as unknown as { __TAURI__?: ShellBridge }).__TAURI__;
   return typeof t?.core?.invoke === 'function' && !filesViaNative() ? t.core.invoke.bind(t.core) : null;
 }

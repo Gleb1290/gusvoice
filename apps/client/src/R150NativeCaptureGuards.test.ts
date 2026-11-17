@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -24,8 +25,11 @@ function body(s: string, name: string) {
   assert.fail(`функция ${name} закрыта`);
 }
 function rejects(s: string, from: string, to: string, check: (s: string) => void) {
-  check(s); assert.equal(s.split(from).length - 1, 1, 'контрфакт меняет одно место целого файла');
-  assert.throws(() => check(s.replace(from, to)), assert.AssertionError);
+  check(s);
+  counterfact(() => {
+    assert.equal(s.split(from).length - 1, 1, 'контрфакт меняет одно место целого файла');
+    assert.throws(() => check(s.replace(from, to)), assert.AssertionError);
+  });
 }
 describe('R150/R151 статическая проводка Android, не эмуляция платформы', () => {
   it('USER_SELECTED не объявлен и не запрашивается; обычные фото и видео остались', () => {

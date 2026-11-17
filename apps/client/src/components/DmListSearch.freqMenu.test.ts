@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -197,6 +198,7 @@ it('R133 без частых обычный клик открывает бесе
 
 it('R133 мутант без обёртки onMouseDown теряет отмену фокуса в листе', async () => {
   await checkMouseDown();
+  await counterfact(async () => {
   const change: Change = (source) => source
     .replace('<div onMouseDown={(e) => e.preventDefault()}>', '<>')
     .replace('          </div>\n        </ContextMenu>', '          </>\n        </ContextMenu>');
@@ -205,16 +207,17 @@ it('R133 мутант без обёртки onMouseDown теряет отмен�
     assert.match(error.message, /^mousedown пункта листа отменяет перевод фокуса/);
     return true;
   });
+  });
 });
 
 it('R133 мутант без false в cleanup оставляет поиск удержанным после close и unmount', async () => {
   const change: Change = (source) => source.replace('return () => onMenuOpenRef.current?.(false);', 'return () => {};');
   for (const mode of ['hide', 'unmount'] as const) {
     await checkClose(mode);
-    await assert.rejects(() => checkClose(mode, change), (error: unknown) => {
+    await counterfact(() => assert.rejects(() => checkClose(mode, change), (error: unknown) => {
       assert.ok(error instanceof assert.AssertionError);
       assert.match(error.message, /^закрытие или размонтирование отпускает поиск ровно один раз/);
       return true;
-    });
+    }));
   }
 });

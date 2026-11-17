@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -24,13 +25,16 @@ it('R174 телефонные счётчики каналов имеют пил�
 });
 it('R174 контрфакты размера и жирности телефонного счётчика обнаруживаются в его CSS-блоке', () => {
   // Меняем число именно нужной декларации; похожий счётчик в другом блоке не является мутантом.
-  const normalized = source.replace(/\r\n/g, '\n'); const selector = '.app.m-list .channel .ch-unread,';
-  const begin = normalized.indexOf(selector), end = normalized.indexOf('}', begin); const block = normalized.slice(begin, end);
   for (const [anchor, replacement, message] of [['height: 21px;', 'height: 20px;', 'высота пилюли 21'], ['font-size: 13px;', 'font-size: 12px;', 'цифра 13'], ['font-weight: 500;', 'font-weight: 400;', 'средняя жирность 500']]) {
-    // Начало декларации важно и для проверки: line-height не может спасти мутант испорченной height.
-    const declaration = new RegExp(`^([ \\t]*)${anchor}[ \\t]*$`, 'gm');
-    check(); assert.equal([...block.matchAll(declaration)].length, 1, 'ровно одна точная CSS-декларация');
-    const mutant = normalized.slice(0, begin) + block.replace(declaration, (_match, indent: string) => indent + replacement) + normalized.slice(end);
-    assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(message));
+    check();
+    counterfact(() => {
+      const normalized = source.replace(/\r\n/g, '\n'); const selector = '.app.m-list .channel .ch-unread,';
+      const begin = normalized.indexOf(selector), end = normalized.indexOf('}', begin); const block = normalized.slice(begin, end);
+      // Начало декларации важно и для проверки: line-height не может спасти мутант испорченной height.
+      const declaration = new RegExp(`^([ \\t]*)${anchor}[ \\t]*$`, 'gm');
+      assert.equal([...block.matchAll(declaration)].length, 1, 'ровно одна точная CSS-декларация');
+      const mutant = normalized.slice(0, begin) + block.replace(declaration, (_match, indent: string) => indent + replacement) + normalized.slice(end);
+      assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.includes(message));
+    });
   }
 });

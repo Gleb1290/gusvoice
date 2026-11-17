@@ -69,6 +69,16 @@ export function isUserOnline(userId: string): boolean {
 }
 
 /**
+ * Есть ли у человека сейчас соединение шлюза, объявившее возможность `cap` в `identify.caps` (ГусКоины 2, этап 4: вызов на
+ * дуэль с выбором — `duel2`). Решается по соединениям этого процесса; нет соединений или ни одно не объявило — false
+ * (fail-closed: «не знаем» = «не умеет»).
+ */
+export function userHasCap(userId: string, cap: string): boolean {
+  for (const conn of hub.connsOf(userId)) if (conn.caps.has(cap)) return true;
+  return false;
+}
+
+/**
  * «В сети» в ЛС (08.10, #211, D4, решения 42–44): есть хоть одно соединение, где человек «здесь» — приложение видно и не
  * простаивает, или он в голосе / звонке (клиент сообщает кадром `visible`; клиент без кадра — здесь всегда, как раньше).
  * Отсюда «был(а)» (`lastSeen.ts`) и «Когда будет в сети» (`scheduled.ts`).

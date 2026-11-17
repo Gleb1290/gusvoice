@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -196,12 +197,15 @@ for (const [label, from, to, check, prefix, actual, expected] of [
   ['сеть стартует до наблюдателя', 'if (!near) return;', 'if (false) return;', waitsForObserver, 'R220-geo-near:', 1, 0],
   ['отказ оставил has-map', 'const withMap = mapOn && !mapFailed;', 'const withMap = mapOn;', failure, 'R220-geo-fail:', true, false],
 ] as const) it(`R220 контрфакт карты: ${label}`, async () => {
-  await check(source); assert.equal(source.split(from).length - 1, 1);
-  let mutated = source.replace(from, to);
-  if (label === 'вернулся OSM') {
-    const importAnchor = '  yandexMapsUrl,'; assert.equal(source.split(importAnchor).length - 1, 1);
-    mutated = mutated.replace(importAnchor, '  yandexMapsUrl,\n  osmUrl,');
-  }
-  await assert.rejects(Promise.resolve().then(() => check(mutated)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await check(source);
+  await counterfact(async () => {
+    assert.equal(source.split(from).length - 1, 1);
+    let mutated = source.replace(from, to);
+    if (label === 'вернулся OSM') {
+      const importAnchor = '  yandexMapsUrl,'; assert.equal(source.split(importAnchor).length - 1, 1);
+      mutated = mutated.replace(importAnchor, '  yandexMapsUrl,\n  osmUrl,');
+    }
+    await assert.rejects(Promise.resolve().then(() => check(mutated)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

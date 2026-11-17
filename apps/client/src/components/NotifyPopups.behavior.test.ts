@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -139,9 +140,11 @@ async function idleCheck(raw = source) {
 it('R223 без человеческого ввода уведомление ждёт, после ввода живёт 3 секунды и угасает 4 секунды', () => idleCheck());
 it('R223 контрфакт таймера без проверки человеческого ввода отвергается поведенческой проверкой', async () => {
   await idleCheck(source);
-  const from = "p.kind === 'wait' && popupInputSeen(p.at, now, idle)"; assert.equal(source.split(from).length - 1, 1);
-  await assert.rejects(idleCheck(source.replace(from, "p.kind === 'wait'")), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R223-input-wait:') && e.operator === 'strictEqual' && e.actual === '0' && e.expected === '1');
+  await counterfact(async () => {
+    const from = "p.kind === 'wait' && popupInputSeen(p.at, now, idle)"; assert.equal(source.split(from).length - 1, 1);
+    await assert.rejects(idleCheck(source.replace(from, "p.kind === 'wait'")), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R223-input-wait:') && e.operator === 'strictEqual' && e.actual === '0' && e.expected === '1');
+  });
 });
 
 type Fixture = Awaited<ReturnType<typeof mount>>;
@@ -219,19 +222,21 @@ async function lineDomCheck(raw = source) {
 }
 it('R233 автор и вид вложения выделены в полном popupLine, ответ лежит в actions только у бесед', () => lineDomCheck());
 
-const actionsLayer = source.match(/<div className="nfp-actions">[\s\S]*?<\/div>/)?.[0] ?? '';
+const actionsLayer = () => source.match(/<div className="nfp-actions">[\s\S]*?<\/div>/)?.[0] ?? '';
 for (const mutant of [
   { label: 'экранная ширина заменена константой', from: 'const w = r ? Math.ceil(r.width) || POPUP_WIDTH : POPUP_WIDTH;', to: 'const w = POPUP_WIDTH;', check: (raw: string) => widthCheck(368, raw), prefix: 'R233-width-measured:', actual: 320, expected: 368 },
   { label: 'убрана запасная ширина при нулевом измерении', from: 'Math.ceil(r.width) || POPUP_WIDTH', to: 'Math.ceil(r.width)', check: (raw: string) => widthCheck(0, raw), prefix: 'R233-width-fallback:', actual: 0, expected: 320 },
   { label: 'не подписывается на storage', from: "window.addEventListener('storage', bump);", to: 'void bump;', check: storageLayoutCheck, prefix: 'R233-storage-layout:', actual: 0, expected: 1 },
   { label: 'layout не зависит от restyle', from: '[stack.shown.length, corner, monitor, restyle]', to: '[stack.shown.length, corner, monitor]', check: storageLayoutCheck, prefix: 'R233-storage-layout:', actual: 0, expected: 1 },
-  { label: 'ответ вне существующего слоя actions', from: actionsLayer, to: actionsLayer.replace('<div className="nfp-actions">', '<><div className="nfp-actions" />').replace('</div>', '</>'), check: lineDomCheck, prefix: 'R233-reply-actions:', actual: false, expected: true },
+  { label: 'ответ вне существующего слоя actions', get from() { return actionsLayer(); }, get to() { return actionsLayer().replace('<div className="nfp-actions">', '<><div className="nfp-actions" />').replace('</div>', '</>'); }, check: lineDomCheck, prefix: 'R233-reply-actions:', actual: false, expected: true },
   { label: 'нет выделенного вида вложения', from: 'className="nfp-kind"', to: 'className="nfp-kind-missing"', check: lineDomCheck, prefix: 'R233-body-kind:', actual: null, expected: 'Фото, ' },
   { label: 'нет выделенного автора', from: 'className="nfp-from"', to: 'className="nfp-from-missing"', check: lineDomCheck, prefix: 'R233-body-from:', actual: null, expected: 'Имя1: ' },
   { label: 'подпись потеряна из строки превью', from: '{line.text}', to: "{''}", check: lineDomCheck, prefix: 'R233-body-line:', actual: 'Имя1: Фото, ', expected: 'Имя1: Фото, Летний день' },
 ]) it(`R233 контрфакт целого NotifyPopups: ${mutant.label}`, async () => {
   await mutant.check(source);
-  assert.equal(source.split(mutant.from).length - 1, 1, `единственный якорь: ${mutant.label}`);
-  await assert.rejects(() => mutant.check(source.replace(mutant.from, mutant.to)), e => e instanceof assert.AssertionError
-    && e.message.startsWith(mutant.prefix) && e.operator === 'strictEqual' && e.actual === mutant.actual && e.expected === mutant.expected);
+  await counterfact(async () => {
+    assert.equal(source.split(mutant.from).length - 1, 1, `единственный якорь: ${mutant.label}`);
+    await assert.rejects(() => mutant.check(source.replace(mutant.from, mutant.to)), e => e instanceof assert.AssertionError
+      && e.message.startsWith(mutant.prefix) && e.operator === 'strictEqual' && e.actual === mutant.actual && e.expected === mutant.expected);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, it } from 'node:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -158,10 +159,12 @@ it('R173 игнорирование phoneUi обнаруживается пар�
   // Мутант исполняет целый модуль и обязан упасть на подписи, не на неизвестной VM-границе.
   const source = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   await phoneCaption(source);
-  const anchor = 'function CoinNotifyPanel({ phoneUi = false }: { phoneUi?: boolean } = {}) {';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственная сигнатура панели монет');
-  const mutant = source.replace(anchor, 'function CoinNotifyPanel(_props: { phoneUi?: boolean } = {}) { const phoneUi = false;');
-  await assert.rejects(() => phoneCaption(mutant), assert.AssertionError);
+  await counterfact(async () => {
+    const anchor = 'function CoinNotifyPanel({ phoneUi = false }: { phoneUi?: boolean } = {}) {';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственная сигнатура панели монет');
+    const mutant = source.replace(anchor, 'function CoinNotifyPanel(_props: { phoneUi?: boolean } = {}) { const phoneUi = false;');
+    await assert.rejects(() => phoneCaption(mutant), assert.AssertionError);
+  });
 });
 
 function compileAndroidInstallTab(hasDistributor: boolean, change?: (source: string) => string): ComponentType {
@@ -218,16 +221,18 @@ it('R113 Android без приёмника показывает WebSockets ме�
   const view = await renderAndroidInstallTab(compileAndroidInstallTab(false));
   try { assertNtfyGuide(view.host); } finally { await view.cleanup(); }
 
-  const noWebSockets = compileAndroidInstallTab(false, (source) => source.replace(
-    /\n          <li>\n            <b>Там же, в «Advanced»[\s\S]*?\n          <\/li>/,
-    '',
-  ));
-  const mutant = await renderAndroidInstallTab(noWebSockets);
-  try {
-    assert.throws(() => assertNtfyGuide(mutant.host), (error: unknown) =>
-      error instanceof assert.AssertionError && error.actual === 3 && error.expected === 4,
-    'убрать шаг — нарушить ту же проверку четырёх шагов, которая прошла на оригинале');
-  } finally { await mutant.cleanup(); }
+  await counterfact(async () => {
+    const noWebSockets = compileAndroidInstallTab(false, (source) => source.replace(
+      /\n          <li>\n            <b>Там же, в «Advanced»[\s\S]*?\n          <\/li>/,
+      '',
+    ));
+    const mutant = await renderAndroidInstallTab(noWebSockets);
+    try {
+      assert.throws(() => assertNtfyGuide(mutant.host), (error: unknown) =>
+        error instanceof assert.AssertionError && error.actual === 3 && error.expected === 4,
+      'убрать шаг — нарушить ту же проверку четырёх шагов, которая прошла на оригинале');
+    } finally { await mutant.cleanup(); }
+  });
 });
 
 it('R113 Android с установленным приёмником не предлагает шаги установки ntfy', async () => {
@@ -275,22 +280,24 @@ it('выбор группы отделяет контакты и блокиру�
       assert.ok(noMax.host.querySelector('.group-limit'));
     } finally { await noMax.cleanup(); }
 
-    const duplicate = compilePeoplePicker(state, [], (source) => source.replace(
-      '.filter((u) => !taken.includes(u.id) && !contactIds.has(u.id))',
-      '.filter((u) => !taken.includes(u.id))',
-    ));
-    const mutated = await mountPicker(duplicate, { taken: ['me'], picked: [contact], setPicked: () => {}, maxPick: 1 });
-    try {
-      assert.throws(() => assert.equal(mutated.host.querySelectorAll('.group-pick').length, 2,
-        'контактный ID снова дублируется в блоке «Остальные»'), assert.AssertionError);
-    } finally { await mutated.cleanup(); }
+    await counterfact(async () => {
+      const duplicate = compilePeoplePicker(state, [], (source) => source.replace(
+        '.filter((u) => !taken.includes(u.id) && !contactIds.has(u.id))',
+        '.filter((u) => !taken.includes(u.id))',
+      ));
+      const mutated = await mountPicker(duplicate, { taken: ['me'], picked: [contact], setPicked: () => {}, maxPick: 1 });
+      try {
+        assert.throws(() => assert.equal(mutated.host.querySelectorAll('.group-pick').length, 2,
+          'контактный ID снова дублируется в блоке «Остальные»'), assert.AssertionError);
+      } finally { await mutated.cleanup(); }
 
-    const noLimited = compilePeoplePicker(state, [], (source) => source.replace("${state.full && !on ? ' limited' : ''}", ''));
-    const limitedMutant = await mountPicker(noLimited, { taken: ['me'], picked: [contact], setPicked: () => {}, maxPick: 1 });
-    try {
-      assert.throws(() => assert.ok(limitedMutant.host.querySelector('.group-pick:not(.on)')?.classList.contains('limited'),
-        'переполненную строку притушил production className'), assert.AssertionError);
-    } finally { await limitedMutant.cleanup(); }
+      const noLimited = compilePeoplePicker(state, [], (source) => source.replace("${state.full && !on ? ' limited' : ''}", ''));
+      const limitedMutant = await mountPicker(noLimited, { taken: ['me'], picked: [contact], setPicked: () => {}, maxPick: 1 });
+      try {
+        assert.throws(() => assert.ok(limitedMutant.host.querySelector('.group-pick:not(.on)')?.classList.contains('limited'),
+          'переполненную строку притушил production className'), assert.AssertionError);
+      } finally { await limitedMutant.cleanup(); }
+    });
   } finally { await view.cleanup(); }
 
   const settingsSource = readFileSync(new URL('./UserSettingsModal.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -309,20 +316,22 @@ it('выбор группы отделяет контакты и блокиру�
     assert.equal(text.includes('Tab или Enter'), true, 'клавиатурная подсказка сохранена на ПК');
   } finally { await desktop.cleanup(); }
 
-  for (const anchor of [
-    "{!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}",
-    "{phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}",
-  ]) assert.equal(settingsSource.split(anchor).length - 1, 1, 'каждый старый контрфакт меняет одну настоящую границу телефона');
-  const noMobileGate = settingsSource
-    .replace("{!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}", "{' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}")
-    .replace("{phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}", "{'←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}");
-  assert.notEqual(noMobileGate, settingsSource);
-  const ungated = await renderSettingsText(compileSettingsText(noMobileGate, () => true), true);
-  try {
-    const text = ungated.host.textContent ?? '';
-    assert.throws(() => assert.equal(text.includes('Windows'), false), assert.AssertionError);
-    assert.throws(() => assert.equal(text.includes('Tab или Enter'), false), assert.AssertionError);
-  } finally { await ungated.cleanup(); }
+  await counterfact(async () => {
+    for (const anchor of [
+      "{!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}",
+      "{phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}",
+    ]) assert.equal(settingsSource.split(anchor).length - 1, 1, 'каждый старый контрфакт меняет одну настоящую границу телефона');
+    const noMobileGate = settingsSource
+      .replace("{!phoneUi && ' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}", "{' ⚠️ В полноэкранной игре Windows прячет уведомления — оттуда доходит только звук.'}")
+      .replace("{phoneUi ? 'Нажми на эмодзи в полосе — оно встанет в текст. ' : '←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}", "{'←/→ выбирают, Tab или Enter подставляют, Esc закрывает. '}");
+    assert.notEqual(noMobileGate, settingsSource);
+    const ungated = await renderSettingsText(compileSettingsText(noMobileGate, () => true), true);
+    try {
+      const text = ungated.host.textContent ?? '';
+      assert.throws(() => assert.equal(text.includes('Windows'), false), assert.AssertionError);
+      assert.throws(() => assert.equal(text.includes('Tab или Enter'), false), assert.AssertionError);
+    } finally { await ungated.cleanup(); }
+  });
 
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const rule = (selector: string) => {

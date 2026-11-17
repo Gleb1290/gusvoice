@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { DM_FOLDER_PERSONAL, dmFolderContains, type DmFolder } from '@gusvoice/shared';
@@ -24,8 +25,10 @@ it('R129 свой набор идёт сверху в своём порядке,
     assert.equal(JSON.stringify(rows), before, 'признаки входного общего списка не изменены');
   };
   check(rules);
-  assert.throws(() => check(changed('pinnedAt: FOLDER_PIN_AT', 'pinnedAt: null')), assert.AssertionError);
-  assert.throws(() => check(changed('pinnedAt: null }', 'pinnedAt: d.pinnedAt }')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(changed('pinnedAt: FOLDER_PIN_AT', 'pinnedAt: null')), assert.AssertionError);
+    assert.throws(() => check(changed('pinnedAt: null }', 'pinnedAt: d.pinnedAt }')), assert.AssertionError);
+  });
 });
 
 it('R129 пустой свой набор без общих закрепов сохраняет массив, снятие общего использует createdAt при пустом lastMessageAt', () => {
@@ -51,8 +54,10 @@ it('R129 план перевода пропускает системные и с
   const check = (api: typeof rules) => assert.equal(JSON.stringify(api.folderPinOwnPlan(folders, dms, chat)),
     JSON.stringify([{ id: 'folder', ids: ['fresh', 'explicit', 'b', 'a'] }]));
   check(rules);
-  assert.throws(() => check(changed('if (f.system || f.pinnedOwn) continue;', 'if (f.system) continue;')), assert.AssertionError);
-  assert.throws(() => check(changed('return !!c && dmFolderContains(f, folderChat(c));', 'return !!c;')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(changed('if (f.system || f.pinnedOwn) continue;', 'if (f.system) continue;')), assert.AssertionError);
+    assert.throws(() => check(changed('return !!c && dmFolderContains(f, folderChat(c));', 'return !!c;')), assert.AssertionError);
+  });
   assert.equal(JSON.stringify({ folders, dms }), before);
 });
 
@@ -94,7 +99,9 @@ it('R126 обёртка закрепов папки не включает нез
   const rows = [{ id: 'a', pinnedAt: '2026-10-09T00:00:00Z' }, { id: 'b', pinnedAt: '2026-10-08T00:00:00Z' }, { id: 'free', pinnedAt: null }];
   const check = (api: typeof rules) => assert.deepEqual(Array.from(api.folderPinnedRows(rows, ['free', 'b', 'a']), r => r.id), ['b', 'a', 'free']);
   check(rules);
-  assert.throws(() => check(changed('const pinned = rows.filter((d) => !!d.pinnedAt);', 'const pinned = rows;')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(changed('const pinned = rows.filter((d) => !!d.pinnedAt);', 'const pinned = rows;')), assert.AssertionError);
+  });
 });
 
 function changed(from:string,to:string):typeof rules {
@@ -114,12 +121,16 @@ it('Ctrl-цифры прижимаются к последней папке, в�
   assert.equal(rules.folderByHotkey(long,8),long[9]);
   const check=(api:typeof rules)=>{assert.equal(api.folderByHotkey(list,5),list[2]);assert.equal(api.folderByHotkey(long,8),long[9]);};
   check(rules);
-  assert.throws(()=>check(changed('Math.min(n - 1, folders.length - 1)','n - 1')),assert.AssertionError);
-  assert.throws(()=>check(changed('if (n === FOLDER_HOTKEY_LAST) return folders[folders.length - 1];','')),assert.AssertionError);
+  counterfact(() => {
+    assert.throws(()=>check(changed('Math.min(n - 1, folders.length - 1)','n - 1')),assert.AssertionError);
+    assert.throws(()=>check(changed('if (n === FOLDER_HOTKEY_LAST) return folders[folders.length - 1];','')),assert.AssertionError);
+  });
   const page=(api:typeof rules)=>{assert.equal(api.pageSettle(-100,0,300,{prev:true,next:true}),0);assert.equal(api.pageSettle(-101,0,300,{prev:true,next:true}),1);};
   page(rules);
-  assert.throws(()=>page(changed('Math.abs(dx) > w * PAGE_COMMIT_FRACTION','Math.abs(dx) >= w * PAGE_COMMIT_FRACTION')),assert.AssertionError);
-  assert.throws(()=>page(changed('const dir = dx < 0 ? 1 : -1;','const dir = dx < 0 ? -1 : 1;')),assert.AssertionError);
+  counterfact(() => {
+    assert.throws(()=>page(changed('Math.abs(dx) > w * PAGE_COMMIT_FRACTION','Math.abs(dx) >= w * PAGE_COMMIT_FRACTION')),assert.AssertionError);
+    assert.throws(()=>page(changed('const dir = dx < 0 ? 1 : -1;','const dir = dx < 0 ? -1 : 1;')),assert.AssertionError);
+  });
   for(const prefix of ['Digit','Numpad']) for(let n=1;n<=9;n++) assert.equal(rules.digitOfKey(prefix+n),n);
   for(const key of ['Digit0','Numpad0','KeyA','Digit10']) assert.equal(rules.digitOfKey(key),null);
 });
@@ -167,6 +178,8 @@ it('обёртка папки передаёт признак группы: «Л
   };
   check(rules);
   check(changed('group: c.group,', 'group: c.group,'));
-  assert.throws(() => check(changed('group: c.group,', 'group: false,')), assert.AssertionError,
-    'мутант теряет группу при передаче в системное/личное правило папки');
+  counterfact(() => {
+    assert.throws(() => check(changed('group: c.group,', 'group: false,')), assert.AssertionError,
+      'мутант теряет группу при передаче в системное/личное правило папки');
+  });
 });

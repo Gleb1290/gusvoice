@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -248,9 +249,9 @@ const cases: { name: string; guard: Guard; mutate: (raw: string) => string }[] =
   { name: 'actions latest не меняет исполняемый шаг незаметно', guard: 'versions', mutate: change('uses: actions/checkout@v4', 'uses: actions/checkout@latest') },
   { name: 'build >= не выдаётся за точное закрепление', guard: 'pythonPins', mutate: change('build==$PY_BUILD_VERSION', 'build>=$PY_BUILD_VERSION') },
   { name: 'twine >= не выдаётся за точное закрепление', guard: 'pythonPins', mutate: change('twine==$PY_TWINE_VERSION', 'twine>=$PY_TWINE_VERSION') },
-  { name: 'боевой npm publish не теряет публичный доступ', guard: 'publicAccess', mutate: change(livePublish, livePublish.replace(' --access public', '')) },
-  { name: 'пробный npm publish проверяет тот же публичный доступ', guard: 'publicAccess', mutate: change(dryPublish, dryPublish.replace(' --access public', '')) },
-  { name: 'удаление настоящего --dry-run не маскируется оставшимся echo', guard: 'npmDry', mutate: change(dryPublish, dryPublish.replace(' --dry-run', '')) },
+  { name: 'боевой npm publish не теряет публичный доступ', guard: 'publicAccess', mutate: raw => change(livePublish, livePublish.replace(' --access public', ''))(raw) },
+  { name: 'пробный npm publish проверяет тот же публичный доступ', guard: 'publicAccess', mutate: raw => change(dryPublish, dryPublish.replace(' --access public', ''))(raw) },
+  { name: 'удаление настоящего --dry-run не маскируется оставшимся echo', guard: 'npmDry', mutate: raw => change(dryPublish, dryPublish.replace(' --dry-run', ''))(raw) },
   { name: 'перевёрнутое условие не делает dry_run боевым', guard: 'npmDry', mutate: changeStep(npmStep, 'if [ "$DRY" = "false" ]; then', 'if [ "$DRY" != "false" ]; then') },
   { name: 'лишний publish в другом шаге не обходит единый dry_run', guard: 'npmDry', mutate: raw => `${raw}\n      - name: Лишняя выкладка\n        run: npm publish extra.tgz --access public\n` },
   { name: 'лишний publish в другом шаге не обходит --access public', guard: 'publicAccess', mutate: raw => `${raw}\n      - name: Лишняя выкладка\n        run: npm publish extra.tgz\n` },
@@ -271,10 +272,12 @@ const cases: { name: string; guard: Guard; mutate: (raw: string) => string }[] =
 ];
 for (const c of cases) it(`R311 ${c.name}; исходный workflow проходит первым`, () => {
   check(c.guard, source);
+  counterfact(() => {
   const mutant = c.mutate(source);
   assert.throws(() => check(c.guard, mutant), error => error instanceof assert.AssertionError
     && error.message.startsWith(guards[c.guard].marker) && error.operator === 'strictEqual' && error.actual === false && error.expected === true,
   'R311 изменённый контракт падает адресно, не на разборе или якоре');
+  });
 });
 
 it('R311 комментарии с опасными примерами не исполняются; буквальный npmrc и названия секретов разрешены', () => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -160,18 +161,26 @@ function logoutGuard(raw = storeSource) {
 }
 it('R225 logout реального store содержит вызов stopAllGeoLiveLocal через импорт менеджера', () => logoutGuard());
 for (const status of [403, 404]) it(`R225 контрфакт: статус ${status} перестал снимать трансляцию`, async () => {
-  await permanent(status, source); const from = 'st === 403 || st === 404'; assert.equal(source.split(from).length - 1, 1);
-  await assert.rejects(permanent(status, source.replace(from, 'false')), e => e instanceof assert.AssertionError
-    && e.message.startsWith(`R225-status-${status}:`) && e.operator === 'strictEqual' && e.actual === 1 && e.expected === 0);
+  await permanent(status, source);
+  await counterfact(async () => {
+    const from = 'st === 403 || st === 404'; assert.equal(source.split(from).length - 1, 1);
+    await assert.rejects(permanent(status, source.replace(from, 'false')), e => e instanceof assert.AssertionError
+      && e.message.startsWith(`R225-status-${status}:`) && e.operator === 'strictEqual' && e.actual === 1 && e.expected === 0);
+  });
 });
 it('R225 контрфакт: выход забыл выключить нативную службу', () => {
-  cleanup(source); const from = 'liveBridge()?.stopAllLiveLocations?.();'; assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => cleanup(source.replace(from, '')), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R225-native-cleanup:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  cleanup(source);
+  counterfact(() => {
+    const from = 'liveBridge()?.stopAllLiveLocations?.();'; assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => cleanup(source.replace(from, '')), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R225-native-cleanup:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  });
 });
 it('R225 контрфакт: logout больше не вызывает менеджер трансляций', () => {
   logoutGuard(storeSource);
-  const from = "void import('./geoLiveSharing').then((m) => m.stopAllGeoLiveLocal(), () => {});"; assert.equal(storeSource.split(from).length - 1, 1);
-  assert.throws(() => logoutGuard(storeSource.replace(from, '')), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R225-logout:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  counterfact(() => {
+    const from = "void import('./geoLiveSharing').then((m) => m.stopAllGeoLiveLocal(), () => {});"; assert.equal(storeSource.split(from).length - 1, 1);
+    assert.throws(() => logoutGuard(storeSource.replace(from, '')), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R225-logout:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });

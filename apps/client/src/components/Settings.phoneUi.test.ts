@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as React from 'react';
@@ -17,6 +19,8 @@ async function render(component: string, phone: boolean, props: Record<string, u
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   const deps: Record<string, unknown> = {
     react: React, 'react/jsx-runtime': jsx,
+    // У shared нет require-входа; его экспортов эти сценарии не используют.
+    '@gusvoice/shared': { __esModule: true },
     '../phoneLayout': { usePhoneUi: () => phone },
     '../hotkeys': { isAndroid: () => phone, isMobile: () => false, isDesktop: () => false,
       isTauri: () => false, getHotkeys: () => ({ mute: '', deafen: '', screenShare: '',
@@ -43,6 +47,7 @@ async function render(component: string, phone: boolean, props: Record<string, u
     './MicBubbleSetting': { MicBubbleSetting: () => null },
     './StreamQualityPanel': { StreamQualityPanel: () => React.createElement('b', null, 'качество') },
   };
+  const imports = testVmImports(new URL('./UserSettingsModal.tsx', import.meta.url), deps);
   try {
     const module = { exports: {} as Record<string, React.ComponentType<any>> };
     // Исполняется весь TSX; дополнительный export открывает только существующие приватные панели.
@@ -52,9 +57,7 @@ async function render(component: string, phone: boolean, props: Record<string, u
       // Реальный микрофон не запрашиваем: звук — внешняя граница, не предмет проверки разметки.
       navigator: { mediaDevices: { enumerateDevices: async () => [],
         getUserMedia: async () => { throw new Error('Микрофон недоступен в тесте'); } } },
-      require: (id: string) => deps[id] ?? new Proxy({}, { get: (_t, key) => {
-        throw new Error(`Неописанная граница ${id}.${String(key)}`);
-      } }) });
+      require: imports });
     await React.act(async () => { root.render(React.createElement(module.exports[component], props)); });
     check(host);
   } finally {
@@ -129,6 +132,9 @@ for (const [label, anchor, replacement] of [
   ['APK вместо телефонного вида', 'const mobile = usePhoneUi();', 'const mobile = isMobile();'],
   ['Windows на телефоне', '!isTauri() && !mobile && <WindowsDownload />', '!isTauri() && <WindowsDownload />'],
 ] as const) it(`R169 ${label} обнаруживается связями окна настроек`, () => {
-  guard(); assert.equal(source.split(anchor).length - 1, 1);
-  assert.throws(() => guard(source.replace(anchor, replacement)), assert.AssertionError);
+  guard();
+  counterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => guard(source.replace(anchor, replacement)), assert.AssertionError);
+  });
 });

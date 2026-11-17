@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import vm from 'node:vm';
@@ -113,8 +114,10 @@ for (const [label, from, to, check, marker] of [
 ] as const) {
   it(`R260 контрфакт: ${label} — требуется адресная ошибка утверждения, не сбой загрузки`, () => {
     check(source);
+    counterfact(() => {
     assert.equal(source.split(from).length - 1, 1, 'одна адресная точка мутации');
     assert.throws(() => check(source.replace(from, to)), error =>
       error instanceof assert.AssertionError && error.message.includes(marker));
+    });
   });
 }

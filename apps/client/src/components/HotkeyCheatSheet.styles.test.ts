@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -66,7 +67,7 @@ function boundedDialog(raw: string) {
   assert.equal(modal.get('flex-direction'), 'column', 'R283 шапка и тело идут вертикально');
   const sheet = declarations(raw, '.modal.cheatsheet');
   assert.equal(sheet.get('max-height')?.replace(/\s+/g, ''),
-    'calc(100dvh-var(--gv-titlebar-h,0px)-2*var(--sp-6))', markers.height);
+    'calc(var(--vh-px,100dvh)-var(--gv-titlebar-h,0px)-2*var(--sp-6))', markers.height);
   assert.equal(sheet.get('overflow'), 'hidden', 'R283 наружное окно не листает шапку вместе с телом');
   assert.equal(declarations(raw, '.cheat-head').get('flex'), 'none', 'R283 шапка не сжимается длинным списком');
 }
@@ -120,7 +121,7 @@ it('R283 потеря высоты, прокрутки или возврат gri
   // Отрицательный контроль отличает действующие декларации от старого текста и проверяет оригинал первым.
   boundedDialog(css); scrollingColumns(css); unbrokenRows(css);
   const cases = [
-    ['.modal.cheatsheet', 'max-height: calc(100dvh - var(--gv-titlebar-h, 0px) - 2 * var(--sp-6));', '', boundedDialog, markers.height],
+    ['.modal.cheatsheet', 'max-height: calc(var(--vh-px, 100dvh) - var(--gv-titlebar-h, 0px) - 2 * var(--sp-6));', '', boundedDialog, markers.height],
     ['.cheat-body', 'overflow-y: auto;', '', scrollingColumns, markers.overflow],
     ['.cheat-body', 'columns: 2 300px;', 'display: grid; grid-template-columns: 1fr 1fr;', scrollingColumns, markers.columns],
     ['.cheat-body', 'columns: 2 300px;', 'columns: 2 300px; display: grid; grid-template-columns: 1fr 1fr;', scrollingColumns, markers.grid],
@@ -130,10 +131,12 @@ it('R283 потеря высоты, прокрутки или возврат gri
   ] as const;
   for (const [selector, from, to, check, marker] of cases) {
     check(css);
-    const changed = changeDeclaration(css, selector, from, to);
-    assert.notEqual(changed, css);
-    const comment = `\n/* ${selector} { ${from} } */`;
-    assert.throws(() => check(changed + comment), failsAt(marker));
+    counterfact(() => {
+      const changed = changeDeclaration(css, selector, from, to);
+      assert.notEqual(changed, css);
+      const comment = `\n/* ${selector} { ${from} } */`;
+      assert.throws(() => check(changed + comment), failsAt(marker));
+    });
   }
   // Настоящее позднее переопределение важнее раннего правильного значения той же специфичности.
   assert.throws(() => scrollingColumns(css + '\n.cheat-body { overflow-y: hidden; }'), failsAt(markers.overflow));

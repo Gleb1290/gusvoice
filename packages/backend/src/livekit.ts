@@ -1,4 +1,4 @@
-import { AccessToken, ParticipantPermission, RoomServiceClient, TrackSource } from 'livekit-server-sdk';
+import { AccessToken, ParticipantInfo_State, ParticipantPermission, RoomServiceClient, TrackSource } from 'livekit-server-sdk';
 import { env } from './env.js';
 import { BOT_VOICE_TOKEN_TTL_S } from '@gusvoice/shared';
 import { botPublishGrant, publishGrant, voiceTokenMetadata } from './livekitRules.js';
@@ -45,6 +45,17 @@ export function botVoicePermission(permissions: bigint, muted: boolean): Partici
     ...botPublishGrant(permissions, muted),
     canUpdateMetadata: false,
   });
+}
+
+/** The session SID changes when someone leaves and joins again, even with the same identity. */
+export async function activeVoiceParticipantSid(room: string, identity: string): Promise<string | null> {
+  try {
+    const participant = await roomService.getParticipant(room, identity);
+    return participant.state === ParticipantInfo_State.ACTIVE ? participant.sid || null : null;
+  } catch {
+    // Participant not found, room gone, or LiveKit unavailable: no temporary access.
+    return null;
+  }
 }
 
 /** Move a participant from one voice room to another. */
@@ -94,11 +105,12 @@ export async function createVoiceToken(opts: {
   avatarUrl?: string | null;
   /** If they're currently server-muted, mint the token WITHOUT mic so the mute survives (re)joins. */
   serverMuted?: boolean;
+  ttl?: string;
 }): Promise<string> {
   const at = new AccessToken(env.livekit.apiKey, env.livekit.apiSecret, {
     identity: opts.identity,
     name: opts.name,
-    ttl: '4h',
+    ttl: opts.ttl ?? '4h',
     // Carried through to LiveKit webhooks: avatar for presence, priority for speaker ordering.
     metadata: voiceTokenMetadata(opts.permissions, opts.avatarUrl),
   });

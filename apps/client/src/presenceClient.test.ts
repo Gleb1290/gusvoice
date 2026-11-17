@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -68,8 +69,8 @@ it('online.away меняет только dmAwayUsers, повтор не дуб�
     assert.deepEqual(wire.cleared, ['peer', 'peer'], 'скрытие снимает локальные 30 секунд, возвращение не снимает');
   };
   check();
-  assert.throws(() => check((s) => s.replace('return store.setDmAway(msg.userId, msg.away);', 'return;')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('кадр away попадает в dmAwayUsers'));
+  counterfact(() => { assert.throws(() => check((s) => s.replace('return store.setDmAway(msg.userId, msg.away);', 'return;')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('кадр away попадает в dmAwayUsers')); });
 });
 
 it('снимок online.snapshot передаёт dmAway, старый снимок очищает прежний away', () => {
@@ -81,8 +82,8 @@ it('снимок online.snapshot передаёт dmAway, старый сним�
     assert.deepEqual(s.get().onlineUsers, ['next']); assert.deepEqual(Array.from(s.get().dmAwayUsers), []); assert.deepEqual(Array.from(s.get().dmOnlineUsers), []);
   };
   check();
-  assert.throws(() => check((s) => s.replace('store.setOnlineSnapshot(msg.users, msg.dmOnly, msg.dmAway)', 'store.setOnlineSnapshot(msg.users, msg.dmOnly)')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('снимок сохраняет dmAway'));
+  counterfact(() => { assert.throws(() => check((s) => s.replace('store.setOnlineSnapshot(msg.users, msg.dmOnly, msg.dmAway)', 'store.setOnlineSnapshot(msg.users, msg.dmOnly)')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('снимок сохраняет dmAway')); });
 });
 
 it('серверный список участников оставляет away в сети, шапка ЛС применяет dmPresent', () => {
@@ -102,8 +103,8 @@ it('серверный список участников оставляет away
     assert.equal(back, true, 'возвращение в окно возвращает онлайн шапки');
   };
   check();
-  assert.throws(() => check((s) => s.replace('dmPresent(s, dm.otherUser.id)', 's.onlineUsers.includes(dm.otherUser.id)')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('шапка ЛС исключает away'));
+  counterfact(() => { assert.throws(() => check((s) => s.replace('dmPresent(s, dm.otherUser.id)', 's.onlineUsers.includes(dm.otherUser.id)')),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('шапка ЛС исключает away')); });
 });
 
 it('серверное автодополнение ChatView берёт onlineUsers, не ЛС-присутствие невидимых', () => {
@@ -126,8 +127,8 @@ it('карточка UserContextMenu спрашивает lastSeen в конте
     }
   };
   check();
-  assert.throws(() => check((s) => s.replace("inDm ? 'dm' : 'server'", "'dm'")),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('карточка передаёт реальный контекст lastSeen'));
+  counterfact(() => { assert.throws(() => check((s) => s.replace("inDm ? 'dm' : 'server'", "'dm'")),
+    (e: unknown) => e instanceof assert.AssertionError && e.message.includes('карточка передаёт реальный контекст lastSeen')); });
 });
 
 it('identify текущего шлюза согласует presence5 capability и начальное hidden', () => {
@@ -139,14 +140,20 @@ it('identify текущего шлюза согласует presence5 capability
   };
   check(source);
   for (const [from, expected] of [["caps?.push(FEATURE_PRESENCE5)", 'caps содержат presence5'], ['...(presentNow() ? {} : { hidden: true })', 'identify несёт hidden при отсутствии']]) {
-    assert.ok(source.includes(from));
-    assert.throws(() => check(source.replace(from, '')), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(expected));
+    counterfact(() => {
+      assert.ok(source.includes(from));
+      assert.throws(() => check(source.replace(from, '')), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(expected));
+    });
   }
 });
 
 it('identify фонового шлюза несёт hidden, пока приложение не здесь', () => {
   const source = read('./bgGateways.ts');
   const check = (code: string) => assert.match(code, /t: 'identify'[\s\S]{0,150}bgPresent \? \{\} : \{ hidden: true \}/, 'фоновый identify тоже несёт hidden');
-  check(source); const from = '...(bgPresent ? {} : { hidden: true })'; assert.ok(source.includes(from));
-  assert.throws(() => check(source.replace(from, '')), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('фоновый identify тоже несёт hidden'));
+  check(source);
+  counterfact(() => {
+    const from = '...(bgPresent ? {} : { hidden: true })';
+    assert.ok(source.includes(from));
+    assert.throws(() => check(source.replace(from, '')), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('фоновый identify тоже несёт hidden'));
+  });
 });

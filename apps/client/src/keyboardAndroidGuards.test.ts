@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -24,8 +25,10 @@ function body(raw: string, name: string) {
 function mutate(raw: string, from: string, to: string) { assert.equal(raw.split(from).length - 1, 1, 'единственный якорь Android-контрфакта'); return raw.replace(from, to); }
 function killed(raw: string, from: string, to: string, check: (s: string) => void, prefix: string, actual: unknown, expected: unknown) {
   check(raw);
+  counterfact(() => {
   assert.throws(() => check(mutate(raw, from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
     && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 }
 function wrapper(raw: string) {
   const wrap = body(raw, 'wrap');
@@ -150,17 +153,23 @@ function apkKeyboardGuard(raw: string) {
 }
 it('R226 CI проверяет подключение клавиатуры именно в RustWebView собранного APK до обоих способов публикации', () => {
   apkKeyboardGuard(androidWorkflow);
+  counterfact(() => {
   const steps = workflowSteps(androidWorkflow), check = steps.find(step => step.name === apkCheckName)!;
   const movedBeforeBuild = mutate(androidWorkflow, check.block, '').replace('      - name: Build signed APK', `${check.block}      - name: Build signed APK`);
   assert.throws(() => apkKeyboardGuard(movedBeforeBuild), e => e instanceof assert.AssertionError
     && e.message.startsWith('R226-apk-order:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
   for (const [from, to, prefix] of [
     [apkClassDescriptor('RustWebView'), apkClassDescriptor('OtherWebView'), 'R226-apk-class:'],
     ['inside && /name +: .onCreateInputConnection./', '/name +: .onCreateInputConnection./', 'R226-apk-scope:'],
     ['/name +: .onCreateInputConnection./', '/name +: .onKeyDown./', 'R226-apk-method:'],
     ['"$DEXDUMP" "$dex" | awk', 'printf ignored | awk', 'R226-apk-dexdump:'],
   ] as const) killed(androidWorkflow, from, to, apkKeyboardGuard, prefix, false, true);
+  apkKeyboardGuard(androidWorkflow);
+  counterfact(() => {
   const missingLine = /^ {10}\[ "\$found" = 1 \] \|\| \{[^\n]*; exit 1; \}$/m.exec(androidWorkflow);
   assert.ok(missingLine);
-  killed(androidWorkflow, missingLine[0], missingLine[0].replace('exit 1;', 'exit 0;'), apkKeyboardGuard, 'R226-apk-exit:', false, true);
+  assert.throws(() => apkKeyboardGuard(mutate(androidWorkflow, missingLine[0], missingLine[0].replace('exit 1;', 'exit 0;'))), e => e instanceof assert.AssertionError
+    && e.message.startsWith('R226-apk-exit:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });

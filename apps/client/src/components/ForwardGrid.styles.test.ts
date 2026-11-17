@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -15,11 +16,13 @@ function pair(selector: string, property: string, expected: string, wrong: strin
     assert.equal(values[0].slice(property.length + 1).trim(), expected);
   };
   check(css);
-  const found = block(css, selector); const declaration = new RegExp(`(^|;)\\s*${property}\\s*:[^;]+`, 'g');
-  const body = found[2].replace(declaration, `$1 ${property}: ${wrong}`); assert.notEqual(body, found[2]);
-  const at = found.index! + found[0].indexOf('{') + 1;
-  const mutant = css.slice(0, at) + body + css.slice(at + found[2].length);
-  assert.throws(() => check(mutant), assert.AssertionError);
+  counterfact(() => {
+    const found = block(css, selector); const declaration = new RegExp(`(^|;)\\s*${property}\\s*:[^;]+`, 'g');
+    const body = found[2].replace(declaration, `$1 ${property}: ${wrong}`); assert.notEqual(body, found[2]);
+    const at = found.index! + found[0].indexOf('{') + 1;
+    const mutant = css.slice(0, at) + body + css.slice(at + found[2].length);
+    assert.throws(() => check(mutant), assert.AssertionError);
+  });
 }
 it('R171 сетка пересылки сохраняет четыре колонки и ячейку высотой 103', () => {
   // Изменение количества колонок при прежнем размере ячейки ломает плотность ShareAlert.

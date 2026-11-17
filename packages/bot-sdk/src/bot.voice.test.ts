@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -137,7 +138,9 @@ for (const c of [
     probe: shutdown, message: 'R306 voice stop закрывает все соединения и освобождает дополнение' },
 ]) it(`R306 bot.voice контрфакт: ${c.name}, оригинал проходит первым`, async () => {
   await c.probe(source);
+  await counterfact(async () => {
   assert.equal(source.split(c.needle).length - 1, 1, 'bot.voice: точный уникальный якорь');
   await assert.rejects(() => c.probe(source.replace(c.needle, c.replacement)), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.message.split('\n', 1)[0] === c.message);
+  });
 });

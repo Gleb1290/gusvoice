@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -199,13 +200,15 @@ describe('боты: исполняемые контрфакты полного �
   for (const m of mutations) it(m.name, () => {
     m.check(rules);
     m.check(loadModule(source)); // Original-first: тот же полный TS→VM путь обязан быть зелёным до замены.
-    assert.equal(source.split(m.from).length - 1, 1, `единственный якорь ${m.name}`);
-    const changed = source.replace(m.from, m.to);
-    assert.notEqual(changed, source);
-    assert.throws(() => m.check(loadModule(changed)), (error: unknown) => error instanceof assert.AssertionError
-      && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.message
-      && error.operator === 'strictEqual' && error.actual === true && error.expected === false,
-    `мутант обязан упасть именно на host AssertionError: ${m.message}`);
+    counterfact(() => {
+      assert.equal(source.split(m.from).length - 1, 1, `единственный якорь ${m.name}`);
+      const changed = source.replace(m.from, m.to);
+      assert.notEqual(changed, source);
+      assert.throws(() => m.check(loadModule(changed)), (error: unknown) => error instanceof assert.AssertionError
+        && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.message
+        && error.operator === 'strictEqual' && error.actual === true && error.expected === false,
+      `мутант обязан упасть именно на host AssertionError: ${m.message}`);
+    });
   });
 });
 

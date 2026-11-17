@@ -4,9 +4,10 @@ import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads, seedServerCoun
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
-const countSource = readFileSync(new URL('./channelRules.ts', import.meta.url), 'utf8');
 function countsModule(anchor: string, replacement: string): typeof import('./channelRules') {
+  const countSource = readFileSync(new URL('./channelRules.ts', import.meta.url), 'utf8');
   assert.equal(countSource.split(anchor).length - 1, 1, 'единственный якорь');
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(countSource.replace(anchor, replacement), {
@@ -76,8 +77,10 @@ describe('R180 засев счётчиков серверов', () => {
   ] as const) it(`мутант «${name}» нарушает поведение засева`, () => {
     // Целый модуль и original-first отделяют ошибку контракта от ошибки VM-харнесса.
     scenario();
-    assert.throws(() => scenario(countsModule(anchor, replacement).seedServerCounts),
-      e => e instanceof assert.AssertionError && e.message.includes(message));
+    counterfact(() => {
+      assert.throws(() => scenario(countsModule(anchor, replacement).seedServerCounts),
+        e => e instanceof assert.AssertionError && e.message.includes(message));
+    });
   });
 });
 

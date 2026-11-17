@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -70,8 +71,10 @@ it('R169 телефонная волна получает 51 столбик, П�
 it('R169 контрфакт телефонных столбиков в режиме обрезки отвергается по DOM', async () => {
   // Проверка идёт на целиком скомпилированном компоненте, а не на вычисленной отдельно строке условия.
   const baseline = await waveScenario(true, true); assert.equal(baseline.tg, false);
+  await counterfact(async () => {
   const s = await waveScenario(true, true, s => replaceOnce(s, 'const tgBars = phone && !trim;', 'const tgBars = phone;'));
   assert.throws(() => assert.equal(s.tg, false), assert.AssertionError);
+  });
 });
 
 async function contactsScenario(phone: boolean, mutate?: (s: string) => string) {
@@ -141,7 +144,7 @@ it('R169 контрфакты автофокуса телефона и стат�
     [false, 'useContactSeen(candidateIds, onlineSet, phone)', 'useContactSeen(candidateIds, onlineSet, true)'],
   ] as const) {
     await contactsScenario(phone);
-    await assert.rejects(() => contactsScenario(phone, s => replaceOnce(s, anchor, replacement)), assert.AssertionError);
+    await counterfact(() => assert.rejects(() => contactsScenario(phone, s => replaceOnce(s, anchor, replacement)), assert.AssertionError));
   }
 });
 
@@ -161,11 +164,13 @@ function dmContract(text: string) {
 it('R169 поле контактов не открывает клавиатуру телефона, статус и fallback подключены к обоим спискам', () => {
   // AST/text guard: фиксирует проводку props, не обещает реальное поведение клавиатуры или layout.
   const s = declaration('./DmSidebar.tsx', 'NewDmSheet'); dmContract(s);
+  counterfact(() => {
   for (const change of [
     (s: string) => replaceOnce(s, 'autoFocus={!phone}', 'autoFocus'),
     (s: string) => replaceOnce(s, 'onlineSet, phone)', 'onlineSet, true)'),
     (s: string) => replaceOnce(s, 'dm-sub seen', 'dm-sub'),
   ]) { const changed = change(s); assert.notEqual(changed, s); assert.throws(() => dmContract(changed), assert.AssertionError); }
+  });
 });
 function groupContract(s: string) {
   const tree = ts.createSourceFile('group.tsx', s, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -200,9 +205,11 @@ function groupContract(s: string) {
 it('R169 шаг участников телефона имеет отключённую без выбора кнопку Далее, ПК сохраняет действия', () => {
   // AST/text guard ловит перестановку веток и пропажу disabled; размер 48 px проверяется отдельным CSS-стражем.
   const s = declaration('./GroupDialogs.tsx', 'NewGroupDialog'); groupContract(s);
+  counterfact(() => {
   for (const change of [
     (s: string) => replaceOnce(s, 'aria-label="Далее"\n                title="Далее"\n                disabled={picked.length === 0}', 'aria-label="Далее"\n                title="Далее"\n                disabled={false}'),
     // Шаг названия тоже имеет phone-ветку: меняем только ветку сразу после выбора участников.
     (s: string) => replaceOnce(s, 'setPicked={setPicked} />\n          {phone ? (', 'setPicked={setPicked} />\n          {!phone ? ('),
   ]) { const changed = change(s); assert.notEqual(changed, s); assert.throws(() => groupContract(changed), assert.AssertionError); }
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { Blob, File } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -105,8 +106,10 @@ describe('R141: большие файлы нативного моста', () => 
   ] as const) {
     it(`мутант «${name}» нарушает ту же проверку большого файла после зелёного оригинала`, async () => {
       await checkBigFile(source);
-      const mutant = replaceOnce(from, to);
-      await assert.rejects(() => checkBigFile(mutant), assert.AssertionError);
+      await counterfact(async () => {
+        const mutant = replaceOnce(from, to);
+        await assert.rejects(() => checkBigFile(mutant), assert.AssertionError);
+      });
     });
   }
 });

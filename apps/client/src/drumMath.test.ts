@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -143,7 +144,9 @@ for (const [name, anchor, replacement, check, marker] of [
 ] as const) {
   it(`R265 настоящий модуль до мутации проходит, контрфакт ${name} падает адресно`, () => {
     check(load(source));
-    const mutant = load(replaceOnce(anchor, replacement));
-    assert.throws(() => check(mutant), error => error instanceof assert.AssertionError && error.message.includes(marker));
+    counterfact(() => {
+      const mutant = load(replaceOnce(anchor, replacement));
+      assert.throws(() => check(mutant), error => error instanceof assert.AssertionError && error.message.includes(marker));
+    });
   });
 }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { createHash } from 'node:crypto';
 import { it } from 'node:test';
 import Fastify from 'fastify';
@@ -73,17 +74,25 @@ it('R307 настоящий getMe сообщает openapi и api_version 4, а 
 }));
 it('R307 контрфакт: ETag потерян из ответа', async () => {
   await anonymous();
+  await counterfact(async () => {
   await assert.rejects(anonymous({ from: ".header('ETag', doc.etag)", to: '' }), assertion('R307 маршрут отдаёт ETag'));
+  });
 });
 it('R307 контрфакт: публичный маршрут начал требовать токен', async () => {
   await anonymous();
+  await counterfact(async () => {
   await assert.rejects(anonymous({ from: "app.get('/bot/v1/openapi.json', async (req, reply) => {", to: "app.get('/bot/v1/openapi.json', async (req, reply) => {\n    if (!req.headers.authorization) return reply.code(401).send({ error: 'Unauthorized' });" }), assertion('R307 схема доступна без авторизации', 401, 200));
+  });
 });
 it('R307 контрфакт: статический путь потерян и запрос проваливается в настоящий :method/authBot', async () => {
   await anonymous();
+  await counterfact(async () => {
   await assert.rejects(anonymous({ from: "app.get('/bot/v1/openapi.json',", to: "app.get('/bot/v1/openapi-renamed.json'," }), assertion('R307 схема доступна без авторизации', 401, 200));
+  });
 });
 it('R307 контрфакт: If-None-Match перестал давать 304', async () => {
   await conditional();
+  await counterfact(async () => {
   await assert.rejects(conditional({ from: "if (req.headers['if-none-match'] === doc.etag)", to: "if (req.headers['if-none-match'] === 'never-a-real-etag')" }), assertion('R307 совпавший ETag даёт 304', 200, 304));
+  });
 });

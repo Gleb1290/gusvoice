@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -51,9 +52,11 @@ it('R128 страж фильтра типа, приоритета canSend и п�
     assert.ok(body.includes('rank(a)-rank(c)||a.position-c.position'));
   };
   verify(raw);
-  for (const [from, to] of [["c.type === 'text' && ", ''], ['c.canSend ?? serverCan', 'serverCan'], ['rank(a) - rank(c)', 'rank(c) - rank(a)']]) {
-    assert.ok(raw.includes(from)); assert.throws(() => verify(raw.replace(from, to)), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of [["c.type === 'text' && ", ''], ['c.canSend ?? serverCan', 'serverCan'], ['rank(a) - rank(c)', 'rank(c) - rank(a)']]) {
+      assert.ok(raw.includes(from)); assert.throws(() => verify(raw.replace(from, to)), assert.AssertionError);
+    }
+  });
 });
 
 it('R118 обычный текст не получает лишнюю тему, пробелы по краям снимаются', () => {
@@ -153,13 +156,15 @@ it('R118 страж правил ловит потерю темы, приём п
     assert.match(functions.get('shareSkippedText') ?? '', /if\s*\(dropped\s*>\s*0\)\s*parts\.push\(/, 'dropped получает объяснение');
   };
   check(raw);
-  for (const [from, to] of [
-    ['`${s}\\n${t}`', 't'],
-    ['if (files.length === 0 && !text && dropped === 0) return null;', ''],
-    ['if (dropped > 0) parts.push(', 'if (false) parts.push('],
-  ]) {
-    assert.ok(raw.includes(from!), 'якорь контрфакта существует');
-    const mutant = raw.replace(from!, to!);
-    assert.throws(() => check(mutant), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of [
+      ['`${s}\\n${t}`', 't'],
+      ['if (files.length === 0 && !text && dropped === 0) return null;', ''],
+      ['if (dropped > 0) parts.push(', 'if (false) parts.push('],
+    ]) {
+      assert.ok(raw.includes(from!), 'якорь контрфакта существует');
+      const mutant = raw.replace(from!, to!);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
 });

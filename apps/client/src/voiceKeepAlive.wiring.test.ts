@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import ts from 'typescript';
@@ -105,7 +106,9 @@ for (const [name, raw, check, from, to, marker] of [
 ] as const) {
   it(`проводка и контрфакт: ${name}`, () => {
     check(raw);
-    const mutant = replace(raw, from, to);
-    assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(marker));
+    counterfact(() => {
+      const mutant = replace(raw, from, to);
+      assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(marker));
+    });
   });
 }

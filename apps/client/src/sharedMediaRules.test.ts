@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -49,9 +50,11 @@ it('ссылки считаются строками сообщений, а не
   assert.equal(items.length, 2);
   assert.deepEqual(items.map((x) => x.key), ['multi', 'single']);
   assert.deepEqual(items[0]?.urls, ['https://one.example/a', 'https://two.example/b']);
-  const mutant = linksPerUrlMutant();
-  assert.throws(() => assert.equal(mutant.sharedItems(rows, 'link').length, 2), assert.AssertionError,
-    'мутант раздувает число строк и счётчик ссылок для одного сообщения');
+  counterfact(() => {
+    const mutant = linksPerUrlMutant();
+    assert.throws(() => assert.equal(mutant.sharedItems(rows, 'link').length, 2), assert.AssertionError,
+      'мутант раздувает число строк и счётчик ссылок для одного сообщения');
+  });
 });
 
 it('медиа и файлы сохраняют порядок вложений, а просмотрщик разворачивает ленту', () => {

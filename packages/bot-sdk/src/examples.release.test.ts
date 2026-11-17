@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { it } from 'node:test';
@@ -28,16 +29,20 @@ for (const name of ['notify.sh', 'notify.py']) it(`R307 ${name}: токен и �
 });
 it('R307 контрфакт: новый пример без строки в README замечается, исходный каталог проходит первым', () => {
   const files = inventory(); documented(files, readme);
+  counterfact(() => {
   assert.throws(() => documented([...files, 'forgotten-example.ts'], readme), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.actual === false && e.expected === true && e.message.split('\n', 1)[0] === 'R307 каждый пример описан в README');
+  });
 });
 for (const [name, addition, marker] of [
   ['токен в тексте', `\n# gvb_${'X'.repeat(16)}\n`, 'R307 в примере нет зашитого токена'],
   ['зашитый инстанс', '\n# https://private-instance.test/api\n', 'R307 notify не привязан к конкретному инстансу'],
 ] as const) it(`R307 контрфакт: ${name}, исходный notify проходит первым`, () => {
   const text = readFileSync(new URL('notify.sh', directory), 'utf8'); safeExample(text);
+  counterfact(() => {
   assert.throws(() => safeExample(text + addition), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' && e.message.split('\n', 1)[0] === marker);
+  });
 });
 
 const build = 'node -e "require(\'fs\').rmSync(\'dist\',{recursive:true,force:true})" && tsc -p tsconfig.build.json';
@@ -80,14 +85,18 @@ it('R314 оба рабочих SDK публичны, без старых бан�
 for (const pkg of releases) {
   it(`R314 ${pkg.name}: возврат private true замечается, публичный оригинал проходит первым`, () => {
     const original = readRelease(pkg); publicRelease(pkg, original);
+    counterfact(() => {
     assert.throws(() => publicRelease(pkg, { ...original, manifest: { ...original.manifest, private: true } }), error => error instanceof assert.AssertionError
       && error.message.startsWith('R314 публичный пакет не содержит private') && error.operator === 'strictEqual'
       && error.actual === true && error.expected === false);
+    });
   });
   it(`R314 ${pkg.name}: возврат баннера замечается, README без баннера проходит первым`, () => {
     const original = readRelease(pkg); publicRelease(pkg, original);
+    counterfact(() => {
     assert.throws(() => publicRelease(pkg, { ...original, readme: `${original.readme}\n> Not published to npm yet.\n` }), error => error instanceof assert.AssertionError
       && error.message.startsWith('R314 README больше не объявляет пакет неопубликованным') && error.operator === 'strictEqual'
       && error.actual === true && error.expected === false);
+    });
   });
 }

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -305,13 +306,16 @@ const mutants = [
 describe('R298 гонка Bot API: адресные контрфакты полного модуля', () => {
   for (const m of mutants) it(m.name, async () => {
     await m.verify(source);
-    const changed = m.mutate(source);
+    await counterfact(async () => {
+const changed = m.mutate(source);
     assert.notEqual(changed, source);
     await assert.rejects(() => m.verify(changed), (error: unknown) => error instanceof assert.AssertionError
       && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.marker
       && error.operator === 'strictEqual' && error.actual === m.actual && error.expected === m.expected,
     `только адресный ERR_ASSERTION: ${m.marker}`);
-  });
+
+});
+});
 });
 
 const pollConflict = 'Conflict: terminated by other getUpdates request; make sure that only one bot instance is running';
@@ -391,10 +395,13 @@ describe('R303 один потребитель и отзыв long-poll', () => {
   }
   it('контрфакт kickPolls без пробуждения ловится до deadline, без зависания теста', async () => {
     await checkKick(source, 4001, 401);
-    const changed = replaceOnce(source, 'for (const id of ids) for (const k of [...(polls.get(id) ?? [])]) k(err);', '/* poll revocation lost */');
+    await counterfact(async () => {
+const changed = replaceOnce(source, 'for (const id of ids) for (const k of [...(polls.get(id) ?? [])]) k(err);', '/* poll revocation lost */');
     await assert.rejects(checkKick(changed, 4001, 401), (error: unknown) => error instanceof assert.AssertionError
       && error.message.split(/\r?\n/, 1)[0] === 'R303 отзыв доступа будит poll до срока' && error.actual === undefined && error.expected === 401);
-  });
+
+});
+});
   for (const [name, from, to, verify, marker, actual, expected] of [
     ['нет takeover poll', '    takeOverConsumer(botId);', '', checkTakeover, 'R303 старый опрос не забирает пачку после вытеснения', undefined, 409],
     ['нет проверки после SQL', '      if (k1) throw k1;', '', checkTakeover, 'R303 старый опрос не забирает пачку после вытеснения', undefined, 409],
@@ -402,7 +409,10 @@ describe('R303 один потребитель и отзыв long-poll', () => {
     ['close запроса вместо ответа', "(reply?.raw ?? req.raw).on('close', () => gone.abort());", "req.raw.on('close', () => gone.abort());", checkReplyClose, 'R303 прочитанное тело POST не отменяет ожидание ответа', true, false],
   ] as const) it(`контрфакт: ${name}`, async () => {
     await verify(source);
-    await assert.rejects(verify(replaceOnce(source, from, to)), (error: unknown) => error instanceof assert.AssertionError
+    await counterfact(async () => {
+await assert.rejects(verify(replaceOnce(source, from, to)), (error: unknown) => error instanceof assert.AssertionError
       && error.message.split(/\r?\n/, 1)[0] === marker && error.actual === actual && error.expected === expected);
-  });
+
+});
+});
 });

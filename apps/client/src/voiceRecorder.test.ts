@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -87,8 +88,8 @@ it('паузы не тратят длину и потолок, после resume
     assert.equal((await r.stop()).durationMs, shared.VOICE_MAX_MS);
   };
   await check();
-  await assert.rejects(() => check(s => s.replace('VOICE_MAX_MS - elapsed()', 'VOICE_MAX_MS')), assert.AssertionError);
-  await assert.rejects(() => check(s => s.replace('        clearTimeout(limit);', '')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(s => s.replace('VOICE_MAX_MS - elapsed()', 'VOICE_MAX_MS')), assert.AssertionError));
+  await counterfact(() => assert.rejects(() => check(s => s.replace('        clearTimeout(limit);', '')), assert.AssertionError));
 });
 
 it('потолок записи сам отпускает микрофон и анализатор до нажатия stop или cancel', async () => {
@@ -104,7 +105,7 @@ it('потолок записи сам отпускает микрофон и а
     assert.equal(f.tracksStopped(), 1); assert.equal(f.contexts[0].closed, 1);
   };
   await check();
-  await assert.rejects(() => check(source => source.replace("  rec.addEventListener('stop', cleanup);", '')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(source => source.replace("  rec.addEventListener('stop', cleanup);", '')), assert.AssertionError));
 });
 
 it('R125 голосовое ограничивает битрейт до 32 кбит/с с выбранным MIME и без поддержки MIME', async () => {
@@ -120,7 +121,7 @@ it('R125 голосовое ограничивает битрейт до 32 кб
     }
   };
   await check();
-  await assert.rejects(() => check(s => s.replaceAll('audioBitsPerSecond: 32_000', 'audioBitsPerSecond: undefined')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(s => s.replaceAll('audioBitsPerSecond: 32_000', 'audioBitsPerSecond: undefined')), assert.AssertionError));
 });
 
 it('R125 снимок паузы и окончательная волна декодируются в 8 кГц, живой анализатор сохраняет обычный контекст', async () => {
@@ -136,7 +137,7 @@ it('R125 снимок паузы и окончательная волна дек
     assert.deepEqual(f.contexts.map(c => c.closed), [1, 1, 1], 'декодеры закрыты вместе с живым анализатором');
   };
   await check();
-  await assert.rejects(() => check(s => s.replace('new AudioContext({ sampleRate: 8000 })', 'new AudioContext()')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(s => s.replace('new AudioContext({ sampleRate: 8000 })', 'new AudioContext()')), assert.AssertionError));
 });
 
 it('R125 отказ конструктора 8 кГц откатывается к обычному декодеру без подмены волны заглушкой', async () => {
@@ -149,7 +150,7 @@ it('R125 отказ конструктора 8 кГц откатывается �
     assert.deepEqual(f.contexts.map(c => c.closed), [1, 1], 'неуспешный конструктор не создаёт лишний контекст');
   };
   await check();
-  await assert.rejects(() => check(s => s.replace('    ctx = new AudioContext();', "    throw new Error('откат потерян');")), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(s => s.replace('    ctx = new AudioContext();', "    throw new Error('откат потерян');")), assert.AssertionError));
 });
 
 it('cancel после потолка не бросает и не освобождает микрофон второй раз', async () => {
@@ -162,7 +163,7 @@ it('cancel после потолка не бросает и не освобож�
     await assert.rejects(record.stop(), /уже завершена/);
   };
   await check();
-  await assert.rejects(() => check(source => source.replace('    if (released) return;', '')), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => check(source => source.replace('    if (released) return;', '')), assert.AssertionError));
 });
 
 it('обычные stop и cancel до потолка отпускают ресурсы и снимают таймер, stop сохраняет файл', async () => {

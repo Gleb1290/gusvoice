@@ -1,7 +1,9 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import * as jsx from 'react/jsx-runtime';
@@ -29,16 +31,13 @@ type Scene = {
   opened: string[];
   click(selector: string): Promise<void>;
 };
-function load<T>(raw: string, deps: Record<string, unknown>): T {
+function load<T>(sourceUrl: URL, raw: string, deps: Record<string, unknown>): T {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, {
     module, exports: module.exports, window, document, performance,
-    require: (id: string) => {
-      assert.ok(Object.hasOwn(deps, id), `неописанная граница целого NewDmSheet/BottomSheet: ${id}`);
-      return deps[id];
-    },
+    require: testVmImports(sourceUrl, deps),
   });
   return module.exports as T;
 }
@@ -60,9 +59,9 @@ async function fixture(phone: boolean, pick: boolean, work: (scene: Scene) => Pr
   const contacts = [contact], online = new Set<string>(), seen = new Map<string, string>();
   const nameOf = (_id: string, fallback: string) => fallback;
   try {
-    const icon = load<typeof import('./Icon')>(read('./Icon.tsx'), common);
+    const icon = load<typeof import('./Icon')>(new URL('./Icon.tsx', import.meta.url), read('./Icon.tsx'), common);
     // Не макет с пропом page: настоящая оболочка создаёт портал и выбирает экран/лист.
-    const bottom = load<typeof import('./BottomSheet')>(read('./BottomSheet.tsx'), { ...common, './Icon': icon });
+    const bottom = load<typeof import('./BottomSheet')>(new URL('./BottomSheet.tsx', import.meta.url), read('./BottomSheet.tsx'), { ...common, './Icon': icon });
     const deps: Record<string, unknown> = {
       ...common, '../store': { useStore }, '../dmRules': dmRules, '../convSyncRules': convRules,
       '../contactRules': contactRules, '../dmListRules': listRules,
@@ -76,14 +75,8 @@ async function fixture(phone: boolean, pick: boolean, work: (scene: Scene) => Pr
       '../peerName': { usePeerName: () => nameOf }, './BottomSheet': bottom, './Icon': icon,
       './Avatar': { Avatar: () => null },
     };
-    // Остальные экспорты целого DmSidebar не рендерятся. Не загружаем стор, транспорт или живые подписки.
-    for (const id of ['../channelRules', '../chatKeysRules', '../dmArchiveRules', '../dmRowRules', '../typing', '../androidBack', '../connState',
-      './SavedAvatar', './GroupDialogs', '../groupChatRules', './DmRowMenu', './DmFolderBar', '../dmFolderView', '../dmFolders',
-      '../cornerButtonsRules', '../dmListSearchRules', './DmServerSearch', './DmAllSearch', './DmListSearch', './DmArchive',
-      '../dragOut', '../dmListView', '../uiPrefs', '../filesDrop', './DmListSwipe', './DmPinDrag', '../chatSwipe', './Goose',
-      './SelfVoiceBar', './SettingsShell', './SharedMedia', './StatusDot', './VoicePanel', '../voiceDrafts']) deps[id] = {};
     // Только тестовый экспорт приватного компонента; исполняется весь модуль, не вырезанный JSX.
-    const sidebar = load<Sidebar>(`${raw}\nexport { NewDmSheet };`, deps);
+    const sidebar = load<Sidebar>(new URL('./DmSidebar.tsx', import.meta.url), `${raw}\nexport { NewDmSheet };`, deps);
     function Parent() {
       const [visible, setVisible] = React.useState(true);
       hide = () => setVisible(false);
@@ -200,9 +193,11 @@ it('R258 обе раскладки: выбор строки отдаёт кон�
 it('R258 контрфакт: безусловный page обнаруживается настоящим выбором контакта после зелёного оригинала', async () => {
   const scenario = (raw: string) => fixture(true, true, async scene => { checkPicker(scene.body, true); }, raw);
   await scenario(source);
-  const anchor = 'page={!pick}';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственная развилка экран/лист в NewDmSheet');
-  await assert.rejects(scenario(source.replace(anchor, 'page')), (error: unknown) =>
-    error instanceof assert.AssertionError && error.message.startsWith('R258-pick: выбор контакта не превращается в полный экран')
-      && error.actual === true && error.expected === false);
+  await counterfact(async () => {
+    const anchor = 'page={!pick}';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственная развилка экран/лист в NewDmSheet');
+    await assert.rejects(scenario(source.replace(anchor, 'page')), (error: unknown) =>
+      error instanceof assert.AssertionError && error.message.startsWith('R258-pick: выбор контакта не превращается в полный экран')
+        && error.actual === true && error.expected === false);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from "../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -44,19 +45,21 @@ it('R135 последний Esc закрывает беседу на ПК без
     assert.ok(!strings.some(n => n.text.includes('.dm-find')), 'поиск не участвует в закрытии беседы');
   }
   check(original);
-  const close = 'useStore.setState({ currentDmId: null });';
-  assert.equal(original.split(close).length - 1, 1);
-  const { ast, body } = callback(original);
-  const phone = body.statements.find(n => ts.isIfStatement(n) && n.expression.getText(ast) === 'phone')!;
-  const mutants = [
-    original.replace(close, close + " requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.dm-find input')?.focus());"),
-    original.replace(close, 'useStore.setState({});'),
-    original.slice(0, phone.getStart(ast)) + original.slice(phone.end),
-  ];
-  for (const mutant of mutants) {
-    assert.notEqual(mutant, original);
-    assert.throws(() => check(mutant), assert.AssertionError);
-  }
+  counterfact(() => {
+    const close = 'useStore.setState({ currentDmId: null });';
+    assert.equal(original.split(close).length - 1, 1);
+    const { ast, body } = callback(original);
+    const phone = body.statements.find(n => ts.isIfStatement(n) && n.expression.getText(ast) === 'phone')!;
+    const mutants = [
+      original.replace(close, close + " requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.dm-find input')?.focus());"),
+      original.replace(close, 'useStore.setState({});'),
+      original.slice(0, phone.getStart(ast)) + original.slice(phone.end),
+    ];
+    for (const mutant of mutants) {
+      assert.notEqual(mutant, original);
+      assert.throws(() => check(mutant), assert.AssertionError);
+    }
+  });
 });
 
 function nodes<T extends ts.Node>(root: ts.Node, guard: (n: ts.Node) => n is T): T[] {
@@ -116,19 +119,23 @@ it('убранный !dmOff у любой из двух кнопок списк�
   for (const before of ['!phone && !dmOff && (', 'phone && !dmOff && !selecting']) {
     const original = source(name);
     checkUi(name, original);
-    assert.ok(original.includes(before));
-    const changed = original.replace(before, before.replace('!dmOff && ', ''));
-    assert.throws(() => checkUi(name, changed), assert.AssertionError);
+    counterfact(() => {
+      assert.ok(original.includes(before));
+      const changed = original.replace(before, before.replace('!dmOff && ', ''));
+      assert.throws(() => checkUi(name, changed), assert.AssertionError);
+    });
   }
 });
 it('заглушка главной области не может стать постоянной или исчезнуть из-за инверсии dmOff', () => {
   const name = 'components/MainLayout.tsx';
   const original = source(name);
   checkUi(name, original);
-  assert.ok(original.includes('{dmOff ? ('));
-  for (const replacement of ['{!dmOff ? (', '{true ? (', '{false ? (']) {
-    assert.throws(() => checkUi(name, original.replace('{dmOff ? (', replacement)), assert.AssertionError);
-  }
+  counterfact(() => {
+    assert.ok(original.includes('{dmOff ? ('));
+    for (const replacement of ['{!dmOff ? (', '{true ? (', '{false ? (']) {
+      assert.throws(() => checkUi(name, original.replace('{dmOff ? (', replacement)), assert.AssertionError);
+    }
+  });
 });
 
 function storeFixture(mutate?: (s: string) => string) {
@@ -187,17 +194,19 @@ it('при поддержке бесед loadDms грузит список, open
 });
 it('снятие гейта с загрузки или открытия ЛС обнаруживается на полном модуле стора', async () => {
   await disabledScenario();
-  for (const name of ['loadDms', 'openDmWith']) {
-    await assert.rejects(() => disabledScenario((text) => {
-      const ast = parse('store.ts', text);
-      const action = nodes(ast, ts.isPropertyAssignment).find((n) => n.name.getText(ast) === name);
-      assert.ok(action);
-      const old = action.getText(ast);
-      const changed = old.replace('if (get().convActive)', 'if (true)');
-      assert.notEqual(changed, old);
-      return text.slice(0, action.getStart(ast)) + changed + text.slice(action.end);
-    }), assert.AssertionError);
-  }
+  await counterfact(async () => {
+    for (const name of ['loadDms', 'openDmWith']) {
+      await assert.rejects(() => disabledScenario((text) => {
+        const ast = parse('store.ts', text);
+        const action = nodes(ast, ts.isPropertyAssignment).find((n) => n.name.getText(ast) === name);
+        assert.ok(action);
+        const old = action.getText(ast);
+        const changed = old.replace('if (get().convActive)', 'if (true)');
+        assert.notEqual(changed, old);
+        return text.slice(0, action.getStart(ast)) + changed + text.slice(action.end);
+      }), assert.AssertionError);
+    }
+  });
 });
 
 it('клиент не вызывает старые /dm API, а шлюз не обрабатывает dm.* и read.dm', () => {

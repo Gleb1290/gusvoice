@@ -1,5 +1,7 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
+
 import assert from 'node:assert/strict';
-import { after, before, it } from 'node:test';
+import { it, after, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -165,11 +167,13 @@ it('presence4 перекрывает запоздалый REST offline, пока
     assert.equal(unchanged.seen?.approx, null);
   } finally { await cleanup(); }
 
-  const noFeature = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=without-presence4') as SeenModule).useLastSeen;
-  await assert.rejects(() => expectRestAsIs(noFeature,
-    { serverFeatures: ['lastseen1'], onlineUsers: ['peer'], dmOnlineUsers: [], user: null }, response), assert.AssertionError,
-  'исполняемый мутант перекрывает REST без capability presence4');
-  assert.ok(appliedMutants.has('without-presence4'), 'Vite загрузил реально изменённый hook');
+  await counterfact(async () => {
+    const noFeature = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=without-presence4') as SeenModule).useLastSeen;
+    await assert.rejects(() => expectRestAsIs(noFeature,
+      { serverFeatures: ['lastseen1'], onlineUsers: ['peer'], dmOnlineUsers: [], user: null }, response), assert.AssertionError,
+    'исполняемый мутант перекрывает REST без capability presence4');
+    assert.ok(appliedMutants.has('without-presence4'), 'Vite загрузил реально изменённый hook');
+  }, { timeoutMs: 60000 });
 });
 
 it('без presence4 и при одном dmOnlineUsers ответ REST остаётся без изменений', async () => {
@@ -180,10 +184,12 @@ it('без presence4 и при одном dmOnlineUsers ответ REST оста
   const dmOnly: State = { serverFeatures: ['lastseen1', 'presence4'], onlineUsers: [], dmOnlineUsers: ['peer'], user: null };
   await expectRestAsIs(useLastSeen, dmOnly, response);
 
-  const mutant = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=dm-online-is-global') as SeenModule).useLastSeen;
-  await assert.rejects(() => expectRestAsIs(mutant, dmOnly, response), assert.AssertionError,
-    'исполняемый мутант принимает dmOnlineUsers за глобальное присутствие');
-  assert.ok(appliedMutants.has('dm-online-is-global'), 'Vite загрузил реально изменённый hook');
+  await counterfact(async () => {
+    const mutant = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=dm-online-is-global') as SeenModule).useLastSeen;
+    await assert.rejects(() => expectRestAsIs(mutant, dmOnly, response), assert.AssertionError,
+      'исполняемый мутант принимает dmOnlineUsers за глобальное присутствие');
+    assert.ok(appliedMutants.has('dm-online-is-global'), 'Vite загрузил реально изменённый hook');
+  }, { timeoutMs: 60000 });
 });
 
 it('серверный lastSeen оставляет сокет в сети даже при dmAway, ЛС сохраняет REST offline', async () => {
@@ -200,9 +206,11 @@ it('серверный lastSeen оставляет сокет в сети даж
   await checkServer(useLastSeen);
   const dm = await renderSeen(useLastSeen, state, response, 'dm');
   try { assert.strictEqual(dm.seen, response, 'ЛС возвращает REST как есть при away'); } finally { await cleanup(); }
-  const mutant = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=away-hides-server') as SeenModule).useLastSeen;
-  await assert.rejects(() => checkServer(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('серверный сокет перекрывает away lastSeen'));
-  assert.ok(appliedMutants.has('away-hides-server'));
+  await counterfact(async () => {
+    const mutant = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=away-hides-server') as SeenModule).useLastSeen;
+    await assert.rejects(() => checkServer(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('серверный сокет перекрывает away lastSeen'));
+    assert.ok(appliedMutants.has('away-hides-server'));
+  }, { timeoutMs: 60000 });
 });
 
 it('ЛС не перекрывает REST при away, но после возвращения в окно перекрывает', async () => {
@@ -215,9 +223,11 @@ it('ЛС не перекрывает REST при away, но после возв�
   await check(useLastSeen);
   const back = await renderSeen(useLastSeen, { ...state, dmAwayUsers: [] }, response, 'dm');
   try { assert.equal(back.seen?.online, true); assert.equal(back.seen?.at, null); } finally { await cleanup(); }
-  const mutant = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=away-ignored-in-dm') as SeenModule).useLastSeen;
-  await assert.rejects(() => check(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('away сохраняет REST без подмены'));
-  assert.ok(appliedMutants.has('away-ignored-in-dm'));
+  await counterfact(async () => {
+    const mutant = (await server.ssrLoadModule('/src/useLastSeen.ts?lastseenmutant=away-ignored-in-dm') as SeenModule).useLastSeen;
+    await assert.rejects(() => check(mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('away сохраняет REST без подмены'));
+    assert.ok(appliedMutants.has('away-ignored-in-dm'));
+  }, { timeoutMs: 60000 });
 });
 
 after(async () => {

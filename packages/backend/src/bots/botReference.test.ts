@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { BOT_METHOD_SPECS, BOT_EVENT_SPECS } from './botSpec.js';
 import { document, loadPure, read, reference, referenceSource, replaceOnce, texts, type Reference } from './botReference.harness.js';
@@ -80,16 +81,22 @@ it('R307 контрфакт: игнорирование второго язык�
   const check = (r: Reference) => { const t = texts(); delete t.ru['method.getMe.summary'];
     assert.equal(r.botTextErrors(document(), t).some(e => e.startsWith('text.ru.json:') && e.includes('method.getMe.summary')), true, 'R307_TEXT_RU: обязательный RU-текст проверяется'); };
   check(reference());
+  counterfact(() => {
   assert.throws(() => check(loadPure<Reference>(replaceOnce(referenceSource, 'return errors;', "return errors.filter(e => !e.startsWith('text.ru.json:'));"))),
     e => e instanceof assert.AssertionError && e.message.startsWith('R307_TEXT_RU:') && e.actual === false && e.expected === true);
+  });
 });
 it('R307 контрфакт: разрешение лишних ключей не проходит контракт текстов', () => {
   extraKeys();
+  counterfact(() => {
   assert.throws(() => extraKeys(loadPure<Reference>(replaceOnce(referenceSource, 'if (!used.has(k)) errors.push', 'if (false) errors.push'))),
     e => e instanceof assert.AssertionError && e.message.startsWith('R307_TEXT_EXTRA:') && e.actual === 0 && e.expected === 4);
+  });
 });
 it('R307 контрфакт: потеря выделения обязательности не проходит справочник', () => {
   required();
+  counterfact(() => {
   assert.throws(() => required(loadPure<Reference>(replaceOnce(referenceSource, 'const name = r.has(p) ?', 'const name = false ?'))),
     e => e instanceof assert.AssertionError && e.message.startsWith('R307_REFERENCE_REQUIRED:') && e.actual === false && e.expected === true);
+  });
 });

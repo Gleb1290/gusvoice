@@ -13,7 +13,10 @@ import {
   type FileJob,
 } from '../fileActions';
 import { confirmLaunch } from '../fileLaunch';
-import { attachmentTarget, legacyDownloadWithToast, legacyDownloadsAvailable, ringDownloads, toggleDownload } from '../pcDownloads';
+import {
+  attachmentTarget, desktopFileOpenAvailable, isOpeningDownloadedFile, legacyDownloadWithToast, legacyDownloadsAvailable,
+  openDownloadedFile, ringDownloads, subscribeDownloadedFileOpening, toggleDownload,
+} from '../pcDownloads';
 import { Icon } from './Icon';
 
 /**
@@ -21,8 +24,8 @@ import { Icon } from './Icon';
  * бэкенда с `Content-Disposition: attachment`: загрузку делает браузер или оболочка. Приложение Android (мост медиа,
  * `fileActions.ts`): нажатие на карточку — скачать с прогрессом и открыть системным приложением, «⬇» — в «Загрузки»;
  * пока файл качается, вместо скрепки — кольцо прогресса с крестиком (нажатие — отмена), вместо веса — «пришло / всего».
- * ПК и браузер телефона (G31, 08.10, `pcDownloads.ts`): щелчок по карточке или «⬇» — скачать страницей с тем же кольцом и
- * отменой, потом сохранить, как раньше; средняя кнопка и Ctrl / Shift — ссылка как ссылка.
+ * ПК и браузер телефона (`pcDownloads.ts`): скачивание с кольцом и отменой. В Windows нажатие по карточке открывает
+ * готовый локальный файл; «⬇» сохраняет копию. Средняя кнопка и Ctrl / Shift оставляют переход по ссылке.
  */
 
 /** Идущая загрузка этого вложения (общая для карточки, «⬇» и повторно смонтированной строки). */
@@ -56,24 +59,35 @@ export function ProgressRing({ ratio }: { ratio: number }) {
 /** Карточка файла (не картинка, не видео, не голосовое). `sizeLabel` — вес так, как его пишет лента. */
 export function FileCard({ a, href, sizeLabel }: { a: Attachment; href: string; sizeLabel: string }) {
   const job = useFileJob(a);
+  const desktop = desktopFileOpenAvailable();
+  const key = attachmentKey(a);
+  const opening = useSyncExternalStore(subscribeDownloadedFileOpening, () => desktop && isOpeningDownloadedFile(key), () => false);
   if (!filesViaNative() && ringDownloads()) {
     const onClick = (e: ReactMouseEvent<HTMLAnchorElement>) => {
+      if (desktop && isOpeningDownloadedFile(key)) {
+        e.preventDefault();
+        return;
+      }
       if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
+      const t = attachmentTarget(a);
+      const save = (e.target as Element).closest('.att-file-dl');
       // Приложение со старым WebView (`pcDownloads.legacyDownloadsAvailable`): «⬇» — в «Загрузки», нажатие на карточку — скачать и открыть.
       if (legacyDownloadsAvailable() && !job) {
-        const t = attachmentTarget(a);
-        if ((e.target as Element).closest('.att-file-dl')) legacyDownloadWithToast(t.url, t.name, t.type, 'save');
+        if (save) legacyDownloadWithToast(t.url, t.name, t.type, 'save');
         else void confirmLaunch(a.name).then((ok) => ok && legacyDownloadWithToast(t.url, t.name, t.type, 'open'));
         return;
       }
-      toggleDownload(attachmentTarget(a));
+      if (!save && desktop) void openDownloadedFile(t);
+      else toggleDownload(t);
     };
     return (
       <a
         href={href}
-        className={job ? 'att-file busy' : 'att-file'}
-        title={job ? 'Отменить загрузку' : `Скачать ${a.name}`}
+        className={`att-file${job ? ' busy' : ''}${opening ? ' att-file-opening' : ''}`}
+        title={opening ? 'Открывается…' : job ? 'Отменить загрузку' : desktop ? a.name : `Скачать ${a.name}`}
+        aria-busy={opening || undefined}
+        aria-disabled={opening || undefined}
         onClick={onClick}
         data-att={attachmentKey(a)}
       >
@@ -81,9 +95,9 @@ export function FileCard({ a, href, sizeLabel }: { a: Attachment; href: string; 
           {job ? <ProgressRing ratio={progressRatio(job.loaded, job.total)} /> : <Icon name="paperclip" size={16} />}
         </span>
         <span className="att-file-name">{a.name}</span>
-        <span className="att-file-size">{job ? progressText(job.loaded, job.total) : sizeLabel}</span>
+        <span className="att-file-size">{opening ? 'Открывается…' : job ? progressText(job.loaded, job.total) : sizeLabel}</span>
         {job ? null : (
-          <span className="att-file-dl">
+          <span className="att-file-dl" title={desktop ? 'Скачать' : undefined}>
             <Icon name="download" size={15} />
           </span>
         )}

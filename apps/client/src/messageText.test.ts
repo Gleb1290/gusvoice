@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { createContext, Script } from 'node:vm';
@@ -174,19 +175,21 @@ describe('R282 серверное решение о broadcast не подмен�
     const source = readFileSync(new URL('./messageText.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     const original = loadMessageRenderer(source);
     for (const fixture of nestedBroadcasts) nestedBroadcastContract(original, fixture);
-    const visited = new Set<string>();
-    for (const fixture of nestedBroadcasts) {
-      if (visited.has(fixture.anchor)) continue; // *…* и _…_ делят одну ветку raw.
-      visited.add(fixture.anchor);
-      assert.equal(source.split(fixture.anchor).length - 1, 1, `R282 однозначный якорь: ${fixture.anchor}`);
-      const mutant = loadMessageRenderer(source.replace(fixture.anchor, fixture.anchor.replace(', plainBroadcast)', ')')));
-      const marker = nestedMarker(fixture, '@everyone');
-      assert.throws(() => nestedBroadcastContract(mutant, fixture), (error: unknown) =>
-        error instanceof assert.AssertionError && error.message.split('\n')[0] === marker
-        && error.operator === 'strictEqual' && error.actual === true && error.expected === false,
-      `R282 потеря передачи: ${fixture.anchor}`);
-    }
-    assert.equal(visited.size, 7, 'R282 проверены шесть рекурсивных inline-веток и цитата');
+    counterfact(() => {
+      const visited = new Set<string>();
+      for (const fixture of nestedBroadcasts) {
+        if (visited.has(fixture.anchor)) continue; // *…* и _…_ делят одну ветку raw.
+        visited.add(fixture.anchor);
+        assert.equal(source.split(fixture.anchor).length - 1, 1, `R282 однозначный якорь: ${fixture.anchor}`);
+        const mutant = loadMessageRenderer(source.replace(fixture.anchor, fixture.anchor.replace(', plainBroadcast)', ')')));
+        const marker = nestedMarker(fixture, '@everyone');
+        assert.throws(() => nestedBroadcastContract(mutant, fixture), (error: unknown) =>
+          error instanceof assert.AssertionError && error.message.split('\n')[0] === marker
+          && error.operator === 'strictEqual' && error.actual === true && error.expected === false,
+        `R282 потеря передачи: ${fixture.anchor}`);
+      }
+      assert.equal(visited.size, 7, 'R282 проверены шесть рекурсивных inline-веток и цитата');
+    });
   });
 });
 

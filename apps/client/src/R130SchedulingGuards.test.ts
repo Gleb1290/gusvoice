@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -19,7 +20,7 @@ test('R130 SchedPick не принимает mute: окно отправки б�
     assert.ok(props.members.every(m=>!m.name||m.name.getText(sf)!=='mute'));
     const binding=pick.parameters[0].name;assert.ok(ts.isObjectBindingPattern(binding));assert.ok(binding.elements.every(e=>(e.propertyName??e.name).getText(sf)!=='mute'));
   };
-  verify(schedSource);assert.throws(()=>verify(mutant(schedSource,'export interface SchedPickProps {','export interface SchedPickProps { mute?: boolean;')),assert.AssertionError);
+  verify(schedSource);counterfact(() => { assert.throws(()=>verify(mutant(schedSource,'export interface SchedPickProps {','export interface SchedPickProps { mute?: boolean;')),assert.AssertionError); });
 });
 test('R130 заголовок Отправить позже передаётся и листу телефона, и десктопному диалогу',()=>{
   // Ловит старый заголовок выбора срока и потерю правильной подписи в одной платформе.
@@ -27,8 +28,8 @@ test('R130 заголовок Отправить позже передаётся
     const openings=nodes(pick,(n):n is ts.JsxOpeningElement|ts.JsxSelfClosingElement=>ts.isJsxOpeningElement(n)||ts.isJsxSelfClosingElement(n));
     for(const name of ['BottomSheet','SchedDialog']){const list=openings.filter(n=>n.tagName.getText(sf)===name);assert.equal(list.length,1);const value=attr(list[0],'title')?.initializer;assert.ok(value&&ts.isJsxExpression(value)&&value.expression);assert.ok(ts.isIdentifier(value.expression));assert.equal(value.expression.text,'TITLE');}
   };
-  verify(schedSource);assert.throws(()=>verify(mutant(schedSource,"const TITLE = 'Отправить позже';","const TITLE = 'Выключить на время';")),assert.AssertionError);
-  assert.throws(()=>verify(mutant(schedSource,'<SchedDialog title={TITLE}','<SchedDialog title="Выключить на время"')),assert.AssertionError);
+  verify(schedSource);counterfact(() => { assert.throws(()=>verify(mutant(schedSource,"const TITLE = 'Отправить позже';","const TITLE = 'Выключить на время';")),assert.AssertionError); });
+  counterfact(() => { assert.throws(()=>verify(mutant(schedSource,'<SchedDialog title={TITLE}','<SchedDialog title="Выключить на время"')),assert.AssertionError); });
 });
 test('R130 быстрые варианты по-прежнему вычисляются и выбирают время отправки через commit',()=>{
   // Ловит исчезновение быстрых кнопок после удаления режима mute, а не просто наличие текста в комментарии.
@@ -39,9 +40,9 @@ test('R130 быстрые варианты по-прежнему вычисля�
     const buttons=nodes(maps[0],ts.isJsxOpeningElement).filter(n=>n.tagName.getText(sf)==='button');assert.equal(buttons.length,1);const click=attr(buttons[0],'onClick')?.initializer;assert.ok(click);
     const commits=nodes(click,ts.isCallExpression).filter(call=>ts.isIdentifier(call.expression)&&call.expression.text==='commit');assert.equal(commits.length,1);assert.equal(commits[0].arguments[0]?.getText(sf),'q.at');
   };
-  verify(schedSource);assert.throws(()=>verify(mutant(schedSource,'quick.map((q)','[].map((q)')),assert.AssertionError);
-  assert.throws(()=>verify(mutant(schedSource,'commit(q.at,','commit(now,')),assert.AssertionError);
-  assert.throws(()=>verify(mutant(schedSource,'{q.label}',"{'Вариант'}")),assert.AssertionError);
+  verify(schedSource);counterfact(() => { assert.throws(()=>verify(mutant(schedSource,'quick.map((q)','[].map((q)')),assert.AssertionError); });
+  counterfact(() => { assert.throws(()=>verify(mutant(schedSource,'commit(q.at,','commit(now,')),assert.AssertionError); });
+  counterfact(() => { assert.throws(()=>verify(mutant(schedSource,'{q.label}',"{'Вариант'}")),assert.AssertionError); });
 });
 test('R130 класс desk ставится только полосе Tauri, браузер и телефон его не получают',()=>{
   // Ловит инверсию платформы и перенос трёхстрочной подписи в обычный браузер.
@@ -50,6 +51,6 @@ test('R130 класс desk ставится только полосе Tauri, б�
     assert.ok(ts.isConditionalExpression(phone.whenFalse));const desktop=phone.whenFalse;assert.ok(ts.isCallExpression(desktop.condition));assert.ok(ts.isIdentifier(desktop.condition.expression));assert.equal(desktop.condition.expression.text,'isTauri');assert.equal(desktop.condition.arguments.length,0);
     assert.ok(ts.isStringLiteral(desktop.whenTrue)&&ts.isStringLiteral(desktop.whenFalse));assert.equal(desktop.whenTrue.text,'dm-folders desk');assert.equal(desktop.whenFalse.text,'dm-folders');
   };
-  verify(folderSource);assert.throws(()=>verify(mutant(folderSource,"isTauri() ? 'dm-folders desk'","!isTauri() ? 'dm-folders desk'")),assert.AssertionError);
-  assert.throws(()=>verify(mutant(folderSource,"isTauri() ? 'dm-folders desk' : 'dm-folders'","isTauri() ? 'dm-folders' : 'dm-folders desk'")),assert.AssertionError);
+  verify(folderSource);counterfact(() => { assert.throws(()=>verify(mutant(folderSource,"isTauri() ? 'dm-folders desk'","!isTauri() ? 'dm-folders desk'")),assert.AssertionError); });
+  counterfact(() => { assert.throws(()=>verify(mutant(folderSource,"isTauri() ? 'dm-folders desk' : 'dm-folders'","isTauri() ? 'dm-folders' : 'dm-folders desk'")),assert.AssertionError); });
 });

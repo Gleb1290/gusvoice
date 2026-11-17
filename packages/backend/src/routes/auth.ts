@@ -96,8 +96,8 @@ export const registerBody = z.object({
   displayName: z.string().min(1).max(64, 'Отображаемое имя: максимум 64 символа').optional(),
 });
 
-const loginBody = z.object({ username: z.string(), password: z.string() });
-const verifyBody = z.object({ identifier: z.string(), code: z.string().regex(/^\d{6}$/) });
+const loginBody = z.object({ username: z.string(), password: z.string(), rememberMe: z.boolean().optional() });
+const verifyBody = z.object({ identifier: z.string(), code: z.string().regex(/^\d{6}$/), rememberMe: z.boolean().optional() });
 const resendBody = z.object({ identifier: z.string() });
 // A 2FA code is either a 6-digit TOTP or a backup code like "a1b2-c3d4".
 const anyCode = z.string().min(4).max(20);
@@ -304,8 +304,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (loginGate(updated) === 'pending_approval') {
       return reply.code(403).send({ error: PENDING_APPROVAL_ERROR, reason: 'pending_approval' });
     }
+    // Подтверждение новой почты из настроек тоже заменяет токен. Без нового выбора сохраняем
+    // режим только действующей auth-сессии того же человека и поколения, не чужого/2FA токена.
+    let rememberMe = body.rememberMe;
+    if (rememberMe === undefined && req.headers.authorization?.startsWith('Bearer ')) {
+      try {
+        const current = verifyToken(req.headers.authorization.slice(7));
+        if (current.typ !== '2fa' && current.sub === updated.id && (current.gen ?? 0) === updated.tokenGeneration) {
+          rememberMe = current.rememberMe === true;
+        }
+      } catch { /* Просроченная сессия не мешает подтверждению почты, но не сохраняет долгий вход. */ }
+    }
     const res: AuthResponse = {
-      token: signToken({ sub: updated.id, username: updated.username, gen: updated.tokenGeneration }),
+      token: signToken({ sub: updated.id, username: updated.username, gen: updated.tokenGeneration, rememberMe }),
       user: serializeUser(updated),
     };
     return res;
@@ -357,10 +368,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     // 2FA on: hand back a short-lived challenge instead of a session token. The real token is only
     // issued by /auth/login/totp once a code passes.
     if (row.totpEnabled) {
-      return reply.send({ status: 'totp_required', challenge: signChallengeToken({ sub: row.id, username: row.username }) });
+      return reply.send({ status: 'totp_required', challenge: signChallengeToken({ sub: row.id, username: row.username, rememberMe: body.rememberMe }) });
     }
     const res: AuthResponse = {
-      token: signToken({ sub: row.id, username: row.username, gen: row.tokenGeneration }),
+      token: signToken({ sub: row.id, username: row.username, gen: row.tokenGeneration, rememberMe: body.rememberMe }),
       user: serializeUser(row),
     };
     return res;
@@ -391,8 +402,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(401).send({ error: 'неверный код' });
     }
     await redisPub.del(failKey);
+    // Долгий вход выбирался на шаге пароля: доверяем только подписанному challenge, не телу TOTP.
     const res: AuthResponse = {
-      token: signToken({ sub: row.id, username: row.username, gen: row.tokenGeneration }),
+      token: signToken({ sub: row.id, username: row.username, gen: row.tokenGeneration, rememberMe: claims.rememberMe }),
       user: serializeUser(row),
     };
     return res;
@@ -411,7 +423,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const gen = await bumpTokenGeneration(row.id);
     // Смена пароля гасит сессии и на чужих инстансах (§5.6.1): угонщик не должен остаться гостем.
     await revokeSessionsEverywhere({ userId: row.id, gen }).catch(() => {});
-    return { ok: true, token: signToken({ sub: row.id, username: row.username, gen }) };
+    return { ok: true, token: signToken({ sub: row.id, username: row.username, gen, rememberMe: req.user!.rememberMe }) };
   });
 
   // Log out everywhere: revoke every outstanding token, hand back a fresh one for THIS device.
@@ -435,7 +447,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
      * когда вернётся. Ронять здесь значило бы не выпустить человека даже со своего инстанса.
      */
     await revokeSessionsEverywhere({ userId: row.id, gen }).catch(() => {});
-    return { token: signToken({ sub: row.id, username: row.username, gen }) };
+    return { token: signToken({ sub: row.id, username: row.username, gen, rememberMe: req.user!.rememberMe }) };
   });
 
   // Forgot password — email a reset code. Always 202 (never reveal whether the email is registered).

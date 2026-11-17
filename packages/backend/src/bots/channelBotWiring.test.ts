@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -74,20 +75,24 @@ it('R303 AST всех прод-файлов запрещает обход вхо
 it('R303 AST всех мутаций serverMembers требует memberChanged либо обоснованное исключение', () => memberGuard());
 it('R303 контрфакт прямой публикации из webhooks ловится после original-first', () => {
   channelGuard();
-  const changed = new Map(originals);
-  changed.set('routes/webhooks.ts', originals.get('routes/webhooks.ts')! + "\npublishToChannel('s', 'c', { t: 'message.create', message: synthetic });\n");
-  assert.throws(() => channelGuard(changed), e => e instanceof assert.AssertionError && e.operator === 'deepStrictEqual'
-    && e.message.startsWith('R303 сообщения каналов проходят только общий вход') && JSON.stringify(e.actual) === '["routes/webhooks.ts"]');
+  counterfact(() => {
+    const changed = new Map(originals);
+    changed.set('routes/webhooks.ts', originals.get('routes/webhooks.ts')! + "\npublishToChannel('s', 'c', { t: 'message.create', message: synthetic });\n");
+    assert.throws(() => channelGuard(changed), e => e instanceof assert.AssertionError && e.operator === 'deepStrictEqual'
+      && e.message.startsWith('R303 сообщения каналов проходят только общий вход') && JSON.stringify(e.actual) === '["routes/webhooks.ts"]');
+  });
 });
 it('R303 контрфакт исчезнувшего memberChanged из invites ловится после original-first', () => {
   memberGuard();
-  const raw = originals.get('routes/invites.ts')!;
-  const file = parse('invites.ts', raw);
-  const calls = nodes(file, ts.isCallExpression).filter(n => n.expression.getText(file) === 'memberChanged');
-  assert.ok(calls.length > 0);
-  let changedRaw = raw;
-  for (const call of calls.sort((a, b) => b.pos - a.pos)) changedRaw = changedRaw.slice(0, call.expression.getStart(file)) + 'lostMemberChanged' + changedRaw.slice(call.expression.end);
-  const changed = new Map(originals); changed.set('routes/invites.ts', changedRaw);
-  assert.throws(() => memberGuard(changed), e => e instanceof assert.AssertionError && e.operator === 'deepStrictEqual'
-    && e.message.startsWith('R303 мутация членства не обходит memberChanged') && JSON.stringify(e.actual) === '["routes/invites.ts"]');
+  counterfact(() => {
+    const raw = originals.get('routes/invites.ts')!;
+    const file = parse('invites.ts', raw);
+    const calls = nodes(file, ts.isCallExpression).filter(n => n.expression.getText(file) === 'memberChanged');
+    assert.ok(calls.length > 0);
+    let changedRaw = raw;
+    for (const call of calls.sort((a, b) => b.pos - a.pos)) changedRaw = changedRaw.slice(0, call.expression.getStart(file)) + 'lostMemberChanged' + changedRaw.slice(call.expression.end);
+    const changed = new Map(originals); changed.set('routes/invites.ts', changedRaw);
+    assert.throws(() => memberGuard(changed), e => e instanceof assert.AssertionError && e.operator === 'deepStrictEqual'
+      && e.message.startsWith('R303 мутация членства не обходит memberChanged') && JSON.stringify(e.actual) === '["routes/invites.ts"]');
+  });
 });

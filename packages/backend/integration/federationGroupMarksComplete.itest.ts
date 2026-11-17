@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -114,11 +115,15 @@ test('R217 обычная 1:1 не получает новый признак п
 });
 test('R217 контрфакт: обход marksWhole ошибочно обещает полноту без прослушиваний', async () => {
   await noOnce();
-  await assert.rejects(() => noOnce(mutation('marks && (await marksWhole(instanceId))', 'marks')),
-    killed('без dm2once нельзя объявлять срез полным', true, undefined));
+  await counterfact(async () => {
+    await assert.rejects(() => noOnce(mutation('marks && (await marksWhole(instanceId))', 'marks')),
+      killed('без dm2once нельзя объявлять срез полным', true, undefined));
+  });
 });
 test('R217 контрфакт: признак при marks=null ошибочно разрешает снятие у старого соседа', async () => {
   await noMarks();
-  await assert.rejects(() => noMarks(mutation('marks && (await marksWhole(instanceId))', '(await marksWhole(instanceId))')),
-    killed('без dmgroupmarks1 полнота не объявляется', true, undefined));
+  await counterfact(async () => {
+    await assert.rejects(() => noMarks(mutation('marks && (await marksWhole(instanceId))', '(await marksWhole(instanceId))')),
+      killed('без dmgroupmarks1 полнота не объявляется', true, undefined));
+  });
 });

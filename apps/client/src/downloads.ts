@@ -17,7 +17,7 @@
  * Self-gates to desktop: on web every function here is a no-op and the browser keeps doing its thing.
  */
 import { onDownloadEvents, pickFolder, setNativeDownloadDir, type DownloadAsk } from './desktopWindow';
-import { noteSavedFile } from './downloadList';
+import { finishNativeSave, nativeSaveAcknowledged, noteSavedFile, waitForNativeSave } from './downloadList';
 import { showInFolder } from './pcDownloads';
 import { toast } from './toast';
 
@@ -62,6 +62,11 @@ const queued: DownloadAsk[] = [];
 
 /** One picker for a burst of downloads: everything asked while the dialog is open replays after it. */
 async function handleNeedDir(ask: DownloadAsk): Promise<void> {
+  if (!ask.url) {
+    toast('error', 'Не удалось скачать файл', ask.name);
+    return;
+  }
+  nativeSaveAcknowledged(ask.url);
   queued.push(ask);
   if (asking) return;
   asking = true;
@@ -74,12 +79,16 @@ async function handleNeedDir(ask: DownloadAsk): Promise<void> {
     const dir = await chooseDownloadDir();
     const batch = queued.splice(0);
     if (!dir) {
+      batch.forEach((q) => finishNativeSave(q.url));
       const what = batch.length > 1 ? `${batch.length} файл(ов)` : (batch[0]?.name ?? '');
       toast('error', 'Скачивание отменено', `${what} — папка для загрузок не выбрана`);
       return;
     }
     toast('success', 'Папка для загрузок выбрана', `${dir} · изменить — Настройки → Десктоп`);
-    batch.forEach((q) => reissue(q.url, q.name));
+    batch.forEach((q) => {
+      waitForNativeSave(q.url);
+      reissue(q.url, q.name);
+    });
   } finally {
     asking = false;
   }
@@ -94,15 +103,19 @@ export function initDownloads(): void {
   // Hand the shell the folder we already know about — it starts every run with none.
   setNativeDownloadDir(getDownloadDir());
   onDownloadEvents({
-    // Only the terminal states are toasted: attachments are usually small, so a "started" toast would
-    // fire and be replaced a blink later. The started event still exists for a future progress UI.
+    // Only the terminal states are toasted. A started save owns its blob until completion.
+    started: (d) => nativeSaveAcknowledged(d.url),
     // «Показать в папке» (G59, tdesktop `_saveMsg` → `File::ShowInFolder`): оболочка сообщила путь — запоминаем (для пунктов меню и
     // «Загрузок») и даём ссылку в тосте.
     done: (d) => {
       if (d.path) noteSavedFile({ url: d.url, path: d.path });
+      finishNativeSave(d.url);
       toast('success', 'Файл скачан', d.dir ? `${d.name} → ${d.dir}` : d.name, d.path ? { action: { label: 'Показать в папке', onClick: () => showInFolder(d.path) } } : undefined);
     },
-    failed: (d) => toast('error', 'Не удалось скачать файл', `${d.name} — загрузка прервана`),
+    failed: (d) => {
+      finishNativeSave(d.url);
+      toast('error', 'Не удалось скачать файл', `${d.name} — загрузка прервана`);
+    },
     needDir: (a) => void handleNeedDir(a),
   });
 }

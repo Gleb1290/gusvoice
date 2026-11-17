@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as rules from './stageOrderRules';
+import { testVmImports } from './testVmImports';
 
 const source = readFileSync(new URL('./stageOrderRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 type Rules = typeof rules;
@@ -11,13 +13,15 @@ const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 function load(raw: string): Rules {
   const module = { exports: {} as Rules };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, require: (id: string) => { throw Error(`Неизвестный импорт ${id}`); } });
+    { module, exports: module.exports, require: testVmImports(new URL('./stageOrderRules.ts', import.meta.url), {}) });
   return module.exports;
 }
 function mutation(anchor: string, replacement: string, check: (r: Rules) => void) {
-  assert.equal(source.split(anchor).length - 1, 1, 'якорь уникален');
   check(rules);
-  assert.throws(() => check(load(source.replace(anchor, replacement))), assert.AssertionError);
+  counterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь уникален');
+    assert.throws(() => check(load(source.replace(anchor, replacement))), assert.AssertionError);
+  });
 }
 function apply(r: Rules) {
   assert.deepEqual(plain(r.applyStageOrder(['a', 'b', 'c', 'a'], ['b', 'gone', 'b', 'a'])), ['b', 'a', 'c']);

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -59,8 +60,10 @@ it('R210 GET instance отдаёт fedName готовой федерации и 
 // Удалённый gate не должен раскрывать подпись выключенной федерации и нарушать парный успешный ответ.
 it('R210 снятие ready-проверки fedName обнаруживается настоящим ответом GET instance', async () => {
   await instance('disabled', 'Для соседей'); await instance('ready', 'Для соседей');
-  const anchor = 'fed ? (await readInstanceMeta()).name : null'; assert.equal(source.split(anchor).length - 1, 1);
+  await counterfact(async () => {
+const anchor = 'fed ? (await readInstanceMeta()).name : null'; assert.equal(source.split(anchor).length - 1, 1);
   await assert.rejects(instance('disabled', 'Для соседей', source.replace(anchor, '(await readInstanceMeta()).name')),
     e => e instanceof assert.AssertionError && e.message.startsWith('публичная подпись федерации выдаётся только готовому инстансу')
       && e.operator === 'strictEqual' && e.actual === 'Для соседей' && e.expected === null);
+});
 });

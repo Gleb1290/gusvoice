@@ -1,105 +1,84 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import ts from 'typescript';
-import { viewportSafe } from './popover.js';
+import { placeByPoint, viewportSafe } from './popover.ts';
 
-const source = readFileSync(new URL('./popover.ts', import.meta.url), 'utf8');
 before(() => GlobalRegistrator.register({ url: 'http://localhost/' }));
 after(() => GlobalRegistrator.unregister());
 
-// Разбирается только AST присваивания, никакие фрагменты приложения не исполняются.
-function probeCss(raw: string): string {
-  const file = ts.createSourceFile('popover.ts', raw, ts.ScriptTarget.Latest, true);
-  const fn = file.statements.find((s): s is ts.FunctionDeclaration =>
-    ts.isFunctionDeclaration(s) && s.name?.text === 'viewportSafe');
-  assert.ok(fn?.body);
-  const assignments: ts.BinaryExpression[] = [];
-  const visit = (node: ts.Node) => {
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      node.left.getText(file) === 'probe.style.cssText') assignments.push(node);
-    ts.forEachChild(node, visit);
-  };
-  visit(fn.body);
-  assert.equal(assignments.length, 1, 'единственное присваивание CSS настоящей пробы');
-  const literal = (node: ts.Expression): string => {
-    if (ts.isStringLiteral(node)) return node.text;
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken)
-      return literal(node.left) + literal(node.right);
-    assert.fail('CSS пробы должен быть явно задан строковыми литералами');
-  };
-  return literal(assignments[0].right);
-}
-
-function checkProbe(css: string) {
-  for (const [side, native] of [['top', 'sat'], ['bottom', 'sab'], ['left', 'sal'], ['right', 'sar']]) {
-    assert.match(css, new RegExp(`(?:^|;)\\s*padding-${side}\\s*:\\s*max\\(env\\(safe-area-inset-${side}\\),\\s*var\\(--gv-${native},\\s*0px\\)\\)\\s*(?:;|$)`),
-      `${side}: проба измеряет максимум браузерной и native-вставки`);
-  }
-}
-
-function measure(top: number, bottom: number, left: number, right: number, zoom = 1) {
+type Measurement = {
+  top?: number; bottom?: number; left?: number; right?: number; zoom?: number; titlebar?: number;
+  width?: number; height?: number; visual?: { width: number; height: number };
+};
+function measure({ top = 0, bottom = 0, left = 0, right = 0, zoom = 1, titlebar = 0,
+  width = 900, height = 600, visual }: Measurement = {}) {
   const restore: Array<() => void> = [];
   const patch = (target: object, key: string, descriptor: PropertyDescriptor) => {
     const old = Object.getOwnPropertyDescriptor(target, key);
     Object.defineProperty(target, key, { configurable: true, ...descriptor });
     restore.push(() => { if (old) Object.defineProperty(target, key, old); else Reflect.deleteProperty(target, key); });
   };
-  const written = new WeakMap<Element, string>();
   const create = document.createElement.bind(document);
-  let probe: Element | undefined;
+  let probe: HTMLElement | undefined;
   let measurements = 0;
   const children = document.body.childElementCount;
-  patch(document.documentElement, 'clientWidth', { value: 900 });
-  patch(document.documentElement, 'clientHeight', { value: 600 });
-  patch(window, 'visualViewport', { value: null });
-  patch(document, 'createElement', { value: (tag: string) => {
-    const element = create(tag);
-    probe = element;
-    // Перехватываем ДО парсера HappyDOM: paddingLeft из style здесь всегда был бы пустым.
-    patch(element.style, 'cssText', { get: () => written.get(element) ?? '',
-      set: (css: string) => { written.set(element, css); } });
-    return element;
-  } });
+  patch(document.documentElement, 'clientWidth', { value: width });
+  patch(document.documentElement, 'clientHeight', { value: height });
+  patch(window, 'visualViewport', { value: visual ?? null });
+  patch(document, 'createElement', { value: (tag: string) => { probe = create(tag); return probe; } });
+  // HappyDOM не вычисляет env()/max(): здесь граница браузерного измерения,
+  // а перевод viewport, учёт вставок и размещение меню — настоящие продуктовые функции.
   patch(globalThis, 'getComputedStyle', { value: (element: Element) => {
     if (element === document.documentElement) return { zoom: String(zoom) };
-    assert.ok(element === probe, 'измеряется созданная проба');
-    assert.ok(document.body.contains(element), 'измерение только после подключения к DOM');
-    checkProbe(written.get(element) ?? '');
+    assert.equal(element, probe);
+    assert.ok(document.body.contains(element), 'измеряется подключённый к DOM элемент');
     measurements++;
-    return { paddingTop: `${top}px`, paddingBottom: `${bottom}px`, paddingLeft: `${left}px`, paddingRight: `${right}px` };
+    return { paddingTop: `${top}px`, paddingBottom: `${bottom}px`, paddingLeft: `${left}px`, paddingRight: `${right}px`, marginTop: `${titlebar}px` };
   } });
   try {
     const result = viewportSafe();
     assert.equal(measurements, 1);
-    assert.equal(document.body.childElementCount, children, 'после замера проба удалена');
+    assert.equal(document.body.childElementCount, children, 'проба не остаётся в DOM после замера');
     assert.equal(probe?.isConnected, false);
     return result;
-  } finally { for (const undo of restore.reverse()) undo(); }
+  } finally {
+    probe?.remove();
+    for (const undo of restore.reverse()) undo();
+  }
 }
 
-it('R120 проба без вставок сохраняет прежний вьюпорт без лишних left/top', () => {
-  assert.deepEqual(measure(0, 0, 0, 0), { vw: 900, vh: 600 });
+it('без системных вставок доступно всё окно без лишних смещений', () => {
+  assert.deepEqual(measure(), { vw: 900, vh: 600 });
 });
-it('R120 проба с левой навигацией сдвигает начало, но не правую кромку', () => {
-  assert.deepEqual(measure(0, 0, 48, 0), { vw: 900, vh: 600, left: 48 });
+it('навигация слева сдвигает начало доступной области, сохраняя правую кромку', () => {
+  assert.deepEqual(measure({ left: 48 }), { vw: 900, vh: 600, left: 48 });
 });
-it('R120 проба с правой навигацией сокращает правую кромку без левого сдвига', () => {
-  assert.deepEqual(measure(0, 0, 0, 48), { vw: 852, vh: 600 });
+it('навигация справа сокращает правую кромку без левого сдвига', () => {
+  assert.deepEqual(measure({ right: 48 }), { vw: 852, vh: 600 });
 });
-it('R120 четыре разных вставки не путаются и измеряются в layout-единицах при zoom', () => {
-  // Разные значения ловят перестановку сторон; CSS padding не надо повторно делить на zoom.
-  assert.deepEqual(measure(32, 24, 48, 36, 1.5), { vw: 564, vh: 376, top: 32, left: 48 });
+it('четыре разные вставки сохраняют свои стороны и не масштабируются повторно', () => {
+  assert.deepEqual(measure({ top: 32, bottom: 24, left: 48, right: 36, zoom: 1.5 }),
+    { vw: 564, vh: 376, top: 32, left: 48 });
 });
-it('R120 страж пробы отвергает удаление каждой боковой декларации и native fallback', () => {
-  checkProbe(probeCss(source));
-  for (const [side, native] of [['left', 'sal'], ['right', 'sar']]) {
-    const declaration = `padding-${side}:max(env(safe-area-inset-${side}), var(--gv-${native}, 0px))`;
-    for (const replacement of ['', `padding-${side}:env(safe-area-inset-${side})`]) {
-      const mutant = source.replace(declaration, replacement);
-      assert.notEqual(mutant, source, 'контрфакт меняет настоящий исходник');
-      assert.throws(() => checkProbe(probeCss(mutant)), assert.AssertionError);
-    }
-  }
+it('полоса окна удерживает высокое меню ниже себя с зазором', () => {
+  const vp = measure({ titlebar: 32 });
+  assert.deepEqual(vp, { vw: 900, vh: 600, top: 32 });
+  assert.equal(placeByPoint(400, 590, 200, 580, 8, vp).top, 40);
+});
+it('без полосы окна высокое меню может подниматься к прежней верхней границе', () => {
+  const vp = measure();
+  assert.equal(placeByPoint(400, 590, 200, 580, 8, vp).top, 10);
+});
+it('полоса окна складывается с верхней системной вставкой при увеличенном интерфейсе', () => {
+  assert.deepEqual(measure({ top: 24, bottom: 12, left: 6, right: 4, zoom: 1.5, titlebar: 32 }),
+    { vw: 596, vh: 388, top: 56, left: 6 });
+});
+it('на телефоне клавиатура сокращает доступное место, меню остаётся над нижней вставкой', () => {
+  const vp = measure({ width: 390, height: 844, visual: { width: 390, height: 420 }, top: 24, bottom: 16 });
+  assert.deepEqual(vp, { vw: 390, vh: 404, top: 24 });
+  const placed = placeByPoint(380, 400, 200, 180, 8, vp);
+  assert.deepEqual(placed, { left: 180, top: 216 });
+});
+it('visual viewport больше окна не расширяет доступную область', () => {
+  assert.deepEqual(measure({ visual: { width: 1000, height: 700 } }), { vw: 900, vh: 600 });
 });

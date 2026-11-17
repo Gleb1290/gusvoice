@@ -1,13 +1,16 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports';
 import * as rules from './streamPipRules';
 import type { PipTrackRef } from './streamPip';
 
-const source = readFileSync(new URL('./streamPip.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const sourceUrl = new URL('./streamPip.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 type PipWindow = EventTarget & { document: Document; innerWidth: number; innerHeight: number; closes: number; closed: boolean; close(): void };
 type PipState = {
   pipStreams: readonly string[];
@@ -110,7 +113,7 @@ async function fixture(check: (f: {
         getItem: (key: string) => { if (options.storageError) throw new Error('storage'); return saved.get(key) ?? null; },
         setItem: (key: string, value: string) => { if (options.storageError) throw new Error('storage'); saved.set(key, value); saves.push(key); },
       },
-      require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `R254 описана граница ${id}`); return deps[id]; },
+      require: testVmImports(sourceUrl, deps),
     });
     api = module.exports;
     assert.equal(api.useStreamPipWindow(), null);
@@ -285,8 +288,11 @@ for (const [label, from, to, check, message] of [
 ] as const) {
   // Класс ошибки: потеря стилей, очистки, размера или добавления обязана быть замечена сценарием.
   it(`R254 контрфакт окна: ${label}`, async () => {
-    await check(); assert.equal(source.split(from).length - 1, 1, 'единственный адресный якорь');
-    await assert.rejects(check(source.replace(from, to)), error => error instanceof assert.AssertionError && error.message.startsWith(message));
+    await check();
+    await counterfact(async () => {
+      assert.equal(source.split(from).length - 1, 1, 'единственный адресный якорь');
+      await assert.rejects(check(source.replace(from, to)), error => error instanceof assert.AssertionError && error.message.startsWith(message));
+    });
   });
 }
 
@@ -365,9 +371,12 @@ for (const [label, from, to, message] of [
 ] as const) {
   // Класс ошибки: успешный requestWindow не маскирует неверный порядок IPC или передачу его размера.
   it(`R255 контрфакт стыковки: ${label}`, async () => {
-    await desktopArm(); assert.equal(source.split(from).length - 1, 1, 'единственный адресный якорь');
-    await assert.rejects(desktopArm(source.replace(from, to)), error =>
-      error instanceof assert.AssertionError && error.message.startsWith(message));
+    await desktopArm();
+    await counterfact(async () => {
+      assert.equal(source.split(from).length - 1, 1, 'единственный адресный якорь');
+      await assert.rejects(desktopArm(source.replace(from, to)), error =>
+        error instanceof assert.AssertionError && error.message.startsWith(message));
+    });
   });
 }
 
@@ -449,8 +458,10 @@ it('R256 удаление показа запасного пути закрыв�
 // Класс ошибки: без проверки отсутствия документа непоследний id удаляется, но video PiP не закрывается.
 it('R256 контрфакт удаления: без !pipWindow запасное окно не закрывается при нескольких id', async () => {
   await removedFallback();
-  const from = 'if (!pipWindow || st.pipStreams.length <= 1)';
-  assert.equal(source.split(from).length - 1, 1, 'единственный адресный якорь');
-  await assert.rejects(removedFallback(source.replace(from, 'if (st.pipStreams.length <= 1)')), error =>
-    error instanceof assert.AssertionError && error.message.startsWith('R256 удаление в запасном пути закрывает'));
+  await counterfact(async () => {
+    const from = 'if (!pipWindow || st.pipStreams.length <= 1)';
+    assert.equal(source.split(from).length - 1, 1, 'единственный адресный якорь');
+    await assert.rejects(removedFallback(source.replace(from, 'if (st.pipStreams.length <= 1)')), error =>
+      error instanceof assert.AssertionError && error.message.startsWith('R256 удаление в запасном пути закрывает'));
+  });
 });

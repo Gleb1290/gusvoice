@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -36,13 +37,14 @@ it('R238 плашка незнакомца при ширине до 700px сох
   check();
 });
 it('R238 потеря nowrap ellipsis или min-width ловится внутри нужного media, не подменяется комментарием или правилом ПК', () => {
-  const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
   for (const [selector, property, value, prefix] of [
     ['.stranger-bar-btn', 'white-space', 'nowrap', 'R238 stranger-nowrap:'],
     ['.stranger-bar-btn', 'text-overflow', 'ellipsis', 'R238 stranger-ellipsis:'],
     ['.stranger-bar-actions', 'min-width', '0', 'R238 stranger-min:'],
   ]) {
     check();
+    counterfact(() => {
+    const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
     const selected = phoneBlocks(clean).filter(block => block.header === selector);
     assert.equal(selected.length, 1);
     const anchor = `${selector} {${selected[0].body}}`;
@@ -52,5 +54,6 @@ it('R238 потеря nowrap ellipsis или min-width ловится внутр
     const mutant = clean.replace(anchor, anchor.replace(declaration, '')) + `\n/* ${anchor} */\n${selector} { ${declaration} }`;
     assert.throws(() => check(mutant), e => e instanceof assert.AssertionError && e.message.startsWith(prefix) &&
       e.operator === 'strictEqual' && e.actual === undefined && e.expected === value);
+    });
   }
 });

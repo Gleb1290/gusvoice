@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -82,7 +83,9 @@ async function resumeCase(api = chunks) {
 it('R127 после обрыва тот же File продолжает сессию только недостающим куском', async () => {
   // Пересоздание сессии теряло бы уже отправленные байты после краткого обрыва сети.
   await resumeCase();
-  await assert.rejects(resumeCase(changed('    sessions.set(file, { convId, uploadId: r.uploadId });', '')), /продолжает прежнюю сессию/);
+  await counterfact(async () => {
+    await assert.rejects(resumeCase(changed('    sessions.set(file, { convId, uploadId: r.uploadId });', '')), /продолжает прежнюю сессию/);
+  });
 });
 it('R131 404 статуса и сборки создают новую сессию, другой объект File не подхватывает чужую', async () => {
   // Забытый сервером upload и другой файл должны начать заново, а не доливаться в старый объект.
@@ -118,7 +121,9 @@ async function assemblyCase(api=chunks){
 it('R131 202 сборки опрашивается с ASSEMBLY_POLL_MS до настоящего вложения',async()=>{
   // Ответ «собирается» не является вложением и не должен уходить в отправку сообщения.
   await assemblyCase();
-  await assert.rejects(assemblyCase(changed('      if (!isAssembling(r)) return r;','      return r;')),/не выдаётся за готовое вложение/);
+  await counterfact(async () => {
+    await assert.rejects(assemblyCase(changed('      if (!isAssembling(r)) return r;','      return r;')),/не выдаётся за готовое вложение/);
+  });
 });
 async function busyCase(api=chunks){
   const file=fileOf(4);const s=server(file,{part:async(_n,attempt)=>{
@@ -133,7 +138,9 @@ async function busyCase(api=chunks){
 it('R131 429 и 503 с Retry-After ждут указанные секунды, не расходуя повторы обрыва',async()=>{
   // Шесть ответов «занят» должны оставить обычную сетевую квоту попыток нетронутой.
   await busyCase();
-  await assert.rejects(busyCase(changed('          attempt--;','')),e=>e instanceof TypeError);
+  await counterfact(async () => {
+    await assert.rejects(busyCase(changed('          attempt--;','')),e=>e instanceof TypeError);
+  });
 });
 it('R131 BUSY_RETRIES ровно 60 дополнительных ожиданий, бесконечно занятый сервер не зависает',async()=>{
   // Дополнительные ожидания ограничены: очередь должна вернуть сетевую ошибку, а не крутиться вечно.
@@ -166,9 +173,11 @@ async function recoverCase(api=chunks){
 it('R131 потерянный ответ сборки после 404 статуса восстанавливается complete до нового POST',async()=>{
   // Повторный старт после уже оплаченной сборки создавал бы второй файл и повторно расходовал квоту.
   await recoverCase();
-  await assert.rejects(recoverCase(changed(
-    "      const att = await assemble(prevPath).catch((e: { status?: number }) => {\n        if (e?.status === 404) return null;\n        throw e;\n      });",
-    '      const att = null;')),/не создаёт новую сессию/);
+  await counterfact(async () => {
+    await assert.rejects(recoverCase(changed(
+      "      const att = await assemble(prevPath).catch((e: { status?: number }) => {\n        if (e?.status === 404) return null;\n        throw e;\n      });",
+      '      const att = null;')),/не создаёт новую сессию/);
+  });
 });
 async function progressFailureCase(api=chunks){
   const file=fileOf(4);const s=server(file,{part:async(_n,attempt,_body,opts)=>{
@@ -184,7 +193,9 @@ async function progressFailureCase(api=chunks){
 it('R131 половина оборванного куска не откатывает показанное назад, повтор догоняет прогресс',async()=>{
   // Репро R127 [0,2,0,…] теперь закреплён против возврата регрессии.
   await progressFailureCase();
-  await assert.rejects(progressFailureCase(changed('shown = Math.max(shown, Math.min(sum, file.size));','shown = Math.min(sum, file.size);')),/полоса не идёт назад/);
+  await counterfact(async () => {
+    await assert.rejects(progressFailureCase(changed('shown = Math.max(shown, Math.min(sum, file.size));','shown = Math.min(sum, file.size);')),/полоса не идёт назад/);
+  });
 });
 it('R127 409 сборки перечитывает статус и доливает только исчезнувший кусок', async () => {
   // Ответ успешного PUT мог потеряться у сервера: нельзя собирать неполный файл или лить всё снова.
@@ -210,7 +221,9 @@ async function abortCase(api = chunks) {
 it('R127 отмена обрывает транспорт, отдаёт aborted и удаляет сессию без повторов', async () => {
   // Закрытие отправки должно освобождать серверную multipart-загрузку, а не оставлять мусор.
   await abortCase();
-  await assert.rejects(abortCase(changed("    void deps.req('DELETE', path).catch(() => {});", '')), /сессия удалена/);
+  await counterfact(async () => {
+    await assert.rejects(abortCase(changed("    void deps.req('DELETE', path).catch(() => {});", '')), /сессия удалена/);
+  });
 });
 it('R127 заранее отменённый сигнал не начинает ни сессию, ни PUT', async () => {
   // Отменённая ещё до старта очередь не должна расходовать серверный суточный бюджет.
@@ -227,7 +240,9 @@ async function rejectedPartCase(api = chunks) {
 it('R127 413 куска не повторяется и удаляет бесполезную сессию', async () => {
   // Неисправимый ответ 4xx должен закончить отправку немедленно, без пяти повторов.
   await rejectedPartCase();
-  await assert.rejects(rejectedPartCase(changed('  return status === undefined || status === 408 || status === 429 || status >= 500;', '  return true;')));
+  await counterfact(async () => {
+    await assert.rejects(rejectedPartCase(changed('  return status === undefined || status === 408 || status === 429 || status >= 500;', '  return true;')));
+  });
 });
 it('R127 зависший кусок отменяется по STALL_MS и повторяется с нулевой реальной паузой', async t => {
   // Транспорт может молчать вечно: сторож должен оборвать попытку сам, без долгого тестового sleep.

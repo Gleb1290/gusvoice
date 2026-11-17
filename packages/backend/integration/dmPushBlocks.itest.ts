@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { createDecipheriv, createECDH, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -273,6 +274,7 @@ test('регистрация устройства отвергает плохо�
   assert.equal((await read())[0].tz, 'Europe/Moscow');
   await registerPushDevice('a', 'tz-phone', 'https://ntfy.example.test/utc', 'android', null, null, 'UTC');
   assert.equal((await read())[0].tz, 'UTC');
+  await counterfact(async () => {
   const raw = readFileSync(new URL('../src/push.ts', import.meta.url), 'utf8');
   const coalesce = 'tz: sql`coalesce(${tz}, ${pushDevices.tz})`';
   assert.ok(raw.includes(coalesce));
@@ -284,51 +286,7 @@ test('регистрация устройства отвергает плохо�
   const noValidation = await compilePush(raw.replace(validation, 'const tz = tzIn;'));
   await noValidation.registerPushDevice('a', 'tz-invalid', 'https://ntfy.example.test/invalid-new', 'android', null, null, 'Not/AZone');
   assert.equal((await t.raw.query<{ tz: string }>("SELECT tz FROM push_devices WHERE device_id='tz-invalid'")).rows[0].tz, 'Not/AZone', 'контрфакт без проверки хранит неподдерживаемый пояс');
-});
-
-test('ночной повтор ждёт 11:00 с прежним номером и firstAt, дневной и без пояса доставляются', async () => {
-  await t.raw.exec(`INSERT INTO push_devices (id,user_id,device_id,endpoint,platform,tz) VALUES
-    ('tz-a','a','phone','https://ntfy.example.test/a','android','Europe/Moscow');
-    UPDATE users SET notify_repeat=60 WHERE id='a'`);
-  const raw = readFileSync(new URL('../src/push.ts', import.meta.url), 'utf8');
-  const held: unknown[][] = [];
-  const defer = await import('../src/pushDefer.js');
-  const push = await compilePush(raw, { './pushDefer.js': { ...defer, recipientActive: () => false,
-    postponeRepeatPush: async (...args: unknown[]) => { held.push(args); }, scheduleRepeatPush: async () => {} } });
-  const originalNow = Date.now;
-  const payload = { type: 'dm' as const, title: 'Б', body: 'текст', dmId: 'dm', key: 10 };
-  const at = Date.parse('2026-10-09T20:30:00Z');
-  try {
-    Date.now = () => at;
-    await push.sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true, repeat: 2, firstAt: at - 3600_000 });
-    assert.equal(posted.length, 0);
-    assert.equal(held.length, 1);
-    const [item, now, wait] = held[0] as [{ uid: string; repeat: number; firstAt: number }, number, number];
-    assert.equal(item.uid, 'a'); assert.equal(item.repeat, 2); assert.equal(item.firstAt, at - 3600_000);
-    assert.equal(now, at); assert.equal(wait, 11.5 * 3600_000);
-    const nightGuard = 'if (opts.repeat && all.length > 0) {';
-    assert.ok(raw.includes(nightGuard));
-    const noNight = await compilePush(raw.replace(nightGuard, 'if (false) {'), { './pushDefer.js': { ...defer, recipientActive: () => false, scheduleRepeatPush: async () => {} } });
-    await noNight.sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true, repeat: 2, firstAt: at - 3600_000 });
-    assert.equal(posted.length, 1, 'контрфакт без ночного окна действительно отправляет повтор');
-    posted.length = 0;
-    await push.sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true });
-    assert.equal(posted.length, 1, 'первое сообщение ночью не задерживается');
-    posted.length = 0;
-    held.length = 0;
-    Date.now = () => Date.parse('2026-10-09T09:00:00Z');
-    await push.sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true, repeat: 2 });
-    assert.equal(posted.length, 1); assert.equal(held.length, 0);
-    posted.length = 0;
-    Date.now = () => at;
-    await t.raw.exec("UPDATE push_devices SET tz=NULL WHERE user_id='a'");
-    await push.sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true, repeat: 2 });
-    assert.equal(posted.length, 1); assert.equal(held.length, 0);
-    posted.length = 0;
-    await t.raw.exec("UPDATE push_devices SET tz='Europe/Moscow' WHERE user_id='a'");
-    await push.sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true, repeat: 2, firstAt: at - 23 * 3600_000 });
-    assert.equal(posted.length, 0); assert.equal(held.length, 0, 'утро за пределами суток не продлевает цепочку');
-  } finally { Date.now = originalNow; }
+  });
 });
 
 test('серверный черновик виден и журналируется только владельцу, повтор другого устройства молчит', async () => {
@@ -524,91 +482,12 @@ test('R304 контрфакт выключенной keyless-редакции л
     assert.equal(posted.length, 1);
     assert.equal(JSON.parse(String(posted[0].init.body)).title, 'GusVoice', 'R304 keyless скрывает имя отправителя');
   };
-  await probe(raw); const from = 'const REDACT_KEYLESS = true;'; assert.equal(raw.split(from).length - 1, 1);
+  await probe(raw); await counterfact(async () => {
+  const from = 'const REDACT_KEYLESS = true;'; assert.equal(raw.split(from).length - 1, 1);
   await assert.rejects(probe(raw.replace(from, 'const REDACT_KEYLESS = false;')), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' && e.message.split(/\r?\n/, 1)[0] === 'R304 keyless скрывает имя отправителя'
     && e.actual === 'Личное имя' && e.expected === 'GusVoice');
-});
-
-test('R112 номер повтора есть только в отправке, не загрязняет очередь и сохраняется без звука', async () => {
-  const keys = pushKeys();
-  await t.raw.query(`INSERT INTO push_devices (id,user_id,device_id,endpoint,platform,p256dh,auth) VALUES
-    ('rep-secure','a','secure','https://ntfy.example.test/rep-secure','android',$1,$2),
-    ('rep-legacy','a','legacy','https://ntfy.example.test/rep-legacy','android',null,null)`,
-  [keys.public.p256dh, keys.public.auth]);
-  await t.raw.exec("UPDATE users SET notify_repeat=5 WHERE id='a'");
-  const payload = { type: 'dm' as const, title: 'Б', body: 'текст', dmId: 'dm', key: 10, mid: 'repeat-mid' };
-  const source = { scope: 'dm_user' as const, targetId: 'b' };
-  const raw = readFileSync(new URL('../src/push.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const defer = await import('../src/pushDefer.js');
-  const queued: Parameters<typeof defer.scheduleRepeatPush>[0][] = [];
-  const load = (code: string) => compilePush(code, { './pushDefer.js': {
-    ...defer, recipientActive: () => false,
-    scheduleRepeatPush: async (item: Parameters<typeof defer.scheduleRepeatPush>[0]) => { queued.push(item); },
-  } });
-  const wires = () => posted.map((p) => JSON.parse(p.url.endsWith('rep-secure')
-    ? decryptPush(Buffer.from(p.init.body as Buffer), keys.receiver, keys.auth).toString()
-    : String(p.init.body)) as Record<string, unknown>);
-  const check = async (code: string) => {
-    const push = await load(code);
-    for (const repeat of [undefined, 1, 3]) {
-      posted.length = 0; queued.length = 0;
-      await push.sendPushToUsers(['a'], payload, source, { private: true, noDefer: true, ...(repeat ? { repeat } : {}) });
-      assert.equal(posted.length, 2, 'каждое устройство получает пуш');
-      for (const wire of wires()) {
-        assert.equal(Object.hasOwn(wire, 'repeat'), repeat !== undefined, 'обычная доставка не помечена повтором');
-        if (repeat) assert.equal(wire.repeat, repeat, 'номер отправленного повтора соответствует очереди');
-      }
-      assert.equal(queued.length, 1, 'следующий повтор ставится один раз на получателя');
-      assert.equal(Object.hasOwn(queued[0]!.payload, 'repeat'), false, 'очередь хранит исходную нагрузку без repeat');
-      assert.equal(JSON.stringify(queued[0]!.payload), JSON.stringify(payload));
-      assert.equal(queued[0]!.repeat, (repeat ?? 0) + 1);
-      assert.equal(JSON.stringify(queued[0]!.source), JSON.stringify(source));
-    }
-    posted.length = 0; queued.length = 0;
-    await push.sendPushToUsers(['a'], { ...payload, silent: true }, source, { private: true, noDefer: true, repeat: 2 });
-    assert.equal(posted.length, 2);
-    for (const wire of wires()) {
-      assert.equal(wire.silent, true);
-      assert.equal(wire.repeat, 2, 'тихий повтор сохраняет номер');
-    }
-    assert.equal(queued.length, 0, 'беззвучное сообщение не запускает новую цепочку');
-  };
-  await check(raw);
-  const allRepeat = raw.replace('opts.repeat ? { ...payload, repeat: opts.repeat } : payload', '{ ...payload, repeat: opts.repeat ?? 1 }');
-  assert.notEqual(allRepeat, raw);
-  await assert.rejects(check(allRepeat), /обычная доставка не помечена повтором/);
-  const noRepeat = raw.replace('opts.repeat ? { ...payload, repeat: opts.repeat } : payload', 'payload');
-  assert.notEqual(noRepeat, raw);
-  await assert.rejects(check(noRepeat), /обычная доставка не помечена повтором/);
-  // Поднимаем sent до schedule: иначе мутант ловился бы по ReferenceError, а не по испорченной очереди.
-  const sentLine = '  const sent: PushPayload = opts.repeat ? { ...payload, repeat: opts.repeat } : payload;';
-  const queueSent = raw.replace(sentLine, '').replace(
-    "  if (opts.private && payload.type === 'dm' && payload.dmId && typeof payload.key === 'number' && !payload.silent) {",
-    `${sentLine}\n  if (opts.private && payload.type === 'dm' && payload.dmId && typeof payload.key === 'number' && !payload.silent) {`,
-  ).replace('scheduleRepeatPush({ uid, payload,', 'scheduleRepeatPush({ uid, payload: sent,');
-  assert.notEqual(queueSent, raw);
-  await assert.rejects(check(queueSent), /очередь хранит исходную нагрузку без repeat/);
-  const silentDropsRepeat = raw.replace('q ? { ...sent, silent: true as const } : sent', 'q ? { ...sent, silent: true as const } : (sent.silent ? payload : sent)');
-  assert.notEqual(silentDropsRepeat, raw);
-  await assert.rejects(check(silentDropsRepeat), /тихий повтор сохраняет номер/);
-  await t.raw.exec("INSERT INTO push_mutes (user_id,scope,target_id,sound_only) VALUES ('a','dm_user','b',true)");
-  const checkQuiet = async (code: string) => {
-    posted.length = 0; queued.length = 0;
-    const push = await load(code);
-    await push.sendPushToUsers(['a'], payload, source, { private: true, noDefer: true, repeat: 4 });
-    assert.equal(posted.length, 2);
-    for (const wire of wires()) {
-      assert.equal(wire.silent, true, 'заглушка звука даёт тихий вариант');
-      assert.equal(wire.repeat, 4, 'тихий вариант по настройке получателя сохраняет repeat');
-    }
-    assert.equal(queued.length, 0, 'заглушка звука не запускает следующую задачу');
-  };
-  await checkQuiet(raw);
-  const quietDropsRepeat = raw.replace('q ? { ...sent, silent: true as const } : sent', 'q ? { ...payload, silent: true as const } : sent');
-  assert.notEqual(quietDropsRepeat, raw);
-  await assert.rejects(checkQuiet(quietDropsRepeat), /тихий вариант по настройке получателя сохраняет repeat/);
-  assert.equal(Object.hasOwn(payload, 'repeat'), false, 'исходный объект не мутируется');
+  });
 });
 
 test('выключенные личные сообщения отсекают получателя и гостя только для private-пуша', async () => {
@@ -629,162 +508,170 @@ test('выключенные личные сообщения отсекают п
   assert.equal(posted.length, 1, 'legacy/group-вызов без private остаётся незатронутым');
 });
 
-test('повтор после выключения настройки снимается, активный получатель откладывает его, потолок — 24', async () => {
-  // Уже поставленный repeat перепроверяет настройку; за активным получателем тот же номер ждёт, всего не более 24 повторов.
-  await t.raw.exec(`
-    INSERT INTO push_devices (id,user_id,device_id,endpoint,platform) VALUES ('pa','a','a-phone','https://ntfy.example.test/a','android');
-    UPDATE users SET notify_repeat = 0 WHERE id='a';
-  `);
-  const payload = { type: 'dm' as const, title: 'Б', body: 'текст', dmId: 'dm', key: 10 };
-  await sendPushToUsers(['a'], payload, undefined, { private: true, repeat: 1 });
-  assert.equal(posted.length, 0, 'повтор из старой очереди снят после notify_repeat=0');
-
-  await t.raw.exec("UPDATE users SET notify_repeat = 5 WHERE id='a'");
-  const { runPushDeferTick } = await import('../src/pushDefer.js');
-  const defer = await import('../src/pushDefer.js');
-  const original = {
-    multi: redisPub.multi,
-    zrangebyscore: redisPub.zrangebyscore,
-    eval: redisPub.eval,
-  };
+// Доставка и очередь подменены; прочтение и видимость проверяет настоящая база PGlite.
+function deferredQueue() {
   const items = new Map<string, string>();
   const due = new Map<string, number>();
+  const original = { multi: redisPub.multi, zrangebyscore: redisPub.zrangebyscore, eval: redisPub.eval };
   redisPub.multi = (() => {
-    let id = '';
-    let raw = '';
-    let score = 0;
+    const writes: (() => void)[] = [];
     const chain = {
-      hset(_key: string, key: string, value: string) { id = key; raw = value; return chain; },
-      hsetnx(_key: string, key: string, value: string) { id = key; raw = items.has(key) ? items.get(key)! : value; return chain; },
-      zadd(_key: string, atOrNx: number | string, scoreOrAt: number | string, maybeKey?: string) {
-        if (typeof atOrNx === 'string') {
-          id = maybeKey!;
-          score = Number(scoreOrAt);
-          if (atOrNx === 'NX' && due.has(id)) blockedByNx = true;
-        } else { id = String(scoreOrAt); score = atOrNx; }
-        return chain;
-      },
-      exec: async () => { if (!blockedByNx) { items.set(id, raw); due.set(id, score); } return []; },
+      hset(_hash: string, id: string, value: string) { writes.push(() => { items.set(id, value); }); return chain; },
+      zadd(_set: string, at: number, id: string) { writes.push(() => { due.set(id, at); }); return chain; },
+      exec: async () => { for (const write of writes) write(); return []; },
     };
-    let blockedByNx = false;
     return chain;
   }) as unknown as typeof redisPub.multi;
-  redisPub.zrangebyscore = (async (_key: string, _min: string | number, max: string | number) =>
+  redisPub.zrangebyscore = (async (_set: string, _min: number, max: number) =>
     [...due].filter(([, at]) => at <= Number(max)).map(([id]) => id)) as typeof redisPub.zrangebyscore;
-  redisPub.eval = (async (_script: string, _keys: number, _zkey: string, _hkey: string, id: string, now: string) => {
-    const score = due.get(id);
-    if (score === undefined || score > Number(now)) return null;
+  redisPub.eval = (async (_script: string, _keys: number, _set: string, _hash: string, id: string, now: string) => {
+    const at = due.get(id);
+    if (at === undefined || at > Number(now)) return null;
     due.delete(id);
     const raw = items.get(id) ?? null;
     items.delete(id);
     return raw;
   }) as unknown as typeof redisPub.eval;
+  return { items, due, restore() { Object.assign(redisPub, original); } };
+}
+
+for (const marker of ['options', 'payload'] as const) test(`повтор из ${marker} не доставляется локально или дому гостя и не откладывается`, async () => {
+  await t.raw.exec(`INSERT INTO users(id,username,display_name,password_hash,home_instance_id,home_user_id)
+      VALUES ('d','delta','Delta','hash','home','remote-d');
+    UPDATE users SET notify_repeat=60;
+    INSERT INTO push_devices(id,user_id,device_id,endpoint,platform) VALUES
+      ('repeat-local','a','phone','https://ntfy.example.test/a','android')`);
+  const defer = await import('../src/pushDefer.js');
+  const queue = deferredQueue();
+  defer.setPushActivityProbe(() => true);
   try {
-    const oldFirstAt = Date.now() - 48 * 60 * 60_000;
-    defer.setPushActivityProbe(() => true);
-    await sendPushToUsers(['a'], payload, undefined, { private: true, repeat: 1, firstAt: oldFirstAt });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(posted.length, 0, 'повтор за активным ПК, но уже старше окна от первого пуша, всё равно снимается');
-    assert.equal(items.size, 0, 'за пределами окна не ставится следующий repeat даже при активном получателе');
-
-    const pushSource = readFileSync(new URL('../src/push.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-    const noWindowGuardSource = pushSource.replace(
-      'if (opts.repeat && !notifyRepeatInWindow(firstAt, now)) return;',
-      'if (opts.repeat && !notifyRepeatInWindow(firstAt, now)) { /* mutant: продолжить */ }',
-    );
-    assert.notEqual(noWindowGuardSource, pushSource, 'мутант действительно убирает ранний отказ просроченной цепочки');
-    const noWindowGuard = await compilePush(noWindowGuardSource);
-    defer.setPushActivityProbe(() => false);
-    await noWindowGuard.sendPushToUsers(['a'], payload, undefined, { private: true, repeat: 1, firstAt: oldFirstAt });
-    assert.equal(posted.length, 1, 'мутант без раннего отказа доставляет уже просроченный повтор');
-    assert.equal(items.size, 0, 'поздний repeat не должен оставлять новую задачу за окном');
-    posted.length = 0;
-
-    const noFirstAtPostponeSource = pushSource.replace(
-      'private: true, repeat: opts.repeat, firstAt',
-      'private: true, repeat: opts.repeat',
-    );
-    assert.notEqual(noFirstAtPostponeSource, pushSource, 'мутант удаления firstAt из postpone найден');
-    const noFirstAtPostpone = await compilePush(noFirstAtPostponeSource);
-    const keptFirstAt = Date.now() - 60_000;
-    defer.setPushActivityProbe(() => true);
-    await noFirstAtPostpone.sendPushToUsers(['a'], payload, undefined, { noDefer: true, private: true, repeat: 1, firstAt: keptFirstAt });
-    const lostFirstAt = JSON.parse(items.get('rep:a:dm')!);
-    assert.equal(lostFirstAt.firstAt, undefined, 'runtime-мутант действительно теряет firstAt при переносе за ПК');
-    items.clear(); due.clear();
-    defer.setPushActivityProbe(() => false);
-
-    await sendPushToUsers(['a'], payload, undefined, { private: true });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.deepEqual([...due.keys()], ['rep:a:dm'], 'исходное сообщение ставит один repeat для беседы');
-    const firstAt = JSON.parse(items.get('rep:a:dm')!).firstAt;
-    assert.equal(typeof firstAt, 'number', 'первый push задаёт начало окна повторов');
-    const repeats: number[] = [];
-    defer.setPushActivityProbe(() => true);
-    const held = await runPushDeferTick(async (item) => {
-      repeats.push(item.repeat ?? 0);
-      await sendPushToUsers([item.uid], item.payload, item.source, { noDefer: true, private: item.private === true, repeat: item.repeat, firstAt: item.firstAt });
-    }, Date.now() + 10 * 60_000);
-    assert.deepEqual(held, { sent: 1, read: 0 });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(posted.length, 1, 'активный получатель не получает повтор на телефон');
-    assert.equal(JSON.parse(items.get('rep:a:dm')!).repeat, 1, 'повтор остаётся под тем же номером');
-    const originalFirstAt = JSON.parse(items.get('rep:a:dm')!).firstAt;
-    assert.equal(originalFirstAt, firstAt, 'перенос за ПК сохраняет исходное время цепочки');
-    assert.ok(due.has('rep:a:dm'), 'повтор переносится на ближайшую проверку');
-    assert.ok(pushSource.includes('private: true, repeat: opts.repeat, firstAt'), 'перенос в push.ts явно сохраняет firstAt');
-    const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-    const indexWithoutFirstAt = indexSource.replace('...(item.repeat && typeof item.firstAt === \'number\' ? { firstAt: item.firstAt } : {}),', '');
-    assert.notEqual(indexWithoutFirstAt, indexSource, 'source mutant действительно удаляет firstAt из worker callback');
-    assert.ok(indexSource.includes("...(item.repeat && typeof item.firstAt === 'number' ? { firstAt: item.firstAt } : {}),"),
-      'index.ts переносит время начала очереди повторов в sendPushToUsers');
-    defer.setPushActivityProbe(() => false);
-    for (const expected of Array.from({ length: 24 }, (_, i) => i + 1)) {
-      const result = await runPushDeferTick(async (item) => {
-        repeats.push(item.repeat ?? 0);
-        await sendPushToUsers([item.uid], item.payload, item.source, { noDefer: true, private: item.private === true, repeat: item.repeat, firstAt: item.firstAt });
-      }, Date.now() + 10 * 60_000);
-      assert.deepEqual(result, { sent: 1, read: 0 });
-      // The callback intentionally enqueues asynchronously, just as index.ts does in the real worker.
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(due.size, expected < 24 ? 1 : 0, `после повтора ${expected} остаётся только следующий из разрешённых`);
+    for (const repeat of [0.5, 1, 2]) for (const privatePush of [false, true]) for (const silent of [false, true]) for (const noDefer of [false, true]) {
+      await sendPushToUsers(['a', 'd'], {
+        type: 'dm', title: 'Б', body: 'текст', dmId: 'dm', key: 10,
+        ...(marker === 'payload' ? { repeat } : {}), ...(silent ? { silent: true as const } : {}),
+      }, undefined, { private: privatePush, noDefer, ...(marker === 'options' ? { repeat } : { repeat: 0 }) });
     }
-    assert.deepEqual(repeats, [1, ...Array.from({ length: 24 }, (_, i) => i + 1)]);
-    assert.equal(JSON.parse(items.get('rep:a:dm') ?? 'null'), null, 'после потолка очередь повторов пуста');
-    assert.equal(posted.length, 25, 'один исходный push и ровно 24 доставленных повтора');
-    const endOfWindow = Date.now() - 24 * 60 * 60_000 - 30_000;
-    await sendPushToUsers(['a'], payload, undefined, { private: true, repeat: 1, firstAt: endOfWindow });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(posted.length, 26, 'повтор ещё в grace окне сам может уйти');
-    assert.equal(items.size, 0, 'но следующий срок через пять минут уже за окном и повтор не ставится');
-    assert.equal(due.size, 0);
-
-    const legacyNow = Date.now();
-    items.set('legacy-repeat-without-firstAt', JSON.stringify({ uid: 'a', payload, private: true, repeat: 1 }));
-    due.set('legacy-repeat-without-firstAt', legacyNow - 1);
-    const legacyTick = await runPushDeferTick(async (item) => {
-      await sendPushToUsers([item.uid], item.payload, item.source, {
-        noDefer: true, private: item.private === true, repeat: item.repeat, firstAt: item.firstAt,
-      });
-    }, legacyNow);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(legacyTick.sent, 1, 'старая запись очереди без firstAt всё ещё доставляется один раз');
-    assert.deepEqual([...due.keys()], ['rep:a:dm'], 'tick создал следующую запись повтора для старой цепочки');
-    const legacyNext = JSON.parse(items.get('rep:a:dm')!);
-    assert.equal(legacyNext.repeat, 2);
-    assert.ok(typeof legacyNext.firstAt === 'number' && legacyNext.firstAt >= legacyNow && legacyNext.firstAt <= Date.now(),
-      'первый callback legacy-очереди начинает окно повторов с текущего такта');
-    assert.equal(posted.length, 27);
-
-  } finally {
-    defer.setPushActivityProbe(() => false);
-    redisPub.multi = original.multi;
-    redisPub.zrangebyscore = original.zrangebyscore;
-    redisPub.eval = original.eval;
-  }
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(posted.length, 0);
+    assert.equal(published.length, 0, 'дом гостя также не получает повтор');
+    assert.equal(queue.items.size, 0);
+    assert.equal(queue.due.size, 0);
+  } finally { defer.setPushActivityProbe(() => false); queue.restore(); }
 });
 
-test('repeat не ставится для silent, заглушки со звуком и группового вызова', async () => {
+test('первый ночной пуш доставляется шифрованному и старому устройству без планирования повтора', async () => {
+  const keys = pushKeys();
+  await t.raw.query(`INSERT INTO push_devices(id,user_id,device_id,endpoint,platform,p256dh,auth,tz) VALUES
+    ('first-secure','a','secure','https://ntfy.example.test/secure','android',$1,$2,'Europe/Moscow'),
+    ('first-legacy','a','legacy','https://ntfy.example.test/legacy','android',NULL,NULL,'Europe/Moscow')`,
+  [keys.public.p256dh, keys.public.auth]);
+  await t.raw.exec("UPDATE users SET notify_repeat=60 WHERE id='a'");
+  const queue = deferredQueue();
+  const originalNow = Date.now;
+  const payload = { type: 'dm' as const, title: 'Б', body: 'текст', dmId: 'dm', key: 10, mid: 'first-mid' };
+  try {
+    Date.now = () => Date.parse('2026-10-09T20:30:00Z');
+    await sendPushToUsers(['a'], payload, undefined, { private: true, noDefer: true, repeat: 0 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(posted.length, 2);
+    const secure = posted.find(p => p.url.endsWith('/secure'))!;
+    assert.deepEqual(JSON.parse(decryptPush(Buffer.from(secure.init.body as Buffer), keys.receiver, keys.auth).toString()), payload);
+    const legacy = JSON.parse(String(posted.find(p => p.url.endsWith('/legacy'))!.init.body));
+    assert.equal(legacy.title, 'GusVoice');
+    assert.equal(legacy.body, 'Новое сообщение');
+    assert.equal(Object.hasOwn(legacy, 'repeat'), false);
+    assert.equal(Object.hasOwn(payload, 'repeat'), false);
+    assert.equal(queue.items.size, 0);
+    assert.equal(queue.due.size, 0);
+  } finally { Date.now = originalNow; queue.restore(); }
+});
+
+test('новое личное сообщение отправляет первый пуш и не создаёт цепочку при старой настройке повторов', async () => {
+  await t.raw.exec(`UPDATE users SET notify_repeat=60 WHERE id='a';
+    INSERT INTO push_devices(id,user_id,device_id,endpoint,platform)
+      VALUES ('new-dm','a','phone','https://ntfy.example.test/a','android')`);
+  const queue = deferredQueue();
+  try {
+    const response = await injectFixture({ method: 'POST', url: '/conv/dm/messages', headers: authHeader('b'), payload: { content: 'новое' } });
+    assert.equal(response.statusCode, 201, response.body);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(posted.length, 1);
+    assert.equal(JSON.parse(String(posted[0].init.body)).mid, response.json().id);
+    assert.equal(queue.items.size, 0);
+    assert.equal(queue.due.size, 0);
+  } finally { queue.restore(); }
+});
+
+test('дренаж удаляет legacy rep-ключ и оба номера повтора без чтения БД или доставки', async () => {
+  const { db: originalDb, setDbForTests } = await import('../src/db/index.js');
+  const { runPushDeferTick } = await import('../src/pushDefer.js');
+  const queue = deferredQueue();
+  const now = Date.now();
+  const payload = { type: 'dm', title: 'Б', body: 'старое', dmId: 'dm', key: 10, mid: 'missing' };
+  for (const [id, item] of [
+    ['rep:a:dm', { uid: 'a', payload }],
+    ['legacy-item', { uid: 'a', payload, repeat: 1 }],
+    ['legacy-payload', { uid: 'a', payload: { ...payload, repeat: 2 }, repeat: 0 }],
+  ] as const) { queue.items.set(id, JSON.stringify(item)); queue.due.set(id, now); }
+  let reads = 0;
+  setDbForTests(new Proxy(originalDb, { get(target, key) {
+    const value = Reflect.get(target, key);
+    if (key === 'select' || key === 'execute') return (...args: unknown[]) => {
+      reads++; return value.apply(target, args);
+    };
+    return typeof value === 'function' ? value.bind(target) : value;
+  } }));
+  try {
+    let sent = 0;
+    const tick = await runPushDeferTick(async () => { sent++; }, now);
+    assert.equal(tick.sent, 0);
+    assert.equal(sent, 0);
+    assert.equal(reads, 0, 'устаревшая очередь очищается до проверок прочтения и видимости');
+    assert.equal(queue.items.size, 0);
+    assert.equal(queue.due.size, 0);
+    await runPushDeferTick(async () => { sent++; }, now);
+    assert.equal(sent, 0);
+    assert.equal(reads, 0);
+  } finally { setDbForTests(originalDb); queue.restore(); }
+});
+
+test('обычный defer ждёт 30 секунд, досылает непрочитанное один раз и снимает прочитанное', async () => {
+  const defer = await import('../src/pushDefer.js');
+  await t.raw.exec(`UPDATE users SET notify_repeat=60 WHERE id='a';
+    INSERT INTO push_devices(id,user_id,device_id,endpoint,platform)
+      VALUES ('defer-first','a','phone','https://ntfy.example.test/a','android');
+    INSERT INTO conversation_messages(id,conversation_id,author_id,sort_key,content)
+      VALUES ('defer-live','dm','b',10,'непрочитанное')`);
+  const queue = deferredQueue();
+  defer.setPushActivityProbe(() => true);
+  try {
+    const before = Date.now();
+    const payload = { type: 'dm' as const, title: 'Б', body: 'текст', dmId: 'dm', key: 10, mid: 'defer-live' };
+    await sendPushToUsers(['a'], payload, undefined, { private: true });
+    assert.equal(posted.length, 0);
+    assert.equal(queue.items.size, 1);
+    const deadline = [...queue.due.values()][0]!;
+    assert.ok(deadline >= before + 30_000 && deadline <= Date.now() + 30_000);
+    const send = async (item: import('../src/pushDefer.js').DeferredPush) => {
+      await sendPushToUsers([item.uid], item.payload, item.source, { private: item.private === true, noDefer: true });
+    };
+    assert.deepEqual(await defer.runPushDeferTick(send, deadline - 1), { sent: 0, read: 0 });
+    assert.deepEqual(await defer.runPushDeferTick(send, deadline), { sent: 1, read: 0 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(posted.length, 1);
+    assert.equal(queue.items.size, 0, 'первый отложенный пуш не запускает повтор');
+    assert.equal(queue.due.size, 0);
+    assert.deepEqual(await defer.runPushDeferTick(send, deadline), { sent: 0, read: 0 });
+    await defer.deferPush({ uid: 'a', payload, private: true }, deadline);
+    await t.raw.exec("UPDATE conversation_members SET last_read_key=10 WHERE conversation_id='dm' AND user_id='a'");
+    assert.deepEqual(await defer.runPushDeferTick(send, deadline + 30_000), { sent: 0, read: 1 });
+    assert.equal(posted.length, 1);
+    assert.equal(queue.items.size, 0);
+    assert.equal(queue.due.size, 0);
+  } finally { defer.setPushActivityProbe(() => false); queue.restore(); }
+});
+
+test('первый silent, заглушка со звуком и групповой пуш доставляются без планирования повторов', async () => {
   // Уведомление без звука не должно снова зазвенеть позже, а групповая беседа не использует личную политику повторов.
   await t.raw.exec(`
     INSERT INTO push_devices (id,user_id,device_id,endpoint,platform) VALUES ('pa','a','a-phone','https://ntfy.example.test/a','android');
@@ -829,7 +716,7 @@ test('старый и новый вызов получают call push толь�
 });
 
 test('отложенный пуш с удалённым или скрытым сообщением снимается, живое уходит ровно один раз', async () => {
-  // Повтор push3 и defer push2 несут mid: удалённое у всех, скрытое у получателя и исчезнувшее сообщение не должны светиться.
+  // Обычный defer несёт mid: удалённое у всех, скрытое у получателя и исчезнувшее сообщение не должны светиться.
   await t.raw.exec(`
     INSERT INTO conversation_messages (id,conversation_id,author_id,content,deleted_at,hidden_for) VALUES
       ('gone-deleted','dm','b','секрет удалён',now(),'{}'),
@@ -838,11 +725,9 @@ test('отложенный пуш с удалённым или скрытым с
   `);
   const { runPushDeferTick } = await import('../src/pushDefer.js');
   const items = new Map([
-    ['deleted-repeat', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 1, mid: 'gone-deleted' }, repeat: 1 })],
     ['deleted-defer', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 1, mid: 'gone-deleted' } })],
-    ['hidden-repeat', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 2, mid: 'gone-hidden' }, repeat: 2 })],
     ['hidden-defer', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 2, mid: 'gone-hidden' } })],
-    ['missing', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 3, mid: 'no-longer-exists' }, repeat: 1 })],
+    ['missing', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 3, mid: 'no-longer-exists' } })],
     ['live', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'x', dmId: 'dm', key: 4, mid: 'still-here' } })],
   ]);
   const tickAt = Date.now();
@@ -884,7 +769,7 @@ test('отложенный пуш с удалённым или скрытым с
   try {
     const sent: string[] = [];
     const result = await runPushDeferTick(async (item) => { sent.push(item.payload.mid ?? item.payload.body); }, tickAt);
-    assert.deepEqual(result, { sent: 1, read: 5 });
+    assert.deepEqual(result, { sent: 1, read: 3 });
     assert.deepEqual(sent, ['still-here']);
     assert.equal(due.get('rescheduled'), futureAt, 'новая постановка не теряет будущий срок');
     assert.match(items.get('rescheduled')!, /новое/, 'новое содержимое остаётся в очереди');
@@ -901,6 +786,13 @@ test('отложенный пуш с удалённым или скрытым с
     assert.deepEqual(sent.sort(), ['still-here', 'будущее', 'новое']);
     assert.equal(items.size, 0); assert.equal(due.size, 0);
 
+    const mutantAt = Date.now();
+    items.set('future-mutant', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'слишком рано', dmId: 'dm' } }));
+    due.set('future-mutant', mutantAt + 60_000);
+    forcedRangeIds = ['future-mutant'];
+    const controlFuture = await runPushDeferTick(async () => assert.fail('штатный Lua-контракт не должен брать будущий элемент'), mutantAt);
+    assert.deepEqual(controlFuture, { sent: 0, read: 0 });
+    await counterfact(async () => {
     const source = readFileSync(new URL('../src/pushDefer.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     const withoutDeadline = source.replace(
       'if not s or tonumber(s) > tonumber(ARGV[2]) then return false end',
@@ -908,20 +800,18 @@ test('отложенный пуш с удалённым или скрытым с
     );
     assert.notEqual(withoutDeadline, source, 'в LUA сценарии есть часовой guard для мутанта');
     const noDeadline = await compilePushDefer(withoutDeadline);
-    const mutantAt = Date.now();
-    items.set('future-mutant', JSON.stringify({ uid: 'a', payload: { type: 'dm', title: 'Б', body: 'слишком рано', dmId: 'dm' } }));
-    due.set('future-mutant', mutantAt + 60_000);
-    forcedRangeIds = ['future-mutant'];
-    const controlFuture = await runPushDeferTick(async () => assert.fail('штатный Lua-контракт не должен брать будущий элемент'), mutantAt);
-    assert.deepEqual(controlFuture, { sent: 0, read: 0 });
+
     const premature: string[] = [];
     const mutantFuture = await noDeadline.runPushDeferTick(async (item) => { premature.push(item.payload.body); }, mutantAt);
     assert.equal(mutantFuture.sent, 1, 'мутант без проверки срока забирает будущий элемент');
     assert.equal(mutantFuture.read, 0);
     assert.deepEqual(premature, ['слишком рано']);
+    });
     forcedRangeIds = null;
 
-    const threeCommands = source.replace(
+    await counterfact(async () => {
+    const source = readFileSync(new URL('../src/pushDefer.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const threeCommands = source.replace(
       'const raw = await claimDue(id, now);',
       'await redis.zrem(ZKEY, id); const raw = await redis.hget(HKEY, id); await redis.hdel(HKEY, id);',
     );
@@ -947,6 +837,7 @@ test('отложенный пуш с удалённым или скрытым с
     assert.deepEqual(sentEarly, ['новое сообщение'], 'три команды читают и отправляют новую запись до её будущего срока');
     assert.equal(due.get(staleId), futureAt, 'мутант оставляет срок без payload');
     assert.equal(items.has(staleId), false, 'мутант удаляет свежее содержимое очереди');
+  });
   } finally {
     redisPub.zrangebyscore = original.zrangebyscore;
     redisPub.eval = original.eval;
@@ -1385,7 +1276,8 @@ test('перед вытеснением повторно проверяется 
     assert.equal(stored.has('dm/pending-1'), true);
 
     // Удаление условия state=pending должно воспроизвести поломку и сделать проверку красной.
-    const mutant = await mutantAttachments((source) => source.replace(
+    await counterfact(async () => {
+  const mutant = await mutantAttachments((source) => source.replace(
       ".where(and(inArray(attachments.id, evict), eq(attachments.state, 'pending')));",
       '.where(inArray(attachments.id, evict));',
     ));
@@ -1404,6 +1296,7 @@ test('перед вытеснением повторно проверяется 
     await mutant.createPending({ ownerId: 'b', conversationId: 'dm', name: 'new', contentType: 'application/octet-stream', bytes: Buffer.from('new') });
     const mutantRow = await t.raw.query<{ state: string }>("SELECT state FROM attachments WHERE id='mut-pending-1'");
     assert.throws(() => assert.equal(mutantRow.rows[0]?.state, 'attached'), assert.AssertionError);
+  });
   } finally { setDmWriteBarrierForTests({}); setAttachmentStoreForTests(null); }
 });
 
@@ -1846,13 +1739,6 @@ for (const name of ['аудитория без фильтра блокирово
     if (blocked) await t.raw.exec(`INSERT INTO user_blocks (blocker_id, blocked_id, created_at)
       VALUES ('b','a', now() - interval '${name === 'потолок прошлой блокировки' ? 1 : 3} days')`);
     const original = await import('../src/conversations.js');
-    const mutant = name === 'аудитория без фильтра блокировок'
-      ? await mutantConversations((s) => s, (s) => s.replace(' && !readerBlocked.has(id)', ''))
-      : name === 'потолок прочтения отсутствует'
-        ? await mutantConversations((s) => s, (s) => s.replace('Math.max(0, Math.min(o.lastReadKey, o.firstWithheldKey - 1))', 'o.lastReadKey'))
-        : name === 'журнал только себе'
-          ? await mutantConversations((s) => s.replace("audience.map((userId) => ({ userId, conversationId, kind: 'read'", "[me].map((userId) => ({ userId, conversationId, kind: 'read'"))
-          : await mutantConversations((s) => s.replace(' AND x.created_at >= b.created_at', ''));
     async function scenario(code: typeof original) {
       published.length = 0;
       const access = await code.loadAccess('dm', 'b'); assert.ok(access);
@@ -1866,9 +1752,18 @@ for (const name of ['аудитория без фильтра блокирово
     const expected = { key: !blocked || name === 'потолок прошлой блокировки' ? 20 : 9,
       journal: blocked ? 0 : 1, events: blocked ? ['b:conv.change'] : ['a:conv.change', 'b:conv.change'] };
     assert.deepEqual(await scenario(original), expected);
+    await counterfact(async () => {
+    const mutant = name === 'аудитория без фильтра блокировок'
+      ? await mutantConversations((s) => s, (s) => s.replace(' && !readerBlocked.has(id)', ''))
+      : name === 'потолок прочтения отсутствует'
+        ? await mutantConversations((s) => s, (s) => s.replace('Math.max(0, Math.min(o.lastReadKey, o.firstWithheldKey - 1))', 'o.lastReadKey'))
+        : name === 'журнал только себе'
+          ? await mutantConversations((s) => s.replace("audience.map((userId) => ({ userId, conversationId, kind: 'read'", "[me].map((userId) => ({ userId, conversationId, kind: 'read'"))
+          : await mutantConversations((s) => s.replace(' AND x.created_at >= b.created_at', ''));
     await t.raw.exec(`TRUNCATE user_changes, user_sync CASCADE; UPDATE conversation_members SET last_read_key=0 WHERE conversation_id='dm'`);
     const wrong = await scenario(mutant);
     assert.throws(() => assert.deepEqual(wrong, expected), assert.AssertionError, 'мутант должен нарушить тот же контракт');
+    });
   });
 }
 
@@ -2829,9 +2724,11 @@ test('мутант раннего replay красит интеграционны
     const before = copies;
     assert.equal((await original.forwardMessages('a', access, input)).kind, 'replay');
     assert.equal(copies, before, 'штатный повтор не копирует файлы повторно');
-    const mutant = await mutantConversations((s) => s.replace('const early = decide(await already(db));\n  if (early) return early;', 'const early = null;\n  if (early) return early;'));
+    await counterfact(async () => {
+  const mutant = await mutantConversations((s) => s.replace('const early = decide(await already(db));\n  if (early) return early;', 'const early = null;\n  if (early) return early;'));
     await mutant.forwardMessages('a', access, input);
     assert.throws(() => assert.equal(copies, before), assert.AssertionError);
+  });
   } finally { setAttachmentStoreForTests(null); }
 });
 
@@ -2842,6 +2739,7 @@ test('мутант фильтра видимости красит пересыл
   const access = await original.loadAccess('dm', 'a'); assert.ok(access);
   const input = { clientId: '00000000-0000-4000-8000-000000000802', fromConversationId: 'foreign-dm', messageIds: ['mut-hidden'], withheld: false };
   assert.equal((await original.forwardMessages('a', access, input)).kind, 'source-missing');
+  await counterfact(async () => {
   const mutant = await mutantConversations((source) => {
     const anchor = "    .filter((m) => messageView(m, me) === 'full' && inView(m))";
     assert.equal(source.split(anchor).length - 1, 1, 'единственный фильтр источников пересылки в полном conversations');
@@ -2852,6 +2750,7 @@ test('мутант фильтра видимости красит пересыл
     e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
     && e.message.split(/\r?\n/, 1)[0] === 'скрытый источник не пересылается'
     && e.actual === 'created' && e.expected === 'source-missing');
+  });
 });
 
 test('мутант атомарного запрета пачки красит удаление своего перед чужим', async () => {
@@ -2864,12 +2763,14 @@ test('мутант атомарного запрета пачки красит �
   const access = await original.loadAccess('mut-group', 'a'); assert.ok(access);
   const baseline = await original.deleteMessages('a', access, ['mut-own', 'mut-peer'], 'both');
   assert.equal(baseline.kind, 'forbidden');
+  await counterfact(async () => {
   const mutant = await mutantConversations((s) => s.replace(
     "const forbidden = plan.filter((p) => p.action === 'forbidden').map((p) => p.id);",
     'const forbidden: string[] = [];',
   ));
   const wrong = await mutant.deleteMessages('a', access, ['mut-own', 'mut-peer'], 'both');
   assert.throws(() => assert.equal(wrong.kind, 'forbidden'), assert.AssertionError);
+  });
 });
 
 test('мутант разрешённой правки пересланного красит запрет редактирования', async () => {
@@ -2878,9 +2779,11 @@ test('мутант разрешённой правки пересланного 
   const original = await import('../src/conversations.js');
   const access = await original.loadAccess('dm', 'a'); assert.ok(access);
   assert.equal((await original.editMessage('a', access, 'mut-forwarded', 'changed')).kind, 'forbidden');
+  await counterfact(async () => {
   const mutant = await mutantConversations((s) => s.replace('if (m.forwardedFrom) return { kind: \'forbidden\' };', ''));
   const wrong = await mutant.editMessage('a', access, 'mut-forwarded', 'changed');
   assert.throws(() => assert.equal(wrong.kind, 'forbidden'), assert.AssertionError);
+  });
 });
 
 test('HTTP правка пересланного запрещена в conv, обычная авторская правка принимается', async () => {
@@ -2910,7 +2813,8 @@ test('мутант ссылки на оригинал красит провер�
     assert.equal(base.kind, 'created');
     if (base.kind !== 'created') return;
     assert.notEqual(base.rows[0].attachments[0]?.id, sourceId);
-    const realAttachments = await import('../src/attachments.js');
+    await counterfact(async () => {
+  const realAttachments = await import('../src/attachments.js');
     const mutantAttachments = { ...realAttachments, copyForForward: async (input: { sources: { id: string }[] }) => {
       const rows = await realAttachments.attachmentsByIds(input.sources.map((source) => source.id));
       return new Map(rows.map((row) => [row.id, row]));
@@ -2918,6 +2822,7 @@ test('мутант ссылки на оригинал красит провер�
     const mutant = await mutantConversations((s) => s.replace('const copy = copies.get(a.id);', 'const copy = copies.get(a.id); // copyForForward mutant injected below'), undefined, { './attachments.js': mutantAttachments });
     const wrong = await mutant.forwardMessages('a', access, { ...input, clientId: '00000000-0000-4000-8000-000000000806' });
     assert.throws(() => assert.equal(wrong.kind, 'created'), assert.AssertionError);
+  });
   } finally { setAttachmentStoreForTests(null); }
 });
 
@@ -2931,6 +2836,7 @@ test('мутант created на каждом сообщении красит о�
   assert.equal(base.kind, 'created');
   if (base.kind !== 'created') return;
   assert.equal(base.deliveries.filter((d) => d.created).length, 1);
+  await counterfact(async () => {
   const mutant = await mutantConversations((s) => s.replace(
     'deliveries[deliveries.length - 1].created = true;',
     'for (const delivery of deliveries) delivery.created = true;',
@@ -2939,6 +2845,7 @@ test('мутант created на каждом сообщении красит о�
   assert.equal(wrong.kind, 'created');
   if (wrong.kind !== 'created') return;
   assert.throws(() => assert.equal(wrong.deliveries.filter((d) => d.created).length, 1), assert.AssertionError);
+  });
 });
 
 test('хранилище без copy пересылает чтением и записью те же байты', async () => {
@@ -3412,12 +3319,14 @@ test('С2 контрфакты без видимости актора, собе�
     assert.equal(res.kind, 'not-found');
   };
   await checkActor(actual);
+  await counterfact(async () => {
   const actorMutant = await mutantConversations((s) => {
     const start = s.indexOf('export async function pinMessage(');
     assert.ok(start >= 0, 'найдена именно функция pinMessage для мутанта видимости');
     return s.slice(0, start) + s.slice(start).replace("if (!m || messageView(m, me) !== 'full') return { kind: 'not-found' };", "if (!m) return { kind: 'not-found' };");
   });
   await assert.rejects(checkActor(actorMutant), assert.AssertionError);
+  });
   const checkPeer = async (module: typeof actual) => {
     await t.raw.exec(`DELETE FROM conversation_pins WHERE message_id='mutant-peer'`);
     const res = await module.pinMessage('a', access, 'mutant-peer', 'both');
@@ -3425,16 +3334,20 @@ test('С2 контрфакты без видимости актора, собе�
     assert.deepEqual((await t.raw.query(`SELECT user_id FROM conversation_pins WHERE message_id='mutant-peer' ORDER BY user_id`)).rows, [{ user_id: 'a' }]);
   };
   await checkPeer(actual);
+  await counterfact(async () => {
   const peerMutant = await mutantConversations((s) => s, (s) => s.replace(" && messageView(message, id) === 'full'", ''));
   await assert.rejects(checkPeer(peerMutant), assert.AssertionError);
+  });
   const checkList = async (module: typeof actual) => {
     const list = await module.listPins('a', 'dm');
     assert.equal(list?.pins.some((p) => p.message.id === 'mutant-actor'), false);
   };
   await checkList(actual);
+  await counterfact(async () => {
   const listMutant = await mutantConversations((s) => s.replace(
     'eq(conversationPins.userId, me), visibleTo(me, conversationId)', 'eq(conversationPins.userId, me)'));
   await assert.rejects(checkList(listMutant), assert.AssertionError);
+  });
 });
 
 test('С3 только boolean принимается, а silent true присутствует во всех DTO без изменения обычного сообщения', async () => {
@@ -3596,8 +3509,10 @@ test('исключение личной беседы перекрывает noti
     }
   };
   await check(await compilePush(raw));
+  await counterfact(async () => {
   const changed = raw.replace(' || always.has(r.id)', ''); assert.notEqual(changed, raw);
   await assert.rejects(check(await compilePush(changed)), /notifyDm=false, исключение b\/a/);
+  });
 });
 
 test('включение исключения снимает полную заглушку своей беседы, сохраняет sound_only и чужие строки', async () => {
@@ -3616,8 +3531,10 @@ test('включение исключения снимает полную заг
     assert.equal((await t.raw.query("SELECT * FROM push_always WHERE user_id='b'")).rows.length, 2, 'повтор включения идемпотентен');
   };
   await check(await compilePush(raw));
+  await counterfact(async () => {
   const changed = raw.replace('          eq(pushMutes.soundOnly, false),', ''); assert.notEqual(changed, raw);
   await assert.rejects(check(await compilePush(changed)), /sound_only не удаляется исключением/);
+  });
 });
 
 test('полная заглушка снимает своё исключение, soundOnly и серверная заглушка оставляют его', async () => {
@@ -3659,8 +3576,10 @@ test('тихая досылка не ретранслируется дому г�
     assert.equal(posted.length, 0, 'гость не получает прямой ntfy на чужом инстансе');
   };
   await check(raw);
+  await counterfact(async () => {
   const changed = raw.replace(" && !opts.burst", ''); assert.notEqual(changed, raw);
   await assert.rejects(check(changed), /burst не будит дом второй раз/);
+  });
 });
 
 test('4096 знаков принимаются и 4097 отклоняются всеми ручками, включая черновик', async () => {
@@ -3731,6 +3650,7 @@ test('правка прежним текстом и пробелами не ст
     if (response.kind === 'ok') assert.equal(response.delivery === null, true, 'неизменённая правка не создаёт delivery');
   };
   await check(actual);
+  await counterfact(async () => {
   const bad = await mutantConversations((source) => {
     // Простое удаление раннего return теперь создаёт пустой Drizzle set и падает ДО проверки поведения.
     // Потеря сравнения текста моделирует настоящую лишнюю правку: UPDATE, editedAt, журнал и delivery.
@@ -3742,6 +3662,7 @@ test('правка прежним текстом и пробелами не ст
     && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual'
     && e.message.split(/\r?\n/, 1)[0] === 'неизменённая правка не создаёт delivery'
     && e.actual === false && e.expected === true);
+  });
 });
 
 test('история conv даёт список поставивших по времени с фильтром блока', async () => {
@@ -3764,6 +3685,7 @@ test('история conv даёт список поставивших по вр
   assert.equal(newGroup.me, true, 'моя реакция сохраняет прежний флаг');
 
   // Эти контрфакты прогоняют тот же DB-путь через изменённую в памяти копию модуля: тест должен ловить потерю сортировки и фильтра блока.
+  await counterfact(async () => {
   const unsorted = await mutantConversations((source) => source.replace(
     'function reactorsInOrder(list: ReactionReactor[]): ReactionReactor[] {\n  return [...list].sort((a, b) => a.at.localeCompare(b.at) || a.userId.localeCompare(b.userId));\n}',
     'function reactorsInOrder(list: ReactionReactor[]): ReactionReactor[] {\n  return [...list];\n}',
@@ -3777,6 +3699,7 @@ test('история conv даёт список поставивших по вр
   if (!unfilteredView || 'gone' in unfilteredView) assert.fail('контрфакт фильтра должен возвращать сообщение');
   assert.throws(() => assert.deepEqual(unfilteredView.reactions[0]?.reactors?.map((r) => r.userId), ['c', 'a']), assert.AssertionError,
     'мутант фильтра должен показывать заблокированного b и ломать проверку');
+  });
 
 });
 
@@ -3816,9 +3739,7 @@ test('запись conv не отправляет старые события с
   // Восстанавливаем удалённый вызов в ПОЛНОМ fanOutSend, не в вырезанном обработчике.
   // Старого emitter уже нет: его граница подменена реальной публикацией старого конверта.
   const raw = readFileSync(new URL('../src/convSendFanout.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const anchor = '  await deliver(s.delivery);';
-  assert.ok(raw.includes(anchor));
-  const changed = raw.replace(anchor, anchor + '\n  await publishLegacySend(s);');
+
   const deps: Record<string, unknown> = {};
   for (const spec of ['drizzle-orm', './authGuard.js', './conversations.js', './db/index.js', './contacts.js',
     './contactRules.js', './db/schema.js', './groupRules.js', './push.js']) {
@@ -3844,7 +3765,12 @@ test('запись conv не отправляет старые события с
   published.length = 0;
   await compileFanout(raw).fanOutSend!(input);
   check();
+  await counterfact(async () => {
+  const anchor = '  await deliver(s.delivery);';
+  assert.ok(raw.includes(anchor));
+  const changed = raw.replace(anchor, anchor + '\n  await publishLegacySend(s);');
   published.length = 0;
   await compileFanout(changed).fanOutSend!(input);
   assert.throws(check, assert.AssertionError, 'возврат publishLegacySend нарушает тот же контракт доставки');
+  });
 });

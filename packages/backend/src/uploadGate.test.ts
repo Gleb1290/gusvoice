@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -66,7 +67,7 @@ it('R131 четыре билета проходят, пятый получает
     assert.deepEqual(usage(gate, 'u'), { bytes: 0, mine: 0 });
   };
   check(production);
-  assert.throws(() => check(fixture(['mine >= perUser', 'mine > perUser']).api), assert.AssertionError);
+  counterfact(() => { assert.throws(() => check(fixture(['mine >= perUser', 'mine > perUser']).api), assert.AssertionError); });
 });
 
 it('R131 ровно 256 МиБ разрешены, лишний байт получает 503, release возвращает байты в бюджет', () => {
@@ -87,7 +88,7 @@ it('R131 ровно 256 МиБ разрешены, лишний байт пол�
     assert.equal(gate.usage().bytes, 0);
   };
   check(production);
-  assert.throws(() => check(fixture(['inFlight -= bytes;', '']).api), assert.AssertionError);
+  counterfact(() => { assert.throws(() => check(fixture(['inFlight -= bytes;', '']).api), assert.AssertionError); });
 });
 
 it('R131 release ждёт конец track, двойной release не освобождает операцию хранилища', async () => {
@@ -102,8 +103,10 @@ it('R131 release ждёт конец track, двойной release не осво
     assert.equal(f.timers.size, 0);
   };
   await check(fixture());
+  await counterfact(async () => {
   await assert.rejects(() => check(fixture(['if (responded) return;', ''])), assert.AssertionError);
   await assert.rejects(() => check(fixture(['          holders++;', ''])), assert.AssertionError);
+  });
 });
 
 it('R131 новый track после закрытия ответа держит уже занятый билет до окончания последней операции', async () => {

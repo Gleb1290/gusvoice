@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -82,8 +83,11 @@ for (const [label, from, to, scenario, marker] of [
   test(`R279 контрфакт «${label}» ломает предметную проверку после зелёного оригинала`, () => {
     // Класс ошибки: мутант обязан упасть на поведении, не на импорте или настройке стенда.
     scenario(load(source));
-    const mutant = from === 'pluralDays(maxDays)' ? source.replaceAll(from, to) : changed(from, to);
-    if (from === 'pluralDays(maxDays)') assert.equal(source.split(from).length, 3);
-    assert.throws(() => scenario(load(mutant)), (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n', 1)[0] === marker);
+
+    runCounterfact(() => {
+      const mutant = from === 'pluralDays(maxDays)' ? source.replaceAll(from, to) : changed(from, to);
+      if (from === 'pluralDays(maxDays)') assert.equal(source.split(from).length, 3);
+      assert.throws(() => scenario(load(mutant)), (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n', 1)[0] === marker);
+    });
   });
 }

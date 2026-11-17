@@ -96,10 +96,13 @@ export function viewportSafe(): Viewport {
     'padding-top:max(env(safe-area-inset-top), var(--gv-sat, 0px));' +
     'padding-bottom:max(env(safe-area-inset-bottom), var(--gv-sab, 0px));' +
     'padding-left:max(env(safe-area-inset-left), var(--gv-sal, 0px));' +
-    'padding-right:max(env(safe-area-inset-right), var(--gv-sar, 0px))';
+    'padding-right:max(env(safe-area-inset-right), var(--gv-sar, 0px));' +
+    // Своя полоса окна десктопа (#219, `--gv-titlebar-h` только у `html.gv-frameless`) — тоже верхняя вставка: меню у
+    // нижней кромки поднималось вверх и шапкой уходило под полосу (у неё z-index выше любого слоя).
+    'margin-top:var(--gv-titlebar-h, 0px)';
   document.body.appendChild(probe);
   const cs = getComputedStyle(probe);
-  const sat = parseFloat(cs.paddingTop) || 0;
+  const sat = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.marginTop) || 0);
   const sab = parseFloat(cs.paddingBottom) || 0;
   const sal = parseFloat(cs.paddingLeft) || 0;
   const sar = parseFloat(cs.paddingRight) || 0;
@@ -342,8 +345,13 @@ let varsInstalled = false;
 export function refreshViewportVars(): void {
   const { vw, vh } = viewport();
   const s = document.documentElement.style;
-  s.setProperty('--vw-px', `${vw}px`);
-  s.setProperty('--vh-px', `${vh}px`);
+  // Окно без размера (WebView ещё не разложен, окно десктопа свёрнуто — 0×0): «0px» обнулил бы потолки ВСЕХ окон
+  // (`max-height: calc(var(--vh-px) * 0.85)` → 0), а следующий resize мог и не прийти. Оставляем прошлое значение,
+  // на самом старте — запасное `100dvh` / `100dvw` из `var(--vh-px, …)`.
+  if (vw >= 1 && vh >= 1) {
+    s.setProperty('--vw-px', `${vw}px`);
+    s.setProperty('--vh-px', `${vh}px`);
+  }
   refreshKeyboardFlag();
 }
 

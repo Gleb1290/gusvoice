@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -128,7 +129,7 @@ for (const [label, from, to, scenario, prefix, actual, expected] of [
   ['у закрытого опроса остаются действия', '  if (poll.closed) return null;', '', (s: string) => menuCase(4, s), 'R219-menu-4:', '["Отменить голос","Остановить опрос"]', '[]'],
   ['остановка разрешена не автору', '{mine && (', '{true && (', (s: string) => menuCase(1, s), 'R219-menu-1:', '["Отменить голос","Остановить опрос"]', '["Отменить голос"]'],
 ] as const) it(`R219 DOM контрфакт: ${label}`, async () => {
-  await scenario(raw); await assert.rejects(scenario(replaceOne(raw, from, to)), failure(prefix, actual, expected));
+  await scenario(raw); await counterfact(() => assert.rejects(scenario(replaceOne(raw, from, to)), failure(prefix, actual, expected)));
 });
 
 function all<T extends ts.Node>(node: ts.Node, guard: (n: ts.Node) => n is T): T[] {
@@ -263,18 +264,22 @@ for (const [label, to, index, actual, expected] of [
   ['проверка не false открывает опрос при отсутствующей сводке', 's.conv.summaries[dm.id]?.fedPoll !== false', 0, true, false],
 ] as const) it(`R222 контрфакт разрешения опроса: ${label}`, () => {
   fedPollCase(index);
+  counterfact(() => {
   const changed = replaceOne(chatRaw, 's.conv.summaries[dm.id]?.fedPoll === true', to);
   assert.throws(() => fedPollCase(index, changed), failure(`R222-fed-case-${index}:`, actual, expected));
+  });
 });
 it('R219 AST контрфакт пункта Опрос без признака ловится полным MessagePane', () => {
-  actions(); assert.throws(() => actions(replaceOne(paneRaw, '...(convPoll ? [{', '...(true ? [{')), failure('R219-actions:', 'true', 'convPoll'));
+  actions(); counterfact(() => assert.throws(() => actions(replaceOne(paneRaw, '...(convPoll ? [{', '...(true ? [{')), failure('R219-actions:', 'true', 'convPoll')));
 });
 for (const field of ['peerHome', 'groupHostId', 'viaOn']) it(`R219 AST контрфакт снятого ${field} ловится проводкой DmChatView`, () => {
   featureGate();
+  counterfact(() => {
   const removed = field === 'peerHome' ? ' && (!peerHome || fedPollOk)' : ` && !${field}`;
   const changed = replaceOne(chatRaw, pollGateSource, pollGateSource.replace(removed, ''));
   const actual = pollGateSource.replace(removed, '').replace(/\s/g, '');
   assert.throws(() => featureGate(changed), failure('R219-fed-gate:', actual, pollGateContract));
+  });
 });
 function declaration(css: string, selector: string, property: string) {
   const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
@@ -302,4 +307,4 @@ for (const [label, from, to, prefix, actual, expected] of [
     'R219-css:.poll-bar:pointer-events:', 'auto', 'none'],
   ['ошибка викторины рисует цвет успеха', '.poll-opt.wrong .poll-bar {\n  background: var(--danger-soft);', '.poll-opt.wrong .poll-bar {\n  background: var(--green);',
     'R219-css:.poll-opt.wrong .poll-bar:background:', 'var(--green)', 'var(--danger-soft)'],
-] as const) it(`R219 CSS контрфакт: ${label}`, () => { styles(); assert.throws(() => styles(replaceOne(cssRaw, from, to)), failure(prefix, actual, expected)); });
+] as const) it(`R219 CSS контрфакт: ${label}`, () => { styles(); counterfact(() => assert.throws(() => styles(replaceOne(cssRaw, from, to)), failure(prefix, actual, expected))); });

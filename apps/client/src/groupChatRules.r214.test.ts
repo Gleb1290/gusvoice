@@ -8,6 +8,7 @@ import type { ConvGroupService } from '@gusvoice/shared';
 import * as convRules from './convSyncRules';
 import * as plural from './plural';
 import * as rules from './groupChatRules';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 const raw = readFileSync(new URL('./groupChatRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 type Label = typeof rules.groupServiceLabel;
@@ -44,8 +45,10 @@ for (const [label, from, to, index, actual] of [
 ] as const) it(`R214 G6 контрфакт: ${label}`, () => {
   // Полный оригинал проходит тем же loader: несовпадение realm или импортов не выдаётся за персонализацию.
   check(load(raw), index);
+  counterfact(() => {
   assert.equal(raw.split(from).length - 1, 1, 'у контрфакта один якорь в полном модуле');
   assert.throws(() => check(load(raw.replace(from, to)), index), (error: unknown) => error instanceof assert.AssertionError
     && error.message.startsWith(`G6-label-${index}:`) && error.operator === 'strictEqual'
     && error.actual === actual && error.expected === cases[index].expected);
+  });
 });

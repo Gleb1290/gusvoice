@@ -1,9 +1,9 @@
 import { useNameResolver } from '../memberName';
 import { useStore, voiceIsHere } from '../store';
 import { returnToVoice } from './VoicePanel';
-import { toggleSelfMute } from '../voiceSelf';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
+import { usePttMicButton } from '../usePttMicButton';
 import { Icon } from './Icon';
 
 /**
@@ -16,6 +16,7 @@ import { Icon } from './Icon';
  * the phone layout of a browser (≤ 760 px), where the mobile styles hide VoicePanel + SelfVoiceBar too.
  */
 export function MobileCallChip() {
+  const micButton = usePttMicButton();
   const voice = useStore((s) => s.voice);
   const bootstrap = useStore((s) => s.bootstrap);
   const presence = useStore((s) => s.presence);
@@ -63,18 +64,14 @@ export function MobileCallChip() {
       <div className="cc-info">
         <div className="cc-title">
           <span className="cc-dot" />
-          {channel?.name ?? (away ? voice.channelName : 'Голос')}
+          {channel?.name ?? (away || voice.temporary ? voice.channelName : 'Голос')}
         </div>
         <div className="cc-sub">{sub}</div>
       </div>
       <button
         type="button"
         className={`cc-btn ${selfMuted ? 'off' : ''}`}
-        title={selfMuted ? 'Включить микрофон' : 'Выключить микрофон'}
-        onClick={(e) => {
-          e.stopPropagation();
-          toggleSelfMute();
-        }}
+        {...micButton}
       >
         <Icon name={selfMuted ? 'mic-off' : 'mic'} size={20} />
       </button>

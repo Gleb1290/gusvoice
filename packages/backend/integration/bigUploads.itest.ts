@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { before, beforeEach, after, test } from 'node:test';
@@ -201,6 +202,7 @@ test('R142 пересылка на разрешённом пределе даё�
   type Conversations=typeof import('../src/conversations.js');
   type Routes=typeof import('../src/routes/conv.js');
   for(const mutated of [false,true]){
+    const scenario=async()=>{
     const rules=mutated?await sourceModule<Rules>('../src/convRules.ts','FORWARD_BYTES_MAX = 8 * 1024 * 1024 * 1024','FORWARD_BYTES_MAX = 9 * 1024 * 1024 * 1024'):await import('../src/convRules.js');
     if(!mutated)assert.ok(rules.FORWARD_BYTES_MAX<=DM_DAILY_UPLOAD_BYTES);
     else assert.ok(rules.FORWARD_BYTES_MAX>DM_DAILY_UPLOAD_BYTES);
@@ -220,6 +222,8 @@ test('R142 пересылка на разрешённом пределе даё�
       if(mutated){assert.throws(()=>assert.equal(response.statusCode,201),assert.AssertionError);assert.equal((await t.raw.query("SELECT id FROM attachments WHERE owner_id='b'")).rows.length,0);}
       else assert.equal(response.json().messages[0].attachments[0].size,8*1024*1024*1024);
     }finally{await target.close();}
+    };
+    if(mutated)await counterfact(scenario);else await scenario();
   }
 });
 test('R127 контрфакты размера, отсутствующих частей и повторной сборки ловятся на настоящих строках',async()=>{
@@ -232,8 +236,10 @@ test('R127 контрфакты размера, отсутствующих ча�
     ['if (!row) return (await assembled(ownerId, conversationId, uploadId)) ?? notFound;','if (!row) return notFound;',async(mod:Big,id:string)=>{await actual.uploadPart({ownerId:'a',conversationId:'dm',uploadId:id,n:1,bytes:Buffer.from('abc')});await actual.completeUpload('a','dm',id);const result=await mod.completeUpload('a','dm',id);assert.ok(!('code' in result));assert.equal(result.id,id);}]
   ] as const){
     const a=(await start()).json().uploadId;await verify(actual,a);
+    await counterfact(async()=>{
     const mutant=await sourceModule<Big>('../src/bigUploads.ts',from,to);const b=(await start()).json().uploadId;
     await assert.rejects(()=>verify(mutant,b),assert.AssertionError,from);
+    });
   }
 });
 test('R127 канал и аватар отвергают обрезку, снятая проверка меняет ответ',async()=>{
@@ -241,25 +247,32 @@ test('R127 канал и аватар отвергают обрезку, сня�
   const storage=await import('../src/storage.js');
   for(const relative of ['../src/routes/messages.ts','../src/routes/users.ts']){
     const routeName=relative.endsWith('messages.ts')?'messageRoutes':'userRoutes';const path=routeName==='messageRoutes'?'/channels/channel/attachments':'/users/me/avatar';
-    const anchor="if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' });";
     for(const mutated of [false,true]){
+      const scenario=async()=>{
+      const anchor="if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' });";
       const mod=await sourceModule<Record<string,(app:ReturnType<typeof Fastify>)=>Promise<void>>>(relative,mutated?anchor:undefined,'',{ '../storage.js':{...storage,storageConfigured:()=>true,putAttachment:async()=> 'https://media.example.test/file'}});
       const target=Fastify();errorHandler(target);await target.register(multipart,{limits:{fileSize:2,files:1},throwFileSizeLimit:false});await target.register(mod[routeName]);await target.ready();
       const f=form(Buffer.from('abc'),'image/png');const verify=async()=>assert.equal((await target.inject({method:'POST',url:path,headers:{...headers(),...f.headers},payload:f.payload})).statusCode,413);
       try{if(mutated)await assert.rejects(verify,assert.AssertionError);else await verify();}finally{await target.close();}
+      };
+      if(mutated)await counterfact(scenario);else await scenario();
     }
   }
 });
 test('R127 снятая проверка truncated в acceptDmUpload сохраняет обрезанный файл и ловится реальным multipart',async()=>{
   // Сам parser не бросает исключение: гарантию 413 должна дать ручка, а не конфигурация раннера.
   type Att=typeof import('../src/routes/att.js');
-  const auth=await import('../src/auth.js');const anchor="if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' });";
+  const auth=await import('../src/auth.js');
   for(const mutated of [false,true]){
+    const scenario=async()=>{
+    const anchor="if (file.file.truncated) return reply.code(413).send({ error: 'request file too large' });";
     const mod=await sourceModule<Att>('../src/routes/att.ts',mutated?anchor:undefined,'');
     const target=Fastify();errorHandler(target);target.addHook('onRequest',auth.requireAuth);
     await target.register(multipart,{limits:{fileSize:SINGLE_UPLOAD_MAX_BYTES,files:1},throwFileSizeLimit:false});
     target.post('/single',(req,reply)=>mod.acceptDmUpload(req,reply,'dm',req.user!.sub));
     const verify=async()=>{const f=form(Buffer.alloc(SINGLE_UPLOAD_MAX_BYTES+1));assert.equal((await target.inject({method:'POST',url:'/single',headers:{...headers(),...f.headers},payload:f.payload})).statusCode,413);};
     try{if(mutated)await assert.rejects(verify,assert.AssertionError);else await verify();}finally{await target.close();}
+    };
+    if(mutated)await counterfact(scenario);else await scenario();
   }
 });

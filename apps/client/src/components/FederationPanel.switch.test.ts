@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -50,7 +51,7 @@ async function fixture(check: (f: {
         return { ...sw };
       },
     };
-    const { FederationPanel } = load<{ FederationPanel: React.ComponentType }>(raw, {
+    const { FederationPanel } = load<{ FederationPanel: React.ComponentType }>(new URL('./FederationPanel.tsx', import.meta.url), raw, {
       '../adminApi': { adminApi: () => api }, '../store': { useStore: (select: (s: { federationRev: number }) => unknown) => select({ federationRev: 0 }) },
       './FederationReports': { FederationReports: () => null }, './FederationAudit': { FederationAudit: () => null },
       './Toggle': { Toggle }, '../plural': { count }, '../byteSize': { formatBytes, gigabytesToBytes },
@@ -218,11 +219,13 @@ for (const [label, condition, message, actual, expected] of [
   ['подсказки никогда нет', 'false', 'R290 подсказка перезапуска: enabled=true, dmEnabled=false', 0, 1],
 ] as const) it(`R290 контрфакт: ${label}`, async () => {
   await restartHintProbe();
-  const anchor = `{sw.enabled && (\n        <p className="muted">${restartHint}</p>`;
-  const changed = mutate(source, anchor, `{${condition} && (\n        <p className="muted">${restartHint}</p>`);
-  await assert.rejects(() => restartHintProbe(changed), (e: unknown) =>
-    e instanceof assert.AssertionError && e.message.startsWith(message) &&
-    e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await counterfact(async () => {
+    const anchor = `{sw.enabled && (\n        <p className="muted">${restartHint}</p>`;
+    const changed = mutate(source, anchor, `{${condition} && (\n        <p className="muted">${restartHint}</p>`);
+    await assert.rejects(() => restartHintProbe(changed), (e: unknown) =>
+      e instanceof assert.AssertionError && e.message.startsWith(message) &&
+      e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });
 
 it('R257 незавершённый PATCH блокирует оба тумблера и не допускает второго запроса', async () => {
@@ -293,6 +296,8 @@ for (const [label, from, to, probe, message] of [
   ['пропущено подтверждение', 'if (patch.enabled === false) {', 'if (false) {', confirmProbe, 'R257 выключение ждёт подтверждения'],
 ] as const) it(`R257 контрфакт переключателя: ${label}`, async () => {
   await probe();
-  await assert.rejects(() => probe(mutate(source, from, to)), (e: unknown) =>
-    e instanceof assert.AssertionError && e.message.startsWith(message));
+  await counterfact(async () => {
+    await assert.rejects(() => probe(mutate(source, from, to)), (e: unknown) =>
+      e instanceof assert.AssertionError && e.message.startsWith(message));
+  });
 });

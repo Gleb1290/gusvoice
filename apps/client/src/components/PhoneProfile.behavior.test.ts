@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -229,44 +230,47 @@ it('R173 прокрутка до 120 показывает компактную �
 function replace(raw: string, anchor: string, replacement: string) { assert.equal(raw.split(anchor).length - 1, 1, 'уникальный якорь'); return raw.replace(anchor, replacement); }
 // Класс ошибки: регистрация экрана не учитывает реальную телефонную раскладку.
 it('R173 мутанты isPhone всегда false и всегда true обнаруживаются парой телефон ПК', async () => {
-  await phoneRouting(); for (const value of ['false', 'true']) await assert.rejects(() => phoneRouting(replace(source, 'isPhone: isPhoneUiNow', `isPhone: () => ${value}`)), assert.AssertionError);
+  await phoneRouting();
+  await counterfact(async () => {
+    for (const value of ['false', 'true']) await assert.rejects(() => phoneRouting(replace(source, 'isPhone: isPhoneUiNow', `isPhone: () => ${value}`)), assert.AssertionError);
+  });
 });
 // Класс ошибки: действие сообщения дублирует открытую беседу.
 it('R173 мутант без fromThisChat обнаруживается скрытой кнопкой той же беседы', async () => {
-  await message(); await assert.rejects(() => message(replace(source, '!fromThisChat && !dmBlocked', '!dmBlocked')), assert.AssertionError);
+  await message(); await counterfact(() => assert.rejects(() => message(replace(source, '!fromThisChat && !dmBlocked', '!dmBlocked')), assert.AssertionError));
 });
 // Класс ошибки: профиль посылает противоположное состояние push mute.
 it('R173 мутант инверсии push mute обнаруживается true false вызовами', async () => {
-  await mute(); await assert.rejects(() => mute(replace(menuSource, "onMute: () => setPushMuted('dm_user', target.userId, !pushMuted)", "onMute: () => setPushMuted('dm_user', target.userId, pushMuted)")), assert.AssertionError);
+  await mute(); await counterfact(() => assert.rejects(() => mute(replace(menuSource, "onMute: () => setPushMuted('dm_user', target.userId, !pushMuted)", "onMute: () => setPushMuted('dm_user', target.userId, pushMuted)")), assert.AssertionError));
 });
 // Класс ошибки: блокировка обходит подтверждение пользователя.
 it('R173 мутант блокировки без подтверждения обнаруживается отказом подтверждения', async () => {
-  await blockConfirm(); await assert.rejects(() => blockConfirm(replace(menuSource, 'if (!peerBlocked) {\n      const ok = await confirmAction', 'if (false) {\n      const ok = await confirmAction')), assert.AssertionError);
+  await blockConfirm(); await counterfact(() => assert.rejects(() => blockConfirm(replace(menuSource, 'if (!peerBlocked) {\n      const ok = await confirmAction', 'if (false) {\n      const ok = await confirmAction')), assert.AssertionError));
 });
 // Класс ошибки: пункт Профиль остаётся в собственном меню профиля.
 it('R173 мутант лишнего пункта Профиль обнаруживается в fromProfile', async () => {
   const anchor = "{!fromProfile && <MenuItem icon=\"user\" label=\"Профиль\" onClick={() => setView('profile')} />}\n          {/* Гостю";
-  await menus(); await assert.rejects(() => menus(replace(menuSource, anchor, anchor.replace('!fromProfile && ', ''))), assert.AssertionError);
+  await menus(); await counterfact(() => assert.rejects(() => menus(replace(menuSource, anchor, anchor.replace('!fromProfile && ', ''))), assert.AssertionError));
 });
 // Класс ошибки: обработчик Назад сообщает что профиль не закрывался.
 it('R173 мутант false от обработчика Назад обнаруживается handled', async () => {
-  await backBehavior(); await assert.rejects(() => backBehavior(replace(source, 'closeRef.current();\n      return true;', 'closeRef.current();\n      return false;')), assert.AssertionError);
+  await backBehavior(); await counterfact(() => assert.rejects(() => backBehavior(replace(source, 'closeRef.current();\n      return true;', 'closeRef.current();\n      return false;')), assert.AssertionError));
 });
 // Класс ошибки: Escape проходит сквозь верхний lightbox.
 it('R173 мутант без layerAbove обнаруживается сохранившимся экраном под lightbox', async () => {
-  await viewerEscape(); await assert.rejects(() => viewerEscape(replace(source, "e.key !== 'Escape' || layerAbove(rootRef.current)", "e.key !== 'Escape'")), assert.AssertionError);
+  await viewerEscape(); await counterfact(() => assert.rejects(() => viewerEscape(replace(source, "e.key !== 'Escape' || layerAbove(rootRef.current)", "e.key !== 'Escape'")), assert.AssertionError));
 });
 // Класс ошибки: выбирается группа вместо беседы 1:1.
 it('R173 мутант поиска медиа в группе обнаруживается выбранным direct convId', async () => {
-  await media(); await assert.rejects(() => media(replace(source, '!d.group && d.otherUser.id === target.userId', 'd.otherUser.id === target.userId')), assert.AssertionError);
+  await media(); await counterfact(() => assert.rejects(() => media(replace(source, '!d.group && d.otherUser.id === target.userId', 'd.otherUser.id === target.userId')), assert.AssertionError));
 });
 // Класс ошибки: порог раскрытия вырос с 0.33 до 0.5.
 it('R173 мутант порога 0.5 обнаруживается раскрытием ровно при 99 пикселях', async () => {
-  await expand(); await assert.rejects(() => expand(replace(source, 'const EXPAND_AT = 0.33;', 'const EXPAND_AT = 0.5;')), assert.AssertionError);
+  await expand(); await counterfact(() => assert.rejects(() => expand(replace(source, 'const EXPAND_AT = 0.33;', 'const EXPAND_AT = 0.5;')), assert.AssertionError));
 });
 // Класс ошибки: жест раскрывает шапку без фотографии.
 it('R173 мутант раскрытия без фото обнаруживается пустым аватаром', async () => {
-  await noPhoto(); await assert.rejects(() => noPhoto(replace(source, 'if (canExpand && dy /', 'if (dy /')), assert.AssertionError);
+  await noPhoto(); await counterfact(() => assert.rejects(() => noPhoto(replace(source, 'if (canExpand && dy /', 'if (dy /')), assert.AssertionError));
 });
 // Класс ошибки: экран не зарегистрирован или импортом меню создано кольцо модулей.
 it('R173 PhoneProfile подставляется загрузкой модуля и импортируется в main, карта импортов меню неизменна', () => {
@@ -301,11 +305,11 @@ async function absentBackground(raw = source) {
 it('R176 без статичного фото нет слоя фона и has-bg, даже если существует отдельная анимация', () => absentBackground());
 // Класс ошибки: подмена статичного источника фона анимированным.
 it('R176 мутант анимированного фона обнаруживается разными URL статичного и живого аватара', async () => {
-  await staticBackground(); await assert.rejects(() => staticBackground(replace(source, 'const bgUrl = target.avatarUrl ?? null;', 'const bgUrl = animatedUrl ?? target.avatarUrl ?? null;')), assert.AssertionError);
+  await staticBackground(); await counterfact(() => assert.rejects(() => staticBackground(replace(source, 'const bgUrl = target.avatarUrl ?? null;', 'const bgUrl = animatedUrl ?? target.avatarUrl ?? null;')), assert.AssertionError));
 });
 // Класс ошибки: фоновый слой рисуется всегда, включая пустой профиль.
 it('R176 мутант постоянного фона обнаруживается отсутствием фото', async () => {
-  await absentBackground(); await assert.rejects(() => absentBackground(replace(source, 'const bgUrl = target.avatarUrl ?? null;', "const bgUrl = target.avatarUrl ?? '/forced.png';")), assert.AssertionError);
+  await absentBackground(); await counterfact(() => assert.rejects(() => absentBackground(replace(source, 'const bgUrl = target.avatarUrl ?? null;', "const bgUrl = target.avatarUrl ?? '/forced.png';")), assert.AssertionError));
 });
 async function profileVolume(raw = source) {
   for (const options of [{ target: { voiceChannelId: 'voice' } }, { inPresence: true },
@@ -336,7 +340,7 @@ async function volumeIcon(raw = source) {
 it('R176 значок volume-off при mute и нуле процентов, volume при ненулевом уровне', () => volumeIcon());
 // Класс ошибки: нулевой процент звучит визуально как включённый звук.
 it('R176 мутант без проверки нуля громкости обнаруживается строкой профиля', async () => {
-  await volumeIcon(); await assert.rejects(() => volumeIcon(replace(source, "audio.muted || volPct === 0 ? 'volume-off' : 'volume'", "audio.muted ? 'volume-off' : 'volume'")), assert.AssertionError);
+  await volumeIcon(); await counterfact(() => assert.rejects(() => volumeIcon(replace(source, "audio.muted || volPct === 0 ? 'volume-off' : 'volume'", "audio.muted ? 'volume-off' : 'volume'")), assert.AssertionError));
 });
 async function menuVolume(menuRaw = menuSource) {
   for (const [options, expected] of [[{ fromProfile: true }, false], [{ fromProfile: false }, true], [{ fromProfile: true, width: 1280 }, true]] as const)
@@ -347,7 +351,7 @@ async function menuVolume(menuRaw = menuSource) {
 it('R176 меню fromProfile скрывает ctx-vol2 только на телефоне, обычное меню и ПК сохраняют регулятор', () => menuVolume());
 // Класс ошибки: fromProfile игнорируется и голосовая строка дублируется в меню.
 it('R176 мутант без телефонного ограничения ctx-vol2 обнаруживается меню профиля', async () => {
-  await menuVolume(); await assert.rejects(() => menuVolume(replace(menuSource, '!(fromProfile && phoneProfile?.isPhone()) &&', 'true &&')), assert.AssertionError);
+  await menuVolume(); await counterfact(() => assert.rejects(() => menuVolume(replace(menuSource, '!(fromProfile && phoneProfile?.isPhone()) &&', 'true &&')), assert.AssertionError));
 });
 
 const fedHome = { instanceId: 'neighbor', name: 'Сосед', domain: 'neighbor.example' };
@@ -374,8 +378,8 @@ for (const [name, anchor, replacement, target] of [
   ['результат времени показан без fedm4', 'const shownSeen = presenceOff ? null : profileSeen;', 'const shownSeen = profileSeen;', 'строка статуса только'],
 ] as const) it(`R197 UserContextMenu мутант «${name}» обнаруживается настоящими телефонным и ПК-профилями`, async () => {
   await profilePresence(true, false);
-  await assert.rejects(profilePresence(true, false, 'dm', replace(menuSource, anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await counterfact(() => assert.rejects(profilePresence(true, false, 'dm', replace(menuSource, anchor, replacement)),
+    e => e instanceof assert.AssertionError && e.message.includes(target)));
 });
 async function guestLine(width: number, rosterHome: shared.User['homeInstance'], dmHome: shared.User['homeInstance'], raw = source, menuRaw = menuSource) {
   const home = rosterHome ?? dmHome;
@@ -405,7 +409,9 @@ for (const [name, width, owner] of [['PhoneProfile', 390, 'phone'], ['UserContex
   it(`R197 мутант потерянного dmHome в ${name} обнаруживается настоящим GuestLine`, async () => {
     await guestLine(width, null, fedHome);
     const anchor = 'const lineHome = guestHome ?? dmHome;';
-    const changed = replace(owner === 'phone' ? source : menuSource, anchor, 'const lineHome = guestHome;');
-    await assert.rejects(guestLine(width, null, fedHome, owner === 'phone' ? changed : source, owner === 'menu' ? changed : menuSource),
-      e => e instanceof assert.AssertionError && e.message.includes('инстанс человека виден и без ростера'));
+    await counterfact(async () => {
+      const changed = replace(owner === 'phone' ? source : menuSource, anchor, 'const lineHome = guestHome;');
+      await assert.rejects(guestLine(width, null, fedHome, owner === 'phone' ? changed : source, owner === 'menu' ? changed : menuSource),
+        e => e instanceof assert.AssertionError && e.message.includes('инстанс человека виден и без ростера'));
+    });
   });

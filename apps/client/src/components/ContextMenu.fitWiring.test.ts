@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -60,15 +61,17 @@ for (const site of sites) {
     // Один исправленный вход не спасает остальные: каждый вызов ContextMenu обязан включать подгонку.
     const raw = readFileSync(new URL(`./${site.file}`, import.meta.url), 'utf8');
     checkFit(raw, site);
-    const { ast, fit } = menuAt(raw, site);
-    const attr = fit[0]!;
-    const start = attr.getStart(ast);
-    const end = attr.getEnd();
-    for (const replacement of ['', 'fit={false}']) {
-      const mutant = raw.slice(0, start) + replacement + raw.slice(end);
-      assert.notEqual(mutant, raw, 'контрфакт действительно меняет выбранный JSX-вызов');
-      assert.throws(() => checkFit(mutant, site), assert.AssertionError,
-        `${site.label}: снятие или выключение fit замечено стражем`);
-    }
+    counterfact(() => {
+      const { ast, fit } = menuAt(raw, site);
+      const attr = fit[0]!;
+      const start = attr.getStart(ast);
+      const end = attr.getEnd();
+      for (const replacement of ['', 'fit={false}']) {
+        const mutant = raw.slice(0, start) + replacement + raw.slice(end);
+        assert.notEqual(mutant, raw, 'контрфакт действительно меняет выбранный JSX-вызов');
+        assert.throws(() => checkFit(mutant, site), assert.AssertionError,
+          `${site.label}: снятие или выключение fit замечено стражем`);
+      }
+    });
   });
 }

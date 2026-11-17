@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import * as rules from './mediaViewerRules';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 it('видео уважает модификаторы, кадры только на паузе, третий край и неизвестную длительность',()=>{
   // Ловит перехват системной клавиши и неожиданный seek вместо кадра.
   for(const mods of [{ctrl:true},{alt:true},{meta:true}]) assert.equal(rules.videoKeyAction('KeyK',mods,true),null);
@@ -19,9 +20,11 @@ it('поворот не нормализует угол, вписывание н
   assert.deepEqual(rules.rubberPan({x:20,y:-20},{x:10,y:-10},1),{x:20,y:-20});
   assert.deepEqual(rules.inertiaTarget({x:0,y:0},{x:5000,y:-5000}),{x:1000,y:-1000});
   assert.deepEqual(rules.inertiaTarget({x:2,y:3},{x:NaN,y:Infinity}),{x:2,y:3});
+  counterfact(() => {
   const source=rules.rotateFit.toString(); assert.ok(source.includes('Math.min(1,'));
   const bad=runInNewContext(`(${source.replace('Math.min(1,','Math.min(')})`,{quarterTurned:rules.quarterTurned}) as typeof rules.rotateFit;
   assert.throws(()=>assert.equal(bad(10,20,100,100,90),1),assert.AssertionError);
+  });
 });
 it('дата просмотрщика различает сегодня, вчера и другой год, меню удаляет дубли без изменения входа',()=>{
   // Ловит устаревшую подпись дня и повторную опасную команду в меню.

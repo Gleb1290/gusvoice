@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -225,6 +226,7 @@ test('R159 контрфакт без ограничения 1:1 ошибочно
   await seedR159GroupCall();
   const api = await import('../src/conversations.js');
   await checkR159GroupCall(api);
+  await counterfact(async () => {
   const from = '...(!isGroup ? lastCallOf(r.lm_svc) : {}),';
   const moduleSource = readFileSync(new URL('../src/conversations.ts', import.meta.url), 'utf8');
   assert.equal(moduleSource.split(from).length - 1, 1, 'контрфакт меняет единственное ограничение звонка группой');
@@ -232,6 +234,7 @@ test('R159 контрфакт без ограничения 1:1 ошибочно
     from, '...lastCallOf(r.lm_svc),');
   await assert.rejects(checkR159GroupCall(wrong),
     (error: unknown) => error instanceof assert.AssertionError && error.message.includes('группа не получает поле call'));
+  });
 });
 
 test('R125 тридцать минут принимаются, лишняя миллисекунда отвергается в беседе и канале', async () => {
@@ -292,12 +295,14 @@ test('избранные вытесняют шестой стикер, копи�
   assert.ok(events.length >= 8); assert.ok(events.every((p) => p.channel === 'gw:user:a'));
   assert.equal((await app.inject({ method: 'GET', url: '/stickers/lists', headers: authHeader('b') })).json().faved.length, 0);
   const api=await import('../src/stickerLists.js');
+  await counterfact(async () => {
   const wrong=await mutantModule<typeof api>(new URL('../src/stickerLists.ts',import.meta.url),'publishToUser(userId,',"publishToUser('b',");
   published.length=0;
   await assert.rejects(async()=>{
     await wrong.publishStickerLists('a',lists.json());
     assert.ok(published.length>0 && published.every(p=>p.channel==='gw:user:a'));
   },assert.AssertionError);
+  });
 });
 
 test('недавние ограничены двадцатью, повтор поднимается, очистка и событие личные', async () => {
@@ -391,11 +396,13 @@ test('уход передаёт владение раннему участник
     assert.ok(!(res.json().messages ?? []).some((m: { conversationId: string }) => m.conversationId === id));
   }
   assert.ok((await app.inject({ method: 'GET', url: '/conv?groups=1', headers: authHeader('b') })).json().conversations.some((c: { id: string }) => c.id === id));
-  const groupMutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), "const cap = conv?.kind === 'group' ? FEATURE_GROUPS1 : CAP_CONV1;", 'const cap = CAP_CONV1;');
   published.length = 0;
   const made = await (await import('../src/convGroups.js')).updateGroupInfo('b', id, { title: 'Новое' }); assert.equal(made.kind, 'ok');
   if (made.kind !== 'ok') return;
+  await counterfact(async () => {
+  const groupMutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), "const cap = conv?.kind === 'group' ? FEATURE_GROUPS1 : CAP_CONV1;", 'const cap = CAP_CONV1;');
   await assert.rejects(async () => { await groupMutant.deliver(made.delivery); checkCaps(); }, assert.AssertionError);
+  });
   await t.raw.exec(`UPDATE conversation_members SET joined_at=CASE user_id WHEN 'b' THEN '2026-01-01'::timestamptz ELSE '2026-01-02'::timestamptz END WHERE conversation_id='${id}'`);
   const left = await app.inject({ method: 'POST', url: `/conv/${id}/leave`, headers: authHeader('a') }); assert.equal(left.statusCode, 200, left.body);
   const owner = await t.raw.query<{ user_id: string }>(`SELECT user_id FROM conversation_members WHERE conversation_id='${id}' AND role='owner' AND left_at IS NULL`);
@@ -434,6 +441,7 @@ test('бывшая группа показывает состав на моме�
   assert.equal(await formerFor('b'), 'a,d');
 
   const conv = await import('../src/conversations.js');
+  await counterfact(async () => {
   const mutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
     'or(isNull(conversationMembers.leftAt), gt(conversationMembers.leftAt, at))', 'isNull(conversationMembers.leftAt)');
   await assert.rejects(async () => {
@@ -444,6 +452,7 @@ test('бывшая группа показывает состав на моме�
     assert.ok(entry.group);
     assert.equal(entry.group.members.map((member: { id: string }) => member.id).join(','), 'a,b');
   }, assert.AssertionError);
+  });
 });
 
 test('две чужие реакции на сообщение дают одну непрочитанную, своя и удалённая не считаются', async () => {
@@ -536,7 +545,7 @@ test('поиск из списка фильтрует невидимое, кур
   const check = async (api: typeof conv) => assert.equal((await api.searchAllConversations('a',query)).hits.map(h=>h.id).join(','),'keep-search');
   await check(conv);
   for (const [from,to] of [['x.created_at < ${qy.until.toISOString()}', 'x.created_at <= ${qy.until.toISOString()}'], ['sql`(m.hidden_key IS NULL OR x.sort_key > m.hidden_key)`,','sql`true`,']] as const)
-    await assert.rejects(async()=>check(await mutantModule<typeof conv>(new URL('../src/conversations.ts',import.meta.url),from,to)),assert.AssertionError);
+    await counterfact(() => assert.rejects(async()=>check(await mutantModule<typeof conv>(new URL('../src/conversations.ts',import.meta.url),from,to)),assert.AssertionError));
   await conv.hideConversation('a', (await conv.loadAccess('dm','a'))!, false);
   assert.deepEqual((await get('?q=иголка')).json().hits,[]);
 });
@@ -551,7 +560,7 @@ test('счёт непрочитанных реакций отсекает уви
   const check = async (api: typeof conv) => assert.equal((await api.listConversations('a')).conversations.find(c=>c.id==='dm')!.unreadReactions,1);
   await check(conv);
   for (const [from,to] of [['r.seen_at IS NULL AND x.conversation_id = c.id','true AND x.conversation_id = c.id'],['AND x.author_id = ${me} AND r.user_id <> ${me}','AND r.user_id <> ${me}'],['AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ${me} AND b.blocked_id = r.user_id)','']] as const)
-    await assert.rejects(async()=>check(await mutantModule<typeof conv>(new URL('../src/conversations.ts',import.meta.url),from,to)),assert.AssertionError);
+    await counterfact(() => assert.rejects(async()=>check(await mutantModule<typeof conv>(new URL('../src/conversations.ts',import.meta.url),from,to)),assert.AssertionError));
 });
 
 test('asFile ограничен изображениями/видео, а round требует квадрат и предел длительности и копируется при пересылке', async () => {
@@ -637,6 +646,7 @@ test('общие медиа считают SQL-вложения, скрываю�
   const conv = await import('../src/conversations.js');
   const search = await conv.searchAllConversations('a', { pattern: null, conversationId: 'dm', kind: 'media', limit: 50 });
   assert.deepEqual(search.hits.map((m) => m.id), ['media-two', 'media-one']);
+  await counterfact(async () => {
   const withOnceMedia = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
     "AND NOT (${t}.attachments @> '[{\"once\": true}]'::jsonb)", '');
   await assert.rejects(async () => {
@@ -656,6 +666,7 @@ test('общие медиа считают SQL-вложения, скрываю�
   await assert.rejects(async () => {
     assert.deepEqual(await withoutVisibility.sharedMediaCounts('a', 'dm', false), { media: 2, file: 1, link: 1, gif: 1, voice: 3 });
   }, assert.AssertionError, 'снятие visibleTo включает скрытое, удалённое и придержанное');
+  });
   assert.equal((await get('/conv/dm/media?kind=unknown')).statusCode, 400);
   assert.equal((await get('/conv/dm/media?kind=media&limit=51')).statusCode, 400);
   assert.equal((await get('/conv/dm/media?kind=media', 'h')).statusCode, 404);
@@ -675,13 +686,15 @@ test('общие медиа считают SQL-вложения, скрываю�
   assert.deepEqual(former.json().messages.map((m: { id: string }) => m.id), ['old-photo']);
   assert.deepEqual((await get('/conv/former-media/media/counts?former=1', 'c')).json(), { media: 1, file: 0, link: 0, gif: 0, voice: 0 });
   assert.equal((await get('/conv/former-media/media?kind=media&former=1', 'h')).statusCode, 404);
-  const withoutLeftBoundary = await mutantModule<typeof conv>(source,
+  await counterfact(async () => {
+  const withoutLeftBoundary = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
     'return leftAt ? (and(base, lte(conversationMessages.createdAt, leftAt)) as SQL) : base;',
     'return leftAt ? base : base;');
   await assert.rejects(async () => {
     const result = await withoutLeftBoundary.sharedMedia('c', 'former-media', 'media', undefined, 50, true);
     assert.deepEqual(result?.messages.map((m) => m.id), ['old-photo']);
   }, assert.AssertionError, 'без created_at <= left_at бывшему открывается фото после выхода');
+  });
 });
 
 test('жалоба незнакомца собирает только его видимые улики, склеивается за сутки и закрывается только админом', async () => {
@@ -742,10 +755,12 @@ test('жалоба незнакомца собирает только его в�
   assert.equal((await close(reportId)).statusCode, 200);
   assert.equal((await close(reportId)).statusCode, 404, 'повторное закрытие уже не является изменением');
   const reports = await import('../src/dmReports.js');
+  await counterfact(async () => {
   const reopenMutant = await mutantModule<typeof reports>(new URL('../src/dmReports.ts', import.meta.url),
     ".where(and(eq(dmReports.id, id), eq(dmReports.status, 'new')))" , '.where(eq(dmReports.id, id))');
   await assert.rejects(async () => assert.equal(await reopenMutant.closeDmReport(reportId), false), assert.AssertionError,
     'мутант без условия new повторно затрагивает уже закрытую запись');
+  });
 });
 
 test('плашка незнакомца видна только до ответа, общего сервера, блока или явного скрытия', async () => {
@@ -759,20 +774,24 @@ test('плашка незнакомца видна только до ответ�
   assert.equal((await summary('pin4'))?.stranger, undefined, 'пустая беседа с удалённым сообщением не зажигает плашку');
 
   const source = new URL('../src/conversations.ts', import.meta.url);
-  const ownReply = await mutantModule<typeof conv>(source,
-    'AND NOT EXISTS (SELECT 1 FROM conversation_messages sx WHERE sx.conversation_id = c.id AND sx.author_id = ${me}\n        AND sx.deleted_at IS NULL AND sx.service IS NULL)', '');
   await insertMessage('stranger-own-reply', 'a', 20, [], 'pin2');
   assert.equal((await summary('pin2'))?.stranger, undefined);
+  await counterfact(async () => {
+  const ownReply = await mutantModule<typeof conv>(source,
+    'AND NOT EXISTS (SELECT 1 FROM conversation_messages sx WHERE sx.conversation_id = c.id AND sx.author_id = ${me}\n        AND sx.deleted_at IS NULL AND sx.service IS NULL)', '');
   await assert.rejects(async () => assert.equal((await summary('pin2', ownReply))?.stranger, undefined), assert.AssertionError,
     'без NOT EXISTS по моим сообщениям плашка остаётся после ответа');
+  });
 
   await insertMessage('known-peer-message', 'd', 10, [], 'pin3');
   await t.raw.exec("INSERT INTO server_members(server_id,user_id) VALUES ('presence-server','d')");
   assert.equal((await summary('pin3'))?.stranger, undefined, 'общий активный сервер означает знакомого');
+  await counterfact(async () => {
   const withoutCommonServer = await mutantModule<typeof conv>(source,
     'AND NOT EXISTS (SELECT 1 FROM server_members sa JOIN server_members sb ON sb.server_id = sa.server_id AND sb.state = \'active\'\n        WHERE sa.user_id = ${me} AND sa.state = \'active\' AND sb.user_id = ${peer})', '');
   await assert.rejects(async () => assert.equal((await summary('pin3', withoutCommonServer))?.stranger, undefined), assert.AssertionError,
     'без проверки общего сервера знакомый ошибочно считается незнакомцем');
+  });
 
   const hide = await app.inject({ method: 'POST', url: '/conv/pin2/stranger/hide', headers: authHeader('a'), payload: {} });
   assert.equal(hide.statusCode, 200, hide.body);
@@ -799,8 +818,16 @@ test('звонок проверяет право на ЛС, встречный �
   const cCanCall = async () => (await app.inject({ method: 'GET', url: '/users/c/last-seen', headers: authHeader('a') })).json().canCall;
   assert.equal(await cCanCall(), false, 'пустая беседа не принимает незнакомца для звонка');
   assert.equal((await start('pin2')).statusCode, 403, 'для «Собеседников» незнакомцу отказано');
-  const peerQueries = await import('../src/db/peerQueries.js');
   const { callAllowedFor } = await import('../src/callPrivacy.js');
+  await insertMessage('accepted-owner-reply', 'c', 11, [], 'pin2');
+  assert.equal(await cCanCall(), true, 'ответ владельца принимает незнакомца, и HTTP canCall совпадает');
+  const acceptedCall = await start('pin2'); assert.equal(acceptedCall.statusCode, 201, acceptedCall.body);
+  assert.equal((await app.inject({ method: 'POST', url: `/calls/${acceptedCall.json().call.id}/hangup`, headers: authHeader('a'), payload: {} })).statusCode, 200);
+  await t.raw.exec("UPDATE conversation_messages SET deleted_at=now() WHERE id='accepted-owner-reply'");
+  assert.equal(await cCanCall(), false, 'удалённый ответ перестаёт принимать незнакомца');
+  assert.equal(await callAllowedFor('a','c'), false);
+  await counterfact(async () => {
+  const peerQueries = await import('../src/db/peerQueries.js');
   const dbModule = await import('../src/db/index.js');
   const schema = await import('../src/db/schema.js');
   const drizzle = await import('drizzle-orm');
@@ -811,14 +838,8 @@ test('звонок проверяет право на ЛС, встречный �
       normalizeCallPrivacy: callRules.normalizeCallPrivacy, callAllowed: callRules.callAllowed, KEY: 'calls',
       arePeers: peerQueries.arePeers,
     });
-  await insertMessage('accepted-owner-reply', 'c', 11, [], 'pin2');
-  assert.equal(await cCanCall(), true, 'ответ владельца принимает незнакомца, и HTTP canCall совпадает');
-  const acceptedCall = await start('pin2'); assert.equal(acceptedCall.statusCode, 201, acceptedCall.body);
-  assert.equal((await app.inject({ method: 'POST', url: `/calls/${acceptedCall.json().call.id}/hangup`, headers: authHeader('a'), payload: {} })).statusCode, 200);
-  await t.raw.exec("UPDATE conversation_messages SET deleted_at=now() WHERE id='accepted-owner-reply'");
-  assert.equal(await cCanCall(), false, 'удалённый ответ перестаёт принимать незнакомца');
-  assert.equal(await callAllowedFor('a','c'), false);
   assert.equal(await arePeersMutant('a','c'), true, 'мутант со старыми arePeers ошибочно считает любую direct-беседу принятием');
+  });
   assert.equal((await exceptions('c', ['a'], [])).statusCode, 200);
   assert.equal(await cCanCall(), true, 'исключение always сильнее peers');
   const exceptionCall = await start('pin2'); assert.equal(exceptionCall.statusCode, 201, exceptionCall.body);
@@ -891,6 +912,8 @@ test('звонок проверяет право на ЛС, встречный �
   ], 'R96 добавляет отдельный успешный звонок через общий сервер до обычного answered/hangup');
 
   // После проверки штатного журнала запускаем контрфакт отдельно: старая семантика arePeers ошибочно принимает пустую ЛС.
+  await counterfact(async () => {
+  const peerQueries = await import('../src/db/peerQueries.js');
   const callsRouteModule = await import('../src/routes/calls.js');
   const routeDbModule = await import('../src/db/index.js');
   const routeSchema = await import('../src/db/schema.js');
@@ -921,6 +944,7 @@ test('звонок проверяет право на ЛС, встречный �
   assert.equal(mutantHttp.statusCode, 201, 'HTTP-контрфакт со старыми arePeers ошибочно разрешает звонок незнакомцу');
   assert.equal((await mutantCallApp.inject({ method: 'POST', url: `/calls/${mutantHttp.json().call.id}/hangup`, headers: authHeader('a'), payload: {} })).statusCode, 200);
   await mutantCallApp.close();
+  });
 });
 
 test('общий закреп создаёт одну служебную строку, личный и повтор не создают, строка не правится и не пересылается', async () => {
@@ -932,9 +956,11 @@ test('общий закреп создаёт одну служебную стр�
   const rows = await services(); assert.equal(rows.length,1); assert.equal(rows[0].author_id,'a'); assert.ok(rows[0].content);
   assert.deepEqual(rows[0].service,{kind:'pin',messageId:'pin-source'});
   const viewed = await conv.messageFor(rows[0].id,'b'); assert.ok(viewed && !('gone' in viewed)); assert.deepEqual(viewed.service,rows[0].service);
+  await counterfact(async () => {
   const noField=await mutantModule<typeof conv>(new URL('../src/conversations.ts',import.meta.url),'...(m.service ? { service: m.service } : {}),','');
   const wrong=await noField.messageFor(rows[0].id,'b'); assert.ok(wrong&&!('gone' in wrong));
   assert.throws(()=>assert.deepEqual(wrong.service,rows[0].service),assert.AssertionError);
+  });
   assert.equal((await conv.listConversations('b')).conversations.find(s=>s.id==='dm')?.unread,2, 'служебная строка добавляет одно непрочитанное');
   await conv.pinMessage('a',access,'pin-source','both'); assert.equal((await services()).length,1);
   assert.equal((await conv.editMessage('a',access,rows[0].id,'изменено')).kind,'forbidden');
@@ -944,11 +970,13 @@ test('общий закреп создаёт одну служебную стр�
   await insertMessage('pin-mine','a',20); await conv.pinMessage('a',access,'pin-mine','me'); assert.equal((await services()).length,0);
   await insertMessage('pin-block','a',30); await t.raw.exec(`INSERT INTO user_blocks (blocker_id,blocked_id) VALUES ('b','a')`);
   await conv.pinMessage('a',access,'pin-block','both'); assert.equal((await services()).length,0);
+  await counterfact(async () => {
   await insertMessage('pin-mine-mutant','a',40);
   const forMine=await mutantModule<typeof conv>(new URL('../src/conversations.ts',import.meta.url),'if (changed.some((id) => id !== me))','if (changed.length > 0)');
   await forMine.pinMessage('a',access,'pin-mine-mutant','me');
   const extra=(await services()).length;
   assert.throws(()=>assert.equal(extra,0),assert.AssertionError);
+  });
 });
 
 test('read_at ставится только чужим впервые накрытым сообщениям, повтор сохраняет дату, блок не выдаёт новое прочтение', async () => {
@@ -1065,8 +1093,10 @@ test('сообщение возвращает из архива автора и 
   };
   await check();
   for (const [from, to] of [['AND NOT pm.sound_only', ''], ['AND NOT pm.sound_only AND (pm.until IS NULL OR pm.until > now())', 'AND NOT pm.sound_only'], ['m.user_id = ${authorId} OR NOT EXISTS', 'm.user_id <> ${authorId} AND NOT EXISTS']]) {
+    await counterfact(async () => {
     const bad = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), from, to);
     await assert.rejects(() => check(bad), assert.AssertionError);
+    });
   }
 });
 
@@ -1085,9 +1115,11 @@ test('пересылка вызывает возврат из архива, пр
       assert.equal(rows[0].archived, false); assert.equal(rows[1].archived, withheld);
     }
   }; await check();
+  await counterfact(async () => {
   const from = '      await unarchiveOnMessage(tx, conversationId, me, audience);\n      const entries = rows.flatMap';
   const bad = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), from, '      const entries = rows.flatMap');
   await assert.rejects(() => check(bad), assert.AssertionError);
+  });
 });
 
 test('поиск фильтрует видимость, считает всё совпавшее, выдаёт новые первыми и продолжает по курсору', async () => {
@@ -1113,7 +1145,7 @@ test('поиск фильтрует видимость, считает всё с
     ['    or(eq(conversationMessages.withheld, false), eq(conversationMessages.authorId, me)),', ''],
     ['.orderBy(desc(key))\n      .limit(limit + 1)', '.orderBy(asc(key))\n      .limit(limit + 1)'],
     ['total: Number(n), hits, next:', 'total: hits.length, hits, next:'],
-  ]) await assert.rejects(() => mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), from, to).then(check), assert.AssertionError);
+  ]) await counterfact(() => assert.rejects(() => mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), from, to).then(check), assert.AssertionError));
   const access = await conv.loadAccess('dm', 'a'); assert.ok(access);
   await t.raw.exec(`UPDATE conversations SET last_sort_key=70 WHERE id='dm'`);
   await conv.clearHistory('a', access, 'me');
@@ -1242,8 +1274,10 @@ test('R128 мутант серверного canSend вместо переопр
   // Контрфакт сохраняет реальный bootstrap и базу, меняя только выбранный источник права.
   await shareChannelPermissionSeed();await verifyShareCanSend();
   type Routes=typeof import('../src/routes/servers.js');
+  await counterfact(async () => {
   const mutant=await mutantModule<Routes>(new URL('../src/routes/servers.ts',import.meta.url),'canSend: has(chanPerms?.get(c.id) ?? 0n, Permission.SEND_MESSAGES)','canSend: has(ctx.serverPermissions, Permission.SEND_MESSAGES)');
   const target=Fastify();await target.register(mutant.serverRoutes);await target.ready();try{await assert.rejects(()=>verifyShareCanSend(target),assert.AssertionError);}finally{await target.close();}
+  });
 });
 
 async function folderPinsSeed() {
@@ -1316,9 +1350,11 @@ test('R126 мутанты pinnedChats, new Set и разрешения сист�
   ] as const){
     await folderPinsSeed();await verify(app);
     // Полный модуль подменяется только для данного контрфакта, исходник на диске неизменен.
+    await counterfact(async () => {
     const target=Fastify();const mod=await mutantModule<Routes>(new URL('../src/routes/dmFolders.ts',import.meta.url),from,to);
     await target.register(mod.dmFolderRoutes);await target.ready();
     try{await assert.rejects(()=>verify(target),assert.AssertionError,from);}finally{await target.close();}
+    });
     await t.raw.exec(`DELETE FROM dm_folders;DELETE FROM conversations WHERE id='folder-foreign'`);
   }
 });
@@ -1327,8 +1363,10 @@ test('R126 мутант без array_remove оставляет старый по
   await folderPinsSeed();const actual=await import('../src/conversations.js');const access=await actual.loadAccess('dm','a');assert.ok(access);
   const verify=async(mod:typeof actual)=>{await t.raw.exec(`UPDATE conversation_members SET pinned_at=now() WHERE conversation_id='dm' AND user_id='a';UPDATE dm_folders SET pinned_ids=ARRAY['dm','pin2'] WHERE user_id='a'`);const result=await mod.setConversationPinned('a',access,false);assert.equal(result.kind,'ok');assert.ok((await folderPinRows()).rows.filter(r=>r.id!=='pins-b').every(r=>!r.pinned_ids.includes('dm')));};
   await verify(actual);
+  await counterfact(async () => {
   const mutant=await mutantModule<typeof actual>(new URL('../src/conversations.ts',import.meta.url),'array_remove(pinned_ids, ${conversationId})','pinned_ids');
   await assert.rejects(()=>verify(mutant),assert.AssertionError);
+  });
 });
 
 test('пометка непрочитанного личная, повтор бесшумен, чтение прежнего ключа и read-all снимают точку', async () => {
@@ -1346,12 +1384,14 @@ test('пометка непрочитанного личная, повтор б�
   assert.notEqual(list.json().conversations.find((c: { id: string }) => c.id === 'dm').markedUnread, true);
   const actual = await import('../src/conversations.js'); const access = await actual.loadAccess('dm', 'a'); assert.ok(access);
   await mark();
+  await counterfact(async () => {
   const mutant = await mutantModule<typeof actual>(new URL('../src/conversations.ts', import.meta.url), 'if (!before.marked) return', 'if (true) return');
   await assert.rejects(async () => {
     await mutant.markRead('a', access, 10);
     const row = await t.raw.query<{ marked: Date | null }>(`SELECT unread_marked_at AS marked FROM conversation_members WHERE conversation_id='dm' AND user_id='a'`);
     assert.equal(row.rows[0].marked, null, 'прежний ключ тоже обязан снять точку');
   }, assert.AssertionError);
+  });
   await actual.markRead('a', access, 10);
   await app.inject({ method: 'PUT', url: '/conv/pin2/unread-mark', headers: authHeader('a'), payload: { marked: true } });
   const all = await app.inject({ method: 'POST', url: '/conv/read-all', headers: authHeader('a') });
@@ -1373,12 +1413,14 @@ test('выключенный звук доставляет тихий push, см
   await sendPushToUsers(['b'], { type: 'dm', title: 'x', body: 'y' }, { scope: 'dm_user', targetId: 'a' });
   assert.equal(bodies.length, 1); assert.equal((bodies[0] as { silent?: boolean }).silent, true);
   const actualPush = await import('../src/push.js');
+  await counterfact(async () => {
   const mutantPush = await mutantModule<typeof actualPush>(new URL('../src/push.ts', import.meta.url), 'muted.filter((m) => !m.soundOnly)', 'muted');
   bodies.length = 0;
   await assert.rejects(async () => {
     await mutantPush.sendPushToUsers(['b'], { type: 'dm', title: 'x', body: 'y' }, { scope: 'dm_user', targetId: 'a' });
     assert.equal(bodies.length, 1, 'soundOnly не исключает получателя');
   }, assert.AssertionError);
+  });
   await app.inject({ method: 'POST', url: '/push/mute', headers: authHeader('b'), payload: { scope: 'dm_user', targetId: 'a', seconds: 60 } });
   bodies.length = 0;
   await sendPushToUsers(['b'], { type: 'dm', title: 'x', body: 'y' }, { scope: 'dm_user', targetId: 'a' });
@@ -1541,12 +1583,14 @@ test('срочный мьют фильтрует только действующ
   await sendPushToUsers(['b'], { type: 'mention', title: 'x', body: 'y' }, { scope: 'server', targetId: 's' });
   assert.deepEqual(pushed, ['https://ntfy.example.test/b'], 'истёкший срок снова пропускает push');
   const actualPush = await import('../src/push.js');
+  await counterfact(async () => {
   const mutantPush = await mutantModule<typeof actualPush>(new URL('../src/push.ts', import.meta.url), 'activeMute(),', 'sql`TRUE`,');
   pushed.length = 0;
   await assert.rejects(async () => {
     await mutantPush.sendPushToUsers(['b'], { type: 'mention', title: 'x', body: 'y' }, { scope: 'server', targetId: 's' });
     assert.deepEqual(pushed, ['https://ntfy.example.test/b'], 'истёкший мьют не фильтрует push');
   }, assert.AssertionError);
+  });
   const timedBeforePermanent = await app.inject({ method: 'POST', url: '/push/mute', headers: authHeader('b'), payload: { scope: 'dm_user', targetId: 'a', seconds: 60 } });
   assert.equal(timedBeforePermanent.statusCode, 204);
   const permanent = await app.inject({ method: 'POST', url: '/push/mute', headers: authHeader('b'), payload: { scope: 'dm_user', targetId: 'a' } });
@@ -1593,12 +1637,14 @@ test('прослушивание голосового пишет одну стр
   const own = await app.inject({ method: 'POST', url: '/conv/dm/messages/voice/listened', headers: authHeader('a') });
   assert.equal(own.statusCode, 404, 'автор не может отметить своё голосовое слушателем');
   const conv = await import('../src/conversations.js'); const access = await conv.loadAccess('dm', 'a'); assert.ok(access);
+  await counterfact(async () => {
   const mutantVoice = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), ' || m.authorId === me', '');
   await assert.rejects(async () => {
     const result = await mutantVoice.listenVoice('a', access, 'voice', new Set());
     assert.equal(result.kind, 'not-found', 'автор не является собственным слушателем');
   }, assert.AssertionError);
   await t.raw.exec(`DELETE FROM conversation_voice_listens WHERE message_id='voice' AND user_id='a'`);
+  });
   published.length = 0;
   const listened = await app.inject({ method: 'POST', url: '/conv/dm/messages/voice/listened', headers: authHeader('b') });
   assert.equal(listened.statusCode, 204);
@@ -1654,9 +1700,10 @@ test('одноразовое голосовое тратится только п
     const group = await send('once-group', '90000000-0000-4000-8000-000000000092', '90000000-0000-4000-8000-000000000102');
     assert.equal(group.statusCode, 201, group.body);
     assert.equal(Object.hasOwn(group.json().attachments[0], 'once'), false, 'в группе one-shot снимается');
+    const conv = await import('../src/conversations.js');
+    await counterfact(async () => {
     await t.raw.exec(`INSERT INTO attachments(id,conversation_id,owner_id,storage_key,name,content_type,size,state)
       VALUES ('90000000-0000-4000-8000-000000000105','once-group','a','once-group/mutant','once.ogg','audio/ogg',1,'pending')`);
-    const conv = await import('../src/conversations.js');
     const groupAccess = await conv.loadAccess('once-group', 'a'); assert.ok(groupAccess);
     const alwaysOnce = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
       'const onceOk = lock.kind === \'direct\' && !access.saved;', 'const onceOk = true;');
@@ -1669,6 +1716,7 @@ test('одноразовое голосовое тратится только п
       assert.equal(mutant.kind === 'created' && mutant.row.attachments[0]?.once, false,
         'контрфакт должен оставлять групповое сообщение не одноразовым');
     }, assert.AssertionError);
+    });
     const saved = await send('once-saved', '90000000-0000-4000-8000-000000000093', '90000000-0000-4000-8000-000000000103');
     assert.equal(saved.statusCode, 201, saved.body);
     assert.equal(Object.hasOwn(saved.json().attachments[0], 'once'), false, 'в «Избранном» one-shot снимается');
@@ -1718,12 +1766,14 @@ test('одноразовое голосовое тратится только п
     assert.equal(published.length, eventCount, 'повтор не пишет журнал и не рассылает события');
     const edit = await conv.editMessage('a', aAccess, directId, 'не вернуть файл');
     assert.equal(edit.kind, 'forbidden', 'потраченное сообщение уже нельзя редактировать');
+    await counterfact(async () => {
     const editableMutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
       'if (m.onceSpentAt) return { kind: \'forbidden\' };', '');
     await assert.rejects(async () => {
       const result = await editableMutant.editMessage('a', aAccess, directId, 'не вернуть файл');
       assert.equal(result.kind, 'forbidden');
     }, assert.AssertionError);
+    });
   } finally { setAttachmentStoreForTests(null); }
 });
 
@@ -1752,6 +1802,7 @@ test('контакты валидируют цель, сохраняют под�
   const contactDb = await import('../src/db/index.js');
   const contactSchema = await import('../src/db/schema.js');
   const drizzle = await import('drizzle-orm');
+  await counterfact(async () => {
   const eraseOnOmittedName = mutateExportedFunction<typeof contactsModule.addContact>(new URL('../src/contacts.ts', import.meta.url), 'addContact',
     [['if (clean !== undefined) {', 'if (clean !== undefined || name === undefined) {'], ['.set({ name: clean })', '.set({ name: clean ?? null })']], {
       db: contactDb.db, and: drizzle.and, eq: drizzle.eq, count: drizzle.count, userContacts: contactSchema.userContacts,
@@ -1761,15 +1812,18 @@ test('контакты валидируют цель, сохраняют под�
     await eraseOnOmittedName('a', 'c', undefined, CONTACTS_MAX);
     assert.equal((await getList()).json().contacts[0].name, 'Близкий');
   }, assert.AssertionError, 'мутант затирает личную подпись при повторе без name');
+  });
   await contactsModule.renameContact('a', 'c', 'Близкий');
   const rename = await app.inject({ method: 'POST', url: '/contacts', headers: authHeader('a'), payload: { userId: 'c', name: 'Свой' } });
   assert.equal(rename.json().contacts[0].name, 'Свой');
-  const noStrangerContact = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
-    'AND NOT EXISTS (SELECT 1 FROM user_contacts uc WHERE uc.owner_id = ${me} AND uc.contact_id = ${peer})', '');
   assert.equal((await conv.listConversations('a')).conversations.find((c) => c.id === 'pin2')?.stranger, undefined,
     'контакт принят и сводка больше не помечает собеседника незнакомцем');
+  await counterfact(async () => {
+  const noStrangerContact = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url),
+    'AND NOT EXISTS (SELECT 1 FROM user_contacts uc WHERE uc.owner_id = ${me} AND uc.contact_id = ${peer})', '');
   assert.equal((await noStrangerContact.listConversations('a')).conversations.find((c) => c.id === 'pin2')?.stranger, true,
     'мутант забывает исключение контакта из плашки незнакомца');
+  });
   assert.equal((await app.inject({ method: 'PATCH', url: '/contacts/d', headers: authHeader('a'), payload: { name: 'нет' } })).statusCode, 404);
   assert.equal((await app.inject({ method: 'DELETE', url: '/contacts/c', headers: authHeader('a') })).statusCode, 200);
   assert.equal(await stranger(), true, 'после удаления контакта плашка незнакомца снова видна');
@@ -1781,14 +1835,16 @@ test('контакты валидируют цель, сохраняют под�
     INSERT INTO user_contacts(owner_id,contact_id) VALUES ('a','c');`);
   assert.deepEqual((await getList()).json().contacts, [], 'контакт с удалённым аккаунтом не выдаётся в списке');
   // Делает SQL-условие удаления истинным для всех строк: контрфакт должен вернуть удалённую цель, рабочая версия — нет.
+  assert.deepEqual(await contactsModule.listContacts('a'), [], 'рабочая версия списка исключает удалённые аккаунты');
+  await counterfact(async () => {
   const includeDeleted = mutateExportedFunction<typeof contactsModule.listContacts>(new URL('../src/contacts.ts', import.meta.url), 'listContacts',
     [['isNull(users.deletedAt)', 'drizzleSql`TRUE`']], {
       db: contactDb.db, and: drizzle.and, eq: drizzle.eq, isNull: drizzle.isNull, asc: drizzle.asc,
       users: contactSchema.users, userContacts: contactSchema.userContacts, drizzleSql: drizzle.sql,
     });
-  assert.deepEqual(await contactsModule.listContacts('a'), [], 'рабочая версия списка исключает удалённые аккаунты');
   assert.equal((await includeDeleted('a')).some((entry) => entry.id === 'c'), true,
     'мутант списка выдаёт профиль удалённого аккаунта');
+  });
   assert.equal((await app.inject({ method: 'POST', url: '/contacts', headers: authHeader('a'), payload: { userId: 'c' } })).statusCode, 404,
     'удалённый пользователь больше не цель добавления');
 
@@ -1803,6 +1859,7 @@ test('контакты валидируют цель, сохраняют под�
   const over = await app.inject({ method: 'POST', url: '/contacts', headers: authHeader('a'), payload: { userId: 'd' } });
   assert.equal(over.statusCode, 400); assert.equal(over.json().reason, 'contacts.limit'); assert.equal(over.json().max, CONTACTS_MAX);
 
+  await counterfact(async () => {
   const limitOffByOne = mutateExportedFunction<typeof contactsModule.addContact>(new URL('../src/contacts.ts', import.meta.url), 'addContact',
     [['Number(n) >= max', 'Number(n) > max']], {
       db: contactDb.db, and: drizzle.and, eq: drizzle.eq, count: drizzle.count, userContacts: contactSchema.userContacts,
@@ -1812,12 +1869,15 @@ test('контакты валидируют цель, сохраняют под�
     await limitOffByOne('a', 'd', undefined, CONTACTS_MAX);
     assert.equal((await getList()).json().contacts.length, CONTACTS_MAX);
   }, assert.AssertionError, 'мутант off-by-one принимает CONTACTS_MAX+1');
+  });
 
+  await counterfact(async () => {
   const noGuestCheck = mutateExportedFunction<typeof contactsModule.contactTarget>(new URL('../src/contacts.ts', import.meta.url), 'contactTarget',
     [['if (row.home !== null) return \'guest\';', '']], {
       db: contactDb.db, and: drizzle.and, eq: drizzle.eq, isNull: drizzle.isNull, users: contactSchema.users,
     });
   assert.equal(await noGuestCheck('a', 'h'), null, 'контрфакт без guest-check принимает гостя');
+  });
 });
 
 test('очистка и удаление чата хоронят только допустимые сообщения и возвращают беседу после нового сообщения', async () => {
@@ -1881,19 +1941,23 @@ test('очистка у себя скрывает лишь свою копию, 
   assert.ok(hiddenMembers.rows.every((m) => m.pinned_at === null), 'удаление чата снимает закреп');
   const conv = await import('../src/conversations.js'); const access = await conv.loadAccess('pin2', 'a'); assert.ok(access);
   await t.raw.exec(`UPDATE conversation_members SET pinned_at=now() WHERE conversation_id='pin2'`);
+  await counterfact(async () => {
   const pinMutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), '.set({ hiddenKey: upToKey, pinnedAt: null })', '.set({ hiddenKey: upToKey })');
   await assert.rejects(async () => {
     await pinMutant.hideConversation('a', access, true);
     const rows = await t.raw.query<{ pinned_at: Date | null }>(`SELECT pinned_at FROM conversation_members WHERE conversation_id='pin2'`);
     assert.ok(rows.rows.every((r) => r.pinned_at === null), 'hide снимает закрепы обоим');
   }, assert.AssertionError);
+  });
   await t.raw.exec(`UPDATE conversation_members SET hidden_key=NULL,pinned_at=NULL WHERE conversation_id='pin2'`);
+  await counterfact(async () => {
   const whoMutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), 'const who = forBoth && othersDeletableForBoth(lock.kind) ? access.memberIds : [me];', 'const who = [me];');
   await assert.rejects(async () => {
     await whoMutant.hideConversation('a', access, true);
     const rows = await t.raw.query<{ hidden_key: number | null }>(`SELECT hidden_key FROM conversation_members WHERE conversation_id='pin2'`);
     assert.ok(rows.rows.every((r) => r.hidden_key !== null), 'both действует на обе копии');
   }, assert.AssertionError);
+  });
   await conv.hideConversation('a', access, true);
   for (const user of ['a', 'c']) {
     const list = await app.inject({ method: 'GET', url: '/conv', headers: authHeader(user) });
@@ -1906,10 +1970,12 @@ test('очистка у себя скрывает лишь свою копию, 
   const marker = markerRow.rows[0].hidden_key;
   await insertMessage('equal-marker', 'c', marker, [], 'pin2');
   assert.equal((await (await import('../src/conversations.js')).myConversationIds('a')).includes('pin2'), false, 'сообщение ровно на hidden_key не возвращает беседу');
+  await counterfact(async () => {
   const boundaryMutant = await mutantModule<typeof conv>(new URL('../src/conversations.ts', import.meta.url), 'z.sort_key > ${hiddenKey}', 'z.sort_key >= ${hiddenKey}');
   await assert.rejects(async () => {
     assert.equal((await boundaryMutant.myConversationIds('a')).includes('pin2'), false, 'равенство метке не возвращает чат');
   }, assert.AssertionError);
+  });
 
   const sent = await app.inject({ method: 'POST', url: '/conv/pin2/messages', headers: authHeader('c'), payload: {
     clientId: '00000000-0000-4000-8000-000000000021', content: 'новое после скрытия', attachments: [],

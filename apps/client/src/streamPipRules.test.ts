@@ -1,8 +1,10 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports';
 import {
   isInPip,
   parsePipSize,
@@ -20,7 +22,8 @@ import {
 } from './streamPipRules.js';
 
 type PipRules = typeof import('./streamPipRules.js');
-const source = readFileSync(new URL('./streamPipRules.ts', import.meta.url), 'utf8');
+const sourceUrl = new URL('./streamPipRules.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8');
 
 function loadRules(raw: string): PipRules {
   // Исполняем целый чистый модуль: извлечение формулы скрыло бы ошибки её окружения.
@@ -29,17 +32,19 @@ function loadRules(raw: string): PipRules {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
   } }).outputText, {
     module, exports: module.exports,
-    require: (id: string) => assert.fail(`Неописанный импорт правил окошка: ${id}`),
+    require: testVmImports(sourceUrl, {}),
   });
   return module.exports;
 }
 
 function rejectMutation(from: string, to: string, verify: (api: PipRules) => void, message: string): void {
   verify(loadRules(source)); // Сначала тот же сценарий обязан пройти на оригинале.
-  assert.equal(source.split(from).length - 1, 1, 'точка мутации единственная');
-  const mutant = loadRules(source.replace(from, to)); // Ошибка загрузки не считается обнаружением регрессии.
-  assert.throws(() => verify(mutant),
-    (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1, 'точка мутации единственная');
+    const mutant = loadRules(source.replace(from, to)); // Ошибка загрузки не считается обнаружением регрессии.
+    assert.throws(() => verify(mutant),
+      (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(message));
+  });
 }
 
 function checkRoundedPositiveSize(api: Pick<PipRules, 'parsePipSize'>): void {

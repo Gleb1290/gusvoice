@@ -1,3 +1,4 @@
+import { counterfact, mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -79,9 +80,12 @@ for (const [name, anchor, replacement, options, target] of [
   ['обойти дом с файлами', '!via || !viaSendable(item)', '!via', { active: true, limited: 'file' as const }, 'обход следует недоступности'],
   ['игнорировать active', 'if (via.active(convId)) return via.send(convId, viaBody, SEND_TIMEOUT_MS);', 'if (false) return via.send(convId, viaBody, SEND_TIMEOUT_MS);', { active: true }, 'обход следует недоступности'],
 ] as const) it(`R200 convStore мутант «${name}» отвергается реальной очередью`, async () => {
-  await viaSending(options); assert.equal(viaStoreSource.split(anchor).length - 1, 1, 'единственный якорь обходной отправки');
-  await assert.rejects(viaSending(options, viaStoreSource.replace(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  await viaSending(options);
+  await counterfact(async () => {
+    assert.equal(viaStoreSource.split(anchor).length - 1, 1, 'единственный якорь обходной отправки');
+    await assert.rejects(viaSending(options, viaStoreSource.replace(anchor, replacement)),
+      e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 
 it('очередь отправляет без превью и как файлы в API после загрузки, обычная строка без флагов', async () => {
@@ -142,7 +146,9 @@ it('увиденное читается пакетом без продления
     assert.equal(f.get().conv.summaries.c.unread, 0); assert.deepEqual(f.get().unreadDms, []);
   };
   await check(createConvActions);
-  await assert.rejects(() => check(mutatedFactory(s => s.replace('const key = clampReadKey(readKeyFor(listOf(s, convId), windowed() ? undefined : summary), seenKeys.get(convId));', 'const key = readKeyFor(listOf(s, convId), windowed() ? undefined : summary);'))), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => check(mutatedFactory(s => s.replace('const key = clampReadKey(readKeyFor(listOf(s, convId), windowed() ? undefined : summary), seenKeys.get(convId));', 'const key = readKeyFor(listOf(s, convId), windowed() ? undefined : summary);'))), assert.AssertionError);
+  });
 });
 
 it('увиденное в закрытой ленте не создаёт отметку даже при последующем readNow', async () => {
@@ -155,7 +161,9 @@ it('увиденное в закрытой ленте не создаёт отм
     f.actions.convReadNow('c'); await settle(); assert.deepEqual(reads, []);
   };
   await check(createConvActions);
-  await assert.rejects(() => check(mutatedFactory(s => s.replace('if (onScreenId(get()) !== convId) return;', ''))), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => check(mutatedFactory(s => s.replace('if (onScreenId(get()) !== convId) return;', ''))), assert.AssertionError);
+  });
 });
 
 it('сводка ухода убирает строку и загруженную ленту, следующая новинка возвращает только строку', () => {
@@ -196,12 +204,14 @@ function mutatedFactory(change: (s: string) => string): typeof createConvActions
   const module = { exports: {} as { createConvActions: typeof createConvActions } };
   runInNewContext(code, { module, exports: module.exports, AbortController, require: (id: string) => {
     assert.ok(Object.hasOwn(deps, id), id); return deps[id];
-  } });
+  } }, { timeout: 500 });
   return module.exports.createConvActions;
 }
 
 type SendBody = Parameters<ConvDeps['api']['convSend']>[1];
-function fixture(overrides: Partial<ConvDeps['api']> = {}, factory = createConvActions, extra: Partial<ConvDeps> = {}) {
+class DraftHarnessBudgetError extends Error {}
+type DraftBudget = { step: () => void; check: () => void };
+function fixture(overrides: Partial<ConvDeps['api']> = {}, factory = createConvActions, extra: Partial<ConvDeps> = {}, draftBudget?: DraftBudget) {
   let host: ConvHost = { conv: { ...convRules.emptyConvState(), pts: 0, phase: 'live' }, convActive: true,
     dms: [], dmMessages: {}, unreadDms: [], historyFailed: [], currentDmId: null, view: 'server', mobilePane: 'content', outbox: {}, drafts: {} };
   let time = 1000;
@@ -224,18 +234,26 @@ function fixture(overrides: Partial<ConvDeps['api']> = {}, factory = createConvA
     convRead: async () => ({ lastReadKey: 1 }),
     ...overrides,
   };
-  const actions = factory((patch) => { writes++; host = { ...host, ...(typeof patch === 'function' ? patch(host) : patch) }; }, () => host, {
-    api, now: () => time, setTimeout: (fn, ms) => { timers.set(++nextTimer, { at: time + ms, fn }); return nextTimer; },
-    clearTimeout: (id) => { timers.delete(id as number); }, onOnline: (fn) => { online = fn; }, isMobile: () => false, markChannelSeen: () => {},
+  const actions = factory((patch) => { draftBudget?.step(); writes++; host = { ...host, ...(typeof patch === 'function' ? patch(host) : patch) }; }, () => host, {
+    api, now: () => time, setTimeout: (fn, ms) => { draftBudget?.step(); timers.set(++nextTimer, { at: time + ms, fn }); return nextTimer; },
+    clearTimeout: (id) => { draftBudget?.step(); timers.delete(id as number); }, onOnline: (fn) => { online = fn; }, isMobile: () => false, markChannelSeen: () => {},
     ...extra,
   });
   return { actions, api, sends, uploads, syncs, histories, timers, get: () => host, writes: () => writes,
     set: (patch: Partial<ConvHost>) => { host = { ...host, ...patch }; }, listCalls: () => listCalls,
     enqueue: (key: string, id = 'c', files: File[] = []) => actions.outboxEnqueue(id, { key, content: key, files, replyToId: null }),
     online: () => online(), advance: async (ms: number) => {
+      draftBudget?.step();
+      if (!Number.isFinite(ms) || ms < 0) throw new DraftHarnessBudgetError('R369: часы принимают только конечный неотрицательный шаг');
       time += ms;
-      for (const [id, task] of [...timers]) if (task.at <= time) { timers.delete(id); task.fn(); }
+      const due = [...timers];
+      if (due.length > 200) throw new DraftHarnessBudgetError('R369: больше 200 таймеров в одном шаге часов');
+      for (const [id, task] of due) {
+        draftBudget?.step();
+        if (task.at <= time) { timers.delete(id); task.fn(); }
+      }
       await settle();
+      draftBudget?.check();
     },
   };
 }
@@ -278,12 +296,14 @@ it('отмена летящей отправки удаляет принятый
     assert.equal(f.get().outbox.c?.length ?? 0, 0);
   };
   await check(createConvActions);
-  const bad = mutatedFactory(source => {
-    const from = 'if (cancelledInFlight.delete(item.key)) {';
-    assert.ok(source.includes(from), 'найдена ветка компенсации отменённой отправки');
-    return source.replace(from, 'if (false) {');
+  await counterfact(async () => {
+    const bad = mutatedFactory(source => {
+      const from = 'if (cancelledInFlight.delete(item.key)) {';
+      assert.ok(source.includes(from), 'найдена ветка компенсации отменённой отправки');
+      return source.replace(from, 'if (false) {');
+    });
+    await assert.rejects(() => check(bad), assert.AssertionError);
   });
-  await assert.rejects(() => check(bad), assert.AssertionError);
 });
 
 describe('применение ответов пачки', () => {
@@ -461,14 +481,16 @@ describe('исполняемая очередь исходящих бесед', 
     await settle();
     assert.deepEqual(f.sends.map((s) => s.body.clientId), ['one', 'two']);
     f.actions.convReset();
-    const mutant = scenario(mutatedFactory((s) => {
-      assert.ok(s.includes('sending.has(convId) || '));
-      return s.replace('sending.has(convId) || ', '');
-    }));
-    assert.equal(mutant.f.sends.length, 2, 'без замка два запроса стартуют до первого ответа');
-    mutant.f.actions.convReset();
-    mutant.pending.resolve(message('one'));
-    await settle();
+    await counterfact(async () => {
+      const mutant = scenario(mutatedFactory((s) => {
+        assert.ok(s.includes('sending.has(convId) || '));
+        return s.replace('sending.has(convId) || ', '');
+      }));
+      assert.equal(mutant.f.sends.length, 2, 'без замка два запроса стартуют до первого ответа');
+      mutant.f.actions.convReset();
+      mutant.pending.resolve(message('one'));
+      await settle();
+    });
   });
 
   it('отправки разных бесед не ждут чужого ответа', async () => {
@@ -588,12 +610,14 @@ describe('исполняемая очередь исходящих бесед', 
       return f.get().dmMessages.c.length;
     };
     assert.equal(await scenario(), 0);
-    const mutant = mutatedFactory((s) => {
-      const needle = 'if (myGen !== gen) return;\n      setItems(convId';
-      assert.ok(s.includes(needle));
-      return s.replace(needle, 'setItems(convId');
+    await counterfact(async () => {
+      const mutant = mutatedFactory((s) => {
+        const needle = 'if (myGen !== gen) return;\n      setItems(convId';
+        assert.ok(s.includes(needle));
+        return s.replace(needle, 'setItems(convId');
+      });
+      assert.equal(await scenario(mutant), 1, 'без поколения старый ответ загрязняет новую ленту');
     });
-    assert.equal(await scenario(mutant), 1, 'без поколения старый ответ загрязняет новую ленту');
     const f = fixture({ convSend: async () => { throw new Error('offline'); } });
     f.enqueue('timer');
     await settle();
@@ -678,16 +702,6 @@ describe('исполняемая очередь исходящих бесед', 
 });
 
 describe('поколения истории и замка очереди', () => {
-  it('без sameGen старое открытие загрязняет новый стор: контрфактическое подтверждение', async () => {
-    const mutant = mutatedFactory((s) => {
-      const needle = 'await sameGen(api.convHistory(convId, { limit: stale ? STALE_PAGE : HISTORY_PAGE }))';
-      const changed = s.replace(needle, 'await api.convHistory(convId, { limit: stale ? STALE_PAGE : HISTORY_PAGE })'); assert.notEqual(changed, s); return changed;
-    });
-    const p = deferred<Awaited<ReturnType<ConvDeps['api']['convHistory']>>>();
-    const f = fixture({ convHistory: () => p.promise }, mutant); const opening = f.actions.convOpen('c');
-    f.actions.convReset(); p.resolve({ pts: 0, messages: [message('old')], hasMoreBefore: false, hasMoreAfter: false });
-    await opening; assert.equal(f.get().dmMessages.c[0].id, 'old');
-  });
   it('ответ открытия после reset не приносит сообщения, прочтение и ошибку в новый стор', async () => {
     const p = deferred<Awaited<ReturnType<ConvDeps['api']['convHistory']>>>();
     let reads = 0;
@@ -730,8 +744,10 @@ describe('поколения истории и замка очереди', () =>
       f.actions.convReset(); fresh.resolve(message('two')); await settle(); return keys;
     }
     assert.deepEqual(await run(createConvActions), ['one', 'two']);
-    const mutant = mutatedFactory((s) => { const changed = s.replace('if (myGen === gen) sending.delete(convId)', 'sending.delete(convId)'); assert.notEqual(changed, s); return changed; });
-    assert.deepEqual(await run(mutant), ['one', 'two', 'two']);
+    await counterfact(async () => {
+      const mutant = mutatedFactory((s) => { const changed = s.replace('if (myGen === gen) sending.delete(convId)', 'sending.delete(convId)'); assert.notEqual(changed, s); return changed; });
+      assert.deepEqual(await run(mutant), ['one', 'two', 'two']);
+    });
   });
 });
 
@@ -749,8 +765,10 @@ describe('оконные действия беседы', () => {
     }
     const good = await run(); assert.deepEqual(good.empty, []); assert.deepEqual(good.reads, [50]);
     assert.equal(good.f.get().conv.summaries.c.unread, 120); assert.deepEqual(good.f.get().unreadDms, []);
-    const mutant = mutatedFactory((s) => { const x = s.replace('win ? undefined : summary', 'summary'); assert.notEqual(x, s); return x; });
-    assert.deepEqual((await run(mutant)).empty, [120]);
+    await counterfact(async () => {
+      const mutant = mutatedFactory((s) => { const x = s.replace('win ? undefined : summary', 'summary'); assert.notEqual(x, s); return x; });
+      assert.deepEqual((await run(mutant)).empty, [120]);
+    });
   });
   it('подгрузка ограничена 300 только в оконном режиме, прежняя лента сохраняет весь хвост', async () => {
     for (const enabled of [true, false]) {
@@ -800,18 +818,20 @@ describe('оконные действия беседы', () => {
       assert.equal(await f.actions.convJumpTo('c', '100'), true);
       const current = f.get().dmMessages.c; p.resolve(page(['9'], false, false));
       assert.equal(await loading, true); assert.equal(f.get().dmMessages.c, current);
-      const mutant = mutatedFactory((s) => {
-        const needle = side === 'older'
-          ? 'if (listOf(s, convId)?.[0]?.id !== first.id) return !!s.conv.windows[convId]?.hasMoreBefore;'
-          : 'if (now?.[now.length - 1]?.id !== last.id) return !!s.conv.windows[convId]?.hasMoreAfter;';
-        const x = s.replace(needle, ''); assert.notEqual(x, s); return x;
+      await counterfact(async () => {
+        const mutant = mutatedFactory((s) => {
+          const needle = side === 'older'
+            ? 'if (listOf(s, convId)?.[0]?.id !== first.id) return !!s.conv.windows[convId]?.hasMoreBefore;'
+            : 'if (now?.[now.length - 1]?.id !== last.id) return !!s.conv.windows[convId]?.hasMoreAfter;';
+          const x = s.replace(needle, ''); assert.notEqual(x, s); return x;
+        });
+        const late = deferred<ReturnType<typeof page>>();
+        const bad = fixture({ convHistory: async (_id, q) => q?.around ? page(['100'], true, true) : late.promise }, mutant, { windowed: () => true });
+        bad.set({ dmMessages: { c: page(['10']).messages }, conv: { ...bad.get().conv, windows: { c: { basePts: 0, hasMoreBefore: true, hasMoreAfter: true } } } });
+        const stale = side === 'older' ? bad.actions.convLoadOlder('c') : bad.actions.convLoadNewer('c');
+        await bad.actions.convJumpTo('c', '100'); late.resolve(page(['9'])); await stale;
+        assert.deepEqual(bad.get().dmMessages.c.map((m) => m.id), ['9', '100']);
       });
-      const late = deferred<ReturnType<typeof page>>();
-      const bad = fixture({ convHistory: async (_id, q) => q?.around ? page(['100'], true, true) : late.promise }, mutant, { windowed: () => true });
-      bad.set({ dmMessages: { c: page(['10']).messages }, conv: { ...bad.get().conv, windows: { c: { basePts: 0, hasMoreBefore: true, hasMoreAfter: true } } } });
-      const stale = side === 'older' ? bad.actions.convLoadOlder('c') : bad.actions.convLoadNewer('c');
-      await bad.actions.convJumpTo('c', '100'); late.resolve(page(['9'])); await stale;
-      assert.deepEqual(bad.get().dmMessages.c.map((m) => m.id), ['9', '100']);
     });
     it(`порция ${side} при неизменном крае смыкается с окном`, async () => {
       const f = fixture({ convHistory: async () => page([side === 'older' ? '9' : '11'], true, true) }, createConvActions, { windowed: () => true });
@@ -842,82 +862,204 @@ describe('список при потере шлюза', () => {
 describe('черновики между устройствами', () => {
   const enabled = { draftsOnServer: () => true, draftDevice: 'me' };
   function drafting(api: Partial<ConvDeps['api']> = {}, deps: Partial<ConvDeps> = enabled, factory = createConvActions) {
+    let steps = 0, exhausted = false;
+    const budget: DraftBudget = {
+      step() {
+        if (++steps > 200) { exhausted = true; throw new DraftHarnessBudgetError('R369: черновик превысил 200 вызовов/шагов'); }
+      },
+      check() { if (exhausted) throw new DraftHarnessBudgetError('R369: ошибка бюджета не является kill'); },
+    };
     const calls: { text: string; keepalive?: boolean }[] = [];
-    const f = fixture({ convDraft: async (_id, body, keepalive) => { calls.push({ text: body.text, keepalive }); }, ...api }, factory, deps);
-    const change = (text: string) => { f.set({ drafts: text ? { c: { text, replyToId: null } } : {} }); f.actions.convDraftChanged('c'); };
-    return { ...f, calls, change };
+    const draftApi: NonNullable<ConvDeps['api']['convDraft']> = api.convDraft
+      ?? (async (_id, body, keepalive) => { calls.push({ text: body.text, keepalive }); });
+    const f = fixture({ ...api, convDraft: (...args) => { budget.step(); return draftApi(...args); } }, factory, deps, budget);
+    const change = (text: string) => { budget.step(); f.set({ drafts: text ? { c: { text, replyToId: null } } : {} }); f.actions.convDraftChanged('c'); budget.check(); };
+    return { ...f, calls, change, checkBudget: budget.check };
   }
-  it('запись после паузы 2 секунды, погашение сразу, keepalive передаётся', async () => {
-    const f = drafting(); f.change('текст'); assert.deepEqual(f.get().draftDirty, ['c']);
-    await f.advance(1999); assert.equal(f.calls.length, 0); await f.advance(1); assert.equal(f.calls[0].text, 'текст');
-    assert.deepEqual(f.get().draftDirty, []); f.change(''); await f.advance(0); assert.equal(f.calls[1].text, '');
-    f.change('уход'); f.actions.convFlushDrafts(true); await settle(); assert.equal(f.calls[2].keepalive, true);
+  function draftMutant(needle: string, replacement: string): typeof createConvActions {
+    return mutatedFactory((source) => {
+      if (source.split(needle).length - 1 !== 1) throw new Error(`R369/подготовка/неединственный якорь ${needle}`);
+      return source.replace(needle, replacement);
+    });
+  }
+  function countFailure(address: string, actual: number, expected: number) {
+    return (error: unknown) => error instanceof assert.AssertionError
+      && error.message.split('\n')[0] === address && error.operator === 'strictEqual'
+      && error.actual === actual && error.expected === expected;
+  }
+  it('запись на границе 14 секунд простоя, погашение сразу, keepalive передаётся; мутант 2 секунды ловится', async () => {
+    const address = 'R369/draft/13999-not-yet';
+    async function scenario(factory = createConvActions) {
+      const f = drafting({}, enabled, factory);
+      try {
+        // Мутант создаёт массив в VM: сравниваем содержимое снимка, а не чужой Array.prototype.
+        f.change('текст'); assert.deepEqual(Array.from(f.get().draftDirty!), ['c']);
+        await f.advance(13999); assert.equal(f.calls.length, 0, address);
+        await f.advance(1); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].text, 'текст');
+        assert.deepEqual(Array.from(f.get().draftDirty!), []);
+        f.change(''); await f.advance(0); assert.equal(f.calls.length, 2); assert.equal(f.calls[1].text, '');
+        f.change('уход'); f.actions.convFlushDrafts(true); await settle(); f.checkBudget();
+        assert.equal(f.calls.length, 3); assert.equal(f.calls[2].keepalive, true);
+      } finally { f.actions.convReset(); }
+    }
+    await scenario();
+    await counterfact(async () => {
+      const mutant = draftMutant('const DRAFT_IDLE_MS = 14_000;', 'const DRAFT_IDLE_MS = 2_000;');
+      // Только конкретный ранний API-вызов (1 вместо 0), не загрузка/бюджет, считается kill.
+      await assert.rejects(() => scenario(mutant), countFailure(address, 1, 0));
+    });
   });
-  it('непрерывный набор не откладывает серверную запись дальше десяти секунд', async () => {
+  it('непрерывный набор дольше 14 секунд откладывает запись без прежнего верхнего предела 10 секунд', async () => {
     const f = drafting(); f.change('0');
-    for (let i = 1; i <= 9; i++) { await f.advance(1000); f.change(String(i)); }
-    assert.equal(f.calls.length, 0); await f.advance(1000); assert.equal(f.calls[0].text, '9');
+    for (let i = 1; i <= 15; i++) {
+      await f.advance(1000); f.change(String(i));
+      assert.equal(f.calls.length, 0, `R369: буква ${i} продлила простой`);
+      assert.equal(f.timers.size, 1);
+    }
+    await f.advance(13999); assert.equal(f.calls.length, 0);
+    await f.advance(1); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].text, '15');
+    f.actions.convReset();
+  });
+  it('буква на 13,9 секунде переносит запись: ни прежние 14 секунд, ни 13999 мс нового простоя не отправляют', async () => {
+    const f = drafting(); f.change('первая');
+    await f.advance(13900); assert.equal(f.calls.length, 0);
+    f.change('первая и новая');
+    await f.advance(100); assert.equal(f.calls.length, 0, 'R369: прежняя граница отменена');
+    await f.advance(13899); assert.equal(f.calls.length, 0, 'R369: с последней буквы прошло 13999 мс');
+    await f.advance(1); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].text, 'первая и новая');
+    f.actions.convReset();
   });
   it('изменение во время записи не снимает dirty и уходит вторым последовательным кругом', async () => {
     const p = deferred<void>(); let n = 0; const texts: string[] = [];
     const f = drafting({ convDraft: async (_id, body) => { texts.push(body.text); if (++n === 1) await p.promise; } });
-    f.change('first'); await f.advance(2000); f.change('second'); await f.advance(2000);
+    f.change('first'); await f.advance(14000); f.change('second'); await f.advance(14000);
     assert.deepEqual(texts, ['first']); assert.deepEqual(f.get().draftDirty, ['c']);
     p.resolve(); await settle(); assert.deepEqual(texts, ['first', 'second']); assert.deepEqual(f.get().draftDirty, []);
   });
   for (const status of [400, 403, 404]) {
     it(`отказ ${status} снимает dirty без бессмысленного автоповтора`, async () => {
       const f = drafting({ convDraft: async () => { throw Object.assign(new Error('нет'), { status }); } });
-      f.change('x'); await f.advance(2000); assert.deepEqual(f.get().draftDirty, []); assert.equal(f.timers.size, 0);
+      f.change('x'); await f.advance(14000); assert.deepEqual(f.get().draftDirty, []); assert.equal(f.timers.size, 0);
     });
   }
   for (const status of [undefined, 429, 500]) {
     it(`временный отказ ${status ?? 'сеть'} сохраняет dirty и повторяет запись без потери текста`, async () => {
       let calls = 0;
       const f = drafting({ convDraft: async () => { if (++calls === 1) throw Object.assign(new Error('нет'), { status }); } });
-      f.change('x'); await f.advance(2000); assert.deepEqual(f.get().draftDirty, ['c']);
+      f.change('x'); await f.advance(14000); assert.deepEqual(f.get().draftDirty, ['c']);
       await f.advance(14999); assert.equal(calls, 1); await f.advance(1); assert.equal(calls, 2); assert.deepEqual(f.get().draftDirty, []);
     });
   }
-  it('старый планировщик повтора нарушает границу 15 секунд — мутант ловится тем же сценарием', async () => {
-    // Ловит возвращение max-wait набора в таймер сетевого повтора.
-    const factory = mutatedFactory((s) => {
-      const changed = s.replace('else armDraftTimer(convId, DRAFT_RETRY_MS);', 'else scheduleDraftSave(convId, DRAFT_RETRY_MS);');
-      assert.notEqual(changed, s); return changed;
-    });
-    let calls = 0;
-    const f = drafting({ convDraft: async () => { if (++calls === 1) throw new Error('сеть'); } }, enabled, factory);
-    f.change('x'); await f.advance(2000); await f.advance(14999);
-    assert.throws(() => assert.equal(calls, 1), assert.AssertionError); assert.equal(calls, 2);
-  });
-  it('новая буква в ожидании повтора ждёт паузу 2 секунды, а не старый предел набора', async () => {
-    // Ловит засев draftFirstDirty от ошибки сети и мгновенную отправку новой буквы.
+  it('повтор после ошибки остаётся ровно через 15 секунд, мутант с 14 секундами простоя нарушает границу', async () => {
+    // scheduleDraftSave теперь только обёртка armDraftTimer: старый мутант был бы эквивалентным.
+    const address = 'R369/draft/retry-is-still-15000';
     async function scenario(factory = createConvActions) {
       let calls = 0;
       const f = drafting({ convDraft: async () => { if (++calls === 1) throw new Error('сеть'); } }, enabled, factory);
-      f.change('x'); await f.advance(2000); await f.advance(12500); f.change('xy');
-      await f.advance(0); const atChange = calls;
-      await f.advance(1999); const beforePause = calls; await f.advance(1);
-      assert.equal(f.get().draftDirty?.length, 0); return { atChange, beforePause, afterPause: calls };
+      try {
+        f.change('x'); await f.advance(14000); assert.equal(calls, 1);
+        await f.advance(14999); assert.equal(calls, 1, address);
+        await f.advance(1); assert.equal(calls, 2); assert.deepEqual(f.get().draftDirty, []);
+      } finally { f.actions.convReset(); }
     }
-    assert.deepEqual(await scenario(), { atChange: 1, beforePause: 1, afterPause: 2 });
-    const mutant = mutatedFactory((s) => {
-      const changed = s.replace('else armDraftTimer(convId, DRAFT_RETRY_MS);', 'else { draftFirstDirty.set(convId, now()); armDraftTimer(convId, DRAFT_RETRY_MS); }');
-      assert.notEqual(changed, s); return changed;
+    await scenario();
+    await counterfact(async () => {
+      const mutant = draftMutant('else armDraftTimer(convId, DRAFT_RETRY_MS);', 'else armDraftTimer(convId, DRAFT_IDLE_MS);');
+      await assert.rejects(() => scenario(mutant), countFailure(address, 2, 1));
     });
-    const result = await scenario(mutant);
-    assert.throws(() => assert.equal(result.atChange, 1), assert.AssertionError);
+  });
+  it('новая буква в ожидании повтора отменяет старый retry и ждёт свои 14 секунд простоя', async () => {
+    const address = 'R369/draft/typing-cancels-earlier-retry';
+    async function scenario(factory = createConvActions) {
+      let calls = 0;
+      const f = drafting({ convDraft: async () => { if (++calls === 1) throw new Error('сеть'); } }, enabled, factory);
+      try {
+        f.change('x'); await f.advance(14000); await f.advance(12500); f.change('xy');
+        await f.advance(0); assert.equal(calls, 1);
+        await f.advance(13999); assert.equal(calls, 1, address);
+        await f.advance(1); assert.equal(calls, 2); assert.equal(f.get().draftDirty?.length, 0);
+      } finally { f.actions.convReset(); }
+    }
+    await scenario();
+    await counterfact(async () => {
+      const mutant = draftMutant('    if (t !== undefined) clearTimeout(t);\n    draftTimers.set(', '    draftTimers.set(');
+      await assert.rejects(() => scenario(mutant), countFailure(address, 2, 1));
+    });
   });
   it('reset посреди записи отбрасывает ответ и убирает таймеры', async () => {
     const p = deferred<void>(); const f = drafting({ convDraft: () => p.promise });
-    f.change('x'); await f.advance(2000); f.actions.convReset(); p.resolve(); await settle();
+    f.change('x'); await f.advance(14000); f.actions.convReset(); p.resolve(); await settle(); f.checkBudget();
     assert.deepEqual(f.get().draftDirty, []); assert.equal(f.timers.size, 0);
   });
   it('ready дописывает dirty, сервер без conv3 не ставит dirty и ничего не пишет', async () => {
     const f = drafting(); f.set({ drafts: { c: { text: 'cached', replyToId: null } }, draftDirty: ['c'] });
     await f.actions.convOnReady(); await settle(); assert.equal(f.calls[0].text, 'cached');
-    const old = drafting({}, {}); old.change('local'); await old.advance(20000);
-    assert.equal(old.get().draftDirty, undefined); assert.equal(old.calls.length, 0);
+    const old = drafting({}, {}); old.change('local'); old.actions.convDraftLeave('c'); await old.advance(20000);
+    assert.equal(old.get().draftDirty, undefined); assert.equal(old.calls.length, 0); assert.equal(old.timers.size, 0);
+    // Незавершённый dirty из кеша тоже не даёт права обращаться к старому серверу без conv3.
+    old.set({ draftDirty: ['c'] }); old.actions.convDraftLeave('c'); await settle(); old.checkBudget();
+    assert.equal(old.calls.length, 0); assert.equal(old.timers.size, 0);
+  });
+  it('уход из dirty-беседы отправляет один черновик немедленно и снимает отложенную запись', async () => {
+    const address = 'R369/draft/leave-sends-now';
+    async function scenario(factory = createConvActions) {
+      const f = drafting({}, enabled, factory);
+      try {
+        f.change('не успели подождать');
+        assert.equal(f.calls.length, 0);
+        f.actions.convDraftLeave('c'); f.checkBudget();
+        assert.equal(f.calls.length, 1, address);
+        assert.equal(f.calls[0].text, 'не успели подождать'); assert.equal(f.calls[0].keepalive, false);
+        assert.equal(f.timers.size, 0);
+        await settle(); f.checkBudget(); assert.deepEqual(f.get().draftDirty, []);
+        f.actions.convDraftLeave('c'); await f.advance(28000);
+        assert.equal(f.calls.length, 1, 'R369: clean-уход и прежний idle-таймер не дублируют запись');
+      } finally { f.actions.convReset(); }
+    }
+    await scenario();
+    await counterfact(async () => {
+      const mutant = draftMutant('convDraftLeave: (convId: string) => void saveDraftNow(convId, false),', 'convDraftLeave: (_convId: string) => {},');
+      await assert.rejects(() => scenario(mutant), countFailure(address, 0, 1));
+    });
+  });
+  it('уход без dirty ничего не пишет даже при локальном тексте и не создаёт таймер', async () => {
+    const f = drafting();
+    f.set({ drafts: { c: { text: 'уже сохранённый', replyToId: null } } });
+    f.actions.convDraftLeave('c'); await settle(); f.checkBudget();
+    assert.equal(f.calls.length, 0); assert.equal(f.timers.size, 0); assert.equal(f.get().draftDirty, undefined);
+    await f.advance(28000); assert.equal(f.calls.length, 0);
+  });
+  it('уход во время записи не создаёт параллельную, draftAgain после сбоя запускает следующий круг сразу', async () => {
+    const address = 'R369/draft/leave-again-after-flight';
+    async function scenario(factory = createConvActions) {
+      const pending = deferred<void>(); let calls = 0, active = 0, peak = 0;
+      const texts: string[] = [];
+      const f = drafting({ convDraft: async (_id, body) => {
+        const attempt = ++calls; texts.push(body.text); active++; peak = Math.max(peak, active);
+        try { if (attempt === 1) { await pending.promise; throw new Error('сеть'); } }
+        finally { active--; }
+      } }, enabled, factory);
+      try {
+        f.change('последний текст'); f.actions.convDraftLeave('c');
+        f.actions.convDraftLeave('c'); f.actions.convDraftLeave('c'); f.checkBudget();
+        assert.equal(calls, 1, 'R369/draft/leave-no-parallel'); assert.equal(peak, 1);
+        // VM-массив должен пройти проверку содержимого до адресной проверки calls, без ослабления kill.
+        assert.deepEqual(Array.from(f.get().draftDirty!), ['c']); assert.equal(f.timers.size, 0);
+        pending.resolve(); await settle(); f.checkBudget();
+        assert.equal(calls, 2, address); assert.equal(peak, 1);
+        assert.equal(texts.join('|'), 'последний текст|последний текст');
+        assert.deepEqual(Array.from(f.get().draftDirty!), []); assert.equal(f.timers.size, 0);
+        await f.advance(15000); assert.equal(calls, 2);
+      } finally { pending.resolve(); await settle(); f.actions.convReset(); }
+    }
+    await scenario();
+    await counterfact(async () => {
+      const flightGuard = '    if (draftInFlight.has(convId)) {\n      draftAgain.add(convId);\n      return;\n    }';
+      const noAgain = draftMutant(flightGuard, '    if (draftInFlight.has(convId)) return;');
+      await assert.rejects(() => scenario(noAgain), countFailure(address, 1, 2));
+      const noLock = draftMutant(flightGuard, '');
+      await assert.rejects(() => scenario(noLock), countFailure('R369/draft/leave-no-parallel', 3, 1));
+    });
   });
   it('чужой серверный черновик обновляет rev, dirty и своё эхо его не меняют', () => {
     const f = drafting();
@@ -935,12 +1077,14 @@ describe('черновики между устройствами', () => {
       places: { c: { messageId: 'm', offset: -5 } } };
     f.set({ drafts: { c: { text: 'new', replyToId: null } } }); f.actions.convHydrate(rec);
     assert.equal(f.get().drafts.c.text, 'new'); assert.equal(f.get().draftRev?.c, undefined); assert.deepEqual(f.get().places, rec.places);
-    const mutant = mutatedFactory((s) => {
-      const needle = 'commit(conv, messages, seedUnread(conv.summaries, onScreenId(s)), false)';
-      const x = s.replace(needle, 'commit(conv, messages, seedUnread(conv.summaries, onScreenId(s)))'); assert.notEqual(x, s); return x;
+    counterfact(() => {
+      const mutant = mutatedFactory((s) => {
+        const needle = 'commit(conv, messages, seedUnread(conv.summaries, onScreenId(s)), false)';
+        const x = s.replace(needle, 'commit(conv, messages, seedUnread(conv.summaries, onScreenId(s)))'); assert.notEqual(x, s); return x;
+      });
+      const bad = fixture({}, mutant, enabled); bad.actions.convReset(); bad.set({ drafts: { c: { text: 'new', replyToId: null } } });
+      bad.actions.convHydrate(rec); assert.equal(bad.get().drafts.c.text, 'old');
     });
-    const bad = fixture({}, mutant, enabled); bad.actions.convReset(); bad.set({ drafts: { c: { text: 'new', replyToId: null } } });
-    bad.actions.convHydrate(rec); assert.equal(bad.get().drafts.c.text, 'old');
   });
 });
 
@@ -989,7 +1133,7 @@ describe('прочтение собеседником и старый кеш con
     assert.equal(f.get().conv.summaries.c.lastReadKey, 1); assert.equal(f.get().conv.summaries.c.unread, 3);
     assert.deepEqual(f.get().unreadDms, before.unreadDms); assert.equal(f.get().drafts, before.drafts); assert.equal(f.get().draftRev, before.draftRev); assert.deepEqual(f.marks, []);
   });
-  it('мутант без refreshPeerRead не обновляет старую сводку, без флага повторяет негодный список', async () => {
+  mutantTest('мутант без refreshPeerRead не обновляет старую сводку, без флага повторяет негодный список', async () => {
     const noRefresh = mutatedFactory((s) => { const x = s.replace('await refreshPeerRead(myGen)', 'await Promise.resolve()'); assert.notEqual(x, s); return x; });
     const f = hydrated({}, true, noRefresh); await f.actions.convOnReady(); assert.equal(f.get().conv.summaries.c.peerReadKey, undefined);
     const noFlag = mutatedFactory((s) => { const x = s.replace('peerReadRefreshed || ', ''); assert.notEqual(x, s); return x; });

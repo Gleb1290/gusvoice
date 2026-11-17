@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -27,12 +28,16 @@ it('R212 контрфакт И вместо ИЛИ отказывает кажд
     for (const mask of [1, 2, 4]) assert.equal(api.messageAllowed({ privacy: 'contacts', isContact: !!(mask & 1), wroteFirst: !!(mask & 2), alwaysAllowed: !!(mask & 4) }), true,
       'R212-privacy-or: один контакт, первый ответ или исключение уже разрешает сообщения');
   };
-  check(load(source)); const from = 'i.alwaysAllowed || i.isContact || i.wroteFirst'; assert.equal(source.split(from).length - 1, 1);
+  check(load(source)); counterfact(() => {
+const from = 'i.alwaysAllowed || i.isContact || i.wroteFirst'; assert.equal(source.split(from).length - 1, 1);
   assert.throws(() => check(load(source.replace(from, 'i.alwaysAllowed && i.isContact && i.wroteFirst'))), e => e instanceof assert.AssertionError
     && e.message.startsWith('R212-privacy-or:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
 });
+});
 it('R212 контрфакт нормализации открывает everyone вместо выбранных contacts', () => {
-  normalize(load(source)); const from = "v === 'contacts' ? 'contacts' : 'everyone'"; assert.equal(source.split(from).length - 1, 1);
+  normalize(load(source)); counterfact(() => {
+const from = "v === 'contacts' ? 'contacts' : 'everyone'"; assert.equal(source.split(from).length - 1, 1);
   assert.throws(() => normalize(load(source.replace(from, "v === 'contacts' ? 'everyone' : 'everyone'"))), e => e instanceof assert.AssertionError
     && e.message.startsWith('R212-privacy-normalize:') && e.operator === 'strictEqual' && e.actual === 'everyone' && e.expected === 'contacts');
+});
 });

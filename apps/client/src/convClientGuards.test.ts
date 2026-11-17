@@ -1,9 +1,85 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { counterfact } from '../../../packages/shared/test/counterfacts';
+import ts from 'typescript';
 import { DM_SERVER_UPDATE_TEXT, dmNeedsServerUpdate } from './dmRules';
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+
+const DRAFT = 'R369/wiring/check/';
+function tree(raw: string, name: string) {
+  if (raw.length > 1_000_000) throw new Error('R369/wiring/budget/source');
+  const ast = ts.createSourceFile(name, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const errors = (ast as ts.SourceFile & { parseDiagnostics: readonly unknown[] }).parseDiagnostics;
+  assert.equal(errors.length, 0, 'R369/wiring/setup/TSX');
+  return ast;
+}
+const compact = (node: ts.Node, ast: ts.SourceFile) => node.getText(ast).replace(/\s/g, '');
+
+function checkDraftWiring(raw: string) {
+  const ast = tree(raw, 'MessagePane.tsx');
+  const pane = ast.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'MessagePane');
+  assert.equal(pane.length, 1, 'R369/wiring/setup/одна-лента');
+  assert.equal(pane[0].modifiers?.some(node => node.kind === ts.SyntaxKind.ExportKeyword), true, 'R369/wiring/setup/экспорт-ленты');
+  assert.ok(pane[0].body, 'R369/wiring/setup/тело-ленты');
+  const statements = pane[0].body.statements;
+  if (statements.length > 2_000) throw new Error('R369/wiring/budget/statements');
+  const effects = statements.filter(ts.isExpressionStatement).map(node => node.expression)
+    .filter((node): node is ts.CallExpression => ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression) && node.expression.text === 'useEffect');
+  const callbacks = effects.map(node => node.arguments[0]).filter((node): node is ts.ArrowFunction => !!node && ts.isArrowFunction(node));
+  const write = callbacks.filter(node => ts.isBlock(node.body) && node.body.statements.some(statement => ts.isVariableStatement(statement)
+    && statement.declarationList.declarations.some(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === 'v'
+      && declaration.initializer && ts.isCallExpression(declaration.initializer)
+      && ts.isIdentifier(declaration.initializer.expression) && declaration.initializer.expression.text === 'draftToSave')));
+  assert.equal(write.length, 1, 'R369/wiring/setup/настоящий-эффект-черновика');
+  const body = write[0].body as ts.Block;
+  const parts = body.statements.map(node => compact(node, ast));
+  const quiet = parts.indexOf('if(!draftTyped.current&&quiet&&quiet.text===v.text&&quiet.replyToId===v.replyToId)return;');
+  const typed = parts.indexOf('draftTyped.current=true;');
+  const last = parts.indexOf('draftLast.current=v;');
+  const save = parts.indexOf('draftSaver.change(v);');
+  assert.equal(quiet >= 0 && quiet < typed && typed < last && last < save, true, DRAFT + 'тихое-до-записи');
+
+  const cleanups = callbacks.map(node => ts.isArrowFunction(node.body) ? node.body : undefined);
+  const restage = cleanups.findIndex(node => node && ts.isBlock(node.body)
+    && compact(node.body, ast) === '{if(draftTyped.current&&draftLast.current&&!draftSaver.pending())draftSaver.change(draftLast.current);}');
+  const flush = cleanups.findIndex(node => node && compact(node.body, ast) === 'draftSaver.flush()');
+  const leave = cleanups.findIndex(node => node && compact(node.body, ast) === 'onDraftLeaveRef.current?.()');
+  assert.equal(restage >= 0 && restage < flush && flush < leave, true, DRAFT + 'последнее-flush-leave');
+}
+
+function checkLeaveWire(raw: string) {
+  const ast = tree(raw, 'DmChatView.tsx');
+  const views = ast.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'DmChatView');
+  assert.equal(views.length, 1, 'R369/wiring/setup/один-вид-ЛС');
+  assert.equal(views[0].modifiers?.some(node => node.kind === ts.SyntaxKind.ExportKeyword), true, 'R369/wiring/setup/экспорт-вида-ЛС');
+  assert.ok(views[0].body, 'R369/wiring/setup/тело-вида-ЛС');
+  const panes: ts.JsxAttributes[] = [];
+  let visited = 0;
+  const visit = (node: ts.Node) => {
+    if (++visited > 100_000) throw new Error('R369/wiring/budget/AST');
+    if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(ast) === 'MessagePane') panes.push(node.attributes);
+    ts.forEachChild(node, visit);
+  };
+  visit(views[0].body);
+  assert.equal(panes.length, 1, 'R369/wiring/setup/один-MessagePane');
+  const prop = panes[0].properties.find((node): node is ts.JsxAttribute => ts.isJsxAttribute(node) && node.name.getText(ast) === 'onDraftLeave');
+  assert.ok(prop?.initializer && ts.isJsxExpression(prop.initializer) && prop.initializer.expression
+    && ts.isArrowFunction(prop.initializer.expression), DRAFT + 'есть-живой-onDraftLeave');
+  const callback = prop.initializer.expression;
+  assert.equal(callback.parameters.length, 0, DRAFT + 'уход-без-чужого-id');
+  assert.equal(compact(callback.body, ast), 'useStore.getState().convDraftLeave(dm.id)', DRAFT + 'уход-именно-этой-беседы');
+}
+
+function replaced(raw: string, before: string, after: string) {
+  assert.equal(raw.split(before).length - 1, 1, 'R369/wiring/setup/единственный-якорь');
+  return raw.replace(before, after);
+}
+function failure(address: string) {
+  return (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith(address);
+}
 
 describe('стыки нового пути личных бесед', () => {
   it('conv1 без conv2 требует обновления сервера, обе возможности включают беседы без локального переключателя', () => {
@@ -26,10 +102,19 @@ describe('стыки нового пути личных бесед', () => {
     // Ловит потерю текста при входе в голос и запись редактируемого сообщения вместо черновика.
     const s = source('./components/MessagePane.tsx');
     assert.match(s, /useState\(draft\?\.text \?\? ''\)/);
-    assert.match(s, /draftSaver\.change\(\s*draftToSave\(/);
+    checkDraftWiring(s);
     assert.match(s, /beforeEdit: before && \{ text: before\.text, replyToId: before\.replyingTo\?\.id \?\? null \}/);
     assert.match(s, /if \(!onDraftRef\.current\) return/);
     assert.match(s, /useEffect\(\(\) => \(\) => draftSaver\.flush\(\), \[draftSaver\]\)/);
+    counterfact(() => {
+    const quiet = '    if (!draftTyped.current && quiet && quiet.text === v.text && quiet.replyToId === v.replyToId) return;';
+    assert.throws(() => checkDraftWiring(replaced(s, quiet, '')), failure(DRAFT + 'тихое-до-записи'));
+    const cleanup = '  useEffect(() => () => draftSaver.flush(), [draftSaver]);\n  useEffect(() => () => onDraftLeaveRef.current?.(), []);';
+    const normalized = s.replace(/\r\n/g, '\n');
+    assert.throws(() => checkDraftWiring(replaced(normalized, cleanup,
+      '  useEffect(() => () => onDraftLeaveRef.current?.(), []);\n  useEffect(() => () => draftSaver.flush(), [draftSaver]);')),
+    failure(DRAFT + 'последнее-flush-leave'));
+    });
   });
 
   it('вид ЛС берёт черновик однократно, без подписки на каждую букву', () => {
@@ -37,6 +122,11 @@ describe('стыки нового пути личных бесед', () => {
     const s = source('./components/DmChatView.tsx');
     assert.match(s, /useState\(\(\) => useStore\.getState\(\)\.drafts\[dm\.id\]\)/);
     assert.doesNotMatch(s, /useStore\(\(s\) => s\.drafts/);
+    checkLeaveWire(s);
+    counterfact(() => {
+    assert.throws(() => checkLeaveWire(replaced(s, 'convDraftLeave(dm.id)', "convDraftLeave('other-chat')")),
+      failure(DRAFT + 'уход-именно-этой-беседы'));
+    });
   });
 
   it('очередь у ленты отправляет через enqueue, каналы сохраняют прежний onSend с тем же ключом', () => {

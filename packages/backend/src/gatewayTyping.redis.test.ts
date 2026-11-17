@@ -1,9 +1,10 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { FEATURE_TYPING2, parseTypingAction, typingActionField, typingActionFor } from '@gusvoice/shared';
+import { FEATURE_TYPING2, FEATURE_TYPING3, parseTypingAction, typingActionField, typingActionFor } from '@gusvoice/shared';
 import { reachesPeer } from './blockRules.js';
 import { typingRoute } from './gatewayRules.js';
 import { relayTyping, type TypingDeps } from './gatewayTyping.js';
@@ -94,6 +95,29 @@ async function roundEnvelopes(relay: Relay = relayTyping) {
     assert.deepEqual(f.sent, []);
   }
 }
+
+it('отправка кружка в ЛС и группе приходит как видео на старые устройства', async () => {
+  for (const group of [false, true]) {
+    const f = fixture();
+    if (group) f.group(['bob']);
+    await relayTyping(f.deps, f.conn, { dmId: 'dm', action: 'round_upload' });
+    assert.deepEqual(f.published, [
+      { userId: 'bob', msg: frame('dm', 'round_upload'), route: { cap: FEATURE_TYPING3 } },
+      { userId: 'bob', msg: frame('dm', 'video'), route: { notCap: FEATURE_TYPING3 } },
+    ]);
+    assert.deepEqual(f.sent, []);
+    f.deps.publishToUser = undefined;
+    f.sockets.set('bob', [
+      { socket: 'new', caps: new Set([FEATURE_TYPING2, FEATURE_TYPING3]) },
+      { socket: 'old', caps: new Set([FEATURE_TYPING2]) },
+    ]);
+    await relayTyping(f.deps, f.conn, { dmId: 'dm', action: 'round_upload' });
+    assert.deepEqual(f.sent, [
+      { socket: 'new', msg: frame('dm', 'round_upload') },
+      { socket: 'old', msg: frame('dm', 'video') },
+    ]);
+  }
+});
 
 async function groupBlock(relay: Relay = relayTyping) {
   const f = fixture();
@@ -287,12 +311,14 @@ function loadRelay(code: string): Relay {
 }
 
 async function kills(from: string, to: string, scenario: (relay: Relay) => Promise<void>, marker: string) {
-  assert.equal(source.split(from).length, 2, `единственный якорь мутации: ${from}`);
   await scenario(loadRelay(source));
+await gatedCounterfact(async () => {
+  assert.equal(source.split(from).length, 2, `единственный якорь мутации: ${from}`);
   const mutated = loadRelay(source.replace(from, to));
   await assert.rejects(() => scenario(mutated), (error: unknown) =>
     error instanceof assert.AssertionError && error.message.includes(marker),
   );
+});
 }
 
 it('R259 мутант с send рядом с Redis пойман реальным дублем, а не ошибкой загрузки', async () => {

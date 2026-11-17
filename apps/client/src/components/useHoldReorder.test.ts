@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
@@ -83,8 +84,10 @@ async function scenario(hook: Hook, earlyMoveStarts: boolean, state: { moves: Ar
 it('касание до 350 мс остаётся прокруткой, а клик после перетаскивания не открывает просмотр', async () => {
   const good = { moves: [] as Array<[number, number]>, clicks: 0 };
   await scenario(originalHook, false, good);
-  const mutated = { moves: [] as Array<[number, number]>, clicks: 0 };
-  await assert.rejects(() => scenario(mutantHook(), false, mutated), assert.AssertionError,
-    'исполняемый мутант раннего touch-drag нарушает тот же контракт на настоящем hook');
-  assert.deepEqual(mutated.moves, [], 'ранний мутант падает именно на старте drag, прежде чем дойдёт до отпускания');
+  await counterfact(async () => {
+    const mutated = { moves: [] as Array<[number, number]>, clicks: 0 };
+    await assert.rejects(() => scenario(mutantHook(), false, mutated), assert.AssertionError,
+      'исполняемый мутант раннего touch-drag нарушает тот же контракт на настоящем hook');
+    assert.deepEqual(mutated.moves, [], 'ранний мутант падает именно на старте drag, прежде чем дойдёт до отпускания');
+  });
 });

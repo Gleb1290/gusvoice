@@ -28,6 +28,8 @@ RUN for i in 1 2 3; do corepack enable && corepack prepare "pnpm@$PNPM_VERSION" 
 ENV COREPACK_ENABLE_NETWORK=0
 WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+# Заплатки `pnpm.patchedDependencies` (корневой package.json): без них `pnpm install --frozen-lockfile` падает.
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/presence/package.json ./packages/presence/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
@@ -56,6 +58,8 @@ RUN for i in 1 2 3; do corepack enable && corepack prepare "pnpm@$PNPM_VERSION" 
 ENV COREPACK_ENABLE_NETWORK=0
 WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+# Заплатки `pnpm.patchedDependencies` (корневой package.json): без них `pnpm install --frozen-lockfile` падает.
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/presence/package.json ./packages/presence/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \

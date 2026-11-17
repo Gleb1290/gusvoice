@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -50,7 +51,9 @@ for (const [name, attribute, anchor, replacement, actual, expected] of [
   ['без readers1 prop отсутствует', 'readersConvId', 'readersOn && group && !saved ? dm.id : null', 'group && !saved ? dm.id : null', 'group&&!saved?dm.id:null', readers],
 ] as const) test(`R239 проводка DmChatView: ${name}, соответствующий мутант обнаруживается AST`, () => {
   const oracle = (raw: string) => assert.equal(prop(raw, attribute), expected, 'R239-dm-gate: реальный JSX gate');
-  oracle(original); assert.throws(() => oracle(changed(anchor, replacement)), killed('R239-dm-gate:', actual, expected));
+  oracle(original); counterfact(() => {
+    assert.throws(() => oracle(changed(anchor, replacement)), killed('R239-dm-gate:', actual, expected));
+  });
 });
 function featureBinding(raw: string) {
   const { fn } = sourceTree(raw);
@@ -64,6 +67,8 @@ function featureBinding(raw: string) {
 test('R239 readersOn получает текущие serverFeatures через useStore, постоянное true обнаруживается', () => {
   const oracle = (raw: string) => assert.equal(featureBinding(raw), true, 'R239-dm-feature: признак берётся с текущего сервера');
   oracle(original);
-  assert.throws(() => oracle(changed('const readersOn = useStore((s) => serverReaders(s.serverFeatures));', 'const readersOn = true;')),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R239-dm-feature:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  counterfact(() => {
+    assert.throws(() => oracle(changed('const readersOn = useStore((s) => serverReaders(s.serverFeatures));', 'const readersOn = true;')),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R239-dm-feature:') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });

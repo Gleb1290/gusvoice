@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -80,16 +81,20 @@ it('R230 системный плеер получает название муз�
 it('R230 контрфакт перезаписи известной длительности обнаруживается повторным событием Audio', () => {
   // Класс ошибки: метаданные браузера затмевают сохранённую сервером или первым событием длительность.
   musicDuration();
-  assert.throws(() => musicDuration(playerChange('t && !(t.durationMs > 0) && Number.isFinite(a.duration)',
-    't && Number.isFinite(a.duration)')), (e: unknown) => e instanceof assert.AssertionError
-      && e.message.startsWith('R230 длительность:') && e.operator === 'strictEqual' && e.actual === 100_000 && e.expected === 12_346);
+  counterfact(() => {
+    assert.throws(() => musicDuration(playerChange('t && !(t.durationMs > 0) && Number.isFinite(a.duration)',
+      't && Number.isFinite(a.duration)')), (e: unknown) => e instanceof assert.AssertionError
+        && e.message.startsWith('R230 длительность:') && e.operator === 'strictEqual' && e.actual === 100_000 && e.expected === 12_346);
+  });
 });
 it('R230 контрфакт потери музыкального названия обнаруживается в настоящей медиасессии плеера', () => {
   // Класс ошибки: удачный запуск файла скрывает регрессию системной шторки и медиаклавиш.
   musicSession();
-  assert.throws(() => musicSession(playerChange("title: track.title ?? 'Голосовое сообщение'", "title: 'Голосовое сообщение'")),
-    (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R230 медиасессия:') && e.operator === 'strictEqual'
-      && e.actual === 'Голосовое сообщение' && e.expected === 'Ночной гусь');
+  counterfact(() => {
+    assert.throws(() => musicSession(playerChange("title: track.title ?? 'Голосовое сообщение'", "title: 'Голосовое сообщение'")),
+      (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R230 медиасессия:') && e.operator === 'strictEqual'
+        && e.actual === 'Голосовое сообщение' && e.expected === 'Ночной гусь');
+  });
 });
 
 it('серия непрослушанных пропускает свои и услышанные, ручное переключение возвращает обычную очередь', async () => {

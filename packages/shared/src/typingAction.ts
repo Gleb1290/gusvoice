@@ -20,8 +20,10 @@
  * (иначе клиент шлёт `voice`). Миграции нет. Только добавления (правило 11). Живёт здесь, а не в `ws.ts`: модуль грузится в тесте отдельно, без зависимостей.
  */
 export const FEATURE_TYPING2 = 'typing2';
+/** Отдельный вид отправки кружка. Старые версии получают обычную отправку видео. */
+export const FEATURE_TYPING3 = 'typing3';
 
-export const TYPING_ACTIONS = ['typing', 'voice', 'photo', 'video', 'file', 'voice_upload', 'sticker', 'round'] as const;
+export const TYPING_ACTIONS = ['typing', 'voice', 'photo', 'video', 'file', 'voice_upload', 'sticker', 'round', 'round_upload'] as const;
 export type TypingAction = (typeof TYPING_ACTIONS)[number];
 
 /** Вид действия из чужого кадра: неизвестное или отсутствующее — `'typing'` (никогда не бросает). */
@@ -38,6 +40,7 @@ export function parseTypingAction(raw: unknown): TypingAction {
 export function typingActionRank(action: TypingAction): number {
   if (action === 'sticker') return 1; // «выбирает стикер» — слабое, как набор текста
   if (action === 'round') return 3; // «записывает видеосообщение» — как запись голоса
+  if (action === 'round_upload') return 3; // Сразу сменяет ещё живую подпись записи кружка.
   return action === 'voice' || action === 'voice_upload' ? 3 : action === 'typing' ? 1 : 2;
 }
 
@@ -47,11 +50,13 @@ export function typingActionRank(action: TypingAction): number {
  * поймёт). Остальные виды не трогаем.
  */
 export function typingActionFor(action: TypingAction, caps: ReadonlySet<string> | undefined): TypingAction {
+  if (action === 'round_upload' && !caps?.has(FEATURE_TYPING3)) return 'video';
   return action === 'round' && !caps?.has(FEATURE_TYPING2) ? 'voice' : action;
 }
 
 /** То же для отправителя: сервер без признака `typing2` не знает `round` — шлём `voice` (иначе собеседнику «печатает»). */
 export function typingActionToServer(action: TypingAction, features: readonly string[] | null | undefined): TypingAction {
+  if (action === 'round_upload' && !features?.includes(FEATURE_TYPING3)) return 'video';
   return action === 'round' && !features?.includes(FEATURE_TYPING2) ? 'voice' : action;
 }
 

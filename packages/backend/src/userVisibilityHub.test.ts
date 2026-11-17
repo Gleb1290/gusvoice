@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import type { GatewayServerMessage } from '@gusvoice/shared';
@@ -42,7 +43,7 @@ for (const [name, from, to, failure] of [
   ['нет фильтра возможностей', 'for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5)) send(c, data);', 'for (const c of set) send(c, data);', 'away только новым'],
   ['событие своему соединению', 'if (uid === subjectId || !mayObserveUser(uid, subjectId, peers, su)) continue;\n        for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5))', 'if (!mayObserveUser(uid, subjectId, peers, su)) continue;\n        for (const c of set) if (c.caps?.has(FEATURE_PRESENCE5))', 'away только новым'],
   ['dmAway старому клиенту', 'const dmAwayIds = conn.caps?.has(FEATURE_PRESENCE5)', 'const dmAwayIds = true', 'старый снимок байт'],
-]) it(`presence5: исходниковый мутант «${name}» пойман`, async () => { await checkPresence5(loadPresence5()); await assert.rejects(() => checkPresence5(loadPresence5(from, to)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure!)); });
+]) it(`presence5: исходниковый мутант «${name}» пойман`, async () => { await checkPresence5(loadPresence5()); await counterfact(async () => { await assert.rejects(() => checkPresence5(loadPresence5(from, to)), (error: unknown) => error instanceof assert.AssertionError && error.message.includes(failure!)); }); });
 
 interface Conn extends HubConn {
   name: string;
@@ -350,6 +351,7 @@ describe('хаб видимости пользователей (#143)', () => {
     assert.equal(hub.isInvisible('hidden'), false, 'повторное значение остаётся идемпотентным');
 
     // Исполняем мутированные копии реальной фабрики: guards ниже должны отличать все три регрессии.
+    await counterfact(async () => {
     const factorySource = createUserVisibilityHub.toString();
     const makeMutant = (source: string) => runInNewContext(`(${source})`, {
       __name: (fn: (...args: unknown[]) => unknown) => fn,
@@ -400,6 +402,7 @@ describe('хаб видимости пользователей (#143)', () => {
     staleHub.setInvisible('subject', true);
     staleHub.setInvisible('subject', false);
     assert.equal(staleHub.isInvisible('subject'), true, 'мутант без delete оставляет человека скрытым после возврата в online');
+    });
   });
 
   it('user.status отдаёт invisible своим устройствам и online соседям, не маскируя остальные статусы', async () => {
@@ -435,6 +438,7 @@ describe('хаб видимости пользователей (#143)', () => {
     }
 
     // Мутации запускают настоящее тело фабрики с той же чистой зависимостью видимости.
+    await counterfact(async () => {
     const source = aboutUserSteps.toString();
     const needle = 'status:statusSeenBy(msg.status,subjectId,null)';
     assert.ok(source.includes(needle), 'мутационный якорь должен совпадать с веткой приватного user.status');
@@ -467,6 +471,7 @@ describe('хаб видимости пользователей (#143)', () => {
     await assertMutationRejected(allInsteadOfOthers, 'мутант others→all показывает маскированное состояние владельцу повторно');
     const noPrivacyBranch = makeMutant(source.replace(needle, 'status:msg.status'));
     await assertMutationRejected(noPrivacyBranch, 'удалённая ветка рассылает invisible всем получателям как есть');
+    });
   });
 
   it('неизменный состав сервера не сбрасывает кэш и не рассылает снимки', async () => {

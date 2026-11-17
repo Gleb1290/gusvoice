@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -108,11 +109,15 @@ it('R203 отсутствие личности, сменного ключа ил
 });
 it('R203 мутант без instanceIdFrom допускает другой дом и ловится настоящими двумя корневыми ключами', () => {
   rootBound();
-  assert.throws(() => rootBound(['if (instanceIdFrom(root) !== w.author.instanceId) return false;', '']),
-    e => e instanceof assert.AssertionError && e.message.includes('корневой ключ другого дома'));
+  counterfact(() => {
+    assert.throws(() => rootBound(['if (instanceIdFrom(root) !== w.author.instanceId) return false;', '']),
+      e => e instanceof assert.AssertionError && e.message.includes('корневой ключ другого дома'));
+  });
 });
 it('R203 мутант без verifySigningKey допускает неподтверждённый сменный ключ и ловится настоящей подписью текста', () => {
   certified();
-  assert.throws(() => certified(['if (!verifySigningKey(root, s.key)) return false;', '']),
-    e => e instanceof assert.AssertionError && e.message.includes('сменный ключ требует подписи'));
+  counterfact(() => {
+    assert.throws(() => certified(['if (!verifySigningKey(root, s.key)) return false;', '']),
+      e => e instanceof assert.AssertionError && e.message.includes('сменный ключ требует подписи'));
+  });
 });

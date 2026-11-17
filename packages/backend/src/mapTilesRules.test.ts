@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -45,7 +46,9 @@ const checks = [
 ];
 for (const m of checks) it(`R224 контрфакт плиток: ${m.label}`, () => {
   const verify = (source: string) => assert.equal(m.check(load(source)), true, `R224-tile-${m.label}: правило не изменено`);
-  verify(raw); assert.equal(raw.split(m.from).length - 1, 1);
+  verify(raw); counterfact(() => {
+assert.equal(raw.split(m.from).length - 1, 1);
   assert.throws(() => verify(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(`R224-tile-${m.label}:`)
     && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === true);
+});
 });

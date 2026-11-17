@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -36,6 +37,7 @@ it('план статуса скрывает invisible от соседей и on
   assert.deepEqual(aboutUserSteps('u', event, true), [{ who: 'own', msg: event }]);
   assert.deepEqual(aboutUserSteps('u', event, false), [{ who: 'all', msg: event }]);
   assert.deepEqual(aboutUserSteps('u', invalidate, true), [{ who: 'all', msg: invalidate }]);
+gatedCounterfact(() => {
   const source = aboutUserSteps.toString();
   for (const [from, to] of [['&&subjectInvisible', '&&false'], ['who:"own"', 'who:"others"']]) {
     assert.ok(source.includes(from));
@@ -46,6 +48,7 @@ it('план статуса скрывает invisible от соседей и on
       assert.deepEqual(bad('u', hidden, true), [{ who: 'own', msg: hidden }, { who: 'others', msg: { ...hidden, status: 'online' } }]);
     }, assert.AssertionError);
   }
+});
 });
 
 describe('разбор внутреннего конверта gateway', () => {
@@ -337,6 +340,7 @@ describe('кому можно знать об онлайне и статусе �
     assert.deepEqual(visibleOnline(online, 'admin', new Set(), 'admin'), online, 'без пятого аргумента сохраняется старое поведение');
 
     // Мутант: убрать исключение владельца из фильтра — невидимый пропадёт даже из собственного снимка.
+gatedCounterfact(() => {
     const functionSource = visibleOnline.toString();
     const selfCheck = 'id!==viewerId&&invisible?.has(id)';
     assert.ok(functionSource.includes(selfCheck), 'исходник мутанта должен совпадать с фактическим условием self');
@@ -355,6 +359,7 @@ describe('кому можно знать об онлайне и статусе �
     assert.ok(adminOnlyLeakSource !== functionSource, 'мутант супер-админа должен менять проверяемое условие');
     const adminOnlyLeak = runInNewContext(`(${adminOnlyLeakSource})`) as typeof visibleOnline;
     assert.notDeepEqual(adminOnlyLeak(online, 'admin', new Set(), 'admin', invisible), ['friend', 'admin'], 'мутант с исключением супер-админа должен раскрыть скрытого');
+});
   });
 });
 

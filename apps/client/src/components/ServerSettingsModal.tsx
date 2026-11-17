@@ -16,6 +16,7 @@ import { ServerRolesPanel } from './ServerRolesPanel';
 import { ServerEmojiPanel } from './ServerEmojiPanel';
 import { ServerStickerPanel } from './ServerStickerPanel';
 import { EconomyPanel } from './EconomyPanel';
+import { GamesSettingsPanel } from './GamesSettingsPanel';
 import { ServerSoundboardPanel } from './ServerSoundboardPanel';
 import { ServerSoundsPanel } from './ServerSoundsPanel';
 import { ServerWebhooksPanel } from './ChannelWebhooksPanel';
@@ -47,7 +48,10 @@ export function ServerSettingsModal({
   // сервера выдаются все права разом, и на голом флаге инстанса вкладку увидел бы владелец чужого
   // сервера (#117, закрытая обкатка).
   const economyShown = economyVisible(useStore((s) => s.user?.economyPreview), config.economyEnabled === true);
-  const tabs = serverSettingsTabs(serverPerms, { economy: economyShown });
+  // Раздел «Игры» (30.10): пока игры в работе — только супер-админу инстанса. Скрытие в интерфейсе, не право:
+  // сервер проверяет сохранение и запуск по-прежнему сам (`MANAGE_ECONOMY`, замок `GAMES_OPEN`).
+  const gamesShown = useStore((s) => s.user?.superAdmin === true);
+  const tabs = serverSettingsTabs(serverPerms, { economy: economyShown, games: gamesShown });
   const canGeneral = tabs.some((t) => t.key === 'general');
   // Внутри «Основного» два РАЗНЫХ права: имя сервера — MANAGE_SERVER, категории — MANAGE_CHANNELS
   // (именно его требуют роуты категорий). Показывать блок, на который придёт 403, нельзя: молчаливый
@@ -359,7 +363,7 @@ export function ServerSettingsModal({
         ) : tab === 'sounds' ? (
           <ServerSoundsPanel serverId={server.id} />
         ) : tab === 'soundboard' ? (
-          <ServerSoundboardPanel serverId={server.id} />
+          <ServerSoundboardPanel serverId={server.id} canManageClips={has(serverPerms, Permission.MANAGE_SOUNDBOARD)} />
         ) : tab === 'integrations' ? (
           <>
             {canRenameServer && (
@@ -385,6 +389,8 @@ export function ServerSettingsModal({
           </>
         ) : tab === 'economy' ? (
           <EconomyPanel serverId={server.id} />
+        ) : tab === 'games' ? (
+          <GamesSettingsPanel serverId={server.id} />
         ) : !canGeneral ? (
           // Сюда штатно не попасть: пункт меню показывается той же функцией, что считает вкладки.
           // Страховка на случай, если модалку однажды откроют из нового места, забыв про права —

@@ -1,3 +1,5 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
+
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
@@ -31,7 +33,8 @@ before(async () => {
   });
   dialogChrome = await server.ssrLoadModule('/src/dialogChrome.ts') as typeof import('../dialogChrome');
 });
-after(async () => { await server?.close(); if (registered) GlobalRegistrator.unregister(); });
+after(async () => {
+await server?.close(); if (registered) GlobalRegistrator.unregister(); });
 
 function loadBox(change?: (source: string) => string) {
   let source = readFileSync(new URL('./SendFilesBox.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -125,9 +128,11 @@ async function runMarkedPhotoScenario(Box: FileBox, shouldRemainMarked: boolean,
 
 it('меню плитки редактирует фото и переносит его спойлер на созданный файл', async () => {
   await runMarkedPhotoScenario(loadBox(), true, []);
-  const mutant = loadBox((source) => source.replace('n.add(next);', 'n.add(old);'));
-  await assert.rejects(() => runMarkedPhotoScenario(mutant, true, []), assert.AssertionError,
-    'исполняемый мутант оставляет спойлер у старого объекта File');
+  await counterfact(async () => {
+    const mutant = loadBox((source) => source.replace('n.add(next);', 'n.add(old);'));
+    await assert.rejects(() => runMarkedPhotoScenario(mutant, true, []), assert.AssertionError,
+      'исполняемый мутант оставляет спойлер у старого объекта File');
+  }, { timeoutMs: 60000 });
 });
 
 it('у строки «как файл» можно переименовать, но нельзя запустить редактор фото', async () => {
@@ -169,7 +174,9 @@ it('Escape в просмотре закрывает просмотр, а не в
   const state = { cancels: 0 };
   await scenario(loadBox(), false, state);
   const mutantState = { cancels: 0 };
-  const mutant = loadBox((source) => source.replace('if (!overlayOpen.current) onCancel(captionNow.current);', 'onCancel(captionNow.current);'));
-  await assert.rejects(() => scenario(mutant, false, mutantState), assert.AssertionError,
-    'исполняемый мутант закрывает окно отправки на чужой клавише Escape');
+  await counterfact(async () => {
+    const mutant = loadBox((source) => source.replace('if (!overlayOpen.current) onCancel(captionNow.current);', 'onCancel(captionNow.current);'));
+    await assert.rejects(() => scenario(mutant, false, mutantState), assert.AssertionError,
+      'исполняемый мутант закрывает окно отправки на чужой клавише Escape');
+  }, { timeoutMs: 60000 });
 });

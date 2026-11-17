@@ -1,5 +1,7 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
+
 import assert from 'node:assert/strict';
-import { after, afterEach, before, it } from 'node:test';
+import { it, after, afterEach, before } from 'node:test';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { tmpdir } from 'node:os';
@@ -364,8 +366,10 @@ it('ForwardPicker ищет логин с @ и без, имя; потеря canSi
   // Отмеченное состояние переживает rerender: тот же сценарий должен отвергнуть модуль без проверки canSilent.
   await checkForwardPicker(ForwardPicker);
   await unmountMounted();
-  const { ForwardPicker: bad } = await server.ssrLoadModule('/src/components/ForwardPicker.tsx?codex-silent-mutant');
-  await assert.rejects(() => checkForwardPicker(bad), assert.AssertionError);
+  await counterfact(async () => {
+    const { ForwardPicker: bad } = await server.ssrLoadModule('/src/components/ForwardPicker.tsx?codex-silent-mutant');
+    await assert.rejects(() => checkForwardPicker(bad), assert.AssertionError);
+  }, { timeoutMs: 60000 });
 });
 
 it('ForwardPicker отправляет выбранные беседы в порядке списка, а не щелчков', async () => {
@@ -384,8 +388,10 @@ it('ForwardPicker отправляет выбранные беседы в пор
   };
   await check(ForwardPicker);
   await unmountMounted();
-  const { ForwardPicker: bad } = await server.ssrLoadModule('/src/components/ForwardPicker.tsx?codex-order-mutant');
-  await assert.rejects(() => check(bad), assert.AssertionError, 'мутант порядка кликов отправил бы B,A');
+  await counterfact(async () => {
+    const { ForwardPicker: bad } = await server.ssrLoadModule('/src/components/ForwardPicker.tsx?codex-order-mutant');
+    await assert.rejects(() => check(bad), assert.AssertionError, 'мутант порядка кликов отправил бы B,A');
+  }, { timeoutMs: 60000 });
 });
 
 async function checkForwardDraftPicker(component: typeof ForwardPicker) {
@@ -434,8 +440,10 @@ async function checkForwardDraftPicker(component: typeof ForwardPicker) {
 it('ForwardPicker различает черновик одного клика, «Избранное» и правый клик для пачки', async () => {
   await checkForwardDraftPicker(ForwardPicker);
   await unmountMounted();
-  const { ForwardPicker: bad } = await server.ssrLoadModule('/src/components/ForwardPicker.tsx?codex-draft-mutant');
-  await assert.rejects(() => checkForwardDraftPicker(bad), assert.AssertionError, 'мутант превращает немедленную отправку в Избранное в черновик');
+  await counterfact(async () => {
+    const { ForwardPicker: bad } = await server.ssrLoadModule('/src/components/ForwardPicker.tsx?codex-draft-mutant');
+    await assert.rejects(() => checkForwardDraftPicker(bad), assert.AssertionError, 'мутант превращает немедленную отправку в Избранное в черновик');
+  }, { timeoutMs: 60000 });
 });
 
 async function checkDockPickers(stickerComponent: typeof StickerPicker, gifComponent: typeof GifPicker) {
@@ -472,10 +480,12 @@ async function checkDockPickers(stickerComponent: typeof StickerPicker, gifCompo
 it('закреплённые стикеры и GIF не создают поповер и не закрываются по Esc или выбору', async () => {
   // Эмодзи проверен через реальный MessagePane; эти две соседние вкладки имеют отдельные handlers и не должны терять dock-контракт.
   await checkDockPickers(StickerPicker, GifPicker);
-  const { StickerPicker: badSticker } = await server.ssrLoadModule('/src/components/StickerPicker.tsx?codex-dock-escape-mutant');
-  await assert.rejects(() => checkDockPickers(badSticker, GifPicker), assert.AssertionError, 'мутант подписывает docked StickerPicker на Esc');
-  const { GifPicker: badGif } = await server.ssrLoadModule('/src/components/GifPicker.tsx?codex-dock-escape-mutant');
-  await assert.rejects(() => checkDockPickers(StickerPicker, badGif), assert.AssertionError, 'мутант подписывает docked GifPicker на Esc');
+  await counterfact(async () => {
+    const { StickerPicker: badSticker } = await server.ssrLoadModule('/src/components/StickerPicker.tsx?codex-dock-escape-mutant');
+    await assert.rejects(() => checkDockPickers(badSticker, GifPicker), assert.AssertionError, 'мутант подписывает docked StickerPicker на Esc');
+    const { GifPicker: badGif } = await server.ssrLoadModule('/src/components/GifPicker.tsx?codex-dock-escape-mutant');
+    await assert.rejects(() => checkDockPickers(StickerPicker, badGif), assert.AssertionError, 'мутант подписывает docked GifPicker на Esc');
+  }, { timeoutMs: 60000 });
 });
 
 it('переключатель видеосообщений меняет autoplayRound отдельно от GIF', async () => {
@@ -501,8 +511,10 @@ it('переключатель видеосообщений меняет autopla
   };
   await check(DataStorageSettings);
   await unmountMounted();
-  const { DataStorageSettings: bad } = await server.ssrLoadModule('/src/components/DataStorageSettings.tsx?codex-round-setting-mutant');
-  await assert.rejects(() => check(bad), assert.AssertionError, 'мутант сохраняет переключатель кругов в autoplayGif');
+  await counterfact(async () => {
+    const { DataStorageSettings: bad } = await server.ssrLoadModule('/src/components/DataStorageSettings.tsx?codex-round-setting-mutant');
+    await assert.rejects(() => check(bad), assert.AssertionError, 'мутант сохраняет переключатель кругов в autoplayGif');
+  }, { timeoutMs: 60000 });
   auto.resetAutoDownload();
 });
 
@@ -534,8 +546,10 @@ it('Ctrl+W и Ctrl+F4 проходят через выбор закрытия о
   };
   try {
     await check(DesktopKeysHost, CloseToTrayPrompt);
-    const { DesktopKeysHost: bad } = await server.ssrLoadModule('/src/components/DesktopKeys.tsx?codex-close-mutant');
-    await assert.rejects(() => check(bad, CloseToTrayPrompt), assert.AssertionError, 'мутант теряет общий маршрут к prompt');
+    await counterfact(async () => {
+      const { DesktopKeysHost: bad } = await server.ssrLoadModule('/src/components/DesktopKeys.tsx?codex-close-mutant');
+      await assert.rejects(() => check(bad, CloseToTrayPrompt), assert.AssertionError, 'мутант теряет общий маршрут к prompt');
+    }, { timeoutMs: 60000 });
 
     calls.length = 0; localStorage.setItem('gv_close_behavior', 'tray');
     const Pair = () => createElement(Fragment, null, createElement(DesktopKeysHost), createElement(CloseToTrayPrompt));
@@ -599,14 +613,17 @@ it('Назад сворачивает свой развёрнутый звоно
     assert.equal(await back(), false, 'завершённый звонок не регистрирует обработчик');
     await unmountMounted();
 
-    const { CallLayer: bad } = await server.ssrLoadModule('/src/components/CallLayer.tsx?codex-back-mutant');
+
     const incomingHasNoBack = async (component: typeof CallLayer) => {
       try { await start(incoming, component); assert.equal(await back(), false, 'входящий вызов не сворачивается Back'); }
       finally { await unmountMounted(); }
     };
     await incomingHasNoBack(CallLayer);
-    await assert.rejects(() => incomingHasNoBack(bad), (e: unknown) => e instanceof assert.AssertionError &&
-      e.message.startsWith('входящий вызов не сворачивается Back') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+    await counterfact(async () => {
+      const { CallLayer: bad } = await server.ssrLoadModule('/src/components/CallLayer.tsx?codex-back-mutant');
+      await assert.rejects(() => incomingHasNoBack(bad), (e: unknown) => e instanceof assert.AssertionError &&
+        e.message.startsWith('входящий вызов не сворачивается Back') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+    }, { timeoutMs: 60_000 });
   } finally {
     await unmountMounted(); useCall.setState({ call: null, peer: null, ended: null, join: null, expanded: true });
   }
@@ -650,8 +667,10 @@ it('общие голосовые показывают видеосообщен�
   try {
     await check(SharedMediaHost);
     await unmountMounted();
-    const { SharedMediaHost: bad } = await server.ssrLoadModule('/src/components/SharedMedia.tsx?codex-voice-kind-mutant');
-    await assert.rejects(() => check(bad), assert.AssertionError, 'мутант меняет местами круг и аудиоголосовое');
+    await counterfact(async () => {
+      const { SharedMediaHost: bad } = await server.ssrLoadModule('/src/components/SharedMedia.tsx?codex-voice-kind-mutant');
+      await assert.rejects(() => check(bad), assert.AssertionError, 'мутант меняет местами круг и аудиоголосовое');
+    }, { timeoutMs: 60000 });
   } finally {
     await unmountMounted();
     if (countsBefore) Object.defineProperty(api, 'convMediaCounts', countsBefore); else Reflect.deleteProperty(api, 'convMediaCounts');
@@ -698,16 +717,19 @@ it('шапка при запрете звонка объясняет отказ,
     const match = source.match(/const callsOn =\s*([\s\S]*?);\s*const callsDenied/);
     assert.ok(match, 'найдено действующее условие показа трубки в DmChatView');
     const base = match![1]!.trim();
-    const mutant = base.replace('&& !blocked', '&& !blocked && lastSeen?.canCall !== false');
-    assert.notEqual(mutant, base, 'мутант восстанавливает удалённое скрытие трубки');
+
     const enabled = (expr: string, denied: boolean) => runInNewContext(`Boolean(${expr})`, {
       useStore: (select: (state: { convActive: boolean; serverFeatures: string[] }) => unknown) => select({ convActive: true, serverFeatures: ['calls1'] }),
       serverCalls: () => true, group: false, saved: false, former: false, blocked: false,
       lastSeen: { canCall: denied ? false : true },
     }) as boolean;
     assert.equal(enabled(base, true), true, 'исходное условие оставляет объясняющую трубку');
-    assert.equal(enabled(mutant, false), true, 'мутант с разрешением проходит контроль');
-    assert.equal(enabled(mutant, true), false, 'исполняемый мутант скрывает трубку при canCall=false');
+    counterfact(() => {
+      const mutant = base.replace('&& !blocked', '&& !blocked && lastSeen?.canCall !== false');
+      assert.notEqual(mutant, base, 'мутант восстанавливает удалённое скрытие трубки');
+      assert.equal(enabled(mutant, false), true, 'мутант с разрешением проходит контроль');
+      assert.equal(enabled(mutant, true), false, 'исполняемый мутант скрывает трубку при canCall=false');
+    }, { timeoutMs: 60_000 });
   } finally { await unmountMounted(); api.userLastSeen = priorSeen; api.callStart = priorStart; await flush(() => store.setState(initial)); }
 });
 
@@ -730,8 +752,10 @@ it('StrangerBar ставит «Добавить в контакты» перво
   };
   await check(StrangerBar);
   await unmountMounted();
-  const { StrangerBar: bad } = await server.ssrLoadModule('/src/components/StrangerBar.tsx?codex-no-add-mutant');
-  await assert.rejects(() => check(bad), assert.AssertionError, 'мутант теряет первое действие «Добавить в контакты»');
+  await counterfact(async () => {
+    const { StrangerBar: bad } = await server.ssrLoadModule('/src/components/StrangerBar.tsx?codex-no-add-mutant');
+    await assert.rejects(() => check(bad), assert.AssertionError, 'мутант теряет первое действие «Добавить в контакты»');
+  }, { timeoutMs: 60000 });
 });
 
 it('на телефоне время поверх фото отложенного открывает меню этого сообщения', async () => {
@@ -823,8 +847,10 @@ it('DmChatView передаёт source черновика и мутант воз
   };
   try {
     await exercise(Chat);
-    const { DmChatView: bad } = await server.ssrLoadModule('/src/components/DmChatView.tsx?codex-forward-source-mutant') as typeof import('./DmChatView');
-    await assert.rejects(() => exercise(bad), assert.AssertionError, 'исполняемый мутант подставляет id целевой беседы вместо source');
+    await counterfact(async () => {
+      const { DmChatView: bad } = await server.ssrLoadModule('/src/components/DmChatView.tsx?codex-forward-source-mutant') as typeof import('./DmChatView');
+      await assert.rejects(() => exercise(bad), assert.AssertionError, 'исполняемый мутант подставляет id целевой беседы вместо source');
+    }, { timeoutMs: 60000 });
   } finally { api.convForward = oldForward; }
 });
 

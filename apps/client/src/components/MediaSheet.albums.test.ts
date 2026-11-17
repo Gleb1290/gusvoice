@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
@@ -80,7 +82,8 @@ async function fixture(check: (f: {
     runInNewContext(ts.transpileModule(options.source ?? source, { compilerOptions: {
       module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
     } }).outputText, { module, exports: module.exports, window, document, URL, File, DOMException,
-      IntersectionObserver: QuietObserver, require(id: string) { assert.ok(Object.hasOwn(deps, id), `неожиданный импорт ${id}`); return deps[id]; } });
+      IntersectionObserver: QuietObserver,
+      require: testVmImports(new URL('./MediaSheet.tsx', import.meta.url), deps) });
     const { MediaSheet } = module.exports as typeof import('./MediaSheet');
     await React.act(async () => root.render(React.createElement(MediaSheet, {
       native: true, room: 10, caption: 'подпись', onSend() {}, onClose() {}, onAttach: unused, onSystemPick: unused,
@@ -153,11 +156,15 @@ async function stale(raw = source) {
 it('R153 ответ прежнего альбома после нового не подменяет текущую сетку', async () => stale());
 it('R153 контрфакт chosen по items теряет выбранное из другого альбома', async () => {
   await persists();
+  await counterfact(async () => {
   const raw = mutate('order.map((id) => seen.current.get(id))', 'order.map((id) => items.find((item) => item.id === id))');
   await assert.rejects(persists(raw), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('прежнего альбома'));
+  });
 });
 it('R153 контрфакт без проверки поколения принимает позднюю порцию прежнего альбома', async () => {
   await stale();
+  await counterfact(async () => {
   const raw = mutate('if (!alive.current || gen !== genRef.current) return;', 'if (!alive.current) return;');
   await assert.rejects(stale(raw), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('поздняя порция'));
+  });
 });

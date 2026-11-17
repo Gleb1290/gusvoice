@@ -1,8 +1,10 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import type { ConvMessage, ConvSearchAllHit, ConvSearchAllResponse, DmChannel, SharedMediaKind } from '@gusvoice/shared';
@@ -17,17 +19,10 @@ const chipsSource = readFileSync(new URL('./DmListSearch.tsx', import.meta.url),
 const dm = { id: 'dm', otherUser: { id: 'peer', username: 'peer', displayName: 'Беседа', avatarUrl: null }, createdAt: '2026-10-12T00:00:00Z', lastMessageAt: null } as DmChannel;
 type Query = Parameters<typeof import('../api').api.convSearchAll>[0];
 function whole<T>(raw: string, deps: Record<string, unknown>): T {
-  const parsed = ts.createSourceFile('module.tsx', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  for (const node of parsed.statements) {
-    if (!ts.isImportDeclaration(node) || node.importClause?.isTypeOnly) continue;
-    const b = node.importClause?.namedBindings;
-    if (b && ts.isNamedImports(b) && b.elements.every(x => x.isTypeOnly)) continue;
-    assert.equal(Object.hasOwn(deps, (node.moduleSpecifier as ts.StringLiteral).text), true, `явный импорт ${node.moduleSpecifier.getText(parsed)}`);
-  }
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
     { module, exports: module.exports, window, document, Date, IntersectionObserver: undefined,
-      require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `неизвестный импорт ${id}`); return deps[id]; } });
+      require: testVmImports(new URL('./DmListSearch.tsx', import.meta.url), deps) });
   return module.exports as T;
 }
 function fullHit(id: string, kind: SharedMediaKind = 'media', conversationId = 'dm'): ConvSearchAllHit {
@@ -79,7 +74,7 @@ async function scene(check: (s: Scene) => Promise<void>, raw = source, chipsRaw 
       // Весь модуль; observer — явная сигнализация конца списка, не выдуманный layout HappyDOM.
       runInNewContext(ts.transpileModule(raw, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
         { module, exports: module.exports, window, document, Date, IntersectionObserver: Observer,
-          require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `граница kinds ${id}`); return deps[id as keyof typeof deps]; } });
+          require: testVmImports(new URL('./DmSearchKinds.tsx', import.meta.url), deps) });
       let props: React.ComponentProps<typeof module.exports.DmKindHits> = { q: '', chips: {}, kind: 'media', dms: [dm], meId: 'me', onLeave: h => leaves.push(h.conversationId) };
       const s: Scene = { host, calls, delays, leaves, jumps,
         render: async patch => { props = { ...props, ...patch }; await React.act(async () => root.render(React.createElement(module.exports.DmKindHits, props))); },
@@ -168,18 +163,26 @@ function replace(raw: string, anchor: string, replacement: string) { assert.equa
 const targeted = (message: string) => (error: unknown) => error instanceof assert.AssertionError && error.message.includes(message);
 it('R183 контрфакт без full отвергается контрактом запроса', async () => {
   // Уникальный полный запрос отличает первую порцию от loadMore.
-  await queryContract(); const mutant = replace(source, 'kind, limit: MESSAGE_SEARCH_PAGE, full: true', 'kind, limit: MESSAGE_SEARCH_PAGE');
-  await assert.rejects(queryContract(mutant), targeted('полное сообщение запрошено'));
+  await counterfact(async () => {
+    const mutant = replace(source, 'kind, limit: MESSAGE_SEARCH_PAGE, full: true', 'kind, limit: MESSAGE_SEARCH_PAGE');
+    await assert.rejects(queryContract(mutant), targeted('полное сообщение запрошено'));
+  });
 });
 it('R183 контрфакт повторов страниц отвергается по DOM id найденных файлов', async () => {
   // Исполняется целый модуль с изменением только дедупликации ответа.
-  await pagination(); await assert.rejects(pagination(replace(source, '...r.hits.filter((h) => !seen.has(h.id))', '...r.hits')), targeted('догрузка без дубля id'));
+  await counterfact(async () => {
+    await assert.rejects(pagination(replace(source, '...r.hits.filter((h) => !seen.has(h.id))', '...r.hits')), targeted('догрузка без дубля id'));
+  });
 });
 it('R183 контрфакт rows.length вместо items.length скрывает пустую выдачу и обнаруживается', async () => {
   // Неподходящий full-hit нужен, иначе rows/items одновременно пусты и мутант не различается.
-  await emptyItems(); await assert.rejects(emptyItems(replace(source, 'legacy ? rows.length === 0 : items.length === 0', 'legacy ? rows.length === 0 : rows.length === 0')), targeted('пустые items'));
+  await counterfact(async () => {
+    await assert.rejects(emptyItems(replace(source, 'legacy ? rows.length === 0 : items.length === 0', 'legacy ? rows.length === 0 : rows.length === 0')), targeted('пустые items'));
+  });
 });
 it('R185 контрфакт игнорирования phone показывает лишние чипы и отвергается', async () => {
   // Парный ПК-сценарий сохраняет разрешённую старую поверхность фильтров.
-  await chipKinds(); await assert.rejects(chipKinds(replace(chipsSource, 'chips.kind || phone ? []', 'chips.kind ? []')), targeted('на телефоне виды скрыты'));
+  await counterfact(async () => {
+    await assert.rejects(chipKinds(replace(chipsSource, 'chips.kind || phone ? []', 'chips.kind ? []')), targeted('на телефоне виды скрыты'));
+  });
 });

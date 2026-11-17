@@ -106,6 +106,14 @@ export const env = {
   // прогон должен копить секунды, пока экономика ещё выключена, — на них и назначаются числа.
   economyEnabled: (process.env.ECONOMY_ENABLED ?? 'false') === 'true',
   /**
+   * Замок мини-игр до приёмки владельцем (ГусКоины 2, решение 29.10, п. 9). Выключено (умолчание) => включить игры сервера
+   * (переключатель «Игры» в `PATCH /servers/:id/economy` и «Запустить игры», `routes/gameLaunch.ts`) может ТОЛЬКО
+   * супер-админ инстанса; выключить — по-прежнему любой управляющий экономикой. Клиенту уходит признак `gamesLocked`.
+   * 🔴 Забытая переменная обязана означать «закрыто»: управляющий чужого сервера не должен включить недопринятые игры,
+   * просто обновившись.
+   */
+  gamesOpen: (process.env.GAMES_OPEN ?? 'false') === 'true',
+  /**
    * ЗАКРЫТЫЙ ПОКАЗ: кому экономика видна на включённом инстансе (идентификаторы через запятую).
    *
    * 🔴 Флага инстанса и выключателя сервера для обкатки вдвоём НЕ хватает: первый открывает вкладку
@@ -115,6 +123,14 @@ export const env = {
    * было», иначе обновление отняло бы экономику там, где её уже открыли людям.
    */
   economyPreviewUsers: parsePreviewList(process.env.ECONOMY_PREVIEW_USERS),
+  /**
+   * 🔴 ТОЛЬКО ДЛЯ ТЕСТОВОГО ИНСТАНСА (съёмка роликов, приёмка звука/арта сундука): `1`/`true` => каждый
+   * рассчитывающийся раунд колеса срывает джекпот, пока флаг стоит (если в сундуке есть хотя бы монета).
+   * Такой раунд НЕ притворяется честным: в итоге `forced: true`, проверка честности в браузере пишет
+   * «принудительный (dev)». При старте с флагом — громкое предупреждение в лог (`startWheelWorker`).
+   * Пусто/иное = выключено; на боевом инстансе переменной быть не должно.
+   */
+  wheelForceJackpot: ['1', 'true'].includes((process.env.WHEEL_FORCE_JACKPOT ?? '').trim().toLowerCase()),
   /**
    * Копит ли инстанс сырую статистику присутствия в голосе — ШАГ 0 экономики GusCoins
    * (`docs/guscoins-plan.md`).
@@ -184,6 +200,14 @@ export const env = {
   ntfy: {
     baseUrl: (process.env.NTFY_BASE_URL ?? '').replace(/\/+$/, ''),
     token: process.env.NTFY_TOKEN ?? '',
+  },
+  // Шлюз FCM (#247, Google Play). `serviceAccountB64` — base64 JSON ключа сервисного аккаунта Firebase: задан => этот
+  // инстанс САМ шлюз (маршрут `POST /api/push/fcm/<токен>`), пусто => маршрута нет. `relayBase` — публичная база шлюза,
+  // на эндпоинты которого (`<база>/api/push/fcm/<токен>`) этому инстансу можно слать пуши наравне с ntfy; пусто => только
+  // ntfy. Переменные независимы: свой шлюз — обе, чужой шлюз — только `PUSH_FCM_RELAY`.
+  fcm: {
+    serviceAccountB64: process.env.FCM_SERVICE_ACCOUNT_B64 ?? '',
+    relayBase: (process.env.PUSH_FCM_RELAY ?? '').trim().replace(/\/+$/, ''),
   },
   // Steam game-activity source (#40 Phase 1B). apiKey = a Steam Web API key (steamcommunity.com/dev);
   // empty => the whole Steam feature is OFF (no link button, no poller). apiPublicUrl is where Steam's

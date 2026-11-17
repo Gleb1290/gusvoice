@@ -130,6 +130,45 @@ function UploadSize({ rowKey, index, size }: { rowKey: string; index: number; si
   return <span className="att-file-size">{up && !up.done && up.total > 0 ? progressText(up.loaded, up.total) : kb(size)}</span>;
 }
 
+/** Подпись поверх медиа: сетевые байты относятся ко всему multipart-запросу. */
+export function MediaUploadStatus({ rowKey, index, size, uploaded = false, inline = false }: {
+  rowKey: string; index: number; size: number; uploaded?: boolean; inline?: boolean;
+}) {
+  const up = useUpload(rowKey, index);
+  const clean = (n: number) => Number.isFinite(n) && n > 0 ? n : 0;
+  const loaded = clean(up?.loaded ?? 0);
+  const total = up ? clean(up.total) : clean(size);
+  const pending = uploaded || !!up?.done || (total > 0 && loaded >= total);
+  let wide: string;
+  let narrow: string;
+  if (pending) {
+    wide = narrow = 'Отправляется…';
+  } else if (!total) {
+    wide = narrow = loaded >= 1024 * 1024 ? `${(Math.floor(loaded / 1024 / 1024 * 10) / 10).toFixed(1).replace('.', ',')} МБ`
+      : loaded >= 1024 ? `${(Math.floor(loaded / 1024 * 10) / 10).toFixed(1).replace('.', ',')} КБ` : `${Math.floor(loaded)} Б`;
+  } else {
+    const unit = total >= 1024 * 1024 ? 1024 * 1024 : total >= 1024 ? 1024 : 1;
+    const suffix = unit === 1 ? 'Б' : unit === 1024 ? 'КБ' : 'МБ';
+    const decimals = unit === 1 ? 0 : 1;
+    const scale = 10 ** decimals;
+    const shownTotal = Math.max(1 / scale, Math.round(total / unit * scale) / scale);
+    const shownLoaded = Math.min(Math.floor(loaded / unit * scale) / scale, shownTotal - 1 / scale);
+    const value = (n: number) => Math.max(0, n).toFixed(decimals).replace('.', ',');
+    wide = `${value(shownLoaded)} / ${value(shownTotal)} ${suffix}`;
+    narrow = `${Math.floor(Math.min(loaded / total, 0.99) * 100)}%`;
+  }
+  return (
+    <span className={inline ? 'att-up-status-container inline' : 'att-up-status-container'}>
+      <span className="att-up-status" role="progressbar" aria-label={wide} aria-valuetext={wide}
+        aria-valuemin={0} aria-valuemax={100}
+        aria-valuenow={total > 0 ? pending ? 100 : Math.floor(Math.min(loaded / total, 0.99) * 100) : undefined}>
+        <span className="att-up-status-wide" aria-hidden="true">{wide}</span>
+        <span className="att-up-status-narrow" aria-hidden="true">{narrow}</span>
+      </span>
+    </span>
+  );
+}
+
 export const OutgoingAttachments = memo(function OutgoingAttachments({
   rowKey,
   files,
@@ -172,6 +211,7 @@ export const OutgoingAttachments = memo(function OutgoingAttachments({
                 <img className="att-img" src={urls[i]} alt={f.name} style={style} />
               )}
               {spoilers?.includes(i) ? <SpoilerParticles /> : null}
+              {sending ? <MediaUploadStatus rowKey={rowKey} index={i} size={f.size} uploaded={!!uploaded?.[i]} /> : null}
               {ring}
             </div>
           );

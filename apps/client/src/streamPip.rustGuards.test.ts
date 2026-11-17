@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -187,53 +188,69 @@ it('R255 Rust: комментарий со скобками и ложным ра
   checkBuilder(decorated);
   checkClose(decorated);
   checkNewWindow(once(rust, '.title("GusVoice")', '.title("GusVoice { // not comment }")'));
-  const ghost = once(rust, '!armed || url.as_str() != "about:blank"', '!armed /* || url.as_str() != "about:blank" */');
-  assert.throws(() => checkNewWindow(ghost), failure('R255-window-url'));
+  counterfact(() => {
+    const ghost = once(rust, '!armed || url.as_str() != "about:blank"', '!armed /* || url.as_str() != "about:blank" */');
+    assert.throws(() => checkNewWindow(ghost), failure('R255-window-url'));
+  });
 });
 
 it('R255 Rust: удаление проверки адреса и Allow вместо Deny отвергаются адресными стражами [window-url/deny]', () => {
   checkNewWindow(rust);
-  const noUrl = once(rust, '!armed || url.as_str() != "about:blank"', '!armed');
-  assert.throws(() => checkNewWindow(noUrl), failure('R255-window-url'));
-  // Allow может не существовать в версии Rust enum: свидетель проверяет контракт, не компиляцию.
-  const allow = once(rust, 'return NewWindowResponse::Deny;', 'return NewWindowResponse::Allow;');
-  assert.throws(() => checkNewWindow(allow), failure('R255-window-deny'));
+  counterfact(() => {
+    const noUrl = once(rust, '!armed || url.as_str() != "about:blank"', '!armed');
+    assert.throws(() => checkNewWindow(noUrl), failure('R255-window-url'));
+    // Allow может не существовать в версии Rust enum: свидетель проверяет контракт, не компиляцию.
+    const allow = once(rust, 'return NewWindowResponse::Deny;', 'return NewWindowResponse::Allow;');
+    assert.throws(() => checkNewWindow(allow), failure('R255-window-deny'));
+  });
 });
 
 it('R255 Rust: load вместо swap и перенос расходования за проверку адреса ловятся [arm-consume/order]', () => {
   checkConsume(rust);
-  const load = once(rust, 'ARMED_UNTIL.swap(0, Ordering::SeqCst)', 'ARMED_UNTIL.load(Ordering::SeqCst)');
-  assert.throws(() => checkConsume(load), failure('R255-arm-consume'));
+  counterfact(() => {
+    const load = once(rust, 'ARMED_UNTIL.swap(0, Ordering::SeqCst)', 'ARMED_UNTIL.load(Ordering::SeqCst)');
+    assert.throws(() => checkConsume(load), failure('R255-arm-consume'));
+  });
   checkNewWindow(rust);
-  const late = once(rust,
-    'let armed = take_arm();\n    if !armed || url.as_str() != "about:blank"',
-    'if url.as_str() != "about:blank" || !take_arm()');
-  assert.throws(() => checkNewWindow(late), failure('R255-window-consume-order'));
+  counterfact(() => {
+    const late = once(rust,
+      'let armed = take_arm();\n    if !armed || url.as_str() != "about:blank"',
+      'if url.as_str() != "about:blank" || !take_arm()');
+    assert.throws(() => checkNewWindow(late), failure('R255-window-consume-order'));
+  });
 });
 
 it('R255 Rust: ровно 5000 мс допустимы, 5001 и неиспользуемая константа нет [arm-deadline/store]', () => {
   checkDeadline(rust);
-  const declaration = lexical(rust).code.match(/\bconst\s+ARM_MS\s*:\s*u64\s*=\s*[\d_]+\s*;/)?.[0];
-  assert.ok(declaration, 'R255-mutation-anchor: объявление срока найдено');
-  checkDeadline(once(rust, declaration, 'const ARM_MS: u64 = 5000;'));
-  assert.throws(() => checkDeadline(once(rust, declaration, 'const ARM_MS: u64 = 5001;')), failure('R255-arm-deadline'));
-  const unused = once(rust, 'ARMED_UNTIL.store(now_ms() + ARM_MS,', 'ARMED_UNTIL.store(now_ms() + 6000,');
-  assert.throws(() => checkDeadline(unused), failure('R255-arm-deadline-store'));
+  counterfact(() => {
+    const declaration = lexical(rust).code.match(/\bconst\s+ARM_MS\s*:\s*u64\s*=\s*[\d_]+\s*;/)?.[0];
+    assert.ok(declaration, 'R255-mutation-anchor: объявление срока найдено');
+    checkDeadline(once(rust, declaration, 'const ARM_MS: u64 = 5000;'));
+    assert.throws(() => checkDeadline(once(rust, declaration, 'const ARM_MS: u64 = 5001;')), failure('R255-arm-deadline'));
+    const unused = once(rust, 'ARMED_UNTIL.store(now_ms() + ARM_MS,', 'ARMED_UNTIL.store(now_ms() + 6000,');
+    assert.throws(() => checkDeadline(unused), failure('R255-arm-deadline-store'));
+  });
 });
 
 it('R255 Rust: прямое закрытие без thread::spawn не проходит [close-thread]', () => {
   checkClose(rust);
-  const direct = once(rust, 'std::thread::spawn(move || {\n                    let _ = w.destroy();\n                });', 'let _ = w.destroy();');
-  assert.throws(() => checkClose(direct), failure('R255-close-thread'));
+  counterfact(() => {
+    const direct = once(rust, 'std::thread::spawn(move || {\n                    let _ = w.destroy();\n                });', 'let _ = w.destroy();');
+    assert.throws(() => checkClose(direct), failure('R255-close-thread'));
+  });
 });
 
 it('R255 Rust: отсутствие async, отказа чужому окну и защитных флагов обнаруживается [arm-origin/flags]', () => {
   checkArm(rust);
-  assert.throws(() => checkArm(once(rust, 'pub async fn gv_pip_arm(', 'pub fn gv_pip_arm(')), failure('R255-arm-async'));
-  assert.throws(() => checkArm(once(rust, 'if window.label() != "main"', 'if window.label() == "main"')), failure('R255-arm-origin'));
+  counterfact(() => {
+    assert.throws(() => checkArm(once(rust, 'pub async fn gv_pip_arm(', 'pub fn gv_pip_arm(')), failure('R255-arm-async'));
+    assert.throws(() => checkArm(once(rust, 'if window.label() != "main"', 'if window.label() == "main"')), failure('R255-arm-origin'));
+  });
   checkBuilder(rust);
-  for (const [method, value] of [['always_on_top', 'true'], ['skip_taskbar', 'true'], ['minimizable', 'false'], ['focused', 'false']]) {
-    const changed = once(rust, `.${method}(${value})`, `.${method}(${value === 'true' ? 'false' : 'true'})`);
-    assert.throws(() => checkBuilder(changed), failure('R255-window-flags'));
-  }
+  counterfact(() => {
+    for (const [method, value] of [['always_on_top', 'true'], ['skip_taskbar', 'true'], ['minimizable', 'false'], ['focused', 'false']]) {
+      const changed = once(rust, `.${method}(${value})`, `.${method}(${value === 'true' ? 'false' : 'true'})`);
+      assert.throws(() => checkBuilder(changed), failure('R255-window-flags'));
+    }
+  });
 });

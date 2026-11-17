@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -65,16 +66,18 @@ function checkPlain(text: string) {
   assert.equal(tokens(text).join(' ').includes('import org . json . JSONObject'), true, 'используется настоящий org.json.JSONObject');
 }
 
-function rejects(target: string, replacement: string, check: (text: string) => void, marker: string, original: string, changed: string) {
+function rejects(target: string, replacement: string | (() => string), check: (text: string) => void, marker: string, original: string, changed: string | (() => string)) {
   check(source);
+  counterfact(() => {
   assert.equal(source.split(target).length - 1, 1, 'мутант меняет ровно одно место настоящего Kotlin');
-  const mutant = source.replace(target, replacement);
+  const mutant = source.replace(target, typeof replacement === 'function' ? replacement() : replacement);
   assert.notEqual(mutant, source);
   assert.throws(() => check(mutant), (error: unknown) => error instanceof assert.AssertionError
     && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual'
     && error.message.split(/\r?\n/, 1)[0] === marker
-    && error.expected === normalized(original) && error.actual === normalized(changed),
+    && error.expected === normalized(original) && error.actual === normalized(typeof changed === 'function' ? changed() : changed),
   'контрфакт отклонён адресным инвариантом, а не ошибкой извлечения/скобок');
+  });
 }
 
 it('R294 порог шифрованного конверта включает 86 байт заголовка и 16 байт тега', () => {
@@ -97,26 +100,26 @@ it('R294 открытый объект принимается только по�
 it('R294 контрфакт первого байта снова пропускает шифр с { мимо расшифровки', () => {
   const old = "message[0] != '{'.code.toByte()";
   rejects('!isPlainJson(message)', old, checkClassifier, classifierMarker, encryptedExpression,
-    encryptedExpression.replace('!isPlainJson(message)', old));
+    () => encryptedExpression.replace('!isPlainJson(message)', old));
 });
 
 it('R294 контрфакт удаления JSONObject не проходит даже с прежним вызовом в комментарии', () => {
   const parse = 'JSONObject(String(message, Charsets.UTF_8))';
   const comment = `/* ${parse} */`;
-  rejects(parse, comment, checkPlain, plainMarker, plainExpression, plainExpression.replace(parse, comment));
+  rejects(parse, comment, checkPlain, plainMarker, plainExpression, () => plainExpression.replace(parse, comment));
 });
 
 it('R294 контрфакт catch=true ошибочно объявляет битый JSON открытым пушем', () => {
   const target = 'catch (_: Exception) {\n      false\n    }';
-  const replacement = target.replace('false', 'true');
+  const replacement = () => target.replace('false', 'true');
   rejects(target, replacement, checkPlain, plainMarker, plainExpression,
-    plainExpression.replace('false', 'true'));
+    () => plainExpression.replace('false', 'true'));
 });
 
 it('R294 контрфакты строгого порога и разбора до длины нарушают границу 102 и защиту пустого входа', () => {
   // Ровно минимальная длина должна идти на расшифровку; короткий ввод не должен индексироваться парсером.
   rejects('message.size >= HEADER_MIN + TAG_LEN', 'message.size > HEADER_MIN + TAG_LEN',
-    checkClassifier, classifierMarker, encryptedExpression, encryptedExpression.replace('>=', '>'));
+    checkClassifier, classifierMarker, encryptedExpression, () => encryptedExpression.replace('>=', '>'));
   const reordered = '!isPlainJson(message) && message.size >= HEADER_MIN + TAG_LEN';
   rejects(encryptedExpression, reordered, checkClassifier, classifierMarker, encryptedExpression, reordered);
 });

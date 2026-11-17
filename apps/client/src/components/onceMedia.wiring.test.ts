@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -117,8 +118,10 @@ it('R262 AST: отдельный Lightbox получает один файл б�
 
 it('R262 контрфакт: удалённый фильтр once из общего альбома обнаруживается адресным AST-стражем', () => {
   albumGuard(source);
-  const anchor = 'if (isOnceMedia(a)) continue;';
-  assert.equal(source.split(anchor).length - 1, 1, 'один реальный фильтр альбома');
-  assert.throws(() => albumGuard(source.replace(anchor, '')), error => error instanceof assert.AssertionError
-    && error.message.includes('R262:общий-альбом-исключает-одноразовые'));
+  counterfact(() => {
+    const anchor = 'if (isOnceMedia(a)) continue;';
+    assert.equal(source.split(anchor).length - 1, 1, 'один реальный фильтр альбома');
+    assert.throws(() => albumGuard(source.replace(anchor, '')), error => error instanceof assert.AssertionError
+      && error.message.includes('R262:общий-альбом-исключает-одноразовые'));
+  });
 });

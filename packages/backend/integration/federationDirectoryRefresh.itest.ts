@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -82,9 +83,12 @@ test('R197 сверка перечитывает capabilities всех акти�
   await everyLinkScenario();
 });
 test('R197 прежнее условие !directory поймано на уже работающей связке и её новом dm3', async () => {
-  await everyLinkScenario(); await truncateAll(t.raw);
+  await everyLinkScenario();
+  await counterfact(async () => {
+  await truncateAll(t.raw);
   await assert.rejects(everyLinkScenario(['features = await refreshCapabilities(link, now);', 'if (!features.includes(FED_FEATURES.directory)) features = await refreshCapabilities(link, now);']),
     e => e instanceof assert.AssertionError && e.message.includes('каждая активная связка перечитывает'));
+  });
 });
 test('R197 визитка обновляется ровно через час, до границы транспорт не вызывается', async () => {
   const f = await fixture();
@@ -183,6 +187,8 @@ for (const [name, mutation, check, failure] of [
   ['каждая визитка объявляет беседы', ['if (changed) featuresChanged?.(link.instanceId);', 'featuresChanged?.(link.instanceId);'], changedScenario, 'равный набор features'],
 ] as [string, Mutation, (mutation?: Mutation) => Promise<void>, string][]) {
   test(`R201 мутант capabilities «${name}» пойман транспортом или conv журналом`, async () => {
-    await check(); await truncateAll(t.raw); await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    await check(); await counterfact(async () => {
+    await truncateAll(t.raw); await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    });
   });
 }

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -84,8 +85,10 @@ function observerContract(raw = source) {
 }
 it('R200 onConnChange уведомляет внешнего наблюдателя только о сменах, включая устройство и возвращение дома', () => observerContract());
 it('R200 мутант потерянного onConnChange не запускает договор обхода при обрыве шлюза', () => {
-  observerContract(); const anchor = 'for (const f of listeners) f(next);';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь внешних слушателей');
-  assert.throws(() => observerContract(source.replace(anchor, '')),
-    e => e instanceof assert.AssertionError && e.message.includes('обходной путь слышит потерю шлюза'));
+  observerContract(); counterfact(() => {
+    const anchor = 'for (const f of listeners) f(next);';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь внешних слушателей');
+    assert.throws(() => observerContract(source.replace(anchor, '')),
+      e => e instanceof assert.AssertionError && e.message.includes('обходной путь слышит потерю шлюза'));
+  });
 });

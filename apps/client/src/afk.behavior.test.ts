@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -164,6 +165,7 @@ it('R284 настоящий ввод возвращает автоматичес
 it('R284 возвращённая подписка на речь и включение микрофона отвергается после оригинала', () => {
   // Мутант должен упасть на признаке ложного ввода, а не на отсутствии subscribe или ошибке VM.
   voiceStaysQuiet(fixture());
+  counterfact(() => {
   const anchor = '  started = true;';
   assert.equal(source.split(anchor).length - 1, 1, 'R284 однозначное место установки подписки');
   const subscription = `
@@ -176,4 +178,5 @@ it('R284 возвращённая подписка на речь и включе
   assert.throws(() => voiceStaysQuiet(mutant), (error: unknown) =>
     error instanceof assert.AssertionError && error.message.split('\n')[0] === QUIET_MARKER
     && error.operator === 'strictEqual' && error.expected === 0 && Number(error.actual) > 0);
+  });
 });

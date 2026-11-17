@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -126,17 +127,25 @@ async function decision(h: ReturnType<typeof load>) {
 it('опасное окно фокусирует Отмену: отказ не открывает, явное подтверждение открывает исходный URL', async () => decision(load()));
 it('контрфакт обхода опасного компонента ловится после успешного original', () => {
   marked(load());
-  const target = 'if (isDangerousLink(url, dangerous))'; assert.equal(guardSource.split(target).length - 1, 1);
-  const mutant = load(source, guardSource.replace(target, 'if (false)'));
-  assert.throws(() => marked(mutant), assert.AssertionError);
+  counterfact(() => {
+    const target = 'if (isDangerousLink(url, dangerous))'; assert.equal(guardSource.split(target).length - 1, 1);
+    const mutant = load(source, guardSource.replace(target, 'if (false)'));
+    assert.throws(() => marked(mutant), assert.AssertionError);
+  });
 });
 it('контрфакт открытия после отмены ловится тем же сценарием настоящего окна', async () => {
-  await decision(load()); const target = 'if (ok) openLink(url);'; assert.equal(source.split(target).length - 1, 1);
-  const mutant = load(source.replace(target, 'openLink(url);'));
-  await assert.rejects(decision(mutant), assert.AssertionError);
+  await decision(load());
+  await counterfact(async () => {
+    const target = 'if (ok) openLink(url);'; assert.equal(source.split(target).length - 1, 1);
+    const mutant = load(source.replace(target, 'openLink(url);'));
+    await assert.rejects(decision(mutant), assert.AssertionError);
+  });
 });
 it('контрфакт фокуса опасного действия вместо отмены ловится настоящим ConfirmHost', async () => {
-  await decision(load()); const target = 'cancelRef.current.focus();'; assert.equal(hostSource.split(target).length - 1, 1);
-  const mutant = load(source, guardSource, hostSource.replace(target, 'okRef.current?.focus();'));
-  await assert.rejects(decision(mutant), assert.AssertionError);
+  await decision(load());
+  await counterfact(async () => {
+    const target = 'cancelRef.current.focus();'; assert.equal(hostSource.split(target).length - 1, 1);
+    const mutant = load(source, guardSource, hostSource.replace(target, 'okRef.current?.focus();'));
+    await assert.rejects(decision(mutant), assert.AssertionError);
+  });
 });

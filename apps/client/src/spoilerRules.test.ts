@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -19,9 +20,11 @@ it('спойлер действует только на кадр фото/вид
   assert.equal(api.spoilerApplies({ ...photo, asFile: true }), false);
   assert.equal(api.spoilerApplies({ ...photo, contentType: 'audio/ogg' }), false);
   assert.equal(api.spoilerApplies({ ...photo, contentType: 'video/mp4' }), true);
-  const mutant = load(readFileSync(new URL('./spoilerRules.ts', import.meta.url), 'utf8').replace('a.asFile !== true && ', ''));
-  assert.throws(() => assert.equal(mutant.spoilerApplies({ ...photo, asFile: true }), false), assert.AssertionError,
-    'мутант размывает карточку «как файл», где спойлера быть не должно');
+  counterfact(() => {
+    const mutant = load(readFileSync(new URL('./spoilerRules.ts', import.meta.url), 'utf8').replace('a.asFile !== true && ', ''));
+    assert.throws(() => assert.equal(mutant.spoilerApplies({ ...photo, asFile: true }), false), assert.AssertionError,
+      'мутант размывает карточку «как файл», где спойлера быть не должно');
+  });
 });
 
 it('однажды раскрытое вложение не закрывается повторно и уведомление приходит ровно один раз', () => {

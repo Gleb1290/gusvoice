@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as React from 'react';
@@ -48,13 +50,12 @@ function load(name: string, raw: string, platform: Platform, permission: Permiss
     '../store': { useStore: (select: (s: any) => unknown) => select({ presence: { channel: occupied ? ['peer'] : [] },
       joinVoice: async (id: string) => { joined.push(id); } }) },
   };
+  const imports = testVmImports(new URL(`./${name}.tsx`, import.meta.url), deps);
   const module = { exports: {} as Record<string, React.ComponentType<any>> };
   const extra = name === 'UserSettingsModal' ? '\nexport { NotifyPermissionRow, OsNotifyPanel, CoinNotifyPanel };' : '';
   runInNewContext(ts.transpileModule(raw + extra, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText,
-  { module, exports: module.exports, window, document, console, require: (id: string) => deps[id] ?? new Proxy({}, {
-    get: (_t, key) => { throw new Error(`Неописанная граница ${id}.${String(key)}`); },
-  }) });
+  { module, exports: module.exports, window, document, console, require: imports });
   return module.exports;
 }
 
@@ -84,7 +85,10 @@ function replaceOne(raw: string, from: string, to: string) {
   assert.equal(raw.split(from).length - 1, 1, 'мутант меняет один якорь целого модуля'); return raw.replace(from, to);
 }
 async function mutant(name: string, check: (raw: string) => Promise<void>, from: string, to: string) {
-  await check(sources[name]); await assert.rejects(() => check(replaceOne(sources[name], from, to)), assert.AssertionError);
+  await check(sources[name]);
+  await counterfact(async () => {
+    await assert.rejects(() => check(replaceOne(sources[name], from, to)), assert.AssertionError);
+  });
 }
 
 async function avatar(raw = sources.Avatar) {
@@ -141,13 +145,16 @@ async function panel(component: string, raw = sources.UserSettingsModal) {
 for (const component of ['OsNotifyPanel', 'CoinNotifyPanel']) {
   it(`B7 ${component}: выбор сохранён; unsupported Android без подсказки, denied и web/desktop с ней`, () => panel(component));
   it(`B7 ${component}: возврат ложной подсказки на Android обнаруживается`, async () => {
-    const fn = component === 'OsNotifyPanel' ? 'async function pick(next: OsNotifyLevel)' : 'async function pick(next: CoinNotifyLevel)';
-    const start = sources.UserSettingsModal.indexOf(fn); assert.ok(start >= 0);
-    const before = sources.UserSettingsModal.slice(0, start), tail = sources.UserSettingsModal.slice(start);
-    const anchor = ': isAndroid()\n              ? null';
-    assert.ok(tail.includes(anchor));
-    const changed = before + tail.replace(anchor, ': false\n              ? null');
-    await panel(component); await assert.rejects(() => panel(component, changed), assert.AssertionError);
+    await panel(component);
+    await counterfact(async () => {
+      const fn = component === 'OsNotifyPanel' ? 'async function pick(next: OsNotifyLevel)' : 'async function pick(next: CoinNotifyLevel)';
+      const start = sources.UserSettingsModal.indexOf(fn); assert.ok(start >= 0);
+      const before = sources.UserSettingsModal.slice(0, start), tail = sources.UserSettingsModal.slice(start);
+      const anchor = ': isAndroid()\n              ? null';
+      assert.ok(tail.includes(anchor));
+      const changed = before + tail.replace(anchor, ': false\n              ? null');
+      await assert.rejects(() => panel(component, changed), assert.AssertionError);
+    });
   });
 }
 

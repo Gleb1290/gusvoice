@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -24,8 +25,10 @@ it('повтор назад подавляется только в полуин�
       for (const [ms, expected] of [[0,true],[249,true],[250,false],[1000,false],[-1,false]] as const) assert.equal(api.isBackRepeat(ms), expected, `интервал ${ms}`);
     };
     check(source);
+    counterfact(() => {
     assert.throws(() => check(mutate('ms < BACK_REPEAT_MS', 'ms <= BACK_REPEAT_MS')), /интервал 250/);
     assert.throws(() => check(mutate('ms >= 0 && ', '')), /интервал -1/);
+    });
   } finally { GlobalRegistrator.unregister(); }
 });
 
@@ -40,7 +43,7 @@ it('Android доставляет один шаг на два одновреме�
       now += 300; back(); assert.equal(steps, 2, 'новый жест делает следующий шаг');
     };
     check(source);
-    assert.throws(() => check(mutate('    last = now;', '')), /повтор не делает второй шаг/);
+    counterfact(() => assert.throws(() => check(mutate('    last = now;', '')), /повтор не делает второй шаг/));
   } finally { GlobalRegistrator.unregister(); }
 });
 
@@ -57,6 +60,6 @@ it('слой получает единственный Esc на document, всп
       finally { document.removeEventListener('keydown', onDoc); window.removeEventListener('keydown', onWin); }
     };
     check(source);
-    assert.throws(() => check(mutate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));", "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));")), /window получает один Esc/);
+    counterfact(() => assert.throws(() => check(mutate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));", "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));")), /window получает один Esc/));
   } finally { GlobalRegistrator.unregister(); }
 });

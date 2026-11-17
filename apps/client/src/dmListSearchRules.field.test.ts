@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -64,17 +65,25 @@ it('R170 точная граница погасания включительна
   // 1 - scrollTop/48 не может представить ровно JS-число 0.01: проверка соседей выше поведенческая,
   // а именно включительность закрепляется на реальном операторе функции, без искусственного alpha.
   inclusive(source);
-  assert.throws(() => inclusive(replaceOnce('<= SEARCH_FIELD_GONE_ALPHA', '< SEARCH_FIELD_GONE_ALPHA')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => inclusive(replaceOnce('<= SEARCH_FIELD_GONE_ALPHA', '< SEARCH_FIELD_GONE_ALPHA')), assert.AssertionError);
+  });
 });
 // Класс ошибки: удалён clamp прозрачности.
 it('R170 мутант без зажима обнаруживается реальной функцией на обеих сторонах диапазона', () => {
-  alpha(); assert.throws(() => alpha(load(replaceOnce('Math.min(1, Math.max(0, scrollTop / SEARCH_FIELD_H))', 'scrollTop / SEARCH_FIELD_H'))), assert.AssertionError);
+  alpha(); counterfact(() => {
+    assert.throws(() => alpha(load(replaceOnce('Math.min(1, Math.max(0, scrollTop / SEARCH_FIELD_H))', 'scrollTop / SEARCH_FIELD_H'))), assert.AssertionError);
+  });
 });
 // Класс ошибки: перепутан приоритет поиска и выбора.
 it('R170 мутант приоритета поиска обнаруживается при одновременно открытом выборе', () => {
-  priorities(); assert.throws(() => priorities(load(replaceOnce('if (selecting) return 0;\n  if (searching) return 1;', 'if (searching) return 1;\n  if (selecting) return 0;'))), assert.AssertionError);
+  priorities(); counterfact(() => {
+    assert.throws(() => priorities(load(replaceOnce('if (selecting) return 0;\n  if (searching) return 1;', 'if (searching) return 1;\n  if (selecting) return 0;'))), assert.AssertionError);
+  });
 });
 // Класс ошибки: высота 56 вместо 48 замедляет исчезновение поля.
 it('R170 мутант высоты 56 обнаруживается прозрачностью на 24 и 48', () => {
-  alpha(); assert.throws(() => alpha(load(replaceOnce('export const SEARCH_FIELD_H = 48;', 'export const SEARCH_FIELD_H = 56;'))), assert.AssertionError);
+  alpha(); counterfact(() => {
+    assert.throws(() => alpha(load(replaceOnce('export const SEARCH_FIELD_H = 48;', 'export const SEARCH_FIELD_H = 56;'))), assert.AssertionError);
+  });
 });

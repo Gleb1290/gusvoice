@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -158,7 +159,9 @@ for (const [name, scenario, mutation, target] of [
 ] as const) test(`R190 контрфакт «${name}» отклонён настоящим маршрутом`, async () => {
   // Класс ошибки: мутант проходит HTTP+SQL и ловится отказом контракта, а не loader/TypeError.
   await scenario();
+  await counterfact(async () => {
   await assert.rejects(scenario(mutation), e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 
 function fanout(mutation?: Mutation) {
@@ -207,6 +210,8 @@ test('R190 местный собеседник получает пуш, отсу
 test('R190 удаление remote home guard обнаруживается счётчиком настоящего fanOutSend', async () => {
   // Класс ошибки: весь модуль мутанта доходит до pushBurst, targeted AssertionError отличает это от сбоя загрузки.
   await remoteFanout();
+  await counterfact(async () => {
   await assert.rejects(remoteFanout(['if (peerRow?.home) return;', 'if (false) return;']),
     e => e instanceof assert.AssertionError && e.message.includes('дом отправителя не будит'));
+  });
 });

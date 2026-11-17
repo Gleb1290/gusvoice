@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it, before, after } from 'node:test';
@@ -95,8 +96,10 @@ it('сохранение исключений «Времени захода» с
   await saveThroughDialog(component(undefined, state), state);
   assert.equal(state.resets, 1, 'после успешного PUT список ЛС должен запросить видимость заново');
 
-  const mutantState = { resets: 0, saves: [] as unknown[] };
-  const mutant = component((source) => source.replace('            resetExactCache();', '            // мутант: кэш не сброшен'), mutantState);
-  await saveThroughDialog(mutant, mutantState);
-  assert.equal(mutantState.resets, 0, 'исполняемый мутант воспроизводит устаревший кэш после сохранения');
+  await counterfact(async () => {
+    const mutantState = { resets: 0, saves: [] as unknown[] };
+    const mutant = component((source) => source.replace('            resetExactCache();', '            // мутант: кэш не сброшен'), mutantState);
+    await saveThroughDialog(mutant, mutantState);
+    assert.equal(mutantState.resets, 0, 'исполняемый мутант воспроизводит устаревший кэш после сохранения');
+  });
 });

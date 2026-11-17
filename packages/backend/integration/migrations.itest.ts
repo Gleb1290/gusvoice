@@ -1,3 +1,4 @@
+import { counterfact, mutantTest } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -186,7 +187,7 @@ test('0087 отвергает неизвестную отложенную ссы
 let t: TestDb;
 
 before(async () => {
-  t = await createTestDb();
+  t = await createTestDb({ cold: true });
 }, { timeout: SCENARIO_TIMEOUT_MS });
 
 after(async () => { if (t) await t.close(); }, { timeout: SCENARIO_TIMEOUT_MS });
@@ -231,12 +232,14 @@ test('migrationPlan включает режим без транзакции то
   const lateMarker = '\n-- gv:no-transaction\n-- gv:step\nCREATE INDEX CONCURRENTLY a ON t (id);';
   assert.deepEqual(migrationPlan(lateMarker), { transaction: true, sql: lateMarker });
 
+  await counterfact(() => {
   const source = migrationPlan.toString().replace(/\r\n/g, '\n');
   const laterAnywhere = source.replace('(lines[0]??"").trim()!==NO_TRANSACTION_MARK', '!lines.some(line=>line.trim()===NO_TRANSACTION_MARK)');
   assert.notEqual(laterAnywhere, source, 'мутация должна переносить распознавание маркера с первой строки на любую');
   const mutant = runInNewContext(`(${laterAnywhere})`, { NO_TRANSACTION_MARK }) as typeof migrationPlan;
   assert.throws(() => assert.deepEqual(mutant(lateMarker), { transaction: true, sql: lateMarker }), assert.AssertionError,
     'мутант включает режим по позднему маркеру и ломает контракт');
+  });
 
   const compose = await readFile(new URL('../../../docker-compose.yml', import.meta.url), 'utf8');
   const postgresStart = compose.indexOf('\n  postgres:') + 1;
@@ -346,7 +349,7 @@ async function checkDmDrop(change: (sql: string) => string = sql => sql): Promis
 
 test('R140 0135 удаляет только четыре старые таблицы с данными, повтор безопасен для бесед, папок и жалоб', { timeout: SCENARIO_TIMEOUT_MS }, () => checkDmDrop());
 
-test('R140 контрфакт 0135 без IF EXISTS ломает повтор', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
+mutantTest('R140 контрфакт 0135 без IF EXISTS ломает повтор', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
   await assert.rejects(() => checkDmDrop(sql => {
     const mutant = sql.replace(/DROP TABLE IF EXISTS/g, 'DROP TABLE');
     assert.notEqual(mutant, sql);
@@ -354,7 +357,7 @@ test('R140 контрфакт 0135 без IF EXISTS ломает повтор', 
   }), /does not exist/);
 });
 
-test('R140 контрфакт 0135 с обратным порядком DROP нарушает внешние ключи', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
+mutantTest('R140 контрфакт 0135 с обратным порядком DROP нарушает внешние ключи', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
   await assert.rejects(() => checkDmDrop(sql => {
     const statements = sql.match(/^DROP TABLE[^;]+;/gm)!;
     assert.equal(statements.length, 4);
@@ -364,7 +367,7 @@ test('R140 контрфакт 0135 с обратным порядком DROP н�
   }), /depend|foreign key/i);
 });
 
-test('R140 контрфакт 0135 с DROP dm_folders теряет живую папку', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
+mutantTest('R140 контрфакт 0135 с DROP dm_folders теряет живую папку', { timeout: SCENARIO_TIMEOUT_MS }, async () => {
   await assert.rejects(() => checkDmDrop(sql => sql + '\nDROP TABLE IF EXISTS dm_folders;'), /dm_folders.*does not exist/);
 });
 
@@ -379,10 +382,12 @@ test('R140 исходники и схема не возвращают четыр
     }
   };
   await walk(fileURLToPath(new URL('../src/', import.meta.url)));
+  await counterfact(async () => {
   const schema = await readFile(new URL('../src/db/schema.ts',import.meta.url),'utf8');
   for (const table of ['dm_messages','dm_channels','dm_reads','dm_message_reactions']) {
     assert.throws(() => check(schema + `\nexport const returned = pgTable('${table}', {});`, 'schema.ts'), assert.AssertionError);
   }
+  });
 });
 
 test('0062 одобряет всех пользователей, существовавших до миграции', async () => {
@@ -500,7 +505,7 @@ async function checkDmMove(window = true): Promise<void> {
 
 test('0079 сохраняет старый порядок, связи и непрочитанное при переносе живых ЛС', () => checkDmMove());
 
-test('0079 без окна непрочитанного возвращает старые сообщения — контрфакт отклоняется', async () => {
+mutantTest('0079 без окна непрочитанного возвращает старые сообщения — контрфакт отклоняется', async () => {
   // Ловит ослабление фикстуры: тот же сценарий обязан отвергать потерю 14-дневного окна.
   await assert.rejects(checkDmMove(false), assert.AssertionError);
 });

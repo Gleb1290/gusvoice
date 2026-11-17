@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import * as rules from './stageLayoutRules';
 import type { StageLayout } from './stageLayoutRules';
 
-const source = readFileSync(new URL('./stageLayoutPrefs.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const sourceUrl = new URL('./stageLayoutPrefs.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8').replace(/\r\n/g, '\n');
 const key = 'gv_stage_layout';
 type Prefs = {
   getStageLayout(): StageLayout;
@@ -30,11 +33,7 @@ function load(initial?: string, failures: readonly ('get' | 'set' | 'remove')[] 
   const module = { exports: {} as Prefs };
   const compiled = ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   runInNewContext(compiled, { module, exports: module.exports, localStorage: storage,
-    require: (id: string) => {
-      if (id === 'react') return hookRuntime;
-      if (id === './stageLayoutRules') return rules;
-      throw new Error(`Неописанная зависимость ${id}`);
-    },
+    require: testVmImports(sourceUrl, { react: hookRuntime, './stageLayoutRules': rules }),
   });
   return { ...module.exports, values };
 }
@@ -107,15 +106,17 @@ it('R248 useStageLayout реактивно перерисовывает подп
 
 // Класс ошибки: визуально выбранное Авто после перезапуска внезапно возвращает прежнюю раскладку.
 it('R248 мутант «Авто» без удаления ключа убивается исходным сценарием сохранения', () => {
-  const anchor = "if (layout === 'auto') localStorage.removeItem(LAYOUT_KEY);";
-  assert.equal(source.split(anchor).length - 1, 1);
   const roundTrip = (raw = source) => {
     const prefs = load(undefined, [], raw);
     prefs.setStageLayout('focus'); assert.equal(prefs.values.get(key), 'focus');
     prefs.setStageLayout('auto'); assert.equal(prefs.values.has(key), false);
   };
   roundTrip();
-  assert.throws(() => roundTrip(source.replace(anchor, "if (layout === 'auto') {}")), assert.AssertionError);
+  counterfact(() => {
+    const anchor = "if (layout === 'auto') localStorage.removeItem(LAYOUT_KEY);";
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => roundTrip(source.replace(anchor, "if (layout === 'auto') {}")), assert.AssertionError);
+  });
 });
 
 function listenerIsolation(raw = source) {
@@ -130,6 +131,7 @@ function listenerIsolation(raw = source) {
 // Класс ошибки: необработанный сбой одного слушателя останавливает остальных, а unsubscribe оставляет утечку.
 it('R248 изоляция и отписка слушателей обнаруживают исходные мутанты реализации', () => {
   listenerIsolation();
+  counterfact(() => {
   const loop = `for (const fn of layoutListeners) {
     try {
       fn();
@@ -143,4 +145,5 @@ it('R248 изоляция и отписка слушателей обнаруж�
   assert.equal(source.split(unsubscribe).length - 1, 1);
   assert.throws(() => listenerIsolation(source.replace(unsubscribe, 'return () => layoutListeners.add(fn);')),
     assert.AssertionError, 'без удаления подписки прежний слушатель вызывается повторно');
+  });
 });

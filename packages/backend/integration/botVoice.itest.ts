@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { eq } from 'drizzle-orm';
@@ -325,5 +326,7 @@ const mutants: { name: string; edit: VoiceEdit; check(f: Fixture): Promise<void>
 ];
 for (const m of mutants) test(`R306 контрфакт: ${m.name}`, async () => {
   await run(m.check);
+  await counterfact(async () => {
   await assert.rejects(run(m.check, m.edit), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(m.marker));
+  });
 });

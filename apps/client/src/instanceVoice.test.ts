@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -141,10 +142,12 @@ describe('запросы к явной записи инстанса', () => {
       return f.records[0].token;
     };
     assert.equal(await scenario(), 'new-login');
-    assert.equal(await scenario((s) => {
-      assert.ok(s.includes('now.token === sent'));
-      return s.replace('now.token === sent', 'true');
-    }), 'stale-refresh', 'без CAS тот же сценарий обязан обнаружить затирание');
+    await counterfact(async () => {
+      assert.equal(await scenario((s) => {
+        assert.ok(s.includes('now.token === sent'));
+        return s.replace('now.token === sent', 'true');
+      }), 'stale-refresh', 'без CAS тот же сценарий обязан обнаружить затирание');
+    });
   });
 
   it('удалённая запись не возвращается в реестр поздним продлением', async () => {
@@ -317,7 +320,8 @@ function storeFixture(mutate?: (s: string) => string, mobile = false) {
   const calls: string[] = [];
   const wipes: string[] = [];
   let bootstrap = { channels: [] as { id: string; type: string; name?: string }[], sounds: {} };
-  let requestToken: (channel: string) => Promise<{ url: string; token: string }> = async (channel) => ({ url: 'wss://new.test', token: `token:${channel}` });
+  let requestToken: (channel: string) => Promise<{ url: string; token: string; temporary?: true; channelName?: string }> =
+    async (channel) => ({ url: 'wss://new.test', token: `token:${channel}` });
   const api = {
     voiceToken: (ch: string) => { calls.push(`home:${ch}`); return requestToken(ch); },
     getServer: async () => bootstrap, listMembers: async () => [],
@@ -413,12 +417,14 @@ describe('голос переживает навигацию между инст
     f.get().switchedInstance();
     assert.equal(f.get().user, null);
     assert.equal(f.get().voice, v);
-    const mutated = scenario((s) => {
-      const re = /(switchedInstance: \(\) => \{[\s\S]*?set\(\(s\) => \(\{)/;
-      assert.match(s, re);
-      return s.replace(re, '$1\n voice: null,');
+    counterfact(() => {
+      const mutated = scenario((s) => {
+        const re = /(switchedInstance: \(\) => \{[\s\S]*?set\(\(s\) => \(\{)/;
+        assert.match(s, re);
+        return s.replace(re, '$1\n voice: null,');
+      });
+      assert.notEqual(mutated.f.get().voice, mutated.v, 'мутант обязан потерять голос');
     });
-    assert.notEqual(mutated.f.get().voice, mutated.v, 'мутант обязан потерять голос');
   });
 
   it('голос выбирает свой API и перемещается с прежним профилем и подписями инстанса', async () => {
@@ -437,6 +443,17 @@ describe('голос переживает навигацию между инст
     assert.equal(moved.channelId, 'moved');
     assert.equal(moved.channelName, 'Голосовой канал');
     assert.deepEqual(f.saved, [['guest', 'vs', 'moved']]);
+  });
+
+  it('разовый перенос показывает имя закрытого канала и не оставляет сессию для автовхода', async () => {
+    const f = storeFixture();
+    f.set({ voice: voice() });
+    f.tokenResponse(async () => ({ url: 'wss://new.test', token: 'temporary-token', temporary: true, channelName: 'Закрытый голос' }));
+    await f.get().moveVoiceTo('private');
+    assert.equal(f.get().voice?.channelName, 'Закрытый голос');
+    assert.equal(f.get().voice?.temporary, true);
+    assert.deepEqual(f.saved, []);
+    assert.deepEqual(f.cleared, ['guest']);
   });
 
   it('обновление токена гостевой комнаты не затирает голос, изменившийся пока шёл запрос', async () => {
@@ -494,17 +511,19 @@ describe('голос переживает навигацию между инст
       assert.equal(f.get().currentChannelId, mobile ? null : 'text-first');
       assert.deepEqual(opened, mobile ? [] : ['text-first']);
     }
-    const mutated = storeFixture((s) => {
-      const start = s.indexOf('openServer: async');
-      const end = s.indexOf('// Member roster', start);
-      const target = s.slice(start, end);
-      assert.ok(target.includes("mobilePane: 'list',"), 'найдена установка мобильного списка');
-      return s.slice(0, start) + target.replace("mobilePane: 'list',", "mobilePane: s.mobilePane,") + s.slice(end);
-    }, true);
-    mutated.bootstrap({ channels: [{ id: 'text-first', type: 'text' }], sounds: {} });
-    mutated.set({ mobilePane: 'content' });
-    await mutated.get().openServer('server');
-    assert.equal(mutated.get().mobilePane, 'content', 'мутант должен оставить пустую панель открытой');
+    await counterfact(async () => {
+      const mutated = storeFixture((s) => {
+        const start = s.indexOf('openServer: async');
+        const end = s.indexOf('// Member roster', start);
+        const target = s.slice(start, end);
+        assert.ok(target.includes("mobilePane: 'list',"), 'найдена установка мобильного списка');
+        return s.slice(0, start) + target.replace("mobilePane: 'list',", "mobilePane: s.mobilePane,") + s.slice(end);
+      }, true);
+      mutated.bootstrap({ channels: [{ id: 'text-first', type: 'text' }], sounds: {} });
+      mutated.set({ mobilePane: 'content' });
+      await mutated.get().openServer('server');
+      assert.equal(mutated.get().mobilePane, 'content', 'мутант должен оставить пустую панель открытой');
+    });
   });
 
   it('черновик канала сохраняет ссылку при повторе, пустой удаляет, а logout и смена инстанса очищают', async () => {
@@ -655,12 +674,14 @@ describe('R136 фоновые ЛС приходят только через conv
     // Без capability сервер продолжил бы слать событие, обработчика которого больше нет.
     const original = source('bgGateways.ts');
     bgConvContract(original);
-    const noCaps = original.replace('caps: [CAP_CONV1]', '');
-    assert.notEqual(noCaps, original);
-    assert.throws(() => bgConvContract(noCaps), assert.AssertionError);
-    const oldEvent = original.replace("case 'conv.change':", "case 'dm.create':\n      case 'conv.change':");
-    assert.notEqual(oldEvent, original);
-    assert.throws(() => bgConvContract(oldEvent), assert.AssertionError);
+    counterfact(() => {
+      const noCaps = original.replace('caps: [CAP_CONV1]', '');
+      assert.notEqual(noCaps, original);
+      assert.throws(() => bgConvContract(noCaps), assert.AssertionError);
+      const oldEvent = original.replace("case 'conv.change':", "case 'dm.create':\n      case 'conv.change':");
+      assert.notEqual(oldEvent, original);
+      assert.throws(() => bgConvContract(oldEvent), assert.AssertionError);
+    });
   });
 
   it('новое чужое сообщение увеличивает фоновый счётчик ровно на один', async () => {
@@ -721,14 +742,16 @@ describe('R136 фоновые ЛС приходят только через conv
         assert.equal(mod.bgUnread().background.dms, 4);
       };
       await withBgConv(verify);
-      await assert.rejects(() => withBgConv(verify, s => {
-        // Авторский фильтр есть и у канальных сообщений — меняем только conv.change.
-        const start = s.indexOf("case 'conv.change':");
-        assert.ok(start >= 0);
-        const tail = s.slice(start);
-        assert.ok(tail.includes(c.before), `найден мутируемый гейт ${c.before}`);
-        return s.slice(0, start) + tail.replace(c.before, c.after);
-      }), assert.AssertionError);
+      await counterfact(async () => {
+        await assert.rejects(() => withBgConv(verify, s => {
+          // Авторский фильтр есть и у канальных сообщений — меняем только conv.change.
+          const start = s.indexOf("case 'conv.change':");
+          assert.ok(start >= 0);
+          const tail = s.slice(start);
+          assert.ok(tail.includes(c.before), `найден мутируемый гейт ${c.before}`);
+          return s.slice(0, start) + tail.replace(c.before, c.after);
+        }), assert.AssertionError);
+      });
     }
   });
 });

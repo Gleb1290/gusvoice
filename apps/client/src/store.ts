@@ -13,6 +13,15 @@ import type {
   ServerMemberInfo,
   User,
   VoiceParticipant,
+  GatewayServerMessage,
+  WheelSnapshotDto,
+  DuelSnapshotDto,
+  DuelGame,
+  PredictionEventDto,
+  PredictionSnapshotDto,
+  GameTitlesDto,
+  RecapDto,
+  RecapKind,
 } from '@gusvoice/shared';
 import { create } from 'zustand';
 import { api, apiFor, getToken, setToken, type Api, type BlockedUser, type PushMuteScope } from './api';
@@ -48,6 +57,8 @@ import { markChannelSeen } from './channelPrefs';
 import { lastPlace, rememberPlace } from './lastPlace';
 import { onTabEvent, publishTabEvent } from './tabSync';
 import type { EconomyView } from './economy';
+import type { WheelView } from './wheelRules';
+import type { DuelView } from './duelRules';
 import { isMobile } from './hotkeys';
 import { stopPushRegistration } from './nativeUnifiedPush';
 import { setChannelSounds, setCustomSounds } from './sounds';
@@ -61,6 +72,16 @@ import { scopedGetItem, scopedSetItem } from './instanceScope';
 import { clampStreamVolume, loadStreamVolumes } from './streamAudioRules';
 import { shouldAutoRejoin } from './voiceCueRules';
 import { clearVoiceSession, rejoinableVoiceSession, restorableVoiceSession, saveVoiceSession, type VoiceSession } from './voiceSession';
+import type { GamesLaunchNotice } from './gamesLaunchRules';
+
+/**
+ * Раскладка телефона — список и лента РАЗНЫЕ экраны: приложение на телефоне (`isMobile()`) или окно не шире 760 px (граница
+ * `PHONE_LAYOUT_QUERY`, `phoneLayout.ts`): вкладка браузера телефона, узкое окно ПК. 🔴 29.10: здесь был только `isMobile()`,
+ * и вкладка Chrome на телефоне считала ленту видимой, когда человек уже ушёл в список, — отмечала прочитанным и прятала число.
+ */
+function phonePanes(): boolean {
+  return isMobile() || (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches);
+}
 
 /** Обновлённый снимок сервера `serverId` убирает голос, только если голос на этом сервере этого инстанса и канала больше не видно. */
 function dropsVoice(v: VoiceConnection | null, serverId: string, visible: Set<string>): boolean {
@@ -99,6 +120,7 @@ export interface VoiceConnection {
   instanceId: string | null;
   serverId: string | null;
   channelName: string;
+  temporary?: true;
   serverName: string;
   /** Имя инстанса голоса — для строки «Вы в голосе на «X»», когда на экране другой. */
   instanceName: string;
@@ -116,6 +138,259 @@ export function voiceApiOf(v: Pick<VoiceConnection, 'instanceId'> | null): Api {
 /** Голос идёт на том инстансе, что сейчас на экране (или реестра нет). */
 export function voiceIsHere(v: Pick<VoiceConnection, 'instanceId'> | null): boolean {
   return !v?.instanceId || v.instanceId === activeInstanceId();
+}
+
+
+/*
+ * Колесо гусей-пиратов (ГусКоины 2, этап 2): слияние снимка и событий шлюза — чистые функции здесь, а не в `wheelRules.ts`:
+ * у стора закрытая граница импортов (стражи тестов), а слияние — часть самого среза `wheel`.
+ */
+export type WheelStateMsg = Extract<GatewayServerMessage, { t: 'wheel.state' }>;
+export type WheelResultMsg = Extract<GatewayServerMessage, { t: 'wheel.result' }>;
+
+/** Поправка часов по `serverNow`; битая дата — без поправки (таймер хуже, но не врёт на часы). */
+export function clockSkew(serverNow: string, nowMs: number): number {
+  const t = Date.parse(serverNow);
+  return Number.isFinite(t) ? t - nowMs : 0;
+}
+
+export function wheelViewOf(snap: WheelSnapshotDto, nowMs: number): WheelView {
+  return { ...snap, skewMs: clockSkew(snap.serverNow, nowMs) };
+}
+
+/**
+ * Событие `wheel.state` поверх снимка. Снимка ещё нет — `undefined`: из события не узнать `enabled`/`betMax`,
+ * вызывающий догружает снимок (`ensureWheel`). `round: null` — раунд отменён (игры выключили).
+ */
+export function applyWheelState(prev: WheelView | undefined, msg: WheelStateMsg, nowMs: number): WheelView | undefined {
+  if (!prev) return undefined;
+  return { ...prev, round: msg.round, jackpot: msg.jackpot, serverNow: msg.serverNow, skewMs: clockSkew(msg.serverNow, nowMs) };
+}
+
+/** Событие `wheel.result`: раунд закрыт, итог — в `last`, пауза до `cooldownUntil`. */
+export function applyWheelResult(prev: WheelView | undefined, msg: WheelResultMsg, nowMs: number): WheelView | undefined {
+  if (!prev) return undefined;
+  return {
+    ...prev,
+    // Итог пришёл по ТЕКУЩЕМУ раунду — он закрыт. Чужой id (опоздавшее событие после нового раунда) живой раунд не трогает.
+    round: prev.round && prev.round.id !== msg.last.id ? prev.round : null,
+    last: msg.last,
+    jackpot: msg.jackpot,
+    cooldownUntil: msg.cooldownUntil,
+    serverNow: msg.serverNow,
+    skewMs: clockSkew(msg.serverNow, nowMs),
+  };
+}
+
+/*
+ * Гусиная дуэль (ГусКоины 2, этап 3): слияние снимка и событий `duel.state` — чистые функции здесь (граница импортов
+ * стора, как у колеса). Партии — по голосовым каналам (`duels[channelId]`, одна на канал), отдельно — входящий мне вызов
+ * (`duelInvite`, он приходит только игрокам и живёт до ответа/срока).
+ */
+export type DuelStateMsg = Extract<GatewayServerMessage, { t: 'duel.state' }>;
+export interface DuelSlice {
+  duels: Record<string, DuelView | null>;
+  duelInvite: DuelView | null;
+  /** Потолок ставки и комиссия сервера из снимка дуэли — форма вызова у обычного участника (настройки видят только управляющие). */
+  duelLimits?: Record<string, DuelLimits>;
+}
+export interface DuelLimits {
+  betMax: number;
+  feePercent: number;
+}
+
+/** Снимок `GET /servers/:id/duel?channelId=`: партия канала и входящий мне вызов на этом сервере. */
+export function applyDuelSnapshot(prev: DuelSlice, serverId: string, channelId: string, snap: DuelSnapshotDto, nowMs: number): DuelSlice {
+  const current = prev.duels[channelId];
+  const serverNowMs = Date.parse(snap.serverNow);
+  if (current?.duel.series && current.serverNowMs !== undefined && current.serverNowMs > serverNowMs) return prev;
+  const skewMs = clockSkew(snap.serverNow, nowMs);
+  const invite =
+    snap.myInvite && snap.myInvite.state === 'invited'
+      ? { duel: snap.myInvite, skewMs }
+      : prev.duelInvite && prev.duelInvite.duel.serverId === serverId
+        ? null // снимок этого сервера сказал «вызова нет»
+        : prev.duelInvite;
+  const duelLimits =
+    typeof snap.betMax === 'number'
+      ? { ...prev.duelLimits, [serverId]: { betMax: snap.betMax, feePercent: snap.feePercent ?? 10 } }
+      : prev.duelLimits;
+  if (snap.duel?.series) {
+    // An entry-time-newer GET can still have read the game before a concurrent move.
+    // Reuse event monotonicity, but the snapshot remains authoritative for invites/limits.
+    // A missing own hand cannot undo an already accepted hand in the same RPS seq.
+    const merged = applyDuelState(prev, {
+      t: 'duel.state', serverId, channelId, duel: snap.duel, serverNow: snap.serverNow,
+    }, undefined, nowMs, snap.myHand ?? undefined);
+    return { duels: merged.duels, duelInvite: invite, duelLimits };
+  }
+  // Этап 4: своя рука КНБ — только в личном снимке; поле в виде появляется лишь при руке (у кубиков вид прежний).
+  const view = snap.duel ? { duel: snap.duel, skewMs, ...(snap.myHand ? { myHand: snap.myHand } : {}) } : null;
+  return { duels: { ...prev.duels, [channelId]: view }, duelInvite: invite, duelLimits };
+}
+
+/**
+ * Событие `duel.state`. `duel: null` — в канале партии нет. Вызов мне (`invited`, я — цель) ложится в `duelInvite`;
+ * любое другое состояние той же дуэли его снимает. Опоздавший итог ДРУГОЙ дуэли канала живую партию не затирает.
+ */
+export function applyDuelState(
+  prev: DuelSlice,
+  msg: DuelStateMsg,
+  meId: string | null | undefined,
+  nowMs: number,
+  myHand?: DuelSnapshotDto['myHand'],
+): DuelSlice {
+  const skewMs = clockSkew(msg.serverNow, nowMs);
+  let d = msg.duel;
+  const cur = prev.duels[msg.channelId] ?? null;
+  if (!d) {
+    return {
+      duels: { ...prev.duels, [msg.channelId]: null },
+      duelInvite: prev.duelInvite?.duel.channelId === msg.channelId ? null : prev.duelInvite,
+    };
+  }
+  const before = cur?.duel;
+  // Heartbeat/HTTP and move publications may arrive out of order. Server time is publication
+  // time, not a game revision: use the session/round and game progress themselves.
+  if (before?.series && d.series?.id === before.series.id && d.series.round < before.series.round) return prev;
+  if (before?.id === d.id) {
+    const closed = before.state === 'settled' || before.state === 'cancelled';
+    if (closed && d.state !== 'settled' && d.state !== 'cancelled') return prev;
+    if (before.state === 'playing' && d.state === 'invited') return prev;
+    if (d.rollNo < before.rollNo ||
+        (before.rps && (!d.rps || d.rps.seq < before.rps.seq)) ||
+        (before.greedy && (!d.greedy || d.greedy.seq < before.greedy.seq)) ||
+        (before.twentyOne && (!d.twentyOne || d.twentyOne.seq < before.twentyOne.seq))) return prev;
+    if (before.state === 'playing' && d.state === 'playing') {
+      if (before.rps && d.rps && before.rps.seq === d.rps.seq) {
+        d = { ...d, rps: { ...d.rps, ready: {
+          challenger: before.rps.ready.challenger || d.rps.ready.challenger,
+          target: before.rps.ready.target || d.rps.ready.target,
+        } } };
+      }
+      // Revealed dice are irreversible inside a throw too (its rollNo has not changed yet).
+      if (before.game === 'dice' && d.game === 'dice' && before.rollNo === d.rollNo) {
+        d = { ...d, rolls: d.rolls.map((r, i) => ({
+          challenger: r.challenger ?? before.rolls[i]?.challenger ?? null,
+          target: r.target ?? before.rolls[i]?.target ?? null,
+        })) };
+      }
+    }
+  }
+  const curLive = !!cur && cur.duel.id !== d.id && (cur.duel.state === 'invited' || cur.duel.state === 'playing');
+  const ended = d.state === 'settled' || d.state === 'cancelled';
+  // Своя рука КНБ (этап 4): из ответа на ход (`myHand`), иначе переносится с прежнего вида, пока партия и раунд те же —
+  // событие шлюза руки не несёт. Новый раунд (`rps.seq`) — рука прошлого уже раскрыта в `rounds`, держать её нельзя.
+  const hand = myHand !== undefined ? myHand : carryMyHand(cur, d);
+  const eventTime = Date.parse(msg.serverNow);
+  const view = { duel: d, skewMs, ...(hand && d.state === 'playing' ? { myHand: hand } : {}),
+    ...(d.series && Number.isFinite(eventTime) ? {
+      serverNowMs: Math.max(eventTime, before?.series?.id === d.series.id ? cur?.serverNowMs ?? eventTime : eventTime),
+    } : {}),
+  };
+  const duels = curLive && ended ? prev.duels : { ...prev.duels, [msg.channelId]: view };
+  let duelInvite = prev.duelInvite;
+  if (d.state === 'invited' && meId && d.targetId === meId) duelInvite = { duel: d, skewMs };
+  else if (duelInvite?.duel.id === d.id) duelInvite = null;
+  return { duels, duelInvite };
+}
+
+/** Перенос своей руки КНБ между событиями: та же партия, идёт, тот же раунд `rps.seq`. */
+export function carryMyHand(prev: DuelView | null | undefined, next: DuelStateMsg['duel']): DuelView['myHand'] | null {
+  if (!prev?.myHand || !next || prev.duel.id !== next.id || next.state !== 'playing') return null;
+  if (!prev.duel.rps || !next.rps || prev.duel.rps.seq !== next.rps.seq) return null;
+  return prev.myHand;
+}
+
+/**
+ * Ставки на события (ГусКоины 2, этап 5): лента сервера — снимок `GET /servers/:id/predictions` + поправка часов, поверх —
+ * события `prediction.state`. Слияние — чистые функции здесь (граница импортов стора, как у колеса и дуэли).
+ */
+export type PredictionStateMsg = Extract<GatewayServerMessage, { t: 'prediction.state' }>;
+export interface PredictionsView {
+  enabled: boolean;
+  betMax: number;
+  canManage: boolean;
+  /** Живые и закончившиеся за сутки, новые сверху. */
+  events: PredictionEventDto[];
+  skewMs: number;
+}
+
+export function predictionsViewOf(snap: PredictionSnapshotDto, nowMs: number): PredictionsView {
+  return { enabled: snap.enabled, betMax: snap.betMax, canManage: snap.canManage, events: sortPredictionEvents(snap.events), skewMs: clockSkew(snap.serverNow, nowMs) };
+}
+
+function sortPredictionEvents(events: PredictionEventDto[]): PredictionEventDto[] {
+  return [...events].sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+}
+
+/**
+ * Событие `prediction.state` поверх ленты. Снимка ещё нет — `undefined` (из события не узнать `enabled`/`betMax`/`canManage`,
+ * вызывающий догружает снимок). `event: null` — события больше нет. ⚠️ В рассылке `mine` всегда null — прежнюю «мою ставку»
+ * из снимка не затираем (своя строка всё равно есть в `bets`).
+ */
+export function applyPredictionState(prev: PredictionsView | undefined, msg: PredictionStateMsg, nowMs: number): PredictionsView | undefined {
+  if (!prev) return undefined;
+  const skewMs = clockSkew(msg.serverNow, nowMs);
+  if (!msg.event) return { ...prev, events: prev.events.filter((e) => e.id !== msg.eventId), skewMs };
+  const ev = msg.event;
+  const old = prev.events.find((e) => e.id === ev.id);
+  const merged: PredictionEventDto = old
+    ? { ...ev, questions: ev.questions.map((q) => ({ ...q, mine: q.mine ?? old.questions.find((o) => o.id === q.id)?.mine ?? null })) }
+    : ev;
+  return { ...prev, events: sortPredictionEvents([merged, ...prev.events.filter((e) => e.id !== ev.id)]), skewMs };
+}
+
+/** Тост ставок на события на той же полке: `new` — «Новое событие · Смотреть» сидящим в голосе сервера, `win` — «Ты угадал: +N». */
+export interface PredictionToast {
+  id: string;
+  serverId: string;
+  eventId: string;
+  kind: 'new' | 'win';
+  title: string;
+  amount: number;
+  until: number;
+}
+
+/** Тост «внизу по центру» о начале партии (`.game-toast-shelf`) — сидящим в канале и не игрокам. */
+export interface GameToast {
+  id: string;
+  serverId: string;
+  channelId: string;
+  challengerId: string;
+  targetId: string;
+  amount: number;
+  until: number;
+  /** Этап 4: игра партии (подпись тоста); нет — кубики. */
+  game?: DuelGame;
+}
+
+/** Что открыто в «Активностях»: `duel-new` — форма вызова (`targetId` — соперник из меню человека), `duel` — сцена канала. */
+/**
+ * Открытые «Итоги» (ГусКоины 2, этап 6, `RecapScene.tsx`): вид, период (`undefined` — последние замороженные) и сухой
+ * прогон управляющего (`preview`). `auto` — показ из очереди `MainLayout` (закрытие отмечает «видел» в `localStorage`).
+ */
+export interface RecapOpen {
+  serverId: string;
+  kind: RecapKind;
+  periodId?: string;
+  preview?: boolean;
+  auto?: boolean;
+}
+
+/** Последние замороженные «Итоги» сервера по видам: `undefined` — ещё не спрашивали, `null` — нет. */
+export type RecapCache = Partial<Record<RecapKind, RecapDto | null>>;
+
+export interface ActivitiesOpen {
+  serverId: string;
+  /** `board` — таблица игр и звания месяца (этап 6); `duel-practice` — тренировка с капитаном без ставки (`game`). */
+  view: 'list' | 'wheel' | 'duel-new' | 'duel' | 'duel-practice' | 'events' | 'board';
+  channelId?: string;
+  /** Лента событий: прокрутить к этому событию (тост «Смотреть»). */
+  eventId?: string;
+  targetId?: string;
+  /** Тренировка с капитаном: игра. */
+  practiceGame?: DuelGame;
 }
 
 /** Live LiveKit connection state for the joined voice session — drives the self-bar status colour. */
@@ -185,6 +460,36 @@ interface State extends ConvActions {
    * Обновляется пушем `economy.wallet` (см. `sockets.ts`), загружается через `ensureEconomy`.
    */
   economy: Record<string, EconomyView>;
+  /**
+   * Колесо гусей-пиратов по серверам (ГусКоины 2, этап 2): снимок `GET /servers/:id/wheel` + поправка часов.
+   * Грузит `economyClient.ensureWheel` (на `ready` и при открытии сцены), живое — события `wheel.state`/`wheel.result`.
+   */
+  wheel: Record<string, WheelView>;
+  /** Открытые «Активности» голоса (список игр, колесо, вызов и сцена дуэли) сервера `serverId`; `null` — закрыто. */
+  activitiesOpen: ActivitiesOpen | null;
+  /** Открытые «Итоги» (этап 6); `null` — закрыто. */
+  recapOpen: RecapOpen | null;
+  /** Карточка «Игры пришли в голос» по событию `games.launched` (29.10, `GamesLaunchNotice.tsx`); `null` — нет. */
+  gamesLaunchNotice: GamesLaunchNotice | null;
+  /** Последние «Итоги» по серверам (грузит `gameBoardClient.ensureRecaps`). */
+  recaps: Record<string, RecapCache>;
+  /** Звания месяца по серверам (грузит `gameBoardClient.ensureGameTitles`). */
+  gameTitles: Record<string, GameTitlesDto>;
+  /** Партии дуэлей по голосовым каналам (этап 3); `null` — снимок был, партии нет. */
+  duels: Record<string, DuelView | null>;
+  /** Входящий мне вызов на дуэль — карточка «Принять / Отказаться». */
+  duelInvite: DuelView | null;
+  /** Потолок ставки и комиссия дуэлей по серверам — из снимка дуэли (`applyDuelSnapshot`). */
+  duelLimits: Record<string, DuelLimits>;
+  /** Тост-полка игр (≤ 1 тост на партию). */
+  gameToast: GameToast | null;
+  /**
+   * Ставки на события по серверам (этап 5): снимок + `prediction.state`. Грузит `economyClient.ensurePredictions` (кнопка
+   * «Активности», открытие ленты — `force`, `ready` сокета — где снимок уже был).
+   */
+  predictions: Record<string, PredictionsView>;
+  /** Тост ставок на события на полке игр (≤ 1 «новое событие» на событие). */
+  predictionToast: PredictionToast | null;
   /** This user's own intended mic-mute / deafen — stable across channel switches & reconnects, so the
    *  UI never flashes a transient state. Mirrored from VoiceConnection; persisted; seeds the global bar. */
   selfMuted: boolean;
@@ -422,13 +727,13 @@ interface State extends ConvActions {
   loadOlderMessages: (channelId: string) => Promise<boolean>;
   /** Слушать соседние вкладки: прочитанное там гаснет и здесь. Возвращает отписку. */
   listenTabs: () => () => void;
-  joinVoice: (channelId: string) => Promise<void>;
+  joinVoice: (channelId: string, moveTicket?: string) => Promise<void>;
   refreshVoiceToken: () => Promise<void>;
   /** keepSession: don't clear the persisted voice session — used by the reconnect-grace visual leave so
    *  a restart within the grace window auto-rejoins (#11). A user-initiated leave clears it. */
   leaveVoice: (keepSession?: boolean) => void;
   /** Модератор переместил нас, пока голос идёт на ДРУГОМ инстансе (01.10): новый токен у инстанса голоса. */
-  moveVoiceTo: (channelId: string) => Promise<void>;
+  moveVoiceTo: (channelId: string, moveTicket?: string) => Promise<void>;
   /** On boot: rejoin the last voice channel if it dropped within the grace window (crash / quick restart). */
   restoreVoiceSession: (session?: VoiceSession) => Promise<void>;
   /** Сеть вернулась в уже запущенном приложении — вернуться в канал, из которого выбило (#11). */
@@ -437,6 +742,22 @@ interface State extends ConvActions {
   setEconomy: (serverId: string, view: EconomyView) => void;
   /** Пуш с сервера: меняем ТОЛЬКО кошелёк, настройки и иконку не трогаем. */
   applyWallet: (serverId: string, w: { balance: number; earnedTotal: number; seasonEarned: number }) => void;
+  setWheel: (serverId: string, snap: WheelSnapshotDto) => void;
+  /** Событие шлюза поверх снимка; снимка нет — `false` (вызывающий догружает его). */
+  applyWheelEvent: (msg: Extract<GatewayServerMessage, { t: 'wheel.state' | 'wheel.result' }>) => boolean;
+  openActivities: (a: ActivitiesOpen | null) => void;
+  openRecap: (r: RecapOpen | null) => void;
+  setGamesLaunchNotice: (n: GamesLaunchNotice | null) => void;
+  setRecap: (serverId: string, kind: RecapKind, recap: RecapDto | null) => void;
+  setGameTitles: (serverId: string, dto: GameTitlesDto) => void;
+  setDuelSnapshot: (serverId: string, channelId: string, snap: DuelSnapshotDto) => void;
+  /** `myHand` — своя рука КНБ из ответа на ход (этап 4); в событии шлюза её нет. */
+  applyDuelEvent: (msg: DuelStateMsg, myHand?: DuelSnapshotDto['myHand']) => void;
+  setGameToast: (t: GameToast | null) => void;
+  setPredictions: (serverId: string, snap: PredictionSnapshotDto) => void;
+  /** Событие шлюза или ответ POST поверх ленты; снимка нет — `false` (вызывающий догружает его). */
+  applyPredictionEvent: (msg: PredictionStateMsg) => boolean;
+  setPredictionToast: (t: PredictionToast | null) => void;
   /** Живые подсказки «кто кого типнул» над строками списка голоса. Сами гаснут. */
   tipHints: TipHint[];
   pushTipHint: (h: { toUserId: string; fromUserId: string; fromName: string; amount: number }) => void;
@@ -610,7 +931,7 @@ function browserConvDeps(): ConvDeps {
         /* без окна — только по `ready` и таймерам */
       }
     },
-    isMobile,
+    isMobile: phonePanes,
     markChannelSeen,
     windowed: () => true,
     draftsOnServer: () => serverKeepsDrafts(useStore.getState().serverFeatures),
@@ -648,6 +969,18 @@ export const useStore = create<State>((set, get) => ({
   voice: null,
   liveVoice: {},
   economy: {},
+  wheel: {},
+  activitiesOpen: null,
+  recapOpen: null,
+  gamesLaunchNotice: null,
+  recaps: {},
+  gameTitles: {},
+  duels: {},
+  duelInvite: null,
+  duelLimits: {},
+  gameToast: null,
+  predictions: {},
+  predictionToast: null,
   selfMuted: loadSelfVoice().muted,
   selfDeafened: loadSelfVoice().deafened,
   voiceState: 'disconnected',
@@ -809,6 +1142,18 @@ export const useStore = create<State>((set, get) => ({
       voice: null,
       liveVoice: {},
       economy: {},
+      wheel: {},
+      activitiesOpen: null,
+      recapOpen: null,
+      gamesLaunchNotice: null,
+      recaps: {},
+      gameTitles: {},
+      duels: {},
+      duelInvite: null,
+      duelLimits: {},
+      gameToast: null,
+  predictions: {},
+  predictionToast: null,
       view: 'server',
       dms: [],
       currentDmId: null,
@@ -1024,7 +1369,7 @@ export const useStore = create<State>((set, get) => ({
     put(marked);
     // Telegram Desktop (03·3.1.4): пометка открытой беседы «непрочитанной» закрывает её. На телефоне открытая беседа —
     // отдельный экран, а меню строки открывают из списка: закрывать нечего.
-    if (marked && get().currentDmId === convId && !isMobile()) set({ currentDmId: null });
+    if (marked && get().currentDmId === convId && !phonePanes()) set({ currentDmId: null });
     try {
       await api.convSetUnreadMark(convId, marked);
     } catch (e) {
@@ -1128,7 +1473,7 @@ export const useStore = create<State>((set, get) => ({
     // mobilePane:'content' and dumps the user into a wall of chat). Desktop opens it (two-pane layout).
     const target = channelId ? (bootstrap.channels.find((c) => c.id === channelId) ?? null) : null;
     if (target) await get().openChannel(target.id);
-    else if (firstText && !isMobile()) await get().openChannel(firstText.id);
+    else if (firstText && !phonePanes()) await get().openChannel(firstText.id);
   },
 
   // Member roster (with roles + join dates) for the user menu / profile card. Best-effort,
@@ -1169,7 +1514,7 @@ export const useStore = create<State>((set, get) => ({
     // On mobile, DON'T auto-open the first text channel — selecting a server should land on the channel
     // LIST (m-list pane), not dump the user straight into a wall of chat. They pick a channel themselves.
     // Desktop keeps auto-opening it (two-pane layout shows list + content side by side).
-    if (!get().currentChannelId && !isMobile()) {
+    if (!get().currentChannelId && !phonePanes()) {
       const firstText = bootstrap.channels.find((c) => c.type === 'text');
       if (firstText) await get().openChannel(firstText.id);
     }
@@ -1307,7 +1652,7 @@ export const useStore = create<State>((set, get) => ({
     const onScreen = isFeedOnScreen({
       id: channelId,
       currentId: s0.currentChannelId,
-      mobile: isMobile(),
+      mobile: phonePanes(),
       mobilePane: s0.mobilePane,
       kind: 'channel',
       view: s0.view,
@@ -1334,6 +1679,8 @@ export const useStore = create<State>((set, get) => ({
     const guard = get().leaveGuard;
     if (guard && !(await guard(channelId))) return;
     const channel = get().bootstrap?.channels.find((c) => c.id === channelId);
+    const voice = get().voice;
+    const temporaryVoice = voice?.temporary && voiceIsHere(voice) && voice.channelId === channelId;
     set((s) => {
       const { [channelId]: _clearedM, ...mentionCounts } = s.mentionCounts;
       const { [channelId]: _clearedU, ...unreadCounts } = s.unreadCounts;
@@ -1345,6 +1692,7 @@ export const useStore = create<State>((set, get) => ({
         serverListOpen: false,
       };
     });
+    if (temporaryVoice) return;
     // Persist the read mark (migration 0018) — fire-and-forget, unread must never block opening.
     if (channel?.type === 'text') void api.markChannelRead(channelId).catch(() => {});
     // Соседние вкладки гасят у себя тот же счётчик: человек один, прочитано — значит прочитано.
@@ -1374,10 +1722,12 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  joinVoice: async (channelId) => {
+  joinVoice: async (channelId, moveTicket) => {
     const prev = get().voice;
-    const { url, token } = await api.voiceToken(channelId);
+    if (moveTicket && (!prev || !voiceIsHere(prev))) return;
+    const { url, token, temporary, channelName } = await api.voiceToken(channelId, moveTicket);
     const s = get();
+    if (moveTicket && s.voice !== prev) return;
     const instanceId = activeInstanceId();
     // Канал на открытом сервере — его сервер; нет (перемещение модератором, пока смотрим другой сервер) — прежний.
     const ch = s.bootstrap?.channels.find((c) => c.id === channelId);
@@ -1390,7 +1740,8 @@ export const useStore = create<State>((set, get) => ({
         token,
         instanceId,
         serverId,
-        channelName: ch?.name ?? (prev?.channelId === channelId ? prev.channelName : 'Голосовой канал'),
+        channelName: channelName ?? ch?.name ?? (prev?.channelId === channelId ? prev.channelName : 'Голосовой канал'),
+        ...(temporary ? { temporary } : {}),
         serverName: s.servers.find((x) => x.id === serverId)?.name ?? '',
         instanceName: inst?.name?.trim() || inst?.domain || '',
         self: s.user ? { displayName: s.user.displayName, avatarUrl: s.user.avatarUrl ?? null } : null,
@@ -1400,7 +1751,8 @@ export const useStore = create<State>((set, get) => ({
     // Голос был на другом инстансе — он закончился (голос всегда один, решение 01.10): его сессию стираем, иначе
     // возврат туда в течение грейса затянул бы обратно в прежний канал.
     if (prev && prev.instanceId !== instanceId) clearVoiceSession(prev.instanceId);
-    if (serverId) saveVoiceSession(instanceId, serverId, channelId);
+    if (temporary) clearVoiceSession(instanceId);
+    else if (serverId) saveVoiceSession(instanceId, serverId, channelId);
   },
 
   // Re-mint the LiveKit token for the channel we're in (same channelId) so updated publish
@@ -1420,15 +1772,16 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  moveVoiceTo: async (channelId) => {
+  moveVoiceTo: async (channelId, moveTicket) => {
     const v = get().voice;
     if (!v) return;
-    const { url, token } = await voiceApiOf(v).voiceToken(channelId);
+    const { url, token, temporary, channelName } = await voiceApiOf(v).voiceToken(channelId, moveTicket);
     const cur = get().voice;
-    if (!cur || cur.instanceId !== v.instanceId) return;
+    if (!cur || cur.instanceId !== v.instanceId || (moveTicket && cur !== v)) return;
     // Снимка того сервера здесь нет — имени канала не знаем, подпись общая до возврата туда.
-    set({ voice: { ...cur, channelId, url, token, channelName: 'Голосовой канал' } });
-    if (cur.serverId) saveVoiceSession(cur.instanceId, cur.serverId, channelId);
+    set({ voice: { ...cur, channelId, url, token, temporary, channelName: channelName ?? 'Голосовой канал' } });
+    if (temporary) clearVoiceSession(cur.instanceId);
+    else if (cur.serverId) saveVoiceSession(cur.instanceId, cur.serverId, channelId);
   },
 
   leaveVoice: (keepSession = false) => {
@@ -1477,6 +1830,30 @@ export const useStore = create<State>((set, get) => ({
   setLiveVoice: (m) => set({ liveVoice: m }),
 
   setEconomy: (serverId, view) => set((s) => ({ economy: { ...s.economy, [serverId]: view } })),
+  setWheel: (serverId, snap) => set((s) => ({ wheel: { ...s.wheel, [serverId]: wheelViewOf(snap, Date.now()) } })),
+  applyWheelEvent: (msg) => {
+    const prev = get().wheel[msg.serverId];
+    const next = msg.t === 'wheel.state' ? applyWheelState(prev, msg, Date.now()) : applyWheelResult(prev, msg, Date.now());
+    if (!next) return false;
+    set((s) => ({ wheel: { ...s.wheel, [msg.serverId]: next } }));
+    return true;
+  },
+  openActivities: (a) => set({ activitiesOpen: a }),
+  openRecap: (r) => set({ recapOpen: r }),
+  setGamesLaunchNotice: (n) => set({ gamesLaunchNotice: n }),
+  setRecap: (serverId, kind, recap) => set((s) => ({ recaps: { ...s.recaps, [serverId]: { ...s.recaps[serverId], [kind]: recap } } })),
+  setGameTitles: (serverId, dto) => set((s) => ({ gameTitles: { ...s.gameTitles, [serverId]: dto } })),
+  setDuelSnapshot: (serverId, channelId, snap) => set((s) => applyDuelSnapshot(s, serverId, channelId, snap, Date.now())),
+  applyDuelEvent: (msg, myHand) => set((s) => applyDuelState(s, msg, s.user?.id, Date.now(), myHand)),
+  setGameToast: (t) => set({ gameToast: t }),
+  setPredictions: (serverId, snap) => set((s) => ({ predictions: { ...s.predictions, [serverId]: predictionsViewOf(snap, Date.now()) } })),
+  applyPredictionEvent: (msg) => {
+    const next = applyPredictionState(get().predictions[msg.serverId], msg, Date.now());
+    if (!next) return false;
+    set((s) => ({ predictions: { ...s.predictions, [msg.serverId]: next } }));
+    return true;
+  },
+  setPredictionToast: (t) => set({ predictionToast: t }),
 
   tipHints: [],
   /**
@@ -1639,7 +2016,7 @@ export const useStore = create<State>((set, get) => ({
       isFeedOnScreen({
         id: dmId,
         currentId: s0.currentDmId,
-        mobile: isMobile(),
+        mobile: phonePanes(),
         mobilePane: s0.mobilePane,
         kind: 'dm',
         view: s0.view,
@@ -1964,6 +2341,18 @@ export const useStore = create<State>((set, get) => ({
       // Голос НЕ трогаем (01.10): он принадлежит своему инстансу (`voice.instanceId`) и идёт, пока человек смотрит
       // другой — как в Discord. Рвёт его только выход, вход в другой канал или потеря записи.
       economy: {},
+      wheel: {},
+      activitiesOpen: null,
+      recapOpen: null,
+      gamesLaunchNotice: null,
+      recaps: {},
+      gameTitles: {},
+      duels: {},
+      duelInvite: null,
+      duelLimits: {},
+      gameToast: null,
+  predictions: {},
+  predictionToast: null,
       incomingPoke: null,
       watchedStreams: [],
       pipStreams: [],

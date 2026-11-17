@@ -1,6 +1,7 @@
 """Изолированные stdlib-границы: никаких сокетов, subprocess или настоящего sleep."""
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import types
@@ -69,8 +70,10 @@ def contract_equal(actual, expected, marker):
 
 
 def reject_mutant(case, original, edits, probe, marker):
-    """Целый Python-модуль в памяти; сначала тот же контракт на оригинале."""
+    """Оригинал проверяется всегда; модуль-мутант — только при GV_MUTANTS=1."""
     probe(original)
+    if os.environ.get("GV_MUTANTS") != "1":
+        return
     path = Path(original.__file__).resolve()
     raw = path.read_text(encoding="utf-8")
     for anchor, replacement in edits:

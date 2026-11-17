@@ -3,6 +3,7 @@ import type {
   EconomySettingsDto,
   EconomySummary,
   EconomyView,
+  GamesWallet,
   Leaderboard,
   LedgerEntry,
   RetroPreview,
@@ -48,6 +49,10 @@ import type {
   MyBotsResponse,
   UpdateBotBody,
   AdminInstanceSettings,
+  AdminSoundboardSettings,
+  AdminStorageReport,
+  SoundboardPolicy,
+  SoundboardQuota,
   InstanceUpdateInfo,
   Channel,
   Category,
@@ -124,6 +129,20 @@ import type {
   SharedMediaResponse,
   CallActiveResponse,
   CallJoinResponse,
+  WheelPick,
+  WheelSnapshotDto,
+  DuelDto,
+  DuelGame,
+  DuelSnapshotDto,
+  RpsHand,
+  PredictionEventDto,
+  PredictionSnapshotDto,
+  GameLeaderboardDto,
+  GameTitleKey,
+  GameTitlesDto,
+  RecapDto,
+  RecapKind,
+  GamesLaunchResult,
 } from '@gusvoice/shared';
 import { mirrorToBg } from './bgGateways';
 import { activeInstance, activeInstanceId, config, instances, updateActiveInstance, updateInstance } from './config';
@@ -291,6 +310,9 @@ async function parseResponse<T>(res: Response): Promise<T> {
     // ⚠️ Машинная причина отказа, если сервер её прислал. Текст предназначен человеку и меняется;
     // ветвиться по нему в коде — значит однажды сломаться от правки формулировки.
     err.reason = (data as { reason?: string }).reason;
+    // Поле формы, к которому относится отказ (`bad_draft` редактора события: `title|lock|questions|qN|qN.options|qN.oM`).
+    const field = (data as { field?: unknown }).field;
+    if (typeof field === 'string') (err as Error & { field?: string }).field = field;
     // ⚠️ Контакты держателя приезжают вместе с отказом «сервер закрыт для гостей» (§5.3.1): окно
     // обязано показать, к кому идти, а второй запрос за ними идти уже некуда — нас туда не пускают.
     const contacts = (data as { contacts?: unknown }).contacts;
@@ -610,10 +632,11 @@ function makeApi(t: Transport) {
   return {
   register: (username: string, email: string, password: string, displayName?: string, inviteCode?: string) =>
     req<RegisterResponse>('POST', '/auth/register', { username, email, password, displayName, inviteCode }),
-  verify: (identifier: string, code: string) => req<AuthResponse>('POST', '/auth/verify', { identifier, code }),
+  verify: (identifier: string, code: string, rememberMe = false) =>
+    req<AuthResponse>('POST', '/auth/verify', { identifier, code, ...(rememberMe ? { rememberMe: true } : {}) }),
   resend: (identifier: string) => req<{ status: string }>('POST', '/auth/resend', { identifier }),
-  login: (username: string, password: string) =>
-    req<AuthResponse | TotpRequiredResponse>('POST', '/auth/login', { username, password }),
+  login: (username: string, password: string, rememberMe = false) =>
+    req<AuthResponse | TotpRequiredResponse>('POST', '/auth/login', { username, password, ...(rememberMe ? { rememberMe: true } : {}) }),
   // UnifiedPush device registration (Android push — see nativeUnifiedPush.ts). Backend upserts per (user,device).
   // `keys` — ключи шифрования пуша устройства (#213, WebPush): без них бэкенд шлёт пуш без текста.
   /** `caps` (Р1, G17) — что умеет APK (`read1`, `reply1`); старый сервер поле отбросит. `tz` — IANA-пояс устройства (`deviceTimeZone`). */
@@ -854,7 +877,10 @@ function makeApi(t: Transport) {
       maxSeconds: number;
       defaultPriceCoins: number;
       maxPriceCoins: number;
+      quota?: SoundboardQuota;
     }>('GET', `/servers/${serverId}/soundboard`),
+  setSoundboardQuota: (serverId: string, limit: number) =>
+    req<{ ok: true }>('PUT', `/servers/${serverId}/soundboard/quota`, { limit }),
   deleteSoundboardClip: (serverId: string, clipId: string) =>
     req<void>('DELETE', `/servers/${serverId}/soundboard/${clipId}`),
   /**
@@ -1075,7 +1101,8 @@ function makeApi(t: Transport) {
   unassignRole: (serverId: string, userId: string, roleId: string) =>
     req<void>('DELETE', `/servers/${serverId}/members/${userId}/roles/${roleId}`),
 
-  voiceToken: (channelId: string) => req<VoiceTokenResponse>('POST', `/channels/${channelId}/voice/token`),
+  voiceToken: (channelId: string, moveTicket?: string) =>
+    req<VoiceTokenResponse>('POST', `/channels/${channelId}/voice/token`, moveTicket ? { moveTicket } : undefined),
   // Companion token for a native (desktop) screen share — same { url, token, room } shape.
   voiceScreenToken: (channelId: string) =>
     req<VoiceTokenResponse>('POST', `/channels/${channelId}/voice/screen-token`),
@@ -1118,6 +1145,9 @@ function makeApi(t: Transport) {
   /** Ретроначисление за сухой прогон — один раз за всю жизнь сервера. */
   grantRetro: (serverId: string) =>
     req<{ granted: number; people: number; skipped: number }>('POST', `/servers/${serverId}/economy/retro`),
+  /** «Запустить игры» (29.10): включить игры и подарить `gift` монет сидящим в голосе — один раз за жизнь сервера. */
+  launchGames: (serverId: string, gift: number) =>
+    req<GamesLaunchResult>('POST', `/servers/${serverId}/games/launch`, { gift }),
 
   /** Что ретро выдаст, если нажать сейчас. Ничего не меняет — обязательный шаг перед выдачей. */
   previewRetro: (serverId: string) => req<RetroPreview>('POST', `/servers/${serverId}/economy/retro/preview`),
@@ -1126,8 +1156,19 @@ function makeApi(t: Transport) {
    * Мои переключатели экономики на сервере. Два РАЗНЫХ (#122): «не участвовать» останавливает и
    * начисление, «не принимать типы» — только входящие, заработок при этом идёт.
    */
-  setEconomyOptOut: (serverId: string, patch: { optedOut?: boolean; tipsOptOut?: boolean }) =>
-    req<{ optedOut: boolean; tipsOptOut: boolean }>('PATCH', `/servers/${serverId}/economy/me`, patch),
+  /**
+   * Игры (ГусКоины 2): `gamesOptOut` — «не показывать мне игры», `gamesLossLimit` — мой предел проигрыша
+   * за сутки (`null` — как на сервере). Понижение сервер применяет сразу, повышение — с 00:00 МСК, и
+   * отвечает обновлённым `games`. Старый сервер этих полей не знает и `games` не вернёт.
+   */
+  setEconomyOptOut: (
+    serverId: string,
+    patch: { optedOut?: boolean; tipsOptOut?: boolean; gamesOptOut?: boolean; gamesLossLimit?: number | null },
+  ) =>
+    req<{ optedOut: boolean; tipsOptOut: boolean; games?: GamesWallet }>('PATCH', `/servers/${serverId}/economy/me`, patch),
+  /** Карточку перерасчёта сезона показали (28.10, `RecountNotice.tsx`) — больше не всплывает. */
+  markRecountSeen: (serverId: string) =>
+    req<{ recountSeen: true }>('PATCH', `/servers/${serverId}/economy/me`, { recountSeen: true }),
   /** Мои настройки участника на сервере (только свои — чужие не раскрываем). */
   getMyMember: (serverId: string) => req<{ pokesOptOut: boolean }>('GET', `/servers/${serverId}/members/me`),
   /** Принимать ли тычки на этом сервере. Решение человека, не владельца. */
@@ -1154,6 +1195,89 @@ function makeApi(t: Transport) {
   getEconomyLedger: (serverId: string, period?: 'week' | 'month' | 'season') =>
     req<LedgerEntry[]>('GET', `/servers/${serverId}/economy/ledger${period ? `?period=${period}` : ''}`),
 
+  /**
+   * Колесо гусей-пиратов (ГусКоины 2, этап 2): снимок раунда сервера. Игры выключены — `enabled:false` и `round:null`.
+   * Хранится в сторе (`wheel[serverId]`), грузит `economyClient.ensureWheel`; живое — события `wheel.state`/`wheel.result`.
+   */
+  getWheel: (serverId: string) => req<WheelSnapshotDto>('GET', `/servers/${serverId}/wheel`),
+  /**
+   * Ставка в колесо. Отказы — 409/403 с машинной причиной в `reason` (`not_in_voice`, `round_locked`, `cooldown`,
+   * `duplicate_pick` и коды денег этапа 1); текст человеку — `wheelRules.wheelBetErrorText`. Ответ — свежий снимок.
+   */
+  placeWheelBet: (serverId: string, pick: WheelPick, amount: number) =>
+    req<WheelSnapshotDto>('POST', `/servers/${serverId}/wheel/bets`, { pick, amount }),
+  /**
+   * «Крутить сейчас» (30.10): закрыть приём ставок досрочно — только тому, кто поставил в этом раунде (иначе `no_bet` 403,
+   * приёма нет — `no_round` 409). Ответ — свежий снимок; всем остальным — `wheel.state` с `locked`.
+   */
+  spinWheelNow: (serverId: string) => req<WheelSnapshotDto>('POST', `/servers/${serverId}/wheel/spin`, {}),
+  /**
+   * Гусиная дуэль (ГусКоины 2, этап 3): снимок партии голосового канала и входящего мне вызова. Не сижу в канале —
+   * `duel: null`. Хранится в сторе (`duels[channelId]`, `duelInvite`), грузит `economyClient.ensureDuel`; живое — `duel.state`.
+   */
+  getDuel: (serverId: string, channelId: string) =>
+    req<DuelSnapshotDto>('GET', `/servers/${serverId}/duel?channelId=${encodeURIComponent(channelId)}`),
+  /**
+   * Вызов, принятие, отказ, отзыв и бросок. Ответ — `{duel, serverNow}`; отказ — `{error: код, message}`: код приезжает в
+   * `Error.message` (`parseResponse` кладёт туда `error`), текст человеку — `duelRules.duelErrorText`.
+   */
+  challengeDuel: (serverId: string, body: { channelId: string; targetId: string; game: DuelGame; amount: number; series?: boolean }) =>
+    req<{ duel: DuelDto; serverNow: string }>('POST', `/servers/${serverId}/duels`, body),
+  /** Четвёртый аргумент: прежнее согласие на серию или номер виденного броска для защиты от позднего повтора. */
+  duelAction: (serverId: string, duelId: string, action: 'accept' | 'decline' | 'withdraw' | 'roll', bodyOrRollNo?: { series: boolean } | number) =>
+    req<{ duel: DuelDto; serverNow: string }>('POST', `/servers/${serverId}/duels/${duelId}/${action}`,
+      typeof bodyOrRollNo === 'number' ? (action === 'roll' ? { rollNo: bodyOrRollNo } : undefined) : bodyOrRollNo),
+  duelSeriesPulse: (serverId: string, duelId: string, body: { clientId: string; roundId: string; visible: boolean; ready: boolean }) =>
+    req<{ duel: DuelDto | null; serverNow: string }>('POST', `/servers/${serverId}/duels/${duelId}/series/pulse`, body),
+  duelSeriesControl: (serverId: string, duelId: string, action: 'pause' | 'stop') =>
+    req<{ duel: DuelDto | null; serverNow: string }>('POST', `/servers/${serverId}/duels/${duelId}/series/${action}`),
+  /**
+   * Ход игры с выбором (этап 4): КНБ — `rock|paper|scissors`, Жадный гусь — `roll|stop`; `seq` — из `duel.rps.seq` /
+   * `duel.greedy.seq` (повтор того же `seq` идемпотентен, устаревший — `stale_seq`). `myHand` — своя рука КНБ, только мне.
+   */
+  duelMove: (serverId: string, duelId: string, seq: number, move: RpsHand | 'roll' | 'stop') =>
+    req<{ duel: DuelDto; myHand?: RpsHand | null; serverNow: string }>('POST', `/servers/${serverId}/duels/${duelId}/move`, { seq, move }),
+  /**
+   * Ставки на события (ГусКоины 2, этап 5): лента сервера — живые события и закончившиеся за сутки, новые сверху; `mine` у
+   * вопроса — только здесь. Хранится в сторе (`predictions[serverId]`), грузит `economyClient.ensurePredictions`; живое —
+   * событие шлюза `prediction.state`. Отказы — `{error, reason, message, field?}`, текст человеку — `predictionRules.predictionErrorText`.
+   */
+  getPredictions: (serverId: string) => req<PredictionSnapshotDto>('GET', `/servers/${serverId}/predictions`),
+  /** Завести событие (`MANAGE_PREDICTIONS`/`MANAGE_ECONOMY`/владелец); id вариантов `o1..` даёт сервер. `lockInSec: null` — закрыть вручную. */
+  createPrediction: (serverId: string, body: { title: string; lockInSec: number | null; questions: { question: string; options: string[] }[] }) =>
+    req<{ event: PredictionEventDto; serverNow: string }>('POST', `/servers/${serverId}/predictions`, body),
+  /** Ставка на вариант вопроса — одна на вопрос, окончательная; только сидя в голосе этого сервера. */
+  betPrediction: (serverId: string, eventId: string, body: { questionId: string; optionId: string; amount: number }) =>
+    req<{ event: PredictionEventDto; serverNow: string }>('POST', `/servers/${serverId}/predictions/${eventId}/bets`, body),
+  /** Закрыть приём ставок (создатель или управляющий) / отменить с возвратом всех ставок. */
+  predictionAction: (serverId: string, eventId: string, action: 'close' | 'cancel') =>
+    req<{ event: PredictionEventDto; serverNow: string }>('POST', `/servers/${serverId}/predictions/${eventId}/${action}`),
+  /** Итог — только создатель, после закрытия: верный вариант на каждый вопрос, `null` — «вопрос не состоялся» (возврат). */
+  settlePrediction: (serverId: string, eventId: string, winners: Record<string, string | null>) =>
+    req<{ event: PredictionEventDto; serverNow: string }>('POST', `/servers/${serverId}/predictions/${eventId}/settle`, { winners }),
+  /**
+   * Лидерборд игр (ГусКоины 2, этап 6): `period=month` — текущий месяц МСК вживую, `month=mYYYY-MM` — прошлый из заморозки
+   * (не заморожен — 404); `season` — текущий сезон экономики. Игры выключены — `enabled:false`.
+   */
+  getGameLeaderboard: (serverId: string, period: 'month' | 'season' = 'month', month?: string) =>
+    req<GameLeaderboardDto>(
+      'GET',
+      `/servers/${serverId}/games/leaderboard?period=${period}${month ? `&month=${encodeURIComponent(month)}` : ''}`,
+    ),
+  /** 27 званий месяца с названиями сервера и носителями прошлого месяца; экономика выключена — 404. */
+  getGameTitles: (serverId: string) => req<GameTitlesDto>('GET', `/servers/${serverId}/games/titles`),
+  /** Переименовать звание (`MANAGE_ECONOMY`); `null` — вернуть название по умолчанию. Длиннее 60 — 400 `bad_name`. */
+  renameGameTitle: (serverId: string, key: GameTitleKey, name: string | null) =>
+    req<GameTitlesDto>('PATCH', `/servers/${serverId}/games/titles/${encodeURIComponent(key)}`, { name }),
+  /**
+   * «Итоги»: замороженные (`preview=false`; без `period` — последние своего вида, нет — `recap:null`) или сухой прогон на
+   * текущих данных (`preview=true`, только `MANAGE_ECONOMY`, ничего не пишет).
+   */
+  getRecap: (serverId: string, kind: RecapKind, opts: { period?: string; preview?: boolean } = {}) =>
+    req<{ recap: RecapDto | null }>(
+      'GET',
+      `/servers/${serverId}/economy/recap${opts.preview ? '/preview' : ''}?kind=${kind}${opts.period ? `&period=${encodeURIComponent(opts.period)}` : ''}`,
+    ),
   /** Сводка за сутки + сверка журнала с балансами (MANAGE_ECONOMY). */
   getEconomySummary: (serverId: string) => req<EconomySummary>('GET', `/servers/${serverId}/economy/summary`),
   /** Загрузить иконку валюты. Проверки (тип, размер, анимация) — на сервере, в `checkCoinIcon`. */
@@ -1763,6 +1887,9 @@ function makeApi(t: Transport) {
   setupComplete: () => req<{ ok: boolean }>('POST', '/setup/complete'),
   setupVoiceTest: () => req<VoiceTestToken>('POST', '/setup/voice-test'),
   adminInstance: () => req<AdminInstanceSettings>('GET', '/admin/instance'),
+  adminSoundboard: () => req<AdminSoundboardSettings>('GET', '/admin/soundboard'),
+  adminSetSoundboard: (policy: SoundboardPolicy) => req<{ ok: true }>('PUT', '/admin/soundboard', policy),
+  adminStorage: () => req<AdminStorageReport>('GET', '/admin/storage'),
   adminSetInstance: (b: {
     name?: string | null;
     registration?: RegistrationPolicy;

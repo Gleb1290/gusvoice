@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -78,9 +79,11 @@ it('R208 refresh без document работает от online, отсутств�
 // Ловит лишние HTTP-запросы при почти одновременном возвращении вкладки и шлюза, не ошибку VM.
 it('R208 контрфакт без дедупликации преждевременно поднимает эпоху', async () => {
   await resumed();
-  const anchor = 'if (!shouldRefreshLastSeen(now, last)) return false;';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(resumed(source.replace(anchor, '')),
-    e => e instanceof assert.AssertionError && e.message.startsWith('online до пяти секунд дедуплицируется')
-      && JSON.stringify(e.actual) === '[8,9]' && JSON.stringify(e.expected) === '[8]');
+  await counterfact(async () => {
+    const anchor = 'if (!shouldRefreshLastSeen(now, last)) return false;';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(resumed(source.replace(anchor, '')),
+      e => e instanceof assert.AssertionError && e.message.startsWith('online до пяти секунд дедуплицируется')
+        && JSON.stringify(e.actual) === '[8,9]' && JSON.stringify(e.expected) === '[8]');
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -65,7 +66,9 @@ for (const [label, from, to, check, prefix, actual, expected] of [
   ['down закрывает поле', ') : linkBroken ? (', ') : peerDown ? (', replacement, 'R217-composer-open:', 'peerDown', 'linkBroken'],
   ['текст заменён комментарием', '{fedPeerDownText(peerHomeLabel)}', '{/* fedPeerDownText(peerHomeLabel) */}', notice, 'R217-down-text:', 0, 1],
 ] as const) it(`R217 контрфакт проводки плашки: ${label}`, () => {
-  check(source); assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  check(source); counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => check(source.replace(from, to)), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

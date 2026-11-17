@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -111,9 +112,6 @@ describe('поток вложения от соседа', () => {
     const over = await request(original);
     await assert.rejects(() => streamBytes(over.body), /ответ соседа больше предела/);
 
-    const anchor = 'if (size > maxBytes) {';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь ограничения потока должен быть уникальным');
-    const mutant = loadPeerStream(() => ({ body }), [], source.replace(anchor, 'if (size > PEER_MAX_STREAM_BYTES) {'));
     const mustRejectOversize = async (api: typeof original) => {
       const result = await request(api);
       try {
@@ -126,11 +124,16 @@ describe('поток вложения от соседа', () => {
       assert.fail('пятый байт должен отвергаться при maxBytes=4');
     };
     await mustRejectOversize(original);
+    await gatedCounterfact(async () => {
+    const anchor = 'if (size > maxBytes) {';
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь ограничения потока должен быть уникальным');
+    const mutant = loadPeerStream(() => ({ body }), [], source.replace(anchor, 'if (size > PEER_MAX_STREAM_BYTES) {'));
     await assert.rejects(
       () => mustRejectOversize(mutant),
       (error: unknown) => error instanceof assert.AssertionError && error.message.includes('пятый байт должен отвергаться при maxBytes=4'),
       'мутант общего потолка не заменяет меньший лимит вызывающей стороны',
     );
+    });
   });
 
   it('Content-Length больше предела отклоняется до чтения тела', async () => {

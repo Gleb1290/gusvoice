@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -40,9 +41,11 @@ function fixture(options: Options = {}) {
 function killed(change: readonly [string, string], options: Options, scenario: (f: ReturnType<typeof fixture>) => void,
   prefix: string, actual: unknown, expected: unknown) {
   scenario(fixture(options));
-  const mutant = fixture({ ...options, mutation: change });
-  assert.throws(() => scenario(mutant), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
+  counterfact(() => {
+    const mutant = fixture({ ...options, mutation: change });
+    assert.throws(() => scenario(mutant), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && Object.is(e.actual, actual) && Object.is(e.expected, expected));
+  });
 }
 it('R216 отсутствие настройки, единица и мусор оставляют поднесение включённым, только строка ноль выключает', () => {
   const { api } = fixture();

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -21,9 +22,15 @@ it('упоминания ниже реакций, нулевые и отрица
     assert.equal(buttons[1]?.label, '999+');
     for (const n of [0, -1, undefined, NaN]) assert.equal(api.cornerButtons({ mentions: n, reactions: n }).length, 0);
   }; check(rules);
-  assert.throws(() => check(mutant('m > 0', 'm >= 0')), assert.AssertionError);
-  assert.throws(() => check(mutant('r > 0', 'r >= 0')), assert.AssertionError);
-  assert.throws(() => check(mutant('return out;', 'return out.reverse();')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutant('m > 0', 'm >= 0')), assert.AssertionError);
+  });
+  counterfact(() => {
+    assert.throws(() => check(mutant('r > 0', 'r >= 0')), assert.AssertionError);
+  });
+  counterfact(() => {
+    assert.throws(() => check(mutant('return out;', 'return out.reverse();')), assert.AssertionError);
+  });
 });
 it('999 показывается точно, 1000 сокращается, отметки списка требуют положительного числа', () => {
   // Ловит раннее округление значка и пустые отметки рядом со счётчиком.
@@ -32,7 +39,9 @@ it('999 показывается точно, 1000 сокращается, отм
     assert.equal(api.cornerCountLabel(1000), '999+');
     assert.equal(api.cornerCountLabel(1), '1');
   }; check(rules);
-  assert.throws(() => check(mutant('n > CORNER_COUNT_MAX', 'n >= CORNER_COUNT_MAX')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutant('n > CORNER_COUNT_MAX', 'n >= CORNER_COUNT_MAX')), assert.AssertionError);
+  });
   assert.deepEqual(rules.rowMarks({}), { mentions: false, reactions: false });
   assert.deepEqual(rules.rowMarks({ unreadMentions: 0, unreadReactions: -1 }), { mentions: false, reactions: false });
   assert.deepEqual(rules.rowMarks({ unreadMentions: 1, unreadReactions: 2 }), { mentions: true, reactions: true });
@@ -41,7 +50,9 @@ it('видимые непрочитанные отмечаются по лент
   // Ловит чтение вне экрана и двойное уменьшение счётчика.
   const check = (api: typeof rules) => assert.equal(api.reactionsToMark(['b', 'a', 'b', 'hidden', 'c'], new Set(['a', 'b', 'c'])).join(','), 'b,a,c');
   check(rules);
-  assert.throws(() => check(mutant(' && !seen.has(id)', '')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutant(' && !seen.has(id)', '')), assert.AssertionError);
+  });
   assert.deepEqual(rules.reactionsToMark([], new Set(['a'])), []);
   assert.deepEqual(rules.reactionsToMark(['a'], new Set()), []);
 });

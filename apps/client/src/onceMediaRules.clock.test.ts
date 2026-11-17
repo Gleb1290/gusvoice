@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -105,7 +106,9 @@ for (const [label, from, to, scenario, marker] of [
     '(serverNowMs - openedAtMs)', backwards, 'R269:отрицательное-прошедшее-не-продлевает'],
 ] as const) it(`R269 контрфакт: ${label} обнаруживается адресным результатом, не ошибкой импорта`, () => {
   scenario();
-  assert.equal(source.split(from).length - 1, 1, 'единственная точка мутации');
-  assert.throws(() => scenario(load(source.replace(from, to))), error => error instanceof assert.AssertionError
-    && error.message.includes(marker));
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1, 'единственная точка мутации');
+    assert.throws(() => scenario(load(source.replace(from, to))), error => error instanceof assert.AssertionError
+      && error.message.includes(marker));
+  });
 });

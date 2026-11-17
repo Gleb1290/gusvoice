@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -112,16 +113,22 @@ test('R212 один отправитель не получает право че
 });
 test('R212 контрфакт: owner/contact поменялись местами — обратный контакт ошибочно разрешает отправку', async () => {
   await contactDirection();
+  await counterfact(async () => {
   await assert.rejects(() => contactDirection(mutation('messageAllowedFor', 'uc.owner_id = ${recipientId} AND uc.contact_id = ${senderId}',
     'uc.owner_id = ${senderId} AND uc.contact_id = ${recipientId}')), killed('контакт отправителя не разрешает ему писать получателю', true, false));
+  });
 });
 test('R212 контрфакт: снят service IS NULL — служебная запись ошибочно разрешает ответ', async () => {
   await wrote('service');
+  await counterfact(async () => {
   await assert.rejects(() => wrote('service', mutation('messageAllowedFor', ' AND sx.service IS NULL', '')),
     killed('только обычное живое сообщение получателя в 1:1 открывает ответ', true, false));
+  });
 });
 test('R212 контрфакт: снят pe.key — разрешение звонков ошибочно распространяется на сообщения', async () => {
   await exceptionKey();
+  await counterfact(async () => {
   await assert.rejects(() => exceptionKey(mutation('messageAllowedFor', ' AND pe.key = ${KEY}', '')),
     killed('исключение calls не разрешает messages', true, false));
+  });
 });

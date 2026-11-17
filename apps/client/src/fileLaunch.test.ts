@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -21,9 +22,11 @@ it('расширение берётся у файла, опасное и сет�
     for (const name of ['a.xyz','README','.hidden']) assert.equal(api.launchKind(name), 'other');
     assert.equal(api.fileExtension('dir.v1/file'), ''); assert.equal(api.fileExtension('a.tar.gz'), 'gz');
   }; check(fixture().api);
-  for (const [a,b] of [['exe fxp', 'fxp'], ["? 'safe' : 'other'", "? 'other' : 'safe'"], ['.toLowerCase()', '']]) {
-    assert.throws(() => check(fixture(s => { assert.ok(s.includes(a), 'мутант найден'); return s.replace(a,b); }).api), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [a,b] of [['exe fxp', 'fxp'], ["? 'safe' : 'other'", "? 'other' : 'safe'"], ['.toLowerCase()', '']]) {
+      assert.throws(() => check(fixture(s => { assert.ok(s.includes(a), 'мутант найден'); return s.replace(a,b); }).api), assert.AssertionError);
+    }
+  });
 });
 it('доверенное расширение не доверяет соседнему, отключение сетевого предупреждения действует только на ip', () => {
   // Одно разрешение на exe не должно отключать предупреждение о любом исполняемом файле.

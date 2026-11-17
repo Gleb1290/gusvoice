@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import * as rules from './dmFolders';
@@ -41,11 +42,14 @@ it('R181 несистемная папка сохраняет собственн
 it('R181 возврат прежней системной подписи обнаруживается на целом модуле правил', () => {
   // Класс ошибки: регрессия системного названия при неизменном system dms.
   systemTitle(rules);
-  const source = readFileSync(new URL('./dmFolders.ts', import.meta.url), 'utf8');
-  const anchor = "export const DM_FOLDER_SYSTEM_TITLE = 'Все чаты';";
-  assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь системной подписи');
-  assert.throws(() => systemTitle(mutant(anchor, "export const DM_FOLDER_SYSTEM_TITLE = 'Личные';")),
-    e => e instanceof assert.AssertionError && e.message.includes('системная подпись Все чаты'));
+
+  runCounterfact(() => {
+    const source = readFileSync(new URL('./dmFolders.ts', import.meta.url), 'utf8');
+    const anchor = "export const DM_FOLDER_SYSTEM_TITLE = 'Все чаты';";
+    assert.equal(source.split(anchor).length - 1, 1, 'уникальный якорь системной подписи');
+    assert.throws(() => systemTitle(mutant(anchor, "export const DM_FOLDER_SYSTEM_TITLE = 'Личные';")),
+      e => e instanceof assert.AssertionError && e.message.includes('системная подпись Все чаты'));
+  });
 });
 
 it('R129 собственные закрепы отличаются от общего режима: null у системы и старой папки, пустой набор у новой', () => {
@@ -72,7 +76,9 @@ it('R129 новый закреп в папке ставится сверху, п
     assert.deepEqual(input, ['a', 'b']);
   };
   check(rules);
-  assert.throws(() => check(mutant('return pinned ? [id, ...rest] : rest;', 'return pinned ? [...rest, id] : rest;')), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => check(mutant('return pinned ? [id, ...rest] : rest;', 'return pinned ? [...rest, id] : rest;')), assert.AssertionError);
+  });
 });
 
 it('R129 открепление убирает все повторы id, отсутствующий id не затрагивает соседей', () => {
@@ -93,7 +99,9 @@ it('R129 полный список собственных закрепов за�
     assert.deepEqual(ids, ['d', 'b', 'a', 'c']);
   };
   check(rules);
-  assert.throws(() => check(mutant('named[k++]', 'id')), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => check(mutant('named[k++]', 'id')), assert.AssertionError);
+  });
 });
 
 it('R129 частичный порядок меняет только слоты названных, пропущенные остаются на прежних местах', () => {
@@ -133,18 +141,22 @@ it('R129 явное исключение сильнее собственного
     assert.equal(api.dmFolderContains({ ...f, exclude: [] }, chat), true, 'без исключения свой закреп снова действует');
   };
   check(rules);
-  assert.throws(() => check(mutant('if (f.exclude.includes(c.id)) return false;', '')), assert.AssertionError);
+
   // Удаление выше уже проверено; отдельно меняем порядок двух настоящих проверок целого модуля.
-  const source = readFileSync(new URL('./dmFolders.ts', import.meta.url), 'utf8');
-  const own = 'if (dmFolderOwnPins(f)?.includes(c.id)) return true;';
-  assert.ok(source.includes(own));
-  const module = { exports: {} };
-  const moved = source.replace('if (f.exclude.includes(c.id)) return false;', '')
-    .replace(own, `${own}\n  if (f.exclude.includes(c.id)) return false;`);
-  assert.notEqual(moved, source);
-  runInNewContext(ts.transpileModule(moved, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports });
-  assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
+
+  runCounterfact(() => {
+    assert.throws(() => check(mutant('if (f.exclude.includes(c.id)) return false;', '')), assert.AssertionError);
+    const source = readFileSync(new URL('./dmFolders.ts', import.meta.url), 'utf8');
+    const own = 'if (dmFolderOwnPins(f)?.includes(c.id)) return true;';
+    assert.ok(source.includes(own));
+    const module = { exports: {} };
+    const moved = source.replace('if (f.exclude.includes(c.id)) return false;', '')
+      .replace(own, `${own}\n  if (f.exclude.includes(c.id)) return false;`);
+    assert.notEqual(moved, source);
+    runInNewContext(ts.transpileModule(moved, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports });
+    assert.throws(() => check(module.exports as typeof rules), assert.AssertionError);
+  });
 });
 
 it('R129 старый pinned без pinnedOwn не обходит правила, собственный пустой набор не наследует чужие id', () => {
@@ -177,8 +189,10 @@ it('R126 новые закрепы сверху в общем порядке, н
   const input = ['new-a', 'old-a', 'new-b', 'old-b']; const order = ['old-b', 'gone', 'old-a'];
   assert.deepEqual(rules.dmFolderPinnedOrder(input, order), ['new-a', 'new-b', 'old-b', 'old-a']);
   assert.deepEqual(input, ['new-a', 'old-a', 'new-b', 'old-b']); assert.deepEqual(order, ['old-b', 'gone', 'old-a']);
-  assert.throws(() => assert.deepEqual([...mutant('return [...fresh, ...placed];', 'return [...placed, ...fresh];').dmFolderPinnedOrder(input, order)],
-    ['new-a', 'new-b', 'old-b', 'old-a']), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.deepEqual([...mutant('return [...fresh, ...placed];', 'return [...placed, ...fresh];').dmFolderPinnedOrder(input, order)],
+      ['new-a', 'new-b', 'old-b', 'old-a']), assert.AssertionError);
+  });
 });
 it('R126 пустой порядок закрепов сохраняет исходный, возвращая отдельный массив', () => {
   const input = ['a', 'b'];
@@ -199,7 +213,9 @@ it('системные личные включают группы, пользо�
   assert.equal(rules.dmFolderContains(system, group), true);
   assert.equal(rules.dmFolderContains(folder, group), false);
   assert.equal(rules.dmFolderContains({ ...system, exclude: ['c'] }, group), false);
-  assert.throws(() => assert.equal(mutant('if (f.system) return true;', '').dmFolderContains(system, group), true), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant('if (f.system) return true;', '').dmFolderContains(system, group), true), assert.AssertionError);
+  });
 });
 it('исключение главнее включения и типа, непрочитанное открытой беседы удерживается до ухода', () => {
   // Прочитанная текущая строка не должна исчезать под пальцем, но исключение всегда уважается.
@@ -209,8 +225,11 @@ it('исключение главнее включения и типа, непр
   const unread = { ...folder,flags:rules.DM_FOLDER_PERSONAL|rules.DM_FOLDER_NO_READ };
   assert.equal(rules.dmFolderContains(unread,{...chat,unread:false}),false); assert.equal(rules.dmFolderContains(unread,{...chat,unread:false},true),true);
   assert.equal(rules.dmFolderContains(folder,{...chat,group:true}),false);
-  assert.throws(() => assert.equal(mutant('if (f.exclude.includes(c.id)) return false;', '').dmFolderContains({ ...folder,include:['c'],exclude:['c'] },chat),false), assert.AssertionError);
-  assert.throws(() => assert.equal(mutant('(f.flags & type) !== 0 &&', '(f.flags & type) !== 0 ||').dmFolderContains({ ...folder,flags:rules.DM_FOLDER_PERSONAL|rules.DM_FOLDER_NO_MUTED },{...chat,muted:true}),false), assert.AssertionError);
+
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant('if (f.exclude.includes(c.id)) return false;', '').dmFolderContains({ ...folder,include:['c'],exclude:['c'] },chat),false), assert.AssertionError);
+    assert.throws(() => assert.equal(mutant('(f.flags & type) !== 0 &&', '(f.flags & type) !== 0 ||').dmFolderContains({ ...folder,flags:rules.DM_FOLDER_PERSONAL|rules.DM_FOLDER_NO_MUTED },{...chat,muted:true}),false), assert.AssertionError);
+  });
 });
 it('ручное добавление и удаление учитывают тип и не оставляют пустую папку без правила', () => {
   // Последняя явная беседа — единственное содержимое такой папки, убрать её нельзя.
@@ -224,7 +243,9 @@ it('пределы имени и списков проходят ровно на
   // Папка не должна терять сотую беседу или принять повторяющийся порядок.
   const input = { title:'x'.repeat(12),flags:rules.DM_FOLDER_PERSONAL,include:Array.from({length:100},(_,i)=>String(i)),exclude:[] };
   assert.equal(rules.dmFolderInputError(input),null); assert.equal(rules.dmFolderInputError({...input,title:'x'.repeat(13)}),'title_long');
-  assert.throws(() => assert.equal(mutant('input.include.length > DM_FOLDER_CHATS_MAX', 'input.include.length >= DM_FOLDER_CHATS_MAX').dmFolderInputError(input),null), assert.AssertionError);
+  runCounterfact(() => {
+    assert.throws(() => assert.equal(mutant('input.include.length > DM_FOLDER_CHATS_MAX', 'input.include.length >= DM_FOLDER_CHATS_MAX').dmFolderInputError(input),null), assert.AssertionError);
+  });
   assert.equal(rules.dmFolderInputError({...input,include:[...input.include,'101']}),'too_many_chats');
   assert.equal(rules.dmFolderInputError({...input,title:' '}),'title_empty'); assert.equal(rules.DM_FOLDERS_MAX,10);
   assert.deepEqual(rules.reorderDmFolders(['a','b'],['b','a']),['b','a']);

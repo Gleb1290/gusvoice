@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -47,7 +48,9 @@ it('верхняя полоса резервирует место только �
     };
     assert.ok(source.includes('export function CallBar'));
     await check(source);
-    const changed = source.replace('return () => root.classList.remove(CALLBAR_ROOT_CLASS);', ''); assert.notEqual(changed, source);
-    await assert.rejects(check(changed), /разворот снимает резерв места/);
+    await counterfact(async () => {
+      const changed = source.replace('return () => root.classList.remove(CALLBAR_ROOT_CLASS);', ''); assert.notEqual(changed, source);
+      await assert.rejects(check(changed), /разворот снимает резерв места/);
+    });
   } finally { GlobalRegistrator.unregister(); delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT; }
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { clampPinIndex, PIN_BAR_SEGMENTS_MAX, pinSegments } from './pinBarRules.js';
@@ -22,11 +23,13 @@ it('трек закрепа соблюдает нижнюю границу и ц
     assert.equal(api.pinTrack({keys,bottomKey:40,clickedKey:10}).index,2);
     assert.equal(api.pinTrack({keys,bottomKey:20,clickedKey:20}).clickedKey,null);
   }; check(rules);
-  for(const [from,to] of [['keys[i] <= limit','keys[i] < limit'],['if (clicked <= keys[0]) limit = Number.POSITIVE_INFINITY;','if (false) limit = Number.POSITIVE_INFINITY;'],['bottomKey <= clicked','bottomKey < clicked']] as const){
-    assert.ok(source.includes(from));const module={exports:{}};
-    runInNewContext(ts.transpileModule(source.replace(from,to),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports});
-    assert.throws(()=>check(module.exports as typeof rules),assert.AssertionError);
-  }
+  counterfact(() => {
+    for(const [from,to] of [['keys[i] <= limit','keys[i] < limit'],['if (clicked <= keys[0]) limit = Number.POSITIVE_INFINITY;','if (false) limit = Number.POSITIVE_INFINITY;'],['bottomKey <= clicked','bottomKey < clicked']] as const){
+      assert.ok(source.includes(from));const module={exports:{}};
+      runInNewContext(ts.transpileModule(source.replace(from,to),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports});
+      assert.throws(()=>check(module.exports as typeof rules),assert.AssertionError);
+    }
+  });
 });
 it('скрытый набор возвращается только новым id, служебная строка принимает известный вид и режет текст до 40', () => {
   // Ловит фантомную служебную строку и навсегда скрытый новый закреп.

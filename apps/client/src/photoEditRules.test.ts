@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -33,8 +34,10 @@ it('поворот против часовой учитывает отражен
   };
   checkRotation(rules);
   checkRotation(mutated('const step = e.flipped ? 270 : 90;', 'const step = e.flipped ? 270 : 90;'));
-  assert.throws(() => checkRotation(mutated('const step = e.flipped ? 270 : 90;', 'const step = 90;')), assert.AssertionError,
-    'мутант всегда вращает модель в неверную сторону после отражения');
+  counterfact(() => {
+    assert.throws(() => checkRotation(mutated('const step = e.flipped ? 270 : 90;', 'const step = 90;')), assert.AssertionError,
+      'мутант всегда вращает модель в неверную сторону после отражения');
+  });
 });
 
 it('пропорциональный угловой crop держит квадрат в снимке, не двигает края и округляется квадратом', () => {
@@ -52,17 +55,21 @@ it('пропорциональный угловой crop держит квадр
   assert.throws(() => assert.equal(rules.cropPixels({ x: 0, y: 0, w: 0.337, h: 0.6 }, 101, 80, null).w,
     rules.cropPixels({ x: 0, y: 0, w: 0.337, h: 0.6 }, 101, 80, null).h), assert.AssertionError,
   'контроль: свободная рамка не обязана быть квадратной');
-  assert.throws(() => checkRatio(mutated('Math.round(ratio ? w / ratio : c.h * vh)', 'Math.round(c.h * vh)')), assert.AssertionError,
-    'мутант теряет заданную пропорцию после округления');
+  counterfact(() => {
+    assert.throws(() => checkRatio(mutated('Math.round(ratio ? w / ratio : c.h * vh)', 'Math.round(c.h * vh)')), assert.AssertionError,
+      'мутант теряет заданную пропорцию после округления');
+  });
   const checkEdge = (api: typeof rules) => {
     const edge = api.dragCrop({ x: 0.8, y: 0.2, w: 0.15, h: 0.15 }, 'se', 60, 60, 100, 200, 1, 1);
     assert.ok(edge.x + edge.w <= 1 && edge.y + edge.h <= 1, 'пропорциональная рамка остаётся внутри обоих краёв');
   };
   checkEdge(rules);
   checkEdge(mutated('nw = Math.min(nw, roomW, roomH * ratio);', 'nw = Math.min(nw, roomW, roomH * ratio);'));
-  const noEdgeClamp = mutated('nw = Math.min(nw, roomW, roomH * ratio);', 'nw = Math.min(nw, roomH * ratio);');
-  assert.throws(() => checkEdge(noEdgeClamp), assert.AssertionError,
-    'мутант выпускает квадратную рамку за правый край снимка');
+  counterfact(() => {
+    const noEdgeClamp = mutated('nw = Math.min(nw, roomW, roomH * ratio);', 'nw = Math.min(nw, roomH * ratio);');
+    assert.throws(() => checkEdge(noEdgeClamp), assert.AssertionError,
+      'мутант выпускает квадратную рамку за правый край снимка');
+  });
 });
 
 it('имя при переименовании сохраняет расширение, чистит запрещённые знаки и не меняет пустой ввод', () => {
@@ -112,9 +119,11 @@ for (const [action, anchor, replacement] of [
   ['flipEdit', 'return { ...e, flipped:', 'return { ...e, marks: undefined, flipped:'],
 ] as const) it(`R214 контрфакт ${action} теряет нарисованное при геометрической правке`, () => {
   carried(marksModule(), action);
-  assert.equal(marksSource.split(anchor).length - 1, 1, 'единственный якорь переноса меток');
-  const mutant = marksModule(marksSource.replace(anchor, replacement));
-  assert.throws(() => carried(mutant, action), e => e instanceof assert.AssertionError
-    && e.message.startsWith(`${action} сохраняет исходные метки без преобразования координат`)
-    && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  counterfact(() => {
+    assert.equal(marksSource.split(anchor).length - 1, 1, 'единственный якорь переноса меток');
+    const mutant = marksModule(marksSource.replace(anchor, replacement));
+    assert.throws(() => carried(mutant, action), e => e instanceof assert.AssertionError
+      && e.message.startsWith(`${action} сохраняет исходные метки без преобразования координат`)
+      && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });

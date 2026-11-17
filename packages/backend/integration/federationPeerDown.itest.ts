@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -232,27 +233,41 @@ it('R217 одновременная потеря связки и down объяв
 const linkEdit = (from: string, to: string): Edit => ({ file: 'federation/convLink', from, to });
 const convEdit = (from: string, to: string): Edit => ({ file: 'conversations', from, to });
 it('R217 контрфакт включает down на точной границе десяти минут', async () => {
-  await boundary(); await assert.rejects(boundary(linkEdit('const since = pullDownSince.get(h);\n    if (since !== undefined && now - since > STALE_AFTER_MS)',
-    'const since = pullDownSince.get(h);\n    if (since !== undefined && now - since >= STALE_AFTER_MS)')), failure('R217-boundary:', true, false));
+  await boundary(); await counterfact(async () => {
+    await assert.rejects(boundary(linkEdit('const since = pullDownSince.get(h);\n    if (since !== undefined && now - since > STALE_AFTER_MS)',
+      'const since = pullDownSince.get(h);\n    if (since !== undefined && now - since >= STALE_AFTER_MS)')), failure('R217-boundary:', true, false));
+  });
 });
 it('R217 контрфакт silentHomes теряет сетевой down', async () => {
-  await union(); await assert.rejects(union(linkEdit('for (const h of downHomes(homes)) out.add(h);', '')), failure('R217-union:', false, true));
+  await union(); await counterfact(async () => {
+    await assert.rejects(union(linkEdit('for (const h of downHomes(homes)) out.add(h);', '')), failure('R217-union:', false, true));
+  });
 });
 it('R217 контрфакт показывает fedPeerDown вместе с broken', async () => {
-  await broken(); await assert.rejects(broken(convEdit('downHomes.has(peer.homeInstanceId) && !brokenHomes.has(peer.homeInstanceId)', 'downHomes.has(peer.homeInstanceId)')), failure('R217-broken:', true, undefined));
+  await broken(); await counterfact(async () => {
+    await assert.rejects(broken(convEdit('downHomes.has(peer.homeInstanceId) && !brokenHomes.has(peer.homeInstanceId)', 'downHomes.has(peer.homeInstanceId)')), failure('R217-broken:', true, undefined));
+  });
 });
 it('R217 контрфакт использует stale вместо down для недоступности собеседника', async () => {
-  await staleOnly(); await assert.rejects(staleOnly(convEdit('downHomes.has(peer.homeInstanceId)', 'staleHomes.has(peer.homeInstanceId)')), failure('R217-stale:', true, undefined));
+  await staleOnly(); await counterfact(async () => {
+    await assert.rejects(staleOnly(convEdit('downHomes.has(peer.homeInstanceId)', 'staleHomes.has(peer.homeInstanceId)')), failure('R217-stale:', true, undefined));
+  });
 });
 it('R217 контрфакт убирает цикл объявления downKnown', async () => {
-  await directRefresh(); await assert.rejects(directRefresh(linkEdit('for (const instanceId of directHomes) {\n    if ((downBefore?.has(instanceId) ?? false) === down.has(instanceId)) continue;',
-    'for (const instanceId of [] as string[]) {\n    if ((downBefore?.has(instanceId) ?? false) === down.has(instanceId)) continue;')), failure('R217-refresh:', 0, 1));
+  await directRefresh(); await counterfact(async () => {
+    await assert.rejects(directRefresh(linkEdit('for (const instanceId of directHomes) {\n    if ((downBefore?.has(instanceId) ?? false) === down.has(instanceId)) continue;',
+      'for (const instanceId of [] as string[]) {\n    if ((downBefore?.has(instanceId) ?? false) === down.has(instanceId)) continue;')), failure('R217-refresh:', 0, 1));
+  });
 });
 it('R217 контрфакт повторно объявляет дом, уже объявленный как молчащий хост группы', async () => {
-  await sharedHostRefresh(); await assert.rejects(sharedHostRefresh(linkEdit('if (groupHosts.includes(instanceId) && (silentBefore?.has(instanceId) ?? false) !== silent.has(instanceId)) continue;', '')),
-    failure('R217-shared-host:', 2, 1));
+  await sharedHostRefresh(); await counterfact(async () => {
+    await assert.rejects(sharedHostRefresh(linkEdit('if (groupHosts.includes(instanceId) && (silentBefore?.has(instanceId) ?? false) !== silent.has(instanceId)) continue;', '')),
+      failure('R217-shared-host:', 2, 1));
+  });
 });
 it('R217 контрфакт повторно объявляет дом, уже объявленный как broken', async () => {
-  await changedRefresh(); await assert.rejects(changedRefresh(linkEdit('if (changed.includes(instanceId) || (staleBefore?.has(instanceId) ?? false) !== stale.has(instanceId)) continue;', '')),
-    failure('R217-archive-refresh:', 2, 1));
+  await changedRefresh(); await counterfact(async () => {
+    await assert.rejects(changedRefresh(linkEdit('if (changed.includes(instanceId) || (staleBefore?.has(instanceId) ?? false) !== stale.has(instanceId)) continue;', '')),
+      failure('R217-archive-refresh:', 2, 1));
+  });
 });

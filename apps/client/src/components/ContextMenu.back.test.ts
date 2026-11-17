@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import * as React from 'react';
@@ -58,13 +59,19 @@ it('R179 тап по подложке закрывает всё меню вме�
 it('R179 контрфакты приоритета и телефонной границы отвергаются реальным Esc', async () => {
   // Whole-module mutants: типовая ошибка закрывает не тот уровень при наличии обеих возможностей.
   await scenario(620, 'attribute');
-  const priority = replaceMenu("const up = ref.current?.querySelector<HTMLElement>('[data-menu-back], .ctx-back');", "if (onBack) { onBack(); return true; }\n      const up = ref.current?.querySelector<HTMLElement>('[data-menu-back], .ctx-back');");
-  await assert.rejects(scenario(620, 'attribute', priority), e => e instanceof assert.AssertionError && e.message.includes('пункт возврата нажимается'));
-  await scenario(621, 'callback'); const all = replaceMenu("if (!window.matchMedia('(max-width: 620px)').matches) return false;", 'if (false) return false;');
-  await assert.rejects(scenario(621, 'callback', all), e => e instanceof assert.AssertionError && e.message.includes('Esc закрывает'));
+  await counterfact(async () => {
+    const priority = replaceMenu("const up = ref.current?.querySelector<HTMLElement>('[data-menu-back], .ctx-back');", "if (onBack) { onBack(); return true; }\n      const up = ref.current?.querySelector<HTMLElement>('[data-menu-back], .ctx-back');");
+    await assert.rejects(scenario(620, 'attribute', priority), e => e instanceof assert.AssertionError && e.message.includes('пункт возврата нажимается'));
+  });
+  await scenario(621, 'callback'); await counterfact(async () => {
+    const all = replaceMenu("if (!window.matchMedia('(max-width: 620px)').matches) return false;", 'if (false) return false;');
+    await assert.rejects(scenario(621, 'callback', all), e => e instanceof assert.AssertionError && e.message.includes('Esc закрывает'));
+  });
 });
 it('R179 контрфакт отсутствующего onBack в зависимостях эффекта ловит старый обработчик', async () => {
   // При неизменном onClose лишь зависимость onBack должна обновить обработчик клавиши.
-  await fresh(); const raw = replaceMenu('[onClose, onBack, isMobile, viewerOpen, stacked, tapClose, anchored]', '[onClose, isMobile, viewerOpen, stacked, tapClose, anchored]');
-  await assert.rejects(fresh(raw), e => e instanceof assert.AssertionError && e.message.includes('свежий onBack'));
+  await fresh(); await counterfact(async () => {
+    const raw = replaceMenu('[onClose, onBack, isMobile, viewerOpen, stacked, tapClose, anchored]', '[onClose, isMobile, viewerOpen, stacked, tapClose, anchored]');
+    await assert.rejects(fresh(raw), e => e instanceof assert.AssertionError && e.message.includes('свежий onBack'));
+  });
 });

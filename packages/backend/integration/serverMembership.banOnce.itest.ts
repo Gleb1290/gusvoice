@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { after, before, test } from 'node:test';
 import { eq } from 'drizzle-orm';
 import * as s from '../src/db/schema.js';
@@ -27,8 +28,8 @@ async function scenario(edit?: Phase3Edit) {
 test('R306 бан гостя сохраняет запрет и анонсирует удаление соседу ровно один раз', () => scenario());
 test('R306 контрфакт слияния: второй анонс после server.invalidate обнаруживается числом вызовов', async () => {
   await scenario();
-  await assert.rejects(scenario({ file: 'serverMembership',
+  await counterfact(() => assert.rejects(scenario({ file: 'serverMembership',
     from: "  memberChanged({ serverId, userId, actorId, from: gone.length > 0 ? 'member' : 'left', to: 'kicked' });",
     to: "  await announceMembership({ guest: banned, serverId, state: FED_MEMBERSHIP_STATES.removed });\n  memberChanged({ serverId, userId, actorId, from: gone.length > 0 ? 'member' : 'left', to: 'kicked' });" }),
-  e => e instanceof assert.AssertionError && e.message.startsWith('R306 один бан гостя анонсируется один раз') && e.actual === 2 && e.expected === 1);
+  e => e instanceof assert.AssertionError && e.message.startsWith('R306 один бан гостя анонсируется один раз') && e.actual === 2 && e.expected === 1));
 });

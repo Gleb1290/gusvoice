@@ -166,6 +166,7 @@ export function Login({
   const [username, setUsername] = useState(activeInstance()?.lastLogin ?? '');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
   // Second "repeat new password" box, used only on the reset screen, to catch typos before submit.
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPw, setShowPw] = useState(false);
@@ -201,7 +202,7 @@ export function Login({
     try {
       if (mode === 'login') {
         try {
-          const res = await api.login(username, password);
+          const res = await api.login(username, password, rememberMe);
           if ('token' in res) {
             await completeAuth(res.token, res.user);
           } else {
@@ -248,7 +249,7 @@ export function Login({
         setMode('login');
         setInfo('Пароль обновлён — войдите с новым паролем.');
       } else {
-        const res = await api.verify(username, code);
+        const res = await api.verify(username, code, rememberMe);
         await completeAuth(res.token, res.user);
       }
     } catch (err) {
@@ -596,11 +597,28 @@ export function Login({
               {/* Password reset is for EXISTING users, so (unlike self-service registration) it must be
                   available on mobile too — hiding it left app users with no way to recover an account. */}
               {isLogin && (
+                <>
                 <div style={{ textAlign: 'right', margin: '-2px 0 10px' }}>
                   <button type="button" className="auth-link" onClick={() => { setMode('forgot'); setError(null); setInfo(null); }}>
                     Забыли пароль?
                   </button>
                 </div>
+                <div className="auth-remember">
+                  <label className="auth-remember-choice">
+                    <input
+                      type="checkbox"
+                      checked={rememberMe}
+                      disabled={busy}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                      aria-describedby="auth-remember-help"
+                    />
+                    <span>Запомнить меня</span>
+                  </label>
+                  <p id="auth-remember-help" className="auth-remember-help">
+                    До 90 дней без повторного входа. Любой с доступом к устройству сможет открыть ваш аккаунт.
+                  </p>
+                </div>
+                </>
               )}
 
               {info && <div className="muted" style={{ marginBottom: 12 }}>{info}</div>}

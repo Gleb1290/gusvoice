@@ -4,6 +4,7 @@ import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as original from './gatewaySubs';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 type Rules = typeof original;
 const source = readFileSync(new URL('./gatewaySubs.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -129,9 +130,11 @@ for (const [name, anchor, replacement, probe, marker] of [
   // Класс ошибки: тест выглядит полезным, но регрессия в реальном исходнике его не меняет.
   it(`R264 исходниковый мутант «${name}» пойман адресным AssertionError после original-first`, () => {
     probe(load(source));
+    counterfact(() => {
     assert.equal(source.split(anchor).length - 1, 1, 'якорь мутации уникален');
     const mutated = source.replace(anchor, replacement); assert.notEqual(mutated, source);
     assert.throws(() => probe(load(mutated)),
       e => e instanceof assert.AssertionError && e.message.startsWith(marker));
+    });
   });
 }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -34,21 +35,23 @@ it('заказ живёт ровно 8 секунд, пустой drop не со
   assert.equal(api.dragMoved({ x: 10, y: 10 }, 14, 14), false);
   assert.equal(api.dragMoved({ x: 10, y: 10 }, 15, 10), true);
   assert.equal(api.dragMoved({ x: 10, y: 10 }, 10, 15), true);
-  const source = readFileSync(new URL('./filesDrop.ts', import.meta.url), 'utf8');
-  const module = { exports: {} as Record<string, unknown> };
-  runInNewContext(ts.transpileModule(source.replace('now - at > FILES_DROP_TTL_MS', 'now - at >= FILES_DROP_TTL_MS'),
-    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, require: () => ({ useSyncExternalStore: () => 0 }) });
-  const mutant = module.exports as typeof rules;
-  mutant.requestFilesDrop('dm:boundary', [old], 0);
-  assert.throws(() => assert.notEqual(mutant.takeFilesDrop('dm:boundary', api.FILES_DROP_TTL_MS), null), assert.AssertionError,
-    'мутант протухает заказ ровно на границе допустимых восьми секунд');
-  const noClear = load(source.replace('  pending = null;\n  return now - at > FILES_DROP_TTL_MS', '  return now - at > FILES_DROP_TTL_MS'));
-  noClear.requestFilesDrop('dm:once', [old], 0);
-  assert.throws(() => assert.equal(noClear.takeFilesDrop('dm:once', 0), null), assert.AssertionError,
-    'мутант оставляет один и тот же бросок доступным для второго открытия окна');
-  const oneAxisOnly = load(source.replace('Math.abs(x - prev.x) > DRAG_STILL_PX || Math.abs(y - prev.y) > DRAG_STILL_PX',
-    'Math.abs(x - prev.x) > DRAG_STILL_PX && Math.abs(y - prev.y) > DRAG_STILL_PX'));
-  assert.throws(() => assert.equal(oneAxisOnly.dragMoved({ x: 10, y: 10 }, 10, 15), true), assert.AssertionError,
-    'мутант не замечает вертикальное движение мыши без горизонтального');
+  counterfact(() => {
+    const source = readFileSync(new URL('./filesDrop.ts', import.meta.url), 'utf8');
+    const module = { exports: {} as Record<string, unknown> };
+    runInNewContext(ts.transpileModule(source.replace('now - at > FILES_DROP_TTL_MS', 'now - at >= FILES_DROP_TTL_MS'),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+      { module, exports: module.exports, require: () => ({ useSyncExternalStore: () => 0 }) });
+    const mutant = module.exports as typeof rules;
+    mutant.requestFilesDrop('dm:boundary', [old], 0);
+    assert.throws(() => assert.notEqual(mutant.takeFilesDrop('dm:boundary', api.FILES_DROP_TTL_MS), null), assert.AssertionError,
+      'мутант протухает заказ ровно на границе допустимых восьми секунд');
+    const noClear = load(source.replace('  pending = null;\n  return now - at > FILES_DROP_TTL_MS', '  return now - at > FILES_DROP_TTL_MS'));
+    noClear.requestFilesDrop('dm:once', [old], 0);
+    assert.throws(() => assert.equal(noClear.takeFilesDrop('dm:once', 0), null), assert.AssertionError,
+      'мутант оставляет один и тот же бросок доступным для второго открытия окна');
+    const oneAxisOnly = load(source.replace('Math.abs(x - prev.x) > DRAG_STILL_PX || Math.abs(y - prev.y) > DRAG_STILL_PX',
+      'Math.abs(x - prev.x) > DRAG_STILL_PX && Math.abs(y - prev.y) > DRAG_STILL_PX'));
+    assert.throws(() => assert.equal(oneAxisOnly.dragMoved({ x: 10, y: 10 }, 10, 15), true), assert.AssertionError,
+      'мутант не замечает вертикальное движение мыши без горизонтального');
+  });
 });

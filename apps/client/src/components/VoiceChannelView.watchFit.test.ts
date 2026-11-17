@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import { createRoot } from 'react-dom/client';
@@ -16,26 +18,13 @@ type FitProps = { 'data-fit'?: string; style?: React.CSSProperties };
 type Exports = { fitWatchGrid(input: Input): Layout | null;
   useWatchFit(ref: React.RefObject<HTMLDivElement>, count: number): FitProps };
 
-// Весь модуль исполняется без доступа к настоящим store/LiveKit/API. Неизвестный импорт — ошибка,
-// а не скрытое подключение приложения. Компоненты сцены здесь не вызываются, только чистый расчёт и хук.
-const dormantImports = new Set(`@livekit/components-react livekit-client ../api ../hotkeys ../cameraSettings
-../memberName ../economyClient ../store ../streamAudioRules ../streamPipRules ../streamCardRules ../toast
-../tipMode ../tipGesture ../voiceSelf ./Avatar ./Crown ../avatarAnimation ./BottomSheet ./Goose ./Icon
-./UserContextMenu ./VoiceParticipants ../localUserAudio ./StreamTipFeed ./StreamVolumeControl ./StreamPipView
-../pendingWatch ../streamCue ../watchGrace ../streamQuality ../windowCovered ../badPicture ./ContextMenu
-../stageGridRules ../stageViewPrefs ../stageLayoutPrefs ../stageLayoutRules ../voiceRules ../useStageSpeaker ./StageLayoutPicker
-../phoneLayout ../stageAutoShowRules ../useStageAutoShow ../stageOrderRules ../stageOrderPrefs ../useStageDrag`.split(/\s+/));
+// Компоненты сцены не вызываются; исполняем чистый расчёт и хук без реального IO.
 function load(raw = source, globals: Record<string, unknown> = {}): Exports {
   const module = { exports: {} as Exports };
   runInNewContext(ts.transpileModule(raw + '\nexport { useWatchFit };', { compilerOptions: {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, { module, exports: module.exports, console, ...globals,
-    require(id: string) {
-      if (id === 'react') return React;
-      if (id === 'react/jsx-runtime') return jsx;
-      assert.ok(dormantImports.has(id), `Неописанная граница сцены: ${id}`);
-      return Object.freeze({});
-    },
+    require: testVmImports(new URL('./VoiceChannelView.tsx', import.meta.url), { react: React, 'react/jsx-runtime': jsx }),
   });
   return module.exports;
 }
@@ -226,24 +215,28 @@ it('R261 сценическая сетка получает результат �
 });
 
 it('R261 удаление порога выигрыша обнаруживается именно потерей мёртвой зоны', () => {
-  gainContract();
+  counterfact(() => {
   const mutant = replaceOnce(source, 'score(dflt) * WATCH_GAIN', 'score(dflt)');
   assert.throws(() => gainContract(mutant), killed('R261_GAIN'));
+  });
 });
 it('R261 замена минимальной ширины160 на ноль обнаруживается пропавшей прокруткой', () => {
-  minContract();
+  counterfact(() => {
   const mutant = replaceOnce(source, 'input.minTileW ?? WATCH_TILE_MIN_W', 'input.minTileW ?? 0');
   assert.throws(() => minContract(mutant), killed('R261_MIN'));
+  });
 });
 it('R261 потеря ветки scroll обнаруживается проверкой публичной раскладки', () => {
-  scrollContract();
+  counterfact(() => {
   const mutant = replaceOnce(source, 'if (bestScore < minW) {', 'if (false) {');
   assert.throws(() => scrollContract(mutant), killed('R261_SCROLL'));
+  });
 });
 it('R261 потеря data-fit обнаруживается на DOM-атрибуте, а не случайной ошибкой загрузки', async () => {
-  await hookScrollContract();
+  await counterfact(async () => {
   const mutant = replaceOnce(source, "'data-fit': layout.scroll ? 'scroll' : 'cols'", "'data-lost': layout.scroll ? 'scroll' : 'cols'");
   await assert.rejects(() => hookScrollContract(mutant), killed('R261_DATA_FIT'));
+  });
 });
 
 // CSS-проверки читают только декларации. happy-dom не рассчитывает layout и не служит оракулом геометрии.

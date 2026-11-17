@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -98,35 +99,43 @@ function sideLayout(raw = css) {
 // Класс ошибки: карточки переносятся в несколько рядов, а обычный center обрезает начало переполнения.
 it('R248 полоса показа остаётся в одном безопасно центрированном ряду с горизонтальной прокруткой', () => {
   stripDeclarations();
-  for (const [property, value] of [['flex-wrap', 'wrap'], ['justify-content', 'center'], ['overflow-x', 'hidden']])
-    assert.throws(() => stripDeclarations(replaceDeclaration(css, '.voice-stage.watching .stage-streams', property, value)),
-      assert.AssertionError, `мутант ${property}: ${value} должен быть обнаружен`);
+  counterfact(() => {
+    for (const [property, value] of [['flex-wrap', 'wrap'], ['justify-content', 'center'], ['overflow-x', 'hidden']])
+      assert.throws(() => stripDeclarations(replaceDeclaration(css, '.voice-stage.watching .stage-streams', property, value)),
+        assert.AssertionError, `мутант ${property}: ${value} должен быть обнаружен`);
+  });
 });
 
 // Класс ошибки: специфичный hover сбрасывает transform состояния pressing/lifted у перетаскиваемой карточки.
 it('R248 hover-эффект не отменяет drag-state у карточки показа', () => {
   hoverDragException();
-  const oldSelector = '.voice-stage.watching .stream-card:hover:not([data-drag])';
-  assert.equal(css.split(oldSelector).length - 1, 1);
-  assert.throws(() => hoverDragException(css.replace(oldSelector,
-    '.voice-stage.watching .stream-card:hover')), assert.AssertionError,
-  'без :not([data-drag]) более специфичный hover снова перекроет состояние удержания');
+  counterfact(() => {
+    const oldSelector = '.voice-stage.watching .stream-card:hover:not([data-drag])';
+    assert.equal(css.split(oldSelector).length - 1, 1);
+    assert.throws(() => hoverDragException(css.replace(oldSelector,
+      '.voice-stage.watching .stream-card:hover')), assert.AssertionError,
+    'без :not([data-drag]) более специфичный hover снова перекроет состояние удержания');
+  });
 });
 
 // Класс ошибки: grid ужимает строки по доступной высоте и плитки второго ряда наезжают на первый.
 it('R248 мобильная полоса людей строит ряды по высоте плитки, не по доле контейнера', () => {
   mobilePeopleRows();
-  const selector = '.app.m-content .voice-stage.watching .stage-people';
-  assert.throws(() => mobilePeopleRows(replaceDeclaration(css, selector, 'grid-auto-rows', '1fr')), assert.AssertionError,
-    '1fr снова ужимает ряды и накладывает нижние плитки на верхние');
+  counterfact(() => {
+    const selector = '.app.m-content .voice-stage.watching .stage-people';
+    assert.throws(() => mobilePeopleRows(replaceDeclaration(css, selector, 'grid-auto-rows', '1fr')), assert.AssertionError,
+      '1fr снова ужимает ряды и накладывает нижние плитки на верхние');
+  });
 });
 
 // Класс ошибки: режим Сбоку теряет одну из областей или сжимает крупное содержимое за колонку.
 it('R248 режим Сбоку сохраняет крупную основную область и отдельную боковую колонку', () => {
   sideLayout();
-  const side = '.voice-stage.side .stage-side';
-  const sideRule = /\.voice-stage\.side \.stage-side\s*\{/g;
-  assert.equal([...css.matchAll(sideRule)].length, 1);
-  assert.throws(() => sideLayout(css.replace(sideRule, '.voice-stage.side .stage-side-removed {')), assert.AssertionError,
-    'переименование селектора не должно молча оставить режим без боковой колонки');
+  counterfact(() => {
+    const side = '.voice-stage.side .stage-side';
+    const sideRule = /\.voice-stage\.side \.stage-side\s*\{/g;
+    assert.equal([...css.matchAll(sideRule)].length, 1);
+    assert.throws(() => sideLayout(css.replace(sideRule, '.voice-stage.side .stage-side-removed {')), assert.AssertionError,
+      'переименование селектора не должно молча оставить режим без боковой колонки');
+  });
 });

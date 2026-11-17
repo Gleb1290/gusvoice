@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -153,8 +154,11 @@ it('R234 контрфакты локальной уборки и распозн�
       (raw) => dismiss(raw, 'guest'), 'R234-dismiss-switch:', 'guest', 'home'],
   ];
   for (const [label, from, to, check, prefix, actual, expected] of mutants) {
-    await check(source); assert.equal(source.split(from).length - 1, 1, label);
-    await assert.rejects(async () => check(source.replace(from, to)), e => e instanceof assert.AssertionError
-      && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected, label);
+    await check(source);
+    await counterfact(async () => {
+      assert.equal(source.split(from).length - 1, 1, label);
+      await assert.rejects(async () => check(source.replace(from, to)), e => e instanceof assert.AssertionError
+        && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected, label);
+    });
   }
 });

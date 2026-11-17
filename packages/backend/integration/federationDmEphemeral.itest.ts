@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -35,7 +36,7 @@ function moduleOf<T>(name: string, deps: Record<string, unknown>, globals: Recor
   });
   return module.exports as T;
 }
-async function fixture(options: { dm3?: boolean; mutations?: readonly Mutation[] } = {}) {
+async function fixture(options: { dm3?: boolean; typing3?: boolean; mutations?: readonly Mutation[] } = {}) {
   let now = NOW;
   class ClockDate extends Date { constructor(value?: number | string) { super(value ?? now); } static now() { return now; } }
   await t.db.insert(schema.users).values([
@@ -45,7 +46,10 @@ async function fixture(options: { dm3?: boolean; mutations?: readonly Mutation[]
     { id: 'shadow', username: 'ephemeral_shadow', displayName: 'Сосед', passwordHash: 'fixture', homeInstanceId: peer, homeUserId: 'remote' },
     { id: 'shadow2', username: 'ephemeral_shadow2', displayName: 'Второй сосед', passwordHash: 'fixture', homeInstanceId: peer, homeUserId: 'remote2' },
   ]);
-  await t.db.insert(schema.federationLinks).values({ instanceId: peer, domain: 'peer.invalid', apiBase: 'https://peer.invalid/api', clientOrigin: 'https://peer.invalid', rootKey: 'fixture', state: 'active', features: options.dm3 === false ? ['dm1'] : ['dm1', 'dm3'] });
+  const features = ['dm1'];
+  if (options.dm3 !== false) features.push('dm3');
+  if (options.typing3) features.push(shared.FED_FEATURES.typing3);
+  await t.db.insert(schema.federationLinks).values({ instanceId: peer, domain: 'peer.invalid', apiBase: 'https://peer.invalid/api', clientOrigin: 'https://peer.invalid', rootKey: 'fixture', state: 'active', features });
   await t.db.insert(schema.conversations).values({ id: conv, kind: 'direct', directKey: 'local:shadow', createdBy: 'local' });
   await t.db.insert(schema.conversationMembers).values([{ conversationId: conv, userId: 'local' }, { conversationId: conv, userId: 'shadow' }]);
   const savedLink = (await t.db.select().from(schema.federationLinks))[0]!;
@@ -244,17 +248,21 @@ test('R202 минутный такт посылает «жив» и обновл
 });
 test('R202 потеря обновления теней в минутном такте обнаруживается реальными SQL-изменениями', async () => {
   await shadowTickScenario(); await truncateAll(t.raw);
-  await assert.rejects(shadowTickScenario([[
-    'const alive = setInterval(() => {\n    void refreshShadowIds().catch(() => {});',
-    'const alive = setInterval(() => {',
-  ]]), e => e instanceof assert.AssertionError && e.message.includes('минутный такт обновляет новые и удалённые тени'));
+  await counterfact(async () => {
+    await assert.rejects(shadowTickScenario([[
+      'const alive = setInterval(() => {\n    void refreshShadowIds().catch(() => {});',
+      'const alive = setInterval(() => {',
+    ]]), e => e instanceof assert.AssertionError && e.message.includes('минутный такт обновляет новые и удалённые тени'));
+  });
 });
 test('R202 отдельный третий интервал обновления теней не заменяет совмещённый минутный такт', async () => {
   await shadowTickScenario(); await truncateAll(t.raw);
-  await assert.rejects(shadowTickScenario([[
-    'const stale = setInterval(() => {',
-    'setInterval(() => { void refreshShadowIds().catch(() => {}); }, FED_PRESENCE_ALIVE_MS);\n  const stale = setInterval(() => {',
-  ]]), e => e instanceof assert.AssertionError && e.message.includes('обновление теней не заводит третий штатный интервал'));
+  await counterfact(async () => {
+    await assert.rejects(shadowTickScenario([[
+      'const stale = setInterval(() => {',
+      'setInterval(() => { void refreshShadowIds().catch(() => {}); }, FED_PRESENCE_ALIVE_MS);\n  const stale = setInterval(() => {',
+    ]]), e => e instanceof assert.AssertionError && e.message.includes('обновление теней не заводит третий штатный интервал'));
+  });
 });
 
 async function capabilitiesScenario(mutations: readonly Mutation[] = []) {
@@ -274,6 +282,14 @@ async function capabilitiesScenario(mutations: readonly Mutation[] = []) {
 }
 test('R197 сосед без dm3 не получает эфемерные записи, обновлённый получает оба вида', async () => {
   await capabilitiesScenario();
+});
+test('в межсерверном ЛС старому соседу кружок приходит как видео, новому — как видеосообщение', async () => {
+  for (const typing3 of [false, true]) {
+    await truncateAll(t.raw);
+    const f = await fixture({ typing3 });
+    await f.ephemeral.testSendTyping(conv, 'local', 'shadow', 'round_upload');
+    assert.deepEqual(f.requests.map(r => r.payload.action), [typing3 ? 'round_upload' : 'video']);
+  }
 });
 test('R197 заблокированному местным автором не уходят typing и presence, снятие блока возобновляет оба', async () => {
   const f = await fixture(); await f.blocks.blockUser('local', 'shadow');
@@ -333,8 +349,10 @@ test('R197 местный offline адресат и чужой автор не �
 
 test('R197 мутант без проверки dm3 пойман на беззвучной связке до парного положительного приёма', async () => {
   await capabilitiesScenario(); await truncateAll(t.raw);
-  await assert.rejects(capabilitiesScenario([['if (features.includes(FED_FEATURES.dm3)) link = row as unknown as StoredLink;', 'link = row as unknown as StoredLink;']]),
-    e => e instanceof assert.AssertionError && e.message.includes('без dm3 не уходят'));
+  await counterfact(async () => {
+    await assert.rejects(capabilitiesScenario([['if (features.includes(FED_FEATURES.dm3)) link = row as unknown as StoredLink;', 'link = row as unknown as StoredLink;']]),
+      e => e instanceof assert.AssertionError && e.message.includes('без dm3 не уходят'));
+  });
 });
 test('R197 мутант серверного invisible в sharesLastSeen ловится фактическим payload ЛС', async () => {
   const check = async (mutations: readonly Mutation[] = []) => {
@@ -342,10 +360,12 @@ test('R197 мутант серверного invisible в sharesLastSeen лов�
     assert.equal(f.sentPresence().at(-1)!.payload.views[0].last_seen, NOW, 'Невидимый не скрывает время ЛС от собеседника');
   };
   await check(); await truncateAll(t.raw);
-  await assert.rejects(check([
-    ['privacy: users.lastSeenPrivacy, home: users.homeInstanceId, deletedAt: users.deletedAt', 'privacy: users.lastSeenPrivacy, presence: users.presenceStatus, home: users.homeInstanceId, deletedAt: users.deletedAt'],
-    ['sharesLastSeen(privacy, false, true, exceptionOf({ exceptions }, p.peer))', "sharesLastSeen(privacy, me.presence === 'invisible', true, exceptionOf({ exceptions }, p.peer))"],
-  ]), e => e instanceof assert.AssertionError && e.message.includes('Невидимый не скрывает время ЛС'));
+  await counterfact(async () => {
+    await assert.rejects(check([
+      ['privacy: users.lastSeenPrivacy, home: users.homeInstanceId, deletedAt: users.deletedAt', 'privacy: users.lastSeenPrivacy, presence: users.presenceStatus, home: users.homeInstanceId, deletedAt: users.deletedAt'],
+      ['sharesLastSeen(privacy, false, true, exceptionOf({ exceptions }, p.peer))', "sharesLastSeen(privacy, me.presence === 'invisible', true, exceptionOf({ exceptions }, p.peer))"],
+    ]), e => e instanceof assert.AssertionError && e.message.includes('Невидимый не скрывает время ЛС'));
+  });
 });
 test('R197 мутант чужого user.instance_id не проходит адресную проверку принадлежности', async () => {
   const check = async (mutations: readonly Mutation[] = []) => {
@@ -355,6 +375,8 @@ test('R197 мутант чужого user.instance_id не проходит ад
     assert.equal((await f.ephemeral.acceptEphemeral(f.link, presenceWire())).status, 202);
   };
   await check(); await truncateAll(t.raw);
-  await assert.rejects(check([['if (e.user.instanceId !== link.instanceId)', 'if (false)']]),
-    e => e instanceof assert.AssertionError && e.message.includes('не свой человек не принимается'));
+  await counterfact(async () => {
+    await assert.rejects(check([['if (e.user.instanceId !== link.instanceId)', 'if (false)']]),
+      e => e instanceof assert.AssertionError && e.message.includes('не свой человек не принимается'));
+  });
 });

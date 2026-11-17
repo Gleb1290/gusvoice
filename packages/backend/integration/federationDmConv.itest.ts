@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -146,10 +147,12 @@ test('R187 страница отдаёт беседу участника, пос
 test('R187 удаление EXISTS обнаруживается выдачей беседы после настоящего удаления участника', async () => {
   // Whole-module original-first; отсутствие участника моделируется SQL, не поддельной страницей.
   const f = await recorded(); await removed(f.ch, f.id, f.remote.id);
-  const broken = changes(t.db, [
-    'sql`EXISTS (SELECT 1 FROM conversation_members cm JOIN users u ON u.id = cm.user_id\n                    WHERE cm.conversation_id = ${fedConvChanges.conversationId} AND u.home_instance_id = ${instanceId})`', 'sql`true`',
-  ]);
-  await assert.rejects(removed(broken, f.id, f.remote.id), e => e instanceof assert.AssertionError && e.message.includes('удалённый участник скрывает'));
+  await counterfact(async () => {
+    const broken = changes(t.db, [
+      'sql`EXISTS (SELECT 1 FROM conversation_members cm JOIN users u ON u.id = cm.user_id\n                    WHERE cm.conversation_id = ${fedConvChanges.conversationId} AND u.home_instance_id = ${instanceId})`', 'sql`true`',
+    ]);
+    await assert.rejects(removed(broken, f.id, f.remote.id), e => e instanceof assert.AssertionError && e.message.includes('удалённый участник скрывает'));
+  });
 });
 test('R187 уборка старого журнала поднимает min_seq, ниже границы reset, на границе остаётся новая запись', async () => {
   // Класс ошибки курсора: удалённый префикс нельзя выдавать как полный непрерывный журнал.
@@ -246,8 +249,10 @@ test('R187 POST открытия местной беседы завершает�
 test('R187 глобальный db вместо tx у directKeyOf обнаруживается ограниченным ожиданием POST без зависания cleanup', async () => {
   // Whole-module original-first; откат после целевого timeout освобождает настоящее единственное соединение.
   await directHttp();
-  await assert.rejects(directHttp(['directKey: await directKeyOf(tx, me, otherId)', 'directKey: await directKeyOf(db, me, otherId)']),
-    e => e instanceof assert.AssertionError && e.message.includes('POST на одном соединении завершается'));
+  await counterfact(async () => {
+    await assert.rejects(directHttp(['directKey: await directKeyOf(tx, me, otherId)', 'directKey: await directKeyOf(db, me, otherId)']),
+      e => e instanceof assert.AssertionError && e.message.includes('POST на одном соединении завершается'));
+  });
 });
 
 test('R187 федеративная ручка изменений выключена флагом, без подписи запрещена, неверный since отвергается, подпись соседа принимается', async () => {

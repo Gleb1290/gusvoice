@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -12,6 +13,7 @@ import * as dmRules from '../dmRules';
 import * as convRules from '../convSyncRules';
 import * as contactRules from '../contactRules';
 import * as listRules from '../dmListRules';
+import { testVmImports } from '../testVmImports';
 
 const source = readFileSync(new URL('./DmSidebar.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const localPeer = { id: 'local-peer', username: 'peer', displayName: 'Местный собеседник', avatarUrl: null };
@@ -55,19 +57,12 @@ async function compose(scene: Scene, phone = false, raw = source) {
       './Avatar': { Avatar: () => null }, './Icon': { Icon: () => null },
       './BottomSheet': { BottomSheet: ({ children }: { children: React.ReactNode }) => React.createElement('div', { 'data-compose-sheet': true }, children) },
     };
-    // Белый список остальных импортов целого DmSidebar. Их функции не выполняются в сцене NewDmSheet.
-    for (const id of ['../channelRules', '../chatKeysRules', '../dmArchiveRules', '../dmRowRules', '../typing', '../androidBack', '../connState',
-      './SavedAvatar', './GroupDialogs', '../groupChatRules', './DmRowMenu', './DmFolderBar', '../dmFolderView', '../dmFolders',
-      '../cornerButtonsRules', '../dmListSearchRules', './DmServerSearch', './DmAllSearch', './DmListSearch', './DmArchive',
-      '../dragOut', '../dmListView', '../uiPrefs', '../filesDrop', './DmListSwipe', './DmPinDrag', '../chatSwipe', './Goose',
-      './SelfVoiceBar', './SettingsShell', './SharedMedia', './StatusDot', './VoicePanel', '../voiceDrafts']) deps[id] = {};
     const module = { exports: {} as { NewDmSheet: React.ComponentType<{ initialQuery: string }> } };
     // Экспорт приватного компонента добавлен ТОЛЬКО в тестовый модуль, вся исходная реализация исполняется целиком.
     runInNewContext(ts.transpileModule(`${raw}\nexport { NewDmSheet };`, { compilerOptions: { module: ts.ModuleKind.CommonJS,
       jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { module, exports: module.exports, window, document, require: (id: string) => {
-        assert.equal(Object.hasOwn(deps, id), true, `неописанная граница compose ${id}`); return deps[id];
-      } });
+      { module, exports: module.exports, window, document,
+        require: testVmImports(new URL('./DmSidebar.tsx', import.meta.url), deps) });
     await React.act(async () => root.render(React.createElement(module.exports.NewDmSheet, { initialQuery: query })));
     await React.act(async () => { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); });
     assert.equal(searches.length, 1); assert.equal(searches[0], query, 'поиск передаёт домашний адрес без потери инстанса');
@@ -102,8 +97,10 @@ it('R197 окно Написать сохраняет местный и смеш
 });
 it('R197 мутант без remote в условии обёртки обнаруживается удалённой выдачей ПК', async () => {
   await compose('remote');
-  const anchor = '(contactRows.length > 0 || candidates.length > 0 || found.length > 0 || remote.length > 0)';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь списка Написать');
-  await assert.rejects(compose('remote', false, source.replace(anchor, '(contactRows.length > 0 || candidates.length > 0 || found.length > 0)')),
-    e => e instanceof assert.AssertionError && e.message.includes('одни remote тоже открывают список compose'));
+  await counterfact(async () => {
+    const anchor = '(contactRows.length > 0 || candidates.length > 0 || found.length > 0 || remote.length > 0)';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь списка Написать');
+    await assert.rejects(compose('remote', false, source.replace(anchor, '(contactRows.length > 0 || candidates.length > 0 || found.length > 0)')),
+      e => e instanceof assert.AssertionError && e.message.includes('одни remote тоже открывают список compose'));
+  });
 });

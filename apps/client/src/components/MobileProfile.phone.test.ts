@@ -1,6 +1,8 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import ts from 'typescript';
 import * as React from 'react';
@@ -28,7 +30,6 @@ async function check(superAdmin: boolean, activation?: 'click' | 'Enter' | ' ', 
     './Avatar': { Avatar: () => React.createElement('i', { 'data-avatar': true }) },
     './StatusDot': { StatusDot: () => React.createElement('i') },
     './Icon': { Icon: ({ name }: { name: string }) => React.createElement('i', { 'data-icon': name }) },
-    '../api': { api: {} }, '../instanceSwitch': {}, '../toast': {}, './BottomSheet': {},
     './UserContextMenu': { UserContextMenu: (props: any) => {
       menus.push(props);
       return React.createElement('button', { 'data-self-menu': true, onClick: props.onClose }, 'Закрыть профиль');
@@ -38,9 +39,7 @@ async function check(superAdmin: boolean, activation?: 'click' | 'Enter' | ' ', 
     const module = { exports: {} as { MobileProfile: React.ComponentType } };
     runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS,
       jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, require: (id: string) => {
-      assert.ok(Object.hasOwn(deps, id), `Неописанный импорт ${id}`); return deps[id];
-    } });
+    { module, exports: module.exports, require: testVmImports(new URL('./MobileProfile.tsx', import.meta.url), deps) });
     await React.act(async () => root.render(React.createElement(module.exports.MobileProfile)));
     assert.equal(host.querySelectorAll('.prof-group').length, 3);
     assert.equal(!!host.querySelector('.prof-banner, .prof-card'), false);
@@ -93,9 +92,11 @@ for (const [action, label] of [['click', 'клик'], ['Enter', 'Enter'], [' ', 
 it('R230 потеря клика шапки обнаруживается отсутствием меню собственного профиля', async () => {
   // Контрфакт проходит тот же whole-module загрузчик и те же DOM-действия, что оригинал.
   await check(false, 'click');
-  const anchor = 'onClick={() => setSelfProfile(true)}';
-  assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(check(false, 'click', source.replace(anchor, '')), (e: unknown) => e instanceof assert.AssertionError &&
-    e.message.startsWith('R230 нажатие шапки открывает собственный профиль') &&
-    e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  await counterfact(async () => {
+    const anchor = 'onClick={() => setSelfProfile(true)}';
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(check(false, 'click', source.replace(anchor, '')), (e: unknown) => e instanceof assert.AssertionError &&
+      e.message.startsWith('R230 нажатие шапки открывает собственный профиль') &&
+      e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  });
 });

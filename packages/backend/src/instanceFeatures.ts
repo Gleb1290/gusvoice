@@ -55,9 +55,13 @@ import {
   FEATURE_PINORDER2,
   FEATURE_PINSET1,
   FEATURE_TYPING2,
+  FEATURE_TYPING3,
   FEATURE_BIGFILE1,
   FEATURE_MSGPRIV1,
   FEATURE_LINKTHREATS1,
+  FEATURE_DUEL2,
+  FEATURE_DUEL_SERIES1,
+  FEATURE_DUEL21,
   FEATURE_FEDM1,
   FEATURE_FEDM2,
   FEATURE_FEDM3,
@@ -133,6 +137,8 @@ import { linkThreatsEnabled } from './linkThreatsRules.js';
  *   событие `online.dm`), «Кто может звонить» (`callPrivacy`, `/users/me/call-exceptions`, `canCall`, миграция 0122, `FEATURE_PRESENCE4`).
  *
  * `msgpriv1` (13.10, #218) — «Кто может мне писать» (`messagePrivacy`, `/users/me/message-exceptions`, `canMessage`, 403 `message_privacy`, миграция 0146, `FEATURE_MSGPRIV1`).
+ *
+ * `duel2` (28.10, ГусКоины 2 этап 4) — дуэли с выбором «Камень-ножницы-бумага» и «Жадный гусь» (`DuelDto.rps`/`greedy`/`moveUntil`, `POST …/duels/:duelId/move`, миграция 0163); вызвать можно соперника с `duel2` в `identify.caps` (`FEATURE_DUEL2`).
  *
  * `media1` (08.10, #211, G29) — общие медиа беседы в профиле: `GET /conv/:id/media`, `GET /conv/:id/media/counts`, миграция 0108 (`FEATURE_MEDIA1`).
  *
@@ -230,6 +236,7 @@ export const INSTANCE_FEATURES: readonly string[] = [
   FEATURE_PINORDER2,
   FEATURE_PINSET1,
   FEATURE_TYPING2,
+  FEATURE_TYPING3,
   FEATURE_BIGFILE1,
   FEATURE_ALBUM1,
   // Геопозиция и карточка контакта в ЛС (14.10, G69): миграция 0145, `ConvMessage.media`.
@@ -245,6 +252,10 @@ export const INSTANCE_FEATURES: readonly string[] = [
   FEATURE_MSGPRIV1,
   // Опасные ссылки (#218 п.5): объявляем, только пока проверка включена (`LINK_THREATS_ENABLED`).
   ...(linkThreatsEnabled(process.env.LINK_THREATS_ENABLED) ? [FEATURE_LINKTHREATS1] : []),
+  // ГусКоины 2, этап 4 (28.10): дуэли с выбором (`rps`/`greedy`) — клиенту показать их в выборе игры; соперник нужен с `duel2` в `identify.caps`.
+  FEATURE_DUEL2,
+  FEATURE_DUEL_SERIES1,
+  FEATURE_DUEL21,
 ];
 
 /**

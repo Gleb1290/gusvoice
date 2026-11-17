@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -212,15 +213,17 @@ function killed(prefix: string, actual: number | boolean, expected: number | boo
 }
 test('R235 контрфакт без blocked guard раскрывает прочтение настоящей SQL-строкой', async () => {
   await blocked();
+  await counterfact(async () => {
   let copiedKey = 0;
   await assert.rejects(blocked(['if (!c.group && !blocked && !service && author.home === peer)', 'if (!c.group && !service && author.home === peer)'], key => { copiedKey = key; }),
     (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith('R235-blocked:') && e.operator === 'strictEqual' && copiedKey > 10 && e.actual === copiedKey && e.expected === 10);
+  });
 });
 test('R235 контрфакт без present guard удерживает курсор отказанной отсутствующей беседы', async () => {
   await absent();
-  await assert.rejects(absent(['if (!present.has(item.conversationId)) continue;', '// present guard удалён']), killed('R235-absent:', 1, 3));
+  await counterfact(() => assert.rejects(absent(['if (!present.has(item.conversationId)) continue;', '// present guard удалён']), killed('R235-absent:', 1, 3)));
 });
 test('R235 контрфакт без удаления refusedConvs оставляет устаревший отказ после реального приёма read', async () => {
   await forgetRefusal();
-  await assert.rejects(forgetRefusal(['refusedConvs.delete(item.conversationId);', '// отказ не забыт']), killed('R235-forget:', true, false));
+  await counterfact(() => assert.rejects(forgetRefusal(['refusedConvs.delete(item.conversationId);', '// отказ не забыт']), killed('R235-forget:', true, false)));
 });

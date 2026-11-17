@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -380,8 +381,10 @@ for (const count of [400, 401]) {
 
 async function killed(scenario: (mutations?: readonly Mutation[]) => Promise<void>, mutations: readonly Mutation[], message: string) {
   await scenario(); await truncateAll(t.raw);
-  await assert.rejects(scenario(mutations),
-    error => error instanceof assert.AssertionError && error.message.includes(message));
+  await counterfact(async () => {
+    await assert.rejects(scenario(mutations),
+      error => error instanceof assert.AssertionError && error.message.includes(message));
+  });
 }
 test('R204 потеря fromDb обнаруживается старым временем offline в фактическом payload', async () => {
   await killed(offlineScenario, [['{ onlyHome, fromDb: true }', '{ onlyHome }']],
@@ -408,13 +411,15 @@ test('R204 обход null-guard обнаруживается лишней prese
 });
 test('R204 буквальная потеря null-guard поймана адресным doesNotReject настоящего flush, не ошибкой загрузки', async () => {
   await nullScenario(); await truncateAll(t.raw);
-  await assert.rejects(nullScenario([
-    ['if (!me.lastSeenAt) return; // не заходил — сказать нечего', '// мутант: отказ на отсутствующей отметке удалён'],
-  ]), error => {
-    if (!(error instanceof assert.AssertionError) || !error.message.includes('null-guard завершает настоящий flush')) return false;
-    // Error из vm имеет другой prototype: проверяем actual у host AssertionError, имя и конкретное чтение getTime.
-    const actual = error.actual as Error | undefined;
-    return actual?.name === 'TypeError' && actual.message.includes('getTime');
+  await counterfact(async () => {
+    await assert.rejects(nullScenario([
+      ['if (!me.lastSeenAt) return; // не заходил — сказать нечего', '// мутант: отказ на отсутствующей отметке удалён'],
+    ]), error => {
+      if (!(error instanceof assert.AssertionError) || !error.message.includes('null-guard завершает настоящий flush')) return false;
+      // Error из vm имеет другой prototype: проверяем actual у host AssertionError, имя и конкретное чтение getTime.
+      const actual = error.actual as Error | undefined;
+      return actual?.name === 'TypeError' && actual.message.includes('getTime');
+    });
   });
 });
 test('R204 потеря settle-пропуска обнаруживается лишним post, а не ожиданием таймера', async () => {
@@ -481,6 +486,8 @@ for (const [label, from, to, check, prefix, actual, expected] of [
     (m: readonly Mutation[]) => addedPresence(true, m), 'R235-added-home:', 2, 1],
 ] as const) test(`R235 контрфакт fedPeerAdded: ${label}`, async () => {
   await check([]); await truncateAll(t.raw);
-  await assert.rejects(() => check([[from, to]]), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await counterfact(async () => {
+    await assert.rejects(() => check([[from, to]]), e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -47,7 +48,10 @@ function check(raw = source) {
 it('R170 класс m-dmlist добавляется корню app только при isDm и list', () => check());
 // Класс ошибки: класс m-dmlist действует и на content, ломая отступ открытой беседы.
 it('R170 мутант класса списка в content обнаруживается адресным guard корня app', () => {
-  const anchor = "if (isDm && mobilePane === 'list') appClass.push('m-dmlist');";
-  assert.equal(source.split(anchor).length - 1, 1); check();
-  assert.throws(() => check(source.replace(anchor, "if (isDm) appClass.push('m-dmlist');")), assert.AssertionError);
+  check();
+  counterfact(() => {
+    const anchor = "if (isDm && mobilePane === 'list') appClass.push('m-dmlist');";
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => check(source.replace(anchor, "if (isDm) appClass.push('m-dmlist');")), assert.AssertionError);
+  });
 });

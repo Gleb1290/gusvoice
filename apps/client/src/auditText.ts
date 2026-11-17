@@ -121,6 +121,8 @@ export function describeAudit(e: AuditLogEntry): string {
       return `изменил в лавке ${q('label', s('item') ? `«${s('item')}»` : 'награду')}`;
     case 'economy.retro':
       return `доначислил за прошлое ${n('granted') ?? 0} монет${peopleTail(n('paid'))}`;
+    case 'economy.games-launch':
+      return `запустил игры${(n('gift') ?? 0) > 0 ? ` и подарил по ${n('gift')} монет${peopleTail(n('people'))}` : ''}`;
     case 'economy.icon':
       return 'сменил значок валюты';
 

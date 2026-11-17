@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact, mutantTest } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +22,8 @@ it('голос переходит в отправку сразу, слабые �
     now = 0; api.noteTyping('c', 'u', 'voice'); api.noteTyping('c', 'u', 'voice_upload');
     assert.equal(api.useTypingAction('c', 'u'), 'voice_upload');
     assert.equal(api.typingActionLabel('voice_upload'), 'отправляет голосовое');
+    api.noteTyping('c', 'camera', 'round'); api.noteTyping('c', 'camera', 'round_upload');
+    assert.equal(api.typingActionLabel(api.useTypingAction('c', 'camera')), 'отправляет видеосообщение');
     now = 5900; api.noteTyping('c', 'u', 'file'); api.noteTyping('c', 'u', 'typing');
     assert.equal(api.useTypingAction('c', 'u'), 'voice_upload');
     now = 6100; assert.equal(api.useTypingAction('c', 'u'), 'typing');
@@ -32,9 +35,11 @@ it('голос переходит в отправку сразу, слабые �
     }
   };
   check(load(source));
+  counterfact(() => {
   for (const [a, b] of [['TTL_MS = 6000', 'TTL_MS = 5000'], ['TYPING_SEND_MS = 4000', 'TYPING_SEND_MS = 2500'], ['voice_upload: 3', 'voice_upload: 2']] as const) {
     assert.ok(source.includes(a)); assert.throws(() => check(load(source.replace(a, b))), assert.AssertionError);
   }
+  });
 });
 
 it('сообщение гасит печать только своего автора, а gateway вызывает dropTyping в обоих живых путях', () => {
@@ -69,6 +74,7 @@ it('сообщение гасит печать только своего авт�
   typing.dropTyping('c', 'bob');
   assert.deepEqual(Array.from(typing.useTyping('c')), [], 'после сообщения автора печать погашена');
 
+  counterfact(() => {
   const mutantSource = source.replace('if (!m || !m.delete(userId)) return;', 'if (!m) return;');
   assert.notEqual(mutantSource, source, 'реальный модуль удаляет userId из typing map');
   const mutant = load(mutantSource);
@@ -76,6 +82,7 @@ it('сообщение гасит печать только своего авт�
   mutant.dropTyping('c', 'alice');
   assert.throws(() => assert.deepEqual(Array.from(mutant.useTyping('c')), [], 'после сообщения автора печать погашена'), assert.AssertionError,
     'мутант без удаления автора должен провалить контракт dropTyping');
+  });
 
   const sockets = readFileSync(fileURLToPath(new URL('./sockets.ts', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
   const message = /case 'message\.create':\s*\{[\s\S]*?dropTyping\(msg\.channelId, msg\.message\.author\.id\)/;
@@ -123,7 +130,7 @@ it('сильный typing action не продлевается слабым, р�
   assert.ok(typingActionRank('voice') > typingActionRank('file'), 'shared contract voice rank is higher than upload');
 });
 
-it('реальный typing store ловит мутации приоритета, равного ранга и сохранения action', () => {
+mutantTest('реальный typing store ловит мутации приоритета, равного ранга и сохранения action', () => {
   // Удаление любого из этих условий даёт мигающую/ложную подпись при одновременной печати и загрузке.
   const source = readFileSync(new URL('./typing.ts', import.meta.url), 'utf8');
   const load = (text: string) => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -53,7 +54,9 @@ for (const c of [
   { name: 'перепутан маршрут участников', needle: "return this.call('getVoiceChatMembers', { chat_id: chatId });", replacement: "return this.call('getChatMembers', { chat_id: chatId });", test: cases[4], message: 'R306 API getVoiceChatMembers: точный маршрут' },
 ]) it(`R306 API контрфакт: ${c.name}, оригинал проходит первым`, async () => {
   await request(c.test, load(source).Api);
+  await counterfact(async () => {
   assert.equal(source.split(c.needle).length - 1, 1, 'R306 API: точный уникальный якорь');
   await assert.rejects(() => request(c.test, load(source.replace(c.needle, c.replacement)).Api), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.message.split('\n', 1)[0] === c.message);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
@@ -84,8 +85,10 @@ test('R263 база только с гостями не превращает и�
 
 test('R263 потеря фильтра homeInstanceId ловится настоящей SQL-выдачей после проверки оригинала', async () => {
   await localOnly();
+  await counterfact(async () => {
   const anchor = '.where(and(isNull(users.deletedAt), isNull(users.homeInstanceId), eq(users.bot, false)));';
   assert.equal(source.split(anchor).length - 1, 1);
   await assert.rejects(() => localOnly(source.replace(anchor, '.where(and(isNull(users.deletedAt), eq(users.bot, false)));')),
     (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('R263:этот-инстанс-содержит-только-своих'));
+  });
 });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -176,6 +177,7 @@ describe('привязка супер-админа с внешними опер�
     const source = readFileSync(new URL('./superAdminRules.ts', import.meta.url), 'utf8');
     await ensureApprovedContract(loadSuperAdminRules(source).bindSuperAdminWith);
 
+    await counterfact(async () => {
     const anchor = '  if (decision.superAdminId && io.ensureApproved) await io.ensureApproved(decision.superAdminId);';
     assert.equal(source.split(anchor).length - 1, 1, 'якорь одобрения должен встретиться ровно один раз');
     await assert.rejects(
@@ -183,6 +185,7 @@ describe('привязка супер-админа с внешними опер�
       (error) => error instanceof assert.AssertionError && error.message.includes('одобрение следует после записи и получает её id'),
       'контракт должен отвергнуть модульный мутант без ensureApproved',
     );
+    });
   });
 });
 

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { alertDialog, confirmAction } from '../confirm';
 import {
+  aloneCapHours,
   coinsPerHour,
+  hoursLabel,
   minutesForCoins,
   type EconomyPreview,
   type EconomySettingsDto,
@@ -36,6 +38,8 @@ interface SliderProps {
   max: number;
   step?: number;
   suffix?: string;
+  /** Ползунок виден, но не двигается — например, раздел «Игры» при выключенном тумблере. */
+  disabled?: boolean;
   onChange: (v: number) => void;
 }
 
@@ -113,7 +117,19 @@ function AvatarPriceEditor({
   );
 }
 
-function Slider({ label, hint, value, min, max, step = 1, suffix, onChange }: SliderProps) {
+/** Подпись под порогом одному: сколько это часов ожидания (28.10). */
+function aloneCapHint(aloneCap: number, ratePer5min: number, alonePercent: number): string {
+  if (aloneCap <= 0) return 'Без порога: одному капает весь день. Затухание время одному не считает.';
+  const hours = aloneCapHours(aloneCap, ratePer5min, alonePercent);
+  if (hours === null) return 'Одному сейчас не капает вовсе — ставка или «Один в канале» на нуле.';
+  return `≈ ${hoursLabel(hours)} одному с включённым микрофоном, дальше до полуночи одному не капает. Затухание время одному не считает. Ноль — без порога.`;
+}
+
+/**
+ * Ползунок с подписью, числом и подсказкой. Экспортируется ради раздела «Игры» (`GamesSettingsPanel`, 30.10) — тот же
+ * вид, что в «Монетах», без второй копии.
+ */
+export function Slider({ label, hint, value, min, max, step = 1, suffix, disabled, onChange }: SliderProps) {
   return (
     <div className="eco-slider">
       <div className="eco-slider-top">
@@ -129,6 +145,7 @@ function Slider({ label, hint, value, min, max, step = 1, suffix, onChange }: Sl
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
       />
       {hint && <div className="eco-slider-hint">{hint}</div>}
@@ -373,6 +390,20 @@ export function EconomyPanel({ serverId }: { serverId: string }) {
         hint="Главный тормоз против «оставил на ночь». Ноль — совсем не капает, но тогда и тот, кто зашёл первым и ждёт друзей, не получает ничего."
         onChange={(v) => patch({ alonePercent: v })}
       />
+      {/* 🔴 Пара к правилу 28.10 «одному затухание не бьёт»: время одному больше не режет ставку в
+          компании, и одиночный фарм держит этот порог. Старый сервер поля не прислал — не рисуем. */}
+      {settings.aloneCap !== undefined && (
+        <Slider
+          label="Порог ожидания одному"
+          suffix="монет в сутки"
+          min={0}
+          max={1000}
+          step={10}
+          value={settings.aloneCap}
+          hint={aloneCapHint(settings.aloneCap, settings.ratePer5min, settings.alonePercent)}
+          onChange={(v) => patch({ aloneCap: v })}
+        />
+      )}
       <Slider
         label="Втроём и больше"
         suffix="% ставки"
@@ -419,7 +450,7 @@ export function EconomyPanel({ serverId }: { serverId: string }) {
         max={720}
         step={30}
         value={settings.decayAfterMinutes}
-        hint="Ноль — не резать вовсе."
+        hint="Считается только время в компании: кто ждал друзей один, вечером получает наравне со всеми. Ноль — не резать вовсе."
         onChange={(v) => patch({ decayAfterMinutes: v })}
       />
       <Slider
@@ -554,6 +585,10 @@ export function EconomyPanel({ serverId }: { serverId: string }) {
         hint="Награда за регулярность, а не за длительность: пришёл сегодня — получил, пришёл семь дней подряд — семикратно. Дальше недели не растёт. Пропустил день — цепочка начинается заново, но бонус за сегодня всё равно даётся. 0 — стрика нет."
         onChange={(v) => patch({ streakBonus: v })}
       />
+
+      {/* Игры (ГусКоины 2) здесь больше не живут: с 30.10 у них свой раздел «Игры» (`GamesSettingsPanel`), и пока они в
+          работе, его видит только супер-админ инстанса (`serverSettingsTabs.ts`, `features.games`). Поля игр остаются в
+          `settings` и при «Сохранить» уходят на сервер такими, какими пришли. */}
 
       <h4 className="eco-head">Сезоны</h4>
       <div className="eco-row-toggle">

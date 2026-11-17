@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -159,13 +160,19 @@ it('R246 запись только режимов даёт пункт сброс
 }));
 it('R169 мутант безусловного пункта сброса обнаруживается на несохранённом канале', async () => {
   const anchor = "c.type === 'voice' && hasStageOrder &&";
-  assert.equal(source.split(anchor).length - 1, 1); await resetVisibility();
-  await assert.rejects(() => resetVisibility(source.replace(anchor, "c.type === 'voice' &&")), assert.AssertionError);
+  await resetVisibility();
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(() => resetVisibility(source.replace(anchor, "c.type === 'voice' &&")), assert.AssertionError);
+  });
 });
 it('R169 мутант сброса чужого id обнаруживается нажатием настоящего пункта', async () => {
   const anchor = 'resetStageOrder(c.id)';
-  assert.equal(source.split(anchor).length - 1, 1); await resetClick();
-  await assert.rejects(() => resetClick(source.replace(anchor, "resetStageOrder('voice-a')")), assert.AssertionError);
+  await resetClick();
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(() => resetClick(source.replace(anchor, "resetStageOrder('voice-a')")), assert.AssertionError);
+  });
 });
 it('R167 выключенная настройка доступна в голосовом меню без прав управления', () => stateShown(false));
 it('R167 включённая настройка отмечена тем же active и галочкой в меню', () => stateShown(true));
@@ -221,13 +228,19 @@ function mutate(before: string, after: string) {
 }
 it('R167 мутант пункта у текстовых каналов обнаруживается парной проверкой', async () => {
   await noText();
-  await assert.rejects(() => noText(mutate("{c.type === 'voice' && (\n        <MenuItem\n          icon={hideNoVideo", "{c && (\n        <MenuItem\n          icon={hideNoVideo")), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => noText(mutate("{c.type === 'voice' && (\n        <MenuItem\n          icon={hideNoVideo", "{c && (\n        <MenuItem\n          icon={hideNoVideo")), assert.AssertionError);
+  });
 });
 it('R167 мутант инверсии состояния отметки обнаруживается обеими сторонами выбора', async () => {
   await stateShown(false); await stateShown(true);
-  await assert.rejects(() => stateShown(false, mutate('active={hideNoVideo}', 'active={!hideNoVideo}')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => stateShown(false, mutate('active={hideNoVideo}', 'active={!hideNoVideo}')), assert.AssertionError);
+  });
 });
 it('R167 мутант повторной записи того же выбора вместо переключения обнаруживается', async () => {
   await toggle();
-  await assert.rejects(() => toggle(mutate('setHideNoVideo(!hideNoVideo);', 'setHideNoVideo(hideNoVideo);')), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(() => toggle(mutate('setHideNoVideo(!hideNoVideo);', 'setHideNoVideo(hideNoVideo);')), assert.AssertionError);
+  });
 });

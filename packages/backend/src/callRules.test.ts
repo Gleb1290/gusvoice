@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { callAllowed, callDurationSec, callRecordPlan, callRoomName, callTransition, inCall, normalizeCallPrivacy, orphanCallEnd, silentParticipant } from './callRules.js';
@@ -17,11 +18,13 @@ it('звонящий не может ответить сам, а отмена, �
   assert.deepEqual(callTransition(call('active'), null, 'drop'), { kind: 'end', reason: 'disconnect' });
   assert.deepEqual(callTransition(call('ended'), 'b', 'answer'), { kind: 'gone' });
   assert.deepEqual(callTransition(call(), 'stranger', 'decline'), { kind: 'forbidden' });
-  const source = callTransition.toString();
-  const swapped = source.replace('isCaller?"missed":"busy"', 'isCaller?"busy":"missed"');
-  // nosemgrep: gv-no-eval — тест исполняет свой callTransition.toString() с фиксированной заменой; чужого ввода нет.
-  const mutant = (new Function(`return (${swapped})`)()) as typeof callTransition; // nosemgrep: gv-no-eval
-  assert.throws(() => assert.deepEqual(mutant(call(), 'a', 'hangup'), { kind: 'end', reason: 'missed' }), assert.AssertionError);
+  counterfact(() => {
+    const source = callTransition.toString();
+    const swapped = source.replace('isCaller?"missed":"busy"', 'isCaller?"busy":"missed"');
+    // nosemgrep: gv-no-eval — тест исполняет свой callTransition.toString() с фиксированной заменой; чужого ввода нет.
+    const mutant = (new Function(`return (${swapped})`)()) as typeof callTransition; // nosemgrep: gv-no-eval
+    assert.throws(() => assert.deepEqual(mutant(call(), 'a', 'hangup'), { kind: 'end', reason: 'missed' }), assert.AssertionError);
+  });
 });
 
 it('пропущенный звонок уведомляет, остальные записи тихие и уже прочитаны', () => {

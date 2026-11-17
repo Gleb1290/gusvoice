@@ -5,6 +5,7 @@ import type { ConvMessage } from './types.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { counterfact } from '../test/counterfacts.js';
 
 describe('имена голосовых комнат LiveKit', () => {
   it('идентификатор канала получает ровно один служебный префикс', () => {
@@ -32,11 +33,13 @@ it('смена фазы звонка распознаётся как серве�
   assert.equal(isServerMessageType(parsed.t), true);
   assert.equal(parsed.call.video, true);
   for (const t of ['calls.state', 'call.State', 'constructor', '__proto__', null, {}]) assert.equal(isServerMessageType(t), false);
-  const source = readFileSync(new URL('./ws.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes("'call.state': true,"), 'точка мутации whitelist существует');
-  const module = { exports: {} as { isServerMessageType: typeof isServerMessageType } };
-  runInNewContext(ts.transpileModule(source.replace("'call.state': true,", ''), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
-  assert.throws(() => assert.equal(module.exports.isServerMessageType(parsed.t), true), assert.AssertionError);
+  counterfact(() => {
+    const source = readFileSync(new URL('./ws.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes("'call.state': true,"), 'точка мутации whitelist существует');
+    const module = { exports: {} as { isServerMessageType: typeof isServerMessageType } };
+    runInNewContext(ts.transpileModule(source.replace("'call.state': true,", ''), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
+    assert.throws(() => assert.equal(module.exports.isServerMessageType(parsed.t), true), assert.AssertionError);
+  });
 });
 
 it('погашенное одноразовое вложение имеет общий флаг и разные запасные тексты голоса и кружка', () => {
@@ -68,14 +71,16 @@ it('присутствие ЛС распознаётся отдельным со
   for (const fixture of fixtures) assert.equal(isServerMessageType(JSON.parse(JSON.stringify(fixture)).t), true);
   assert.equal(isServerMessageType('online.dmOnly'), false);
   const source = readFileSync(new URL('./ws.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes("'online.dm': true,"));
   const load = (s: string) => {
     const module = { exports: {} as { isServerMessageType: typeof isServerMessageType } };
     runInNewContext(ts.transpileModule(s, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
     return module.exports.isServerMessageType;
   };
   assert.equal(load(source)('online.dm'), true, 'неизменённый изолированный модуль проходит тот же контракт');
-  assert.throws(() => assert.equal(load(source.replace("'online.dm': true,", ''))('online.dm'), true), assert.AssertionError);
+  counterfact(() => {
+    assert.ok(source.includes("'online.dm': true,"));
+    assert.throws(() => assert.equal(load(source.replace("'online.dm': true,", ''))('online.dm'), true), assert.AssertionError);
+  });
 });
 
 it('обновление контактов распознаётся шлюзом и несёт личную подпись, пустой список допустим', () => {
@@ -91,11 +96,13 @@ it('обновление контактов распознаётся шлюзо�
     assert.deepEqual(parsed.contacts, fixture.contacts);
   }
   assert.equal(isServerMessageType('contact.update'), false);
-  const source = readFileSync(new URL('./ws.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes("'contacts.update': true,"));
-  const module = { exports: {} as { isServerMessageType: typeof isServerMessageType } };
-  runInNewContext(ts.transpileModule(source.replace("'contacts.update': true,", ''), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
-  assert.throws(() => assert.equal(module.exports.isServerMessageType('contacts.update'), true), assert.AssertionError);
+  counterfact(() => {
+    const source = readFileSync(new URL('./ws.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes("'contacts.update': true,"));
+    const module = { exports: {} as { isServerMessageType: typeof isServerMessageType } };
+    runInNewContext(ts.transpileModule(source.replace("'contacts.update': true,", ''), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
+    assert.throws(() => assert.equal(module.exports.isServerMessageType('contacts.update'), true), assert.AssertionError);
+  });
 });
 
 it('большая реакция распознаётся отдельным событием с адресом сообщения и автором', () => {
@@ -105,12 +112,14 @@ it('большая реакция распознаётся отдельным с
   assert.equal(isServerMessageType(fixture.t), true);
   assert.equal(isServerMessageType('reaction.Big'), false);
   const source = readFileSync(new URL('./ws.ts', import.meta.url), 'utf8');
-  assert.ok(source.includes("'reaction.big': true,"));
   const load = (s: string) => {
     const module = { exports: {} as { isServerMessageType: typeof isServerMessageType } };
     runInNewContext(ts.transpileModule(s, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
     return module.exports.isServerMessageType;
   };
   assert.equal(load(source)(fixture.t), true);
-  assert.throws(() => assert.equal(load(source.replace("'reaction.big': true,", ''))(fixture.t), true), assert.AssertionError);
+  counterfact(() => {
+    assert.ok(source.includes("'reaction.big': true,"));
+    assert.throws(() => assert.equal(load(source.replace("'reaction.big': true,", ''))(fixture.t), true), assert.AssertionError);
+  });
 });

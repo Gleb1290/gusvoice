@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -76,18 +77,24 @@ function correctContract(api: typeof wire) {
 }
 test('R222 контрфакт: удаление correct из сериализации убито точным полем полного модуля', () => {
   correctContract(load());
-  assert.throws(() => correctContract(load(['{ correct: m.correct, solution: m.solution }', '{ solution: m.solution }'])),
-    killed('сериализация сохраняет правильный вариант', undefined, '1'));
+  runCounterfact(() => {
+    assert.throws(() => correctContract(load(['{ correct: m.correct, solution: m.solution }', '{ solution: m.solution }'])),
+      killed('сериализация сохраняет правильный вариант', undefined, '1'));
+  });
 });
 test('R222 контрфакт: потеря correct при разборе убита результатом целого модуля', () => {
   correctContract(load());
-  assert.throws(() => correctContract(load(['    correct,\n    solution: quiz', '    correct: null,\n    solution: quiz'])),
-    killed('разбор сохраняет правильный вариант', null, '1'));
+  runCounterfact(() => {
+    assert.throws(() => correctContract(load(['    correct,\n    solution: quiz', '    correct: null,\n    solution: quiz'])),
+      killed('разбор сохраняет правильный вариант', null, '1'));
+  });
 });
 test('R222 контрфакт: closed всегда false не переживает историческую закрытую викторину', () => {
   const scenario = (api: typeof wire) => assert.equal((api.parseConvMediaWire(example.media) as wire.FedConvPollWire)?.closed, true, 'закрытие сохраняется в проводе');
   scenario(load());
-  assert.throws(() => scenario(load(['closed: r.closed === true,', 'closed: false,'])), killed('закрытие сохраняется в проводе', false, true));
+  runCounterfact(() => {
+    assert.throws(() => scenario(load(['closed: r.closed === true,', 'closed: false,'])), killed('закрытие сохраняется в проводе', false, true));
+  });
 });
 test('R222 определение опроса не переносит клиентские счётчики и мой выбор в провод', () => {
   const m = { ...example.media, revealed: true, my: ['0'], voters: 9, options: example.media.options.map((o: any) => ({ ...o, votes: 7 })) };

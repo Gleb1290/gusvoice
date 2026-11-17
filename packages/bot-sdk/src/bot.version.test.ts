@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -127,7 +128,9 @@ for (const c of [
   { name: 'WS забыл предупредить при hello', from: '            this.warnIfServerNewer(me);', to: '            /* R307 нет предупреждения WS */', check: (raw: string) => once(raw, 'ws'), marker: 'R307 старт предупреждает о новом сервере' },
 ]) it(`R307 версия контрфакт: ${c.name}, оригинал проходит первым`, async () => {
   await c.check(source);
+  await counterfact(async () => {
   assert.equal(source.split(c.from).length - 1, 1, 'R307 версия: уникальный якорь');
   await assert.rejects(c.check(source.replace(c.from, c.to)), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' && e.message.split('\n', 1)[0] === c.marker);
+  });
 });

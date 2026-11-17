@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -46,13 +47,15 @@ function scenario(makeAction: ReturnType<typeof actionFromStore>) {
 it('черновик пересылки ставится и заменяется, null удаляет без пустой записи и лишней копии', () => {
   // Пустой ключ с undefined расходится с отсутствием и мешает проверкам жизненного цикла черновика.
   scenario(actionFromStore());
-  const from = 'delete next[convId];';
-  const to = 'next[convId] = undefined;';
-  const bad = actionFromStore((source) => {
-    assert.ok(source.includes(from), 'найдена настоящая операция удаления из store.ts');
-    const changed = source.replace(from, to);
-    assert.notEqual(changed, source, 'мутант действительно изменил исходник');
-    return changed;
+  counterfact(() => {
+    const from = 'delete next[convId];';
+    const to = 'next[convId] = undefined;';
+    const bad = actionFromStore((source) => {
+      assert.ok(source.includes(from), 'найдена настоящая операция удаления из store.ts');
+      const changed = source.replace(from, to);
+      assert.notEqual(changed, source, 'мутант действительно изменил исходник');
+      return changed;
+    });
+    assert.throws(() => scenario(bad), assert.AssertionError);
   });
-  assert.throws(() => scenario(bad), assert.AssertionError);
 });

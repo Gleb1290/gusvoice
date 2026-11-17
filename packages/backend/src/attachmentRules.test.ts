@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -28,6 +29,7 @@ describe('R131 сроки копирования и перехвата сбор�
       assert.equal(rules.copyTimeoutMs(1024 * 1024 * 1024), 316000);
     };
     check(chunks);
+    counterfact(() => {
     const source = readFileSync(new URL('./attachmentRules.ts', import.meta.url), 'utf8');
     const target = 'Math.max(0, size) / (4 * 1024 * 1024)';
     assert.ok(source.includes(target));
@@ -40,6 +42,7 @@ describe('R131 сроки копирования и перехвата сбор�
         throw new Error(`неожиданная зависимость ${name}`);
       } });
     assert.throws(() => check(module.exports as typeof chunks), assert.AssertionError);
+    });
   });
 
   it('лишний байт после границы четыре МиБ увеличивает срок, пустой и отрицательный размер получают базовую минуту', () => {
@@ -99,6 +102,7 @@ describe('R127 чистые правила загрузки кусками', () 
       assert.equal(rules.PENDING_MAX_BYTES, FORWARD_BYTES_MAX);
     };
     verify(chunks);
+    counterfact(() => {
     const source = readFileSync(new URL('./attachmentRules.ts', import.meta.url), 'utf8');
     for (const [from, to] of [
       ['BIGFILE_MAX_BYTES = 1024 * 1024 * 1024', 'BIGFILE_MAX_BYTES = 512 * 1024 * 1024'],
@@ -115,6 +119,7 @@ describe('R127 чистые правила загрузки кусками', () 
         } });
       assert.throws(() => verify(module.exports as typeof chunks), assert.AssertionError);
     }
+    });
   });
   it('одиннадцать открытых допускают ещё загрузку, двенадцать уже получают429', () => {
     assert.equal(chunks.UPLOADS_OPEN_MAX, 12);
@@ -137,6 +142,7 @@ describe('R127 чистые правила загрузки кусками', () 
       assert.equal(r.uploadStartBlock(512, 512, 0, 512, 1024), null);
     };
     verify(chunks);
+    counterfact(() => {
     for (const [from, to] of [['size > max', 'size >= max'], ['usedToday + size > daily', 'usedToday + size >= daily'],
       ['size - (count - 1) * partSize', 'partSize']]) {
       assert.ok(source.includes(from));
@@ -145,6 +151,7 @@ describe('R127 чистые правила загрузки кусками', () 
         { module, exports: module.exports, Buffer, URL, require: (id: string) => { assert.ok(id in deps); return deps[id]; } });
       assert.throws(() => verify(module.exports as typeof chunks), assert.AssertionError);
     }
+    });
   });
 });
 

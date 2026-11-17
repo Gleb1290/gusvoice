@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import ts from 'typescript';
@@ -22,19 +24,6 @@ const releasesValue = releases[0]!.initializer;
 assert.ok(releasesValue && ts.isStringLiteral(releasesValue));
 const releasesUrl = releasesValue.text;
 
-const dormantImports = [
-  './DmFolderBar', './DataStorageSettings', './DmFolderSettings', 'react-dom', '../androidBack',
-  '../settingsAnchor', '../settingsSeen', '../audioSettings', '../micProcessorRules', '../desktopWindow',
-  '../dialogChrome', '../downloads', '../phoneLayout', '../notifications', '../updater', '../theme',
-  '../uiPrefs', './Avatar', './AvatarCropModal', './Icon', './NotifyExceptions', './Select', './SettingsShell',
-  '../settingsChanged', '../settingsNav', '../settingsSnapshot', './GuestPlacesPanel', './InstancesPanel',
-  '../federationClient', './OverlaySettingsPanel', './ToastSettingsPanel', './NotifyPopupSetting',
-  './SoundSettingsPanel', './StreamQualityPanel', '../streamSettings', './MicBubbleSetting', './MyBotsSettings', './Toggle',
-  '../avatarAnimation', '../liteMode', './LinkPreview', '../sendMode', '../emojiSuggest', '../dmListView',
-  './DmListSwipe', '../quickReaction', './ContextMenu', './EmojiPicker', './DiagConsent', '../lastSeenText',
-  './LastSeenExceptions', './MessagePrivacySetting', '../lastSeenExceptionsRules', '../callView', '../convSyncRules',
-  '../store', '../toast',
-];
 let createRoot: typeof import('react-dom/client')['createRoot'];
 let previousAct: PropertyDescriptor | undefined;
 before(async () => {
@@ -70,10 +59,7 @@ async function panel(options: Options, check: (host: HTMLDivElement, requests: n
       return repository;
     } } },
   };
-  for (const id of dormantImports) deps[id] = new Proxy({}, { get: (_target, property) => {
-    const message = `Неописанная граница ${id}.${String(property)}`;
-    unexpected.push(message); throw new Error(message);
-  } });
+  const imports = testVmImports(new URL('./UserSettingsModal.tsx', import.meta.url), deps);
   const module = { exports: {} as { AndroidInstallTab: React.ComponentType } };
   const host = document.createElement('div'); document.body.append(host);
   const root = createRoot(host);
@@ -83,12 +69,11 @@ async function panel(options: Options, check: (host: HTMLDivElement, requests: n
     runInNewContext(ts.transpileModule((options.raw ?? source) + '\nexport { AndroidInstallTab };', {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
     }).outputText, { module, exports: module.exports, window, document, navigator,
-      require: (id: string) => {
-        if (!Object.hasOwn(deps, id)) {
-          const message = `Неописанный импорт ${id}`; unexpected.push(message); throw new Error(message);
-        }
-        return deps[id];
-      },
+      // Сохраняем сигнал об ошибке mock, даже если панель перехватит её как ошибку API.
+      require: (id: string) => new Proxy(imports(id) as object, { get(target, key) {
+        try { return Reflect.get(target, key); }
+        catch (error) { unexpected.push(`${id}.${String(key)}`); throw error; }
+      } }),
     });
     await React.act(async () => root.render(React.createElement(module.exports.AndroidInstallTab)));
     check(host, requests);
@@ -175,9 +160,11 @@ it('R267 в установленном APK адрес ntfy есть, ненуж�
 
 it('R267 контрфакт config.ntfyServer вместо вычисленного адреса падает адресно, оригинал проходит первым', async () => {
   await fallback();
+  await counterfact(async () => {
   const anchor = '<code>{addrs.ntfy}</code>';
   assert.equal(source.split(anchor).length - 1, 1);
   const mutant = source.replace(anchor, '<code>{config.ntfyServer}</code>');
   await assert.rejects(() => fallback(mutant), error => error instanceof assert.AssertionError &&
     error.message.includes('R267:ntfy-из-pushGateway-без-слэша'));
+  });
 });

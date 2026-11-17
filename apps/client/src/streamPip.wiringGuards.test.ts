@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -157,9 +158,11 @@ function hostGuard(raw: string) {
 }
 function rejects(raw: string, from: string, to: string, check: (raw: string) => void, message: string) {
   check(raw); // Original-first: красный оригинал не считается защитой от мутанта.
-  assert.equal(raw.split(from).length - 1, 1, 'R254 единственный точный якорь контрфакта');
-  assert.throws(() => check(raw.replace(from, to)), (e: unknown) =>
-    e instanceof assert.AssertionError && e.message.startsWith(message));
+  counterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1, 'R254 единственный точный якорь контрфакта');
+    assert.throws(() => check(raw.replace(from, to)), (e: unknown) =>
+      e instanceof assert.AssertionError && e.message.startsWith(message));
+  });
 }
 
 it('R254 звук PiP без сцены остаётся подписанным с личной громкостью и мьютом', () => {
@@ -184,11 +187,13 @@ it('R254 потеря PiP из поля видимости звука или с�
   for (const kind of ['audio', 'layer'] as const) {
     const check = kind === 'audio' ? audioGuard : layerGuard;
     check(voice);
-    // Меняем только одно из двух мест, чтобы исправная соседняя проводка не скрывала регрессию.
-    const index = kind === 'audio' ? voice.indexOf(anchor) : voice.lastIndexOf(anchor);
-    const changed = voice.slice(0, index) + 'const watchedStreams = useStore.getState().watchedStreams;' + voice.slice(index + anchor.length);
-    assert.throws(() => check(changed), (e: unknown) => e instanceof assert.AssertionError
-      && e.message.startsWith(`R254 ${kind}: PiP включён в поле видимости`));
+    counterfact(() => {
+      // Меняем только одно из двух мест, чтобы исправная соседняя проводка не скрывала регрессию.
+      const index = kind === 'audio' ? voice.indexOf(anchor) : voice.lastIndexOf(anchor);
+      const changed = voice.slice(0, index) + 'const watchedStreams = useStore.getState().watchedStreams;' + voice.slice(index + anchor.length);
+      assert.throws(() => check(changed), (e: unknown) => e instanceof assert.AssertionError
+        && e.message.startsWith(`R254 ${kind}: PiP включён в поле видимости`));
+    });
   }
 });
 it('R254 удаление inPip из выбора слоя обнаруживается, даже когда звук подключён правильно', () => {
@@ -210,10 +215,12 @@ it('R256 звук и слой не ограничивают объединённ
   for (const kind of ['audio', 'layer'] as const) {
     const check = kind === 'audio' ? audioGuard : layerGuard;
     check(voice);
-    const index = kind === 'audio' ? voice.indexOf(anchor) : voice.lastIndexOf(anchor);
-    const changed = voice.slice(0, index) + anchor.replace('pipStreams)', 'pipStreams[0])') + voice.slice(index + anchor.length);
-    assert.throws(() => check(changed), (e: unknown) => e instanceof assert.AssertionError
-      && e.message.startsWith(`R254 ${kind}: PiP включён в поле видимости`));
+    counterfact(() => {
+      const index = kind === 'audio' ? voice.indexOf(anchor) : voice.lastIndexOf(anchor);
+      const changed = voice.slice(0, index) + anchor.replace('pipStreams)', 'pipStreams[0])') + voice.slice(index + anchor.length);
+      assert.throws(() => check(changed), (e: unknown) => e instanceof assert.AssertionError
+        && e.message.startsWith(`R254 ${kind}: PiP включён в поле видимости`));
+    });
   }
 });
 it('R256 слой сохраняет владельцев всех спутников PiP, а не только первого или точный identity', () => {

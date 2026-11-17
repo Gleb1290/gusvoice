@@ -20,11 +20,14 @@ it('якорь держится до последней операции и сл
   assert.ok((s.match(/followHeld\(\);/g) ?? []).length >= 5);
   assert.match(s, /navMessages\.current === messages/); assert.match(s, /ownMessage = added > 0 &&/);
 });
-it('черновик первого кадра не отправляется, удалённое поле не затирает правку и текущий набор', () => {
+it('черновик первого кадра не отправляется, пришедшее не затирает правку, отложенную запись и тронутое поле', () => {
   const s = src('components/MessagePane.tsx');
   assert.match(s, /if \(!draftSeen\.current\) \{\s*draftSeen\.current = true;\s*return;/);
   assert.match(s, /if \(composerEdit \|\| draftSaver\.pending\(\)\) return/);
-  assert.match(s, /document\.activeElement === input && text\.trim\(\)/);
+  // Уже набранное не уступает удалённому даже после debounce, когда pending() снова false.
+  assert.match(s, /if \(draftTyped\.current\) return;/);
+  assert.match(s, /draftQuiet\.current = \{ text: r\.text, replyToId: r\.replyToId \};\s*setText\(r\.text\)/);
+  assert.match(s, /if \(!draftTyped\.current && quiet && quiet\.text === v\.text && quiet\.replyToId === v\.replyToId\) return;/);
   assert.match(src('components/DmChatView.tsx'), /s\.draftRev\[dm\.id\]/);
   assert.match(src('App.tsx'), /onConvCacheFlushed\(\(\) => useStore\.getState\(\)\.convFlushDrafts\(true\)\)/);
   assert.match(src('api.ts'), /convDraft:[\s\S]*?body, \{ keepalive \}\)/);

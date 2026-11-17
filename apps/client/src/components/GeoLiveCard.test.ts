@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -155,7 +156,10 @@ for (const m of [
   { label: 'полноэкранное следование после конца', from: 'follow={!ended}\n            title=', to: 'follow={true}\n            title=', check: follows, prefix: 'R225-ended-follow:', actual: false, expected: true },
   { label: 'беседа плашки', from: 's.conversationId === conversationId', to: 'true', check: barScope, prefix: 'R225-bar-hidden:', actual: 1, expected: 0 },
 ]) it(`R225 контрфакт карточки: ${m.label}`, async () => {
-  await m.check(raw); assert.equal(raw.split(m.from).length - 1, 1);
+  await m.check(raw);
+  await counterfact(async () => {
+  assert.equal(raw.split(m.from).length - 1, 1);
   await assert.rejects(() => m.check(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
     && e.operator === 'strictEqual' && e.actual === m.actual && e.expected === m.expected);
+  });
 });

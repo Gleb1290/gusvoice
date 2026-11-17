@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -81,23 +82,25 @@ describe('сообщения, которые ещё отправляются', (
     assert.equal(originalOutgoing.sendErrorText(new Error(code)), expected,
       'исходные целые fedErrorText и outgoingRules проходят тот же oracle в VM');
 
-    let source = readFileSync(new URL('./fedErrorText.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-    const movedCase = "    case FED_ERRORS.dmAttachmentsLater:\n      return 'Файлы людям других инстансов можно будет отправлять в следующем обновлении. Текст доходит.';\n";
-    assert.equal(source.split(movedCase).length - 1, 1, 'у мутанта один точный якорь ветки вложений');
-    source = source.replace(movedCase, '');
-    const openAnchor = '  switch (code) {\n    case FED_ERRORS.dmRefused:';
-    assert.equal(source.split(openAnchor).length - 1, 1, 'у мутанта один якорь switch открытия ЛС');
-    source = source.replace(openAnchor, `  switch (code) {\n${movedCase}    case FED_ERRORS.dmRefused:`);
-    const fedText = compileWholeModule(source, { '@gusvoice/shared': shared });
-    const outgoing = compileWholeModule(outgoingSource, {
-      './fedErrorText': fedText,
-      './longTextRules': { humanLengthError },
-    }) as { sendErrorText: (value: unknown) => string | null };
-    assert.throws(
-      () => assert.equal(outgoing.sendErrorText(new Error(code)), expected, 'очередь должна получать общий перевод ошибки'),
-      (error: unknown) => error instanceof assert.AssertionError && error.message.includes('очередь должна получать общий перевод ошибки'),
-      'мутант оставляет в «Не отправлено» исходный код, даже если fedDmOpenText всё ещё его знает',
-    );
+    counterfact(() => {
+      let source = readFileSync(new URL('./fedErrorText.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+      const movedCase = "    case FED_ERRORS.dmAttachmentsLater:\n      return 'Файлы людям других инстансов можно будет отправлять в следующем обновлении. Текст доходит.';\n";
+      assert.equal(source.split(movedCase).length - 1, 1, 'у мутанта один точный якорь ветки вложений');
+      source = source.replace(movedCase, '');
+      const openAnchor = '  switch (code) {\n    case FED_ERRORS.dmRefused:';
+      assert.equal(source.split(openAnchor).length - 1, 1, 'у мутанта один якорь switch открытия ЛС');
+      source = source.replace(openAnchor, `  switch (code) {\n${movedCase}    case FED_ERRORS.dmRefused:`);
+      const fedText = compileWholeModule(source, { '@gusvoice/shared': shared });
+      const outgoing = compileWholeModule(outgoingSource, {
+        './fedErrorText': fedText,
+        './longTextRules': { humanLengthError },
+      }) as { sendErrorText: (value: unknown) => string | null };
+      assert.throws(
+        () => assert.equal(outgoing.sendErrorText(new Error(code)), expected, 'очередь должна получать общий перевод ошибки'),
+        (error: unknown) => error instanceof assert.AssertionError && error.message.includes('очередь должна получать общий перевод ошибки'),
+        'мутант оставляет в «Не отправлено» исходный код, даже если fedDmOpenText всё ещё его знает',
+      );
+    });
   });
 
   it('подпись вложений различает пустой, один и несколько файлов', () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -117,7 +118,10 @@ for (const [label, from, to, scenario, prefix, actual, expected] of [
   ['ё не нормализуется', ".replace(/ё/g, 'е')", '', folded, 'R218-filter:', '[{"att":{"name":"ёж.txt"}}]',
     '[{"att":{"name":"ЕЖИК.TXT"}},{"att":{"name":"ёж.txt"}}]'],
 ] as const) it(`R218 правила контрфакт: ${label}`, () => {
-  scenario(load(raw)); assert.equal(raw.split(from).length - 1, 1, 'однозначная мутация полного attachRules');
+  scenario(load(raw));
+  counterfact(() => {
+  assert.equal(raw.split(from).length - 1, 1, 'однозначная мутация полного attachRules');
   assert.throws(() => scenario(load(raw.replace(from, to))), (error: unknown) => error instanceof assert.AssertionError
     && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });

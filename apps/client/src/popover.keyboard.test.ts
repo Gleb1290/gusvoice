@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -33,10 +34,12 @@ it('R116 клавиатура требует фокус и просадку ро
       assert.equal(rule(800, height, focused), focused && shrink >= 150, `фокус=${focused}, просадка=${shrink}`);
   };
   check(isKeyboardOpen);
-  for (const [from, to] of [['>= KEYBOARD_MIN_SHRINK', '> KEYBOARD_MIN_SHRINK'], ['editableFocused && fullHeight', 'fullHeight']]) {
-    const mutant = source.replace(from, to); assert.notEqual(mutant, source);
-    assert.throws(() => check(fixture(mutant).rules.isKeyboardOpen), assert.AssertionError);
-  }
+  counterfact(() => {
+    for (const [from, to] of [['>= KEYBOARD_MIN_SHRINK', '> KEYBOARD_MIN_SHRINK'], ['editableFocused && fullHeight', 'fullHeight']]) {
+      const mutant = source.replace(from, to); assert.notEqual(mutant, source);
+      assert.throws(() => check(fixture(mutant).rules.isKeyboardOpen), assert.AssertionError);
+    }
+  });
 });
 
 it('R116 фокус и сжатие ставят data-kb, уход фокуса снимает, поворот сбрасывает максимум, pinch не клавиатура', () => {
@@ -58,13 +61,15 @@ it('R116 фокус и сжатие ставят data-kb, уход фокуса 
     assert.doesNotThrow(() => f.rules.refreshKeyboardFlag());
   };
   check(source);
-  for (const [from, to, message] of [
-    ['kbFullHeight = 0;\n  }', '/* максимум оставлен */\n  }', /новая ширина/],
-    ['const open = vv.scale <= 1 &&', 'const open =', /pinch не ставит/],
-  ] as const) {
-    const mutant = source.replace(from, to); assert.notEqual(mutant, source);
-    assert.throws(() => check(mutant), message);
-  }
+  counterfact(() => {
+    for (const [from, to, message] of [
+      ['kbFullHeight = 0;\n  }', '/* максимум оставлен */\n  }', /новая ширина/],
+      ['const open = vv.scale <= 1 &&', 'const open =', /pinch не ставит/],
+    ] as const) {
+      const mutant = source.replace(from, to); assert.notEqual(mutant, source);
+      assert.throws(() => check(mutant), message);
+    }
+  });
 });
 
 it('R116 installViewportVars слушает focusin/focusout и visual resize ровно один раз', () => {

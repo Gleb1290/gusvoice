@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { applyFieldFormat, formatHotkey, textReplacement, revertReplacement } from './fieldFormat';
 import { readFileSync } from 'node:fs';
@@ -20,7 +21,9 @@ it('формат оборачивается и снимается повторо
   const one = applyFieldFormat(' x ',0,3,'bold'); assert.deepEqual(one,{ value:' **x** ',start:3,end:4 });
   assert.deepEqual(applyFieldFormat(one!.value,one!.start,one!.end,'bold'),{ value:' x ',start:1,end:2 });
   assert.equal(applyFieldFormat('__**x**__',4,5,'italic')?.value,'**x**');
-  assert.throws(() => assert.equal(mutant('if (!layer) break;', 'break;').applyFieldFormat('__**x**__',4,5,'italic')?.value,'**x**'), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => assert.equal(mutant('if (!layer) break;', 'break;').applyFieldFormat('__**x**__',4,5,'italic')?.value,'**x**'), assert.AssertionError);
+  });
   assert.equal(applyFieldFormat('  ',0,2,'bold'),null); assert.equal(applyFieldFormat('x',1,1,'bold'),null);
 });
 it('моно по строкам становится блоком, цитата переключается, снятие убирает все слои', () => {
@@ -38,7 +41,9 @@ it('горячая клавиша физическая, автозамены н�
   assert.equal(formatHotkey({ code:'KeyB',ctrlOrMeta:true,shift:false,alt:true }),null);
   const r = textReplacement('--',2,'-'); assert.equal(r?.value,'—');
   assert.equal(textReplacement('`--',3,'-'),null); assert.equal(textReplacement('--',2,null),null);
-  assert.throws(() => assert.equal(mutant("if ((line.split('`').length - 1) % 2 === 1) return null;", '').textReplacement('`--',3,'-'),null), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => assert.equal(mutant("if ((line.split('`').length - 1) % 2 === 1) return null;", '').textReplacement('`--',3,'-'),null), assert.AssertionError);
+  });
   for (const [s,t] of [['<<','«'],['>>','»']] as const) assert.equal(textReplacement(s,2,s[1])?.value,t);
   assert.ok(r,'замена для отката найдена');
   assert.equal(revertReplacement(r.value,r.caret,r.caret,r.undo)?.value,'--');

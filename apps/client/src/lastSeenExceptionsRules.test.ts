@@ -6,6 +6,7 @@ import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
 import { FEATURE_LASTSEEN3, FEATURE_PRESENCE4 } from '@gusvoice/shared';
 import * as rules from './lastSeenExceptionsRules';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { applyExceptionPick, exceptionCountLabel, exceptionKindsShown, exceptionsBody, serverLastSeenExceptions } from './lastSeenExceptionsRules';
 
 function mutant(from: string, to: string): typeof rules {
@@ -52,6 +53,8 @@ it('исключения звонков имеют свои подписи и в
   };
   check(rules);
   check(mutant('return setting === \'calls\' ? CALL_EXCEPTION_TITLE : EXCEPTION_TITLE;', 'return setting === \'calls\' ? CALL_EXCEPTION_TITLE : EXCEPTION_TITLE;'));
+  counterfact(() => {
   assert.throws(() => check(mutant('return !!features?.includes(FEATURE_PRESENCE4);', 'return !!features?.includes(FEATURE_LASTSEEN3);')), assert.AssertionError,
     'мутант включает настройки звонков по флагу приватности захода');
+  });
 });

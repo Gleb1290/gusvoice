@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -259,10 +260,12 @@ const mutants = [
 describe('доставка бота: адресные исполняемые контрфакты', () => {
   for (const m of mutants) it(m.name, async () => {
     await m.verify(source); // Original-first: исходный полный модуль и тот же адаптер IO проходят до мутации.
-    const changed = m.mutate(source); assert.notEqual(changed, source, `найден якорь ${m.name}`);
-    await assert.rejects(() => m.verify(changed), (error: unknown) => error instanceof assert.AssertionError
-      && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.marker
-      && error.operator === 'strictEqual' && error.actual === m.actual && error.expected === m.expected,
-    `ожидается только адресный host AssertionError: ${m.marker}`);
+    await counterfact(async () => {
+      const changed = m.mutate(source); assert.notEqual(changed, source, `найден якорь ${m.name}`);
+      await assert.rejects(() => m.verify(changed), (error: unknown) => error instanceof assert.AssertionError
+        && error.code === 'ERR_ASSERTION' && error.message.split(/\r?\n/, 1)[0] === m.marker
+        && error.operator === 'strictEqual' && error.actual === m.actual && error.expected === m.expected,
+      `ожидается только адресный host AssertionError: ${m.marker}`);
+    });
   });
 });

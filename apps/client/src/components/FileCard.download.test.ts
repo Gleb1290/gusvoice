@@ -7,6 +7,7 @@ import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import { createRoot } from 'react-dom/client';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 
 it('FileCard в старом WebView: стрелка сохраняет, нажатие по карточке открывает', async () => {
   GlobalRegistrator.register({ url: 'http://localhost/' });
@@ -18,23 +19,23 @@ it('FileCard в старом WebView: стрелка сохраняет, наж�
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   }).outputText, {
     module, exports: module.exports,
-    require: (id: string) => {
-      if (id === 'react') return React;
-      if (id === 'react/jsx-runtime') return jsx;
-      if (id === '../fileActions') return {
+    require: testVmImports(new URL('./FileCard.tsx', import.meta.url), {
+      react: React,
+      'react/jsx-runtime': jsx,
+      '../fileActions': {
         attachmentKey: (a: { id?: string; url?: string }) => a.id || a.url,
         fileJobOf: () => null, filesViaNative: () => false, openAttachmentFile() {}, progressRatio: () => 0,
         progressText: () => '', saveAttachmentFile() {}, subscribeFileJobs: () => () => {},
-      };
-      if (id === '../fileLaunch') return { confirmLaunch: async () => true };
-      if (id === '../pcDownloads') return {
+      },
+      '../fileLaunch': { confirmLaunch: async () => true },
+      '../pcDownloads': {
         attachmentTarget: () => ({ url: '/api/download/file', name: 'document.txt', type: 'text/plain' }),
         legacyDownloadWithToast: (url: string, name: string, mime: string, then: string) => calls.push({ url, name, mime, then }),
+        desktopFileOpenAvailable: () => false, subscribeDownloadedFileOpening: () => () => {},
         legacyDownloadsAvailable: () => true, ringDownloads: () => true, toggleDownload() {},
-      };
-      if (id === './Icon') return { Icon: () => null };
-      throw new Error(`неожиданный импорт ${id}`);
-    },
+      },
+      './Icon': { Icon: () => null },
+    }),
   });
   const FileCard = module.exports.FileCard as React.ComponentType<{ a: { id: string; url: string; name: string; contentType: string }; href: string; sizeLabel: string }>;
   const host = document.createElement('div'); document.body.append(host);

@@ -27,7 +27,7 @@ interface Entry {
  * Что главнее (копия `typingActionRank` из `@gusvoice/shared`: этот модуль в тесте грузится отдельно, из зависимостей ему
  * разрешён один `react`, поэтому значение — а не импорт; таблицы обязаны совпадать).
  */
-const RANK: Record<TypingAction, number> = { typing: 1, sticker: 1, photo: 2, video: 2, file: 2, voice: 3, voice_upload: 3, round: 3 };
+const RANK: Record<TypingAction, number> = { typing: 1, sticker: 1, photo: 2, video: 2, file: 2, voice: 3, voice_upload: 3, round: 3, round_upload: 3 };
 const typing = new Map<string, Map<string, Entry>>(); // key -> userId -> запись
 const listeners = new Set<() => void>();
 let version = 0;
@@ -117,6 +117,7 @@ const LABELS: Record<TypingAction, string> = {
   sticker: 'выбирает стикер',
   // Кружок (09.10): tdesktop `lng_send_action_record_round` / Android `RecordingRound` — «записывает видеосообщение»; в ЛС и группах одинаково.
   round: 'записывает видеосообщение',
+  round_upload: 'отправляет видеосообщение',
 };
 
 /** Подпись вида действия для шапки беседы и строки списка (без многоточия: его рисуют точки `.typing-dots`). */

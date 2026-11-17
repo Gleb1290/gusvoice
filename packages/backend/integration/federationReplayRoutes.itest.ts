@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -92,6 +93,6 @@ async function scenario(edit?: Edit) {
 test('R304 настоящие HTTP маршруты: ephemeral 200/200 без отметок, events 200/401 без тревоги', () => scenario());
 test('R304 контрфакт: ephemeral потерял replayGuard false', async () => {
   await scenario();
-  await assert.rejects(scenario({ file: 'routes/fedEphemeral', from: '{ requireActive: true, replayGuard: false }',
-    to: '{ requireActive: true }' }), e => e instanceof assert.AssertionError && e.message.includes('повтор ephemeral принимается'));
+  await counterfact(() => assert.rejects(scenario({ file: 'routes/fedEphemeral', from: '{ requireActive: true, replayGuard: false }',
+    to: '{ requireActive: true }' }), e => e instanceof assert.AssertionError && e.message.includes('повтор ephemeral принимается')));
 });

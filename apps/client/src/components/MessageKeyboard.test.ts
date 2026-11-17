@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -12,6 +13,7 @@ import type { BotCallbackResult, InlineKeyboard } from '@gusvoice/shared';
 import * as rules from '../botKeyboardRules';
 import * as linkSafety from '../linkSafety';
 import * as dangerousLinkRules from '../dangerousLinkRules';
+import { testVmImports } from '../testVmImports';
 
 const source = readFileSync(new URL('./MessageKeyboard.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const linkSource = readFileSync(new URL('../linkGuard.tsx', import.meta.url), 'utf8');
@@ -65,7 +67,7 @@ interface Fixture {
   settle: (index: number, value: BotCallbackResult | unknown, reject?: boolean) => Promise<void>;
 }
 
-// Настоящие полные TSX-модули, закрытый перечень импортов; подменены только сеть, окно ОС, диалог и тосты.
+// Настоящие полные TSX-модули; подменены только сеть, окно ОС, диалог и тосты.
 // happy-dom здесь проверяет DOM/события, не геометрию и не пиксели.
 async function withKeyboard(check: (f: Fixture) => void | Promise<void>, raw = source) {
   GlobalRegistrator.register({ url: 'https://client.example.test/' });
@@ -76,14 +78,12 @@ async function withKeyboard(check: (f: Fixture) => void | Promise<void>, raw = s
   const requests: Request[] = [], opened: string[] = [], alerts: string[] = [], rowEvents: string[] = [];
   const toasts: Fixture['toasts'] = [], errors: Fixture['errors'] = [];
   window.open = (url?: string | URL) => { opened.push(String(url)); return null; };
-  function load(text: string, dependencies: Record<string, unknown>) {
+  function load(text: string, dependencies: Record<string, unknown>, path = './MessageKeyboard.tsx') {
     const module = { exports: {} as Record<string, any> };
     runInNewContext(ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-    { module, exports: module.exports, window, document, location: window.location, URL, require: (id: string) => {
-      assert.ok(Object.hasOwn(dependencies, id), `R302 неописанный импорт клавиатуры: ${id}`);
-      return dependencies[id];
-    } });
+    { module, exports: module.exports, window, document, location: window.location, URL,
+      require: testVmImports(new URL(path, import.meta.url), dependencies) });
     return module.exports;
   }
   try {
@@ -94,7 +94,7 @@ async function withKeyboard(check: (f: Fixture) => void | Promise<void>, raw = s
       './desktopWindow': { openExternal: () => { throw new Error('R302 веб не зовёт ОС'); } },
       './linkSafety': linkSafety, './dangerousLinkRules': dangerousLinkRules,
       './dangerousLink': { DangerousMessageLink: () => { throw new Error('R302 неиспользуемая граница опасной ссылки'); } },
-    });
+    }, '../linkGuard.tsx');
     const request = (kind: Request['kind'], args: Request['args']) => new Promise<BotCallbackResult>((resolve, reject) => {
       const req: Request = { kind, args, settled: false,
         resolve: value => { req.settled = true; resolve(value); },
@@ -109,7 +109,7 @@ async function withKeyboard(check: (f: Fixture) => void | Promise<void>, raw = s
       '../toast': { toast: (kind: string, text: string) => { toasts.push([kind, text]); },
         toastError: (error: unknown, fallback: string) => { errors.push([error, fallback]); } },
       '../linkGuard': linkGuard,
-      './Icon': load(iconSource, { 'react/jsx-runtime': jsx }),
+      './Icon': load(iconSource, { 'react/jsx-runtime': jsx }, './Icon.tsx'),
     });
     const render: Fixture['render'] = async node => {
       await React.act(async () => root.render(React.createElement('div', {
@@ -366,8 +366,10 @@ for (const [label, anchor, replacement, scenario, message, actual, expected] of 
     'R302 события клавиатуры не доходят до строки', 1, 0],
 ] as const) it(`R302 контрфакт «${label}» ловится точным AssertionError реального компонента`, async () => {
   await scenario();
-  assert.equal(source.split(anchor).length - 1, 1, 'R302 одна точка мутации');
-  await assert.rejects(scenario(source.replace(anchor, replacement)), (error: unknown) =>
-    error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual' &&
-    error.message.split('\n')[0] === message && error.actual === actual && error.expected === expected);
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1, 'R302 одна точка мутации');
+    await assert.rejects(scenario(source.replace(anchor, replacement)), (error: unknown) =>
+      error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual' &&
+      error.message.split('\n')[0] === message && error.actual === actual && error.expected === expected);
+  });
 });

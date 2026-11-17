@@ -46,7 +46,8 @@ export function GooseBonusHost({ presentationAllowed }: { presentationAllowed: b
       opportunity={opportunity}
       presentationAllowed={presentationAllowed}
       onClaim={async (id) => {
-        if (!serverId) return { ok: false, reason: 'unavailable' };
+        if (!serverId) return { ok: false };
+        const clearClaimedOffer = () => setOpportunity((current) => (current?.id === id ? null : current));
         try {
           const res = await api.claimGoose(serverId, id);
           /**
@@ -60,19 +61,19 @@ export function GooseBonusHost({ presentationAllowed }: { presentationAllowed: b
            */
           // Баланс приедет пушем; перезапрос — страховка, и его провал не должен превращать
           // состоявшуюся надбавку в ложную ошибку.
+          clearClaimedOffer();
           ensureEconomy(serverId, true);
           return { ok: true, bonus: res.bonus };
         } catch (e) {
-          // ⚠️ Причину берём из ответа сервера, а не гадаем: «не успел» и «уже забрал» он различает,
-          // и от этого зависит, гасить подсказку молча или показать сожаление.
-          const reason = (e as { reason?: GooseFailure }).reason;
-          return { ok: false, reason: reason ?? 'unavailable' };
-        } finally {
-          setOpportunity(null);
+          const { reason, status } = (e as { reason?: string; status?: number } | null) ?? {};
+          if (reason === 'expired' || reason === 'claimed' || reason === 'unavailable' || status === 403 || status === 404 || status === 409) {
+            clearClaimedOffer();
+            return { ok: false };
+          }
+          // Ответ мог потеряться до или после поимки. Повтор идёт с тем же одноразовым жетоном.
+          return { ok: false, retry: true };
         }
       }}
     />
   );
 }
-
-type GooseFailure = 'expired' | 'claimed' | 'unavailable';

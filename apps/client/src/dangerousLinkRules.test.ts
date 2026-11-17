@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -55,8 +56,10 @@ it('контрфакт подстроки вместо точного хоста
     assert.equal(r.isDangerousLink('https://notevil.com', ['evil.com']), false);
   };
   check(load(source));
-  const target = "h.toLowerCase().replace(/\\.+$/, '') === host";
-  assert.equal(source.split(target).length - 1, 1, 'цель мутации единственная');
-  const mutant = load(source.replace(target, "host.includes(h.toLowerCase().replace(/\\.+$/, ''))"));
-  assert.throws(() => check(mutant), assert.AssertionError);
+  counterfact(() => {
+    const target = "h.toLowerCase().replace(/\\.+$/, '') === host";
+    assert.equal(source.split(target).length - 1, 1, 'цель мутации единственная');
+    const mutant = load(source.replace(target, "host.includes(h.toLowerCase().replace(/\\.+$/, ''))"));
+    assert.throws(() => check(mutant), assert.AssertionError);
+  });
 });

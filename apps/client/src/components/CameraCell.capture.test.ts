@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -60,8 +61,11 @@ describe('R150 CameraCell: жест системной камеры', () => {
     ['задержка 301', '}, HOLD_TO_RECORD_MS);', '}, HOLD_TO_RECORD_MS + 1);'],
     ['click не погашен', 'if (held.current) {', 'if (false) {'],
   ] as const) it(`контрфакт ${name} нарушает сценарий после оригинала`, () => {
-    boundary(source); assert.equal(source.split(from).length - 1, name === 'задержка 301' ? 2 : 1);
-    // Первый таймер принадлежит CameraCell, второй — затвору CameraScreen; модуль исполняется целиком.
-    assert.throws(() => boundary(source.replace(from, to)), assert.AssertionError);
+    boundary(source);
+    counterfact(() => {
+      assert.equal(source.split(from).length - 1, name === 'задержка 301' ? 2 : 1);
+      // Первый таймер принадлежит CameraCell, второй — затвору CameraScreen; модуль исполняется целиком.
+      assert.throws(() => boundary(source.replace(from, to)), assert.AssertionError);
+    });
   });
 });

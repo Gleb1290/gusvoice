@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -155,6 +156,6 @@ test('неизменившаяся отметка не попадает в draft
     assert.deepEqual((await changes()).rows, ['three', 'one'].map(conversation_id => ({ user_id: 'a', conversation_id, kind: 'draft', message_id: null })));
   };
   await verify(await clockedModule(false));
-  await assert.rejects(() => verifyModuleMutant(), assert.AssertionError);
+  await counterfact(() => assert.rejects(() => verifyModuleMutant(), assert.AssertionError));
   async function verifyModuleMutant() { await verify(await clockedModule(true)); }
 });

@@ -4,8 +4,7 @@ import { createDecipheriv, createECDH, createHmac, randomBytes } from 'node:cryp
 /** Одноразовый тестовый получатель WebPush; никаких сохранённых ключей или настоящих устройств. */
 export function testPushDevice() {
   const receiver = createECDH('prime256v1'); receiver.generateKeys(); const auth = randomBytes(16);
-  return { public: { p256dh: receiver.getPublicKey().toString('base64url'), auth: auth.toString('base64url') },
-    decode(body: unknown): Record<string, unknown> {
+  function decodeBytes(body: unknown): Buffer {
       // Эти фикстуры всегда с ключами: plaintext здесь скрыл бы регрессию шифрования.
       assert.ok(body instanceof Uint8Array, 'шифрованный пуш — байты'); const bytes = Buffer.from(body);
       const salt = bytes.subarray(0, 16), sender = bytes.subarray(21, 21 + bytes[20]!);
@@ -19,6 +18,12 @@ export function testPushDevice() {
       decipher.setAuthTag(sealed.subarray(-16));
       const clear = Buffer.concat([decipher.update(sealed.subarray(0, -16)), decipher.final()]);
       assert.equal(clear.at(-1), 2, 'получена последняя запись RFC8188');
-      return JSON.parse(clear.subarray(0, -1).toString('utf8')) as Record<string, unknown>;
+      return clear.subarray(0, -1);
+  }
+  return { public: { p256dh: receiver.getPublicKey().toString('base64url'), auth: auth.toString('base64url') },
+    // Побайтная проверка нужна отдельно: JSON.parse скрыл бы изменения пробелов/escape в старом ntfy-проводе.
+    decodeBytes,
+    decode(body: unknown): Record<string, unknown> {
+      return JSON.parse(decodeBytes(body).toString('utf8')) as Record<string, unknown>;
     } };
 }

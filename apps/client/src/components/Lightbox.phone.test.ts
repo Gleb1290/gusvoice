@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { it } from 'node:test';
@@ -67,8 +68,11 @@ it('ПК: одиночное фото сохраняет масштаб и ве�
   assert.equal(t.content(t.cls('lb-sub')[0]), 'сегодня в 14:05 · 2 КБ');
 });
 function mutate(from: string, to: string, check: (text: string) => void) {
-  assert.equal(source.split(from).length - 1, 1); check(source);
-  assert.throws(() => check(source.replace(from, to)), assert.AssertionError);
+  check(source);
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => check(source.replace(from, to)), assert.AssertionError);
+  });
 }
 it('контрфакт перевёрнутого phone у крестика ломает телефонное дерево', () => mutate('{!phone && (\n          <button type="button" className="lb-btn" title="Закрыть"', '{phone && (\n          <button type="button" className="lb-btn" title="Закрыть"', phoneChrome));
 it('контрфакт счётчика при одном фото обнаруживается настоящим деревом JSX', () => mutate('{phone && images.length > 1 && (', '{phone && images.length >= 1 && (', text => assert.equal(tree(true, 1, 0, text).cls('lb-count').length, 0)));

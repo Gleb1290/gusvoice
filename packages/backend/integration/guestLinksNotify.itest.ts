@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
@@ -137,7 +138,9 @@ for (const [label, anchor, replacement, kind, actual] of [
   ['забыт вызов при upsertLink', 'void announceGuestLinks(link.instanceId);', '', 'upsert', 0],
 ] as const) test(`R234 контрфакт всего links.ts: ${label}`, async () => {
   await change(kind);
+  await counterfact(async () => {
   assert.equal(source.split(anchor).length - 1, 1, 'якорь контрфакта единственный');
   await assert.rejects(() => change(kind, source.replace(anchor, replacement)), e => e instanceof assert.AssertionError
     && e.message.startsWith('R234-guest-count:') && e.operator === 'strictEqual' && e.actual === actual && e.expected === 2);
+  });
 });

@@ -1,4 +1,6 @@
+import { testVmImports } from '../testVmImports';
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { before, after, it } from 'node:test';
@@ -26,13 +28,11 @@ async function scene(mode:'custom'|'presets',source=raw){
       MenuDivider:()=>React.createElement('hr'),
       MenuItem:({label,onClick}:{label:string;onClick:()=>void})=>React.createElement('button',{onClick},label),
     }};
-  const tree=ts.createSourceFile('DmChatView.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-  const imports=new Set(tree.statements.filter(ts.isImportDeclaration).map(n=>(n.moduleSpecifier as ts.StringLiteral).text));
   const module={exports:{}};
   // Целый DmChatView, а не вырезанная функция меню; лента не монтируется, внешние зависимости изолированы.
   runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText,
     {module,exports:module.exports,window,document,CustomEvent,Date,setTimeout,clearTimeout,
-      require:(id:string)=>{assert.ok(imports.has(id)||id==='react/jsx-runtime',id);return deps[id]??{};}});
+      require:testVmImports(new URL('./DmChatView.tsx',import.meta.url),deps)});
   const menu=(module.exports as {DmMuteMenuItems:typeof DmMuteMenuItems}).DmMuteMenuItems;
   const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
   const event=(e:Event)=>calls.push(['custom',(e as CustomEvent<unknown>).detail]);
@@ -67,9 +67,11 @@ it('R130 пять пресетов времени сохраняют срок и
 it('R130 мутанты незакрытого меню, чужого id и потерянного пресета отвергаются',async()=>{
   // Страж события проверяет и адресата, и порядок закрытия; количество не маскируется последним пунктом.
   await scene('custom');
+  await counterfact(async () => {
   for(const[from,to,msg]of[
     ['            onDone();\n            window.dispatchEvent','            window.dispatchEvent','сначала закрыто меню'],
     ['new CustomEvent<string>(MUTE_CUSTOM_EVENT, { detail: peerId })',"new CustomEvent<string>(MUTE_CUSTOM_EVENT, { detail: 'other-peer' })",'сначала закрыто меню'],
     ['DM_MUTE_PRESETS.map((p)', 'DM_MUTE_PRESETS.slice(0, 4).map((p)','ровно пять пресетов'],
   ])await assert.rejects(scene('custom',changed(from!,to!)),(e:unknown)=>e instanceof assert.AssertionError&&e.message.includes(msg!));
+  });
 });

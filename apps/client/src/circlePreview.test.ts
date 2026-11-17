@@ -1,4 +1,6 @@
+import { testVmImports } from './testVmImports';
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -14,15 +16,17 @@ it('одиночный кружок без подписи — безрамочн
   const look = (bubbleLook: typeof bubble.bubbleLook, content = '') => bubbleLook({ content, attachments: [round] } as never, 400, 300);
   assert.equal(look(bubble.bubbleLook).kind, 'sticker');
   assert.equal(look(bubble.bubbleLook, 'подпись').kind, 'media');
+  counterfact(() => {
   const source = readFileSync(new URL('./bubbleRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const branch = "if (atts.length === 1 && a?.round === true && a.contentType.startsWith('video/') && !m.content && !framed) {\n    return { kind: 'sticker', jumbo: 0, mediaWidth: null };";
   assert.ok(source.includes(branch), 'в пузыре есть отдельное правило круга');
   const module = { exports: {} as Record<string, unknown> };
   runInNewContext(ts.transpileModule(source.replace(branch, "if (false) {\n    return { kind: 'sticker', jumbo: 0, mediaWidth: null };"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { module, exports: module.exports, require: (id: string) => id === '@gusvoice/shared' ? shared : id === './imageSize' ? imageSize : null });
+    { module, exports: module.exports, require: testVmImports(new URL('./bubbleRules.ts', import.meta.url), { '@gusvoice/shared': shared, './imageSize': imageSize }) });
   const mutant = module.exports as typeof bubble;
   assert.throws(() => assert.equal(look(mutant.bubbleLook).kind, 'sticker'), assert.AssertionError,
     'мутант возвращает кругу обычную рамку изображения вместо безрамочного вида');
+  });
 });
 
 it('кружок сохраняет attachmentRound от вложения до превью строки и уведомления', () => {
@@ -34,20 +38,22 @@ it('кружок сохраняет attachmentRound от вложения до �
   assert.equal(row.messageAttachmentLabel({ attachments: [round] }), 'Видеосообщение');
 
   const source = readFileSync(new URL('./dmRowRules.ts', import.meta.url), 'utf8');
-  const roundBranch = 'first.round === true ? ({ attachmentRound: true } as const) : {}';
-  assert.ok(source.includes(roundBranch), 'найдено сохранение признака кружка для строки');
   const load = (code: string) => {
     const module = { exports: {} as Record<string, unknown> };
     runInNewContext(ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { module, exports: module.exports, require: (id: string) => id === '@gusvoice/shared' ? shared : id === './bubbleRules' ? bubble : {} });
+      { module, exports: module.exports, require: testVmImports(new URL('./dmRowRules.ts', import.meta.url), { '@gusvoice/shared': shared, './bubbleRules': bubble }) });
     return module.exports as typeof row;
   };
   const vmRules = load(source);
   assert.equal(vmRules.dmAttachmentPreview({ text: '', attachments: 1, ...vmRules.attachmentPreviewOf([round]) })?.label, 'Видеосообщение',
     'неизменённый модуль в VM сохраняет ту же подпись без длительности');
+  counterfact(() => {
+  const roundBranch = 'first.round === true ? ({ attachmentRound: true } as const) : {}';
+  assert.ok(source.includes(roundBranch), 'найдено сохранение признака кружка для строки');
   const mutantSource = source.replace(roundBranch, 'first.round === true ? ({} as const) : {}');
   assert.notEqual(mutantSource, source, 'мутант действительно удаляет round-признак');
   const mutant = load(mutantSource);
   assert.throws(() => assert.equal(mutant.dmAttachmentPreview({ text: '', attachments: 1, ...mutant.attachmentPreviewOf([round]) })?.label,
     'Видеосообщение'), assert.AssertionError, 'мутант теряет метку кружка и подписывает его как обычное видео');
+  });
 });

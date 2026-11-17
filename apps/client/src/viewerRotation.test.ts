@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -139,6 +140,28 @@ it('R276 два просмотра друг над другом не возвр�
   });
 });
 
+it('полноэкранный стрим сохраняет телефонную раскладку при повороте, а открытое фото продлевает исключение', () => {
+  environment(source, h => {
+    h.viewer.installViewerRotation();
+    const closeStream = h.viewer.holdViewerRotation();
+    assert.ok(closeStream);
+    assert.deepEqual(h.calls, [false, true]);
+    h.width(1000);
+    assert.equal(h.phoneLayout(), true);
+
+    const photo = h.add('lightbox');
+    closeStream();
+    assert.deepEqual(h.calls, [false, true]);
+    photo.remove();
+    h.flush();
+    assert.deepEqual(h.calls, [false, true, false]);
+    h.width(400);
+    h.width(1000);
+    assert.equal(h.phoneLayout(), false);
+    h.cleanup();
+  });
+});
+
 it('R276 замена одного портала другим в одной доставке observer не возвращает портрет между просмотрщиками', () => {
   // React может в одном commit снять Lightbox и поставить галерею: промежуточное состояние не должно дёргать датчик.
   environment(source, h => {
@@ -256,8 +279,10 @@ for (const [name, from, to, check, marker] of [
 ] as const) {
   it(`R276 контрфакт: ${name}`, () => {
     check();
-    assert.equal(source.split(from).length - 1, 1, 'мутация однозначно меняет production-ветку');
-    assert.throws(() => check(source.replace(from, to)), error =>
-      error instanceof assert.AssertionError && error.message.includes(marker));
+    counterfact(() => {
+      assert.equal(source.split(from).length - 1, 1, 'мутация однозначно меняет production-ветку');
+      assert.throws(() => check(source.replace(from, to)), error =>
+        error instanceof assert.AssertionError && error.message.includes(marker));
+    });
   });
 }

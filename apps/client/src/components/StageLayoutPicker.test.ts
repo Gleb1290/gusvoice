@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -140,9 +141,11 @@ function pickerContract(raw = source) {
 // Класс ошибки: мобильное меню показывает лишние режимы, семантическая отметка инвертируется или меню зависает после выбора.
 it('R248 исходные мутанты выбора устройства, radio-отметки и закрытия меню обнаруживаются', () => {
   pickerContract();
-  assert.throws(() => pickerContract(source.replace('stageLayoutChoices(phone)', 'stageLayoutChoices(false)')), assert.AssertionError);
-  assert.throws(() => pickerContract(source.replace('aria-checked={l === current}', 'aria-checked={l !== current}')),
-    assert.AssertionError);
-  const closeAfterSave = 'setStageLayout(l);\n                close();';
-  assert.throws(() => pickerContract(source.replace(closeAfterSave, 'setStageLayout(l);')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => pickerContract(source.replace('stageLayoutChoices(phone)', 'stageLayoutChoices(false)')), assert.AssertionError);
+    assert.throws(() => pickerContract(source.replace('aria-checked={l === current}', 'aria-checked={l !== current}')),
+      assert.AssertionError);
+    const closeAfterSave = 'setStageLayout(l);\n                close();';
+    assert.throws(() => pickerContract(source.replace(closeAfterSave, 'setStageLayout(l);')), assert.AssertionError);
+  });
 });

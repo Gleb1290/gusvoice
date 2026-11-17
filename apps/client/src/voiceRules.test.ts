@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -17,11 +18,13 @@ function load(raw: string): Rules {
   return module.exports;
 }
 function mutation(anchor: string, replacement: string, probe: (r: Rules) => void, marker: string) {
-  assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта однозначен');
   probe(rules);
-  assert.throws(() => probe(load(source.replace(anchor, replacement))),
-    e => e instanceof assert.AssertionError && e.message.startsWith(marker),
-    'мутант отвергается целевым контрактом, не ошибкой загрузки');
+  counterfact(() => {
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь мутанта однозначен');
+    assert.throws(() => probe(load(source.replace(anchor, replacement))),
+      e => e instanceof assert.AssertionError && e.message.startsWith(marker),
+      'мутант отвергается целевым контрактом, не ошибкой загрузки');
+  });
 }
 
 it('R306 булева метка bot:true в метаданных распознаётся и с соседними полями', () => {

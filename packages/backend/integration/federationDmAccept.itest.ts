@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -140,8 +141,10 @@ async function equalVersion(mutation?: Mutation) {
 test('R190 допуск равной версии обнаруживается изменением настоящей SQL-строки', async () => {
   // Класс ошибки идемпотентности: > вместо >= в условии отказа принимает равный повтор.
   await equalVersion();
+  await counterfact(async () => {
   await assert.rejects(equalVersion(['w.editVersion <= row.editVersion', 'w.editVersion < row.editVersion']),
     e => e instanceof assert.AssertionError && e.message.includes('равная версия не переписывает'));
+  });
 });
 async function monotonic(mutation?: Mutation) {
   const f = await fixture(mutation);
@@ -158,8 +161,10 @@ async function monotonic(mutation?: Mutation) {
 test('R190 надгробие монотонно, снятие deleted guard обнаруживается возвращением текста', async () => {
   // Класс ошибки монотонности: даже большая версия не оживляет удалённую копию.
   await monotonic();
+  await counterfact(async () => {
   await assert.rejects(monotonic(['if (row.deletedAt) return; // надгробие монотонно: воскресить нельзя', '// guard удалён']),
     e => e instanceof assert.AssertionError && e.message.includes('надгробие не возвращает текст'));
+  });
 });
 for (const kind of ['direct', 'group'] as const) test(`R190 надгробие своего сообщения Ф8 ${kind === 'direct' ? 'применяется в 1:1' : 'не принимается в группе'}`, async () => {
   // Класс ошибки области полномочий: исключение для удаления у обоих не распространяется на группы.
@@ -213,8 +218,10 @@ for (const [name, from, to] of [
   ['четвёртая', 'if (n >= REACTIONS_PER_USER_MAX) return;', '// потолок снят'],
 ] as const) test(`R304 контрфакт приёма реакций: ${name} не попадает в SQL`, async () => {
   await auditReactions();
+  await counterfact(async () => {
   await assert.rejects(auditReactions([from, to]), e => e instanceof assert.AssertionError &&
     e.operator === 'deepStrictEqual' && e.message.startsWith('R304 сосед: только три разных допустимых эмодзи'));
+  });
 });
 
 test('R304 пересылка от нашего человека привязывается только к существующему оригиналу с тем же текстом и временем', async () => {
@@ -268,8 +275,10 @@ async function auditQuote(mutation?: Mutation) {
 test('R304 фед-приём пересчитывает auto, принимает точную цитату и убирает поддельную или без родителя', () => auditQuote());
 test('R304 контрфакт цитаты провода как есть меняет настоящую строку сообщения', async () => {
   await auditQuote();
+  await counterfact(async () => {
   await assert.rejects(auditQuote(['const replyQuote = fedReplyQuote(parentContent, w.replyQuote);', 'const replyQuote = w.replyQuote;']),
     e => e instanceof assert.AssertionError && e.message.startsWith('R304 цитата не подделывает нашу копию родителя'));
+  });
 });
 test('R304 дата 2099 заменяется временем приёма, близкая дата автора сохраняется до миллисекунды', async () => {
   const f = await fixture();
@@ -285,8 +294,10 @@ test('R304 дата 2099 заменяется временем приёма, б�
 test('R190 реакции заменяются только у людей соседа, удаление peer guard допускает подделку местного', async () => {
   // Класс ошибки владельца состояния: итог соседа не имеет права менять реакцию нашего человека.
   await reactions();
+  await counterfact(async () => {
   await assert.rejects(reactions(['if (r.user.instanceId !== peer) continue;\n      const who', 'const who']),
     e => e instanceof assert.AssertionError && e.message.includes('реакция местного не подделывается'));
+  });
 });
 test('R190 прочитано движется вперёд, readAt впервые покрытых чужих сообщений сохраняется при откате и повторе', async () => {
   // Класс ошибки монотонности курсора: старый read не снимает ✓✓ и не переписывает момент чтения.
@@ -351,9 +362,11 @@ async function blockedReaction(mutation?: Mutation) {
 test('R191 блокировка исключает местного из журнала чужой реакции, без блока изменение доставляется', async () => {
   // Класс ошибки приватности доставки: состояние соседа применено, но блокирующему не должен идти msg этой реакции.
   await blockedReaction();
+  await counterfact(async () => {
   const anchor = "const audience = changeAudience({ action: 'react', actorId: theirs[0], memberIds: c.memberIds, withheld: m.withheld, blockedActor });";
   await assert.rejects(blockedReaction([anchor, anchor.replace('blockedActor });', 'blockedActor: new Set() });')]),
     e => e instanceof assert.AssertionError && e.message.includes('заблокировавшему не пишется msg'));
+  });
 });
 
 test('R191 общий закреп от заблокированного не ложится местному и не снимает его ранее полученный закреп', async () => {
@@ -393,7 +406,9 @@ async function arrivalSummary(mutation?: Mutation) {
 test('R191 поздняя копия поднимает сводку моментом приёма, контрфакт createdAt не прячет новую беседу', async () => {
   // Класс ошибки порядка списка: досланное сообщение не должно остаться на старом месте по часам автора.
   await arrivalSummary();
+  await counterfact(async () => {
   const anchor = 'lastMessageAt: sql`GREATEST(${conversations.lastMessageAt}, now())`';
   await assert.rejects(arrivalSummary([anchor, 'lastMessageAt: sql`GREATEST(${conversations.lastMessageAt}, ${createdAt.toISOString()}::timestamptz)`']),
     e => e instanceof assert.AssertionError && e.message.includes('опоздавшая копия поднимает сводку'));
+  });
 });

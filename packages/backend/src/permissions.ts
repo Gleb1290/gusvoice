@@ -46,13 +46,18 @@ export interface MemberContext {
   roles: RoleRow[];
   everyoneRoleId: string | null;
   serverPermissions: bigint;
+  /**
+   * Это виртуальный участник-супер-админ (29.10, замок игр `GAMES_OPEN`): маршруты, которым важно «кто именно», берут
+   * признак отсюда, а не новым импортом `auth`. Обычному участнику поля нет.
+   */
+  superAdmin?: true;
 }
 
 /** Load a member's server-level context, or null if they are not a member. */
 export async function getMemberContext(serverId: string, userId: string): Promise<MemberContext | null> {
   // Super-admin is a virtual full-permission member of every server. По id, без похода в базу (#140).
   if (isSuperAdmin(asUserId(userId))) {
-    return { isOwner: true, roleIds: [], roles: [], everyoneRoleId: null, serverPermissions: ALL_PERMISSIONS };
+    return { isOwner: true, roleIds: [], roles: [], everyoneRoleId: null, serverPermissions: ALL_PERMISSIONS, superAdmin: true };
   }
 
   const [member] = await db

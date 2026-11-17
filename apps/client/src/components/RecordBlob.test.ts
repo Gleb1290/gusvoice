@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -148,8 +149,10 @@ it('R176 размонтирование активной записи отмен
 // Класс ошибки: контрфакт продолжает цикл после onDone даже если cleanup потом отменит лишний кадр.
 it('R176 мутант rAF после onDone обнаруживается по числу запросов, не только отсутствию canvas', async () => {
   await completed();
-  const anchor = 'if (st.exit && t >= 1) {\n        st.onDone();\n        return;\n      }';
-  assert.equal(source.split(anchor).length - 1, 1, 'единственная граница окончания ухода');
-  await assert.rejects(() => completed(source.replace(anchor, anchor.replace('        return;\n', ''))),
-    e => e instanceof assert.AssertionError && e.message.includes('завершённый уход не планирует'));
+  await counterfact(async () => {
+    const anchor = 'if (st.exit && t >= 1) {\n        st.onDone();\n        return;\n      }';
+    assert.equal(source.split(anchor).length - 1, 1, 'единственная граница окончания ухода');
+    await assert.rejects(() => completed(source.replace(anchor, anchor.replace('        return;\n', ''))),
+      e => e instanceof assert.AssertionError && e.message.includes('завершённый уход не планирует'));
+  });
 });

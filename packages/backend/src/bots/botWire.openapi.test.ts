@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { MessageEmbed } from '@gusvoice/shared';
@@ -54,7 +55,9 @@ it('R307 неизвестные добавленные поля карточки
 const custom = { from: '  embeds: z.array(wireEmbed).optional(),', to: '  embeds: z.array(z.custom()).optional(),' };
 it('R307 контрфакт: z.custom вновь пропускает неверный embed в wireMessage', () => {
   const check = (w: typeof wire) => assert.equal(w.wireMessage.safeParse({ ...message, embeds: [{ author: { name: 7 } }] }).success, false, 'R307 форма вложенного embed проверяется');
-  check(wire); check(loadWire()); assert.throws(() => check(loadWire(custom)), assertion('R307 форма вложенного embed проверяется', true, false));
+  check(wire); check(loadWire()); counterfact(() => {
+    assert.throws(() => check(loadWire(custom)), assertion('R307 форма вложенного embed проверяется', true, false));
+  });
 });
 it('R307 контрфакт: z.custom теряет схему embed в OpenAPI, а не падает случайно при загрузке', () => {
   const check = (w: typeof wire) => {
@@ -62,5 +65,7 @@ it('R307 контрфакт: z.custom теряет схему embed в OpenAPI, 
     const schemas = doc.components.schemas as Record<string, unknown>;
     assert.equal(Object.hasOwn(schemas, 'MessageEmbed'), true, 'R307 OpenAPI описывает MessageEmbed');
   };
-  check(wire); check(loadWire()); assert.throws(() => check(loadWire(custom)), assertion('R307 OpenAPI описывает MessageEmbed', false, true));
+  check(wire); check(loadWire()); counterfact(() => {
+    assert.throws(() => check(loadWire(custom)), assertion('R307 OpenAPI описывает MessageEmbed', false, true));
+  });
 });

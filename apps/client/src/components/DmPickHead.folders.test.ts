@@ -1,8 +1,10 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as React from 'react';
 import * as jsx from 'react/jsx-runtime';
 import * as shared from '@gusvoice/shared';
@@ -23,25 +25,15 @@ function dm(id: string): shared.DmChannel {
   return { id, createdAt: '2026-10-12T00:00:00Z', lastMessageAt: null,
     otherUser: { id: `peer-${id}`, username: id, displayName: id, avatarUrl: null } } as shared.DmChannel;
 }
-function wholeModule<T>(source: string, deps: Record<string, unknown>): T {
-  const parsed = ts.createSourceFile('module.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  for (const node of parsed.statements) {
-    if (!ts.isImportDeclaration(node) || node.importClause?.isTypeOnly) continue;
-    const binding = node.importClause?.namedBindings;
-    if (binding && ts.isNamedImports(binding) && binding.elements.every(e => e.isTypeOnly)) continue;
-    assert.equal(Object.hasOwn(deps, (node.moduleSpecifier as ts.StringLiteral).text), true, `явный импорт ${node.moduleSpecifier.getText(parsed)}`);
-  }
+function wholeModule<T>(source: string, deps: Record<string, unknown>, path: string): T {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
   { module, exports: module.exports, window, document, navigator, Date, Promise,
-    require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `неописанная граница ${id}`); return deps[id]; } });
+    require: testVmImports(new URL(path, import.meta.url), deps) });
   return module.exports as T;
 }
 const fail = (name: string) => () => { throw new Error(`неожиданная операция ${name}`); };
-function unused(name: string) {
-  return new Proxy({}, { get: (_target, key) => key === '__esModule' ? true : fail(`${name}.${String(key)}`) });
-}
 type Call = { folderId: string; chat: shared.DmFolderChat; add: boolean };
 interface Options { folders?: shared.DmFolder[]; activeId?: string | null; features?: string[]; convActive?: boolean; ids?: string[]; row?: string; bar?: string }
 interface Fixture {
@@ -79,11 +71,11 @@ async function fixture(options: Options, check: (f: Fixture) => Promise<void>) {
     const bar = wholeModule<typeof import('./DmFolderBar')>(options.bar ?? folderSource, { ...common,
       '../hotkeys': { isTauri: () => false }, '../dmFolderView': view,
       '../dmFolders': { useDmFolders, serverFolders: (fs: readonly string[] | undefined) => !!fs?.includes(shared.FEATURE_FOLDERS1) },
-      './DmRowMenu': { readAllDms: fail('readAllDms') } });
+      './DmRowMenu': { readAllDms: fail('readAllDms') } }, './DmFolderBar.tsx');
     const row = wholeModule<typeof import('./DmRowMenu')>(options.row ?? rowSource, { ...common,
       '../notifyExceptionsRules': notify, '../dmArchiveRules': archive, './DmFolderBar': bar,
       './DmPinDrag': { reorderDmPins: fail('reorder') }, './DmChatView': { DmMuteMenuItems: fail('mute submenu'), switchDmBlock: fail('block'), toggleDmPinned: fail('pin') },
-      './dmClearActions': unused('clear'), '../dmRowRules': unused('plural'), './DmArchive': { archiveDms: fail('archive') } });
+      './DmArchive': { archiveDms: fail('archive') } }, './DmRowMenu.tsx');
     const item = (label: string) => {
       const matches = [...document.querySelectorAll<HTMLButtonElement>('.ctx-item')].filter(b => b.querySelector('.ctx-label-main')?.textContent === label);
       assert.equal(matches.length, 1, `единственный пункт ${label}`); return matches[0];
@@ -203,17 +195,23 @@ function archiveFirst() {
 const assertionAt = (text: string) => (error: unknown) => error instanceof assert.AssertionError && error.message.includes(text);
 it('R181 контрфакт архива первой кнопкой обнаруживается по реальному DOM панели', async () => {
   // Переставляются JSX-узлы только нужной панели; исполняется весь модуль, не фрагмент исходника.
-  await order(); await assert.rejects(order(archiveFirst()), assertionAt('порядок пяти действий'));
+  await counterfact(async () => {
+    await assert.rejects(order(archiveFirst()), assertionAt('порядок пяти действий'));
+  });
 });
 it('R181 контрфакт добавления всех вместо недостающих обнаруживается по первому toggleChat', async () => {
   // Уже включённый a не должен повторно уйти в API: это не просто проверка общего числа запросов.
-  await missing(); const mutant = replaceUnique(folderSource, 'all ? chats : missing, !all', 'chats, !all');
-  await assert.rejects(missing(mutant), assertionAt('добавляется только первый недостающий'));
+  await counterfact(async () => {
+    const mutant = replaceUnique(folderSource, 'all ? chats : missing, !all', 'chats, !all');
+    await assert.rejects(missing(mutant), assertionAt('добавляется только первый недостающий'));
+  });
 });
 it('R181 контрфакт параллельных toggleChat обнаруживается до ответа первого запроса', async () => {
   // Отложенные Promise моделируют независимые полные ответы сервера без таймеров и сети.
-  await missing(); const mutant = replaceUnique(folderSource,
-    'return chats.reduce<Promise<void>>((p, c) => p.then(() => useDmFolders.getState().toggleChat(folderId, c, add)), Promise.resolve());',
-    'return Promise.all(chats.map(c => useDmFolders.getState().toggleChat(folderId, c, add))).then(() => undefined);');
-  await assert.rejects(missing(mutant), assertionAt('добавляется только первый недостающий'));
+  await counterfact(async () => {
+    const mutant = replaceUnique(folderSource,
+      'return chats.reduce<Promise<void>>((p, c) => p.then(() => useDmFolders.getState().toggleChat(folderId, c, add)), Promise.resolve());',
+      'return Promise.all(chats.map(c => useDmFolders.getState().toggleChat(folderId, c, add))).then(() => undefined);');
+    await assert.rejects(missing(mutant), assertionAt('добавляется только первый недостающий'));
+  });
 });

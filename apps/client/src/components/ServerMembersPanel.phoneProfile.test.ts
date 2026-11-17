@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -88,13 +89,13 @@ it('R176 правый клик на ПК сохраняет обычное ме�
 // Класс ошибки: возвращён setSheetMember вместо полноэкранного профиля.
 it('R176 мутант возврата прежнего листа участника обнаруживается контрактом openMenu profile', async () => {
   const anchor = "? (e) => openMenu(e, { userId: m.user.id, name, avatarUrl: m.user.avatarUrl, username: m.user.username }, 'profile')";
-  assert.equal(source.split(anchor).length - 1, 1); await phone();
-  await assert.rejects(() => phone(source.replace(anchor, '? () => setSheetMember(m)')), assert.AssertionError);
+  counterfact(() => assert.equal(source.split(anchor).length - 1, 1)); await phone();
+  await counterfact(() => assert.rejects(() => phone(source.replace(anchor, '? () => setSheetMember(m)')), assert.AssertionError));
 });
 // Класс ошибки: usePhoneUi потерян, телефонный браузер стал ПК.
 it('R176 мутант только isMobile обнаруживается браузером шириной 760', async () => {
-  const anchor = 'mobile || phoneUi\n            ?'; assert.equal(source.split(anchor).length - 1, 1); await phone();
-  await assert.rejects(() => phone(source.replace(anchor, 'mobile\n            ?')), assert.AssertionError);
+  const anchor = 'mobile || phoneUi\n            ?'; counterfact(() => assert.equal(source.split(anchor).length - 1, 1)); await phone();
+  await counterfact(() => assert.rejects(() => phone(source.replace(anchor, 'mobile\n            ?')), assert.AssertionError));
 });
 // Класс ошибки: старый MemberProfileSheet импортирован или вновь вставлен в панель.
 it('R176 в исходной панели нет MemberProfileSheet, профиль идёт через существующую карту меню', () => {

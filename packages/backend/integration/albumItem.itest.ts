@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -188,15 +189,19 @@ test('G56 удаление не существует вне сообщения �
 });
 test('G56 контрфакт потери прироста версии ловится реальной строкой PostgreSQL', async () => {
   await bothScenario();
+  await counterfact(async () => {
   await assert.rejects(bothScenario(['attachments: m.attachments.filter((a) => a.id !== attachmentId),\n        editVersion: sql`${conversationMessages.editVersion} + 1`,',
     'attachments: m.attachments.filter((a) => a.id !== attachmentId),\n        editVersion: sql`${conversationMessages.editVersion}`,']), failure('версия альбома растёт на один', 0, 1));
+  });
 });
 test('G56 контрфакт отметки изм. ловится сохранённым edited_at, а не ошибкой VM', async () => {
   await bothScenario();
+  await counterfact(async () => {
   await assert.rejects(bothScenario(['attachments: m.attachments.filter((a) => a.id !== attachmentId),',
     'attachments: m.attachments.filter((a) => a.id !== attachmentId), editedAt: new Date(),']),
   e => e instanceof assert.AssertionError && e.message.startsWith('удаление элемента не ставит изм.')
     && e.actual instanceof Date && Number.isFinite(e.actual.getTime()) && e.expected === null && e.operator === 'strictEqual');
+  });
 });
 async function scopedFile(mutation?: Mutation) {
   const f = await fixture(mutation);
@@ -209,8 +214,10 @@ async function scopedFile(mutation?: Mutation) {
 }
 test('G56 условие messageId защищает файл чужой строки и его снятие ловится реальным SQL', async () => {
   await scopedFile();
+  await counterfact(async () => {
   const anchor = 'eq(attachments.id, attachmentId),\n          eq(attachments.messageId, messageId),';
   await assert.rejects(scopedFile([anchor, 'eq(attachments.id, attachmentId),']), failure('файл другого сообщения не удаляется', 'deleted', 'attached'));
+  });
 });
 test('G56 пересылка выбранного элемента копирует один файл без общей подписи, целиком сохраняет все три и подпись', async () => {
   const f = await fixture(), access = await f.access('local', target);

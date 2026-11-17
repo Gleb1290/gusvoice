@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -120,10 +121,10 @@ it('R123 панель без подписей и пустые подписи н�
 it('R123 контрфакты пропуска n, неснятого атрибута и обеих неверных границ обнаруживаются поведением', () => {
   // Мутанты проходят те же измерения, что оригинал; не копируем алгоритм в тест.
   const cases = [
-    { raw: mutate("bar.setAttribute('data-fit', 'n');", "bar.setAttribute('data-fit', 'col');"), widths: dimensions([101], [100], [100]), old: null, expected: 'n' },
-    { raw: mutate("bar.removeAttribute('data-fit');", ''), widths: dimensions([100], [100], [100]), old: 'col', expected: null },
-    { raw: mutate('label.scrollWidth > label.clientWidth', 'label.scrollWidth >= label.clientWidth'), widths: dimensions([100]), old: null, expected: null },
-    { raw: mutate('label.scrollWidth > label.clientWidth', 'label.scrollWidth < label.clientWidth'), widths: dimensions([101], [100]), old: null, expected: 'n' },
+    { raw: () => mutate("bar.setAttribute('data-fit', 'n');", "bar.setAttribute('data-fit', 'col');"), widths: dimensions([101], [100], [100]), old: null, expected: 'n' },
+    { raw: () => mutate("bar.removeAttribute('data-fit');", ''), widths: dimensions([100], [100], [100]), old: 'col', expected: null },
+    { raw: () => mutate('label.scrollWidth > label.clientWidth', 'label.scrollWidth >= label.clientWidth'), widths: dimensions([100]), old: null, expected: null },
+    { raw: () => mutate('label.scrollWidth > label.clientWidth', 'label.scrollWidth < label.clientWidth'), widths: dimensions([101], [100]), old: null, expected: 'n' },
   ];
   for (const c of cases) {
     const check = (raw: string) => {
@@ -133,7 +134,7 @@ it('R123 контрфакты пропуска n, неснятого атриб�
       assert.equal(p.bar.getAttribute('data-fit'), c.expected);
     };
     check(source);
-    assert.throws(() => check(c.raw), assert.AssertionError);
+    counterfact(() => assert.throws(() => check(c.raw()), assert.AssertionError));
   }
 });
 

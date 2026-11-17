@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -65,8 +66,10 @@ for (const c of [
     probe: (m: typeof rules) => assert.equal(m.moveTarget({ ...moved(), user: { ...moved().user, id: 'other' } }, 'self', 'old'), null, 'R306 reconnect чужой участник не переносит бота'), message: 'R306 reconnect чужой участник не переносит бота' },
 ]) it(`R306 reconnect контрфакт: ${c.name}, оригинал проходит первым`, () => {
   c.probe(load(source));
+  counterfact(() => {
   assert.equal(source.split(c.needle).length - 1, 1, 'reconnect: точный уникальный якорь');
   assert.throws(() => c.probe(load(source.replace(c.needle, c.replacement))), (e: unknown) => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.message.split('\n', 1)[0] === c.message
     && e.operator === 'strictEqual');
+  });
 });

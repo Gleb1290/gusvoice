@@ -1,7 +1,9 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import * as jsx from 'react/jsx-runtime';
 import type { ReactNode, ReactElement } from 'react';
 import ts from 'typescript';
@@ -16,13 +18,11 @@ function render(unreadDms: string[], archived: string[] = [], text = source) {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(text, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
-  } }).outputText, { module, exports: module.exports, require(id: string) {
-    if (id === 'react/jsx-runtime') return jsx;
-    if (id === '../store') return { useStore: (select: (s: typeof state) => unknown) => select(state) };
-    if (id === '../dmArchiveRules') return archive;
-    if (id === './Icon') return { Icon: () => null };
-    assert.fail(`неожиданный импорт ${id}`);
-  } });
+  } }).outputText, { module, exports: module.exports, require: testVmImports(new URL('./MobileNav.tsx', import.meta.url), {
+    'react/jsx-runtime': jsx,
+    '../store': { useStore: (select: (s: typeof state) => unknown) => select(state) },
+    '../dmArchiveRules': archive, './Icon': { Icon: () => null },
+  }) });
   const tree = (module.exports as typeof import('./MobileNav')).MobileNav();
   const nodes: Node[] = [];
   const visit = (node: ReactNode) => {
@@ -60,9 +60,13 @@ it('R157 одна и несколько непрочитанных бесед п
 it('R157 архивные исключаются из числовой пилюли, названия вкладок сохраняются', () => count());
 it('R157 контрфакт точки вместо числа обнаруживается после успешного оригинала', () => {
   count();
-  assert.throws(() => count(replaceOnce('{badge}</span>', "{''}</span>")), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => count(replaceOnce('{badge}</span>', "{''}</span>")), assert.AssertionError);
+  });
 });
 it('R157 контрфакт счёта вместе с архивом обнаруживается после успешного оригинала', () => {
   count();
-  assert.throws(() => count(replaceOnce('unreadOutsideArchive(s.dms, s.unreadDms).length', 's.unreadDms.length')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => count(replaceOnce('unreadOutsideArchive(s.dms, s.unreadDms).length', 's.unreadDms.length')), assert.AssertionError);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
@@ -146,14 +147,18 @@ async function gateExport(edit?: Mutation) {
 test('R222 dmmedia1 без dmpoll1 получает запасной текст и движущийся курсор; новый дом получает media и голоса', async () => { await gateExport(); });
 test('R222 контрфакт: удалён KIND_FEATURE[vote] — старому дому ошибочно ушли голоса', async () => {
   await gateExport();
-  const file = 'federation/convChanges', from = '  [FED_CONV_CHANGE_E2.vote]: FED_FEATURES.dmpoll1,';
-  assert.equal(source(file).split(from).length, 2);
-  await assert.rejects(() => gateExport({ file, from, to: '' }), killed('старому дому не уходит строка голосов', true, false));
+  await counterfact(async () => {
+    const file = 'federation/convChanges', from = '  [FED_CONV_CHANGE_E2.vote]: FED_FEATURES.dmpoll1,';
+    assert.equal(source(file).split(from).length, 2);
+    await assert.rejects(() => gateExport({ file, from, to: '' }), killed('старому дому не уходит строка голосов', true, false));
+  });
 });
 test('R222 контрфакт: pollOk=true — старому дому ошибочно ушёл опрос вместо текста', async () => {
   await gateExport();
-  await assert.rejects(() => gateExport(mutation('federation/convChanges', 'materialize', 'const pollOk = await peerKnowsPolls(msgs, instanceId);', 'const pollOk = true;')),
-    killed('старому дому не уходит media опроса', true, false));
+  await counterfact(async () => {
+    await assert.rejects(() => gateExport(mutation('federation/convChanges', 'materialize', 'const pollOk = await peerKnowsPolls(msgs, instanceId);', 'const pollOk = true;')),
+      killed('старому дому не уходит media опроса', true, false));
+  });
 });
 test('R222 местный голос журналируется как pollvote, а не msg', async () => {
   const w = await fixture();
@@ -181,13 +186,17 @@ test('R222 multi сохраняет два известных варианта �
 });
 test('R222 контрфакт: theirs без фильтра дома стирает местный голос', async () => {
   await admission();
-  await assert.rejects(() => admission(mutation('federation/convAccept', 'applyPollVotes', 'c.members.filter((x) => (fromHost ? x.home !== null : x.home === peer))', 'c.members')),
-    killed('сосед не снимает местный голос', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => admission(mutation('federation/convAccept', 'applyPollVotes', 'c.members.filter((x) => (fromHost ? x.home !== null : x.home === peer))', 'c.members')),
+      killed('сосед не снимает местный голос', false, true));
+  });
 });
 test('R222 контрфакт: single без slice принимает лишний вариант', async () => {
   await admission();
-  await assert.rejects(() => admission(mutation('federation/convAccept', 'applyPollVotes', 'poll.multi ? opts : opts.slice(0, 1)', 'opts')),
-    killed('single принимает один известный вариант', 2, 1));
+  await counterfact(async () => {
+    await assert.rejects(() => admission(mutation('federation/convAccept', 'applyPollVotes', 'poll.multi ? opts : opts.slice(0, 1)', 'opts')),
+      killed('single принимает один известный вариант', 2, 1));
+  });
 });
 async function relay(edit?: Mutation) {
   const w = await fixture('host', edit);
@@ -200,8 +209,10 @@ async function relay(edit?: Mutation) {
 test('R222 хост пересылает голос третьему дому, но не дому голосующего', async () => { await relay(); });
 test('R222 контрфакт: снят exceptHome — голос возвращается дому автора', async () => {
   await relay();
-  await assert.rejects(() => relay(mutation('federation/convAccept', 'applyPollVotes', ', exceptHome: peer', '')),
-    killed('хост не возвращает голос дому автора', true, false));
+  await counterfact(async () => {
+    await assert.rejects(() => relay(mutation('federation/convAccept', 'applyPollVotes', ', exceptHome: peer', '')),
+      killed('хост не возвращает голос дому автора', true, false));
+  });
 });
 test('R222 от хоста принимаются действующие люди третьего дома, но не свои и не бывшие', async () => {
   const w = await fixture('member');
@@ -253,15 +264,19 @@ test('R222 полный проход учитывает pollvote в seen, отс
 });
 test('R222 контрфакт: забытая pollvote в seen стирает присланный голос', async () => {
   await fullPass(true, true);
-  await assert.rejects(() => fullPass(true, true, mutation('federation/convAccept', 'noteSeenMark',
-    'else if (item.kind === FED_CONV_CHANGE_E2.vote) (seen.vote ??= new Set()).add(id);', '')),
-    killed('полный проход сохраняет присланный голос и не стирает голоса старого дома', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => fullPass(true, true, mutation('federation/convAccept', 'noteSeenMark',
+      'else if (item.kind === FED_CONV_CHANGE_E2.vote) (seen.vote ??= new Set()).add(id);', '')),
+      killed('полный проход сохраняет присланный голос и не стирает голоса старого дома', false, true));
+  });
 });
 test('R222 контрфакт: снят признак dmpoll1 при снятии неприсланных голосов — старый дом стирает зеркало', async () => {
   await fullPass(false, false);
-  await assert.rejects(() => fullPass(false, false, mutation('federation/convAccept', 'dropUnsentGroupMarks',
-    'if (link?.features.includes(FED_FEATURES.dmpoll1)) {', 'if (true) {')),
-    killed('полный проход сохраняет присланный голос и не стирает голоса старого дома', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => fullPass(false, false, mutation('federation/convAccept', 'dropUnsentGroupMarks',
+      'if (link?.features.includes(FED_FEATURES.dmpoll1)) {', 'if (true) {')),
+      killed('полный проход сохраняет присланный голос и не стирает голоса старого дома', false, true));
+  });
 });
 test('R222 marksComplete группы сохраняется для дома без dmpoll1, но pollvote не отдаётся', async () => {
   const w = await fixture('host', undefined, false);

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -79,9 +80,13 @@ it('R169 отказ API оставляет пустую карту для пре
 it('R169 контрфакты выключенного экрана и запроса на каждого отвергаются', async () => {
   // Настоящий модуль с ошибкой должен нарушить контракт, а не только совпасть с текстовым якорем.
   const baselineDisabled = await scenario(['lastseen1'], false, ['a']); assert.equal(baselineDisabled.calls.length, 0);
-  const disabled = await scenario(['lastseen1'], false, ['a'], false, s => replaceOnce(s, '&& enabled', '&& true'));
-  assert.throws(() => assert.equal(disabled.calls.length, 0), assert.AssertionError);
+  await counterfact(async () => {
+    const disabled = await scenario(['lastseen1'], false, ['a'], false, s => replaceOnce(s, '&& enabled', '&& true'));
+    assert.throws(() => assert.equal(disabled.calls.length, 0), assert.AssertionError);
+  });
   const baselineBatch = await scenario(['lastseen1'], true, ['a', 'b']); assert.equal(baselineBatch.calls.length, 1);
-  const perUser = await scenario(['lastseen1'], true, ['a', 'b'], false, s => replaceOnce(s, 'const BATCH = 200;', 'const BATCH = 1;'));
-  assert.throws(() => assert.equal(perUser.calls.length, 1), assert.AssertionError);
+  await counterfact(async () => {
+    const perUser = await scenario(['lastseen1'], true, ['a', 'b'], false, s => replaceOnce(s, 'const BATCH = 200;', 'const BATCH = 1;'));
+    assert.throws(() => assert.equal(perUser.calls.length, 1), assert.AssertionError);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -196,8 +197,10 @@ async function formerPin(edit?: Mutation) {
 test('R221 полный проход обоими направлениями сохраняет общий закреп бывшего участника', () => formerPin());
 test('R221 контрфакт отсутствие бывших в экспорте ошибочно снимает их закреп', async () => {
   await formerPin();
-  const edit = inFunction('dropUnsentGroupMarks', [['!seen.pin.has(r.id) && !former.has(r.by)', '!seen.pin.has(r.id)']]);
-  await assert.rejects(formerPin(edit), killed('R221-former-pin:', 0, 1));
+  await counterfact(async () => {
+    const edit = inFunction('dropUnsentGroupMarks', [['!seen.pin.has(r.id) && !former.has(r.by)', '!seen.pin.has(r.id)']]);
+    await assert.rejects(formerPin(edit), killed('R221-former-pin:', 0, 1));
+  });
 });
 async function snapshot() {
   return {
@@ -311,21 +314,27 @@ test('R217 отсутствие признака в одной беседе не
 
 test('R217 контрфакт: снят seen.complete — старый сосед ошибочно стирает живые отметки', async () => {
   await incomplete(2);
-  await assert.rejects(() => incomplete(2, inFunction('fullPass', [['if (ended && seen.complete)', 'if (ended)']])),
-    killed('без признака на любой странице старая реакция сохранена', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => incomplete(2, inFunction('fullPass', [['if (ended && seen.complete)', 'if (ended)']])),
+      killed('без признака на любой странице старая реакция сохранена', false, true));
+  });
 });
 test('R217 контрфакт: ended заменён true — 404 ошибочно превращается в полный пустой хвост', async () => {
   await notEnded('404');
-  await assert.rejects(() => notEnded('404', inFunction('fullPass', [['if (ended && seen.complete)', 'if (true && seen.complete)']])),
-    killed('недостигнутый конец не разрешает снять старую реакцию', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => notEnded('404', inFunction('fullPass', [['if (ended && seen.complete)', 'if (true && seen.complete)']])),
+      killed('недостигнутый конец не разрешает снять старую реакцию', false, true));
+  });
 });
 test('R217 контрфакт: один seen на все беседы переносит неполноту первой на вторую', async () => {
   await separateConversations();
-  const edit = inFunction('fullPass', [
-    ['for (const cid of todo) {', 'const sharedSeen: SeenMarks = { react: new Set(), pin: new Set(), listen: new Set(), complete: true };\n  for (const cid of todo) {'],
-    ['const seen: SeenMarks = prog.cid === cid && prog.seen ? prog.seen : { react: new Set(), pin: new Set(), listen: new Set(), complete: true };', 'const seen: SeenMarks = sharedSeen;'],
-  ]);
-  await assert.rejects(() => separateConversations(edit), killed('полнота следующей беседы не заражена seen предыдущей', true, false));
+  await counterfact(async () => {
+    const edit = inFunction('fullPass', [
+      ['for (const cid of todo) {', 'const sharedSeen: SeenMarks = { react: new Set(), pin: new Set(), listen: new Set(), complete: true };\n  for (const cid of todo) {'],
+      ['const seen: SeenMarks = prog.cid === cid && prog.seen ? prog.seen : { react: new Set(), pin: new Set(), listen: new Set(), complete: true };', 'const seen: SeenMarks = sharedSeen;'],
+    ]);
+    await assert.rejects(() => separateConversations(edit), killed('полнота следующей беседы не заражена seen предыдущей', true, false));
+  });
 });
 test('R217 контрфакт: без фильтра pinned_by сосед снимает наш общий закреп', async () => {
   const scenario = async (edit?: Mutation) => {
@@ -335,9 +344,11 @@ test('R217 контрфакт: без фильтра pinned_by сосед сни
     assert.equal(await hasOwnPin(cid), true, 'местный pinned_by защищает собственный общий закреп');
   };
   await scenario();
-  await assert.rejects(() => scenario(inFunction('dropUnsentGroupMarks', [
-    ['fromHost ? sql`${users.homeInstanceId} IS NOT NULL` : eq(users.homeInstanceId, peer),', 'sql`TRUE`,'],
-  ])), killed('местный pinned_by защищает собственный общий закреп', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => scenario(inFunction('dropUnsentGroupMarks', [
+      ['fromHost ? sql`${users.homeInstanceId} IS NOT NULL` : eq(users.homeInstanceId, peer),', 'sql`TRUE`,'],
+    ])), killed('местный pinned_by защищает собственный общий закреп', false, true));
+  });
 });
 test('R217 контрфакт: перепутанная сторона fromHost оставляет старую реакцию хоста', async () => {
   const scenario = async (edit?: Mutation) => {
@@ -347,22 +358,28 @@ test('R217 контрфакт: перепутанная сторона fromHost 
     assert.equal(await hasPeer(cid), false, 'сторона хоста выбирает чужих владельцев снятия');
   };
   await scenario();
-  await assert.rejects(() => scenario(inFunction('dropUnsentGroupMarks', [['const fromHost = c.origin === peer;', 'const fromHost = c.origin !== peer;']])),
-    killed('сторона хоста выбирает чужих владельцев снятия', true, false));
+  await counterfact(async () => {
+    await assert.rejects(() => scenario(inFunction('dropUnsentGroupMarks', [['const fromHost = c.origin === peer;', 'const fromHost = c.origin !== peer;']])),
+      killed('сторона хоста выбирает чужих владельцев снятия', true, false));
+  });
 });
 test('R217 контрфакт: потерян prog.seen при 429 — текущая отметка первой страницы стёрта', async () => {
   await resume();
-  await assert.rejects(() => resume(inFunction('fullPass', [['prog.seen = seen;', '']])),
-    killed('продолжение помнит отметку уже пройденной страницы', false, true));
+  await counterfact(async () => {
+    await assert.rejects(() => resume(inFunction('fullPass', [['prog.seen = seen;', '']])),
+      killed('продолжение помнит отметку уже пройденной страницы', false, true));
+  });
 });
 test('R217 снятие одного left_at в запросе владельцев эквивалентно: приём ещё раз отбирает действующих', async () => {
   await completed('from-host');
-  const edit = inFunction('dropUnsentGroupMarks', [[
-    '.where(and(eq(conversationMembers.conversationId, conversationId), isNull(conversationMembers.leftAt)));',
-    '.where(eq(conversationMembers.conversationId, conversationId));',
-  ]]);
-  // Не выдаём отсутствие дополнительного SQL-фильтра за kill: lockFor не даёт менять бывших повторно.
-  await completed('from-host', edit);
+  await counterfact(async () => {
+    const edit = inFunction('dropUnsentGroupMarks', [[
+      '.where(and(eq(conversationMembers.conversationId, conversationId), isNull(conversationMembers.leftAt)));',
+      '.where(eq(conversationMembers.conversationId, conversationId));',
+    ]]);
+    // Не выдаём отсутствие дополнительного SQL-фильтра за kill: lockFor не даёт менять бывших повторно.
+    await completed('from-host', edit);
+  });
 });
 test('R217 контрфакт: сняты оба left_at-стража — бывший ошибочно становится владельцем снятия', async () => {
   const scenario = async (edit?: Mutation) => {
@@ -373,11 +390,12 @@ test('R217 контрфакт: сняты оба left_at-стража — быв
       'бывший участник не включается в владельцы снятия');
   };
   await scenario();
-  const owners = inFunction('dropUnsentGroupMarks', [[
-    '.where(and(eq(conversationMembers.conversationId, conversationId), isNull(conversationMembers.leftAt)));',
-    '.where(eq(conversationMembers.conversationId, conversationId));',
-  ]]);
-  const admission = inFunction('lockFor', [['const live = group ? rows.filter((m) => !m.leftAt) : rows;', 'const live = rows;']]);
-  await assert.rejects(() => scenario(combine(owners, admission)), killed('бывший участник не включается в владельцы снятия', false, true));
+  await counterfact(async () => {
+    const owners = inFunction('dropUnsentGroupMarks', [[
+      '.where(and(eq(conversationMembers.conversationId, conversationId), isNull(conversationMembers.leftAt)));',
+      '.where(eq(conversationMembers.conversationId, conversationId));',
+    ]]);
+    const admission = inFunction('lockFor', [['const live = group ? rows.filter((m) => !m.leftAt) : rows;', 'const live = rows;']]);
+    await assert.rejects(() => scenario(combine(owners, admission)), killed('бывший участник не включается в владельцы снятия', false, true));
+  });
 });
-

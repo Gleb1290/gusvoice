@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -116,10 +117,12 @@ it('R130 телефонный вид сохраняет 8 часов и те ж�
 it('R130 четыре мутанта замка, disabled, секунд и finally отвергаются поведением',async()=>{
   // Стражи UI ловят не только неверную арифметику: повтор, доступную пустую кнопку и застрявшее окно.
   await scene({mode:'double'});await scene({mode:'zeros'});await scene({mode:'custom'});await scene({error:true});
-  for(const[a,from,to,msg]of[
-    [{mode:'double'},'if (seconds === null || done.current) return;','if (seconds === null) return;','точные секунды ровно один раз'],
-    [{mode:'zeros'},'disabled={seconds === null}','disabled={false}','отключает кнопку'],
-    [{mode:'custom'},'onPick(seconds);','onPick(seconds / 60);','точные секунды'],
-    [{error:true},'    } finally {\n      onClose();\n    }','    } finally {\n      // окно забыли закрыть\n    }','окно закрывается ровно раз'],
-  ]as const)await assert.rejects(scene(a,changed(from,to)),(e:unknown)=>e instanceof assert.AssertionError&&e.message.includes(msg));
+  await counterfact(async () => {
+    for(const[a,from,to,msg]of[
+      [{mode:'double'},'if (seconds === null || done.current) return;','if (seconds === null) return;','точные секунды ровно один раз'],
+      [{mode:'zeros'},'disabled={seconds === null}','disabled={false}','отключает кнопку'],
+      [{mode:'custom'},'onPick(seconds);','onPick(seconds / 60);','точные секунды'],
+      [{error:true},'    } finally {\n      onClose();\n    }','    } finally {\n      // окно забыли закрыть\n    }','окно закрывается ровно раз'],
+    ]as const)await assert.rejects(scene(a,changed(from,to)),(e:unknown)=>e instanceof assert.AssertionError&&e.message.includes(msg));
+  });
 });

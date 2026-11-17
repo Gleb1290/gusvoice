@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, beforeEach, afterEach, after, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -135,18 +136,23 @@ async function sourceModule<T>(relative: string, from?: string, to?: string): Pr
 test('реальные SQL-мутанты author, left, deleted и hidden_for отвергаются той же проверкой Postgres', async () => {
   const verify=async (mod: typeof conv) => { await t.raw.exec('ROLLBACK'); await truncateAll(t.raw); await t.raw.exec(`BEGIN; INSERT INTO users(id,username,display_name,password_hash) VALUES ('a','alpha','Alpha','hash'),('b','bravo','Bravo','hash')`); await exclusions(mod); };
   await verify(await sourceModule<typeof conv>('../src/conversations.ts'));
+  await counterfact(async () => {
   for (const clause of ['AND x.author_id = ${me}','AND m.left_at IS NULL','AND x.deleted_at IS NULL','AND NOT (${me} = ANY(x.hidden_for))']) {
     const mutant=await sourceModule<typeof conv>('../src/conversations.ts',clause,'AND TRUE');
     await assert.rejects(()=>verify(mutant),assert.AssertionError,clause);
   }
+  });
 });
 test('мутант conv-search вместо отдельного ключа ловится реальным GET после зелёного оригинала', async () => {
   type Routes=typeof import('../src/routes/conv.js');
   for (const mutant of [false,true]) {
+    const run = async () => {
     const mod=await sourceModule<Routes>('../src/routes/conv.ts', mutant ? '`conv-frequent:${me}`' : undefined,'`conv-search:${me}`');
     const target=await routeApp(mod.convRoutes);
     try { if (mutant) await assert.rejects(()=>independentBudget(target),assert.AssertionError); else await independentBudget(target); }
     finally { await target.close(); }
+    };
+    if (mutant) await counterfact(run); else await run();
   }
 });
 test('мутант сортировки по свежести проигрывает частоте на тех же настоящих строках', async () => {
@@ -155,7 +161,7 @@ test('мутант сортировки по свежести проигрыва
   await message('new','recent');
   const verify=async (mod: typeof conv) => assert.deepEqual(Array.from((await mod.frequentConversations('a',30)).items,x=>x.conversationId),['often','recent']);
   await verify(await sourceModule<typeof conv>('../src/conversations.ts'));
-  await assert.rejects(()=>sourceModule<typeof conv>('../src/conversations.ts','ORDER BY score DESC, last_at DESC','ORDER BY last_at DESC, score DESC').then(verify),assert.AssertionError);
+  await counterfact(() => assert.rejects(()=>sourceModule<typeof conv>('../src/conversations.ts','ORDER BY score DESC, last_at DESC','ORDER BY last_at DESC, score DESC').then(verify),assert.AssertionError));
 });
 
 test('R126 отметка убирает частую беседу до нового моего сообщения, чужой ответ её не возвращает', async () => {
@@ -222,7 +228,9 @@ test('R126 SQL-мутанты HAVING, LEAST, GREATEST и left_at отверга�
     ['WHERE m.conversation_id = v.id AND m.user_id = ${me} AND m.left_at IS NULL','WHERE m.conversation_id = v.id AND m.user_id = ${me}',async(mod:typeof conv)=>{await conversation('l');await t.raw.exec(`UPDATE conversation_members SET left_at=now() WHERE conversation_id='l' AND user_id='a'`);assert.equal(await mod.hideFrequentConversations('a',[{conversationId:'l'}]),0);}]
   ] as const){
     await reset();await verify(await sourceModule<typeof conv>('../src/conversations.ts'));
+    await counterfact(async () => {
     await reset();const mutant=await sourceModule<typeof conv>('../src/conversations.ts',from,to);
     await assert.rejects(()=>verify(mutant),assert.AssertionError,from);
+    });
   }
 });

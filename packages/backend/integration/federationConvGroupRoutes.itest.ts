@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -251,8 +252,8 @@ async function routing(mutations: Mutations = {}) {
 }
 it('R203 удаление groupHostOf обнаруживается HTTP-ответом и записью не на том доме', async () => {
   await routing();
-  await assert.rejects(routing({ route: [["return c?.kind === 'group' && c.origin ? c.origin : null;", 'return null;']] }),
-    assertion('чужая операция ожидает снимок хоста'));
+  await counterfact(() => assert.rejects(routing({ route: [["return c?.kind === 'group' && c.origin ? c.origin : null;", 'return null;']] }),
+    assertion('чужая операция ожидает снимок хоста')));
 });
 
 function photoPayload() {
@@ -294,8 +295,8 @@ async function invitable(mutations: Mutations = {}) {
 }
 it('R203 тень без invitable не приглашается, с dmgroup1 приглашается; снятый gate краснеет на 403', async () => {
   await invitable();
-  await assert.rejects(invitable({ route: [['if (!fedGroups || !(await fedGroups.invitable(u.homeInstanceId))) out.push(id);', 'if (false) out.push(id);']] }),
-    assertion('тень без invitable не попадает в местную группу'));
+  await counterfact(() => assert.rejects(invitable({ route: [['if (!fedGroups || !(await fedGroups.invitable(u.homeInstanceId))) out.push(id);', 'if (false) out.push(id);']] }),
+    assertion('тень без invitable не попадает в местную группу')));
 });
 
 it('R203 создание смешанной группы принимает 5 вместе с владельцем, 6 отклоняет до SQL, без invitable — 403', async () => {
@@ -343,8 +344,8 @@ async function originGuard(mutations: Mutations = {}) {
 }
 it('R203 acceptGroupOp отклоняет foreign origin с 404, местную группу меняет; снятый origin gate обнаруживается', async () => {
   await originGuard();
-  await assert.rejects(originGuard({ fed: [["if (!c || c.kind !== 'group' || c.origin) return { status: 404, body: { error: 'not found' } };",
-    "if (!c || c.kind !== 'group') return { status: 404, body: { error: 'not found' } };"]] }), assertion('операции хоста не изменяют копию чужой группы'));
+  await counterfact(() => assert.rejects(originGuard({ fed: [["if (!c || c.kind !== 'group' || c.origin) return { status: 404, body: { error: 'not found' } };",
+    "if (!c || c.kind !== 'group') return { status: 404, body: { error: 'not found' } };"]] }), assertion('операции хоста не изменяют копию чужой группы')));
 });
 
 async function memberGuard(mutations: Mutations = {}) {
@@ -357,8 +358,8 @@ async function memberGuard(mutations: Mutations = {}) {
 }
 it('R203 acceptGroupOp не участнику даёт 404, участнику 200; снятие membership guard меняет чужое название', async () => {
   await memberGuard();
-  await assert.rejects(memberGuard({ group: [["if (!active.includes(me)) return { kind: 'not-found' };\n    const [cur] = await tx",
-    'const [cur] = await tx']] }), assertion('действующий не участник получает 404'));
+  await counterfact(() => assert.rejects(memberGuard({ group: [["if (!active.includes(me)) return { kind: 'not-found' };\n    const [cur] = await tx",
+    'const [cur] = await tx']] }), assertion('действующий не участник получает 404')));
 });
 
 it('R203 acceptGroupOp не оживляет ушедшего или неизвестного актёра; тот же действующий принимается', async () => {
@@ -401,9 +402,9 @@ async function limit(mutations: Mutations = {}) {
 it('R203 acceptGroupOp предел 5 включает теневые строки: пятый проходит, шестой не пишет служебную запись', async () => { await limit(); });
 it('R203 подсчёт только местных вместо всех участников обнаруживается разрешённым шестым, не loader', async () => {
   await limit();
-  await assert.rejects(limit({ group: [['const verdict = groupAddCheck(active.length, adding.length);',
+  await counterfact(() => assert.rejects(limit({ group: [['const verdict = groupAddCheck(active.length, adding.length);',
     'const localOnly = await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, active), isNull(users.homeInstanceId)));\n    const verdict = groupAddCheck(localOnly.length, adding.length);']] }),
-    assertion('шестой участник отклонён с учётом теневых'));
+    assertion('шестой участник отклонён с учётом теневых')));
 });
 
 it('R203 acceptGroupOp remove чужого участника разрешён владельцу, обычному 403; leave разрешён самому', async () => {

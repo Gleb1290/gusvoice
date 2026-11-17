@@ -1,3 +1,4 @@
+import { counterfact } from "../../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -182,7 +183,10 @@ for (const m of [
   { label: 'трансляция выбранного места', from: 'className="geo-pick-send geo-pick-live" disabled={!fix || busy}', to: 'className="geo-pick-send geo-pick-live" disabled={(!fix && !chosen) || busy}', check: liveNoFix, prefix: 'R231-geo-live-fix:', actual: false, expected: true, operator: 'strictEqual' },
   { label: 'ожидающий повтор не снят при закрытии', from: 'window.clearTimeout(restart);', to: '', check: pendingRestart, prefix: 'R231-geo-restart-cleanup:', actual: 1, expected: 0, operator: 'strictEqual', exactMessage: new assert.AssertionError({ message: TIMER_CLEANUP_MESSAGE, actual: 1, expected: 0, operator: 'strictEqual' }).message },
 ]) it(`R230–231 контрфакт геопозиции: ${m.label}`, async () => {
-  await m.check(raw); assert.equal(raw.split(m.from).length - 1, 1, 'единственный якорь мутации');
-  await assert.rejects(() => m.check(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
-    && e.operator === m.operator && e.actual === m.actual && e.expected === m.expected && (!('exactMessage' in m) || e.message === m.exactMessage));
+  await m.check(raw);
+  await counterfact(async () => {
+    assert.equal(raw.split(m.from).length - 1, 1, 'единственный якорь мутации');
+    await assert.rejects(() => m.check(raw.replace(m.from, m.to)), e => e instanceof assert.AssertionError && e.message.startsWith(m.prefix)
+      && e.operator === m.operator && e.actual === m.actual && e.expected === m.expected && (!('exactMessage' in m) || e.message === m.exactMessage));
+  });
 });

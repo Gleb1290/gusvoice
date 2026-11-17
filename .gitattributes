@@ -4,6 +4,10 @@ deploy/maps/regions/* text eol=lf
 Dockerfile text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+# The verified GLib backport tree has a platform-independent byte hash in SAST.
+apps/desktop/vendor/glib/** text eol=lf
+# Preserve the published license byte-for-byte, including its final empty line.
+apps/desktop/vendor/glib/LICENSE whitespace=-blank-at-eof
 # Сгенерированная схема Bot API сверяется байт в байт (`node scripts/gen-bot-api.mjs --check`).
 docs/bot-api/openapi.json text eol=lf
 # Python-обёртки Bot API генерируются тем же скриптом и сверяются так же.

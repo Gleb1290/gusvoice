@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -21,9 +22,12 @@ it('R194 контрфакт thumb копирующегося фото ловит
   const check = (api: typeof import('./bubbleRules')) => assert.equal(api.replyQuoteLook({ content: '', deleted: false }, original).thumb, undefined, 'копия не имеет thumb');
   const source = readFileSync(new URL('./bubbleRules.ts', import.meta.url), 'utf8');
   const anchor = "a.fedState === 'copying' ? undefined : a.url || undefined";
-  assert.equal(source.split(anchor).length - 1, 1, 'единственный thumb-якорь'); check(loadBubble(source));
+  check(loadBubble(source));
+  counterfact(() => {
+  assert.equal(source.split(anchor).length - 1, 1, 'единственный thumb-якорь');
   assert.throws(() => check(loadBubble(source.replace(anchor, 'a.url || undefined'))),
     (e: unknown) => e instanceof assert.AssertionError && e.message.includes('копия не имеет thumb'));
+  });
 });
 
 it('как файлы не становится ни одиночным кадром, ни альбомом фото и видео', () => {
@@ -166,11 +170,13 @@ it('слова цитаты совпадают со строкой списка 
   };
   const source = readFileSync(new URL('./bubbleRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   check(loadBubble(source));
+  counterfact(() => {
   const words = 'return attachmentWords({ kind: f.attachmentKind === \'voice\' ? \'voice\' : \'file\', video: f.attachmentVideo === true, round: f.attachmentRound === true, name: f.attachmentName });';
   assert.throws(() => check(bubbleMutant(words, words.replace('return attachmentWords(', 'return `${attachmentWords(').replace(' });', ' })} · 0:42`;'))), assert.AssertionError);
   assert.throws(() => check(bubbleMutant(words, "return f.attachmentVideo ? attachmentWords({ kind: 'file', video: true, round: f.attachmentRound === true, name: f.attachmentName }) : f.attachmentKind === 'voice' ? attachmentWords({ kind: 'voice' }) : `Файл: ${attachmentWords({ kind: 'file', name: f.attachmentName })}`;")), assert.AssertionError);
   assert.throws(() => check(bubbleMutant('...(a.round === true ? { attachmentRound: true as const } : {})', '...{}')), assert.AssertionError);
   assert.throws(() => check(bubbleMutant('...(reply.attachmentRound === true ? { attachmentRound: true as const } : {})', '...{}')), assert.AssertionError);
+  });
 });
 it('галочки прочитано включаются на равном ключе, не на следующем и не при неизвестном ключе', () => {
   assert.equal(readByPeer(10, 10), true); assert.equal(readByPeer(11, 10), false);

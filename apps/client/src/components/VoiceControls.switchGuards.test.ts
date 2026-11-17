@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import ts from 'typescript';
@@ -43,5 +44,7 @@ for (const [title, anchor, replacement, check] of [
   ['пропуск fg.isShell', 'if (fg.isShell)', 'if (false)', shellGuard],
   ['нативные опции браузеру', 'webCaptureOptions({ ...s, audio })', 'captureOptions({ ...s, audio })', browserStart],
 ] as const) it(`R304 контрфакт VoiceControls: ${title} отвергается AST-стражем`, () => {
-  check(source); assert.throws(() => check(mutate(source, anchor, replacement)), assert.AssertionError);
+  check(source); counterfact(() => {
+    assert.throws(() => check(mutate(source, anchor, replacement)), assert.AssertionError);
+  });
 });

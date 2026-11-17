@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -25,9 +26,11 @@ it('«Открыть» разрешено безопасным растром и
   for (const type of ['image/svg+xml', 'text/html', 'application/xml', 'application/octet-stream'])
     assert.equal(downloads.opensInBrowser(type), false, `${type} не исполняется из нашей blob-ссылки`);
   assert.equal(downloads.opensInBrowser(' IMAGE/PNG ; charset=binary '), true);
-  const broken = mutant('/^image\\/(png|jpeg|gif|webp|avif|bmp)$/', '/^image\\/.+$/');
-  assert.throws(() => assert.equal(broken.opensInBrowser('image/svg+xml'), false), assert.AssertionError,
-    'мутант раскрывает SVG из собственного blob-origin');
+  counterfact(() => {
+    const broken = mutant('/^image\\/(png|jpeg|gif|webp|avif|bmp)$/', '/^image\\/.+$/');
+    assert.throws(() => assert.equal(broken.opensInBrowser('image/svg+xml'), false), assert.AssertionError,
+      'мутант раскрывает SVG из собственного blob-origin');
+  });
 });
 
 it('очистка удаляет завершённые записи и освобождает их blob, а загрузку оставляет активной', () => {
@@ -39,9 +42,11 @@ it('очистка удаляет завершённые записи и осв�
   assert.equal(JSON.stringify(api.downloadsSnapshot().map(e => e.key)), JSON.stringify(['active']));
   assert.deepEqual(revoked, ['blob:done']);
   assert.equal(api.downloadsSnapshot()[0]?.id, active);
-  const mutant = mutantApi('const keep = list.filter((e) => e.state === \'loading\');', 'const keep = [];');
-  assert.throws(() => assert.deepEqual(mutant.downloadsSnapshot().map(e => e.key), ['active']), assert.AssertionError,
-    'мутант очищает список и роняет активную загрузку с карточки');
+  counterfact(() => {
+    const mutant = mutantApi('const keep = list.filter((e) => e.state === \'loading\');', 'const keep = [];');
+    assert.throws(() => assert.deepEqual(mutant.downloadsSnapshot().map(e => e.key), ['active']), assert.AssertionError,
+      'мутант очищает список и роняет активную загрузку с карточки');
+  });
 });
 
 function mutantApi(from: string, to: string): typeof downloads {

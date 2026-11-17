@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { after, afterEach, before, test } from 'node:test';
@@ -210,9 +211,11 @@ test('R239 solo-группа сохраняет семисуточный сро�
 
 test('R239 возврат прежнего раннего solo-выхода ловится настоящим HTTP без expired', async () => {
   await soloExpiry();
+  await counterfact(async () => {
   const from = 'const others = access.memberIds.filter((id) => id !== me);';
   await assert.rejects(soloExpiry({ file: 'lastSeen', from,
     to: `${from}\n  if (others.length === 0) return { items: [] };` }), killed('R239-solo-expire:', undefined, true));
+  });
 });
 
 async function readerPrivacy(mutation?: Mutation) {
@@ -282,15 +285,15 @@ function killed(prefix: string, actual: unknown, expected: unknown) {
 }
 test('R239 мутант без проверки автора убит реальным HTTP 200 вместо требуемого 404', async () => {
   await authorOnly();
-  await assert.rejects(authorOnly({ file: 'lastSeen', from: 'if (!msg || msg.authorId !== me || msg.deletedAt) return null;', to: 'if (!msg || msg.deletedAt) return null;' }), killed('R239-author:', 200, 404));
+  await counterfact(() => assert.rejects(authorOnly({ file: 'lastSeen', from: 'if (!msg || msg.authorId !== me || msg.deletedAt) return null;', to: 'if (!msg || msg.deletedAt) return null;' }), killed('R239-author:', 200, 404)));
 });
 test('R239 мутант строгого больше убит читателем ровно на ключе сообщения', async () => {
   await inclusive();
-  await assert.rejects(inclusive({ file: 'lastSeenRules', from: 'm.lastReadKey >= sortKey', to: 'm.lastReadKey > sortKey' }), killed('R239-key:', 'c', 'b,c'));
+  await counterfact(() => assert.rejects(inclusive({ file: 'lastSeenRules', from: 'm.lastReadKey >= sortKey', to: 'm.lastReadKey > sortKey' }), killed('R239-key:', 'c', 'b,c')));
 });
 test('R239 мутант снятой приватности убит появлением скрывшего время читателя', async () => {
   await readerPrivacy();
-  await assert.rejects(readerPrivacy({ file: 'lastSeenRules', from: ' && !readTimeHidden(me, m, m.isPeer)', to: '' }), killed('R239-privacy:', true, false));
+  await counterfact(() => assert.rejects(readerPrivacy({ file: 'lastSeenRules', from: ' && !readTimeHidden(me, m, m.isPeer)', to: '' }), killed('R239-privacy:', true, false)));
 });
 test('R239 оба односторонних мутанта блока убиты утечкой ровно одного прочитавшего', async () => {
   const both = 'or(\n          and(eq(userBlocks.blockerId, me), inArray(userBlocks.blockedId, others)),\n          and(inArray(userBlocks.blockerId, others), eq(userBlocks.blockedId, me)),\n        )';
@@ -299,19 +302,19 @@ test('R239 оба односторонних мутанта блока убит�
     'and(inArray(userBlocks.blockerId, others), eq(userBlocks.blockedId, me))',
   ]) {
     await blocks();
-    await assert.rejects(blocks({ file: 'lastSeen', from: both, to: one }), killed('R239-blocks:', 1, 0));
+    await counterfact(() => assert.rejects(blocks({ file: 'lastSeen', from: both, to: one }), killed('R239-blocks:', 1, 0)));
   }
 });
 test('R239 мутант снятого срока убит отсутствующим expired у сообщения семи суток', async () => {
   await expires();
-  await assert.rejects(expires({ file: 'lastSeenRules', from: 'if (now - createdAt.getTime() >= READ_DATE_EXPIRE_MS) return { ids: [], expired: true };', to: '// срок списка отключён' }), killed('R239-expire:', undefined, true));
+  await counterfact(() => assert.rejects(expires({ file: 'lastSeenRules', from: 'if (now - createdAt.getTime() >= READ_DATE_EXPIRE_MS) return { ids: [], expired: true };', to: '// срок списка отключён' }), killed('R239-expire:', undefined, true)));
 });
 test('R239 мутант допуска 1:1 убит HTTP 200 вместо группового 404', async () => {
   await directRefused();
-  await assert.rejects(directRefused({ file: 'lastSeen', from: "if (access.kind !== 'group' || access.saved || access.peerId) return null;", to: 'if (access.saved) return null;' }), killed('R239-kind:', 200, 404));
+  await counterfact(() => assert.rejects(directRefused({ file: 'lastSeen', from: "if (access.kind !== 'group' || access.saved || access.peerId) return null;", to: 'if (access.saved) return null;' }), killed('R239-kind:', 200, 404)));
 });
 test('R239 мутант всех строк членов вместо access убит появлением реально вышедшего участника', async () => {
   await activeOnly();
-  await assert.rejects(activeOnly({ file: 'lastSeen', from: 'const others = access.memberIds.filter((id) => id !== me);',
-    to: 'const others = (await db.select({ id: conversationMembers.userId }).from(conversationMembers).where(eq(conversationMembers.conversationId, access.conversationId))).map((r) => r.id).filter((id) => id !== me);' }), killed('R239-members:', true, false));
+  await counterfact(() => assert.rejects(activeOnly({ file: 'lastSeen', from: 'const others = access.memberIds.filter((id) => id !== me);',
+    to: 'const others = (await db.select({ id: conversationMembers.userId }).from(conversationMembers).where(eq(conversationMembers.conversationId, access.conversationId))).map((r) => r.id).filter((id) => id !== me);' }), killed('R239-members:', true, false)));
 });

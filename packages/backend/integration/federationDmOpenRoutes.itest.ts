@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -169,9 +170,11 @@ test('R189 proto принимает настоящую Ed25519 подпись с
 });
 test('R189 маршрут conv open вне proto теряет rawBody и отвергается именно подписью', async () => {
   // Класс ошибки: регистрация подписанного POST вне нужного content-type scope.
-  await signed(); const anchor = "proto.post('/fed/v1/conv/open',"; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(signed(source.replace(anchor, "app.post('/fed/v1/conv/open',")),
-    e => e instanceof assert.AssertionError && e.message.includes('подписанный POST прошёл proto admission'));
+  await signed(); await counterfact(async () => {
+    const anchor = "proto.post('/fed/v1/conv/open',"; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(signed(source.replace(anchor, "app.post('/fed/v1/conv/open',")),
+      e => e instanceof assert.AssertionError && e.message.includes('подписанный POST прошёл proto admission'));
+  });
 });
 test('R189 conv open без флага не регистрируется, даже с правильной подписью', async () => {
   // Класс ошибки: протокольная ручка доступна до включения Э1.

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -377,28 +378,36 @@ test('R204 настоящий Redis-store глотает отказ SET, а пр
 
 test('R204 мутант восстановления online обнаруживается штатным stale callback после парного перезапуска', async () => {
   await restartScenario(); await truncateAll(t.raw);
-  await assert.rejects(restartScenario([[
-    'return { at: o.at, online: false, receivedAt: now, views };',
-    'return { at: o.at, online: true, receivedAt: now, views };',
-  ]]), (error) => error instanceof assert.AssertionError && error.message.includes('восстановленное состояние остаётся offline'));
+  await counterfact(async () => {
+    await assert.rejects(restartScenario([[
+      'return { at: o.at, online: false, receivedAt: now, views };',
+      'return { at: o.at, online: true, receivedAt: now, views };',
+    ]]), (error) => error instanceof assert.AssertionError && error.message.includes('восстановленное состояние остаётся offline'));
+  });
 });
 
 test('R204 мутант без ограничения будущего пойман на восстановлении через startDmEphemeral', async () => {
   await futureScenario(); await truncateAll(t.raw);
-  await assert.rejects(futureScenario([['Math.min(row[2], now)', 'row[2]']]),
-    (error) => error instanceof assert.AssertionError && error.message.includes('сохранённое будущее ограничивается часами запуска'));
+  await counterfact(async () => {
+    await assert.rejects(futureScenario([['Math.min(row[2], now)', 'row[2]']]),
+      (error) => error instanceof assert.AssertionError && error.message.includes('сохранённое будущее ограничивается часами запуска'));
+  });
 });
 
 test('R204 мутант без защиты свежего приёма пойман на гонке startup loadAll и presence', async () => {
   await lateLoadScenario(); await truncateAll(t.raw);
-  await assert.rejects(lateLoadScenario([[
-    'if (remote.has(id) || remote.size > 50_000) continue;',
-    'if (remote.size > 50_000) continue;',
-  ]]), (error) => error instanceof assert.AssertionError && error.message.includes('поздний loadAll не затирает свежий приём'));
+  await counterfact(async () => {
+    await assert.rejects(lateLoadScenario([[
+      'if (remote.has(id) || remote.size > 50_000) continue;',
+      'if (remote.size > 50_000) continue;',
+    ]]), (error) => error instanceof assert.AssertionError && error.message.includes('поздний loadAll не затирает свежий приём'));
+  });
 });
 
 test('R204 мутант без save пойман на фактической копии принятого presence', async () => {
   await saveScenario(); await truncateAll(t.raw);
-  await assert.rejects(saveScenario([['ephemeralStore?.save(shadow.id, encodeRemote(st));', '']]),
-    (error) => error instanceof assert.AssertionError && error.message.includes('принятое presence копируется в хранилище'));
+  await counterfact(async () => {
+    await assert.rejects(saveScenario([['ephemeralStore?.save(shadow.id, encodeRemote(st));', '']]),
+      (error) => error instanceof assert.AssertionError && error.message.includes('принятое presence копируется в хранилище'));
+  });
 });

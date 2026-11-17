@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports.js';
 import type { BackGestureSink, BackGesturePhase } from './androidBack';
 
-const source = readFileSync(new URL('./androidBack.ts', import.meta.url), 'utf8');
+const sourceUrl = new URL('./androidBack.ts', import.meta.url);
+const source = readFileSync(sourceUrl, 'utf8');
 function fixture(raw = source, android = true) {
   let now = 1000;
   let topLayer = false;
@@ -22,11 +25,10 @@ function fixture(raw = source, android = true) {
   } }).outputText, {
     module, exports: module.exports, window, document: { querySelector: () => topLayer ? {} : null },
     performance: { now: () => now },
-    require: (id: string) => {
-      if (id === './hotkeys') return { isAndroid: () => android };
-      if (id === './store') return { useStore: { getState: () => state } };
-      assert.fail(`неожиданная внешняя зависимость ${id}`);
-    },
+    require: testVmImports(sourceUrl, {
+      './hotkeys': { isAndroid: () => android },
+      './store': { useStore: { getState: () => state } },
+    }),
   });
   const api = module.exports as typeof import('./androidBack');
   return { api, window, state, advance: (ms: number) => { now += ms; }, setLayer: (value: boolean) => { topLayer = value; },
@@ -50,9 +52,11 @@ it('R121 обработчик без peek считается забирающи�
     off(); off(); assert.equal(f.api.backLeavesPane(), true);
   };
   check(source);
+  counterfact(() => {
   const mutant = source.replace('if (!peek || peek()) return false;', 'if (peek && peek()) return false;');
   assert.notEqual(mutant, source);
   assert.throws(() => check(mutant), assert.AssertionError);
+  });
 });
 
 it('R121 peek true забирает шаг, false пропускает, опрос идёт с вершины стека без действий', () => {
@@ -95,8 +99,10 @@ it('R121 ведомый invoked откладывает единственный 
     assert.equal(invokes, 2, 'после done следующий жест снова принимается');
   };
   check(source);
+  counterfact(() => {
   const mutant = source.replace('if (committing) return;', '/* предохранитель удалён */');
   assert.notEqual(mutant, source); assert.throws(() => check(mutant), assert.AssertionError);
+  });
 });
 
 it('R121 без приёмника или при отказе вести invoked шаг выполняется сразу', () => {

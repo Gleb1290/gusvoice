@@ -212,7 +212,8 @@ export function parseRange(header: string | undefined, size: number): { start: n
  * ссылка — ключ на предъявителя. id вложения оставляем — по нему разбирают жалобы.
  */
 export function redactLogUrl(url: string): string {
-  return url.replace(/(\/api\/att\/[^/?#]+)\/[^?#]*/, '$1/…');
+  // Токен устройства в адресе шлюза FCM (#247, `/api/push/fcm/<токен>`) — тоже не для журнала.
+  return url.replace(/(\/api\/att\/[^/?#]+)\/[^?#]*/, '$1/…').replace(/(\/api\/push\/fcm\/)[^?#]*/, '$1…');
 }
 
 /** Путь — наша ссылка на файл ЛС. Сервер не строит по таким ссылкам превью: иначе подпись уедет в базу превью и журнал. */

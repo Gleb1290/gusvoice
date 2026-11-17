@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from '../testVmImports';
 import * as shared from '@gusvoice/shared';
 
 const read = (name: string) => readFileSync(new URL(`./${name}.tsx`, import.meta.url), 'utf8');
@@ -52,20 +53,6 @@ function fixture(file: 'CoinWalletModal' | 'AdminPanel', raw: string, initial: u
     '../toast': { toast() {}, toastError: (error: unknown) => { errors.push(error instanceof Error ? error.message : String(error)); } },
     '../adminNav': { ADMIN_SECTIONS: [], adminSectionLabel: unused('adminSectionLabel'), adminSectionOf: unused('adminSectionOf') },
   };
-  const dormant = new Set(['../api', '../benchMock', '../economy', '../economyClient', '../ledgerCsv', '../memberName',
-    '../streakView', './Goose', './Icon', '../config', '../dialogChrome', './DmReports', './FederationPanel',
-    './InstanceSettingsForms', './AdminPeerGroups', './SmtpForm', './SettingsShell', './Toggle', '../guestAtMark',
-    '../confirm', '../androidBack']);
-  const ast = ts.createSourceFile(`${file}.tsx`, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  for (const node of ast.statements) {
-    if (!ts.isImportDeclaration(node) || node.importClause?.isTypeOnly || !ts.isStringLiteral(node.moduleSpecifier)) continue;
-    const id = node.moduleSpecifier.text;
-    if (Object.hasOwn(deps, id)) continue;
-    assert.equal(dormant.has(id), true, `описанный импорт ${file}: ${id}`);
-    const bindings = node.importClause?.namedBindings;
-    assert.ok(bindings && ts.isNamedImports(bindings));
-    deps[id] = Object.fromEntries(bindings.elements.filter(e => !e.isTypeOnly).map(e => [e.propertyName?.text ?? e.name.text, unused(`${id}:${e.name.text}`)]));
-  }
   const module = { exports: {} };
   const componentName = file === 'CoinWalletModal' ? 'ShopSection' : 'EconomyTab';
   // Экспортируем только тестовую точку входа, но транспилируем/исполняем модуль целиком, не вырезанное тело.
@@ -74,7 +61,7 @@ function fixture(file: 'CoinWalletModal' | 'AdminPanel', raw: string, initial: u
   }).outputText;
   class FixedDate extends Date { constructor(value?: string | number) { super(value ?? now); } static now() { return now; } }
   runInNewContext(code, { module, exports: module.exports, Date: FixedDate, Error,
-    require(id: string) { assert.equal(Object.hasOwn(deps, id), true, `описанный require ${id}`); return deps[id]; } });
+    require: testVmImports(new URL(`./${file}.tsx`, import.meta.url), deps) });
   const component = (module.exports as { __r279: Component }).__r279;
   return { states, calls, errors, store, render(props: Props = {}) { cursor = 0; return component(props); } };
 }

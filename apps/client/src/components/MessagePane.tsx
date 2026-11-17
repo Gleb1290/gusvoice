@@ -224,8 +224,8 @@ import {
   textFileOffer,
   tooLongText,
 } from '../longTextRules';
-import { clearUploadProgress, isUploadAborted, setUploadSignal } from '../uploadProgress';
-import { localAttachments, OutgoingAttachments, useLocalDims } from './OutgoingAttachments';
+import { clearUploadProgress, isUploadAborted, setUploadProgress, setUploadSignal } from '../uploadProgress';
+import { localAttachments, MediaUploadStatus, OutgoingAttachments, useLocalDims } from './OutgoingAttachments';
 import { SendPreview } from './SendPreview';
 import { startVoiceRecording, voiceRecordingSupported, type VoiceTake } from '../voiceRecorder';
 import { roundRecordingSupported, startRoundRecording, type RoundRecording } from '../roundRecorder';
@@ -1921,6 +1921,15 @@ function phoneTaps(touch: boolean | null = null): boolean {
 }
 
 /**
+ * Телефон для жестов и меню сообщения (удержание → меню у пузыря или выделение, «Выделить текст», порядок
+ * Android): приложение на телефоне ИЛИ вкладка браузера телефона — окно ≤ 760 px вне оболочки Tauri (как `isPhoneUiNow`,
+ * `phoneLayout.ts`). 🔴 29.10: было `isMobile()`, и в Chrome на телефоне удержание давало системное меню и выделение слова.
+ */
+function phoneUi(): boolean {
+  return isMobile() || (!isTauri() && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches);
+}
+
+/**
  * Момент отправки строки «в пути», мс: у очереди бесед — `OutboxItem.createdAt`, у старой отправки — свой, с постановки
  * в ленту (`submit`). По нему время в пузыре и группировка с соседями.
  */
@@ -2077,6 +2086,7 @@ export function MessagePane({
   draft,
   draftRemote,
   onDraftChange,
+  onDraftLeave,
   onEdit,
   onDelete,
   deletePeerName,
@@ -2231,12 +2241,14 @@ export function MessagePane({
    */
   draft?: { text: string; replyToId: string | null };
   /**
-   * Черновик, пришедший с другого моего устройства (ЛС, Р7): новый `rev` — положить в поле, если человек здесь не
-   * печатает (поле не в фокусе с текстом, последние 300 мс без букв) и не правит сообщение. Пусто — очистить поле
-   * (погашен отправкой на другом устройстве).
+   * Черновик, пришедший с другого моего устройства (ЛС, Р7): новый `rev` — положить в поле, только если человек здесь
+   * поле ещё не трогал с открытия ленты (30.10: набранное здесь главнее всего пришедшего) и не правит сообщение. Пусто —
+   * очистить поле (погашен отправкой на другом устройстве). Положенное наружу НЕ отдаётся — иначе эхо.
    */
   draftRemote?: { text: string; replyToId: string | null; rev: number };
   onDraftChange?: (text: string, replyToId: string | null) => void;
+  /** Лента уходит с экрана (размонтирование) ПОСЛЕ последней записи черновика: ЛС пишут его на сервер сразу (Р7). */
+  onDraftLeave?: () => void;
   outbox?: {
     items: readonly (OutgoingMessage<File> & { fileNames?: string[] })[];
     enqueue: (item: {
@@ -2389,7 +2401,7 @@ export function MessagePane({
    * их надо приложить к вложению, а `onSend` принимает голые файлы. ЛС это тоже умеют: голосовое
    * не серверная настройка, в отличие от стикеров и ников.
    */
-  onSendVoice?: (take: VoiceTake, opts?: { once?: boolean }) => Promise<void>;
+  onSendVoice?: (take: VoiceTake, opts?: { once?: boolean }, onProgress?: (loaded: number, total: number) => void) => Promise<void>;
   /**
    * Кружки (08.10, G68, признак сервера `circles1`): короткое нажатие на кнопку записи переключает «микрофон ↔ камера», в
    * режиме камеры удержание пишет видеосообщение (`roundRecorder.ts`) и уходит тем же `onSendVoice` (`take.round`). Нет —
@@ -2541,8 +2553,15 @@ export function MessagePane({
   /** Файл прослушивания режется (WebM, разбирается) — ручки показываются. */
   const [trimOk, setTrimOk] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceHoldState<VoiceTake> | null>(null);
-  /** Сколько записанных голосовых сейчас грузится (голосовое уходит прямым вызовом, не строкой очереди `outgoing`). */
-  const [voiceSending, setVoiceSending] = useState(0);
+  /** Голосовые и кружки грузятся прямым вызовом. Строка прогресса хранит вид и беседу записи. */
+  const [recordedUploads, setRecordedUploads] = useState<{ key: string; feedId: string | undefined; file: File; round: boolean }[]>([]);
+  const recordedUploadKeys = useRef(new Set<string>());
+  const recordedUploadGeneration = useRef(0);
+  useEffect(() => () => {
+    recordedUploadGeneration.current++;
+    for (const key of recordedUploadKeys.current) clearUploadProgress(key);
+    recordedUploadKeys.current.clear();
+  }, []);
   /**
    * Режим кнопки записи (G68, Telegram Android `ChatActivityEnterView` `isInVideoMode` / tdesktop `VoiceRecordBar` `_kind`):
    * `round` — кружок с камеры. Помнится на устройстве (`gv.recMode`), как у Telegram. Без `roundOk` — всегда голосовое.
@@ -2599,17 +2618,29 @@ export function MessagePane({
           // Кружок не режется (ручек у него нет).
           const sel = take.round ? null : trimSelRef.current;
           const once = voiceOnceRef.current;
+          const sendVoice = onSendVoiceRef.current;
+          const uploadFeed = feedNow.current;
+          const uploadGeneration = recordedUploadGeneration.current;
           const cut = sel ? await trimVoiceTake(take, voiceTrimFromRatios(sel.from, sel.to, sel.totalMs)) : take;
           if (!cut) {
             toast('error', 'Не удалось обрезать запись');
             return;
           }
-          // «Отправляет голосовое…» (G21): пока записанное грузится — собеседник видит это, а не «отправляет файл».
-          setVoiceSending((n) => n + 1);
+          const uploadKey = newClientId();
+          // Обрезка могла закончиться уже после ухода со страницы: отправка продолжается без нового UI/подписки.
+          if (uploadGeneration === recordedUploadGeneration.current) {
+            recordedUploadKeys.current.add(uploadKey);
+            setUploadProgress(uploadKey, 0, 0, cut.file.size);
+            setRecordedUploads((list) => [...list, { key: uploadKey, feedId: uploadFeed, file: cut.file, round: !!cut.round }]);
+          }
           try {
-            await onSendVoiceRef.current?.(cut, once ? { once: true } : undefined);
+            await sendVoice?.(cut, once ? { once: true } : undefined, (loaded, total) => {
+              if (recordedUploadKeys.current.has(uploadKey)) setUploadProgress(uploadKey, 0, loaded, total);
+            });
           } finally {
-            setVoiceSending((n) => n - 1);
+            const tracked = recordedUploadKeys.current.delete(uploadKey);
+            clearUploadProgress(uploadKey);
+            if (tracked) setRecordedUploads((list) => list.filter((item) => item.key !== uploadKey));
           }
         },
         previewUrl: (take) => URL.createObjectURL(take.file),
@@ -2744,6 +2775,20 @@ export function MessagePane({
   const draftReplyId = useRef(draft?.replyToId ?? null);
   const onDraftRef = useRef(onDraftChange);
   onDraftRef.current = onDraftChange;
+  const onDraftLeaveRef = useRef(onDraftLeave);
+  onDraftLeaveRef.current = onDraftLeave;
+  /* 🔴 30.10 (видео владельца: набор на телефоне откатывался к старому тексту, стёртое воскресало). Поле отдаёт наружу
+     ТОЛЬКО набранное здесь. «Тихое» значение — что положили в поле не руками (черновик при открытии, черновик с другого
+     устройства): пока человек поле не тронул (`draftTyped`), такие значения не пишутся. Раньше пришедший черновик шёл в
+     поле → эффект ниже считал это набором → через 300 мс `setDraft`; пришёл за эти 300 мс ещё более новый — его
+     пропускали (`pending()`), а старый записывался поверх, улетал на сервер с меткой ЭТОГО устройства и возвращался на
+     то, где печатали. Тронул поле — дальше пришедшее его не трогает (Telegram Desktop `History::createLocalDraftFromCloud`
+     берёт облачный только не старее местного; tweb `input.ts` не затирает поле, пока идёт отложенная запись). */
+  const draftQuiet = useRef<{ text: string; replyToId: string | null } | null>(
+    draft ? { text: draft.text, replyToId: draft.replyToId } : { text: '', replyToId: null },
+  );
+  const draftTyped = useRef(false);
+  const draftLast = useRef<{ text: string; replyToId: string | null } | null>(null);
   const [draftSaver] = useState(() =>
     createDraftSaver((d: { text: string; replyToId: string | null }) => onDraftRef.current?.(d.text, d.replyToId)),
   );
@@ -2767,26 +2812,40 @@ export function MessagePane({
       return;
     }
     const before = draftBeforeEdit.current;
-    draftSaver.change(
-      draftToSave({
-        text,
-        replyToId: replyingTo?.id ?? draftReplyId.current,
-        editing: !!composerEdit,
-        beforeEdit: before && { text: before.text, replyToId: before.replyingTo?.id ?? null },
-      }),
-    );
+    const v = draftToSave({
+      text,
+      replyToId: replyingTo?.id ?? draftReplyId.current,
+      editing: !!composerEdit,
+      beforeEdit: before && { text: before.text, replyToId: before.replyingTo?.id ?? null },
+    });
+    const quiet = draftQuiet.current;
+    // Не тронутое руками поле с «тихим» значением (подгрузился цитируемый ответ, лёг пришедший черновик) — не набор.
+    if (!draftTyped.current && quiet && quiet.text === v.text && quiet.replyToId === v.replyToId) return;
+    draftTyped.current = true;
+    draftLast.current = v;
+    draftSaver.change(v);
   }, [text, replyingTo, composerEdit, draftSaver]);
+  /* Уход (очистки размонтирования идут в порядке объявления): набранное здесь — последнее слово (пришедшее с другого
+     устройства могло лечь в стор, пока поле было тронуто) → запись → на сервер сразу (`onDraftLeave`). Поле не трогали —
+     писать нечего, пришедшее уже в сторе. */
+  useEffect(
+    () => () => {
+      if (draftTyped.current && draftLast.current && !draftSaver.pending()) draftSaver.change(draftLast.current);
+    },
+    [draftSaver],
+  );
   useEffect(() => () => draftSaver.flush(), [draftSaver]);
-  /* Черновик с другого устройства (Р7). Поле не затираем, пока человек здесь печатает: его набранное важнее — оно
-     уйдёт на сервер следом и само станет черновиком у остальных. */
+  useEffect(() => () => onDraftLeaveRef.current?.(), []);
+  /* Черновик с другого устройства (Р7). Только в поле, которое здесь руками не трогали с открытия (`draftTyped`): набранное
+     здесь важнее — оно уйдёт на сервер при уходе и само станет черновиком у остальных. Положенное — «тихое» значение. */
   const remoteRev = useRef(draftRemote?.rev ?? 0);
   useEffect(() => {
     const r = draftRemote;
     if (!r || r.rev === remoteRev.current) return;
     remoteRev.current = r.rev;
     if (composerEdit || draftSaver.pending()) return;
-    const input = inputRef.current;
-    if (input && document.activeElement === input && text.trim()) return;
+    if (draftTyped.current) return;
+    draftQuiet.current = { text: r.text, replyToId: r.replyToId };
     setText(r.text);
     const reply = r.replyToId ? (messages.find((m) => m.id === r.replyToId) ?? null) : null;
     // Цитируемого ещё нет в ленте — встанет, когда подгрузится (тот же путь, что у черновика при открытии).
@@ -3975,6 +4034,8 @@ export function MessagePane({
   useLayoutEffect(() => {
     const fw = fwRef.current;
     restoringPlace.current = false;
+    // Новый визит (в том числе после догонки read cursor) отменяет якорь прежнего открытия из кеша.
+    pendingScroll.current = null;
     if (!fw) return;
     setJumpStack([]);
     if (!fw.place) return;
@@ -4331,7 +4392,7 @@ export function MessagePane({
     const report = onSeenRef.current;
     if (!box || !report) return;
     const covered = feedCovered();
-    if (!canMarkRead({ focused: windowFocused(), covered, idleMs: idleMs(), mobile: isMobile() })) {
+    if (!canMarkRead({ focused: windowFocused(), covered, idleMs: idleMs(), mobile: phoneUi() })) {
       // Слой закрывают не только кликом (Esc «Назад» Android, закрытие по таймеру или из кода) — проверяем, пока он есть.
       if (covered && coverTimer.current === null)
         coverTimer.current = window.setTimeout(() => {
@@ -5178,6 +5239,9 @@ export function MessagePane({
     if (inputRef.current) inputRef.current.value = '';
     setText('');
     // Полоса подсказок (эмодзи по слову, @, #) уходит вместе с текстом — иначе на телефоне висела над пустым полем (приёмка 25.10).
+    // 30.10: и отложенный показ «слова целиком» (300 мс после буквы) гасим — быстрое «да» + Enter иначе поднимало полосу уже после отправки.
+    window.clearTimeout(acExactTimer.current);
+    acExactTimer.current = 0;
     setAc(null);
     // Caps Lock экранной клавиатуры сбрасывается после отправки, как в Telegram (`keyboardReset.ts`).
     resetKeyboardShift(inputRef.current);
@@ -5625,7 +5689,7 @@ export function MessagePane({
       return;
     }
     /* Удержание по аватарке отправителя (G43, Telegram `didLongPressUserAvatar`): меню человека, а не тап-карточка. */
-    if (target.closest('.msg-ava') && isMobile() && e.touches.length === 1) {
+    if (target.closest('.msg-ava') && phoneUi() && e.touches.length === 1) {
       startAvatarPress(e, m);
       return;
     }
@@ -5657,9 +5721,12 @@ export function MessagePane({
   /**
    * `menu` — раунд 12: долгое нажатие открывает меню у пузыря или выделение, а не лист под пальцем
    * (`swallowNativeLongPress`: системное долгое нажатие и клик того же касания до строки не доходят).
+   * Телефон — `phoneUi()`: приложение И вкладка браузера телефона (29.10; было `isMobile()`, и в Chrome на телефоне
+   * удержание давало системное меню и выделение слова вместо меню сообщения). Вместе с ним — `openMsgMenu` (`touch`),
+   * пункт «Выделить текст» и порядок меню. «Выбрать» в меню остаётся пунктом приложения (R161: в браузере его нет).
    */
   function startLongPress(e: React.TouchEvent, id: string, open: () => void, menu = false) {
-    if (!isMobile() || e.touches.length !== 1) return;
+    if (!phoneUi() || e.touches.length !== 1) return;
     const target = e.target as Element;
     /* Раунд 12 (05.10, как в Telegram): удержание пальцем на фото и ячейке альбома (`.att-img-link`) — как на пузыре:
        выделение или меню. Тап по фото по-прежнему открывает просмотр — клик гасит только сработавшее удержание
@@ -6255,7 +6322,7 @@ export function MessagePane({
     const bubble = bubbleSpot(row, m.author.id === meId);
     /* Телефон: палец не указал ни на картинку, ни на файл (тап по подписи, по времени) — единственное фото сообщения и
        единственный файл / видео / голосовое (07.10); альбом и несколько файлов без указания — без пунктов. */
-    const guess = isMobile() && !photo && !more?.file;
+    const guess = phoneUi() && !photo && !more?.file;
     const shown = photo ?? (guess ? photoFromTouch(m.attachments, null) : undefined);
     const file = more?.file ?? (guess ? fileFromTarget(m.attachments, null, true) : undefined);
     setMsgMenu({ m, pos: { x: bubble.anchor.left, y: bubble.anchor.top }, bubble, photo: shown, file, link: more?.link, item: more?.item, quote: selectionQuote(m) ?? undefined });
@@ -6314,7 +6381,7 @@ export function MessagePane({
       openLinkMenu(m, more.link, more.linkRect);
       return;
     }
-    if (touch && isMobile()) {
+    if (touch && phoneUi()) {
       const fire = lpFire.current;
       if (fire) return fire();
       swipeDrop();
@@ -7909,8 +7976,11 @@ export function MessagePane({
       const a = uploadTypingAction(o.files.map((f) => f.type));
       if (a && (!best || typingActionRank(a) > typingActionRank(best))) best = a;
     }
-    // Голосовое грузится прямым вызовом, а не строкой очереди: у него свой вид, и он главнее файла.
-    return voiceSending > 0 ? 'voice_upload' : best;
+    // Последняя записанная отправка этой беседы важнее обычных вложений.
+    for (const item of recordedUploads) {
+      if (item.feedId === feedId) best = item.round ? 'round_upload' : 'voice_upload';
+    }
+    return best;
   })();
   useEffect(() => {
     if (!uploadAction) return;
@@ -9105,8 +9175,8 @@ export function MessagePane({
             const files = outgoingFilesLabel(('fileNames' in o && o.fileNames) || o.files.map((f) => f.name));
             if (bubbles) {
               /* Пузыри (раунд 10): состояние — отметкой у времени, как у отправленного: часы (если сервер молчит
-                 дольше секунды) или красный кружок; под неотправленным — строка «Не отправлено · Повторить» (причина —
-                 в подсказке и в листе). «Удалить» и «Повторить отправку» — в листе (телефон) и в меню (ПК); открывают
+                 дольше секунды) или красный кружок; под неотправленным — строка с причиной и «Повторить».
+                 «Удалить» и «Повторить отправку» — в листе (телефон) и в меню (ПК); открывают
                  их долгое нажатие, правый клик и сама «Не отправлено» — кнопка (`openOutActions`). Эмодзи без
                  текста и файлов — крупно уже в пути: иначе на ответе сервера пузырь со смайликом превращался бы в
                  крупный смайлик без пузыря — заметный прыжок. */
@@ -9226,12 +9296,12 @@ export function MessagePane({
                         // Раунд 12: листа неотправленного нет — и на телефоне меню (у пузыря).
                         aria-haspopup="menu"
                         aria-expanded={outMenu?.key === o.key || outSheet === o.key}
-                        aria-label="Не отправлено — действия с сообщением"
+                        aria-label={o.error ? `Не отправлено: ${o.error}. Действия с сообщением` : 'Не отправлено — действия с сообщением'}
                         title={failHint}
                         onClick={(e) => openOutActions(o.key, e.currentTarget)}
                       >
                         <Icon name="alert-circle" size={14} />
-                        <span>Не отправлено</span>
+                        <span>Не отправлено{o.error ? `: ${o.error}` : ''}</span>
                       </button>
                       <button type="button" className="link" onClick={() => (outbox ? outbox.retry(o.key) : retryOutgoing(o.key))}>
                         Повторить
@@ -9817,6 +9887,13 @@ export function MessagePane({
       {/* Полоса записи (#20) — над композером, как строка ответа: сам ввод остаётся на месте,
           и запись не выглядит как «приложение переключилось в другой режим». */}
       {/* Кружок (G68): круглое окно с камерой (или записанным, на паузе) поверх ленты; полоса записи ниже — та же. */}
+      {!selecting && recordedUploads.filter((item) => item.feedId === feedId).map((item) => (
+        <div className="recorded-upload" key={item.key}>
+          <Icon name={item.round ? 'camera' : 'mic'} size={18} />
+          <span className="recorded-upload-title">{item.round ? 'Видеосообщение' : 'Голосовое сообщение'}</span>
+          <MediaUploadStatus rowKey={item.key} index={0} size={item.file.size} inline />
+        </div>
+      ))}
       {(roundRec || roundPreview) && !selecting && (
         <RoundRecOverlay
           live={roundLive}
@@ -9824,6 +9901,7 @@ export function MessagePane({
           previewMs={roundPreview?.take.durationMs ?? 0}
           recMs={recMs}
           maxMs={ROUND_MAX_MS}
+          onFlipError={(error) => toastError(error, 'Не удалось сменить камеру')}
         />
       )}
       {(recording || preview) && !selecting && (
@@ -9960,7 +10038,8 @@ export function MessagePane({
             {SEND_HINT_TEXT}
           </div>
         )}
-        {ac && acItems.length > 0 && (
+        {/* Пустое поле — подсказок нет вовсе (30.10): что бы ни осталось в `ac` от прошлого текста, над пустым полем полоса не висит. */}
+        {ac && acItems.length > 0 && text.trim() !== '' && (
           // Эмодзи (G53) — полоса в строку, как у Telegram Desktop (`EmojiSuggestions`): ←/→ выбирают, Tab и Enter подставляют, Esc закрывает.
           <div className={ac.trigger === ':' ? 'ac-pop ac-strip' : 'ac-pop'} data-testid={ac.trigger === ':' ? 'emoji-suggest' : undefined}>
             {ac.trigger !== ':' && (
@@ -10356,7 +10435,7 @@ export function MessagePane({
             схлопнулась бы прямо под пальцем. На компьютере всё это скрыто — там своя полоса записи. */}
         {preview && (
           <div className="rec-inline">
-            <button type="button" className="rec-trash" title="Выбросить запись" onClick={voice.discardPreview}>
+            <button type="button" className="rec-trash" title="Выбросить запись" onPointerDown={keepFocus} onMouseDown={keepFocus} onClick={voice.discardPreview}>
               <Icon name="trash" size={19} />
             </button>
             {roundPreview ? (
@@ -10369,7 +10448,7 @@ export function MessagePane({
         {(recording || holdUi) && !preview && (
           <div className="rec-inline" aria-live="polite">
             {!holdUi && (
-              <button type="button" className="rec-trash" title="Выбросить запись" onClick={voice.cancel}>
+              <button type="button" className="rec-trash" title="Выбросить запись" onPointerDown={keepFocus} onMouseDown={keepFocus} onClick={voice.cancel}>
                 <Icon name="trash" size={19} />
               </button>
             )}
@@ -11042,7 +11121,7 @@ export function MessagePane({
              1.05 / 2.20): на ПК сразу под «Ответить» (tdesktop `HistoryInner::showContextMenu`), в пузырях ЛС на телефоне —
              после «Переслать», перед «Удалить» (Android `ChatActivity.fillMessageMenu`: Ответить · Копировать · Переслать ·
              Закрепить · Изменить · Удалить). Каналы держат порядок ПК везде. */
-          const androidOrder = bubbles && isMobile();
+          const androidOrder = bubbles && phoneUi();
           const editItem =
             !readOnly && mine && !m.forwardedFrom && !m.sticker && !convMediaOf(m as { media?: unknown }) ? (
               // Пересланное правке не подлежит (сервер ответит 403) — «Изменить» у него нет.
@@ -11176,7 +11255,7 @@ export function MessagePane({
                 />
               )}
               {/* Телефон: выделять текст пальцем — пунктом меню (Telegram Android), удержание выделяет само сообщение. */}
-              {isMobile() && m.content && (
+              {phoneUi() && m.content && (
                 <MenuItem
                   icon="copy"
                   label="Выделить текст"

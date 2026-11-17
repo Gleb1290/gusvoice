@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
@@ -61,10 +62,12 @@ describe('R140 лимит крупного видео проходит от ли
       assert.equal(value.expression?.getText(result.tree), 'maxBytes');
     };
     // Ограничиваем мутацию единственным тегом камеры: maxBytes есть также у списка и выбора файлов.
-    const { tree, found } = nodes(source, (node) => ts.isJsxSelfClosingElement(node) && node.tagName.getText() === 'CameraScreen');
-    assert.equal(found.length, 1);
-    const tag = found[0]!.getText(tree);
-    rejects(source, tag, tag.replace('maxBytes={maxBytes}', 'maxBytes={25 * 1024 * 1024}'), check);
+    const tag = () => {
+      const { tree, found } = nodes(source, (node) => ts.isJsxSelfClosingElement(node) && node.tagName.getText() === 'CameraScreen');
+      assert.equal(found.length, 1);
+      return found[0]!.getText(tree);
+    };
+    rejects(source, tag, () => tag().replace('maxBytes={maxBytes}', 'maxBytes={25 * 1024 * 1024}'), check);
   });
 });
 
@@ -91,18 +94,24 @@ function body(source: string, name: string): string {
   assert.fail(`закрыта функция ${name}`);
 }
 
-function rejects(source: string, target: string, replacement: string, check: (source: string) => void): void {
+function rejects(source: string, target: string | (() => string), replacement: string | (() => string), check: (source: string) => void): void {
   check(source);
-  assert.equal(source.split(target).length - 1, 1, 'мутант меняет ровно одно место настоящего исходника');
-  const mutant = source.replace(target, replacement);
-  assert.notEqual(mutant, source);
-  assert.throws(() => check(mutant), assert.AssertionError, 'удаление защиты обязано покраснить страж');
+  counterfact(() => {
+    target = typeof target === 'function' ? target() : target;
+    replacement = typeof replacement === 'function' ? replacement() : replacement;
+    assert.equal(source.split(target).length - 1, 1, 'мутант меняет ровно одно место настоящего исходника');
+    const mutant = source.replace(target, replacement);
+    assert.notEqual(mutant, source);
+    assert.throws(() => check(mutant), assert.AssertionError, 'удаление защиты обязано покраснить страж');
+  });
 }
 
 function rejectsIn(source: string, name: string, target: string, replacement: string, check: (source: string) => void): void {
-  const b = body(source, name);
-  assert.equal(b.split(target).length - 1, 1, 'одно место в выбранной функции');
-  rejects(code(source), b, b.replace(target, replacement), check);
+  rejects(code(source), () => {
+    const b = body(source, name);
+    assert.equal(b.split(target).length - 1, 1, 'одно место в выбранной функции');
+    return b;
+  }, () => body(source, name).replace(target, replacement), check);
 }
 
 function filters(source: string): string[] {
@@ -186,9 +195,9 @@ describe('R118 Android: безопасный вход системного «П�
         for (const mime of mimes) assert.ok(filter.includes(`android:mimeType="${mime}"`), mime);
       };
       rejects(manifest, `<action android:name="android.intent.action.${action}" />`, '', check);
-      const original = filterWith(manifest, action);
-      rejects(manifest, original, original.replace('<category android:name="android.intent.category.DEFAULT" />', ''), check);
-      for (const mime of mimes) rejects(manifest, original, original.replace(`<data android:mimeType="${mime}" />`, ''), check);
+      const original = () => filterWith(manifest, action);
+      rejects(manifest, original, () => original().replace('<category android:name="android.intent.category.DEFAULT" />', ''), check);
+      for (const mime of mimes) rejects(manifest, original, () => original().replace(`<data android:mimeType="${mime}" />`, ''), check);
     });
   }
 
@@ -202,8 +211,8 @@ describe('R118 Android: безопасный вход системного «П�
     };
     for (const action of ['MAIN', 'VIEW']) rejects(manifest, `<action android:name="android.intent.action.${action}" />`, '', check);
     for (const category of ['LAUNCHER', 'LEANBACK_LAUNCHER', 'BROWSABLE']) rejects(manifest, `<category android:name="android.intent.category.${category}" />`, '', check);
-    const view = filterWith(manifest, 'VIEW');
-    rejects(manifest, view, view.replace('<category android:name="android.intent.category.DEFAULT" />', ''), check);
+    const view = () => filterWith(manifest, 'VIEW');
+    rejects(manifest, view, () => view().replace('<category android:name="android.intent.category.DEFAULT" />', ''), check);
     rejects(manifest, '<data android:scheme="gusvoice" />', '', check);
   });
 });
@@ -312,8 +321,8 @@ describe('R119 Android: второй рубеж и отмена входящих
       assert.match(c, /catch \(e: Exception\) \{\s*out\.delete\(\)\s*SharedFile\(name, mime, -1L, null, "unreadable"\)/);
     };
     rejects(media, 'if (job.dead) throw IOException("share copy cancelled")', '', check);
-    const c = body(media, 'copyShared');
-    rejects(code(media), c, c.replace(/(catch \(e: Exception\) \{\s*)out\.delete\(\)/, '$1'), check);
+    const c = () => body(media, 'copyShared');
+    rejects(code(media), c, () => c().replace(/(catch \(e: Exception\) \{\s*)out\.delete\(\)/, '$1'), check);
   });
 
   it('attach убирает брошенный inbox даже без моста, но с мостом сохраняет текущие токены', () => {

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, it } from 'node:test';
@@ -93,12 +94,20 @@ it('R224 без обоих признаков остаются координа�
   assert.equal(f.maps.length, 0); assert.equal(f.images.length, 0); assert.equal(f.host.querySelector('.msg-geo-map'), null); assert.match(f.host.textContent ?? '', /Геопозиция/);
 }));
 it('R224 контрфакт отключение приоритета OSM ловится оригинальным сценарием', async () => {
-  await priority(raw); const from = 'const liveMap = osmOn && !osmFailed;'; assert.equal(raw.split(from).length - 1, 1);
-  await assert.rejects(() => priority(raw.replace(from, 'const liveMap = osmOn && !osmFailed && !mapOn;')), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R224-osm-priority:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  await priority(raw);
+  await counterfact(async () => {
+    const from = 'const liveMap = osmOn && !osmFailed;';
+    assert.equal(raw.split(from).length - 1, 1);
+    await assert.rejects(() => priority(raw.replace(from, 'const liveMap = osmOn && !osmFailed && !mapOn;')), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R224-osm-priority:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  });
 });
 it('R224 контрфакт игнорирование onFail не оставляет вечную пустую карту вместо Яндекса', async () => {
-  await fallback(raw); const from = 'const liveMap = osmOn && !osmFailed;'; assert.equal(raw.split(from).length - 1, 1);
-  await assert.rejects(() => fallback(raw.replace(from, 'const liveMap = osmOn;')), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R224-osm-fallback:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  await fallback(raw);
+  await counterfact(async () => {
+    const from = 'const liveMap = osmOn && !osmFailed;';
+    assert.equal(raw.split(from).length - 1, 1);
+    await assert.rejects(() => fallback(raw.replace(from, 'const liveMap = osmOn;')), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R224-osm-fallback:') && e.operator === 'strictEqual' && e.actual === 0 && e.expected === 1);
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -83,7 +84,7 @@ async function empty(mutation?: Mutation) {
   }, mutation);
 }
 test('R239 пустой список неактивен, снятие empty guard обнаруживается', async () => {
-  await empty(); await assert.rejects(empty(['disabled={loading || looks.length === 0}', 'disabled={loading}']), killed('R239-empty:', false, true));
+  await empty(); await counterfact(async () => { await assert.rejects(empty(['disabled={loading || looks.length === 0}', 'disabled={loading}']), killed('R239-empty:', false, true)); });
 });
 async function faces(mutation?: Mutation) {
   await scene(async f => {
@@ -96,7 +97,7 @@ async function faces(mutation?: Mutation) {
   }, mutation);
 }
 test('R239 четыре читателя дают три аватара, нажатие возвращает весь исходный список; лимит мутанта ловится', async () => {
-  await faces(); await assert.rejects(faces(['const FACES_MAX = 3;', 'const FACES_MAX = 4;']), killed('R239-faces:', 4, 3));
+  await faces(); await counterfact(async () => { await assert.rejects(faces(['const FACES_MAX = 3;', 'const FACES_MAX = 4;']), killed('R239-faces:', 4, 3)); });
 });
 test('R239 один читатель показывает имя контакта вместо серверного и отдаёт его в окно', async () => {
   await scene(async f => { await f.answer({ items: [readers[0]] }); assert.equal(f.host.textContent, 'Мой контакт'); f.host.querySelector('button')!.click(); assert.equal(f.opened[0][0], readers[0]); });
@@ -117,7 +118,7 @@ async function opens(mutation?: Mutation) {
   }, mutation);
 }
 test('R239 удаление вызова onOpen обнаруживается нажатием на настоящую кнопку', async () => {
-  await opens(); await assert.rejects(opens(['if (items.length > 0) onOpen(items);', '// onOpen удалён']), killed('R239-open:', 0, 1));
+  await opens(); await counterfact(async () => { await assert.rejects(opens(['if (items.length > 0) onOpen(items);', '// onOpen удалён']), killed('R239-open:', 0, 1)); });
 });
 async function stale(mutation?: Mutation) {
   await scene(async f => {
@@ -129,5 +130,5 @@ async function stale(mutation?: Mutation) {
   }, mutation);
 }
 test('R239 ответ закрытого эффекта после смены сообщения игнорируется, снятие alive guard ловится', async () => {
-  await stale(); await assert.rejects(stale(["if (alive) setList(v.expired ? 'none' : v.items);", "setList(v.expired ? 'none' : v.items);"]), killed('R239-stale:', '', 'Имя1'));
+  await stale(); await counterfact(async () => { await assert.rejects(stale(["if (alive) setList(v.expired ? 'none' : v.items);", "setList(v.expired ? 'none' : v.items);"]), killed('R239-stale:', '', 'Имя1')); });
 });

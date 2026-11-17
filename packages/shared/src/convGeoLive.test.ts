@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -144,7 +145,10 @@ for (const [name, from, to, check, prefix, actual, expected] of [
   ['until ещё разрешён', 'return m.stopped || m.until <= now;', 'return m.stopped || m.until < now;', endBoundary, 'R225-expiry:', false, true],
   ['снят предел трёх секунд', 'if (now - m.updatedAt < GEO_LIVE_LIMITS.minGapMs)', 'if (false)', throttled, 'R225-gap:', false, true],
 ] as const) it(`R225 строгий контрфакт: ${name}`, () => {
-  check(load()); assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь в целом модуле');
-  assert.throws(() => check(load(raw.replace(from, to))), (e: unknown) => e instanceof assert.AssertionError
-    && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.expected === expected && e.actual === actual);
+  check(load());
+  runCounterfact(() => {
+    assert.equal(raw.split(from).length - 1, 1, 'однозначный якорь в целом модуле');
+    assert.throws(() => check(load(raw.replace(from, to))), (e: unknown) => e instanceof assert.AssertionError
+      && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.expected === expected && e.actual === actual);
+  });
 });

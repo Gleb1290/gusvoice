@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -41,8 +42,11 @@ function oldPage(raw = source) {
 it('R217 отсутствие нового признака сохраняет старую страницу экспорта без добавленного поля', () => oldPage());
 it('R217 контрфакт сериализатор всегда обещает полную выгрузку даже старой странице', () => {
   oldPage(source);
-  const from = '...(p.marksComplete ? { marks_complete: true } : {}),';
-  assert.equal(source.split(from).length - 1, 1);
-  assert.throws(() => oldPage(source.replace(from, 'marks_complete: true,')), e => e instanceof assert.AssertionError
-    && e.message.startsWith('R217-old-export:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+
+  runCounterfact(() => {
+    const from = '...(p.marksComplete ? { marks_complete: true } : {}),';
+    assert.equal(source.split(from).length - 1, 1);
+    assert.throws(() => oldPage(source.replace(from, 'marks_complete: true,')), e => e instanceof assert.AssertionError
+      && e.message.startsWith('R217-old-export:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  });
 });

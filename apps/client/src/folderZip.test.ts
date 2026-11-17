@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -236,9 +237,11 @@ function change(anchor: string, replacement: string) {
 async function killed(anchor: string, replacement: string, scenario: (runtime: Runtime) => Promise<unknown>, prefix: string, actual: unknown, expected: unknown,
   compressionStream: typeof CompressionStream | undefined = undefined) {
   await scenario(load(source, compressionStream));
-  const runtime = load(change(anchor, replacement), compressionStream);
-  await assert.rejects(async () => { await scenario(runtime); }, e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
-    && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  await counterfact(async () => {
+    const runtime = load(change(anchor, replacement), compressionStream);
+    await assert.rejects(async () => { await scenario(runtime); }, e => e instanceof assert.AssertionError && e.message.startsWith(prefix)
+      && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 }
 it('R211 контрфакт подменяет CRC файла нулём и независимый читатель это обнаруживает', () => killed('crc: r.crc, packed:', 'crc: 0, packed:', stored,
   'CRC оглавления совпадает с независимым читателем', 0, 0xcbf43926));

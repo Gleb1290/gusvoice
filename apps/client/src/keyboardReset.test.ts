@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -142,16 +143,20 @@ describe('R292: сброс Shift без потери фокуса экранно
 
   it('контрфакт: снятие проверки фокуса ломает именно сохранение исходного атрибута', () => {
     checkNoFocus(resetKeyboardShift, 'other');
+    counterfact(() => {
     const changed = mutant('  if (el.ownerDocument?.activeElement !== (el as unknown)) return;\n', '');
     assert.throws(() => checkNoFocus(changed, 'other'), exactFailure(NO_FOCUS));
+    });
   });
 
   it('контрфакт: невосстановленное прежнее значение ломает именно результат после кадра', () => {
     checkFocused(resetKeyboardShift, 'sentences');
+    counterfact(() => {
     const changed = mutant(
       "    if (prev === null) el.removeAttribute('autocapitalize');\n    else el.setAttribute('autocapitalize', prev);",
       '    void prev;',
     );
     assert.throws(() => checkFocused(changed, 'sentences'), exactFailure(RESTORED));
+    });
   });
 });

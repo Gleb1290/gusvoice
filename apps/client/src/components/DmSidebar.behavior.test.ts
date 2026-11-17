@@ -1,5 +1,6 @@
+import { counterfact, mutantsEnabled } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
-import { after, afterEach, before, it } from 'node:test';
+import { it, after, afterEach, before } from 'node:test';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,7 +21,7 @@ const nativeTimeout = globalThis.setTimeout, nativeInterval = globalThis.setInte
 const nativeClear = globalThis.clearTimeout;
 const handles = () => (process as unknown as { _getActiveHandles(): object[] })._getActiveHandles();
 const originalHandles = new Set(handles());
-const mutant = process.env.GUSVOICE_DM_ROW_MUTANT;
+const mutant = mutantsEnabled() ? process.env.GUSVOICE_DM_ROW_MUTANT : undefined;
 const mutations: Record<string, (s: string) => string> = {
   'ошибка': s => s.replace('{failed ? (', '{false ? ('),
   'телефон': s => s.replace('active={!phone && d.id === currentDmId}', 'active={d.id === currentDmId}'),
@@ -453,7 +454,7 @@ before(async () => {
   const match = window.matchMedia.bind(window);
   window.matchMedia = query => { const m = match(query); if (query === '(max-width: 760px)') Object.defineProperty(m, 'matches', { get: () => phone });
     if (query === '(max-width: 620px)') Object.defineProperty(m, 'matches', { get: () => narrow }); return m; };
-  server = await createServer({ root: fileURLToPath(new URL('../../', import.meta.url)), configFile: false, envFile: false,
+  const openServer = () => createServer({ root: fileURLToPath(new URL('../../', import.meta.url)), configFile: false, envFile: false,
     cacheDir: mkdtempSync(join(tmpdir(), 'gusvoice-dm-sidebar-test-')), optimizeDeps: { noDiscovery: true, include: [] },
     esbuild: { jsx: 'automatic' }, resolve: { alias: { '@gusvoice/shared': fileURLToPath(new URL('../../../../packages/shared/src/index.ts', import.meta.url)) } },
     plugins: [{ name:'test-dm-row-mutant', enforce:'pre', transform(source,id) {
@@ -473,6 +474,7 @@ before(async () => {
       const changed=mutations[mutant](source); assert.notEqual(changed,source,'найден якорь мутанта'); return changed;
     } }],
     server: { middlewareMode: true, hmr: false, watch: null, ws: false }, appType: 'custom', logLevel: 'error' });
+  server = mutant ? (await counterfact(openServer, { timeoutMs: 60_000 }))! : await openServer();
   Sidebar = (await server.ssrLoadModule('/src/components/DmSidebar.tsx')).DmSidebar;
   Chat = (await server.ssrLoadModule('/src/components/DmChatView.tsx')).DmChatView;
   Layout = (await server.ssrLoadModule('/src/components/MainLayout.tsx')).MainLayout;
@@ -1201,20 +1203,22 @@ async function mutantScenario(kind: string) {
     await mount(); await flush(()=>compose.openDmCompose()); await flush(()=>document.querySelector<HTMLButtonElement>('.sheet-row')!.click()); assert.equal(calls,0,'гостевая ЛС не делает API-запрос');
   }
 }
-for (const kind of Object.keys(mutations)) it(`мутант ${kind} отвергается тем же DOM-сценарием`, async () => {
+for (const kind of Object.keys(mutations)) it(`мутант ${kind} отвергается тем же DOM-сценарием`, { timeout: 60_000 }, async () => {
   // Ловит ослабление самого харнесса: оригинал проходит, соответствующая потеря проверки — нет.
-  if (mutant) { await assert.rejects(()=>mutantScenario(kind),assert.AssertionError); return; }
+  if (mutant) { await counterfact(() => assert.rejects(()=>mutantScenario(kind),assert.AssertionError), { timeoutMs: 60_000 }); return; }
   await mutantScenario(kind);
-  const env:NodeJS.ProcessEnv={...process.env,GUSVOICE_DM_ROW_MUTANT:kind}; delete env.NODE_TEST_CONTEXT;
-  const child=spawn(process.execPath,['--import','tsx','--test-reporter','tap','--test-name-pattern',`^мутант ${kind} отвергается тем же DOM-сценарием$`,fileURLToPath(import.meta.url)],{env,stdio:['ignore','pipe','pipe']});
-  let output=''; child.stdout.on('data',(s:Buffer)=>{output=(output+s).slice(-12000);}); child.stderr.on('data',(s:Buffer)=>{output=(output+s).slice(-12000);});
-  const done=new Promise<number|null>((resolve,reject)=>{child.once('close',resolve);child.once('error',reject);});
-  let timer: ReturnType<typeof setTimeout>;
-  try {
-    const code=await Promise.race([done,new Promise<never>((_,reject)=>{timer=nativeTimeout(()=>reject(new Error('Таймаут процесса мутанта')),45000);})]);
-    assert.equal(code,0,output); assert.match(output,/# pass 1(?:\r?\n|$)/,'один тест действительно выполнен');
-  } finally {
-    nativeClear(timer!);
-    if (child.exitCode===null) { child.kill('SIGKILL'); let cleanup:ReturnType<typeof setTimeout>; try { await Promise.race([done,new Promise<never>((_,reject)=>{cleanup=nativeTimeout(()=>reject(new Error('Не закрылся mutant worker')),5000);})]); } finally { nativeClear(cleanup!); } }
-  }
+  await counterfact(async () => {
+    const env:NodeJS.ProcessEnv={...process.env,GUSVOICE_DM_ROW_MUTANT:kind}; delete env.NODE_TEST_CONTEXT;
+    const child=spawn(process.execPath,['--import','tsx','--test-reporter','tap','--test-name-pattern',`^мутант ${kind} отвергается тем же DOM-сценарием$`,fileURLToPath(import.meta.url)],{env,stdio:['ignore','pipe','pipe']});
+    let output=''; child.stdout.on('data',(s:Buffer)=>{output=(output+s).slice(-12000);}); child.stderr.on('data',(s:Buffer)=>{output=(output+s).slice(-12000);});
+    const done=new Promise<number|null>((resolve,reject)=>{child.once('close',resolve);child.once('error',reject);});
+    let timer: ReturnType<typeof setTimeout>;
+    try {
+      const code=await Promise.race([done,new Promise<never>((_,reject)=>{timer=nativeTimeout(()=>reject(new Error('Таймаут процесса мутанта')),45000);})]);
+      assert.equal(code,0,output); assert.match(output,/# pass 1(?:\r?\n|$)/,'один тест действительно выполнен');
+    } finally {
+      nativeClear(timer!);
+      if (child.exitCode===null) { child.kill('SIGKILL'); let cleanup:ReturnType<typeof setTimeout>; try { await Promise.race([done,new Promise<never>((_,reject)=>{cleanup=nativeTimeout(()=>reject(new Error('Не закрылся mutant worker')),5000);})]); } finally { nativeClear(cleanup!); } }
+    }
+  }, { timeoutMs: 60_000 });
 });

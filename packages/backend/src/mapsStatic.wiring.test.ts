@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -126,7 +127,9 @@ it('R220 AST маршрут не подключает постоянные хр�
 });
 it('R220 контрфакт признак включается от одних пробелов в ключе', () => {
   const raw = read('instanceFeatures'), from = 'process.env.YANDEX_MAPS_STATIC_KEY?.trim()';
-  assert.equal(features('   ', raw), 0); assert.equal(raw.split(from).length - 1, 1);
+  assert.equal(features('   ', raw), 0); counterfact(() => {
+assert.equal(raw.split(from).length - 1, 1);
   assert.throws(() => assert.equal(features('   ', raw.replace(from, 'process.env.YANDEX_MAPS_STATIC_KEY')), 0, 'R220-yamap-key: пробелы не ключ'),
     e => e instanceof assert.AssertionError && e.message.startsWith('R220-yamap-key:') && e.operator === 'strictEqual' && e.actual === 1 && e.expected === 0);
+});
 });

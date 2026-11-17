@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -149,8 +150,10 @@ it('R262 fill сохраняет размер альбомной ячейки б
 
 it('R262 контрфакт удаления once-ветки раскрывает фото и адресно ломает проверку плитки', async () => {
   await closed();
+  await counterfact(async () => {
   const anchor = 'if (onceMediaTile(a)) return <OnceMediaTile a={a} mine={!!voice?.mine} fill={fill} onOpen={onOpen} />;';
   assert.equal(source.split(anchor).length - 1, 1);
   await assert.rejects(() => closed(photo, { text: source.replace(anchor, '') }), error =>
     error instanceof assert.AssertionError && error.message.includes('R262:закрытая-одноразовая-плитка'));
+  });
 });

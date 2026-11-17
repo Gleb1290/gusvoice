@@ -1,55 +1,72 @@
 /**
- * Voice-session persistence for reconnect-grace + restore-on-restart (#11). While you're in a voice
- * channel we stamp { serverId, channelId, ts } in localStorage and refresh `ts` on a heartbeat, so it
- * reflects "last alive". On a clean leave we clear it. If the connection drops and doesn't recover
- * within GRACE_MS, VoiceConnection visually leaves but KEEPS the session; on the next app launch we
- * auto-rejoin the same server+channel (mute/deafen come back via the persisted selfMuted/selfDeafened).
- * The grace window also gates restore: a session older than GRACE_MS is treated as a normal past
- * session, not a crash, so we don't yank you back into a call you left hours ago.
+ * Voice-session persistence for reconnect-grace + restore-on-restart (#11).
+ * Startup admits a fresh snapshot before any async work; splash may extend only that snapshot.
+ * Live reconnect uses its own wider window. A deliberate leave clears the saved session.
  */
 import { activeInstanceId } from './config';
 
-// Namespaced per instance (#7): a voice session belongs to one backend's channel-id space, so after
-// switching instances we must NOT auto-rejoin the old instance's channel.
-// 🔴 С 01.10 голос переживает переход между инстансами (смотришь свой дом, а сидишь в голосе у соседа): запись,
-// касание и стирание идут по ИНСТАНСУ ГОЛОСА (`voice.instanceId`), а не по активной записи — иначе касание
-// освежало бы чужую сессию, а выход стирал бы не ту. Восстановление на старте и после обрыва — про активный.
+// Voice may belong to a different instance than the one currently on screen.
 function key(instanceId: string | null | undefined): string {
   return `gv_voice_session:${instanceId ?? 'default'}`;
 }
 export const GRACE_MS = 12_000;
 
-export type VoiceSession = { serverId: string; channelId: string; ts: number };
+export type VoiceSession = { serverId: string; channelId: string; ts: number; schema?: 1 };
 
-function loadRaw(instanceId: string | null | undefined = activeInstanceId()): VoiceSession | null {
+// Also distinguish clear/save of the same channel at the same millisecond within this process.
+const generations = new Map<string, number>();
+function invalidate(instanceId: string | null): void {
+  const k = key(instanceId);
+  generations.set(k, (generations.get(k) ?? 0) + 1);
+}
+
+function parseSession(raw: string | null): VoiceSession | null {
   try {
-    const v = JSON.parse(localStorage.getItem(key(instanceId)) || 'null');
+    const v = JSON.parse(raw || 'null');
     return v && typeof v.serverId === 'string' && typeof v.channelId === 'string' ? (v as VoiceSession) : null;
   } catch {
     return null;
   }
 }
 
-export function saveVoiceSession(instanceId: string | null, serverId: string, channelId: string): void {
+function loadRaw(instanceId: string | null | undefined = activeInstanceId()): VoiceSession | null {
   try {
-    localStorage.setItem(key(instanceId), JSON.stringify({ serverId, channelId, ts: Date.now() }));
+    return parseSession(localStorage.getItem(key(instanceId)));
+  } catch {
+    return null;
+  }
+}
+
+function fresh(s: VoiceSession | null, now: number): s is VoiceSession {
+  // Old splash code could have refreshed a legacy entry just before installing this build.
+  // Such a timestamp cannot prove recent intent: require one manual join after upgrading.
+  if (!s || s.schema !== 1 || typeof s.ts !== 'number' || !Number.isFinite(s.ts)) return false;
+  const age = now - s.ts;
+  return age >= 0 && age < GRACE_MS;
+}
+
+export function saveVoiceSession(instanceId: string | null, serverId: string, channelId: string): void {
+  invalidate(instanceId);
+  try {
+    localStorage.setItem(key(instanceId), JSON.stringify({ serverId, channelId, ts: Date.now(), schema: 1 }));
   } catch {
     /* storage unavailable */
   }
 }
 
-/** Refresh the heartbeat timestamp so "last alive" stays current while connected. */
+/** Refresh the heartbeat timestamp while the live voice connection is healthy. */
 export function touchVoiceSession(instanceId: string | null): void {
   const s = loadRaw(instanceId);
   if (!s) return;
   try {
-    localStorage.setItem(key(instanceId), JSON.stringify({ ...s, ts: Date.now() }));
+    localStorage.setItem(key(instanceId), JSON.stringify({ ...s, ts: Date.now(), schema: 1 }));
   } catch {
     /* storage unavailable */
   }
 }
 
 export function clearVoiceSession(instanceId: string | null = activeInstanceId()): void {
+  invalidate(instanceId);
   try {
     localStorage.removeItem(key(instanceId));
   } catch {
@@ -57,21 +74,79 @@ export function clearVoiceSession(instanceId: string | null = activeInstanceId()
   }
 }
 
-/** The session to auto-rejoin on boot, but only if it was alive within the grace window (a crash /
- *  quick restart) — otherwise null. */
+/** Read-only freshness check; startup admission additionally removes rejected persisted intent. */
 export function restorableVoiceSession(): VoiceSession | null {
   const s = loadRaw();
-  if (!s) return null;
-  return Date.now() - s.ts < GRACE_MS ? s : null;
+  return fresh(s, Date.now()) ? s : null;
 }
 
+export type StartupVoiceSession = {
+  touch: () => void;
+  current: () => VoiceSession | null;
+};
+
 /**
- * Сессия для авто-возврата ПОСЛЕ ВОССТАНОВЛЕНИЯ СВЯЗИ в уже запущенном приложении.
- *
- * ⚠️ Окно здесь своё, шире загрузочного (5 минут против 12 секунд), и это намеренно: на старте
- * приложения мы возвращаем только после падения/быстрого перезапуска, а здесь — после провала сети,
- * который вполне может длиться минуты. Само наличие сессии означает, что уход был непреднамеренным.
+ * Capture BEFORE gateway/async startup work. Rejected intent cannot leak into live-rejoin later.
+ * A lease is bound to this instance and exact storage entry; cancellation is permanent.
  */
+export function captureStartupVoiceSession(): StartupVoiceSession | null {
+  const instanceId = activeInstanceId();
+  const k = key(instanceId);
+  let expected: string | null;
+  try {
+    expected = localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+  let session = parseSession(expected);
+  let lastNow = Date.now();
+  if (!fresh(session, lastNow)) {
+    clearVoiceSession(instanceId);
+    return null;
+  }
+  const generation = generations.get(k) ?? 0;
+  let valid = true;
+  const current = (): VoiceSession | null => {
+    if (!valid) return null;
+    let matches = false;
+    try {
+      matches = localStorage.getItem(k) === expected && (generations.get(k) ?? 0) === generation;
+    } catch {
+      /* storage unavailable */
+    }
+    if (activeInstanceId() !== instanceId || !matches) {
+      valid = false;
+      return null;
+    }
+    const now = Date.now();
+    // Compare observations too: a small clock rollback can leave ts apparently in the past.
+    if (now < lastNow || !fresh(session, now)) {
+      valid = false;
+      clearVoiceSession(instanceId);
+      return null;
+    }
+    lastNow = now;
+    return { ...session };
+  };
+  return {
+    current,
+    touch: () => {
+      const s = current();
+      if (!s) return;
+      const next = { ...s, ts: lastNow };
+      try {
+        const raw = JSON.stringify(next);
+        localStorage.setItem(k, raw);
+        expected = raw;
+        session = next;
+      } catch {
+        valid = false;
+      }
+    },
+  };
+}
+
+/** Live-reconnect intent; the caller applies the separate five-minute window. */
 export function rejoinableVoiceSession(): VoiceSession | null {
   return loadRaw();
 }

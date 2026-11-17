@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Наложение манифеста для сборки Google Play (#247, `GV_STORE=play`, подключается в `app/build.gradle.kts` как манифест
+     наборов исходников debug/release — сливается ПОВЕРХ main, не заменяет его). Пуши — Google FCM (`FcmService`),
+     встроенный WS-распространитель (служба переднего плана dataSync|specialUse с вечным уведомлением) и его перезапуск
+     после загрузки устройства вычеркнуты вместе с их разрешениями: в Google Play такая служба не пройдёт проверку.
+     Своя галерея (READ_MEDIA_*) и USE_FULL_SCREEN_INTENT остаются, как в F-Droid-сборке. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" tools:node="remove" />
+    <!-- Нужно было только `PushBootReceiver` (перезапуск встроенного распространителя). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" tools:node="remove" />
+
+    <application>
+        <service
+            android:name="tech.gusik.gusvoice.PushDistributorService"
+            tools:node="remove" />
+        <receiver
+            android:name="tech.gusik.gusvoice.PushBootReceiver"
+            tools:node="remove" />
+
+        <!-- Приём FCM: `onMessageReceived` → тот же показ, что у UnifiedPush (`PushNotifier.show`). -->
+        <service
+            android:name="tech.gusik.gusvoice.FcmService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Токен — только когда клиент попросил (`StorePush.start`), а не сам при старте процесса. -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
+    </application>
+</manifest>

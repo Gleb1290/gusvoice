@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -13,9 +14,11 @@ it('перетаскивание принимает непустую бесед�
   const valid = { conv: 'c', ids: Array.from({ length: 100 }, (_, i) => `m${i}`) };
   assert.equal(rules.parseMsgDrag(JSON.stringify(valid))?.ids.length, 100);
   assert.equal(rules.parseMsgDrag(JSON.stringify({ conv: 'c', ids: [...valid.ids, 'm100'] })), null);
-  const mutant = mutantApi('ids.length > DRAG_MSG_MAX', 'false');
-  assert.throws(() => assert.equal(mutant.parseMsgDrag(JSON.stringify({ conv: 'c', ids: [...valid.ids, 'm100'] })), null), assert.AssertionError,
-    'мутант принимает невозможную пачку из 101 сообщения');
+  counterfact(() => {
+    const mutant = mutantApi('ids.length > DRAG_MSG_MAX', 'false');
+    assert.throws(() => assert.equal(mutant.parseMsgDrag(JSON.stringify({ conv: 'c', ids: [...valid.ids, 'm100'] })), null), assert.AssertionError,
+      'мутант принимает невозможную пачку из 101 сообщения');
+  });
 });
 
 function mutantApi(from: string, to: string, injected: Record<string, unknown> = {}): typeof rules {
@@ -40,9 +43,11 @@ it('DownloadURL чистит разделители имени, принимае
   assert.equal(rules.downloadUrlValue('image/png', 'photo.png', 'https://cdn.test/a', 'https://gusvoice.test'), 'image/png:photo.png:https://cdn.test/a');
   assert.equal(rules.downloadUrlValue('image/png', 'x', 'javascript:alert(1)', 'https://gusvoice.test'), null);
   assert.equal(rules.downloadUrlValue('image/png', 'x', 'data:text/plain,a', 'https://gusvoice.test'), null);
-  const mutant = mutantApi("abs.protocol !== 'http:' && abs.protocol !== 'https:'", "false");
-  assert.throws(() => assert.equal(mutant.downloadUrlValue('text/plain', 'x', 'javascript:alert(1)', 'https://host.test'), null), assert.AssertionError,
-    'мутант выставляет javascript: в DataTransfer');
+  counterfact(() => {
+    const mutant = mutantApi("abs.protocol !== 'http:' && abs.protocol !== 'https:'", "false");
+    assert.throws(() => assert.equal(mutant.downloadUrlValue('text/plain', 'x', 'javascript:alert(1)', 'https://host.test'), null), assert.AssertionError,
+      'мутант выставляет javascript: в DataTransfer');
+  });
 });
 
 it('бросок на строку беседы доставляет ровно свой payload и отписывается при размонтировании', () => {
@@ -70,8 +75,10 @@ it('бросок на строку беседы доставляет ровно 
   };
   const injected = { window: fakeWindow, CustomEvent: FakeCustomEvent };
   check(mutantApi('const FORWARD_DROP =', 'const FORWARD_DROP =', injected));
-  assert.throws(() => check(mutantApi('if (d?.payload) fn(d.payload, d.to);', 'if (false) fn(d.payload, d.to);', injected)), assert.AssertionError,
-    'мутант глотает drop-событие и не открывает пересылку');
+  counterfact(() => {
+    assert.throws(() => check(mutantApi('if (d?.payload) fn(d.payload, d.to);', 'if (false) fn(d.payload, d.to);', injected)), assert.AssertionError,
+      'мутант глотает drop-событие и не открывает пересылку');
+  });
 });
 
 it('лента открывает пересылку только если все перетаскиваемые id есть в её сообщениях', () => {
@@ -116,8 +123,10 @@ it('лента открывает пересылку только если вс�
     assert.equal(picked.length, 1);
   };
   check(body);
-  const guard = 'if (!batchOn || !p.ids.every((id) => messages.some((x) => x.id === id))) return;';
-  assert.ok(body.includes(guard), 'проверка batch и принадлежности id найдена');
-  assert.throws(() => check(body.replace(guard, '')), assert.AssertionError,
-    'мутант открывает пересылку на id из чужой беседы');
+  counterfact(() => {
+    const guard = 'if (!batchOn || !p.ids.every((id) => messages.some((x) => x.id === id))) return;';
+    assert.ok(body.includes(guard), 'проверка batch и принадлежности id найдена');
+    assert.throws(() => check(body.replace(guard, '')), assert.AssertionError,
+      'мутант открывает пересылку на id из чужой беседы');
+  });
 });

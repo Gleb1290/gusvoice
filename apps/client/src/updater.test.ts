@@ -1,3 +1,4 @@
+import { counterfact } from "../../../packages/shared/test/counterfacts.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, describe, it } from 'node:test';
@@ -52,6 +53,8 @@ type WholeUpdaterOptions = {
   splash?: boolean;
   splashThrows?: boolean;
   noBridge?: boolean;
+  noWindow?: boolean;
+  logRejects?: boolean;
   calls?: string[];
   now?: number;
   observe?: (event: string, stored: Map<string, string>) => void;
@@ -70,6 +73,7 @@ function loadWholeUpdater(source: string, options: WholeUpdaterOptions = {}) {
   let pollCallback: (() => void) | null = null;
   let splashChecks = 0;
   const calls = options.calls ?? [];
+  const logCalls: Array<{ command: string; line: unknown; keys: string[] }> = [];
   const unexpected: string[] = [];
   const deps: Record<string, unknown> = {
     './hotkeys': { isDesktop: () => true },
@@ -98,8 +102,13 @@ function loadWholeUpdater(source: string, options: WholeUpdaterOptions = {}) {
       setItem: (key: string, value: string) => { stored.set(key, value); },
       removeItem: (key: string) => { stored.delete(key); },
     },
-    window: options.noBridge ? {} : {
-      __TAURI__: { core: { invoke: async (command: string) => {
+    ...(options.noWindow ? {} : { window: options.noBridge ? {} : {
+      __TAURI__: { core: { invoke: async (command: string, args?: unknown) => {
+        if (command === 'gv_update_log') {
+          logCalls.push({ command, line: (args as { line?: unknown } | undefined)?.line, keys: Object.keys(args ?? {}) });
+          if (options.logRejects) throw new Error('update log unavailable');
+          return null;
+        }
         if (command !== 'gv_launch_splash') {
           unexpected.push(command);
           throw new Error(`unexpected splash command: ${command}`);
@@ -108,14 +117,14 @@ function loadWholeUpdater(source: string, options: WholeUpdaterOptions = {}) {
         if (options.splashThrows) throw new Error('bridge unavailable');
         return options.splash ?? false;
       } } },
-    },
+    } }),
     Date: { now: () => virtualNow },
     console: { warn: () => {} },
     setTimeout: (callback: () => void, ms = 0) => { virtualNow += ms; callback(); return 0; },
     setInterval: (callback: () => void) => { pollCallback = callback; return 1; },
   });
   return {
-    api: module.exports as Record<string, (...args: never[]) => unknown>, stored, state, calls,
+    api: module.exports as Record<string, (...args: never[]) => unknown>, stored, state, calls, logCalls,
     splashChecks: () => splashChecks,
     updateChecks: () => updateChecks,
     firePoll: async () => {
@@ -258,11 +267,13 @@ describe('R240 контрфакты полного updater-модуля', () => 
 
     const original = loadWholeUpdater(updaterSource);
     assert.equal(await markerCheck(original).then(() => null, error => error), null, 'исходный целый модуль проходит');
-    const mutantSource = replaceOnce(updaterSource,
-      '  markJustUpdated(update.version);\n  try {\n    await update.install();',
-      '  try {\n    await update.install();\n    markJustUpdated(update.version);');
-    const error = await markerCheck(loadWholeUpdater(mutantSource)).then(() => null, caught => caught);
-    assertAssertionShape(error, 'strictEqual', null, '8.0.0', 'R240-marker-at-install');
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(updaterSource,
+        "  markJustUpdated(update.version);\n  updateLog('main', `install v${update.version} (panel)`);\n  try {\n    await update.install();",
+        "  updateLog('main', `install v${update.version} (panel)`);\n  try {\n    await update.install();\n    markJustUpdated(update.version);");
+      const error = await markerCheck(loadWholeUpdater(mutantSource)).then(() => null, caught => caught);
+      assertAssertionShape(error, 'strictEqual', null, '8.0.0', 'R240-marker-at-install');
+    });
   });
 
   it('мутант «не снимать метку при сбое install» ловится точной ошибкой состояния', async () => {
@@ -274,9 +285,11 @@ describe('R240 контрфакты полного updater-модуля', () => 
 
     const original = loadWholeUpdater(updaterSource);
     await installFailure(original);
-    const mutantSource = replaceOnce(updaterSource, '    unmarkJustUpdated();\n    throw e;', '    throw e;');
-    const error = await installFailure(loadWholeUpdater(mutantSource)).then(() => null, caught => caught);
-    assertAssertionShape(error, 'strictEqual', true, false, 'R240-failure-clears-marker');
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(updaterSource, '    unmarkJustUpdated();\n    throw e;', '    throw e;');
+      const error = await installFailure(loadWholeUpdater(mutantSource)).then(() => null, caught => caught);
+      assertAssertionShape(error, 'strictEqual', true, false, 'R240-failure-clears-marker');
+    });
   });
 
   it('мутант «игнорировать pace» ловится пропавшими виртуальными паузами без таймеров', async () => {
@@ -287,12 +300,14 @@ describe('R240 контрфакты полного updater-модуля', () => 
     };
 
     await runWithPace(loadWholeUpdater(updaterSource));
-    const mutantSource = replaceOnce(
-      replaceOnce(updaterSource, 'await pace.sleep(dlLeft)', 'await realPace.sleep(dlLeft)'),
-      'await pace.sleep(instLeft)', 'await realPace.sleep(instLeft)',
-    );
-    const error = await runWithPace(loadWholeUpdater(mutantSource)).then(() => null, caught => caught);
-    assertAssertionShape(error, 'deepStrictEqual', [], [SPLASH_TIMING.downloadMinMs, SPLASH_TIMING.installMinMs], 'R240-pace-is-used');
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(
+        replaceOnce(updaterSource, 'await pace.sleep(dlLeft)', 'await realPace.sleep(dlLeft)'),
+        'await pace.sleep(instLeft)', 'await realPace.sleep(instLeft)',
+      );
+      const error = await runWithPace(loadWholeUpdater(mutantSource)).then(() => null, caught => caught);
+      assertAssertionShape(error, 'deepStrictEqual', [], [SPLASH_TIMING.downloadMinMs, SPLASH_TIMING.installMinMs], 'R240-pace-is-used');
+    });
   });
 
   it('мутант «игнорировать hadSplash» ловится лишним вызовом check', async () => {
@@ -303,11 +318,60 @@ describe('R240 контрфакты полного updater-модуля', () => 
     };
 
     await noSecondCheck(updaterSource);
-    const mutantSource = replaceOnce(updaterSource,
-      '  if (!splash) await runDesktopUpdateCheck();',
-      '  await runDesktopUpdateCheck();');
-    const error = await noSecondCheck(mutantSource).then(() => null, caught => caught);
-    assertAssertionShape(error, 'strictEqual', 1, 0, 'R240-had-splash-skips-main-check');
+    await counterfact(async () => {
+      const mutantSource = replaceOnce(updaterSource,
+        '  if (!splash) await runDesktopUpdateCheck();',
+        '  await runDesktopUpdateCheck();');
+      const error = await noSecondCheck(mutantSource).then(() => null, caught => caught);
+      assertAssertionShape(error, 'strictEqual', 1, 0, 'R240-had-splash-skips-main-check');
+    });
+  });
+});
+
+describe('R316 журнал обновлений не мешает запуску клиента', () => {
+  function log(harness: WholeUpdater, who: 'main' | 'splash', message: string): unknown {
+    const updateLog = harness.api.updateLog as (who: 'main' | 'splash', message: string) => void;
+    try {
+      return updateLog(who, message);
+    } finally {
+      harness.checkIO();
+    }
+  }
+
+  it('без window журнал молча возвращает управление и не вызывает IPC', () => {
+    const harness = loadWholeUpdater(updaterSource, { noWindow: true });
+    assert.equal(log(harness, 'main', 'launch'), undefined);
+    assert.deepEqual(harness.logCalls, []);
+  });
+
+  it('без Tauri журнал молча возвращает управление и не вызывает IPC', () => {
+    const harness = loadWholeUpdater(updaterSource, { noBridge: true });
+    assert.equal(log(harness, 'splash', 'done'), undefined);
+    assert.deepEqual(harness.logCalls, []);
+  });
+
+  it('отказ invoke проглочен, в том числе после возврата синхронного updateLog', async () => {
+    const harness = loadWholeUpdater(updaterSource, { logRejects: true });
+    assert.equal(log(harness, 'main', 'old build without log command'), undefined);
+    // Дать rejected Promise пройти полный оборот: один doesNotThrow не заметил бы потерянный catch.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    harness.checkIO();
+    assert.deepEqual(harness.logCalls, [{
+      command: 'gv_update_log', line: 'main old build without log command', keys: ['line'],
+    }]);
+  });
+
+  it('рабочий мост получает gv_update_log с единственным line, автором и неизменённым сообщением', async () => {
+    const harness = loadWholeUpdater(updaterSource);
+    assert.equal(log(harness, 'main', 'install v9.9.316'), undefined);
+    // Очистка CR/LF — ответственность Rust, клиент не должен потерять полезную часть сообщения.
+    assert.equal(log(harness, 'splash', 'done\r\nnext'), undefined);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    harness.checkIO();
+    assert.deepEqual(harness.logCalls, [
+      { command: 'gv_update_log', line: 'main install v9.9.316', keys: ['line'] },
+      { command: 'gv_update_log', line: 'splash done\r\nnext', keys: ['line'] },
+    ]);
   });
 });
 
@@ -454,17 +518,19 @@ describe('R244 обновление, которое ставится заста�
     await branchScenario(updaterSource, true);
     await branchScenario(updaterSource, false);
 
-    const branch = '  if (await hadSplash()) {\n    await restart();\n    return;\n  }';
-    for (const replacement of [
-      '  if (false) {\n    await restart();\n    return;\n  }',
-      '  if (!(await hadSplash())) {\n    await restart();\n    return;\n  }',
-    ]) {
-      const mutant = replaceOnce(updaterSource, branch, replacement);
-      await assert.rejects(branchScenario(mutant, true), (error: unknown) => {
-        assertAssertionShape(error, 'deepStrictEqual', ['download', 'stop', 'install'], ['stop', 'restart'], 'R244-whole-apply-branch-and-order');
-        return true;
-      });
-    }
+    await counterfact(async () => {
+      const branch = '  if (await hadSplash()) {\n    await restart();\n    return;\n  }';
+      for (const replacement of [
+        '  if (false) {\n    await restart();\n    return;\n  }',
+        '  if (!(await hadSplash())) {\n    await restart();\n    return;\n  }',
+      ]) {
+        const mutant = replaceOnce(updaterSource, branch, replacement);
+        await assert.rejects(branchScenario(mutant, true), (error: unknown) => {
+          assertAssertionShape(error, 'deepStrictEqual', ['download', 'stop', 'install'], ['stop', 'restart'], 'R244-whole-apply-branch-and-order');
+          return true;
+        });
+      }
+    });
 
     const manualOffer = async (source: string) => {
       const harness = loadWholeUpdater(source, { update: updateFixture([]), splash: true });
@@ -473,12 +539,14 @@ describe('R244 обновление, которое ставится заста�
       harness.checkIO();
     };
     await manualOffer(updaterSource);
-    const manualMutant = replaceOnce(updaterSource,
-      "viaSplash: await hadSplashSafe() });\n  } catch (e) {\n    console.warn('[updater] manual check failed:'",
-      " });\n  } catch (e) {\n    console.warn('[updater] manual check failed:'");
-    await assert.rejects(manualOffer(manualMutant), (error: unknown) => {
-      assertAssertionShape(error, 'strictEqual', false, true, 'R244-manual-viaSplash-mutation: маршрут');
-      return true;
+    await counterfact(async () => {
+      const manualMutant = replaceOnce(updaterSource,
+        "viaSplash: await hadSplashSafe() });\n  } catch (e) {\n    console.warn('[updater] manual check failed:'",
+        " });\n  } catch (e) {\n    console.warn('[updater] manual check failed:'");
+      await assert.rejects(manualOffer(manualMutant), (error: unknown) => {
+        assertAssertionShape(error, 'strictEqual', false, true, 'R244-manual-viaSplash-mutation: маршрут');
+        return true;
+      });
     });
 
     const backgroundOffer = async (source: string) => {
@@ -489,12 +557,14 @@ describe('R244 обновление, которое ставится заста�
       harness.checkIO();
     };
     await backgroundOffer(updaterSource);
-    const backgroundMutant = replaceOnce(updaterSource,
-      "viaSplash: await hadSplashSafe() });\n  } catch (e) {\n    console.warn('[updater] background check failed:'",
-      " });\n  } catch (e) {\n    console.warn('[updater] background check failed:'");
-    await assert.rejects(backgroundOffer(backgroundMutant), (error: unknown) => {
-      assertAssertionShape(error, 'strictEqual', false, true, 'R244-background-viaSplash-mutation: маршрут');
-      return true;
+    await counterfact(async () => {
+      const backgroundMutant = replaceOnce(updaterSource,
+        "viaSplash: await hadSplashSafe() });\n  } catch (e) {\n    console.warn('[updater] background check failed:'",
+        " });\n  } catch (e) {\n    console.warn('[updater] background check failed:'");
+      await assert.rejects(backgroundOffer(backgroundMutant), (error: unknown) => {
+        assertAssertionShape(error, 'strictEqual', false, true, 'R244-background-viaSplash-mutation: маршрут');
+        return true;
+      });
     });
   });
 });
@@ -518,12 +588,14 @@ describe('R295 метки одного прохода обновления', () 
     };
 
     await verify(updaterSource);
-    const mutant = replaceOnce(updaterSource,
-      '    localStorage.setItem(INSTALLED_KEY, version);\n', '');
-    await assert.rejects(verify(mutant), (error: unknown) =>
-      assertMutationAssertion(error, 'deepStrictEqual', [['gv:just-updated', '9.9.295']], [
-        ['gv:just-updated', '9.9.295'], ['gv:installed-update', '9.9.295'],
-      ], 'R295-mark-sets-both'));
+    await counterfact(async () => {
+      const mutant = replaceOnce(updaterSource,
+        '    localStorage.setItem(INSTALLED_KEY, version);\n', '');
+      await assert.rejects(verify(mutant), (error: unknown) =>
+        assertMutationAssertion(error, 'deepStrictEqual', [['gv:just-updated', '9.9.295']], [
+          ['gv:just-updated', '9.9.295'], ['gv:installed-update', '9.9.295'],
+        ], 'R295-mark-sets-both'));
+    });
   });
 
   it('peek сохраняет метки и отдаёт installed с приоритетом, take снимает только свои метки', async () => {
@@ -554,11 +626,13 @@ describe('R295 метки одного прохода обновления', () 
     };
 
     await verify(updaterSource);
-    const mutant = replaceOnce(updaterSource,
-      '  clearSplashMarkers();\n  return m;',
-      '  clearSplashMarkers();\n  localStorage.removeItem(UPDATED_KEY);\n  return m;');
-    await assert.rejects(verify(mutant), (error: unknown) =>
-      assertMutationAssertion(error, 'strictEqual', false, true, 'R295-take-preserves-toast-marker'));
+    await counterfact(async () => {
+      const mutant = replaceOnce(updaterSource,
+        '  clearSplashMarkers();\n  return m;',
+        '  clearSplashMarkers();\n  localStorage.removeItem(UPDATED_KEY);\n  return m;');
+      await assert.rejects(verify(mutant), (error: unknown) =>
+        assertMutationAssertion(error, 'strictEqual', false, true, 'R295-take-preserves-toast-marker'));
+    });
   });
 
   it('apply с заставкой использует настоящий default restart и пишет JSON до stop; без заставки метки нет', async () => {
@@ -583,16 +657,18 @@ describe('R295 метки одного прохода обновления', () 
     };
 
     await verifySplash(updaterSource);
-    const mutant = replaceOnce(updaterSource,
-      'restart: () => Promise<void> = relaunchForSplashUpdate,',
-      'restart: () => Promise<void> = relaunchApp,');
-    await assert.rejects(verifySplash(mutant), (error: unknown) =>
-      assertMutationAssertion(error, 'deepStrictEqual', [
-        { name: 'stop', marker: null }, { name: 'restart', marker: null },
-      ], [
-        { name: 'stop', marker: '{"version":"9.9.295","at":123456}' },
-        { name: 'restart', marker: '{"version":"9.9.295","at":123456}' },
-      ], 'R295-relaunch-marker-before-stop-and-restart'));
+    await counterfact(async () => {
+      const mutant = replaceOnce(updaterSource,
+        'restart: () => Promise<void> = relaunchForSplashUpdate,',
+        'restart: () => Promise<void> = relaunchApp,');
+      await assert.rejects(verifySplash(mutant), (error: unknown) =>
+        assertMutationAssertion(error, 'deepStrictEqual', [
+          { name: 'stop', marker: null }, { name: 'restart', marker: null },
+        ], [
+          { name: 'stop', marker: '{"version":"9.9.295","at":123456}' },
+          { name: 'restart', marker: '{"version":"9.9.295","at":123456}' },
+        ], 'R295-relaunch-marker-before-stop-and-restart'));
+    });
 
     const plain = loadWholeUpdater(updaterSource, {
       update: { available: true, version: '9.9.295', body: 'notes', download: async () => {}, install: async () => {} },
@@ -624,9 +700,11 @@ describe('R295 метки одного прохода обновления', () 
     };
 
     await verify(updaterSource);
-    const mutant = replaceOnce(updaterSource,
-      '  if (!splash) clearSplashMarkers();\n', '');
-    await assert.rejects(verify(mutant), (error: unknown) =>
-      assertMutationAssertion(error, 'strictEqual', true, false, 'R295-no-splash-clears-installed'));
+    await counterfact(async () => {
+      const mutant = replaceOnce(updaterSource,
+        '  if (!splash) clearSplashMarkers();\n', '');
+      await assert.rejects(verify(mutant), (error: unknown) =>
+        assertMutationAssertion(error, 'strictEqual', true, false, 'R295-no-splash-clears-installed'));
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
@@ -89,7 +90,7 @@ async function purchaseModules() {
     '../purchase.js': purchase, '../realtime.js': realtime,
   };
   const dormant = new Set(['../audit.js', '../economyDefaults.js', '../gooseRules.js', '../voiceActivityRules.js',
-    '../levelRules.js', '../streakRules.js', '../seasons.js', '../storage.js']);
+    '../levelRules.js', '../streakRules.js', '../seasons.js', '../storage.js', '../gameMoney.js', '../gameMoneyRules.js']);
   const ast = ts.createSourceFile('routes/economy.ts', raw, ts.ScriptTarget.Latest, true);
   for (const node of ast.statements) {
     if (!ts.isImportDeclaration(node) || node.importClause?.isTypeOnly || !ts.isStringLiteral(node.moduleSpecifier)) continue;
@@ -221,19 +222,23 @@ for (const [label, from, to] of [
 ] as const) test(`R279 контрфакт «${label}» ломает частичный PUT после успешного оригинала`, async () => {
   // Класс ошибки: мутант засчитывается только по host AssertionError с адресным маркером предметного сценария.
   await partialScenario();
+  await counterfact(async () => {
   await t.db.delete(schema.instanceSettings);
   assert.equal(settingsSource.split(from).length, 2);
   await assert.rejects(() => partialScenario(settingsSource.replace(from, to)),
     (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n', 1)[0] === 'R279-partial: PUT не затирает соседнюю настройку');
+  });
 });
 
 test('R279 контрфакт каталога без rentalMaxDays ломает доставку настройки после успешного оригинала', async () => {
   // Класс ошибки: поле DTO не должно потеряться при формировании реального ответа магазина.
   await shopScenario();
+  await counterfact(async () => {
   const from = '            rentalMaxDays,';
   assert.equal(shopSource.split(from).length, 2);
   await assert.rejects(() => shopScenario(shopSource.replace(from, '')),
     (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n', 1)[0] === 'R279-shop: реальный каталог доставляет потолок клиенту');
+  });
 });
 
 test('R279 при потолке 90 остаток 55 продлевается, а 65 запрещён с числами 90 и 60', async () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -76,23 +77,32 @@ it('R128 отказ первого места не мешает следующи
 });
 it('R128 контрфакты позднего комментария, break после отказа и пропущенного текста краснеют', async () => {
   const comment = '  for (const c of plan.comment) await sendText(c, []);\n';
-  assert.ok(source.includes(comment));
   const tail = '  for (const part of plan.tail) await sendText(part, []);';
-  assert.ok(source.includes(tail));
-  const late = source.replace(comment, '').replace(tail, `${tail}\n${comment}`);
   const checkOrder = async (raw: string) => {
     const h = await send('conv', { comment: 'комментарий', text: 'подпись', files }, raw);
     assert.equal(h.calls[0].content, 'комментарий');
   };
-  await checkOrder(source); await assert.rejects(checkOrder(late), assert.AssertionError);
-  const broken = source.replace('out.push({ target, ok: false, error });', 'out.push({ target, ok: false, error }); break;');
-  assert.notEqual(broken, source);
+  await checkOrder(source);
+  await counterfact(async () => {
+    assert.ok(source.includes(comment));
+    assert.ok(source.includes(tail));
+    const late = source.replace(comment, '').replace(tail, `${tail}\n${comment}`);
+    await assert.rejects(checkOrder(late), assert.AssertionError);
+  });
   const checkPlaces = async (raw: string) => assert.equal((await send('conv', { comment: '', text: 'x', files: [] }, raw, ['bad', 'next'])).result.length, 2);
-  await checkPlaces(source); await assert.rejects(checkPlaces(broken), assert.AssertionError);
-  const skipped = source.replace(tail, '');
-  assert.notEqual(skipped, source);
+  await checkPlaces(source);
+  await counterfact(async () => {
+    const broken = source.replace('out.push({ target, ok: false, error });', 'out.push({ target, ok: false, error }); break;');
+    assert.notEqual(broken, source);
+    await assert.rejects(checkPlaces(broken), assert.AssertionError);
+  });
   const checkText = async (raw: string) => assert.equal((await send('channel', { comment: '', text: 'x', files: [] }, raw)).calls.length, 2);
-  await checkText(source); await assert.rejects(checkText(skipped), assert.AssertionError);
+  await checkText(source);
+  await counterfact(async () => {
+    const skipped = source.replace(tail, '');
+    assert.notEqual(skipped, source);
+    await assert.rejects(checkText(skipped), assert.AssertionError);
+  });
 });
 
 const textThree='a'.repeat(longText.MESSAGE_TEXT_MAX)+'b'.repeat(longText.MESSAGE_TEXT_MAX)+'c';
@@ -154,6 +164,7 @@ it('R132 сверх восьми пределов текста или комме
 it('R132 мутанты повторных файлов, позднего комментария, общего break и отправки при отказе краснеют',async()=>{
   // Контрфакты исполняют полный sendShareTo с настоящим sharePlan, не заменяя бизнес-правила фикстурой.
   await longOrder('conv');await interrupted();await tooLong();
+  await counterfact(async () => {
   const tail='  for (const part of plan.tail) await sendText(part, []);';assert.ok(source.includes(tail));
   const fileSend='  if (files.length > 0) await sendText(plan.caption, files);';assert.ok(source.includes(fileSend));
   const earlyTail=source.replace(tail,'').replace(fileSend,`${tail}\n${fileSend}`);
@@ -166,4 +177,5 @@ it('R132 мутанты повторных файлов, позднего ком
   const refusal='  if (!plan.ok) return targets.map((target) => ({ target, ok: false, error: new Error(plan.error) }));';assert.ok(source.includes(refusal));
   const leaked=source.replace(refusal,'  if (!plan.ok) { await api.convSend(targets[0].id, { content: p.text, attachments: [] }); return targets.map((target) => ({ target, ok: false, error: new Error(plan.error) })); }');
   await assert.rejects(tooLong(leaked),/API не вызывается вообще/);
+  });
 });

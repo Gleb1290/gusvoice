@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -102,15 +103,17 @@ describe('федеративные группы Э7 — shared-провод', ()
   it('подписываемая строка сохраняет границы полей вместо опасной склейки a|bc и ab|c', () => {
     fieldBoundaryContract({ convMessageSigPayload });
 
-    const source = readFileSync(new URL('./convGroup.ts', import.meta.url), 'utf8');
-    const anchor = "  return parts.map((p) => `${p.length}:${p}`).join('|');";
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь кодирования длин должен быть уникальным');
-    const mutant = loadConvGroup(source.replace(anchor, "  return parts.join('|');"));
-    assert.throws(
-      () => fieldBoundaryContract(mutant),
-      (error) => error instanceof assert.AssertionError && error.message.includes('границы id и conversationId'),
-      'контракт должен поймать целый модуль без длины полей',
-    );
+    runCounterfact(() => {
+      const source = readFileSync(new URL('./convGroup.ts', import.meta.url), 'utf8');
+      const anchor = "  return parts.map((p) => `${p.length}:${p}`).join('|');";
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь кодирования длин должен быть уникальным');
+      const mutant = loadConvGroup(source.replace(anchor, "  return parts.join('|');"));
+      assert.throws(
+        () => fieldBoundaryContract(mutant),
+        (error) => error instanceof assert.AssertionError && error.message.includes('границы id и conversationId'),
+        'контракт должен поймать целый модуль без длины полей',
+      );
+    });
   });
 
   it('текст, editVersion, надгробие и вложение меняют подписываемую строку', () => {
@@ -175,14 +178,16 @@ describe('федеративные группы Э7 — shared-провод', ()
   it('контрфакт: целый модуль подписывает editVersion и ломается при удалении поля', () => {
     editVersionContract({ convMessageSigPayload });
 
-    const source = readFileSync(new URL('./convGroup.ts', import.meta.url), 'utf8');
-    const anchor = "    String(m.editVersion),";
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь editVersion должен быть уникальным');
-    const mutant = loadConvGroup(source.replace(anchor, ''));
-    assert.throws(
-      () => editVersionContract(mutant),
-      (error) => error instanceof assert.AssertionError && error.message.includes('правка должна менять подписываемую строку'),
-      'контракт должен поймать целый модуль без editVersion',
-    );
+    runCounterfact(() => {
+      const source = readFileSync(new URL('./convGroup.ts', import.meta.url), 'utf8');
+      const anchor = "    String(m.editVersion),";
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь editVersion должен быть уникальным');
+      const mutant = loadConvGroup(source.replace(anchor, ''));
+      assert.throws(
+        () => editVersionContract(mutant),
+        (error) => error instanceof assert.AssertionError && error.message.includes('правка должна менять подписываемую строку'),
+        'контракт должен поймать целый модуль без editVersion',
+      );
+    });
   });
 });

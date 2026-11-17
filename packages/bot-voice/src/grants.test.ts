@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -82,8 +83,10 @@ for (const m of mutants) it(`R309 контрфакт прав: ${m.name}`, () =>
   const marker = `R309_GRANTS: ${m.name}`;
   const check = (g: typeof grants) => assert.equal(m.check(g), m.expected, marker);
   check(grants); check(load());
+  counterfact(() => {
   assert.equal(source.split(m.from).length - 1, 1, 'уникальный якорь мутанта');
   assert.throws(() => check(load(source.replace(m.from, m.to))), e => e instanceof assert.AssertionError
     && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' && e.message.startsWith(marker)
     && e.actual === m.actual && e.expected === m.expected);
+  });
 });

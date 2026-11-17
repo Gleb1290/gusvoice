@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -364,10 +365,12 @@ it('R167 размонтирование снимает таймер и слуш�
 }));
 
 it('R167 мутант без задержки обнаруживается на настоящем хуке до границы трёх секунд', async () => {
-  const anchor = '}, STAGE_AUTO_SHOW_DELAY_MS);';
-  assert.equal(source.split(anchor).length - 1, 1, 'точный якорь задержки встречается один раз');
   await delayBoundary();
-  await assert.rejects(() => delayBoundary(source.replace(anchor, '}, 0);')), assert.AssertionError);
+  await counterfact(async () => {
+    const anchor = '}, STAGE_AUTO_SHOW_DELAY_MS);';
+    assert.equal(source.split(anchor).length - 1, 1, 'точный якорь задержки встречается один раз');
+    await assert.rejects(() => delayBoundary(source.replace(anchor, '}, 0);')), assert.AssertionError);
+  });
 });
 
 it('R168 включение в пустом канале не выключает настройку ни через три, ни через десять секунд', () => fixture(async f => {

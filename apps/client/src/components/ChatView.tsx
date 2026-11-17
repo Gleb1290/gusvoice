@@ -106,8 +106,9 @@ export function ChatView({ channel }: { channel: Channel }) {
    * над лентой. ⚠️ И сама подпись КОРОТКАЯ: замер на живом устройстве (411 px) дал полю ровно 128 px —
    * остальное съели четыре кнопки и отправка. «Написать сообщение» в них не влезало и обрывалось
    * многоточием, а обрезанная подсказка читается хуже короткой.
+   * Телефон — и вкладка браузера телефона (окно ≤ 760 px, граница `PHONE_LAYOUT_QUERY`; 29.10): там подсказка та же.
    */
-  const placeholder = isMobile() ? 'Сообщение' : `Написать в #${channel.name}`;
+  const placeholder = isMobile() || window.matchMedia?.('(max-width: 760px)')?.matches ? 'Сообщение' : `Написать в #${channel.name}`;
 
   return (
     <MessagePane
@@ -153,10 +154,10 @@ export function ChatView({ channel }: { channel: Channel }) {
         const msg = await api.sendMessage(channel.id, '', [], null, stickerId);
         appendMessage(channel.id, msg);
       }}
-      onSendVoice={async (take) => {
+      onSendVoice={async (take, _opts, onProgress) => {
         // Огибающая и длительность считаются при записи и приклеиваются к вложению — сервер их
         // только валидирует и хранит (#20).
-        const att = await api.uploadAttachment(channel.id, take.file);
+        const att = await api.uploadAttachment(channel.id, take.file, { onProgress });
         const msg = await api.sendMessage(channel.id, '', [
           { ...att, waveform: take.waveform, durationMs: take.durationMs },
         ]);

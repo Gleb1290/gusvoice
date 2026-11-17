@@ -1,17 +1,17 @@
 [package]
 name = "gusvoice"
-version = "0.9.51"
+version = "0.9.71"
 description = "GusVoice desktop client"
 license = "AGPL-3.0-only"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.90"
 
 [lib]
 name = "gusvoice_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 
 [features]
 # Сбор диагностики с машины пользователя (#113).
@@ -29,7 +29,7 @@ diag = []
 [dependencies]
 # `devtools` keeps F12 / Inspect working in RELEASE builds too (handy for on-device debugging).
 # `tray-icon` enables the system-tray icon/menu (close-to-tray behaviour).
-tauri = { version = "2", features = ["devtools", "tray-icon"] }
+tauri = { version = "2.12.5", features = ["devtools", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -42,7 +42,9 @@ serde_json = "1"
 # сервер вышибает первый — со стороны выглядит как «клиент замолчал сам».
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-global-shortcut = "2.3.2"
-tauri-plugin-updater = "2.10.1"
+# 2.14.1 — первая с zip 9 (CVE-2026-115909/115905 в zip 4.x, шаг sast, 30.10); требует tauri ≥ 2.12.
+# С 2.12 `allowDowngrades` у JS-`check()` убран — пробный откат включает Rust (`splash::update_test_downgrade`).
+tauri-plugin-updater = "2.14.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-notification = "2.3.3"
 # Native folder picker for the downloads directory (Settings → Десктоп, and the first-download ask).
@@ -52,20 +54,22 @@ tauri-plugin-dialog = "2.7.2"
 
 # WebView2 mic/camera permission grant (Windows). Pinned to Tauri/wry's transitive version.
 [target.'cfg(windows)'.dependencies]
-webview2-com = "0.38.2"
+webview2-com = "0.39.1"
 # Тост, который знает про клик (`os_notify.rs`, #212): плагин уведомлений клик на десктопе не отдаёт, а
 # под ним лежит этот же notify-rust. Версия — ровно та, что уже тянет tauri-plugin-notification.
 notify-rust = "4.18.0"
 # Native screen-share audio: WASAPI process-loopback that EXCLUDES the GusVoice process tree, so
-# the stream carries system/game audio without our own voice output (no echo). windows 0.61 matches
-# the version webview2-com/wry already pull in.
-windows = { version = "0.61", features = [
+# the stream carries system/game audio without our own voice output (no echo). windows 0.62 matches
+# the version webview2-com/wry already pull in (с tauri 2.12 / wry 0.57, 30.10; tauri-winrt-notification
+# под notify-rust ещё держит свою 0.61 — это отдельная копия, наши типы с ней не встречаются).
+windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
   "Win32_System_Variant",
   "Win32_System_Threading",
+  "Win32_System_Registry",
   # Авто-«отошёл» уровня ОС: GetTickCount — вторая половина пары к GetLastInputInfo.
   "Win32_System_SystemInformation",
   "Win32_Media_Audio",
@@ -93,7 +97,7 @@ windows = { version = "0.61", features = [
   "Data_Xml_Dom",
   "UI_Notifications",
 ] }
-windows-core = "0.61"
+windows-core = "0.62"
 
 # Native screen-share publish (Plan B): LiveKit Rust SDK = native libwebrtc capture + encode +
 # publish, replacing the WebView2 getDisplayMedia picker (which can't be intercepted). A companion
@@ -118,7 +122,11 @@ base64 = "0.22"
 # Vendored under apps/desktop/vendor/webrtc-sys; see docs/native-screenshare-plan.md.
 [patch.crates-io]
 webrtc-sys = { path = "../vendor/webrtc-sys" }
+# Preserve the 0.3.18 libwebrtc ABI; only its ZIP dependency is patched locally.
+webrtc-sys-build = { path = "../vendor/webrtc-sys-build", version = "=0.3.18" }
 # Та же 0.3.38, что тянет livekit, с одной правкой: публичный `NativeVideoSource::sys_handle()` —
 # в C++-источник пишет захват, при котором кадр не покидает видеокарту (#207, шаг 4.2).
 # См. apps/desktop/vendor/libwebrtc/GUSVOICE.md.
 libwebrtc = { path = "../vendor/libwebrtc" }
+# Upstream VariantStrIter soundness fix backported without changing the GTK 0.18 ABI.
+glib = { path = "../vendor/glib", version = "=0.18.5" }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -120,6 +121,7 @@ it('R126 пустая сетка безопасна, слой стиля не в
 it('R126 контрфакты лимитов, потолка, округления и выбора последней плитки нарушают контракт', () => {
   // Целый настоящий модуль: не исполняем вырезанные функции и не переносим алгоритм в тест.
   contract(rules);
+  counterfact(() => {
   const replacements: Array<[string, string]> = [
     ['ALBUM_TEMPLATE_MAX = 4', 'ALBUM_TEMPLATE_MAX = 3'], ['ALBUM_TEMPLATE_MAX = 4', 'ALBUM_TEMPLATE_MAX = 5'],
     ['ALBUM_MAX = 10', 'ALBUM_MAX = 9'], ['ALBUM_MAX = 10', 'ALBUM_MAX = 11'],
@@ -138,4 +140,5 @@ it('R126 контрфакты лимитов, потолка, округлени
       { module, exports: module.exports, require: (id: string) => { assert.ok(id in deps); return deps[id]; } });
     assert.throws(() => contract(module.exports as Rules), assert.AssertionError, from);
   }
+  });
 });

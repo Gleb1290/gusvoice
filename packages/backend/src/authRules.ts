@@ -19,7 +19,13 @@
  * в localStorage на каждый чих.
  */
 export const TOKEN_TTL_S = 8 * 24 * 3600;
+/** Долгий вход выбирается явно; обычные и старые токены сохраняют прежний TTL. */
+export const REMEMBERED_TOKEN_TTL_S = 90 * 24 * 3600;
 export const REFRESH_AFTER_S = 24 * 3600;
+
+export function authTokenTtlSeconds(rememberMe?: boolean): number {
+  return rememberMe === true ? REMEMBERED_TOKEN_TTL_S : TOKEN_TTL_S;
+}
 
 /** Сколько живёт токен и когда продлевается — для тестов и для документации. */
 export const TOKEN_TIMING = { ttlSeconds: TOKEN_TTL_S, refreshAfterSeconds: REFRESH_AFTER_S };

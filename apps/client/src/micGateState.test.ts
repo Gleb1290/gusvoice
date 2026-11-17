@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import vm from 'node:vm';
@@ -79,8 +80,10 @@ function loadOwnRing(raw: string): typeof ownRingSpeaking {
 it('R260 контрфакт: требование gate===true замечается именно как потеря речи при отсутствующей цепи', () => {
   const check = (raw: string) => assert.equal(loadOwnRing(raw)(true, null), true, 'R260:null-сохраняет-VAD');
   check(source);
+  counterfact(() => {
   const from = 'gateOpenNow !== false';
   assert.equal(source.split(from).length - 1, 1, 'одна адресная точка мутации');
   assert.throws(() => check(source.replace(from, 'gateOpenNow === true')), error =>
     error instanceof assert.AssertionError && error.message.includes('R260:null-сохраняет-VAD'));
+  });
 });

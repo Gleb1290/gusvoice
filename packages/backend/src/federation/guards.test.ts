@@ -1,3 +1,4 @@
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -95,14 +96,16 @@ describe('защита федеративных маршрутов от повт
     // Класс ошибки: сосед получает неподдерживаемый флаг, когда федеративные ЛС выключены.
     const source = readFileSync(new URL('./state.ts', import.meta.url), 'utf8');
     assert.equal(dm2OnceIsGated(source), true, 'целый state.ts включает dm2once только под deps.dmEnabled');
-    const anchor = '...(deps.dmEnabled ? [FED_FEATURES.dm2once] : []),';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь capability должен быть уникальным');
-    const mutant = source.replace(anchor, 'FED_FEATURES.dm2once,');
-    assert.throws(
-      () => assert.equal(dm2OnceIsGated(mutant), true, 'всегда включённый dm2once недопустим'),
-      (error: unknown) => error instanceof assert.AssertionError && error.message.includes('всегда включённый dm2once недопустим'),
-      'AST oracle обнаруживает объявление флага при выключенных ЛС',
-    );
+    counterfact(() => {
+      const anchor = '...(deps.dmEnabled ? [FED_FEATURES.dm2once] : []),';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь capability должен быть уникальным');
+      const mutant = source.replace(anchor, 'FED_FEATURES.dm2once,');
+      assert.throws(
+        () => assert.equal(dm2OnceIsGated(mutant), true, 'всегда включённый dm2once недопустим'),
+        (error: unknown) => error instanceof assert.AssertionError && error.message.includes('всегда включённый dm2once недопустим'),
+        'AST oracle обнаруживает объявление флага при выключенных ЛС',
+      );
+    });
   });
 });
 
@@ -126,10 +129,12 @@ it('R201 журнал открытых федеративных ЛС подкл�
     assert.equal(conditions.some(condition => condition.includes('dmEnabled')), false, 'журнал не зависит от флага новых ЛС');
   };
   check(source);
-  const anchor = 'if (env.federation.enabled) {\n    configureFederatedConv({'; assert.equal(source.split(anchor).length - 1, 1);
-  assert.throws(() => check(source.replace(anchor, 'if (env.federation.enabled && env.federation.dmEnabled) {\n    configureFederatedConv({')),
-    e => e instanceof assert.AssertionError && e.message.includes('защищено только общим флагом'));
-  const record = 'record: recordFedConvChanges,'; assert.equal(source.split(record).length - 1, 1);
-  assert.throws(() => check(source.replace(record, 'record: env.federation.dmEnabled ? recordFedConvChanges : null,')),
-    e => e instanceof assert.AssertionError && e.message.includes('record не выключается'));
+  counterfact(() => {
+    const anchor = 'if (env.federation.enabled) {\n    configureFederatedConv({'; assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => check(source.replace(anchor, 'if (env.federation.enabled && env.federation.dmEnabled) {\n    configureFederatedConv({')),
+      e => e instanceof assert.AssertionError && e.message.includes('защищено только общим флагом'));
+    const record = 'record: recordFedConvChanges,'; assert.equal(source.split(record).length - 1, 1);
+    assert.throws(() => check(source.replace(record, 'record: env.federation.dmEnabled ? recordFedConvChanges : null,')),
+      e => e instanceof assert.AssertionError && e.message.includes('record не выключается'));
+  });
 });

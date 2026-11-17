@@ -16,6 +16,10 @@ import {
   typingActionToServer,
   FEATURE_FEDCALL1,
   FEATURE_TYPING2,
+  FEATURE_TYPING3,
+  FEATURE_DUEL2,
+  FEATURE_DUEL21,
+  FEATURE_DUEL_SERIES1,
   voicePublishBits,
 } from '@gusvoice/shared';
 import { useCall } from './callStore';
@@ -33,7 +37,7 @@ import { feedCovered } from './readByView';
 import { notifyLevel } from './channelPrefs';
 import { isMobile } from './hotkeys';
 import { shouldPulseWallet } from './coinsCue';
-import { ensureEconomy } from './economyClient';
+import { ensureDuel, ensureEconomy, ensurePredictions, ensureWheel } from './economyClient';
 import { resolveMemberName } from './memberName';
 
 /**
@@ -93,6 +97,21 @@ function voiceOnServer(v: VoiceConnection | null, serverId: string): boolean {
   return !!v && voiceIsHere(v) && (v.serverId === null || v.serverId === serverId);
 }
 
+/**
+ * ЭТО устройство само сидит в голосе этого канала (30.10, баг: выстрел саундборда звучал на телефоне, пока голос шёл с ПК).
+ *
+ * 🔴 Сервер адресует голосовые события ЛЮДЯМ (`voiceParticipantIds` — кто числится в голосе по presence), а шлюз
+ * раздаёт их ВСЕМ соединениям человека: телефон той же учётки, в голос не входивший, получал звук и тост. Отличить
+ * «моё устройство в голосе» от «моя учётка в голосе» может только сама вкладка — по своему `voice` в сторе
+ * (LiveKit держит одну личность на учётку, так что в голосе всегда ровно одно устройство). Как в Discord: звуки
+ * канала слышит только подключённый клиент.
+ * ⚠️ Голос на другом инстансе (`voiceIsHere`) — событие этого шлюза не про него, тоже «не здесь».
+ */
+function voiceInChannelHere(channelId: string): boolean {
+  const v = useStore.getState().voice;
+  return !!v && voiceIsHere(v) && v.channelId === channelId;
+}
+
 export function onGooseOffer(fn: (o: GooseOffer) => void): () => void {
   gooseListeners.add(fn);
   return () => gooseListeners.delete(fn);
@@ -128,6 +147,15 @@ import { shouldPlayTipCue } from './tipMode';
 import { toast, toastError } from './toast';
 import { clearDmActivity, noteDmActivity } from './dmOnline';
 import { dropTyping, noteTyping } from './typing';
+
+/**
+ * Раскладка телефона — список и лента РАЗНЫЕ экраны: приложение на телефоне (`isMobile()`) или окно не шире 760 px (граница
+ * `PHONE_LAYOUT_QUERY`, `phoneLayout.ts`): вкладка браузера телефона, узкое окно ПК. 🔴 29.10: здесь был только `isMobile()`,
+ * и вкладка Chrome на телефоне считала ленту видимой, когда человек уже ушёл в список, — отмечала прочитанным и прятала число.
+ */
+function phonePanes(): boolean {
+  return isMobile() || (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches);
+}
 
 let gateway: WebSocket | null = null;
 let presence: WebSocket | null = null;
@@ -258,6 +286,9 @@ function scheduleRead(key: string, fn: () => void): void {
   );
 }
 
+/** Тосты ставок на события, уже показанные в этой вкладке (`new:` — по id события, `win:<id>`) — не чаще одного на событие. */
+const predictionToastSeen = new Set<string>();
+
 export function connectGateway(): void {
   const token = getToken();
   if (!token) return;
@@ -299,8 +330,13 @@ export function connectGateway(): void {
     caps?.push(FEATURE_PRESENCE5);
     // `typing2` (09.10): получать вид действия `round` («записывает видеосообщение»); без него шлюз отдаёт прежнее `voice`.
     caps?.push(FEATURE_TYPING2);
+    caps?.push(FEATURE_TYPING3);
     // `fedcall1` (Э6, 12.10): получать `call.state` входящего звонка с другого инстанса (`DmCall.host`); без него шлюз такого не шлёт.
     caps?.push(FEATURE_FEDCALL1);
+    // `duel2` (28.10, ГусКоины 2 этап 4): клиент показывает «Камень-ножницы-бумага» и «Жадного гуся» — без неё сервер
+    // в эти игры такого соперника не зовёт (`target_unavailable`).
+    caps?.push(FEATURE_DUEL2);
+    caps?.push(FEATURE_DUEL21, FEATURE_DUEL_SERIES1);
     // `groups1` (07.10): события групп ЛС — только соединению с беседами, которое их понимает.
     // `presence4` (08.10): получать `online.dm` — «Невидимый» в сети для ЛС. `bigreact1` (08.10, G43): эффект `reaction.big`.
     socket.send(
@@ -365,6 +401,14 @@ export function connectGateway(): void {
         {
           const sid = store.bootstrap?.server.id;
           if (sid) ensureEconomy(sid, true);
+          // Колесо (ГусКоины 2): раунд мог начаться или закончиться без нас — снимок заново, но только там, где он уже
+          // был нужен (сервер голоса и открытый; без снимка `ensureWheel` подтянет кнопка «Активности» сама).
+          for (const id of new Set([sid, store.voice?.serverId])) if (id && store.wheel?.[id]) ensureWheel(id, true);
+          // Дуэль (этап 3): снимок канала голоса заново, если он уже был загружен (вызов мог истечь без нас).
+          const vc = store.voice?.channelId;
+          if (vc && store.duels?.[vc] !== undefined) ensureDuel(store.voice?.serverId ?? sid, vc, true);
+          // Ставки на события (этап 5): лента заново там, где она уже была (событие могло открыться или закончиться без нас).
+          for (const id of new Set([sid, store.voice?.serverId])) if (id && store.predictions?.[id]) ensurePredictions(id, true);
         }
         return;
       }
@@ -420,7 +464,7 @@ export function connectGateway(): void {
           const chanOnScreen = isFeedOnScreen({
             id: msg.channelId,
             currentId: store.currentChannelId,
-            mobile: isMobile(),
+            mobile: phonePanes(),
             mobilePane: store.mobilePane,
             // Человек в личках — канал не на экране, даже если остался «текущим» (#212, зеркало Б2).
             kind: 'channel',
@@ -490,6 +534,8 @@ export function connectGateway(): void {
         // ВСЕГДА — даже когда событие про сервер, который сейчас не открыт. Иначе переименование
         // и смена иконки доезжали бы до остальных только после перезагрузки страницы.
         void store.loadServers();
+        // Игры/кошелёк голоса могут принадлежать другому серверу, чем открытый текстовый канал.
+        ensureEconomy(msg.serverId, true);
         if (msg.serverId !== store.currentServerId) return;
         /**
          * 🔴 Снимок экономики перечитываем ТОЖЕ (требование 03.09: «права должны открываться
@@ -499,7 +545,6 @@ export function connectGateway(): void {
          * минуты, журнал сервера) и правки витрины доезжали с задержкой до следующего фокуса.
          * ⚠️ `force`, иначе дедуп в `ensureEconomy` увидит готовый снимок и никуда не пойдёт.
          */
-        ensureEconomy(msg.serverId, true);
         // Refresh perms; if our voice publish grants changed while connected, re-mint the token.
         const before = voicePublishBits(store.bootstrap?.permissions);
         void store
@@ -595,6 +640,123 @@ export function connectGateway(): void {
           `Вам натипали ${msg.received} — на сегодня приём закрыт. Лишние типы не копятся: отправителю придёт отказ, а завтра приём откроется снова.`,
         );
         return;
+      /**
+       * Колесо гусей-пиратов (ГусКоины 2, этап 2): ставка/блокировка/отмена и итог раунда — всем членам сервера.
+       * Снимка ещё нет — событие не к чему применить: догружаем снимок (он уже содержит это состояние).
+       * Звуки — у сцены (`WheelScene`); здесь только выигрыш тому, кто ставил, а сцену закрыл.
+       */
+      case 'wheel.state':
+        if (!store.applyWheelEvent(msg)) ensureWheel(msg.serverId);
+        return;
+      case 'wheel.result': {
+        const before = store.wheel[msg.serverId];
+        if (!store.applyWheelEvent(msg)) ensureWheel(msg.serverId);
+        const me = store.user?.id;
+        const sceneOpen = store.activitiesOpen?.serverId === msg.serverId && store.activitiesOpen.view === 'wheel';
+        const iBet = !!me && !!before?.round?.bets.some((b) => b.userId === me);
+        // Сундук сорван, а человек ставил в раунде — пушечный выстрел (этап 7) вместо обычного выигрыша.
+        if (!sceneOpen && iBet && msg.last.jackpotHit && !store.selfDeafened) playSound('wheelJackpot');
+        else if (!sceneOpen && iBet && msg.last.winners.some((w) => w.userId === me) && !store.selfDeafened) playSound('wheelWin');
+        return;
+      }
+      /**
+       * Гусиная дуэль (ГусКоины 2, этап 3): вызов — только игрокам, остальное — сидящим в канале и игрокам.
+       * Здесь: тихий звук вызова цели, тост «началась дуэль» зрителям в канале (≤ 1 на партию) и победный звук игроку,
+       * закрывшему сцену. Стук кубиков и победа при открытой сцене — у самой сцены (`DuelScene`).
+       */
+      case 'duel.state': {
+        const me = store.user?.id;
+        const before = store.duels?.[msg.channelId]?.duel ?? null;
+        const hadInvite = store.duelInvite?.duel.id ?? null;
+        store.applyDuelEvent(msg);
+        const d = msg.duel;
+        if (!d || !me) return;
+        const player = d.challengerId === me || d.targetId === me;
+        // Звук вызова — только устройству в голосе этого канала (владелец 30.10, как саундборд); карточка вызова — всем.
+        if (voiceInChannelHere(msg.channelId) && d.state === 'invited' && d.targetId === me && hadInvite !== d.id && !store.selfDeafened) playSound('duelInvite');
+        const started = d.state === 'playing' && !(before?.id === d.id && before.state === 'playing');
+        if (started && !player && store.voice?.channelId === msg.channelId && store.gameToast?.id !== d.id) {
+          store.setGameToast({
+            id: d.id,
+            serverId: msg.serverId,
+            channelId: msg.channelId,
+            challengerId: d.challengerId,
+            targetId: d.targetId,
+            amount: d.amount,
+            until: Date.now() + 10_000,
+            game: d.game,
+          });
+        }
+        const sceneOpen = store.activitiesOpen?.view === 'duel' && store.activitiesOpen.channelId === msg.channelId;
+        const justSettled = d.state === 'settled' && !(before?.id === d.id && before.state === 'settled');
+        if (justSettled && !sceneOpen && d.winnerId === me && !store.selfDeafened) playSound('duelWin');
+        else if (justSettled && !sceneOpen && d.winnerId && (d.challengerId === me || d.targetId === me) && !store.selfDeafened) playSound('duelLose');
+        return;
+      }
+      /**
+       * Ставки на события (ГусКоины 2, этап 5): событие уровня сервера — всем членам. Снимка нет — догружаем его. Здесь же
+       * тост-полка: «Новое событие · Смотреть» сидящим в голосе этого сервера (≤ 1 на событие, не создателю) и «Ты угадал: +N»
+       * по итогу (с тихим победным звуком, если лента закрыта). ⚠️ Правила итога здесь — инлайном: у `sockets.ts` закрытая
+       * граница импортов (стражи тестов), тот же расчёт в ленте — `predictionRules.myEventResult`.
+       */
+      /**
+       * «Запустить игры» (29.10): карточка «Игры пришли в голос» сразу — тем, кто онлайн (`MainLayout` показывает её не
+       * поверх других окон и не тому, кто её уже видел; отметку «видел» ставит закрытие). Подарок мне — если я в списке
+       * одарённых. Горн играет сама карточка. Снимок экономики перечитает `server.invalidate`, который сервер шлёт следом.
+       */
+      case 'games.launched': {
+        const me = store.user?.id;
+        const mine = me && Array.isArray(msg.giftedUserIds) && msg.giftedUserIds.includes(me) ? msg.gift : 0;
+        store.setGamesLaunchNotice({ serverId: msg.serverId, at: msg.at, gift: msg.gift, mine });
+        return;
+      }
+      case 'prediction.state': {
+        const me = store.user?.id;
+        const before = store.predictions?.[msg.serverId]?.events.find((e) => e.id === msg.eventId) ?? null;
+        if (!store.applyPredictionEvent(msg)) ensurePredictions(msg.serverId);
+        const ev = msg.event;
+        if (!ev || !me) return;
+        const srvNow = Date.parse(msg.serverNow) || Date.now();
+        const fresh = (iso: string | null) => !!iso && srvNow - (Date.parse(iso) || 0) < 120_000;
+        const feedOpen = store.activitiesOpen?.serverId === msg.serverId && store.activitiesOpen.view === 'events';
+        if (
+          ev.state === 'open' &&
+          !before &&
+          fresh(ev.createdAt) &&
+          ev.createdBy !== me &&
+          store.voice?.serverId === msg.serverId &&
+          !feedOpen &&
+          !predictionToastSeen.has(ev.id)
+        ) {
+          predictionToastSeen.add(ev.id);
+          store.setPredictionToast({ id: `new:${ev.id}`, serverId: msg.serverId, eventId: ev.id, kind: 'new', title: ev.title, amount: 0, until: Date.now() + 12_000 });
+        }
+        // Рында «Приём ставок закрыт» (29.10): живой переход open→locked (руками создателя или по `lockAt`) — тем, кто
+        // поставил на событие или сидит в голосе этого сервера; не создателю (закрыл сам). Без снимка — только свежий
+        // `lockedAt`; повтор того же перехода и снимок на `ready` (идёт мимо `prediction.state`) — тишина.
+        const justLocked = ev.state === 'locked' && (before ? before.state === 'open' : fresh(ev.lockedAt));
+        if (justLocked && me !== ev.createdBy && !predictionToastSeen.has(`lock:${ev.id}`)) {
+          const iBet = ev.questions.some((q) => q.bets.some((x) => x.userId === me && !x.refunded));
+          if (iBet || store.voice?.serverId === msg.serverId) {
+            predictionToastSeen.add(`lock:${ev.id}`);
+            if (!store.selfDeafened) playSound('predictionClosed');
+          }
+        }
+        const justSettled = ev.state === 'settled' && (before ? before.state !== 'settled' : fresh(ev.settledAt));
+        if (justSettled && !predictionToastSeen.has(`win:${ev.id}`)) {
+          let won = 0;
+          for (const q of ev.questions) {
+            const b = q.bets.find((x) => x.userId === me);
+            if (b && !b.refunded && q.winnerOptionId === b.optionId && (b.payout ?? 0) > 0) won += b.payout ?? 0;
+          }
+          if (won > 0) {
+            predictionToastSeen.add(`win:${ev.id}`);
+            store.setPredictionToast({ id: `win:${ev.id}`, serverId: msg.serverId, eventId: ev.id, kind: 'win', title: ev.title, amount: won, until: Date.now() + 10_000 });
+            if (!feedOpen && !store.selfDeafened) playSound('predictionResult');
+          }
+        }
+        return;
+      }
       case 'economy.wallet': {
         // Только свой кошелёк и только по событию: опроса раз в минуту больше нет (#117).
         // Прошлое значение берём ДО записи — после неё сравнивать уже не с чем.
@@ -604,6 +766,9 @@ export function connectGateway(): void {
           earnedTotal: msg.earnedTotal,
           seasonEarned: msg.seasonEarned,
         });
+        // Старый wallet DTO не содержит games: после ставки/выплаты/возврата перечитать NET-убыток.
+        // Адресно по serverId (включая голос вне открытого сервера), без периодического опроса.
+        ensureEconomy(msg.serverId, true);
         // 🔴 Выплата ТИХАЯ (решение 03.09, после первой живой выплаты): только анимация кошелька,
         // без звука. Начисление прилетает само, без действия человека, и несколько раз за вечер —
         // звук на него оповещал бы о том, чего никто не просил.
@@ -625,14 +790,30 @@ export function connectGateway(): void {
         // Голос идёт на ДРУГОМ инстансе (01.10) — перемещение касается другого устройства этой учётки здесь, а не нас:
         // иначе звонок там молча закончился бы, а LiveKit выкинул бы телефон по дублю личности.
         if (store.voice && !voiceIsHere(store.voice)) return;
-        // A moderator moved us — reconnect to the new channel's room (same path as joining it).
+        if (msg.moveTicket && (!store.voice || store.voice.channelId !== msg.fromChannelId)) return;
+        // Разовый перенос показывает уведомление только после успешного подключения к новой комнате.
         const ch = store.bootstrap?.channels.find((c) => c.id === msg.channelId);
+        const moved = (name?: string) => {
+          playSound('move', msg.channelId);
+          toast('info', name ? `Вас переместили в «${name}»` : 'Вас переместили в другой канал');
+        };
         void store
-          .joinVoice(msg.channelId)
-          .then(() => store.openChannel(msg.channelId))
+          .joinVoice(msg.channelId, msg.moveTicket)
+          .then(async () => {
+            const s = useStore.getState();
+            if (msg.moveTicket) {
+              if (s.voice?.channelId !== msg.channelId) return;
+              moved(s.voice.channelName);
+            }
+            if (s.voice?.temporary && s.voice.serverId && s.currentServerId !== s.voice.serverId) {
+              await s.openServer(s.voice.serverId);
+            } else if (s.voice?.temporary && s.view !== 'server') {
+              s.setView('server');
+            }
+            await s.openChannel(msg.channelId);
+          })
           .catch((e) => toastError(e, 'Не удалось переместиться'));
-        playSound('move', msg.channelId);
-        toast('info', ch ? `Вас переместили в «${ch.name}»` : 'Вас переместили в другой канал');
+        if (!msg.moveTicket) moved(ch?.name);
         return;
       }
       /**
@@ -669,7 +850,7 @@ export function connectGateway(): void {
                     onScreen: isFeedOnScreen({
                       id: convId,
                       currentId: store.currentDmId,
-                      mobile: isMobile(),
+                      mobile: phonePanes(),
                       mobilePane: store.mobilePane,
                       kind: 'dm',
                       view: store.view,
@@ -723,6 +904,9 @@ export function connectGateway(): void {
       case 'poke': {
         // Тык звучит и мигает окном ВСЕГДА, когда дошёл: «не беспокоить» отсекается на сервере, а
         // здесь глушить нечем — это адресный окрик лично тебе, а не фоновый шум канала.
+        // 🔴 Но окрик — устройству в голосе (тык требует, чтобы адресат сидел в канале): сервер шлёт его всем
+        // соединениям учётки, и телефон вне голоса звенел и мигал, пока человек говорил с ПК (30.10).
+        if (!voiceInChannelHere(msg.channelId)) return;
         store.showPoke({ fromName: msg.fromName, message: msg.message, channelId: msg.channelId });
         playSound('poke', msg.channelId);
         flashWindow();
@@ -737,7 +921,11 @@ export function connectGateway(): void {
          * ⚠️ Решение показывать эффект принимает `planEffect` внутри слоя, а не этот обработчик:
          * скрытая вкладка, полный экран, чужой сервер и выключенная анимация разбираются там, в
          * одном месте на все эффекты.
+         *
+         * 🔴 «Всему каналу» — сидящим в голосе устройствам: другое устройство той же учётки вне этого голоса молчит
+         * целиком — ни перьев, ни звука, ни отметок (`voiceInChannelHere`, 30.10).
          */
+        if (!voiceInChannelHere(msg.channelId)) return;
         const me = useStore.getState().user?.id;
         {
           // Щипок уведомляем ТАК ЖЕ, как тип: свёрнутому окну достаётся только звук, а знать, кто
@@ -823,7 +1011,11 @@ export function connectGateway(): void {
          *
          * ⚠️ Отметка «кто что включил» показывается ВСЕМ, включая заглушённого: она объясняет, что
          * происходит, и держит выстрел публичным — публичный прикол сам себя сдерживает.
+         *
+         * 🔴 «Сидящим в голосе» — людям, а не устройствам: другое устройство той же учётки, не подключённое к этому
+         * каналу, молчит целиком — ни звука, ни отметки (`voiceInChannelHere`, 30.10).
          */
+        if (!voiceInChannelHere(msg.channelId)) return;
         if (!useStore.getState().selfDeafened) playClip(msg.url);
         toast(
           'info',
@@ -836,6 +1028,12 @@ export function connectGateway(): void {
       case 'tip': {
         // Тип — публичный жест. Событие приходит каждому в канале, но серия быстрых типов должна
         // дать один короткий звук, а не превратить разговор в игровой автомат.
+        // 🔴 «Каждому в канале» — устройству в голосе (30.10): телефон той же учётки вне голоса не звенит и не
+        // показывает отметок. Получателю — только тихий отклик чипа: баланс у него правда изменился.
+        if (!voiceInChannelHere(msg.channelId)) {
+          if (useStore.getState().user?.id === msg.toUserId) pulseChip();
+          return;
+        }
         const now = Date.now();
         if (shouldPlayTipCue(lastTipCueAt, now)) {
           lastTipCueAt = now;
@@ -971,7 +1169,7 @@ export function sendTyping(
 ): void {
   if (gateway?.readyState !== WebSocket.OPEN) return;
   // «Печатает» в кадр не пишем (G21): старый сервер и так не знает поля, а кадр остаётся как был.
-  // Сервер без `typing2` не знает `round` и показал бы собеседнику «печатает» — ему шлём прежнее `voice`.
+  // Старому серверу передаём ближайший известный вид записи или загрузки кружка.
   const action = typingActionToServer(wanted, useStore.getState().serverFeatures);
   const msg: GatewayClientMessage = { t: 'typing', ...target, ...typingActionField(action) };
   gateway.send(JSON.stringify(msg));

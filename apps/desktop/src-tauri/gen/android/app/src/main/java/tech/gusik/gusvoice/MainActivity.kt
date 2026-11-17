@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.ActionMode
+import android.view.KeyEvent
 import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -63,6 +64,9 @@ class MainActivity : TauriActivity() {
     }
   }
   private val callAudio: CallAudio by callAudioLazy
+
+  // Only the optional channel-volume bridge opts into stream selection; old JS leaves it untouched.
+  private val voiceChannelVolume = VoiceChannelVolume(this)
 
   // «Поднести к уху» (14.10, G67; RaiseToEar.kt): датчик приближения, пока в ленте играет голосовое. Во время звонка 1:1 звук не трогает.
   private val raiseToEarLazy: Lazy<RaiseToEar> = lazy { RaiseToEar(this) { callAudioLazy.isInitialized() && callAudio.isActive() } }
@@ -410,8 +414,14 @@ class MainActivity : TauriActivity() {
     KeyboardContent.bind(media)
   }
 
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    if (voiceChannelVolume.dispatchKeyEvent(event)) return true
+    return super.dispatchKeyEvent(event)
+  }
+
   override fun onResume() {
     super.onResume()
+    voiceChannelVolume.setForeground(true)
     // Пузырь микрофона (#156, `MicBubble.kt`): GusVoice на экране — пузырь не нужен.
     VoiceForegroundService.setAppForeground(true)
     // Android 14+: один раз предложить «Полноэкранные уведомления» (входящий звонок поверх блокировки).
@@ -420,11 +430,13 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onPause() {
+    voiceChannelVolume.setForeground(false)
     VoiceForegroundService.setAppForeground(false)
     super.onPause()
   }
 
   override fun onDestroy() {
+    voiceChannelVolume.release()
     if (callAudioLazy.isInitialized()) callAudio.stop()
     if (raiseToEarLazy.isInitialized()) raiseToEar.shutdown()
     media.shutdown()
@@ -457,6 +469,12 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun voiceRendererPriority(on: Boolean) {
       runOnUiThread { applyVoiceRendererPriority(on) }
+    }
+
+    // VoiceConnection lifetime: channel start=true, cleanup=false; separate from a private call.
+    @JavascriptInterface
+    fun voiceChannelVolumeSet(active: Boolean) {
+      runOnUiThread { voiceChannelVolume.setChannelActive(active) }
     }
 
     // Состояние микрофона для уведомления голоса (#156, клиент — `nativeMicActions.ts`): JSON
@@ -520,11 +538,13 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun callAudioStart(video: Boolean) {
       callAudio.start(video)
+      runOnUiThread { voiceChannelVolume.setPrivateCallActive(true) }
     }
 
     @JavascriptInterface
     fun callAudioStop() {
       callAudio.stop()
+      runOnUiThread { voiceChannelVolume.setPrivateCallActive(false) }
     }
 
     @JavascriptInterface
@@ -696,6 +716,8 @@ class MainActivity : TauriActivity() {
     // client to POST to /api/push/register. Reused across calls (topic persists in prefs).
     @JavascriptInterface
     fun enableEmbeddedPush(ntfyBase: String): String {
+      // Сборка Google Play (#247): службы распространителя в манифесте нет — пуши идут через FCM (`storePush*`).
+      if (!StorePush.EMBEDDED_DISTRIBUTOR) return ""
       val base = ntfyBase.trim().trimEnd('/')
       if (base.isEmpty()) return ""
       val prefs = getSharedPreferences(UnifiedPushReceiver.PREFS, MODE_PRIVATE)
@@ -707,6 +729,30 @@ class MainActivity : TauriActivity() {
       prefs.edit().putString(PushDistributorService.KEY_NTFY_BASE, base).apply()
       runOnUiThread { PushDistributorService.start(this@MainActivity) }
       return "$base/$topic"
+    }
+
+    // Есть ли в этой сборке встроенный распространитель (#247): в сборке Google Play — нет. Клиент без него идёт к
+    // внешнему UnifiedPush; старый APK метода не знает — у него распространитель есть всегда.
+    @JavascriptInterface
+    fun embeddedPushAllowed(): Boolean = StorePush.EMBEDDED_DISTRIBUTOR
+
+    // --- Пуши магазина (#247): Google FCM в сборке Google Play (`src/play/java/.../StorePush.kt`); в F-Droid-сборке
+    // заглушка (`src/fdroid/java/...`) — всегда «нет». Клиент: `storePushAvailable` → `storePushStart` → опрос
+    // `storePushEndpoint` → `/api/push/register`; выход — `storePushStop`.
+    @JavascriptInterface
+    fun storePushAvailable(): Boolean = StorePush.available(this@MainActivity)
+
+    @JavascriptInterface
+    fun storePushStart() {
+      runOnUiThread { StorePush.start(this@MainActivity) }
+    }
+
+    @JavascriptInterface
+    fun storePushEndpoint(): String = StorePush.endpoint(this@MainActivity)
+
+    @JavascriptInterface
+    fun storePushStop() {
+      runOnUiThread { StorePush.stop(this@MainActivity) }
     }
 
     @JavascriptInterface
@@ -768,6 +814,16 @@ class MainActivity : TauriActivity() {
     fun sendMicAction(action: String): Boolean {
       val wv = liveWebView?.get() ?: return false
       wv.post { wv.evaluateJavascript("window.__gvMicAction && window.__gvMicAction('$action')", null) }
+      return true
+    }
+
+    /**
+     * Адрес пуша магазина сменился (#247, новый токен FCM, `StorePush.saveToken`): странице — перерегистрироваться
+     * (`window.__gvPushEndpointChanged`, `nativeUnifiedPush.ts`). Зовётся с любого потока. false — страницы нет.
+     */
+    fun sendPushEndpointChanged(): Boolean {
+      val wv = liveWebView?.get() ?: return false
+      wv.post { wv.evaluateJavascript("window.__gvPushEndpointChanged && window.__gvPushEndpointChanged()", null) }
       return true
     }
   }

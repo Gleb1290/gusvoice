@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { before, after, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -143,7 +144,9 @@ for (const [name, mode, change, message] of [
   ['без фильтра каналов', 'search', (s: string) => s.replace('!q || matchDmName(c.name, q) || matchDmName(c.serverName, q)', 'true'), 'фильтруются'],
 ] as const) {
   it(`R128 мутант picker ${name} отвергается поведением`, async () => {
-    await scene(mode); const mutant = change(raw); assert.notEqual(mutant, raw);
-    await assert.rejects(scene(mode, mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(message));
+    await scene(mode); await counterfact(async () => {
+      const mutant = change(raw); assert.notEqual(mutant, raw);
+      await assert.rejects(scene(mode, mutant), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(message));
+    });
   });
 }

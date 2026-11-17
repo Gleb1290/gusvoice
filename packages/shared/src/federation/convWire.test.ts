@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -172,17 +173,19 @@ describe('провод личных бесед между инстансами',
     const source = readFileSync(new URL('./convWire.ts', import.meta.url), 'utf8');
     pairKeyContract(loadConvWire(source).pairDirectKey);
 
-    const anchor = '  return fedDirectKey(ref(one), ref(two));';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь сортировки pairDirectKey должен быть уникальным');
-    const unsorted =
-      '  const first = ref(one);\n' +
-      '  const second = ref(two);\n' +
-      '  return `${first.instanceId}:${first.userId}|${second.instanceId}:${second.userId}`;';
-    assert.throws(
-      () => pairKeyContract(loadConvWire(source.replace(anchor, unsorted)).pairDirectKey),
-      (error) => error instanceof assert.AssertionError && error.message.includes('смешанный ключ пары должен иметь общий канонический порядок'),
-      'контракт должен отвергнуть модульный мутант без сортировки',
-    );
+    runCounterfact(() => {
+      const anchor = '  return fedDirectKey(ref(one), ref(two));';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь сортировки pairDirectKey должен быть уникальным');
+      const unsorted =
+        '  const first = ref(one);\n' +
+        '  const second = ref(two);\n' +
+        '  return `${first.instanceId}:${first.userId}|${second.instanceId}:${second.userId}`;';
+      assert.throws(
+        () => pairKeyContract(loadConvWire(source.replace(anchor, unsorted)).pairDirectKey),
+        (error) => error instanceof assert.AssertionError && error.message.includes('смешанный ключ пары должен иметь общий канонический порядок'),
+        'контракт должен отвергнуть модульный мутант без сортировки',
+      );
+    });
   });
 
   it('новый отправитель сохраняет GIF и кружок в настоящем conv-message-e3', () => {
@@ -255,31 +258,37 @@ describe('провод личных бесед между инстансами',
     };
     const source = readFileSync(new URL('./convSync.ts', import.meta.url), 'utf8');
     check(loadConvSync(source));
-    const anchor = '...(r.spent === true ? { spent: true } : {})';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь разбора spent должен быть уникальным');
-    const mutant = source.replace(anchor, '');
-    assert.throws(
-      () => check(loadConvSync(mutant)),
-      (error) => error instanceof assert.AssertionError && error.message.includes('разбор должен сохранить spent=true'),
-      'мутант с целым модулем должен потерять spent и быть отвергнут',
-    );
+
+    runCounterfact(() => {
+      const anchor = '...(r.spent === true ? { spent: true } : {})';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь разбора spent должен быть уникальным');
+      const mutant = source.replace(anchor, '');
+      assert.throws(
+        () => check(loadConvSync(mutant)),
+        (error) => error instanceof assert.AssertionError && error.message.includes('разбор должен сохранить spent=true'),
+        'мутант с целым модулем должен потерять spent и быть отвергнут',
+      );
+    });
   });
 
   it('контрфакт: сериализатор listen не записывает spent=false', () => {
     // Класс ошибки: старый сосед принимает ложное подтверждение расхода и удаляет одноразовый оригинал.
     const source = readFileSync(new URL('./convSync.ts', import.meta.url), 'utf8');
-    const anchor = '...(l.spent ? { spent: true } : {})';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь сериализации spent должен быть уникальным');
+
     const check = (api: typeof import('./convSync.js')) => {
       const wire = api.serializeConvListenWire({ messageId: '0199d2a1-7b3c-7d4e-8f5a-6b7c8d9e0f1b', listeners: [], spent: false });
       assert.equal(Object.hasOwn(wire, 'spent'), false, 'провод не должен утверждать spent при false');
     };
     check(loadConvSync(source));
-    assert.throws(
-      () => check(loadConvSync(source.replace(anchor, '...(l.spent === true ? { spent: true } : { spent: false })'))),
-      (error) => error instanceof assert.AssertionError && error.message.includes('провод не должен утверждать spent при false'),
-      'мутант сериализации должен быть пойман тем же wire oracle',
-    );
+    runCounterfact(() => {
+      const anchor = '...(l.spent ? { spent: true } : {})';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь сериализации spent должен быть уникальным');
+      assert.throws(
+        () => check(loadConvSync(source.replace(anchor, '...(l.spent === true ? { spent: true } : { spent: false })'))),
+        (error) => error instanceof assert.AssertionError && error.message.includes('провод не должен утверждать spent при false'),
+        'мутант сериализации должен быть пойман тем же wire oracle',
+      );
+    });
   });
 
   it('контрфакт: целый convSync не обрезает валидных слушателей по одному', () => {
@@ -298,13 +307,16 @@ describe('провод личных бесед между инстансами',
     };
     const source = readFileSync(new URL('./convSync.ts', import.meta.url), 'utf8');
     check(loadConvSync(source));
-    const anchor = 'r.listeners.slice(0, LIST_MAX)';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь списка слушателей должен быть уникальным');
-    assert.throws(
-      () => check(loadConvSync(source.replace(anchor, 'r.listeners.slice(0, 1)'))),
-      (error) => error instanceof assert.AssertionError && error.message.includes('оба валидных слушателя должны сохраниться'),
-      'мутант с усечённым списком должен проиграть парному случаю двух слушателей',
-    );
+
+    runCounterfact(() => {
+      const anchor = 'r.listeners.slice(0, LIST_MAX)';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь списка слушателей должен быть уникальным');
+      assert.throws(
+        () => check(loadConvSync(source.replace(anchor, 'r.listeners.slice(0, 1)'))),
+        (error) => error instanceof assert.AssertionError && error.message.includes('оба валидных слушателя должны сохраниться'),
+        'мутант с усечённым списком должен проиграть парному случаю двух слушателей',
+      );
+    });
   });
 
   it('контрфакт: целый convWire сериализует once у голосового вложения', () => {
@@ -320,12 +332,15 @@ describe('провод личных бесед между инстансами',
       assert.equal((wire.attachments as Record<string, unknown>[])[0]?.once, true, 'wire должен сохранить once=true');
     };
     check(loadConvWire(source));
-    const anchor = '...(a.once ? { once: true } : {}),';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь сериализации once должен быть уникальным');
-    assert.throws(
-      () => check(loadConvWire(source.replace(anchor, ''))),
-      (error) => error instanceof assert.AssertionError && error.message.includes('wire должен сохранить once=true'),
-      'мутант целого сериализатора обязан быть обнаружен настоящим once fixture',
-    );
+
+    runCounterfact(() => {
+      const anchor = '...(a.once ? { once: true } : {}),';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь сериализации once должен быть уникальным');
+      assert.throws(
+        () => check(loadConvWire(source.replace(anchor, ''))),
+        (error) => error instanceof assert.AssertionError && error.message.includes('wire должен сохранить once=true'),
+        'мутант целого сериализатора обязан быть обнаружен настоящим once fixture',
+      );
+    });
   });
 });

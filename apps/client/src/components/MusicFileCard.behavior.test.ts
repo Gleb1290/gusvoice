@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -166,26 +167,28 @@ it('R230 тип вложения выбирает музыку, файл, гол
 it('R230 контрфакт потери названия обнаруживается на запуске настоящей музыкальной карточки', async () => {
   // Класс ошибки: системный плеер показывает голосовое вместо названия музыки.
   await trackContract();
-  await assert.rejects(() => trackContract(replace(musicSource, '    title,\n  };', '    title: undefined,\n  };')),
-    failure('R230 название:', undefined, 'Ночной гусь'));
+  await counterfact(() => assert.rejects(() => trackContract(replace(musicSource, '    title,\n  };', '    title: undefined,\n  };')),
+    failure('R230 название:', undefined, 'Ночной гусь')));
 });
 it('R230 контрфакт невидимой перемотки до старта обнаруживается действием указателя', async () => {
   // Класс ошибки: скрытая полоса сдвигает ещё не запущенную дорожку.
   await seekContract();
-  await assert.rejects(() => seekContract(replace(musicSource, '              if (!started) return;', '')),
-    failure('R230 до старта:', 1, 0));
+  await counterfact(() => assert.rejects(() => seekContract(replace(musicSource, '              if (!started) return;', '')),
+    failure('R230 до старта:', 1, 0)));
 });
 it('R230 контрфакт перемотки в режиме выбора обнаруживается без изменения голосового обработчика', async () => {
   // Класс ошибки: одинаковое имя обработчика у двух компонентов маскирует проверку не той ветки.
   await seekContract();
-  await assert.rejects(() => seekContract(replace(musicSource, '              if (inSelectMode(e.currentTarget)) return;', '')),
-    failure('R230 выбор:', 1, 0));
+  await counterfact(() => assert.rejects(() => seekContract(replace(musicSource, '              if (inSelectMode(e.currentTarget)) return;', '')),
+    failure('R230 выбор:', 1, 0)));
 });
 it('R230 контрфакт проверки музыки перед картинкой обнаруживается порядком настоящих правил', async () => {
   // Класс ошибки: новая широкая классификация выполняется раньше давно определённого визуального типа.
   await attachments();
-  const branch = '  if (isMusicFile(a))\n    return <MusicFileCard a={a} sizeLabel={kb(a.size)} meta={voice} badge={<DownloadBadge a={a} href={dl} cls="att-file-dl att-audio-dl" />} />;';
-  const without = replace(attachmentSource, branch, '');
-  await assert.rejects(() => attachments(replace(without, '  if (isImage(a.contentType)) {', `${branch}\n  if (isImage(a.contentType)) {`)),
-    failure('R230 изображение:', 1, 0));
+  await counterfact(async () => {
+    const branch = '  if (isMusicFile(a))\n    return <MusicFileCard a={a} sizeLabel={kb(a.size)} meta={voice} badge={<DownloadBadge a={a} href={dl} cls="att-file-dl att-audio-dl" />} />;';
+    const without = replace(attachmentSource, branch, '');
+    await assert.rejects(() => attachments(replace(without, '  if (isImage(a.contentType)) {', `${branch}\n  if (isImage(a.contentType)) {`)),
+      failure('R230 изображение:', 1, 0));
+  });
 });

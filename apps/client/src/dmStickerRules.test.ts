@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { pushRecentSticker, parseRecentStickers, moveStickerPack, stickerPackButton, serverDmStickers } from './dmStickerRules';
 import type { Sticker } from '@gusvoice/shared';
@@ -11,20 +12,22 @@ import * as stickerRules from './dmStickerRules';
 
 it('подсказки отсекают мутанты нормализации, порядка источников и совпадения только по id', () => {
   // Ловит регрессии, которые обычный пример с единственным избранным не отличит.
-  const source = readFileSync(new URL('./dmStickerRules.ts', import.meta.url), 'utf8');
   const a: Sticker = { id: 'a', url: '/a', format: 'webp', emoji: '👍🏻' };
   const b: Sticker = { ...a, id: 'b', url: '/b', emoji: '👍' };
   const check = (api: typeof stickerRules) => {
     assert.equal(api.isFavedSticker([a], { id: 'copy', url: '/a' }), true);
     assert.equal(api.stickersForEmoji('👍🏿', { faved: [a], recent: [b] }).map(s => s.id).join(','), 'a,b');
   }; check(stickerRules);
-  for (const [from, to] of [['return e.replace', 'return e; //'], ['x.id === s.id || x.url === s.url', 'x.id === s.id'],
-    ['for (const s of sources.faved ?? []) take(s);', 'for (const s of sources.recent ?? []) take(s);\n  for (const s of sources.faved ?? []) take(s);']] as const) {
-    assert.ok(source.includes(from)); const module = { exports: {} };
-    runInNewContext(ts.transpileModule(source.replace(from,to), { compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022} }).outputText,
-      {module,exports:module.exports,require:()=>shared});
-    assert.throws(()=>check(module.exports as typeof stickerRules),assert.AssertionError);
-  }
+  counterfact(() => {
+    const source = readFileSync(new URL('./dmStickerRules.ts', import.meta.url), 'utf8');
+    for (const [from, to] of [['return e.replace', 'return e; //'], ['x.id === s.id || x.url === s.url', 'x.id === s.id'],
+      ['for (const s of sources.faved ?? []) take(s);', 'for (const s of sources.recent ?? []) take(s);\n  for (const s of sources.faved ?? []) take(s);']] as const) {
+      assert.ok(source.includes(from)); const module = { exports: {} };
+      runInNewContext(ts.transpileModule(source.replace(from,to), { compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022} }).outputText,
+        {module,exports:module.exports,require:()=>shared});
+      assert.throws(()=>check(module.exports as typeof stickerRules),assert.AssertionError);
+    }
+  });
 });
 
 it('избранное узнаёт каталожную копию по url и исходный стикер по id', () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -310,8 +311,11 @@ it('R169 масштаб два переводит центр в координа
   });
 });
 async function mutant(anchor: string, replacement: string, check: (raw?: string) => Promise<void>) {
-  assert.equal(source.split(anchor).length - 1, 1, 'якорь уникален'); await check();
-  await assert.rejects(() => check(source.replace(anchor, replacement)), assert.AssertionError);
+  await check();
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1, 'якорь уникален');
+    await assert.rejects(() => check(source.replace(anchor, replacement)), assert.AssertionError);
+  });
 }
 // Класс ошибки: таймер удержания обнулён.
 it('R246 мутант мгновенного подъёма убивается границами времени', () => mutant('export const STAGE_DRAG_HOLD_MS = 500;', 'export const STAGE_DRAG_HOLD_MS = 0;', hold));
@@ -404,10 +408,12 @@ async function shortContainer(raw = source) {
 it('R246 полоса высотой 80 и 82 удерживает обычные 80 px плитки внутри обеих вертикальных границ', () => shortContainer());
 
 const dragFailure = (prefix: string) => (e: unknown) => e instanceof assert.AssertionError && e.message.startsWith(prefix);
-async function regression(anchor: string, replacement: string, check: (raw?: string) => Promise<void>, prefix: string) {
-  assert.equal(source.split(anchor).length - 1, 1, 'R246 якорь мутанта уникален');
+async function regression(anchor: string, replacement: string | (() => string), check: (raw?: string) => Promise<void>, prefix: string) {
   await check();
-  await assert.rejects(() => check(source.replace(anchor, replacement)), dragFailure(prefix));
+  await counterfact(async () => {
+    assert.equal(source.split(anchor).length - 1, 1, 'R246 якорь мутанта уникален');
+    await assert.rejects(() => check(source.replace(anchor, typeof replacement === 'function' ? replacement() : replacement)), dragFailure(prefix));
+  });
 }
 // Класс ошибки: квадрат/одна ось вместо радиуса пропускают диагональ, прежний порог срывает допустимое удержание.
 it('R246 контрфакты порога 6 и осевых расстояний вместо hypot отвергаются граничными движениями', async () => {
@@ -557,6 +563,6 @@ it('R247 контрфакты живого предела, проигнорир�
 // Класс ошибки: обычный pointermove маскирует потерю обновления плитки/цели именно в повторных автокадрах.
 it('R247 контрфакты потери placeLifted и trackTarget в автокадре ловятся движением к новому ряду', async () => {
   const frame = 'const c = placeLifted();\n      if (c) trackTarget(c);\n      now.edgeRaf = window.requestAnimationFrame(step);';
-  await regression(frame, frame.replace('const c = placeLifted();', 'const c = undefined;'), edgeNewRow, 'R247 edge-follow:');
-  await regression(frame, frame.replace('if (c) trackTarget(c);', '// цель не пересчитывается'), edgeNewRow, 'R247 edge-preview-early:');
+  await regression(frame, () => frame.replace('const c = placeLifted();', 'const c = undefined;'), edgeNewRow, 'R247 edge-follow:');
+  await regression(frame, () => frame.replace('if (c) trackTarget(c);', '// цель не пересчитывается'), edgeNewRow, 'R247 edge-preview-early:');
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -106,15 +107,19 @@ it('R216 внешняя смена предпочтения через наст�
 });
 it('R216 настройка контрфакт: отсутствие датчика ошибочно показывает switch', async () => {
   await unavailable('no-sensor', settingSource);
-  const from = 'if (!raiseToEarSupported()) return null;';
-  assert.equal(settingSource.split(from).length - 1, 1, 'один якорь поддержки в целом компоненте');
-  await assert.rejects(unavailable('no-sensor', settingSource.replace(from, '')), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith('R216-setting-availability:') && error.operator === 'strictEqual' && error.actual === true && error.expected === false);
+  await counterfact(async () => {
+    const from = 'if (!raiseToEarSupported()) return null;';
+    assert.equal(settingSource.split(from).length - 1, 1, 'один якорь поддержки в целом компоненте');
+    await assert.rejects(unavailable('no-sensor', settingSource.replace(from, '')), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith('R216-setting-availability:') && error.operator === 'strictEqual' && error.actual === true && error.expected === false);
+  });
 });
 it('R216 настройка контрфакт: Toggle возвращает прежнее значение вместо противоположного', async () => {
   await clicks(settingSource, toggleSource);
-  const from = 'onChange(!checked)';
-  assert.equal(toggleSource.split(from).length - 1, 1, 'один якорь инверсии настоящего Toggle');
-  await assert.rejects(clicks(settingSource, toggleSource.replace(from, 'onChange(checked)')), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith('R216-setting-click:') && error.operator === 'strictEqual' && error.actual === true && error.expected === false);
+  await counterfact(async () => {
+    const from = 'onChange(!checked)';
+    assert.equal(toggleSource.split(from).length - 1, 1, 'один якорь инверсии настоящего Toggle');
+    await assert.rejects(clicks(settingSource, toggleSource.replace(from, 'onChange(checked)')), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith('R216-setting-click:') && error.operator === 'strictEqual' && error.actual === true && error.expected === false);
+  });
 });

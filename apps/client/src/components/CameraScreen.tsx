@@ -13,7 +13,7 @@ export interface CameraShot {
 
 /**
  * Живая картинка камеры первой ячейкой сетки листа (как у Telegram: высокая, на две строки, значок камеры в углу). Без
- * потока — тёмная ячейка со значком: нажатие откроет камеру, а разрешение спросит уже она.
+ * потока и до первого кадра — чёрная ячейка; нажатие откроет камеру, а разрешение спросит уже она.
  */
 export function CameraCell({
   stream,
@@ -34,10 +34,13 @@ export function CameraCell({
   short?: boolean;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const [frameStream, setFrameStream] = useState<MediaStream | null>(null);
+  const frameReady = stream !== null && frameStream === stream;
   const holdTimer = useRef(0);
   /** Удержание уже сработало — следующий `click` того же нажатия не открывает ещё и снимок. */
   const held = useRef(false);
   useEffect(() => {
+    setFrameStream(null);
     const v = ref.current;
     if (!v) return;
     if (v.srcObject !== stream) v.srcObject = stream;
@@ -75,10 +78,17 @@ export function CameraCell({
       aria-label="Камера"
       {...hold}
     >
-      {stream ? <video ref={ref} className={facing === 'user' ? 'mirror' : undefined} autoPlay muted playsInline /> : null}
-      <span className="gal-cam-ico">
-        <Icon name="camera" size={22} />
-      </span>
+      {stream && (
+        <video
+          ref={ref}
+          className={facing === 'user' ? 'mirror' : undefined}
+          style={{ visibility: frameReady ? 'visible' : 'hidden' }}
+          onLoadedData={() => setFrameStream(stream)}
+          onError={() => setFrameStream(null)}
+          autoPlay muted playsInline
+        />
+      )}
+      {frameReady && <span className="gal-cam-ico"><Icon name="camera" size={22} /></span>}
     </button>
   );
 }

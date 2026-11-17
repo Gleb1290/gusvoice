@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -14,8 +15,10 @@ function load(text: string): typeof rules {
   return module.exports as typeof rules;
 }
 function reject(old: string, replacement: string, check: (r: typeof rules) => void) {
-  assert.ok(source.includes(old), 'контрфакт применён к настоящему модулю');
-  assert.throws(() => check(load(source.replace(old, replacement))), assert.AssertionError);
+  counterfact(() => {
+    assert.ok(source.includes(old), 'контрфакт применён к настоящему модулю');
+    assert.throws(() => check(load(source.replace(old, replacement))), assert.AssertionError);
+  });
 }
 
 it('R117 верхняя и нижняя вставки ограничивают портрет и ландшафт, пустая область не отрицательна', () => {

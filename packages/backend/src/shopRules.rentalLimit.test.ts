@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -43,8 +44,10 @@ test('R279 контрфакт игнорирования maxDays ловится 
     return module.exports as typeof rules;
   }
   scenario(load(source));
+  counterfact(() => {
   const from = 'now.getTime(), AVATAR_RENTAL_DAYS, maxDays)';
   assert.equal(source.split(from).length, 2);
   assert.throws(() => scenario(load(source.replace(from, 'now.getTime(), AVATAR_RENTAL_DAYS)'))),
     (error: unknown) => error instanceof assert.AssertionError && error.message.split('\n', 1)[0] === 'R279-full: backend не игнорирует изменённый потолок');
+  });
 });

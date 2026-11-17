@@ -14,6 +14,12 @@
  * 24) при этом всё зелено. Так что перечень тут не пережиток, а единственный работающий способ;
  * вернуться к маске можно будет, когда раннер переедет на 21+.
  *
+ * 🔴 Два перечня (30.10.2026, AGENTS.md §11 «тест-файл в гейте — ≤ 2 с»): `test` — гейт `checks` на каждый push,
+ * `test:heavy` — тяжёлые файлы (Vite SSR-харнессы на `createServer` и всё, что дольше 2 с), их гоняет только
+ * ночной `.gitea/workflows/heavy.yaml` и его ручной запуск перед тегом. Каждый файл обязан стоять РОВНО в одном
+ * перечне: ни в одном — не запускается никогда; в обоих — тяжёлый файл снова тормозит гейт. Запись `test:heavy`
+ * без файла на диске — тоже ошибка: ночной прогон упадёт на ней, а гейт этого не увидит.
+ *
  * Запуск: `node scripts/check-tests-listed.mjs`. Ненулевой код возврата = есть незапускаемые тесты.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -23,6 +29,7 @@ const PACKAGES = ['packages/shared', 'packages/presence', 'packages/backend', 'p
 // Tests outside `src/` still run through an owning package's explicit Node-20-compatible test list.
 const EXTERNAL_TESTS = [
   { file: 'scripts/check-codemap.test.ts', pkg: 'apps/client', entry: '../../scripts/check-codemap.test.ts' },
+  { file: 'scripts/check-tests-listed.test.ts', pkg: 'apps/client', entry: '../../scripts/check-tests-listed.test.ts' },
 ];
 
 /** Все `*.test.ts` внутри каталога, рекурсивно, путями относительно самого пакета. */
@@ -42,12 +49,30 @@ function findTests(dir, base = dir) {
   return out;
 }
 
+/** Имена файлов из скрипта: слова, оканчивающиеся на `.test.ts` (флаги бегунка отбрасываются). */
+const listed = (script) => new Set(script.split(/\s+/).filter((w) => w.endsWith('.test.ts')));
+
 let missing = 0;
 for (const pkg of PACKAGES) {
-  const script = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8')).scripts?.test ?? '';
-  for (const file of findTests(join(pkg, 'src'), pkg)) {
-    if (!script.includes(file)) {
-      console.error(`❌ ${pkg}/${file} НЕ перечислен в скрипте test — он не запускается`);
+  const scripts = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8')).scripts ?? {};
+  const script = scripts.test ?? '';
+  const gate = listed(script);
+  const heavy = listed(scripts['test:heavy'] ?? '');
+  const found = findTests(join(pkg, 'src'), pkg);
+  for (const file of found) {
+    const inGate = gate.has(file);
+    if (!inGate && !heavy.has(file)) {
+      console.error(`❌ ${pkg}/${file} НЕ перечислен ни в test, ни в test:heavy — он не запускается`);
+      missing += 1;
+    } else if (heavy.has(file) && inGate) {
+      console.error(`❌ ${pkg}/${file} перечислен И в test, И в test:heavy — тяжёлый файл должен быть только в test:heavy`);
+      missing += 1;
+    }
+  }
+  const onDisk = new Set(found);
+  for (const file of heavy) {
+    if (!onDisk.has(file)) {
+      console.error(`❌ ${pkg}: в test:heavy записан ${file}, а такого файла в src нет — ночной прогон на нём упадёт`);
       missing += 1;
     }
   }
@@ -67,7 +92,7 @@ for (const { file, pkg, entry } of EXTERNAL_TESTS) {
 }
 
 if (missing > 0) {
-  console.error(`\nНезапускаемых файлов с тестами: ${missing}. Допишите их в "test" своего пакета.`);
+  console.error(`\nНезапускаемых файлов с тестами: ${missing}. Допишите их в "test" (или, если файл тяжёлый, в "test:heavy") своего пакета — ровно в один.`);
   process.exit(1);
 }
-console.log('Все файлы с тестами перечислены в скриптах своих пакетов.');
+console.log('Все файлы с тестами перечислены в скриптах своих пакетов (каждый — ровно в одном из test / test:heavy).');

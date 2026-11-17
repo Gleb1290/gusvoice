@@ -1,5 +1,7 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
+
 import assert from 'node:assert/strict';
-import { after, afterEach, before, it } from 'node:test';
+import { it, after, afterEach, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -231,18 +233,20 @@ it('ReactionBar отправляет big только на отпускании,
   await shortTap(Bar);
   await mouseHoldIsOrdinary(Bar, 0);
   await mouseHoldIsOrdinary(Bar, 2);
-  const readyMutant = (await server.ssrLoadModule('/src/components/ContextMenu.tsx?bigmutant=ready')).ReactionBar as ReactionBar;
-  await assert.rejects(() => holdScenario(readyMutant, true), assert.AssertionError,
-    'исполняемый мутант отправляет реакцию до отпускания пальца');
-  assert.ok(mutationsApplied.has('ready'), 'Vite действительно загрузил изменённый компонент');
-  const clickMutant = (await server.ssrLoadModule('/src/components/ContextMenu.tsx?bigmutant=click')).ReactionBar as ReactionBar;
-  await assert.rejects(() => holdScenario(clickMutant, true), assert.AssertionError,
-    'исполняемый мутант пропускает обычный click после большой реакции');
-  assert.ok(mutationsApplied.has('click'), 'Vite действительно загрузил изменённый компонент');
-  const oldMouseGuard = (await server.ssrLoadModule('/src/components/ContextMenu.tsx?bigmutant=mouseguard')).ReactionBar as ReactionBar;
-  await assert.rejects(() => mouseHoldIsOrdinary(oldMouseGuard, 0), assert.AssertionError,
-    'исполняемый старый guard разрешает левой кнопке мыши удерживать большую реакцию');
-  assert.ok(mutationsApplied.has('mouseguard'), 'Vite действительно загрузил изменённый мышиный guard');
+  await counterfact(async () => {
+    const readyMutant = (await server.ssrLoadModule('/src/components/ContextMenu.tsx?bigmutant=ready')).ReactionBar as ReactionBar;
+    await assert.rejects(() => holdScenario(readyMutant, true), assert.AssertionError,
+      'исполняемый мутант отправляет реакцию до отпускания пальца');
+    assert.ok(mutationsApplied.has('ready'), 'Vite действительно загрузил изменённый компонент');
+    const clickMutant = (await server.ssrLoadModule('/src/components/ContextMenu.tsx?bigmutant=click')).ReactionBar as ReactionBar;
+    await assert.rejects(() => holdScenario(clickMutant, true), assert.AssertionError,
+      'исполняемый мутант пропускает обычный click после большой реакции');
+    assert.ok(mutationsApplied.has('click'), 'Vite действительно загрузил изменённый компонент');
+    const oldMouseGuard = (await server.ssrLoadModule('/src/components/ContextMenu.tsx?bigmutant=mouseguard')).ReactionBar as ReactionBar;
+    await assert.rejects(() => mouseHoldIsOrdinary(oldMouseGuard, 0), assert.AssertionError,
+      'исполняемый старый guard разрешает левой кнопке мыши удерживать большую реакцию');
+    assert.ok(mutationsApplied.has('mouseguard'), 'Vite действительно загрузил изменённый мышиный guard');
+  }, { timeoutMs: 60000 });
 });
 
 it('контекстное меню после касания подавлено, мыши и старому бару оно остаётся доступно', async () => {

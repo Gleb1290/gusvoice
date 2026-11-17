@@ -66,7 +66,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         // Настройки уведомлений (G38, `push2`): «Показывать имя / текст» и «Уведомления из групп».
         notifyView: z.enum(['all', 'name', 'nothing']).optional(),
         notifyGroups: z.boolean().optional(),
-        // Остаток (G38, `push3`): «Личные сообщения» и «Повторять уведомления» (минуты из `NOTIFY_REPEAT_MINUTES`).
+        // «Личные сообщения»; notifyRepeat — игнорируемое legacy-поле (валидация старых клиентов сохранена).
         notifyDm: z.boolean().optional(),
         notifyRepeat: z
           .number()
@@ -101,7 +101,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (body.notifyView !== undefined) patch.notifyView = body.notifyView;
     if (body.notifyGroups !== undefined) patch.notifyGroups = body.notifyGroups;
     if (body.notifyDm !== undefined) patch.notifyDm = body.notifyDm;
-    if (body.notifyRepeat !== undefined) patch.notifyRepeat = body.notifyRepeat;
+    // notifyRepeat is accepted for old clients but cannot re-enable the retired reminder feature.
     const [row] = Object.keys(patch).length
       ? await db.update(users).set(patch).where(eq(users.id, req.user!.sub)).returning()
       : await db.select().from(users).where(eq(users.id, req.user!.sub));

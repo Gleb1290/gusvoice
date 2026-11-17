@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -88,17 +89,21 @@ describe('nativeCallAudio: проверка состояния и управле
     const expected = '{"route":"speaker","devices":[{"kind":"speaker"},{"kind":"earpiece"}]}';
     const { api } = fixture();
     assert.equal(json(api.parseCallAudioState(input)), expected);
-    const duplicateMutant = fixture({ mutation: 'dedupe' }).api.parseCallAudioState(input);
-    assertMutantKilled(json(duplicateMutant), expected, 'duplicate kinds are removed');
-    const kindMutant = fixture({ mutation: 'unknown-kind' }).api.parseCallAudioState(input);
-    assertMutantKilled(json(kindMutant), expected, 'unknown kinds are removed');
+    counterfact(() => {
+      const duplicateMutant = fixture({ mutation: 'dedupe' }).api.parseCallAudioState(input);
+      assertMutantKilled(json(duplicateMutant), expected, 'duplicate kinds are removed');
+      const kindMutant = fixture({ mutation: 'unknown-kind' }).api.parseCallAudioState(input);
+      assertMutantKilled(json(kindMutant), expected, 'unknown kinds are removed');
+    });
   });
 
   it('неизвестный route отклоняется — иначе UI может показать действие для несуществующего маршрута', () => {
     const input = '{"route":"car","devices":[]}';
     assert.equal(fixture().api.parseCallAudioState(input), null);
-    const mutantValue = fixture({ mutation: 'route' }).api.parseCallAudioState(input);
-    assertMutantKilled(json(mutantValue), 'null', 'unknown route is rejected');
+    counterfact(() => {
+      const mutantValue = fixture({ mutation: 'route' }).api.parseCallAudioState(input);
+      assertMutantKilled(json(mutantValue), 'null', 'unknown route is rejected');
+    });
   });
 
   it('переключатель выбирает динамик или доступную альтернативу для каждого набора устройств', () => {
@@ -121,17 +126,21 @@ describe('nativeCallAudio: проверка состояния и управле
       const state = { route, devices: [{ kind: 'earpiece' as const }, { kind: 'speaker' as const }, { kind: 'bluetooth' as const }] };
       assert.equal(json(api.speakerPress(state)), '{"sheet":true}');
     }
-    const mutant = fixture({ mutation: 'no-sheet' }).api.speakerPress({
-      route: 'speaker', devices: [{ kind: 'earpiece' }, { kind: 'speaker' }, { kind: 'bluetooth' }],
+    counterfact(() => {
+      const mutant = fixture({ mutation: 'no-sheet' }).api.speakerPress({
+        route: 'speaker', devices: [{ kind: 'earpiece' }, { kind: 'speaker' }, { kind: 'bluetooth' }],
+      });
+      assertMutantKilled(json(mutant), '{"sheet":true}', 'Bluetooth route sheet remains reachable');
     });
-    assertMutantKilled(json(mutant), '{"sheet":true}', 'Bluetooth route sheet remains reachable');
   });
 
   it('проводная гарнитура без earpiece не открывает Bluetooth-лист, а переключается на проводную', () => {
     const state = { route: 'speaker' as const, devices: [{ kind: 'speaker' as const }, { kind: 'wired' as const }, { kind: 'bluetooth' as const }] };
     assert.equal(json(fixture().api.speakerPress(state)), '{"to":"wired"}');
-    const mutant = fixture({ mutation: 'wired-sheet' }).api.speakerPress(state);
-    assertMutantKilled(json(mutant), '{"to":"wired"}', 'wired presence alone does not open the picker');
+    counterfact(() => {
+      const mutant = fixture({ mutation: 'wired-sheet' }).api.speakerPress(state);
+      assertMutantKilled(json(mutant), '{"to":"wired"}', 'wired presence alone does not open the picker');
+    });
   });
 
   it('мост доступен только на Android и только с каждым обязательным методом', () => {
@@ -174,8 +183,10 @@ describe('nativeCallAudio: проверка состояния и управле
     (f.window.__gvCallAudioChanged as () => void)(); assert.deepEqual(seen, ['первый', 'последний', 'последний']);
     offLast();
     assert.equal('__gvCallAudioChanged' in f.window, false);
-    const mutant = fixture({ mutation: 'leaked-callback' }); mutant.api.onCallAudioChanged(() => {})();
-    assertMutantKilled('__gvCallAudioChanged' in mutant.window, false, 'no subscriber means no native callback');
+    counterfact(() => {
+      const mutant = fixture({ mutation: 'leaked-callback' }); mutant.api.onCallAudioChanged(() => {})();
+      assertMutantKilled('__gvCallAudioChanged' in mutant.window, false, 'no subscriber means no native callback');
+    });
   });
 });
 
@@ -210,15 +221,21 @@ it('R216 ошибка чтения настройки передаёт false д�
   const throwing = fixture({ methods: { comm: true }, throws: true }); assert.doesNotThrow(() => throwing.api.startCallAudio(false)); assert.deepEqual(throwing.calls, ['comm:false']);
 });
 it('R216 контрфакт MODE_IN_COMMUNICATION опаздывает за стартом звонка', () => {
-  commOrder(); assert.throws(() => commOrder('comm-order'), e => e instanceof assert.AssertionError && e.message.startsWith('R216-comm-order:')
-    && e.operator === 'strictEqual' && e.actual === 'start:true' && e.expected === 'comm:true');
+  commOrder(); counterfact(() => {
+    assert.throws(() => commOrder('comm-order'), e => e instanceof assert.AssertionError && e.message.startsWith('R216-comm-order:')
+        && e.operator === 'strictEqual' && e.actual === 'start:true' && e.expected === 'comm:true');
+  });
 });
 it('R216 контрфакт считает отсутствие явного нуля разрешением разговорного режима', () => {
   const check = (mutation?: Mutation) => assert.equal(fixture({ commPref: null, mutation }).api.commModeWanted(), false, 'R216-comm-optin: нужен явный opt-in');
-  check(); assert.throws(() => check('comm-loose'), e => e instanceof assert.AssertionError && e.message.startsWith('R216-comm-optin:')
-    && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  check(); counterfact(() => {
+    assert.throws(() => check('comm-loose'), e => e instanceof assert.AssertionError && e.message.startsWith('R216-comm-optin:')
+        && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+  });
 });
 it('R216 контрфакт без typeof блокирует start на старом APK, а не просто бросает в тестовый загрузчик', () => {
-  oldApk(); assert.throws(() => oldApk('comm-unguarded'), e => e instanceof assert.AssertionError && e.message.startsWith('R216-old-apk:')
-    && e.operator === 'strictEqual' && e.actual === undefined && e.expected === 'start:false');
+  oldApk(); counterfact(() => {
+    assert.throws(() => oldApk('comm-unguarded'), e => e instanceof assert.AssertionError && e.message.startsWith('R216-old-apk:')
+        && e.operator === 'strictEqual' && e.actual === undefined && e.expected === 'start:false');
+  });
 });

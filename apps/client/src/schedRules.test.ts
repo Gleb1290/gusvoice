@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -33,15 +34,17 @@ it('возврат к пересборке местных полей красн�
       assert.equal(r.pickAt(start.day, start.h, start.m, now, start)?.toISOString(), '2026-11-01T06:30:00.000Z');
     };
     contract(load(raw));
-    for (const [from, to] of [
-      ['return new Date(roundTo(d.getTime(), step, true));', 'return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes());'],
-      ['roundTo(now.getTime(), 1, false)', 'new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes()).getTime()'],
-      ['if (start?.at && sameDay(day, start.day) && h === start.h && m === start.m) return new Date(start.at.getTime());',
-        'if (start?.at && sameDay(day, start.day) && h === start.h && m === start.m) return composeAt(day, h, m, minuteStart(now));'],
-    ]) {
-      assert.ok(raw.includes(from), 'найден якорь отката DST');
-      assert.throws(() => contract(load(raw.replace(from, to))), assert.AssertionError);
-    }
+    counterfact(() => {
+      for (const [from, to] of [
+        ['return new Date(roundTo(d.getTime(), step, true));', 'return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes());'],
+        ['roundTo(now.getTime(), 1, false)', 'new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes()).getTime()'],
+        ['if (start?.at && sameDay(day, start.day) && h === start.h && m === start.m) return new Date(start.at.getTime());',
+          'if (start?.at && sameDay(day, start.day) && h === start.h && m === start.m) return composeAt(day, h, m, minuteStart(now));'],
+      ]) {
+        assert.ok(raw.includes(from), 'найден якорь отката DST');
+        assert.throws(() => contract(load(raw.replace(from, to))), assert.AssertionError);
+      }
+    });
   } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
 });
 

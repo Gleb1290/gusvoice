@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -238,47 +239,56 @@ describe('открытие личной беседы между инстанса
     // Ловит раскрытие факта блокировки реальным модулем после изменения ветки отказа.
     const source = readFileSync(new URL('./convOpen.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     blockedPolicyContract(loadConvOpen(source));
-    const anchor = '  if (input.blocked) return FED_DM_REFUSAL.policy;';
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь маскировки блокировки должен быть уникальным');
-    assert.throws(
-      () => blockedPolicyContract(loadConvOpen(source.replace(anchor, "  if (input.blocked) return 'blocked' as FedDmRefusal;"))),
-      (error) => error instanceof assert.AssertionError && error.message.includes('блокировка не раскрывается и маскируется отказом policy'),
-      'контракт должен отвергнуть модульный мутант с раскрытой блокировкой',
-    );
+
+    runCounterfact(() => {
+      const anchor = '  if (input.blocked) return FED_DM_REFUSAL.policy;';
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь маскировки блокировки должен быть уникальным');
+      assert.throws(
+        () => blockedPolicyContract(loadConvOpen(source.replace(anchor, "  if (input.blocked) return 'blocked' as FedDmRefusal;"))),
+        (error) => error instanceof assert.AssertionError && error.message.includes('блокировка не раскрывается и маскируется отказом policy'),
+        'контракт должен отвергнуть модульный мутант с раскрытой блокировкой',
+      );
+    });
   });
 
   it('контрфакт: целый модуль отвергает победу большего id', () => {
     // Ловит расхождение id при встречном открытии, которое плодило бы параллельные беседы.
     const source = readFileSync(new URL('./convOpen.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     winnerContract(loadConvOpen(source));
-    const anchor = "  return mine <= theirs ? 'mine' : 'theirs';";
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь выбора меньшего id должен быть уникальным');
-    assert.throws(
-      () => winnerContract(loadConvOpen(source.replace(anchor, "  return mine >= theirs ? 'mine' : 'theirs';"))),
-      (error) => error instanceof assert.AssertionError && error.message.includes('меньший id выигрывает встречное открытие'),
-      'контракт должен отвергнуть модульный мутант, выбирающий больший id',
-    );
+
+    runCounterfact(() => {
+      const anchor = "  return mine <= theirs ? 'mine' : 'theirs';";
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь выбора меньшего id должен быть уникальным');
+      assert.throws(
+        () => winnerContract(loadConvOpen(source.replace(anchor, "  return mine >= theirs ? 'mine' : 'theirs';"))),
+        (error) => error instanceof assert.AssertionError && error.message.includes('меньший id выигрывает встречное открытие'),
+        'контракт должен отвергнуть модульный мутант, выбирающий больший id',
+      );
+    });
   });
 
   it('контрфакт: целый модуль отвергает проверку hidden после общего сервера', () => {
     // Ловит доступ к скрытой цели, если shared-ветка срабатывает раньше проверки видимости.
     const source = readFileSync(new URL('./convOpen.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     hiddenPolicyContract(loadConvOpen(source));
-    const anchor = [
-      '  if (input.hidden) return FED_DM_REFUSAL.hidden;',
-      '  if (input.blocked) return FED_DM_REFUSAL.policy;',
-      "  if (input.sharedServer) return 'create';",
-    ].join('\n');
-    const mutant = [
-      '  if (input.blocked) return FED_DM_REFUSAL.policy;',
-      "  if (input.sharedServer) return 'create';",
-      '  if (input.hidden) return FED_DM_REFUSAL.hidden;',
-    ].join('\n');
-    assert.equal(source.split(anchor).length - 1, 1, 'якорь порядка hidden/shared должен быть уникальным');
-    assert.throws(
-      () => hiddenPolicyContract(loadConvOpen(source.replace(anchor, mutant))),
-      (error) => error instanceof assert.AssertionError && error.message.includes('скрытая цель отказывает до проверки общего сервера'),
-      'контракт должен отвергнуть модульный мутант с поздней проверкой hidden',
-    );
+
+    runCounterfact(() => {
+      const anchor = [
+        '  if (input.hidden) return FED_DM_REFUSAL.hidden;',
+        '  if (input.blocked) return FED_DM_REFUSAL.policy;',
+        "  if (input.sharedServer) return 'create';",
+      ].join('\n');
+      const mutant = [
+        '  if (input.blocked) return FED_DM_REFUSAL.policy;',
+        "  if (input.sharedServer) return 'create';",
+        '  if (input.hidden) return FED_DM_REFUSAL.hidden;',
+      ].join('\n');
+      assert.equal(source.split(anchor).length - 1, 1, 'якорь порядка hidden/shared должен быть уникальным');
+      assert.throws(
+        () => hiddenPolicyContract(loadConvOpen(source.replace(anchor, mutant))),
+        (error) => error instanceof assert.AssertionError && error.message.includes('скрытая цель отказывает до проверки общего сервера'),
+        'контракт должен отвергнуть модульный мутант с поздней проверкой hidden',
+      );
+    });
   });
 });

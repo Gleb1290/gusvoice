@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 
@@ -28,20 +29,24 @@ it('R230 Android мост читает системную геолокацию �
 it('R230 контрфакт метод геолокации без аннотации не подменяется таким же текстом комментария', () => {
   // Публичное Kotlin имя само по себе не делает метод доступным странице WebView.
   locationSettingsBridge();
+  counterfact(() => {
   const from = '@JavascriptInterface\n    fun locationEnabled(): Boolean';
   assert.equal(rawBridge.split(from).length - 1, 1);
   const changed = rawBridge.replace(from, '// @JavascriptInterface\n    fun locationEnabled(): Boolean');
   assert.throws(() => locationSettingsBridge(changed), e => e instanceof assert.AssertionError
     && e.message.startsWith('R230-location-interface:locationEnabled') && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });
 it('R230 контрфакт общие настройки вместо геолокации ловятся внутри метода моста', () => {
   // Уход в общий экран настроек не выполняет обещание кнопки «Включить».
   locationSettingsBridge();
+  counterfact(() => {
   const from = 'startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))';
   assert.equal(rawBridge.split(from).length - 1, 1);
   assert.throws(() => locationSettingsBridge(rawBridge.replace(from, 'startActivity(Intent(Settings.ACTION_SETTINGS))')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R230-location-open:')
       && e.operator === 'strictEqual' && e.actual === false && e.expected === true);
+  });
 });
 
 // Только лексическое снятие комментариев: строки и Kotlin-интерполяция остаются видимыми проверке журналирования.
@@ -125,7 +130,10 @@ for (const [name, from, to, check, prefix, actual, expected] of [
   ['токен аргументом без интерполяции', 'Log.w(TAG, "live location: send failed: ${e.javaClass.simpleName}")', 'Log.w(TAG, s.token)', logs, 'R225-native-log:', 1, 0],
   ['сессии на диске', 'private val sessions = ConcurrentHashMap<String, Session>()', 'private val sessions = ConcurrentHashMap<String, Session>(); val disk: SharedPreferences? = null', logs, 'R225-native-disk:', true, false],
 ] as const) it(`R225 строгий Android-контрфакт: ${name}`, () => {
-  check(); assert.equal(rawService.split(from).length - 1, 1);
+  check();
+  counterfact(() => {
+  assert.equal(rawService.split(from).length - 1, 1);
   assert.throws(() => check(rawService.replace(from, to)), e => e instanceof assert.AssertionError
     && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected);
+  });
 });

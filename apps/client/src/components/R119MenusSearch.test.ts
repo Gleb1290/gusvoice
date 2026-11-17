@@ -1,5 +1,7 @@
-import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
+import assert from 'node:assert/strict';
+
 import { createElement, act, useState } from 'react';
 import { setupHarness } from './MessagePane.behavior.harness';
 import { DM_ROW_HOLD_MS } from '../dmListRules';
@@ -73,9 +75,11 @@ async function frequentScene(server = h.server) {
 }
 it('R119 повтор Частых с 429 сохраняет прежнюю полосу', async () => {
   await frequentScene();
-  const server = await h.paneServer(s => s.replace('setItems((prev) => (prev && prev.length > 0 ? prev : undefined))', 'setItems(undefined)'), 'DmListSearch');
-  try { await assert.rejects(() => frequentScene(server), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('429 оставляет прежнюю полосу')); }
-  finally { await server.close(); }
+  await counterfact(async () => {
+    const server = await h.paneServer(s => s.replace('setItems((prev) => (prev && prev.length > 0 ? prev : undefined))', 'setItems(undefined)'), 'DmListSearch');
+    try { await assert.rejects(() => frequentScene(server), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('429 оставляет прежнюю полосу')); }
+    finally { await server.close(); }
+  }, { timeoutMs: 60000 });
 });
 
 async function fitScene(server = h.server) {
@@ -94,9 +98,11 @@ async function fitScene(server = h.server) {
 }
 it('R119 ContextMenu fit растёт по содержимому, без fit сохраняет заданную ширину', async () => {
   await fitScene();
-  const server = await h.paneServer(s => s.replace('const menuWidth: CSSProperties = fit', 'const menuWidth: CSSProperties = false'), 'ContextMenu');
-  try { await assert.rejects(() => fitScene(server), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('fit не фиксирует ширину в px')); }
-  finally { await server.close(); }
+  await counterfact(async () => {
+    const server = await h.paneServer(s => s.replace('const menuWidth: CSSProperties = fit', 'const menuWidth: CSSProperties = false'), 'ContextMenu');
+    try { await assert.rejects(() => fitScene(server), (e: unknown) => e instanceof assert.AssertionError && e.message.includes('fit не фиксирует ширину в px')); }
+    finally { await server.close(); }
+  }, { timeoutMs: 60000 });
 });
 
 async function emojiScene(server = h.server) {
@@ -146,12 +152,14 @@ async function emojiScene(server = h.server) {
 }
 it('R119 EmojiPicker следует за ростом живого composer и отключает ResizeObserver', async () => {
   await emojiScene();
-  for (const [change, failure] of [
-    [(s: string) => s.replace('if (field) ro?.observe(field);', 'void field;'), 'ResizeObserver сдвигает панель после роста composer'],
-    [(s: string) => s.replace('toLayoutRect(liveAnchor(anchor, anchorEl))', 'toLayoutRect(anchor)'), 'панель стоит над живым composer, а не снимком кнопки'],
-  ] as const) {
-    const server = await h.paneServer(change, 'EmojiPicker', true);
-    try { await assert.rejects(() => emojiScene(server), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(failure)); }
-    finally { await server.close(); }
-  }
+  await counterfact(async () => {
+    for (const [change, failure] of [
+      [(s: string) => s.replace('if (field) ro?.observe(field);', 'void field;'), 'ResizeObserver сдвигает панель после роста composer'],
+      [(s: string) => s.replace('toLayoutRect(liveAnchor(anchor, anchorEl))', 'toLayoutRect(anchor)'), 'панель стоит над живым composer, а не снимком кнопки'],
+    ] as const) {
+      const server = await h.paneServer(change, 'EmojiPicker', true);
+      try { await assert.rejects(() => emojiScene(server), (e: unknown) => e instanceof assert.AssertionError && e.message.includes(failure)); }
+      finally { await server.close(); }
+    }
+  }, { timeoutMs: 60000 });
 });

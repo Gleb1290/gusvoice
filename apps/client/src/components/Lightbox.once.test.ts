@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { before, after, it } from 'node:test';
@@ -163,8 +164,10 @@ for (const [label, anchor, replacement, check, failure] of [
 ] as const) {
   it(`R262 контрфакт Lightbox: ${label}`, async () => {
     await check();
-    assert.equal(source.split(anchor).length - 1, 1, 'единственный участок настоящего компонента');
-    await assert.rejects(() => check(source.replace(anchor, replacement)), error => error instanceof assert.AssertionError
-      && error.message.includes(failure));
+    await counterfact(async () => {
+      assert.equal(source.split(anchor).length - 1, 1, 'единственный участок настоящего компонента');
+      await assert.rejects(() => check(source.replace(anchor, replacement)), error => error instanceof assert.AssertionError
+        && error.message.includes(failure));
+    });
   });
 }

@@ -1,3 +1,4 @@
+import { counterfact as runCounterfact } from '../../test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -59,9 +60,13 @@ it('R200 ответы приглашения принимают ok true и из�
 });
 it('R200 мутант только active теряет ended и обнаруживается по исторической паре фаз', () => {
   phases(load(source));
-  assert.throws(() => phases(mutated("r.phase === 'active' || r.phase === 'ended'", "r.phase === 'active'")), e => e instanceof assert.AssertionError && e.message.includes('обе известные фазы'));
+  runCounterfact(() => {
+    assert.throws(() => phases(mutated("r.phase === 'active' || r.phase === 'ended'", "r.phase === 'active'")), e => e instanceof assert.AssertionError && e.message.includes('обе известные фазы'));
+  });
 });
 it('R200 мутант без проверки expires_at принимает повреждённое приглашение', () => {
   expiry(load(source));
-  assert.throws(() => expiry(mutated(' || expiresAt === null', '')), e => e instanceof assert.AssertionError && e.message.includes('приглашение требует конечный expires_at'));
+  runCounterfact(() => {
+    assert.throws(() => expiry(mutated(' || expiresAt === null', '')), e => e instanceof assert.AssertionError && e.message.includes('приглашение требует конечный expires_at'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -26,8 +27,10 @@ for (const [name, anchor, replacement, target] of [
   const source = readFileSync(new URL('./messagePaneRules.ts', import.meta.url), 'utf8');
   assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь подписи обхода');
   viaCaptionContract(wheelRules); viaCaptionContract(mutatedPaneRules(anchor, anchor));
-  assert.throws(() => viaCaptionContract(mutatedPaneRules(anchor, replacement)),
-    e => e instanceof assert.AssertionError && e.message.includes(target));
+  counterfact(() => {
+    assert.throws(() => viaCaptionContract(mutatedPaneRules(anchor, replacement)),
+      e => e instanceof assert.AssertionError && e.message.includes(target));
+  });
 });
 
 it('канал показывает аватарки только при полной сумме до трёх, ЛС проверяет каждый чип отдельно', () => {
@@ -43,8 +46,10 @@ it('канал показывает аватарки только при пол�
     assert.equal(api.messageChipFaces(null, false).size, 0);
   };
   check(wheelRules);
-  assert.throws(() => check(mutatedPaneRules('sum > CHIP_FACES_MAX', 'sum > 4')), assert.AssertionError);
-  assert.throws(() => check(mutatedPaneRules('sum += r.count;', 'sum = r.count;')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutatedPaneRules('sum > CHIP_FACES_MAX', 'sum > 4')), assert.AssertionError);
+    assert.throws(() => check(mutatedPaneRules('sum += r.count;', 'sum = r.count;')), assert.AssertionError);
+  });
 });
 it('реакции сортируются по числу и первому времени, ничья стабильна и вход не меняется', () => {
   // События реакций не должны переставлять равные чипы или мутировать объект сообщения в кеше.
@@ -60,7 +65,9 @@ it('реакции сортируются по числу и первому вр
     assert.equal(api.sortReactionChips(undefined).length, 0);
   };
   check(wheelRules);
-  assert.throws(() => check(mutatedPaneRules('b.r.count - a.r.count', 'a.r.count - b.r.count')), assert.AssertionError);
+  counterfact(() => {
+    assert.throws(() => check(mutatedPaneRules('b.r.count - a.r.count', 'a.r.count - b.r.count')), assert.AssertionError);
+  });
 });
 
 it('битая дата отправки не роняет меню, а корректные дополнительные даты остаются самостоятельными', () => {
@@ -71,7 +78,9 @@ it('битая дата отправки не роняет меню, а корр
     assert.equal(menuFootLines({ createdAt, editedAt: '2026-10-07T12:00:00Z' }).length, 1);
   }
   assert.equal(menuFootLines({ createdAt: '2026-10-07T12:00:00Z' }).length, 1);
-  assert.throws(() => mutatedPaneRules('validIso(m.createdAt) ? [sentAtLabel(m.createdAt, now)] : []', '[sentAtLabel(m.createdAt, now)]').menuFootLines({ createdAt: '' }), { name: 'RangeError' });
+  counterfact(() => {
+    assert.throws(() => mutatedPaneRules('validIso(m.createdAt) ? [sentAtLabel(m.createdAt, now)] : []', '[sentAtLabel(m.createdAt, now)]').menuFootLines({ createdAt: '' }), { name: 'RangeError' });
+  });
 });
 
 it('тачпад отвечает только при явной горизонтали влево, колесо и Shift остаются браузеру', () => {
@@ -83,8 +92,10 @@ it('тачпад отвечает только при явной горизон�
     assert.equal(api.wheelBurstIntent(30, 0, 0, true), 'other');
   };
   check(wheelRules);
-  for (const [a, b] of [['dx > 0 && ', ''], ['ay * 1.5', 'ay'], ['deltaMode !== 0 || shift', 'false'], ['ax < 3 && ay < 3', 'ax < 10 && ay < 10']])
-    assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+  counterfact(() => {
+    for (const [a, b] of [['dx > 0 && ', ''], ['ay * 1.5', 'ay'], ['deltaMode !== 0 || shift', 'false'], ['ax < 3 && ay < 3', 'ax < 10 && ay < 10']])
+      assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+  });
 });
 
 it('R190 пузырь сохраняет ЧЧ:ММ отправки и помечает позднюю доставку только при deliveredAt', () => {
@@ -112,8 +123,10 @@ it('путь свайпа растёт только влево, возврат �
     assert.deepEqual(tuple(5, 1, -10), [0, 1]);
   };
   check(wheelRules);
-  for (const [a, b] of [['dx > 0 ? 1 : 0', 'dx < 0 ? -1 : dx > 0 ? 1 : 0'], ['Math.max(0, pull + step)', 'pull + step'], ['const step = Math.max(-WHEEL_SWIPE_STEP_MAX, Math.min(WHEEL_SWIPE_STEP_MAX, dx));', 'const step = dx;']])
-    assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+  counterfact(() => {
+    for (const [a, b] of [['dx > 0 ? 1 : 0', 'dx < 0 ? -1 : dx > 0 ? 1 : 0'], ['Math.max(0, pull + step)', 'pull + step'], ['const step = Math.max(-WHEEL_SWIPE_STEP_MAX, Math.min(WHEEL_SWIPE_STEP_MAX, dx));', 'const step = dx;']])
+      assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+  });
 });
 
 it('ответ отпускается после трёх затухающих событий лишь взведённым и с мелким хвостом', () => {
@@ -130,8 +143,10 @@ it('ответ отпускается после трёх затухающих �
     assert.equal(api.wheelReleased(true, 3, 25), false);
   };
   check(wheelRules);
-  for (const [a, b] of [['decayRun >= WHEEL_SWIPE_DECAY_EVENTS', 'decayRun > WHEEL_SWIPE_DECAY_EVENTS'], ['armed && decayRun', 'decayRun'], ['Math.abs(dx) <= WHEEL_SWIPE_TAIL_PX', 'true']])
-    assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+  counterfact(() => {
+    for (const [a, b] of [['decayRun >= WHEEL_SWIPE_DECAY_EVENTS', 'decayRun > WHEEL_SWIPE_DECAY_EVENTS'], ['armed && decayRun', 'decayRun'], ['Math.abs(dx) <= WHEEL_SWIPE_TAIL_PX', 'true']])
+      assert.throws(() => check(mutatedPaneRules(a, b)), assert.AssertionError);
+  });
 });
 
 function mutatedPaneRules(from: string, to: string) {
@@ -165,10 +180,12 @@ it('правка отличает неизменённый текст, пуст�
   assert.equal(editDecision({ draft: '', original: 'текст', hasAttachments: false }), 'ignore');
   assert.equal(editDecision({ draft: ' ', original: 'текст', hasAttachments: true }), 'save');
   assert.equal(editDecision({ draft: '', original: '', hasAttachments: true }), 'close');
-  const noClose = mutatedPaneRules("  if (draft === p.original.trim()) return 'close';\n", '');
-  mutantMustFail(noClose.editDecision({ draft: 'x', original: 'x', hasAttachments: false }), 'close', 'мутант без close нарушает контракт нетронутой правки');
-  const ignoreAttachments = mutatedPaneRules("  if (!draft && !p.hasAttachments) return 'ignore';", "  if (!draft) return 'ignore';");
-  mutantMustFail(ignoreAttachments.editDecision({ draft: '', original: 'текст', hasAttachments: true }), 'save', 'мутант без учёта вложений запрещает убрать подпись');
+  counterfact(() => {
+    const noClose = mutatedPaneRules("  if (draft === p.original.trim()) return 'close';\n", '');
+    mutantMustFail(noClose.editDecision({ draft: 'x', original: 'x', hasAttachments: false }), 'close', 'мутант без close нарушает контракт нетронутой правки');
+    const ignoreAttachments = mutatedPaneRules("  if (!draft && !p.hasAttachments) return 'ignore';", "  if (!draft) return 'ignore';");
+    mutantMustFail(ignoreAttachments.editDecision({ draft: '', original: 'текст', hasAttachments: true }), 'save', 'мутант без учёта вложений запрещает убрать подпись');
+  });
 });
 
 it('вставка заменяет выделение или вставляет в каретку с ограничением позиций', () => {
@@ -178,8 +195,10 @@ it('вставка заменяет выделение или вставляет
   assert.deepEqual(insertAtCaret('abcd', '!', null, null), { text: 'abcd!', caret: 5 });
   assert.deepEqual(insertAtCaret('abcd', 'X', -10, 99), { text: 'X', caret: 1 });
   assert.deepEqual(insertAtCaret('abcd', 'X', 3, 1), { text: 'aXd', caret: 2 });
-  const appendOnly = mutatedPaneRules('  const from = Math.min(a, b);\n  const to = Math.max(a, b);\n  return { text: text.slice(0, from) + piece + text.slice(to), caret: from + piece.length };', '  return { text: text + piece, caret: text.length + piece.length };');
-  mutantMustFail(appendOnly.insertAtCaret('abcd', 'X', 1, 3), { text: 'aXd', caret: 2 }, 'мутант вставки только в конец ломает замену выделения');
+  counterfact(() => {
+    const appendOnly = mutatedPaneRules('  const from = Math.min(a, b);\n  const to = Math.max(a, b);\n  return { text: text.slice(0, from) + piece + text.slice(to), caret: from + piece.length };', '  return { text: text + piece, caret: text.length + piece.length };');
+    mutantMustFail(appendOnly.insertAtCaret('abcd', 'X', 1, 3), { text: 'aXd', caret: 2 }, 'мутант вставки только в конец ломает замену выделения');
+  });
 });
 
 it('Esc закрывает неизменённую правку, спрашивает про изменения и не теряет непустой ответ', () => {
@@ -189,8 +208,10 @@ it('Esc закрывает неизменённую правку, спрашив
   assert.equal(fieldEscape({ editing: false, replying: true, draft: '  ', original: '' }), 'cancel-reply');
   assert.equal(fieldEscape({ editing: false, replying: true, draft: 'текст', original: '' }), 'none');
   assert.equal(fieldEscape({ editing: false, replying: false, draft: '', original: '' }), 'none');
-  const cancelNonemptyReply = mutatedPaneRules("if (p.replying) return p.draft.trim() === '' ? 'cancel-reply' : 'none';", "if (p.replying) return 'cancel-reply';");
-  mutantMustFail(cancelNonemptyReply.fieldEscape({ editing: false, replying: true, draft: 'текст', original: '' }), 'none', 'мутант снимает непустой ответ');
+  counterfact(() => {
+    const cancelNonemptyReply = mutatedPaneRules("if (p.replying) return p.draft.trim() === '' ? 'cancel-reply' : 'none';", "if (p.replying) return 'cancel-reply';");
+    mutantMustFail(cancelNonemptyReply.fieldEscape({ editing: false, replying: true, draft: 'текст', original: '' }), 'none', 'мутант снимает непустой ответ');
+  });
 });
 
 it('двойной тап учитывает id сообщения и точные края первого и общего временного окна', () => {
@@ -203,12 +224,14 @@ it('двойной тап учитывает id сообщения и точны
   assert.deepEqual(doubleTapStep(waiting, { kind: 'down', id: 'other', at: 200 }), { pending: null, act: 'none' });
   assert.deepEqual(doubleTapStep(waiting, { kind: 'down', id: 'm', at: 401 }), { pending: null, act: 'none' });
   assert.equal(doubleTapStep({ ...waiting, second: true }, { kind: 'tap', id: 'm', at: 701 }).act, 'wait');
-  const strictWindow = mutatedPaneRules('e.at - pending.at <= windowMs', 'e.at - pending.at < windowMs');
-  mutantMustFail(strictWindow.doubleTapStep(waiting, { kind: 'down', id: 'm', at: 400 }).pending, { id: 'm', at: 100, second: true }, 'строгая граница теряет касание ровно на окне');
-  const noIdGuard = mutatedPaneRules('pending.id === e.id && e.at - pending.at <= windowMs', 'e.at - pending.at <= windowMs');
-  mutantMustFail(noIdGuard.doubleTapStep(waiting, { kind: 'down', id: 'other', at: 200 }).pending, null, 'мутант без id guard склеивает разные сообщения');
-  const oneWindowOnly = mutatedPaneRules('e.at - pending.at <= 2 * windowMs', 'e.at - pending.at <= windowMs');
-  mutantMustFail(oneWindowOnly.doubleTapStep({ ...waiting, second: true }, { kind: 'tap', id: 'm', at: 700 }).act, 'double', 'мутант без удвоенного окна теряет длинное второе касание');
+  counterfact(() => {
+    const strictWindow = mutatedPaneRules('e.at - pending.at <= windowMs', 'e.at - pending.at < windowMs');
+    mutantMustFail(strictWindow.doubleTapStep(waiting, { kind: 'down', id: 'm', at: 400 }).pending, { id: 'm', at: 100, second: true }, 'строгая граница теряет касание ровно на окне');
+    const noIdGuard = mutatedPaneRules('pending.id === e.id && e.at - pending.at <= windowMs', 'e.at - pending.at <= windowMs');
+    mutantMustFail(noIdGuard.doubleTapStep(waiting, { kind: 'down', id: 'other', at: 200 }).pending, null, 'мутант без id guard склеивает разные сообщения');
+    const oneWindowOnly = mutatedPaneRules('e.at - pending.at <= 2 * windowMs', 'e.at - pending.at <= windowMs');
+    mutantMustFail(oneWindowOnly.doubleTapStep({ ...waiting, second: true }, { kind: 'tap', id: 'm', at: 700 }).act, 'double', 'мутант без удвоенного окна теряет длинное второе касание');
+  });
 });
 
 it('двойной тап снимает только мою реакцию, а лица показываются лишь для полного списка до трёх', () => {
@@ -221,12 +244,14 @@ it('двойной тап снимает только мою реакцию, а 
     { count: 0, reactors: [] }, { count: 2, reactors: [{ userId: 'a' }] },
     { count: 1, reactors: null }, { count: 4, reactors: Array.from({ length: 4 }, (_, i) => ({ userId: String(i) })) },
   ]) assert.equal(chipFaces(value), null);
-  const foreignToggles = mutatedPaneRules('r.emoji === emoji && r.me', 'r.emoji === emoji');
-  mutantMustFail(foreignToggles.quickReactOp([{ emoji: '👍', me: false }], '👍'), 'add', 'чужую реакцию нельзя переключать');
-  const countMismatch = mutatedPaneRules('list.length !== r.count || ', '');
-  mutantMustFail(countMismatch.chipFaces({ count: 2, reactors: [{ userId: 'a' }] }), null, 'несовпадающий count скрывает аватарки');
-  const tooManyFaces = mutatedPaneRules('list.length > CHIP_FACES_MAX', 'false');
-  mutantMustFail(tooManyFaces.chipFaces({ count: 4, reactors: Array.from({ length: 4 }, (_, i) => ({ userId: String(i) })) }), null, 'список больше трёх не должен переполнять чип');
+  counterfact(() => {
+    const foreignToggles = mutatedPaneRules('r.emoji === emoji && r.me', 'r.emoji === emoji');
+    mutantMustFail(foreignToggles.quickReactOp([{ emoji: '👍', me: false }], '👍'), 'add', 'чужую реакцию нельзя переключать');
+    const countMismatch = mutatedPaneRules('list.length !== r.count || ', '');
+    mutantMustFail(countMismatch.chipFaces({ count: 2, reactors: [{ userId: 'a' }] }), null, 'несовпадающий count скрывает аватарки');
+    const tooManyFaces = mutatedPaneRules('list.length > CHIP_FACES_MAX', 'false');
+    mutantMustFail(tooManyFaces.chipFaces({ count: 4, reactors: Array.from({ length: 4 }, (_, i) => ({ userId: String(i) })) }), null, 'список больше трёх не должен переполнять чип');
+  });
 });
 import {
   acTokenAt,
@@ -428,9 +453,11 @@ describe('токен автодополнения под кареткой', () =
     assert.deepEqual(acTokenAt('#гусь', 5, false, true), { trigger: '#', query: 'гусь', start: 0 });
     assert.equal(acTokenAt('#гусь', 5, false), null);
     assert.equal(acTokenAt('@гусь', 5, false, true), null);
-    const withoutDmHashtags = mutatedPaneRules('serverScoped || hashtags', 'serverScoped');
-    mutantMustFail(withoutDmHashtags.acTokenAt('#гусь', 5, false, true), { trigger: '#', query: 'гусь', start: 0 },
-      'мутант игнорирует четвёртый аргумент и закрывает подсказки хэштегов в ЛС');
+    counterfact(() => {
+      const withoutDmHashtags = mutatedPaneRules('serverScoped || hashtags', 'serverScoped');
+      mutantMustFail(withoutDmHashtags.acTokenAt('#гусь', 5, false, true), { trigger: '#', query: 'гусь', start: 0 },
+        'мутант игнорирует четвёртый аргумент и закрывает подсказки хэштегов в ЛС');
+    });
   });
 });
 
@@ -593,20 +620,24 @@ describe('время в подвале меню сообщения', () => {
     assert.match(lines[2] ?? '', /^Исходное: 5 октября в /);
     assert.deepEqual(menuFootLines({ createdAt, editedAt: 'invalid', forwardedFrom: { at: '' } }, now), [sent]);
     assert.equal(timeTooltip({ createdAt: 'invalid' }), '');
-    const oldTimeForForward = mutatedPaneRules('after(m.forwardedFrom!.at)', 'after(m.createdAt)');
-    mutantMustFail(oldTimeForForward.menuFootLines({ createdAt, forwardedFrom: { at: originalAt } }, now), [sent, `Исходное: ${sentAtLabel(originalAt, now).replace(/^(Сегодня|Вчера)/, (w) => w.toLowerCase())}`], 'пересланное должно сохранять исходную дату');
-    const noValidation = mutatedPaneRules('if (validIso(m.forwardedFrom?.at)) lines.push(`Исходное: ${after(m.forwardedFrom!.at)}`);', 'lines.push(`Исходное: ${after(m.forwardedFrom?.at ?? "")}`);');
-    assert.throws(() => assert.doesNotThrow(() => noValidation.menuFootLines({ createdAt, forwardedFrom: { at: '' } }, now)), assert.AssertionError,
-      'мутант без validIso должен потерять обработку пустой даты');
+    counterfact(() => {
+      const oldTimeForForward = mutatedPaneRules('after(m.forwardedFrom!.at)', 'after(m.createdAt)');
+      mutantMustFail(oldTimeForForward.menuFootLines({ createdAt, forwardedFrom: { at: originalAt } }, now), [sent, `Исходное: ${sentAtLabel(originalAt, now).replace(/^(Сегодня|Вчера)/, (w) => w.toLowerCase())}`], 'пересланное должно сохранять исходную дату');
+      const noValidation = mutatedPaneRules('if (validIso(m.forwardedFrom?.at)) lines.push(`Исходное: ${after(m.forwardedFrom!.at)}`);', 'lines.push(`Исходное: ${after(m.forwardedFrom?.at ?? "")}`);');
+      assert.throws(() => assert.doesNotThrow(() => noValidation.menuFootLines({ createdAt, forwardedFrom: { at: '' } }, now)), assert.AssertionError,
+        'мутант без validIso должен потерять обработку пустой даты');
+    });
   });
 
   it('подсказка времени не строит строку для невалидного createdAt', () => {
     // Наведение на испорченное время не должно бросать RangeError во время рендера меню.
     assert.equal(timeTooltip({ createdAt: '' }), '');
     assert.equal(timeTooltip({ createdAt: 'not-a-date' }), '');
-    const noValidation = mutatedPaneRules('if (!validIso(m.createdAt)) return \'\';', 'if (false) return \'\';');
-    assert.throws(() => assert.doesNotThrow(() => noValidation.timeTooltip({ createdAt: 'not-a-date' })), assert.AssertionError,
-      'мутант без проверки даты должен провалить контракт отсутствия подсказки');
+    counterfact(() => {
+      const noValidation = mutatedPaneRules('if (!validIso(m.createdAt)) return \'\';', 'if (false) return \'\';');
+      assert.throws(() => assert.doesNotThrow(() => noValidation.timeTooltip({ createdAt: 'not-a-date' })), assert.AssertionError,
+        'мутант без проверки даты должен провалить контракт отсутствия подсказки');
+    });
   });
 });
 
@@ -626,12 +657,14 @@ describe('копирование нескольких сообщений', () =>
     assert.equal(pickedText([{ ...feed[0]!, id: 'only-file', content: '', label: '[ Видео ]' }], new Set(['only-file']), time, { style: 'desktop' }), '',
       'один файл без подписи не подменяется служебной меткой');
     assert.equal(pickedText([{ ...feed[0]!, id: 'empty', content: '', label: undefined }], new Set(['empty']), time, { style: 'desktop' }), '');
-    const noQuotePrefix = mutatedPaneRules('? `> ${quote}` : \'\'', '? quote : \'\'');
-    mutantMustFail(noQuotePrefix.pickedText(feed, new Set(['c', 'b']), time, { style: 'desktop' }),
-      '[T:b] Борис:\n[ Фотография ]\n\nподпись\n[T:c] Аня в ответ Гоша:\n> первая вторая\nответ', 'цитата обязана отличаться префиксом >');
-    const unordered = mutatedPaneRules('const chosen = feed.filter((m) => picked.has(m.id));', 'const chosen = [...picked].flatMap((id) => { const m = feed.find((x) => x.id === id); return m ? [m] : []; });');
-    mutantMustFail(unordered.pickedText(feed, new Set(['c', 'a']), time, { style: 'desktop' }),
-      '[T:a] Аня:  текст \n[T:c] Аня в ответ Гоша:\n> первая вторая\nответ', 'мутант порядка выбора нарушает порядок ленты');
+    counterfact(() => {
+      const noQuotePrefix = mutatedPaneRules('? `> ${quote}` : \'\'', '? quote : \'\'');
+      mutantMustFail(noQuotePrefix.pickedText(feed, new Set(['c', 'b']), time, { style: 'desktop' }),
+        '[T:b] Борис:\n[ Фотография ]\n\nподпись\n[T:c] Аня в ответ Гоша:\n> первая вторая\nответ', 'цитата обязана отличаться префиксом >');
+      const unordered = mutatedPaneRules('const chosen = feed.filter((m) => picked.has(m.id));', 'const chosen = [...picked].flatMap((id) => { const m = feed.find((x) => x.id === id); return m ? [m] : []; });');
+      mutantMustFail(unordered.pickedText(feed, new Set(['c', 'a']), time, { style: 'desktop' }),
+        '[T:a] Аня:  текст \n[T:c] Аня в ответ Гоша:\n> первая вторая\nответ', 'мутант порядка выбора нарушает порядок ленты');
+    });
   });
 
   it('телефон пишет автора только перед первым и при смене; старый вызов без стиля не меняется', () => {
@@ -643,9 +676,11 @@ describe('копирование нескольких сообщений', () =>
     ];
     assert.equal(pickedText(feed, new Set(['c', 'b', 'a']), time, { style: 'phone' }), 'Аня:\nпервое\n\nвторое\n\nБорис:\nтретье');
     assert.equal(pickedText(feed.slice(0, 2), new Set(['a', 'b']), time), 'Аня, T:a\nпервое\n\nАня, T:b\nвторое');
-    const everyAuthor = mutatedPaneRules('const head = m.author !== prev ? `${m.author}:\\n` : \'\';', 'const head = `${m.author}:\\n`;');
-    mutantMustFail(everyAuthor.pickedText(feed, new Set(['a', 'b', 'c']), time, { style: 'phone' }),
-      'Аня:\nпервое\n\nвторое\n\nБорис:\nтретье', 'мутант повторного имени на каждой строке нарушает формат телефона');
+    counterfact(() => {
+      const everyAuthor = mutatedPaneRules('const head = m.author !== prev ? `${m.author}:\\n` : \'\';', 'const head = `${m.author}:\\n`;');
+      mutantMustFail(everyAuthor.pickedText(feed, new Set(['a', 'b', 'c']), time, { style: 'phone' }),
+        'Аня:\nпервое\n\nвторое\n\nБорис:\nтретье', 'мутант повторного имени на каждой строке нарушает формат телефона');
+    });
   });
 });
 
@@ -659,8 +694,10 @@ it('метка копирования выбирает стикер, альбо�
   assert.equal(copyMediaLabel({ attachments: [{ contentType: 'image/jpeg' }] }), '[ Фотография ]');
   assert.equal(copyMediaLabel({ attachments: [{ contentType: 'video/mp4' }] }), '[ Видео ]');
   assert.equal(copyMediaLabel({ attachments: [{ contentType: 'application/pdf' }] }), '[ Файл ]');
-  const emptyWave = mutatedPaneRules('Array.isArray(a.waveform) && a.waveform.length > 0', 'Array.isArray(a.waveform)');
-  mutantMustFail(emptyWave.copyMediaLabel({ attachments: [{ contentType: 'audio/ogg', waveform: [] }] }), '[ Файл ]', 'пустая форма сигнала не означает голосовое');
-  const albumBeforeSticker = mutatedPaneRules('  if (m.sticker) return \'[ Стикер ]\';\n  const list = m.attachments ?? [];\n  if (list.length === 0) return \'\';\n  if (list.length > 1) return \'[ Альбом ]\';', '  const list = m.attachments ?? [];\n  if (list.length > 1) return \'[ Альбом ]\';\n  if (m.sticker) return \'[ Стикер ]\';\n  if (list.length === 0) return \'\';');
-  mutantMustFail(albumBeforeSticker.copyMediaLabel({ sticker: {}, attachments: [{ contentType: 'image/png' }, { contentType: 'video/mp4' }] }), '[ Стикер ]', 'стикер имеет приоритет над альбомом');
+  counterfact(() => {
+    const emptyWave = mutatedPaneRules('Array.isArray(a.waveform) && a.waveform.length > 0', 'Array.isArray(a.waveform)');
+    mutantMustFail(emptyWave.copyMediaLabel({ attachments: [{ contentType: 'audio/ogg', waveform: [] }] }), '[ Файл ]', 'пустая форма сигнала не означает голосовое');
+    const albumBeforeSticker = mutatedPaneRules('  if (m.sticker) return \'[ Стикер ]\';\n  const list = m.attachments ?? [];\n  if (list.length === 0) return \'\';\n  if (list.length > 1) return \'[ Альбом ]\';', '  const list = m.attachments ?? [];\n  if (list.length > 1) return \'[ Альбом ]\';\n  if (m.sticker) return \'[ Стикер ]\';\n  if (list.length === 0) return \'\';');
+    mutantMustFail(albumBeforeSticker.copyMediaLabel({ sticker: {}, attachments: [{ contentType: 'image/png' }, { contentType: 'video/mp4' }] }), '[ Стикер ]', 'стикер имеет приоритет над альбомом');
+  });
 });

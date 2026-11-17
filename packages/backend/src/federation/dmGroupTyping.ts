@@ -75,7 +75,9 @@ async function post(link: StoredLink, e: FedTypingWire): Promise<void> {
   const res = await postSignedToPeer({
     apiBase: link.apiBase,
     path: `/api${FED_EPHEMERAL_PATH}`,
-    payload: serializeEphemeralWire(self.instanceId, e),
+    payload: serializeEphemeralWire(self.instanceId, e.action === 'round_upload' && !link.features.includes(FED_FEATURES.typing3)
+      ? { ...e, action: 'video' }
+      : e),
     keyid: key.kid,
     privateKeyDer: key.privateKeyDer,
     allowHosts: new Set([host]),

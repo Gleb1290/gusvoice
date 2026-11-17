@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../shared/test/counterfacts.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -133,11 +134,15 @@ function killed(e: unknown, label: string, actual: unknown, expected: unknown) {
 }
 it('R300 контрфакт без If-None-Match возвращает 200 вместо условного 304', async () => {
   await conditionalProbe();
+  await counterfact(async () => {
   const mutant = changed("if (req.headers['if-none-match'] === doc.etag)", 'if (false)');
   await assert.rejects(conditionalProbe(mutant), e => killed(e, 'R300-docs-conditional-304', 200, 304));
+  });
 });
 it('R300 контрфакт text/plain теряет Markdown MIME настоящего документа', async () => {
   await contentProbe();
+  await counterfact(async () => {
   const mutant = changed("return reply.type('text/markdown; charset=utf-8').send(doc.body);", "return reply.type('text/plain; charset=utf-8').send(doc.body);");
   await assert.rejects(contentProbe(mutant), e => killed(e, 'R300-docs-markdown', 'text/plain; charset=utf-8', 'text/markdown; charset=utf-8'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -149,9 +150,12 @@ it('R234 контрфакты рейла ловятся именно соотв�
     ['silent у своего дома', 'inst.guestOf && !live && reachable &&', '!live && reachable &&', silentGroups, 'R234-silent-active-own-false-true:', true, false],
   ];
   for (const [label, from, to, check, prefix, actual, expected] of mutants) {
-    check(loadRail(railSource)); assert.equal(railSource.split(from).length - 1, 1, label);
-    assert.throws(() => check(loadRail(railSource.replace(from, to))), e => e instanceof assert.AssertionError
-      && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected, label);
+    check(loadRail(railSource));
+    counterfact(() => {
+      assert.equal(railSource.split(from).length - 1, 1, label);
+      assert.throws(() => check(loadRail(railSource.replace(from, to))), e => e instanceof assert.AssertionError
+        && e.message.startsWith(prefix) && e.operator === 'strictEqual' && e.actual === actual && e.expected === expected, label);
+    });
   }
 });
 
@@ -229,16 +233,18 @@ describe('группы инстансов в рейле', () => {
     assert.match(serverTitle(down, server), /сейчас недоступен/);
     assert.match(groupHeadTitle(down), /сейчас недоступен/);
     assert.equal(serverTitle(baseGroup, { ...server, closed: true }), 'Дом — закрыт держателем');
-    const original = readFileSync(new URL('./railRules.ts', import.meta.url), 'utf8');
-    const changed = original.replace('if (trustLost(group)) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;', 'if (false) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;');
-    assert.notEqual(changed, original, 'реальный рейл отдельно подписывает потерю доверия');
-    const mod = { exports: {} as Record<string, unknown> };
-    runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { module: mod, exports: mod.exports, require: (id: string) => {
-        assert.equal(id, './configRules'); return { serverHost: (url: string) => new URL(url).hostname.replace(/^api\./, '') };
-      } });
-    const mutant = mod.exports as typeof import('./railRules.js');
-    assert.throws(() => assert.match(mutant.serverTitle(baseGroup, server), /связь с «Сосед» разорвана/), assert.AssertionError,
-      'мутант без специальной подписи trust-lost обязан провалить контракт');
+    counterfact(() => {
+      const original = readFileSync(new URL('./railRules.ts', import.meta.url), 'utf8');
+      const changed = original.replace('if (trustLost(group)) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;', 'if (false) return `${server.name} — связь с «${group.title}» разорвана: ${TRUST_LOST_WHY}`;');
+      assert.notEqual(changed, original, 'реальный рейл отдельно подписывает потерю доверия');
+      const mod = { exports: {} as Record<string, unknown> };
+      runInNewContext(ts.transpileModule(changed, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+        { module: mod, exports: mod.exports, require: (id: string) => {
+          assert.equal(id, './configRules'); return { serverHost: (url: string) => new URL(url).hostname.replace(/^api\./, '') };
+        } });
+      const mutant = mod.exports as typeof import('./railRules.js');
+      assert.throws(() => assert.match(mutant.serverTitle(baseGroup, server), /связь с «Сосед» разорвана/), assert.AssertionError,
+        'мутант без специальной подписи trust-lost обязан провалить контракт');
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { Blob, File } from 'node:buffer';
 import { readFileSync } from 'node:fs';
@@ -79,7 +80,9 @@ describe('R150 системная камера и совместимость р�
   it('partial старой оболочки считается доступом в info и проверке разрешения', async () => { await permission(source); });
   it('контрфакт partial→ask нарушает тот же сценарий после оригинала', async () => {
     await permission(source);
-    await assert.rejects(() => permission(mutate("v === 'granted' || v === 'partial'", "v === 'granted'")), assert.AssertionError);
+    await counterfact(async () => {
+      await assert.rejects(() => permission(mutate("v === 'granted' || v === 'partial'", "v === 'granted'")), assert.AssertionError);
+    });
   });
   it('флаг системной камеры только true: старая оболочка сохраняет резервный путь', async () => {
     for (const capture of [undefined, false, 'true', true]) {
@@ -91,12 +94,16 @@ describe('R150 системная камера и совместимость р�
     ['видео стало фото', 'video: opts.video, max:', 'video: false, max:'],
     ['предел вызывающего потерян', 'max: opts.maxBytes ?? ATTACH_MAX_BYTES }, 1);', 'max: ATTACH_MAX_BYTES }, 1);'],
   ] as const) it(`контрфакт ${name} нарушает протокол камеры после оригинала`, async () => {
-    await captureProtocol(source); await assert.rejects(() => captureProtocol(mutate(from, to)), assert.AssertionError);
+    await captureProtocol(source); await counterfact(async () => {
+      await assert.rejects(() => captureProtocol(mutate(from, to)), assert.AssertionError);
+    });
   });
   it('контрфакт всё в failed теряет код отказа камеры после оригинала', () => {
     const check = (text: string) => assert.equal(bridge(text).api.captureErrorCode(new Error('native media: capture camera-denied')), 'camera-denied');
     check(source);
-    assert.throws(() => check(mutate("return code === 'camera-denied' || code === 'no-camera' || code === 'busy' ? code : 'failed';", "return 'failed';")), assert.AssertionError);
+    counterfact(() => {
+      assert.throws(() => check(mutate("return code === 'camera-denied' || code === 'no-camera' || code === 'busy' ? code : 'failed';", "return 'failed';")), assert.AssertionError);
+    });
   });
 });
 
@@ -157,18 +164,26 @@ describe('R154 разрешение камеры, номера файлов и �
     ['unknown-op потерян', "m.error === 'unknown-op' ? null : 'denied'", "'denied'"],
     ['строка стала доступом', "return m.camera === true ? 'granted' : 'denied';", "return m.camera ? 'granted' : 'denied';"],
   ] as const) it(`контрфакт ${name} нарушает три исхода разрешения`, async () => {
-    await cameraPermission(source); await assert.rejects(() => cameraPermission(mutate(from, to)), assert.AssertionError);
+    await cameraPermission(source); await counterfact(async () => {
+      await assert.rejects(() => cameraPermission(mutate(from, to)), assert.AssertionError);
+    });
   });
   it('indexes сохраняют номера запроса и порядок файлов, пропуск не получает индекс, части не теряются', async () => indexedFiles(source));
   it('контрфакт номера успехов вместо номеров запроса ломает смешанный выбор', async () => {
-    await indexedFiles(source); await assert.rejects(() => indexedFiles(mutate('indexes.push(i);', 'indexes.push(files.length - 1);')), assert.AssertionError);
+    await indexedFiles(source); await counterfact(async () => {
+      await assert.rejects(() => indexedFiles(mutate('indexes.push(i);', 'indexes.push(files.length - 1);')), assert.AssertionError);
+    });
   });
   it('galleryOriginal передаёт предел беседы и сообщает накопленные байты каждой части', async () => originalProgress(source));
   it('контрфакт без onBytes оставляет просмотр без процентов', async () => {
-    await originalProgress(source); await assert.rejects(() => originalProgress(mutate('onBytes?.(bytes);', '')), assert.AssertionError);
+    await originalProgress(source); await counterfact(async () => {
+      await assert.rejects(() => originalProgress(mutate('onBytes?.(bytes);', '')), assert.AssertionError);
+    });
   });
   it('контрфакт стандартного предела вместо предела беседы портит крупное видео', async () => {
-    await originalProgress(source); await assert.rejects(() => originalProgress(mutate('max: maxBytes, view: true', 'max: ATTACH_MAX_BYTES, view: true')), assert.AssertionError);
+    await originalProgress(source); await counterfact(async () => {
+      await assert.rejects(() => originalProgress(mutate('max: maxBytes, view: true', 'max: ATTACH_MAX_BYTES, view: true')), assert.AssertionError);
+    });
   });
 });
 
@@ -224,21 +239,27 @@ describe('R153 альбомы и оригиналы через настоящи�
     ['bucket всегда', 'if (album?.id) filter.bucket = album.id;', "filter.bucket = album?.id ?? '';"],
     ['only потерян', 'if (album?.only) filter.only = album.only;', ''],
   ] as const) it(`контрфакт ${name} нарушает фильтры после оригинала`, async () => {
-    await filters(source); await assert.rejects(() => filters(mutate(from, to)), assert.AssertionError);
+    await filters(source); await counterfact(async () => {
+      await assert.rejects(() => filters(mutate(from, to)), assert.AssertionError);
+    });
   });
   it('оригинал идёт open/view, фото сжимается, видео нет, GIF сохраняет фото-путь для решения на нативе', async () => original(source));
   for (const [name, from, to] of [
     ['сжатие видео', "compress: item.kind === 'image'", 'compress: true'],
     ['без view', 'max: maxBytes, view: true', 'max: maxBytes, view: false'],
   ] as const) it(`контрфакт ${name} нарушает получение оригинала после исходника`, async () => {
-    await original(source); await assert.rejects(() => original(mutate(from, to)), assert.AssertionError);
+    await original(source); await counterfact(async () => {
+      await assert.rejects(() => original(mutate(from, to)), assert.AssertionError);
+    });
   });
   it('cancel адресует текущий поток и даже пришедший после отмены файл становится null', async () => {
     await cancelledOriginal(source);
   });
   it('контрфакт без stop после отмены отдаёт поздний файл и нарушает сценарий', async () => {
     await cancelledOriginal(source);
-    await assert.rejects(() => cancelledOriginal(mutate('(r) => (stop ? null : (r.files[0] ?? null))', '(r) => (r.files[0] ?? null)')), assert.AssertionError);
+    await counterfact(async () => {
+      await assert.rejects(() => cancelledOriginal(mutate('(r) => (stop ? null : (r.files[0] ?? null))', '(r) => (r.files[0] ?? null)')), assert.AssertionError);
+    });
   });
   it('пустой или ошибочный поток оригинала возвращает null без необработанного reject', async () => {
     for (const reply of [{ done: true }, { ok: false, error: 'unreadable' }]) {

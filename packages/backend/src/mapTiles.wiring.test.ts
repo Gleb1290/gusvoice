@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -45,7 +46,9 @@ it('R224 Docker передаёт MAP_PMTILES_PATH именно backend и мон
 });
 it('R224 контрфакт: пробелы не объявляют работоспособную карту', () => {
   const check = (source: string) => assert.equal(features('   ', undefined, source).includes('osmmap1'), false, 'R224-feature-space: пустой путь не признак');
-  check(featureRaw); const anchor = 'process.env.MAP_PMTILES_PATH?.trim()'; assert.equal(featureRaw.split(anchor).length - 1, 1);
+  check(featureRaw); counterfact(() => {
+const anchor = 'process.env.MAP_PMTILES_PATH?.trim()'; assert.equal(featureRaw.split(anchor).length - 1, 1);
   assert.throws(() => check(featureRaw.replace(anchor, 'process.env.MAP_PMTILES_PATH')), e => e instanceof assert.AssertionError
     && e.message.startsWith('R224-feature-space:') && e.operator === 'strictEqual' && e.actual === true && e.expected === false);
+});
 });

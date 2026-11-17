@@ -1,6 +1,8 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { testVmImports } from '../testVmImports';
 import { it } from 'node:test';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
@@ -26,13 +28,13 @@ const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf
 const raw = read('./DmChatView.tsx'), paneRaw = read('./MessagePane.tsx');
 const plate = 'Имя1 принимает сообщения только от своих контактов.';
 const unused = () => assert.fail('граница вне плашки приватности сообщений');
-function load<T>(source: string, deps: Record<string, unknown>): T {
+function load<T>(sourceUrl: URL, source: string, deps: Record<string, unknown>): T {
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, { module, exports: module.exports,
     window, document, HTMLElement, Element, Node, Event, DOMRect, ResizeObserver, requestAnimationFrame, cancelAnimationFrame,
     localStorage, setTimeout, clearTimeout, Error,
-    require: (id: string) => { assert.ok(Object.hasOwn(deps, id), `импорт целого DmChatView и его правил: ${id}`); return deps[id]; } });
+    require: testVmImports(sourceUrl, deps) });
   return module.exports as T;
 }
 type Options = { phone?: boolean; kind?: 'group' | 'saved' | 'blocked' | 'former'; canMessage?: boolean; noLastSeen?: boolean; failedSnapshot?: boolean };
@@ -63,31 +65,24 @@ async function fixture(options: Options, work: (f: Scene) => Promise<void>, sour
   const api = { userLastSeen: async (id: string) => { fetches.push(id); if (options.failedSnapshot) throw new Error('snapshot-failed'); return snapshot; } };
   const common = { react: React, 'react-dom': ReactDOM, 'react/jsx-runtime': jsx };
   const platform = { isMobile: () => false, isAndroid: () => false, isTauri: () => false };
-  const phone = load<typeof import('../phoneLayout')>(read('../phoneLayout.ts'), { ...common, './hotkeys': platform });
-  const online = load<typeof import('../dmOnline')>(read('../dmOnline.ts'), { ...common, '@gusvoice/shared': shared, './api': { api }, './store': { useStore } });
-  const seen = load<typeof import('../useLastSeen')>(read('../useLastSeen.ts'), { ...common, './api': { api }, './dmOnline': online,
+  const phone = load<typeof import('../phoneLayout')>(new URL('../phoneLayout.ts', import.meta.url), read('../phoneLayout.ts'), { ...common, './hotkeys': platform });
+  const online = load<typeof import('../dmOnline')>(new URL('../dmOnline.ts', import.meta.url), read('../dmOnline.ts'), { ...common, '@gusvoice/shared': shared, './api': { api }, './store': { useStore } });
+  const seen = load<typeof import('../useLastSeen')>(new URL('../useLastSeen.ts', import.meta.url), read('../useLastSeen.ts'), { ...common, './api': { api }, './dmOnline': online,
     './lastSeenText': lastSeenText, './store': { useStore } });
-  const fit = load<typeof import('../statusFit')>(read('../statusFit.ts'), { ...common, './lastSeenText': lastSeenText });
+  const fit = load<typeof import('../statusFit')>(new URL('../statusFit.ts', import.meta.url), read('../statusFit.ts'), { ...common, './lastSeenText': lastSeenText });
   const contacts = { useContactList: () => [], useContacts: { getState: unused } };
-  const names = load<typeof import('../peerName')>(read('../peerName.ts'), { ...common, './contactRules': contactRules, './contacts': contacts,
+  const names = load<typeof import('../peerName')>(new URL('../peerName.ts', import.meta.url), read('../peerName.ts'), { ...common, './contactRules': contactRules, './contacts': contacts,
     './config': { activeInstanceId: () => 'instance-test' }, './store': { useStore } });
-  const icon = load<typeof import('./Icon')>(read('./Icon.tsx'), common);
-  const status = load<typeof import('./StatusDot')>(read('./StatusDot.tsx'), common);
-  const lite = load<typeof import('../liteMode')>(read('../liteMode.ts'), common);
-  const avatar = load<typeof import('./Avatar')>(read('./Avatar.tsx'), { ...common, '../liteMode': lite,
+  const icon = load<typeof import('./Icon')>(new URL('./Icon.tsx', import.meta.url), read('./Icon.tsx'), common);
+  const status = load<typeof import('./StatusDot')>(new URL('./StatusDot.tsx', import.meta.url), read('./StatusDot.tsx'), common);
+  const lite = load<typeof import('../liteMode')>(new URL('../liteMode.ts', import.meta.url), read('../liteMode.ts'), common);
+  const avatar = load<typeof import('./Avatar')>(new URL('./Avatar.tsx', import.meta.url), read('./Avatar.tsx'), { ...common, '../liteMode': lite,
     '../windowCovered': { useWindowMotion: () => ({ covered: false, gameFg: false }) },
     '../firstFrame': { useFirstFrame: (url: string | null) => { assert.equal(url, null); return null; } } });
-  const saved = load<typeof import('./SavedAvatar')>(read('./SavedAvatar.tsx'), { ...common, './Goose': { Goose: unused } });
+  const saved = load<typeof import('./SavedAvatar')>(new URL('./SavedAvatar.tsx', import.meta.url), read('./SavedAvatar.tsx'), { ...common, './Goose': { Goose: unused } });
   const sidebarDeps: Record<string, unknown> = { ...common, '../dmListRules': listRules };
   // Из целого DmSidebar выполняется только настоящий useMuteClock; другие экспорты не монтируются.
-  for (const id of ['../api', '../hotkeys', '../store', '../dmOnline', '../useContactSeen', '../toast', '../dialogChrome', '../dmRules',
-    '../channelRules', '../chatKeysRules', '../convSyncRules', '../dmArchiveRules', '../dmCompose', '../dmRowRules', '../phoneLayout',
-    '../typing', '../androidBack', '../connState', './Avatar', '../contactRules', '../contacts', '../peerName', './SavedAvatar',
-    './GroupDialogs', '../groupChatRules', './DmRowMenu', './DmFolderBar', '../dmFolderView', '../dmFolders', '../cornerButtonsRules',
-    '../dmListSearchRules', './DmServerSearch', './DmAllSearch', './DmListSearch', './DmArchive', '../dragOut', '../dmListView',
-    '../uiPrefs', '../filesDrop', './DmListSwipe', './DmPinDrag', '../chatSwipe', './BottomSheet', './Goose', './Icon', './SelfVoiceBar',
-    './SettingsShell', './SharedMedia', './StatusDot', './VoicePanel', '../voiceDrafts']) sidebarDeps[id] = {};
-  const sidebar = load<typeof import('./DmSidebar')>(read('./DmSidebar.tsx'), sidebarDeps);
+  const sidebar = load<typeof import('./DmSidebar')>(new URL('./DmSidebar.tsx', import.meta.url), read('./DmSidebar.tsx'), sidebarDeps);
   const deps = { ...common, '../dmStickerRules': stickerRules, '../dmStickers': { useDmStickers }, './StickerCatalogPanel': { StickerCatalogPanel: unused },
     '../channelVisit': { useChannelVisit: () => ({ newSince: null, readKey: 0, visitKey: 'visit', started: true }) },
     '../api': { api }, '../effectsBus': { fireEffect: unused }, '../chatSearchRules': { SEARCH_PAGE: 50 }, '../confirm': { confirmAction: unused },
@@ -111,7 +106,7 @@ async function fixture(options: Options, work: (f: Scene) => Promise<void>, sour
     '../convSyncRules': convRules, '../notifyExceptionsRules': notifyRules, '../dmListRules': listRules,
     '../muteRecent': { loadMuteRecent: () => [], saveMuteRecent: unused }, '../phoneLayout': phone };
   try {
-    const component = load<typeof import('./DmChatView')>(source, deps);
+    const component = load<typeof import('./DmChatView')>(new URL('./DmChatView.tsx', import.meta.url), source, deps);
     await React.act(async () => { root.render(React.createElement(component.DmChatView, { dm })); });
     // Реальный useLastSeen ждёт таймер перед API: здесь проходит настоящий запрос, не подмена результата хука.
     await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
@@ -178,9 +173,12 @@ for (const [label, from, to, scenario, prefix, actual, expected] of [
   ['плашка называет не собеседника', 'messagePrivacyPlateText(peerName)', "messagePrivacyPlateText('Имя2')", denied,
     'R212-chat-name:', 'Имя2 принимает сообщения только от своих контактов.', plate],
 ] as const) it(`R212 DOM контрфакт: ${label}`, async () => {
-  await scenario(raw); assert.equal(raw.split(from).length - 1, 1, 'один якорь в целом DmChatView');
-  await assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  await scenario(raw);
+  await counterfact(async () => {
+    assert.equal(raw.split(from).length - 1, 1, 'один якорь в целом DmChatView');
+    await assert.rejects(scenario(raw.replace(from, to)), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith(prefix) && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });
 function all<T extends ts.Node>(node: ts.Node, guard: (n: ts.Node) => n is T): T[] {
   const list: T[] = []; const visit = (n: ts.Node) => { if (guard(n)) list.push(n); ts.forEachChild(n, visit); }; visit(node); return list;
@@ -203,15 +201,19 @@ function replacement(source = paneRaw) {
 it('R212 AST запрет сообщений адресован только доступной незаблокированной 1:1', () => guard());
 it('R212 AST настоящий MessagePane заменяет поле composerReplacement и сохраняет ввод без неё', () => replacement());
 for (const field of ['group', 'saved', 'former', 'blocked']) it(`R212 AST контрфакт: убран отдельный запрет ${field}`, () => {
-  guard(); assert.equal(raw.split(deniedLine).length - 1, 1);
-  const changed = raw.replace(deniedLine, deniedLine.replace(`!${field} && `, ''));
-  const expected = '!group&&!saved&&!former&&!blocked&&lastSeen?.canMessage===false';
-  const actual = expected.replace(`!${field}&&`, '');
-  assert.throws(() => guard(changed), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith('R212-chat-guard:') && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  guard(); counterfact(() => {
+    assert.equal(raw.split(deniedLine).length - 1, 1);
+    const changed = raw.replace(deniedLine, deniedLine.replace(`!${field} && `, ''));
+    const expected = '!group&&!saved&&!former&&!blocked&&lastSeen?.canMessage===false';
+    const actual = expected.replace(`!${field}&&`, '');
+    assert.throws(() => guard(changed), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith('R212-chat-guard:') && error.operator === 'strictEqual' && error.actual === actual && error.expected === expected);
+  });
 });
 it('R212 AST контрфакт: плашка ошибочно соединена с полем вместо замены', () => {
-  replacement(); const from = '(composerReplacement ?? ('; assert.equal(paneRaw.split(from).length - 1, 1);
-  assert.throws(() => replacement(paneRaw.replace(from, '(composerReplacement && (')), (error: unknown) => error instanceof assert.AssertionError
-    && error.message.startsWith('R212-pane-replacement:') && error.operator === 'strictEqual' && error.actual === '&&' && error.expected === '??');
+  replacement(); counterfact(() => {
+    const from = '(composerReplacement ?? ('; assert.equal(paneRaw.split(from).length - 1, 1);
+    assert.throws(() => replacement(paneRaw.replace(from, '(composerReplacement && (')), (error: unknown) => error instanceof assert.AssertionError
+      && error.message.startsWith('R212-pane-replacement:') && error.operator === 'strictEqual' && error.actual === '&&' && error.expected === '??');
+  });
 });

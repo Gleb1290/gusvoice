@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -166,7 +167,9 @@ async function featureGate(edit?: Mutation) {
 // Класс ошибки: сосед без групп случайно получает неподдерживаемый провод; проверяем и закрытие, и открытие.
 it('R208 без dmgroup1 список и экспорт закрыты, с признаком открыты; обход gate обнаруживается', async () => {
   await featureGate();
-  await assert.rejects(featureGate(inFunction('federation/convChanges', 'peerKnowsGroups', 'return !!link?.features.includes(FED_FEATURES.dmgroup1);', 'return true;')), killed('без dmgroup1 список закрыт'));
+  await counterfact(async () => {
+    await assert.rejects(featureGate(inFunction('federation/convChanges', 'peerKnowsGroups', 'return !!link?.features.includes(FED_FEATURES.dmgroup1);', 'return true;')), killed('без dmgroup1 список закрыт'));
+  });
 });
 
 async function hostedExport(edit?: Mutation) {
@@ -192,8 +195,11 @@ for (const [name, from, to, label] of [
 ] as const) {
   // Класс ошибки: неправильный фильтр экспорта, а не ошибка загрузчика или VM.
   it(`R208 мутант «${name}» обнаруживается адресным содержимым страницы`, async () => {
-    await hostedExport(); await assert.rejects(hostedExport(inFunction('federation/convChanges', 'exportGroupForPeer', from, to)), killed(label));
+    await hostedExport();
+  await counterfact(async () => {
+    await assert.rejects(hostedExport(inFunction('federation/convChanges', 'exportGroupForPeer', from, to)), killed(label));
   });
+});
 }
 
 async function formerWindow(edit?: Mutation) {
@@ -215,7 +221,9 @@ async function formerWindow(edit?: Mutation) {
 // Класс ошибки: раскрытие истории после ухода всех людей дома; два разных ухода ловят min вместо max.
 it('R208 бывшим история до последнего ухода включительно, список остаётся; возвращённому вся история', async () => {
   await formerWindow();
-  await assert.rejects(formerWindow(inFunction('federation/convChanges', 'exportGroupForPeer', 'if (Number(t.live) === 0)', 'if (false)')), killed('окно бывшего включает max(left_at), но не +1 мс'));
+  await counterfact(async () => {
+    await assert.rejects(formerWindow(inFunction('federation/convChanges', 'exportGroupForPeer', 'if (Number(t.live) === 0)', 'if (false)')), killed('окно бывшего включает max(left_at), но не +1 мс'));
+  });
 });
 
 async function originExport(edit?: Mutation) {
@@ -236,7 +244,9 @@ async function originExport(edit?: Mutation) {
 // Класс ошибки: утечка чужому origin и неподписанная копия, принимаемая на доверии.
 it('R208 участник экспортирует только своё с настоящей подписью, не-хосту отказывает; origin-мутант пойман', async () => {
   await originExport();
-  await assert.rejects(originExport(inFunction('federation/convChanges', 'exportGroupForPeer', 'if (!hosting && c.origin !== instanceId) return null;', '')), killed('не-хост не получает чужую группу'));
+  await counterfact(async () => {
+    await assert.rejects(originExport(inFunction('federation/convChanges', 'exportGroupForPeer', 'if (!hosting && c.origin !== instanceId) return null;', '')), killed('не-хост не получает чужую группу'));
+  });
 });
 
 // Класс ошибки: пагинация считает ровно лимит уже переполнением или теряет сообщение limit+1.
@@ -304,12 +314,16 @@ async function legacyPass(edit?: Mutation, groups = false) {
 // Класс ошибки: gate участника перестал учитывать признак либо 404 старого соседа стал вечной ошибкой reset.
 it('R208 полный проход без dmgroup1 остаётся только 1:1; отключение проверки признака поймано', async () => {
   await legacyPass();
-  await assert.rejects(legacyPass(inFunction('federation/convAccept', 'fullPassGroups', 'if (!link?.features.includes(FED_FEATURES.dmgroup1)) return [];', '')), killed('без dmgroup1 списка в проходе нет'));
+  await counterfact(async () => {
+    await assert.rejects(legacyPass(inFunction('federation/convAccept', 'fullPassGroups', 'if (!link?.features.includes(FED_FEATURES.dmgroup1)) return [];', '')), killed('без dmgroup1 списка в проходе нет'));
+  });
 });
 // Класс ошибки: совместимый 404 превращён в неисправность, хотя direct обязан догрузиться.
 it('R208 список 404 пропускается, 1:1 продолжается; null вместо ids держит курсор и обнаруживается', async () => {
   await legacyPass(undefined, true);
-  await assert.rejects(legacyPass(inFunction('federation/convAccept', 'fullPassGroups', 'if (r.value.status === 404) return ids;', 'if (r.value.status === 404) return null;'), true), killed('старый сосед не держит полный проход'));
+  await counterfact(async () => {
+    await assert.rejects(legacyPass(inFunction('federation/convAccept', 'fullPassGroups', 'if (r.value.status === 404) return ids;', 'if (r.value.status === 404) return null;'), true), killed('старый сосед не держит полный проход'));
+  });
 });
 for (const status of [503, 429]) {
   // Класс ошибки: недоступный список ошибочно подтверждает голову журнала, скрывая потерю группы.
@@ -342,7 +356,9 @@ async function rejectedGroup(edit?: Mutation) {
 // Класс ошибки: обход gone продолжает export группы без нашего участника.
 it('R208 отклонённая conv не заводит группу и не забирает её следующие страницы; gone-мутант пойман', async () => {
   await rejectedGroup();
-  await assert.rejects(rejectedGroup(inFunction('federation/convAccept', 'fullPass', 'if (gone || !parsed.next || parsed.next === after) break;', 'if (!parsed.next || parsed.next === after) break;')), killed('отклонённая conv не запрашивает следующую страницу'));
+  await counterfact(async () => {
+    await assert.rejects(rejectedGroup(inFunction('federation/convAccept', 'fullPass', 'if (gone || !parsed.next || parsed.next === after) break;', 'if (!parsed.next || parsed.next === after) break;')), killed('отклонённая conv не запрашивает следующую страницу'));
+  });
 });
 
 // Класс ошибки: null коллектора не превращён в HTTP 404 или HTTP остаётся закрытым после объявления dmgroup1.

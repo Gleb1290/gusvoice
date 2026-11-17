@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -74,8 +75,10 @@ it('цвет автора стабилен, лежит в семи токена�
     return module.exports as typeof rules;
   };
   check(load('return h % PEER_COLOR_COUNT;', 'return h % PEER_COLOR_COUNT;'));
-  assert.throws(() => check(load('return h % PEER_COLOR_COUNT;', 'return id.length % PEER_COLOR_COUNT;')), assert.AssertionError,
-    'мутант заменяет стабильный FNV-1a цвет длиной имени');
+  counterfact(() => {
+    assert.throws(() => check(load('return h % PEER_COLOR_COUNT;', 'return id.length % PEER_COLOR_COUNT;')), assert.AssertionError,
+      'мутант заменяет стабильный FNV-1a цвет длиной имени');
+  });
 });
 
 it('группы соседей требуют fedm6, а свои доступны всегда', () => {
@@ -107,10 +110,12 @@ it('группы соседей требуют fedm6, а свои доступн
     return module.exports as typeof rules;
   };
   check(rules);
-  assert.throws(() => check(load('return !u.homeInstance || fedGroups;', 'return !u.homeInstance && fedGroups;')),
-    (error) => error instanceof assert.AssertionError && error.message.startsWith('свой участник доступен без fedm6')
-      && error.actual === false && error.expected === true,
-    'мутант && fedGroups ошибочно скрывает своих');
+  counterfact(() => {
+    assert.throws(() => check(load('return !u.homeInstance || fedGroups;', 'return !u.homeInstance && fedGroups;')),
+      (error) => error instanceof assert.AssertionError && error.message.startsWith('свой участник доступен без fedm6')
+        && error.actual === false && error.expected === true,
+      'мутант && fedGroups ошибочно скрывает своих');
+  });
 });
 
 it('подписи дома группы используют имя, домен и источник-хост по приоритету', () => {
@@ -155,12 +160,14 @@ it('подписи дома группы используют имя, домен
     return module.exports as typeof rules;
   };
   check(rules);
-  const memberLoop = '  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;\n  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;';
-  const dmFirst = '  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;\n  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;';
-  assert.throws(() => check(load(memberLoop, dmFirst)),
-    (error) => error instanceof assert.AssertionError && error.message.startsWith('дом участника имеет приоритет над собеседником 1:1')
-      && error.actual === 'Собеседник 1:1' && error.expected === 'Участник хоста',
-    'мутант меняет приоритет источников дома группы');
+  counterfact(() => {
+    const memberLoop = '  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;\n  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;';
+    const dmFirst = '  for (const d of dms) if (d.otherUser.homeInstance?.instanceId === hostId) return d.otherUser.homeInstance;\n  for (const m of members) if (m.homeInstance?.instanceId === hostId) return m.homeInstance;';
+    assert.throws(() => check(load(memberLoop, dmFirst)),
+      (error) => error instanceof assert.AssertionError && error.message.startsWith('дом участника имеет приоритет над собеседником 1:1')
+        && error.actual === 'Собеседник 1:1' && error.expected === 'Участник хоста',
+      'мутант меняет приоритет источников дома группы');
+  });
 });
 
 it('отказ приглашения называет только выбранные инстансы, убирает повторы и даёт безопасный fallback', () => {
@@ -202,8 +209,10 @@ it('отказ приглашения называет только выбран
     return module.exports as typeof rules;
   };
   check(rules);
-  assert.throws(() => check(load('(!ids || ids.has(p.id))', 'true')),
-    (error) => error instanceof assert.AssertionError && error.message.startsWith('один дом дедуплицируется по подписи')
-      && error.expected === 'Нельзя позвать: инстанс «Дом А» не поддерживает группы',
-    'мутант без фильтра userIds подмешивает неотказанные дома');
+  counterfact(() => {
+    assert.throws(() => check(load('(!ids || ids.has(p.id))', 'true')),
+      (error) => error instanceof assert.AssertionError && error.message.startsWith('один дом дедуплицируется по подписи')
+        && error.expected === 'Нельзя позвать: инстанс «Дом А» не поддерживает группы',
+      'мутант без фильтра userIds подмешивает неотказанные дома');
+  });
 });

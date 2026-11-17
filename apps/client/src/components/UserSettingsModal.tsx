@@ -1,12 +1,8 @@
 import {
-  normalizeNotifyRepeat,
   normalizeNotifyView,
-  notifyRepeatLabel,
   notifyShowsName,
   notifyShowsText,
   notifyViewOf,
-  NOTIFY_REPEAT_MAX,
-  NOTIFY_REPEAT_MINUTES,
 } from '@gusvoice/shared';
 import { hasFolderEditRequest, useFoldersOn } from './DmFolderBar';
 import { DataStorageSettings } from './DataStorageSettings';
@@ -19,7 +15,7 @@ import { activeAnchor, atBottomOf, groupLabelAt } from '../settingsAnchor';
 import { markChangedSeen, markGroupSeen, seedSeenOnce, seenChangedPrints, seenGroups } from '../settingsSeen';
 import { api, setToken } from '../api';
 import { getAudioSettings, setAudioSettings, type AudioSettings } from '../audioSettings';
-import { VAD_THRESHOLD_MAX, VAD_THRESHOLD_MIN } from '../micProcessorRules';
+import { micCaptureOptions, VAD_THRESHOLD_MAX, VAD_THRESHOLD_MIN } from '../micProcessorRules';
 import {
   clearServer,
   config,
@@ -31,6 +27,8 @@ import {
 } from '../config';
 import {
   appVersion,
+  autostartGet,
+  autostartSet,
   type CloseBehavior,
   getCloseBehavior,
   gpuAccelGet,
@@ -42,7 +40,7 @@ import { useDialogChrome } from '../dialogChrome';
 import { chooseDownloadDir, getDownloadDir, setDownloadDir } from '../downloads';
 import { usePhoneUi } from '../phoneLayout';
 import { comboFromEvent, comboFromMouse, formatCombo, getHotkeys, type Hotkeys, isAndroid, isDesktop, isMobile, isTauri, setHotkeys } from '../hotkeys';
-import { hasPushDistributor } from '../nativeUnifiedPush';
+import { hasPushDistributor, storePushActive } from '../nativeUnifiedPush';
 import { useStore } from '../store';
 import {
   coinNotifyLevel,
@@ -502,15 +500,7 @@ function AudioVideoTab({ onOpenCheatSheet }: { onOpenCheatSheet?: () => void } =
     setMonitoring(monitor);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          ...(s.inputDeviceId ? { deviceId: { exact: s.inputDeviceId } } : {}),
-          // Mirror the live call's mobile override (VoiceConnection.audioCaptureDefaults): on Android we
-          // force ALL getUserMedia processing OFF and do NS/gain in the in-app chain, so the test meter
-          // must capture the same raw mic — otherwise Samsung's AEC/AGC mangle the test and mislead tuning.
-          echoCancellation: isMobile() ? false : s.echoCancellation,
-          noiseSuppression: isMobile() ? false : s.noiseFilter === 'system',
-          autoGainControl: isMobile() ? false : s.autoGainControl,
-        },
+        audio: micCaptureOptions(s, isMobile(), true),
       });
       navigator.mediaDevices.enumerateDevices().then(setDevices).catch(() => {});
       const ctx = new AudioContext();
@@ -1952,8 +1942,10 @@ function WindowsDownload() {
 }
 
 /** «Android» — in-app install guide for the self-hosted F-Droid store. The credentialed add-link + QR
- *  come from the AUTHED backend endpoint (never the public bundle); the guide text is static here. */
-function AndroidInstallTab() {
+ *  come from the AUTHED backend endpoint (never the public bundle); the guide text is static here.
+ *  `storePush` (#247): пуши идут через Google FCM (сборка Google Play) — гайд ntfy не нужен. Считает родитель
+ *  (`storePushActive`), сюда — готовым признаком. */
+function AndroidInstallTab({ storePush = false }: { storePush?: boolean }) {
   const [info, setInfo] = useState<
     { repoUrl: string; fingerprint: string; addUrl: string; qr: string } | null | undefined
   >(undefined);
@@ -2072,6 +2064,15 @@ function AndroidInstallTab() {
 
       {/* Push-setup guide (#120): DMs/@mentions wake the phone even when GusVoice is closed only if a
           UnifiedPush distributor (ntfy) is installed AND pointed at our server. */}
+      {storePush ? (
+        <>
+          <div className="settings-group-label" id="set-g-push" style={inApp ? undefined : { marginTop: 22 }}>Пуш-уведомления</div>
+          <div style={{ color: 'var(--green)', fontSize: 13, fontWeight: 600 }}>
+            ✓ Пуши включены — через Google Play. Ставить ничего не нужно.
+          </div>
+        </>
+      ) : (
+        <>
       <div className="settings-group-label" id="set-g-push" style={inApp ? undefined : { marginTop: 22 }}>Пуш-уведомления (ntfy)</div>
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
         <b>Без ntfy уведомления (ЛС, упоминания) в фоне и при закрытом приложении приходить не будут.</b> Нужен
@@ -2117,17 +2118,69 @@ function AndroidInstallTab() {
           Проверить снова
         </button>
       )}
+        </>
+      )}
     </div>
   );
 }
 
+function autostartMessage(error: unknown, fallback: string): string {
+  // Tauri может вернуть готовое сообщение пользователю строкой; трассировки и технические ошибки не показываем.
+  if (typeof error === 'string' && error.length <= 300 && /[а-яё]/i.test(error) && !/[\r\n\\]/.test(error)) return error;
+  return fallback;
+}
+
 function DesktopTab() {
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [autostartStatus, setAutostartStatus] = useState<'loading' | 'ready' | 'unsupported' | 'error'>('loading');
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
+  const autostartLock = useRef(false);
+  const autostartMounted = useRef(false);
+  const autostartGeneration = useRef(0);
+  function readAutostart() {
+    if (autostartLock.current) return;
+    autostartLock.current = true;
+    const generation = ++autostartGeneration.current;
+    setAutostartStatus('loading');
+    setAutostartError(null);
+    void autostartGet().then((value) => {
+      if (!autostartMounted.current || generation !== autostartGeneration.current) return;
+      setAutostart(value);
+      setAutostartStatus(value === null ? 'unsupported' : 'ready');
+    }).catch((error: unknown) => {
+      if (autostartMounted.current && generation === autostartGeneration.current) {
+        setAutostartError(autostartMessage(error, 'Не удалось узнать состояние автозапуска.'));
+        setAutostartStatus('error');
+      }
+    }).finally(() => { if (generation === autostartGeneration.current) autostartLock.current = false; });
+  }
+  useEffect(() => {
+    autostartMounted.current = true;
+    readAutostart();
+    return () => { autostartMounted.current = false; autostartGeneration.current++; autostartLock.current = false; };
+  }, []);
+  function flipAutostart(enabled: boolean) {
+    if (autostartLock.current || autostartStatus !== 'ready') return;
+    autostartLock.current = true;
+    setAutostartBusy(true);
+    setAutostartError(null);
+    void autostartSet(enabled).then((value) => {
+      if (autostartMounted.current) setAutostart(value);
+    }).catch((error: unknown) => {
+      if (autostartMounted.current) setAutostartError(autostartMessage(error, 'Не удалось изменить автозапуск. Попробуйте ещё раз.'));
+    }).finally(() => {
+      autostartLock.current = false;
+      if (autostartMounted.current) setAutostartBusy(false);
+    });
+  }
   const [behavior, setBehavior] = useState<CloseBehavior>(getCloseBehavior());
   // Ускорение отрисовки видеокартой (#193). Умолчание — включено; выключатель нужен на случай
   // битого драйвера, когда принудительное ускорение даёт артефакты.
   const [gpu, setGpu] = useState<boolean | null>(null);
   const [gpuBusy, setGpuBusy] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [checkedRecently, setCheckedRecently] = useState(false);
   // Installed app version (tauri.conf.json) — shown under «Обновления» so a user can always tell
   // which update they're on (and copy it into a bug report). Desktop-only: this tab is Tauri-gated.
   const [ver, setVer] = useState<string | null>(null);
@@ -2158,6 +2211,21 @@ function DesktopTab() {
   ];
   return (
     <div className="settings-pane">
+      {autostartStatus !== 'unsupported' && (
+        <>
+          <div className="settings-group-label" id="set-g-autostart">Автозапуск</div>
+          <div className="settings-row">
+            <span>Запускать GusVoice вместе с Windows</span>
+            <Toggle checked={autostart === true} onChange={flipAutostart}
+              disabled={autostartStatus !== 'ready' || autostartBusy} label="Запускать GusVoice вместе с Windows" />
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>Открывать приложение при входе в Windows. Только на этом компьютере.</div>
+          {autostartStatus === 'error' && (
+            <div role="alert">{autostartError} <button type="button" className="settings-action" onClick={readAutostart}>Повторить</button></div>
+          )}
+          {autostartStatus === 'ready' && autostartError && <div role="alert">{autostartError}</div>}
+        </>
+      )}
       {gpu !== null && (
         <>
           <div className="settings-group-label">Отрисовка</div>
@@ -2270,13 +2338,16 @@ function DesktopTab() {
       <button
         type="button"
         className="settings-action"
-        disabled={checking}
+        disabled={checking || checkedRecently}
         onClick={async () => {
           setChecking(true);
           try {
             await manualUpdateCheck();
           } finally {
             setChecking(false);
+            // Пауза после ответа (30.10): частые нажатия порождали пачку запросов и стопку тостов «У вас последняя версия».
+            setCheckedRecently(true);
+            window.setTimeout(() => setCheckedRecently(false), 5000);
           }
         }}
       >
@@ -2362,7 +2433,6 @@ function NotifyContentSetting({ onClose }: { onClose: () => void }) {
     notifyView?: ReturnType<typeof normalizeNotifyView>;
     notifyGroups?: boolean;
     notifyDm?: boolean;
-    notifyRepeat?: number;
   }) =>
     api.updateProfile(body).then(setAuth, toastError);
   return (
@@ -2419,24 +2489,6 @@ function NotifyContentSetting({ onClose }: { onClose: () => void }) {
         Выключите — сообщения групп будут приходить без уведомлений. Личные сообщения уведомляют, как раньше.
       </div>
       <NotifyExceptions onOpen={onClose} />
-      {push3 && (
-        <>
-          <div className="settings-group-label" id="set-g-notify-repeat" style={{ marginTop: 22 }}>
-            Повторять уведомления
-          </div>
-          <Select
-            value={String(normalizeNotifyRepeat(user.notifyRepeat))}
-            onChange={(v) => void save({ notifyRepeat: Number(v) })}
-            title="Повторять уведомления"
-            ariaLabel="Повторять уведомления"
-            options={NOTIFY_REPEAT_MINUTES.map((m) => ({ value: String(m), label: notifyRepeatLabel(m) }))}
-          />
-          <div className="muted" style={{ fontSize: 13 }}>
-            Если личное сообщение висит непрочитанным, на телефон придёт напоминание — не больше {NOTIFY_REPEAT_MAX} раз подряд.
-            Прочитали или выключили звук беседы — напоминания прекращаются.
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -3110,7 +3162,7 @@ export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () =
                 при пустой навигации); «Скачать для Windows» на телефоне не нужно. */}
             {desktop && <DesktopTab />}
             {!isTauri() && !mobile && <WindowsDownload />}
-            <AndroidInstallTab />
+            <AndroidInstallTab storePush={storePushActive()} />
           </>
         )}
         </div>

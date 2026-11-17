@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -46,7 +47,7 @@ type Fixture = {
   render: () => Promise<void>;
   click: () => Promise<void>;
   succeed: (bonus?: number) => Promise<void>;
-  fail: () => Promise<void>;
+  fail: (error?: { reason?: string; status?: number }) => Promise<void>;
 };
 
 async function fixture(check: (f: Fixture) => Promise<void>, options: { snapshot?: string; noServer?: boolean; mutation?: Mutation } = {}) {
@@ -56,7 +57,7 @@ async function fixture(check: (f: Fixture) => Promise<void>, options: { snapshot
     const listeners = new Set<(offer: Offer) => void>();
     const calls: [string, string][] = [], refreshes: [string, boolean][] = [];
     let resolveClaim: ((res: { bonus: number }) => void) | undefined;
-    let rejectClaim: ((error: { reason: string }) => void) | undefined;
+    let rejectClaim: ((error: { reason?: string; status?: number }) => void) | undefined;
     const bonus = load<typeof import('./GooseBonus')>(sourceFor('bonus', options.mutation), {
       '../effectsDom': { fullscreenNow: () => false },
       './Goose': { Goose: () => React.createElement('span', { 'data-goose': true }) },
@@ -88,9 +89,9 @@ async function fixture(check: (f: Fixture) => Promise<void>, options: { snapshot
         assert.ok(resolveClaim, 'настоящий хост отправил запрос');
         await React.act(async () => { resolveClaim!({ bonus: amount }); });
       },
-      fail: async () => {
+      fail: async (error = { reason: 'claimed' }) => {
         assert.ok(rejectClaim, 'настоящий хост отправил запрос');
-        await React.act(async () => { rejectClaim!({ reason: 'claimed' }); });
+        await React.act(async () => { rejectClaim!(error); });
       },
     };
     try { await check(f); }
@@ -174,6 +175,26 @@ it('R249 серверный отказ тоже прячет старый id, н
   });
 });
 
+it('после ошибки сети или временного отказа сервера того же гуся можно поймать без перезахода', async () => {
+  await fixture(async f => {
+    await f.emit('offer-a');
+    await f.click();
+    await f.fail({});
+    gooseCount(f, 1, 'после обрыва сети гусь снова доступен');
+    assert.equal(f.dom.querySelector('.goose-hint'), null);
+
+    await f.click();
+    await f.fail({ status: 503 });
+    await f.emit('offer-a');
+    gooseCount(f, 1, 'повтор сервера оставляет одного доступного гуся');
+
+    await f.click();
+    await f.succeed();
+    gooseCount(f, 0, 'после поимки гусь исчезает');
+    assert.deepEqual(f.calls, Array.from({ length: 3 }, () => ['server-a', 'offer-a']));
+  });
+});
+
 it('R249 снимок поднимает пропущенного гуся, повтор пуша не дублирует и не воскрешает его', async () => {
   await fixture(async f => {
     gooseCount(f, 1, 'предложение из снимка доступно без первого пуша');
@@ -205,12 +226,12 @@ it('R249 контрфакты снятого hiddenId и сброса скрыт
     { target: 'bonus', anchor: 'hiddenId !== opportunity.id &&', replacement: 'true &&' },
     { target: 'bonus', anchor: 'setHiddenId((id) => (id === opportunity.id ? id : null));', replacement: 'setHiddenId(null);' },
   ] satisfies Mutation[]) {
-    await assert.rejects(hidden(mutation), e => e instanceof assert.AssertionError && e.message.includes('не воскрешает hiddenId'));
+    await counterfact(() => assert.rejects(hidden(mutation), e => e instanceof assert.AssertionError && e.message.includes('не воскрешает hiddenId')));
   }
 });
 
 it('R249 контрфакт зависимости от нового объекта вместо id ловит второй claim в полёте', async () => {
   await pending();
   const mutation: Mutation = { target: 'bonus', anchor: '}, [opportunity?.id]);', replacement: '}, [opportunity]);' };
-  await assert.rejects(pending(mutation), e => e instanceof assert.AssertionError && e.message.includes('не разрешает второй claim'));
+  await counterfact(() => assert.rejects(pending(mutation), e => e instanceof assert.AssertionError && e.message.includes('не разрешает второй claim')));
 });

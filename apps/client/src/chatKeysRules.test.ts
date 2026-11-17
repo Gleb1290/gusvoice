@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -33,7 +34,7 @@ it('оба настоящих обработчика поля вызывают �
   };
   for (const body of handlers) {
     check(body);
-    assert.throws(() => check(body.replace('insertLineBreak(e.currentTarget);', '')), (e: unknown) => e instanceof assert.AssertionError && e.actual === 0 && e.expected === 1);
+    counterfact(() => assert.throws(() => check(body.replace('insertLineBreak(e.currentTarget);', '')), (e: unknown) => e instanceof assert.AssertionError && e.actual === 0 && e.expected === 1));
   }
 });
 
@@ -51,7 +52,7 @@ it('прикрепление распознаёт физическую KeyO в �
     for (const patch of [{ ctrlKey: false }, { shiftKey: true }, { altKey: true }, { metaKey: true }, { code: 'KeyP' }]) assert.equal(api.attachKey({ ...e, ...patch }), false);
   };
   check(rules);
-  assert.throws(() => check(mutant("e.code === 'KeyO' || ", '')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant("e.code === 'KeyO' || ", '')), assert.AssertionError));
 });
 it('Enter следует режиму отправки, Ctrl+Enter вставляет перенос только в режиме Enter', () => {
   // Ловит случайную отправку вместо переноса: это уже необратимое действие для пользователя.
@@ -74,7 +75,7 @@ it('ответ листается без круга и после последн
   assert.deepEqual(rules.replyNavTarget(['a','b'], 'a', 'next'), { reply: 'b' });
   assert.equal(rules.replyNavTarget(['a','b'], 'b', 'next'), 'cancel');
   assert.equal(rules.replyNavTarget(['a','b'], null, 'next'), null);
-  assert.throws(() => assert.equal(mutant(" : 'cancel'", ' : null').replyNavTarget(['a'], 'a', 'next'), 'cancel'), assert.AssertionError);
+  counterfact(() => assert.throws(() => assert.equal(mutant(" : 'cancel'", ' : null').replyNavTarget(['a'], 'a', 'next'), 'cancel'), assert.AssertionError));
 });
 it('поле отдаёт стрелку ленте лишь на краю без выделения, модификаторы и IME сохраняют поле', () => {
   // Выделенный текст и составной ввод нельзя превращать в правку предыдущего сообщения.
@@ -99,8 +100,10 @@ it('Esc уважает приоритет выделения, правки, пу
     assert.equal(api.chatEscape({ ...p, replying: false, recording: false }), 'close');
     assert.equal(api.chatEscape({ ...p, replying: false, recording: false, canClose: false }), 'none');
   }; check(rules);
+  counterfact(() => {
   assert.throws(() => check(mutant("if (p.replying && p.draft.trim() === '') return 'reply';", "if (p.recording) return 'voice'; if (p.replying && p.draft.trim() === '') return 'reply';")), assert.AssertionError);
   assert.throws(() => check(mutant("p.draft.trim() === ''", "p.draft === ''")), assert.AssertionError);
+  });
 });
 it('Esc снимает пересылку после правки и до пустого ответа', () => {
   // Черновик пересылки — отдельный слой: он не должен теряться за ответом, даже когда поле пусто.
@@ -116,9 +119,11 @@ it('Esc снимает пересылку после правки и до пус
     assert.equal(api.chatEscape({ ...p, forwarding: false, replying: false, recording: false }), 'close');
   };
   check(rules);
+  counterfact(() => {
   const before = "  if (p.forwarding) return 'forward';\n  if (p.replying && p.draft.trim() === '') return 'reply';";
   const after = "  if (p.replying && p.draft.trim() === '') return 'reply';\n  if (p.forwarding) return 'forward';";
   assert.throws(() => check(mutant(before, after)), assert.AssertionError);
+  });
 });
 it('печатный знак принимает Unicode, режим Ctrl+Enter отправляет и с Shift, касание и IME не отправляют', () => {
   // Русская раскладка и emoji остаются вводом, а Enter на телефоне не отправляет случайное сообщение.

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -84,13 +85,15 @@ it('R246 плитка поджимается 350 мс — до подъёма ч
 
 it('R246 возврат долгого таймера или старого селектора сцены обнаруживается по исходному CSS', () => {
   pressingTransition();
-  const oldDuration = css.replace("transition: transform 350ms linear, box-shadow var(--t-fast) ease-out;",
-    "transition: transform 1.7s linear, box-shadow var(--t-fast) ease-out;");
-  assert.throws(() => pressingTransition(oldDuration), assert.AssertionError,
-    'сохранённые 1.7 секунды уже не соответствуют короткому удержанию');
-  const oldSelector = css.replace(".stage-dnd > [data-drag='pressing']", ".stage-grid > [data-drag='pressing']");
-  assert.throws(() => pressingTransition(oldSelector), assert.AssertionError,
-    'режим просмотра использует .stage-dnd, а не только сетку');
+  counterfact(() => {
+    const oldDuration = css.replace("transition: transform 350ms linear, box-shadow var(--t-fast) ease-out;",
+      "transition: transform 1.7s linear, box-shadow var(--t-fast) ease-out;");
+    assert.throws(() => pressingTransition(oldDuration), assert.AssertionError,
+      'сохранённые 1.7 секунды уже не соответствуют короткому удержанию');
+    const oldSelector = css.replace(".stage-dnd > [data-drag='pressing']", ".stage-grid > [data-drag='pressing']");
+    assert.throws(() => pressingTransition(oldSelector), assert.AssertionError,
+      'режим просмотра использует .stage-dnd, а не только сетку');
+  });
 });
 
 it('R246 screen-controls скрыты только селектором перетаскивания сцены', () => {
@@ -99,24 +102,28 @@ it('R246 screen-controls скрыты только селектором пере
 
 it('R246 мутант показа screen-controls во время перетаскивания обнаруживается', () => {
   draggingControlsOpacity();
-  const shown = css.replace(".stage-dnd[data-dragging] .screen-controls {\n  opacity: 0;",
-    ".stage-dnd[data-dragging] .screen-controls {\n  opacity: 1;");
-  assert.throws(() => draggingControlsOpacity(shown), assert.AssertionError,
-    'управление показом не должно ловить отпускание вместо завершения жеста');
+  counterfact(() => {
+    const shown = css.replace(".stage-dnd[data-dragging] .screen-controls {\n  opacity: 0;",
+      ".stage-dnd[data-dragging] .screen-controls {\n  opacity: 1;");
+    assert.throws(() => draggingControlsOpacity(shown), assert.AssertionError,
+      'управление показом не должно ловить отпускание вместо завершения жеста');
+  });
 });
 
 it('R247 прокрутка сцены теряет anchoring только во время перетаскивания — близкие селекторы не подходят', () => {
   // Иначе браузер сам возвращает полосу к прежней плитке при изменении порядка DOM.
   draggingOverflowAnchor();
-  const block = '.stage-dnd[data-dragging] {\n  overflow-anchor: none;\n}';
-  assert.equal(css.split(block).length - 1, 1, 'точный блок присутствует один раз в исходном CSS');
-  for (const mutant of [
-    css.replace(block, ''),
-    css.replace(block, block.replace('overflow-anchor: none;', 'overflow-anchor: auto;')),
-    css.replace(block, block.replace('.stage-dnd[data-dragging]', '.stage-grid[data-dragging]')),
-    css.replace(block, block.replace('.stage-dnd[data-dragging]', '.stage-dnd')),
-  ]) {
-    assert.throws(() => draggingOverflowAnchor(mutant), assert.AssertionError,
-      'удаление свойства, auto и селекторы без общего контейнера в состоянии dragging должны ловиться');
-  }
+  counterfact(() => {
+    const block = '.stage-dnd[data-dragging] {\n  overflow-anchor: none;\n}';
+    assert.equal(css.split(block).length - 1, 1, 'точный блок присутствует один раз в исходном CSS');
+    for (const mutant of [
+      css.replace(block, ''),
+      css.replace(block, block.replace('overflow-anchor: none;', 'overflow-anchor: auto;')),
+      css.replace(block, block.replace('.stage-dnd[data-dragging]', '.stage-grid[data-dragging]')),
+      css.replace(block, block.replace('.stage-dnd[data-dragging]', '.stage-dnd')),
+    ]) {
+      assert.throws(() => draggingOverflowAnchor(mutant), assert.AssertionError,
+        'удаление свойства, auto и селекторы без общего контейнера в состоянии dragging должны ловиться');
+    }
+  });
 });

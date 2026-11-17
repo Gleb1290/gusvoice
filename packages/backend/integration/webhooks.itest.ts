@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../shared/test/counterfacts.js';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
@@ -260,9 +261,11 @@ test('R275 id из 65 знаков возвращает общий 404 до SQL,
 
 test('R275 контрфакт возврата parse вместо safeParse пойман по HTTP400, а не ошибке VM или HTTP500', async () => {
   await malformedIdScenario();
+  await counterfact(async () => {
   const from = "const parsed = z.object({ id: z.string().min(1).max(64), token: z.string() }).safeParse(req.params);\n        if (!parsed.success) return notFound();\n        const params = parsed.data;";
   const to = "const params = z.object({ id: z.string().min(1).max(64), token: z.string() }).parse(req.params);";
   await assert.rejects(malformedIdScenario({ module: 'routes/webhooks', from, to }), failure('R275:кривой-id-не-отличается-от-неизвестного'));
+  });
 });
 
 test('R274 120 запросов с IP ещё проходят до проверки токена, 121-й получает 429 до базы', async () => {
@@ -595,5 +598,5 @@ const mutants: readonly [string, Mutation, (mutation?: Mutation) => Promise<unkn
 ];
 for (const [label, mutation, scenario, marker] of mutants) test(`R274 контрфакт: ${label} ловится адресным AssertionError после проверки оригинала`, async () => {
   await scenario();
-  await assert.rejects(scenario(mutation), failure(marker));
+  await counterfact(() => assert.rejects(scenario(mutation), failure(marker)));
 });

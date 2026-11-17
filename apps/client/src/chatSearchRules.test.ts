@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
@@ -24,8 +25,10 @@ it('реальный обработчик F3 отвергает инверсию
     for (const shiftKey of [false, true]) sandbox.handler({ key: 'F3', shiftKey, preventDefault() {} });
     assert.deepEqual(directions, ['older', 'newer']);
   }; check(source);
+  counterfact(() => {
   const changed = source.replace("e.shiftKey ? 'newer' : 'older'", "e.shiftKey ? 'older' : 'newer'");
   assert.notEqual(changed, source); assert.throws(() => check(changed), assert.AssertionError);
+  });
 });
 function mutant(from: string, to: string): typeof rules {
   const source = readFileSync(new URL('./chatSearchRules.ts', import.meta.url), 'utf8'); assert.ok(source.includes(from));
@@ -54,7 +57,7 @@ it('шаги не пересекают края, порция запрашива
     assert.equal(api.canStep(null, 'older'), false);
     assert.equal(api.canStep({ ...state, total: 0 }, 'newer'), false);
   }; check(rules);
-  assert.throws(() => check(mutant('<= SEARCH_PREFETCH', '< SEARCH_PREFETCH')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('<= SEARCH_PREFETCH', '< SEARCH_PREFETCH')), assert.AssertionError));
 });
 it('продолжение исключает уже известные id, сохраняет порядок и не меняет предыдущий снимок', () => {
   // Ловит повтор строки при пересечении страниц поиска.
@@ -81,5 +84,5 @@ it('календарь включает сегодня, запрещает за�
     assert.equal(api.canGoNextMonth({ y: 2026, m: 10 }, now), false);
     assert.equal(api.canGoNextMonth({ y: 2026, m: 9 }, now), true);
   }; check(rules);
-  assert.throws(() => check(mutant('date.getTime() > today', 'date.getTime() >= today')), assert.AssertionError);
+  counterfact(() => assert.throws(() => check(mutant('date.getTime() > today', 'date.getTime() >= today')), assert.AssertionError));
 });

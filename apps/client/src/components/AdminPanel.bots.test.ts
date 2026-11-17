@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { BOT_PER_USER_LIMIT_MAX, type BotSettings } from '@gusvoice/shared';
 import * as adminNav from '../adminNav';
@@ -16,15 +17,15 @@ async function fixture(check: (f: Scene) => Promise<void>, options: Options = {}
     const store = { adminInstanceId: null };
     const useStore = (select: (s: typeof store) => unknown) => select(store);
     const deps = uiDependencies(useStore);
-    const phone = load<typeof import('../phoneLayout')>(readClient('../phoneLayout.ts'), { './hotkeys': { isMobile: () => false, isTauri: () => false } });
-    const shell = load<typeof import('./SettingsShell')>(sourceOf('SettingsShell'), { './Icon': deps['./Icon'], '../phoneLayout': phone });
+    const phone = load<typeof import('../phoneLayout')>(new URL('../phoneLayout.ts', import.meta.url), readClient('../phoneLayout.ts'), { './hotkeys': { isMobile: () => false, isTauri: () => false } });
+    const shell = load<typeof import('./SettingsShell')>(new URL('./SettingsShell.tsx', import.meta.url), sourceOf('SettingsShell'), { './Icon': deps['./Icon'], '../phoneLayout': phone });
     const unused = () => assert.fail('вкладка вне тестируемого раздела ботов');
     const api = { adminUsers: async () => [], adminServers: async () => [], federationDirectory: async () => ({ enabled: false, peers: [] }),
       adminBotSettings: async () => ({ ...settings }),
       adminBots: async () => Array.from({ length: options.bots ?? 1 }, (_, i) => ({ ...bot, id: `test-bot-${i}`, owner: { id: 'owner', username: 'test_user', displayName: null } })),
       adminSetBotSettings: async (patch: Partial<BotSettings>) => { patches.push({ ...patch }); settings = { ...settings, ...patch }; return { ...settings }; },
     };
-    const { AdminPanel } = load<typeof import('./AdminPanel')>(source, { ...deps, '../adminApi': { adminApi: () => api },
+    const { AdminPanel } = load<typeof import('./AdminPanel')>(new URL('./AdminPanel.tsx', import.meta.url), source, { ...deps, '../adminApi': { adminApi: () => api },
       '../config': { instances: () => [] }, '../adminNav': adminNav, '../guestAtMark': guestAt,
       '../toast': { toast: () => {}, toastError: () => assert.fail('неожиданная ошибка админки') },
       '../confirm': { confirmAction: async (request: Record<string, unknown>) => { confirmations.push(request); return await (options.confirm ?? true); } },
@@ -109,21 +110,27 @@ it('R297 включение внутренних адресов требует d
 });
 it('R297 контрфакт: выключение ботов без подтверждения', async () => {
   await confirmProbe();
+  await counterfact(async () => {
   await assert.rejects(() => confirmProbe(mutate(raw, 'if (!on && bots && bots.length > 0) {', 'if (false) {')),
     assertion('R297-admin-confirm', 0, 1));
+  });
 });
 it('R297 контрфакт: верхняя граница лимита потеряна', async () => {
   const probe = async (source = raw) => fixture(async f => { await input(f.limit(), String(BOT_PER_USER_LIMIT_MAX + 1));
     assert.equal(f.save().disabled, true, 'R297-admin-limit-invalid'); }, {}, source);
   await probe();
+  await counterfact(async () => {
   await assert.rejects(() => probe(mutate(raw, 'limitNum <= BOT_PER_USER_LIMIT_MAX', 'true')),
     assertion('R297-admin-limit-invalid', false, true));
+  });
 });
 it('R297 контрфакт: выключенный сервер оставляет доступной политику создателей', async () => {
   await offProbe();
+  await counterfact(async () => {
   await assert.rejects(() => offProbe(mutate(raw, 'disabled={busy || !on}\n                  onChange={() => void save({ creators: c.value })}',
     'disabled={busy}\n                  onChange={() => void save({ creators: c.value })}')),
   assertion('R297-admin-off-controls', false, true));
+  });
 });
 it('R300 отмена разрешения внутренних адресов не меняет настройку до или после ответа', async () => {
   let finish!: (answer: boolean) => void;
@@ -141,8 +148,10 @@ it('R300 отмена разрешения внутренних адресов �
 });
 it('R300 контрфакт: выключение ботов показывает корзину вместо предупреждения', async () => {
   await confirmProbe();
+  await counterfact(async () => {
   await assert.rejects(() => confirmProbe(mutate(raw, "icon: 'alert-circle',", "icon: 'trash',")),
     assertion('R300-admin-disable-icon', 'trash', 'alert-circle'));
+  });
 });
 it('R300 контрфакт: разрешение внутренних адресов потеряло щит безопасности', async () => {
   const probe = (source = raw) => fixture(async f => {
@@ -150,6 +159,8 @@ it('R300 контрфакт: разрешение внутренних адре�
     assert.equal(f.confirmations[0].icon, 'shield', 'R300-admin-internal-icon');
   }, {}, source);
   await probe();
+  await counterfact(async () => {
   await assert.rejects(() => probe(mutate(raw, "icon: 'shield',", "icon: 'trash',")),
     assertion('R300-admin-internal-icon', 'trash', 'shield'));
+  });
 });

@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -25,7 +26,10 @@ function check(raw = source) {
 }
 it('R169 телефонное приложение и узкий браузер получают телефонный вид, узкий Tauri и широкий браузер — нет', () => check());
 it('R169 удаление исключения Tauri обнаруживается на узком настольном окне', () => {
-  check(); const anchor = '!isTauri() && phoneNow()';
-  assert.equal(source.split(anchor).length - 1, 1);
-  assert.throws(() => check(source.replace(anchor, 'phoneNow()')), assert.AssertionError);
+  check();
+  counterfact(() => {
+    const anchor = '!isTauri() && phoneNow()';
+    assert.equal(source.split(anchor).length - 1, 1);
+    assert.throws(() => check(source.replace(anchor, 'phoneNow()')), assert.AssertionError);
+  });
 });

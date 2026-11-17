@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -84,9 +85,12 @@ it('R174 строка списка открывает сервер, контек
 });
 it('R174 контрфакт листа создания без права отвергается настоящим FAB', async () => {
   // Мутант меняет весь компонент, исходное поведение проверяется первым.
-  await scene(false, noCreate); const anchor = 'canCreate ? setSheet(true) : setShowJoin(true)'; assert.equal(source.split(anchor).length - 1, 1);
-  await assert.rejects(scene(false, noCreate, source.replace(anchor, 'true ? setSheet(true) : setShowJoin(true)')),
-    e => e instanceof assert.AssertionError && e.message.includes('без права нет листа'));
+  await scene(false, noCreate);
+  await counterfact(async () => {
+    const anchor = 'canCreate ? setSheet(true) : setShowJoin(true)'; assert.equal(source.split(anchor).length - 1, 1);
+    await assert.rejects(scene(false, noCreate, source.replace(anchor, 'true ? setSheet(true) : setShowJoin(true)')),
+      e => e instanceof assert.AssertionError && e.message.includes('без права нет листа'));
+  });
 });
 
 const rail = readFileSync(new URL('./RailGroups.tsx', import.meta.url), 'utf8');
@@ -110,8 +114,10 @@ it('R174 контрфакты badge непрочитанного вместо о
   // Уникальный якорь не должен незаметно мутировать компьютерную ветку рейла.
   for (const [anchor, replacement] of [["? s.mentions\n                    : s.unread", "? s.unread\n                    : s.unread"], ["solo ? ' srv-solo' : ''", "solo ? '' : ''"]]) {
     const normalized = rail.replace(/\r\n/g, '\n');
-    railContract(normalized); assert.equal(normalized.split(anchor).length - 1, 1);
-    assert.throws(() => railContract(normalized.replace(anchor, replacement)), assert.AssertionError);
+    railContract(normalized); counterfact(() => {
+      assert.equal(normalized.split(anchor).length - 1, 1);
+      assert.throws(() => railContract(normalized.replace(anchor, replacement)), assert.AssertionError);
+    });
   }
 });
 it('R174 общее меню сервера содержит Открыть, переключение пушей и выход только не владельцу', () => {

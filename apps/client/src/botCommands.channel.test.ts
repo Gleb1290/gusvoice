@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -93,6 +94,7 @@ it('R303 контрфакт кэша канала без TTL пойман на �
     assert.equal(f.calls.length, 2, 'R303 канал обновляется на минутной границе');
   }
   await probe(source);
+  await counterfact(async () => {
   const anchor = '(!force && hit && Date.now() - hit.at < BOT_COMMANDS_TTL_MS)';
   assert.equal(source.split(anchor).length - 1, 2);
   // Мутируем только второе (канальное) условие, DM-кэш остаётся исходным.
@@ -100,4 +102,5 @@ it('R303 контрфакт кэша канала без TTL пойман на �
   const mutant = source.slice(0, index) + '(!force && hit)' + source.slice(index + anchor.length);
   await assert.rejects(() => probe(mutant), (e: unknown) => e instanceof assert.AssertionError &&
     e.operator === 'strictEqual' && e.message.split('\n')[0] === 'R303 канал обновляется на минутной границе' && e.actual === 1 && e.expected === 2);
+  });
 });

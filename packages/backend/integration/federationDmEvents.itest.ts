@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -155,18 +156,24 @@ test('R187 перепривязка активной связки очищает
 });
 test('R187 мутант без hasEarlierQueued обнаруживается отсутствием немедленного обгона', async () => {
   // Класс ошибки: удалён рубеж перед немедленной отправкой.
-  await queued(); await assert.rejects(queued(replace(streamSource, "if (await hasEarlierQueued(instanceId, event.seq)) return 'queued';", '')),
-    e => e instanceof assert.AssertionError && e.message.includes('ранняя очередь не обгоняется'));
+  await queued(); await counterfact(async () => {
+    await assert.rejects(queued(replace(streamSource, "if (await hasEarlierQueued(instanceId, event.seq)) return 'queued';", '')),
+      e => e instanceof assert.AssertionError && e.message.includes('ранняя очередь не обгоняется'));
+  });
 });
 test('R187 мутант готовой выборки nextAttemptAt обнаруживается хвостом будущей головы', async () => {
   // Класс ошибки: SQL-фильтр скрывает голову очереди от проверки порядка.
-  await pending(); const raw = replace(outboxSource, '.where(eq(federationOutbox.instanceId, link.instanceId))',
-    '.where(and(eq(federationOutbox.instanceId, link.instanceId), lte(federationOutbox.nextAttemptAt, new Date(now))))');
-  const mutated = replace(raw, "import { asc, eq, inArray } from 'drizzle-orm';", "import { and, asc, eq, inArray, lte } from 'drizzle-orm';");
-  await assert.rejects(pending(mutated), e => e instanceof assert.AssertionError && e.message.includes('хвост ждёт будущую голову'));
+  await pending(); await counterfact(async () => {
+    const raw = replace(outboxSource, '.where(eq(federationOutbox.instanceId, link.instanceId))',
+      '.where(and(eq(federationOutbox.instanceId, link.instanceId), lte(federationOutbox.nextAttemptAt, new Date(now))))');
+    const mutated = replace(raw, "import { asc, eq, inArray } from 'drizzle-orm';", "import { and, asc, eq, inArray, lte } from 'drizzle-orm';");
+    await assert.rejects(pending(mutated), e => e instanceof assert.AssertionError && e.message.includes('хвост ждёт будущую голову'));
+  });
 });
 test('R187 мутант позднего lastSeq обнаруживается сохранённым SQL курсором', async () => {
   // Класс ошибки: late событие откатывает последний принятый номер.
-  await missing(); await assert.rejects(missing(replace(streamSource, 'if (!verdict.late) lastSeq = event.seq;', 'lastSeq = event.seq;')),
-    e => e instanceof assert.AssertionError && e.message.includes('late не сдвигает lastSeq'));
+  await missing(); await counterfact(async () => {
+    await assert.rejects(missing(replace(streamSource, 'if (!verdict.late) lastSeq = event.seq;', 'lastSeq = event.seq;')),
+      e => e instanceof assert.AssertionError && e.message.includes('late не сдвигает lastSeq'));
+  });
 });

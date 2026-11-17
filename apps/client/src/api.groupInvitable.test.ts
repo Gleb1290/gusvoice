@@ -1,24 +1,25 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { testVmImports } from './testVmImports.js';
 
+const apiSourceUrl = new URL('./api.ts', import.meta.url);
 type ApiModule = typeof import('./api');
 type GroupError = Error & { status?: number; reason?: string; userIds?: string[] };
-const source = readFileSync(new URL('./api.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const source = readFileSync(apiSourceUrl, 'utf8').replace(/\r\n/g, '\n');
 const refused = ['shadow-a', 'shadow-b'];
 
 function fixture(body: unknown, status = 403, raw = source) {
   const requests: { url: string; init: RequestInit }[] = [];
   const unused = () => assert.fail('неописанная IO-граница API приглашения');
   const dependencies: Record<string, unknown> = {
-    './bgGateways': { mirrorToBg: unused },
     './config': {
       config: { apiUrl: 'https://api.example.test' }, activeInstance: () => null, activeInstanceId: () => null,
       instances: () => [], updateActiveInstance: unused, updateInstance: unused,
     },
-    './imageSize': { measureMediaFile: unused },
   };
   const module = { exports: {} };
   // Исполняется весь api.ts и настоящий activeTransport; подменён только ответ fetch и реестр входов.
@@ -31,10 +32,7 @@ function fixture(body: unknown, status = 403, raw = source) {
       requests.push({ url, init });
       return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     },
-    require: (id: string) => {
-      assert.ok(Object.hasOwn(dependencies, id), `явный импорт api.ts: ${id}`);
-      return dependencies[id];
-    },
+    require: testVmImports(apiSourceUrl, dependencies),
   });
   return { api: (module.exports as ApiModule).api, requests };
 }
@@ -99,9 +97,11 @@ for (const [name, replacement] of [
   ['отключена фильтрация нестрочных id', 'if (Array.isArray(userIds)) (err as Error & { userIds?: string[] }).userIds = userIds as string[];'],
 ] as const) it(`R206 API контрфакт: ${name}`, async () => {
   await filtered();
+  await counterfact(async () => {
   const anchor = "if (Array.isArray(userIds)) (err as Error & { userIds?: string[] }).userIds = userIds.filter((x): x is string => typeof x === 'string');";
   assert.equal(source.split(anchor).length - 1, 1, 'единственный якорь присваивания userIds');
   await assert.rejects(filtered(source.replace(anchor, replacement)),
     (error: unknown) => error instanceof assert.AssertionError && error.message.startsWith('ошибка сохраняет только строковые userIds')
       && error.expected === refused);
+  });
 });

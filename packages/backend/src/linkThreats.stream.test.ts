@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -115,18 +116,24 @@ it('R149 ответ с body null не стирает прежний список
 });
 it('R149 контрфакт проверки после цикла дочитывает лишние куски', async () => {
   await overLimit();
+await gatedCounterfact(async () => {
   const block = "    if (total > MAX_BYTES) {\n      await reader.cancel().catch(() => {});\n      throw new Error(`слишком большой ответ: больше ${MAX_BYTES} байт`);\n    }\n";
   let mutant = replaceOnce(original.replace(/\r\n/g, '\n'), block, '');
   mutant = replaceOnce(mutant, "  return Buffer.concat(chunks, total).toString('utf8');", `${block}  return Buffer.concat(chunks, total).toString('utf8');`);
   await assert.rejects(overLimit(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('следующий кусок'));
 });
+});
 it('R149 контрфакт >= отбрасывает список ровно на разрешённом пределе', async () => {
   await atLimit();
+await gatedCounterfact(async () => {
   const mutant = replaceOnce(original, 'if (total > MAX_BYTES)', 'if (total >= MAX_BYTES)');
   await assert.rejects(atLimit(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('ровно предел'));
 });
+});
 it('R149 контрфакт без cancel оставляет поток неотменённым после отказа', async () => {
   await overLimit();
+await gatedCounterfact(async () => {
   const mutant = replaceOnce(original, 'await reader.cancel().catch(() => {});', '/* mutant: cancel потерян */');
   await assert.rejects(overLimit(mutant), (error: unknown) => error instanceof assert.AssertionError && error.message.includes('поток отменён'));
+});
 });

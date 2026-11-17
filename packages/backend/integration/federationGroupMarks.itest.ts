@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -380,51 +381,67 @@ test('R208 dmgroupmarks1 объявляется только при включё
 
 test('R208 контрфакт: снят exceptHome — ловим реальное эхо реакции дому C', async () => {
   await reactionRelay();
-  const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'i.exceptHome !== home', 'true', 'D');
-  await assert.rejects(() => reactionRelay(mutation), targeted('хост не возвращает реакцию дому её автора', ['react:m1'], []));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'i.exceptHome !== home', 'true', 'D');
+    await assert.rejects(() => reactionRelay(mutation), targeted('хост не возвращает реакцию дому её автора', ['react:m1'], []));
+  });
 });
 test('R208 контрфакт: приём от хоста перестал включать третьи дома — реакция C не доходит до E', async () => {
   await reactionRelay();
-  const mutation = mutationIn('federation/convAccept', 'applyReactions', 'const fromHost = c.group?.host === false;', 'const fromHost = false;', 'E');
-  await assert.rejects(() => reactionRelay(mutation), targeted('реакция C проходит через хоста D в дом E', [], ['e:c1:👍']));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convAccept', 'applyReactions', 'const fromHost = c.group?.host === false;', 'const fromHost = false;', 'E');
+    await assert.rejects(() => reactionRelay(mutation), targeted('реакция C проходит через хоста D в дом E', [], ['e:c1:👍']));
+  });
 });
 test('R208 контрфакт: бывший участник стал допустимым hostedRefs — ловим его реакцию', async () => {
   await hostedReferences();
-  const mutation = mutationIn('federation/convAccept', 'hostedRefs', ' && c.memberIds.includes(who.id)', '', 'C');
-  await assert.rejects(() => hostedReferences(mutation), targeted('хост меняет только действующих чужих, не своих и не бывших',
-    ['c1:❤', 'c:d1:🔥', 'c:e1:👍', 'c:former-e:👻'], ['c1:❤', 'c:d1:🔥', 'c:e1:👍']));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convAccept', 'hostedRefs', ' && c.memberIds.includes(who.id)', '', 'C');
+    await assert.rejects(() => hostedReferences(mutation), targeted('хост меняет только действующих чужих, не своих и не бывших',
+      ['c1:❤', 'c:d1:🔥', 'c:e1:👍', 'c:former-e:👻'], ['c1:❤', 'c:d1:🔥', 'c:e1:👍']));
+  });
 });
 test('R208 контрфакт: снятие только self-стража эквивалентно — home !== null всё ещё защищает свои реакции', async () => {
   await hostedReferences();
-  // byRef(self) возвращает только home=null, поэтому следующий who.home!==null делает self-страж избыточным.
-  // Это честная проверка выжившего мутанта, не ложный kill по другой ошибке загрузчика или realm.
-  const mutation = mutationIn('federation/convAccept', 'hostedRefs', ' || ref.instanceId === self', '', 'C');
-  await hostedReferences(mutation);
+  await counterfact(async () => {
+    // byRef(self) возвращает только home=null, поэтому следующий who.home!==null делает self-страж избыточным.
+    // Это честная проверка выжившего мутанта, не ложный kill по другой ошибке загрузчика или realm.
+    const mutation = mutationIn('federation/convAccept', 'hostedRefs', ' || ref.instanceId === self', '', 'C');
+    await hostedReferences(mutation);
+  });
 });
 test('R208 контрфакт: хост перестал выбирать сообщения автора-адресата в read — ловим m4 вместо v1', async () => {
   await readsRelay();
-  const mutation = mutationIn('federation/convChanges', 'groupMarkEntities', 'sql`a.home_instance_id = ${peer}`', 'sql`TRUE`', 'D');
-  await assert.rejects(() => readsRelay(mutation), targeted('хост отдаёт C последнее прочитанное сообщение именно автора C',
-    [`${homes.E}:e1:m4`], [`${homes.E}:e1:v1`]));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convChanges', 'groupMarkEntities', 'sql`a.home_instance_id = ${peer}`', 'sql`TRUE`', 'D');
+    await assert.rejects(() => readsRelay(mutation), targeted('хост отдаёт C последнее прочитанное сообщение именно автора C',
+      [`${homes.E}:e1:m4`], [`${homes.E}:e1:v1`]));
+  });
 });
 test('R208 контрфакт: участник отдаёт своё прочитанное сообщение — ловим m5 вместо чужого m4', async () => {
   await readsRelay();
-  const mutation = mutationIn('federation/convChanges', 'groupMarkEntities', 'sql`a.home_instance_id IS NOT NULL`', 'sql`TRUE`', 'E');
-  await assert.rejects(() => readsRelay(mutation), targeted('дом E отдаёт последнее прочитанное сообщение любого чужого автора',
-    [`${homes.E}:e1:m5`], [`${homes.E}:e1:m4`]));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convChanges', 'groupMarkEntities', 'sql`a.home_instance_id IS NOT NULL`', 'sql`TRUE`', 'E');
+    await assert.rejects(() => readsRelay(mutation), targeted('дом E отдаёт последнее прочитанное сообщение любого чужого автора',
+      [`${homes.E}:e1:m5`], [`${homes.E}:e1:m4`]));
+  });
 });
 test('R208 контрфакт: applyReads не пишет fedRecordRelay — у C нет пересланного прочитано E', async () => {
   await readsRelay();
-  const mutation = mutationIn('federation/convAccept', 'applyReads',
-    'if (c.group?.host) await fedRecordRelay(tx, [{ conversationId, kind: FED_CONV_CHANGE.read, entityId: null, exceptHome: peer }]);', '', 'D');
-  await assert.rejects(() => readsRelay(mutation), targeted('хост пересылает прочитано E дому C', [], ['read:']));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convAccept', 'applyReads',
+      'if (c.group?.host) await fedRecordRelay(tx, [{ conversationId, kind: FED_CONV_CHANGE.read, entityId: null, exceptHome: peer }]);', '', 'D');
+    await assert.rejects(() => readsRelay(mutation), targeted('хост пересылает прочитано E дому C', [], ['read:']));
+  });
 });
 test('R208 контрфакт: pinner потерян — закреп E у C ложно подписан хостом D', async () => {
   await pinRelay();
-  const mutation = mutationIn('federation/convAccept', 'applyPin',
-    'const pinner = c.group?.host === false && w.by ? (hostedRefs(c, [w.by], peer, self)[0] ?? null) : null;', 'const pinner = null;', 'C');
-  await assert.rejects(() => pinRelay(mutation), targeted('закреп E у C для всех и подписан тенью E, не хоста',
-    ['c1:c:d1:true', 'c:d1:c:d1:true', 'c:e1:c:d1:true'], ['c1:c:e1:true', 'c:d1:c:e1:true', 'c:e1:c:e1:true']));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convAccept', 'applyPin',
+      'const pinner = c.group?.host === false && w.by ? (hostedRefs(c, [w.by], peer, self)[0] ?? null) : null;', 'const pinner = null;', 'C');
+    await assert.rejects(() => pinRelay(mutation), targeted('закреп E у C для всех и подписан тенью E, не хоста',
+      ['c1:c:d1:true', 'c:d1:c:d1:true', 'c:e1:c:d1:true'], ['c1:c:e1:true', 'c:d1:c:e1:true', 'c:e1:c:e1:true']));
+  });
 });
 async function listenRouting(mutation?: Mutation) {
   const { D } = await fixture(mutation);
@@ -436,29 +453,39 @@ async function listenRouting(mutation?: Mutation) {
 test('R208 запись прослушано на хосте адресуется только дому автора, не остальным участникам', async () => { await listenRouting(); });
 test('R208 контрфакт: listen рассылается всем домам вместо дома автора — ловим эхо слушателю E', async () => {
   await listenRouting();
-  const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'marks.listenHome.get(i.entityId) === home', 'true', 'D');
-  await assert.rejects(() => listenRouting(mutation), targeted('listen адресуется только дому автора C', ['listen:v1'], []));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'marks.listenHome.get(i.entityId) === home', 'true', 'D');
+    await assert.rejects(() => listenRouting(mutation), targeted('listen адресуется только дому автора C', ['listen:v1'], []));
+  });
 });
 test('R208 контрфакт: relayListens не вызван — хост теряет слушателя E на копии голосового C', async () => {
   await listenRelay();
-  const mutation = mutationIn('federation/convAccept', 'applyListens',
-    'if (m.attachments.some(isListenable)) await relayListens(tx, c, m, w.listeners, peer, conversationId);', '', 'D');
-  await assert.rejects(() => listenRelay(mutation), targeted('хост сохраняет слушателя E на копии голосового C', [], ['d:e1']));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convAccept', 'applyListens',
+      'if (m.attachments.some(isListenable)) await relayListens(tx, c, m, w.listeners, peer, conversationId);', '', 'D');
+    await assert.rejects(() => listenRelay(mutation), targeted('хост сохраняет слушателя E на копии голосового C', [], ['d:e1']));
+  });
 });
 test('R208 контрфакт: прослушано от хоста не включает третий дом — у автора C исчезает слушатель E', async () => {
   await listenRelay();
-  const mutation = mutationIn('federation/convAccept', 'applyListens', 'const fromHost = c.group?.host === false;', 'const fromHost = false;', 'C');
-  await assert.rejects(() => listenRelay(mutation), targeted('дом автора C получает тень слушателя E', [], ['c:e1']));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convAccept', 'applyListens', 'const fromHost = c.group?.host === false;', 'const fromHost = false;', 'C');
+    await assert.rejects(() => listenRelay(mutation), targeted('дом автора C получает тень слушателя E', [], ['c:e1']));
+  });
 });
 test('R208 контрфакт: хост игнорирует marks.homes — четыре отметки попадают старому дому E', async () => {
   await hostCapabilities();
-  const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'if (!marks.homes.has(home)) continue;', 'if (false) continue;', 'D');
-  await assert.rejects(() => hostCapabilities(mutation), targeted('хост не пишет четыре отметки старому дому без dmgroupmarks1',
-    ['react:m1', 'read:', 'pin:m1'], []));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'if (!marks.homes.has(home)) continue;', 'if (false) continue;', 'D');
+    await assert.rejects(() => hostCapabilities(mutation), targeted('хост не пишет четыре отметки старому дому без dmgroupmarks1',
+      ['react:m1', 'read:', 'pin:m1'], []));
+  });
 });
 test('R208 контрфакт: участник игнорирует marks.homes — четыре отметки отправляются старому хосту', async () => {
   await leafCapabilities();
-  const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'if (marks.homes.has(info.origin))', 'if (true)', 'E');
-  await assert.rejects(() => leafCapabilities(mutation), targeted('участник не пишет четыре отметки хосту без dmgroupmarks1',
-    ['react:m1', 'read:', 'pin:m1', 'listen:v1'], []));
+  await counterfact(async () => {
+    const mutation = mutationIn('federation/convChanges', 'recordFedConvChanges', 'if (marks.homes.has(info.origin))', 'if (true)', 'E');
+    await assert.rejects(() => leafCapabilities(mutation), targeted('участник не пишет четыре отметки хосту без dmgroupmarks1',
+      ['react:m1', 'read:', 'pin:m1', 'listen:v1'], []));
+  });
 });

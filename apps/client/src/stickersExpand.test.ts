@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -15,9 +16,11 @@ function compiled(text: string): Rules {
   return module.exports as Rules;
 }
 function mutant(from: string, to: string, check: (r: Rules) => void) {
-  assert.equal(source.split(from).length - 1, 1, 'мутация попадает ровно в одно место');
   check(rules);
-  assert.throws(() => check(compiled(source.replace(from, to))), assert.AssertionError);
+  counterfact(() => {
+    assert.equal(source.split(from).length - 1, 1, 'мутация попадает ровно в одно место');
+    assert.throws(() => check(compiled(source.replace(from, to))), assert.AssertionError);
+  });
 }
 
 it('свёрнутая панель: бросок вверх от −200 раскрывает даже при малой доле, −199 ещё не бросок', () => {
@@ -70,9 +73,12 @@ it('числа TG: начало 8, бросок 200, доезд 300 и зазо�
   assert.deepEqual([rules.EXPAND_SLOP, rules.EXPAND_FLING, rules.EXPAND_MS, rules.EXPAND_GAP], [8, 200, 300, 6]);
 });
 it('контрфакт: поменять пороги раскрытия и сворачивания местами нельзя', () => {
-  const changed = source.replace('EXPAND_OPEN_AT = 0.4', 'EXPAND_OPEN_AT = 0.6').replace('EXPAND_CLOSE_AT = 0.6', 'EXPAND_CLOSE_AT = 0.4');
   const check = (r: Rules) => { assert.equal(r.expandAfterDrag(false, 0, 0.4), true); assert.equal(r.expandAfterDrag(true, 0, 0.6), false); };
-  check(rules); assert.throws(() => check(compiled(changed)), assert.AssertionError);
+  check(rules);
+  counterfact(() => {
+    const changed = source.replace('EXPAND_OPEN_AT = 0.4', 'EXPAND_OPEN_AT = 0.6').replace('EXPAND_CLOSE_AT = 0.6', 'EXPAND_CLOSE_AT = 0.4');
+    assert.throws(() => check(compiled(changed)), assert.AssertionError);
+  });
 });
 for (const [label, from, to, check] of [
   ['знак броска вверх', 'velocityY <= -EXPAND_FLING', 'velocityY >= EXPAND_FLING', (r: Rules) => assert.equal(r.expandAfterDrag(false, -200, 0.1), true)],

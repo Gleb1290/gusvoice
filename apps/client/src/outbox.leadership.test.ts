@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { load, mutate, sourceOf } from './R304.testHarness';
@@ -44,6 +45,8 @@ for (const mode of ['leader', 'follower', 'missing'] as const)
   it(`R304 очередь с диска: Web Locks ${mode}`, async () => { await hydration(source, mode); });
 it('R304 контрфакт: подъём outbox без лидерства обнаруживается на реальном convHydrate', async () => {
   await hydration(source, 'follower');
-  await assert.rejects(hydration(mutate(source, 'if (outboxLeader === true || !hasLocks()) restore();', 'if (true) restore();'), 'follower'),
-    e => e instanceof assert.AssertionError && e.message.includes('до решения Web Locks'));
+  await counterfact(async () => {
+    await assert.rejects(hydration(mutate(source, 'if (outboxLeader === true || !hasLocks()) restore();', 'if (true) restore();'), 'follower'),
+      e => e instanceof assert.AssertionError && e.message.includes('до решения Web Locks'));
+  });
 });

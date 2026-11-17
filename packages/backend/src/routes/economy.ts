@@ -1,10 +1,10 @@
 import { avatarRentalFullText, checkCoinIcon, has, Permission } from '@gusvoice/shared';
-import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
-import { applyCoins, claimGooseBonus, economyOf, economySeenBy, pushWallet, toEconomy, walletOf, type ServerEconomy } from '../coins.js';
+import { applyCoins, claimGooseBonus, economyOf, economySeenBy, gamesOpenOnInstance, pushWallet, toEconomy, walletOf, type ServerEconomy } from '../coins.js';
 import { economyDefaults } from '../economyDefaults.js';
 import {
   GOOSE_CLAIM_TEXT,
@@ -19,6 +19,7 @@ import {
   beforeCutoff,
   dayStart,
   economyTotals,
+  MILLI,
   raiseCompensation,
   shouldCompensate,
   shouldSpendToggle,
@@ -36,12 +37,15 @@ import { db } from '../db/index.js';
 import {
   coinBalances,
   coinLedger,
+  coinRecounts,
   serverEconomy,
   serverMembers,
   serverShop,
   users,
   voiceActivity,
 } from '../db/schema.js';
+import { announceCancelledDuels, announceCancelledPredictions, cancelLiveRounds, gamesLaunchViewOf, gamesViewOf, withGameMoney } from '../gameMoney.js';
+import { GAMES_LAUNCH_REFUSAL_TEXT, gamesLockedFor, planLossLimit, refuseGamesToggle } from '../gameMoneyRules.js';
 import { getMemberContext } from '../permissions.js';
 import { SAMPLE_PERIOD_MS } from '../voiceActivityRules.js';
 import { levelOf, levelStages } from '../levelRules.js';
@@ -75,6 +79,9 @@ const settingsSchema = z.object({
   alonePercent: z.number().int().min(0).max(100).optional(),
   companyPercent: z.number().int().min(100).max(500).optional(),
   dailyCap: z.number().int().min(0).max(1_000_000).optional(),
+  // Порог монет одному за сутки (28.10); 0 — без порога, как у `dailyCap`. Поле новое и необязательное:
+  // старая панель его не шлёт, и это не ошибка.
+  aloneCap: z.number().int().min(0).max(1_000_000).optional(),
   decayAfterMinutes: z.number().int().min(0).max(1440).optional(),
   decayPercent: z.number().int().min(0).max(100).optional(),
   mutedPercent: z.number().int().min(0).max(100).optional(),
@@ -98,6 +105,14 @@ const settingsSchema = z.object({
   // видит другого при частичном PATCH, а обрезка живёт в `gooseBonusFor` — там, где считается плата.
   gooseDeafenedBonus: z.number().int().min(0).max(1000).optional(),
   streakBonus: z.number().int().min(0).max(1000).optional(),
+  // Мини-игры (ГусКоины 2, миграция 0160). Поля новые и необязательные: старая панель их не шлёт.
+  // Потолок проигрыша 0 — без потолка; комиссия до половины банка.
+  gamesEnabled: z.boolean().optional(),
+  gamesBetMax: z.number().int().min(1).max(1_000_000).optional(),
+  gamesDailyLossMax: z.number().int().min(0).max(1_000_000).optional(),
+  gamesFeePercent: z.number().int().min(0).max(50).optional(),
+  // Этап 4 (миграция 0163): предел пары в играх с выбором за сутки МСК; 0 — без предела.
+  gamesPairDailyMax: z.number().int().min(0).max(1_000_000).optional(),
 });
 
 /** Сколько суток истории берём для пересчёта под ползунками. */
@@ -137,6 +152,21 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
        */
       awayPercent: economy?.awayPercent ?? null,
       iconUrl: economy?.iconUrl ?? null,
+      /**
+       * Мини-игры (ГусКоины 2, этап 1) — ВСЕМ, а не только управляющему: блок «Игры» в кошельке показывается, только
+       * если сервер их включил, а `settings` обычному человеку приходит `null`. ⚠️ Поля ДОБАВЛЕНЫ.
+       */
+      gamesEnabled: (economy?.enabled ?? false) && (economy?.gamesEnabled ?? false),
+      gamesBetMax: (economy ?? economyDefaults(serverId)).gamesBetMax,
+      gamesDailyLossMax: (economy ?? economyDefaults(serverId)).gamesDailyLossMax,
+      /**
+       * Замок игр до приёмки (решение 29.10, п. 9; `GAMES_OPEN`): `true` — ЭТОМУ человеку включать игры нельзя (флаг закрыт,
+       * он не супер-админ). Клиент прячет переключатель «Игры» и кнопку «Запустить игры». ⚠️ Поле ДОБАВЛЕНО: старый клиент
+       * переключатель видит — его держит отказ `PATCH` ниже.
+       */
+      gamesLocked: gamesLockedFor(gamesOpenOnInstance(), ctx.superAdmin === true),
+      /** Запуск игр (`gameLaunch.ts`): когда, сколько дарили и сколько досталось мне; `null` — не запускали. ⚠️ ДОБАВЛЕНО. */
+      gamesLaunch: await gamesLaunchViewOf(serverId, req.user!.sub),
       canManage: has(ctx.serverPermissions, Permission.MANAGE_ECONOMY),
       // Ползунки отдаём ТОЛЬКО тому, кто может их крутить: обычному человеку они ничего не
       // объясняют, а показывать чужую кухню без нужды незачем.
@@ -153,6 +183,17 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
         seasonEarned: wallet.seasonEarned,
         optedOut: wallet.optedOut,
         tipsOptOut: wallet.tipsOptOut,
+        /**
+         * Сколько монет набежало сегодня за ожидание одному — для строки «X из порога» (28.10).
+         * ⚠️ Поле ДОБАВЛЕНО: старый клиент его не знает и не читает. Целыми монетами вниз — порог
+         * считается в тысячных (`aloneEarnedMilli`), а человеку дроби ни к чему.
+         */
+        aloneEarnedToday: Math.floor(wallet.aloneEarnedMilli / MILLI),
+        /**
+         * Мини-игры (ГусКоины 2, этап 1): «не показывать мне игры», свой предел проигрыша, ждущее повышение, проиграно
+         * сегодня и действующий предел. ⚠️ Поле ДОБАВЛЕНО; отдаётся всегда — показывать ли блок, решает `gamesEnabled`.
+         */
+        games: await gamesViewOf(serverId, raw, economy?.gamesDailyLossMax ?? economyDefaults(serverId).gamesDailyLossMax, now),
       },
       season: { id: seasonId(now, length), name: seasonName(seasonId(now, length)) },
       // Уровень едет тем же ответом: он про этого же человека и нужен там же, где баланс.
@@ -183,6 +224,12 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
       // баланс: пункт «Сильно ткнуть» в меню обязан показывать её всегда, а не только когда хватает
       // монет — серый пункт без числа человек прочитает как «сломалось», а с ценой он учит экономике.
       shop: await shopFor(economy),
+      /**
+       * Непросмотренная карточка перерасчёта сезона (28.10, `aloneRecount.ts`): сколько доначислено.
+       * ⚠️ Поле ДОБАВЛЕНО и есть только при непросмотренной строке — старый клиент его не знает.
+       * Отметка просмотра — `PATCH .../economy/me { recountSeen: true }`.
+       */
+      ...(await recountCardOf(serverId, req.user!.sub)),
     });
   });
 
@@ -451,6 +498,20 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
     // 🔴 Чтение старой ставки и запись новой — ОДНОЙ транзакцией под блокировкой строки настроек
     // (#124, Д5). Раньше `before` читался снаружи: два PATCH-а, пришедшие одновременно, видели одну
     // и ту же старую ставку и компенсировали ОДНО повышение дважды.
+    // (Сначала — замок игр: отказ не должен брать блокировку строки.)
+    /* 🔴 Замок игр до приёмки (решение 29.10, п. 9): пока `GAMES_OPEN` выключен, ВКЛЮЧИТЬ игры может только супер-админ.
+       Отказ — только на включение (панель шлёт настройки целиком, `gamesEnabled: true` у уже включённых — не включение);
+       выключать можно. Читаем до транзакции: гонка двух правок не открывает замок — обе видят выключенные игры. */
+    if (patch.gamesEnabled === true) {
+      const current = await economyOf(serverId);
+      if (refuseGamesToggle({ want: patch.gamesEnabled, wasEnabled: !!current?.gamesEnabled, locked: gamesLockedFor(gamesOpenOnInstance(), ctx.superAdmin === true) })) {
+        return reply
+          .code(403)
+          // `error` — текст для человека: клиентский `parseResponse` показывает именно его (и старый клиент тоже), код — в `reason`.
+          .send({ error: GAMES_LAUNCH_REFUSAL_TEXT['games-locked'], reason: 'games-locked', message: GAMES_LAUNCH_REFUSAL_TEXT['games-locked'] });
+      }
+    }
+
     const { row, compensated, touched } = await db.transaction(async (tx) => {
       const [before] = await tx
         .select()
@@ -499,11 +560,36 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
     // Шина — за коммитом: числа уже в базе.
     for (const userId of touched) await pushWallet(serverId, userId);
 
+    /* 🔴 Игры выключены (или вся экономика) — живые раунды отменяются СРАЗУ, ставки возвращаются (этап 2, колесо).
+       Своей транзакцией ПОСЛЕ коммита настроек: та держала строку `server_economy`, а ставка колеса берёт раунд раньше
+       неё (`gameWheel.ts`, порядок замков) — в одной транзакции они встали бы крест-накрест. Ставка, проскочившая между
+       коммитами, уже видит игры выключенными. Такт колеса подберёт то же самое, если здесь упадёт. */
+    let cancelledRounds = 0;
+    if ((patch.gamesEnabled !== undefined || patch.enabled !== undefined) && (!row.enabled || !row.gamesEnabled)) {
+      const cancelled = await withGameMoney((m) => cancelLiveRounds(m, serverId, undefined, 'games-off'));
+      cancelledRounds = cancelled.length;
+      // Дуэли (этап 3): кошельки уже ушли из `withGameMoney`, здесь — `duel.state` с причиной `games-off`.
+      const duelIds = cancelled.filter((r) => r.kind === 'duel').map((r) => r.id);
+      if (duelIds.length > 0) await announceCancelledDuels(duelIds.map((id) => ({ id, serverId, refunded: [] })));
+      // Ставки на события (этап 5): `cancelLiveRounds` уже перевёл и сами события в `cancelled` — здесь `prediction.state`.
+      const eventIds = [...new Set(cancelled.flatMap((r) => (r.kind === 'prediction' && r.eventId ? [r.eventId] : [])))];
+      if (eventIds.length > 0) await announceCancelledPredictions(eventIds.map((id) => ({ id, serverId, refunded: [] })));
+      if (cancelled.some((r) => r.kind === 'wheel')) {
+        await publishToServer(serverId, {
+          t: 'wheel.state',
+          serverId,
+          round: null,
+          jackpot: Math.max(0, Math.floor(Number(row.wheelJackpotCents) / 100)),
+          serverNow: new Date().toISOString(),
+        });
+      }
+    }
+
     await writeAudit(serverId, req.user!.sub, 'economy.settings', {
       targetType: 'server',
       targetId: serverId,
       // Доначисление не должно происходить молча — оно и в ответе, и в журнале действий.
-      data: { ...patch, compensated, people: touched.length } as Record<string, unknown>,
+      data: { ...patch, compensated, people: touched.length, ...(cancelledRounds > 0 ? { cancelledRounds } : {}) } as Record<string, unknown>,
     });
     // Название и иконка валюты видны всем — пусть подхватят без перезахода.
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
@@ -706,24 +792,75 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
   /** Не участвовать в экономике (не копить, не попадать в таблицу лидеров). Свой выбор. */
   app.patch('/servers/:id/economy/me', async (req, reply) => {
     const { id: serverId } = z.object({ id: z.string() }).parse(req.params);
-    const { optedOut, tipsOptOut } = z
-      .object({ optedOut: z.boolean().optional(), tipsOptOut: z.boolean().optional() })
+    const { optedOut, tipsOptOut, recountSeen, gamesOptOut, gamesLossLimit } = z
+      .object({
+        optedOut: z.boolean().optional(),
+        tipsOptOut: z.boolean().optional(),
+        recountSeen: z.literal(true).optional(),
+        // Мини-игры (ГусКоины 2): отказ от игр и свой предел проигрыша за сутки (null — как на сервере).
+        gamesOptOut: z.boolean().optional(),
+        gamesLossLimit: z.number().int().min(0).max(1_000_000).nullable().optional(),
+      })
       .parse(req.body ?? {});
+    const gamesTouched = gamesOptOut !== undefined || gamesLossLimit !== undefined;
     const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
+    // Карточку перерасчёта показали (28.10) — отметка навсегда; повтор безвреден.
+    if (recountSeen) {
+      await db
+        .update(coinRecounts)
+        .set({ seenAt: new Date() })
+        .where(and(eq(coinRecounts.serverId, serverId), eq(coinRecounts.userId, req.user!.sub), isNull(coinRecounts.seenAt)));
+      if (optedOut === undefined && tipsOptOut === undefined && !gamesTouched) return reply.send({ recountSeen: true });
+    }
     // Меняем ТОЛЬКО присланное: два выключателя независимы, и правка одного не должна молча
     // переставлять другой (#122).
     const patch: { optedOut?: boolean; tipsOptOut?: boolean } = {};
     if (optedOut !== undefined) patch.optedOut = optedOut;
     if (tipsOptOut !== undefined) patch.tipsOptOut = tipsOptOut;
-    if (Object.keys(patch).length === 0) return reply.code(400).send({ error: 'nothing to change' });
+    if (Object.keys(patch).length === 0 && !gamesTouched) return reply.code(400).send({ error: 'nothing to change' });
 
-    const [row] = await db
-      .insert(coinBalances)
-      .values({ serverId, userId: req.user!.sub, ...patch })
-      .onConflictDoUpdate({ target: [coinBalances.serverId, coinBalances.userId], set: patch })
-      .returning({ optedOut: coinBalances.optedOut, tipsOptOut: coinBalances.tipsOptOut });
-    return reply.send(row);
+    const userId = req.user!.sub;
+    const now = new Date();
+    const serverMax = (await economyOf(serverId))?.gamesDailyLossMax ?? economyDefaults(serverId).gamesDailyLossMax;
+    const row = await db.transaction(async (tx) => {
+      await tx.insert(coinBalances).values({ serverId, userId }).onConflictDoNothing();
+      // 🔴 Предел читается и пишется ПОД блокировкой: две вкладки, одна понижает, другая повышает — без неё
+      // повышение могло бы лечь поверх понижения без отсрочки.
+      const [cur] = await tx
+        .select()
+        .from(coinBalances)
+        .where(and(eq(coinBalances.serverId, serverId), eq(coinBalances.userId, userId)))
+        .limit(1)
+        .for('update');
+      const set: Partial<typeof coinBalances.$inferInsert> = { ...patch };
+      if (gamesOptOut !== undefined) set.gamesOptOut = gamesOptOut;
+      if (gamesLossLimit !== undefined && cur) {
+        // Понижение — сразу, повышение — с начала следующих суток МСК (`planLossLimit`).
+        const plan = planLossLimit(
+          { lossLimit: cur.gamesLossLimit, raise: cur.gamesLossLimitRaise, raiseAt: cur.gamesLossLimitRaiseAt },
+          gamesLossLimit,
+          serverMax,
+          now,
+        );
+        set.gamesLossLimit = plan.lossLimit;
+        set.gamesLossLimitRaise = plan.raise;
+        set.gamesLossLimitRaiseAt = plan.raiseAt;
+      }
+      const [updated] = await tx
+        .update(coinBalances)
+        .set(set)
+        .where(and(eq(coinBalances.serverId, serverId), eq(coinBalances.userId, userId)))
+        .returning();
+      return updated;
+    });
+    if (!row) return reply.code(404).send({ error: 'no wallet' });
+    return reply.send({
+      optedOut: row.optedOut,
+      tipsOptOut: row.tipsOptOut,
+      // ⚠️ Поле ДОБАВЛЕНО (ГусКоины 2): обновлённый снимок игр; старый клиент его не читает.
+      games: await gamesViewOf(serverId, row, serverMax, now),
+    });
   });
 
   /**
@@ -969,6 +1106,20 @@ export async function economyRoutes(app: FastifyInstance): Promise<void> {
       .limit(limit ?? (period ? 5_000 : 20));
     return reply.send(rows);
   });
+}
+
+/**
+ * Непросмотренная карточка перерасчёта человека на сервере (`coin_recounts`, 28.10): `{ recount }` или
+ * пусто — разворачивается в снимок экономики. Строк бывает несколько видов — показываем самую свежую.
+ */
+async function recountCardOf(serverId: string, userId: string): Promise<{ recount?: { amount: number; seasonId: string } }> {
+  const [row] = await db
+    .select({ amount: coinRecounts.amount, seasonId: coinRecounts.seasonId })
+    .from(coinRecounts)
+    .where(and(eq(coinRecounts.serverId, serverId), eq(coinRecounts.userId, userId), isNull(coinRecounts.seenAt)))
+    .orderBy(desc(coinRecounts.createdAt))
+    .limit(1);
+  return row ? { recount: { amount: row.amount, seasonId: row.seasonId } } : {};
 }
 
 /**

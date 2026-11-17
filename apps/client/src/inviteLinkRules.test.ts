@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
 import { inviteCodeFromPath, inviteLink, isBrokenInvitePath, parseInviteParam, stripInviteParam } from './inviteLinkRules.js';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 describe('ссылки приглашения веб-клиента', () => {
   it('код длиной ровно 4 и 64 символа принимается, соседние границы отвергаются', () => {
@@ -48,6 +49,7 @@ describe('ссылки приглашения веб-клиента', () => {
     assert.equal(inviteCodeFromPath('/i/Ab%31%32'), 'Ab12', 'валидная percent-форма декодируется');
     for (const path of ['/i/Ab12', '/x/%', '/i', '/']) assert.equal(isBrokenInvitePath(path), false, `${path} не помечается битым приглашением`);
 
+    counterfact(() => {
     const pathSource = readFileSync(new URL('./inviteLinkRules.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     const changed = pathSource.replace('  } catch {\n    return null;\n  }', '  } catch {\n    throw new URIError("broken escape");\n  }');
     assert.notEqual(changed, pathSource, 'реальный модуль содержит обработку URIError');
@@ -57,5 +59,6 @@ describe('ссылки приглашения веб-клиента', () => {
     const mutant = mod.exports as typeof import('./inviteLinkRules.js');
     assert.throws(() => assert.doesNotThrow(() => mutant.inviteCodeFromPath('/i/%'), 'битый путь остаётся безопасным'), assert.AssertionError,
       'мутант без безопасного отказа обязан провалить контракт');
+    });
   });
 });

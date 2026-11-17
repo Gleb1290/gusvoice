@@ -153,8 +153,9 @@ export function ServerMembersPanel() {
 
   return (
     <div className="members-panel">
-      {/* Mobile (design-step8 F1): own-screen header with a back affordance + total count. */}
-      {mobile && (
+      {/* Mobile (design-step8 F1): own-screen header with a back affordance + total count. И во вкладке браузера телефона
+          (`phoneUi`, 29.10): там шапки не было, и панель участников закрыть было нечем — «назад» браузера уводила с сайта. */}
+      {phoneUi && (
         <div className="mp-mobile-head">
           <button type="button" className="mp-back" title="Назад" onClick={() => setMobileMembersOpen(false)}>
             <Icon name="chevron-left" size={22} />

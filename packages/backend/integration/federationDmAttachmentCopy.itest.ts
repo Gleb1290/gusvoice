@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -141,10 +142,12 @@ async function releaseOnFailure(mutation?: Mutation) {
 test('R195 finally малой копии возвращает резерв после сбоя, удаление release обнаруживается used_bytes', async () => {
   // Класс ошибки утечки квоты: транспорт/бакет могут упасть после резервирования, но до attached.
   await releaseOnFailure();
+  await counterfact(async () => {
   await assert.rejects(releaseOnFailure([
     "if (!kept) await releaseLinkQuota(origin, row.size).catch(() => {});\n  }\n}\n\n/** Файл ≤ 25 МБ",
     "// release удалён\n  }\n}\n\n/** Файл ≤ 25 МБ",
   ]), e => e instanceof assert.AssertionError && e.message.includes('ошибка записи возвращает'));
+  });
 });
 test('R195 надгробие между put и markCopied стирает объект и возвращает квоту, не выдаёт обновление готового файла', async () => {
   // Класс ошибки гонки: байты могут приехать после удаления сообщения, нельзя воскресить вложение.
@@ -165,8 +168,10 @@ async function chunkScenario(mutation?: Mutation) {
 test('R195 точный порог multipart режется сейчас, мутант > вместо >= сливает последний байт в первый кусок', async () => {
   // Класс ошибки границы буферизации: ровно полный кусок не должен ждать ещё одного входящего байта.
   await chunkScenario();
+  await counterfact(async () => {
   await assert.rejects(chunkScenario(['if (bufLen >= BIGFILE_PART_BYTES) await flush();', 'if (bufLen > BIGFILE_PART_BYTES) await flush();']),
     e => e instanceof assert.AssertionError && e.message.includes('ровно порог multipart'));
+  });
 });
 for (const incoming of [5 * 1024 * 1024 - 1, 5 * 1024 * 1024, 5 * 1024 * 1024 + 1]) test(`R195 входящий кусок ${incoming} байт сохраняет минимум S3 5 МиБ для всех не последних частей`, async () => {
   // Класс ошибки chunking: куски транспорта не равны частям S3, маленькие входящие надо накапливать.
@@ -193,10 +198,12 @@ async function bigRelease(mutation?: Mutation) {
 test('R195 finally multipart возвращает резерв, удаление release обнаруживается SQL-счётчиком', async () => {
   // Класс ошибки компенсации: отменённые части бакета не должны оставлять занятые байты связки.
   await bigRelease();
+  await counterfact(async () => {
   await assert.rejects(bigRelease([
     "if (!kept) await releaseLinkQuota(origin, row.size).catch(() => {});\n  }\n}\n\n/** Копии, которые ждут",
     "// release удалён\n  }\n}\n\n/** Копии, которые ждут",
   ]), e => e instanceof assert.AssertionError && e.message.includes('сбой multipart возвращает'));
+  });
 });
 for (const bad of ['range-status', 'range-value', 'length'] as const) test(`R195 выдача remote отклоняет ${bad}, уничтожает тело и сохраняет имя дома`, async () => {
   // Класс ошибки достоверности ответа: чужие заголовки не разрешают отдавать не тот диапазон или размер.
@@ -247,7 +254,9 @@ test('R199 длина Range ровно2 проходит,1 и3 отвергаю�
 test('R199 потеря сверки Content-Length диапазона обнаруживается на коротком206', async () => {
   // Исходный целый модуль первым; возвращаем именно прежний дефект, не поломку загрузчика.
   await rangeLengthScenario();
+  await counterfact(async () => {
   await assert.rejects(() => rangeLengthScenario([
     '(v.contentLength === null || v.contentLength === range.end - range.start + 1)', 'true',
   ]), e => e instanceof assert.AssertionError && e.message.includes('длина Range должна совпадать'));
+  });
 });

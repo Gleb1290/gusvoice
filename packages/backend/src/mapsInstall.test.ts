@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -218,12 +219,14 @@ function mutate(source: string, anchor: string, replacement: string): string {
 function counterfactual(anchor: string, replacement: string, body: string, options: Options,
   check: (o: Observation) => void, message: string, failure: { actual: unknown; expected: unknown }, source = library): void {
   check(run(body, { ...options, ...(options.update ? { updateSource: source } : { source }) }));
+counterfact(() => {
   const changed = mutate(source, anchor, replacement);
   const observation = run(body, { ...options, ...(options.update ? { updateSource: changed } : { source: changed }) });
   assert.throws(() => check(observation), (error: unknown) => error instanceof assert.AssertionError
     && error.code === 'ERR_ASSERTION' && error.operator === 'strictEqual' && error.message.startsWith(message)
     && Object.is(error.actual, failure.actual) && Object.is(error.expected, failure.expected),
   `контрфакт должен падать именно на ${message}`);
+});
 }
 const eq = (actual: unknown, expected: unknown, message: string) => assert.strictEqual(actual, expected, message);
 const meta = (o: Observation) => Object.fromEntries((o.files['maps/map.meta'] ?? '').trim().split('\n').filter(Boolean)

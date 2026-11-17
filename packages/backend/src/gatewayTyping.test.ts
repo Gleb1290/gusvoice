@@ -1,3 +1,4 @@
+import { counterfact, mutantTest } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -76,9 +77,6 @@ it('R197 удалённый набор уходит только без соке
 
 it('R197 удалённая пересылка до проверки сокетов поймана на парной местной доставке', async () => {
   const original = readFileSync(new URL('./gatewayTyping.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const from = "if (conns.length === 0 || deps.isRemote?.(route.peerId)) {\n      deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');";
-  assert.equal(original.split(from).length, 2, 'уникальный якорь remoteTyping');
-  const mutated = original.replace(from, "deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');\n    if (conns.length === 0) {");
   const load = (source: string) => {
     const module = { exports: {} as typeof import('./gatewayTyping.js') };
     const deps: Record<string, unknown> = {
@@ -91,7 +89,12 @@ it('R197 удалённая пересылка до проверки сокет�
     return module.exports.relayTyping;
   };
   await remoteTypingScenario(load(original));
-  await assert.rejects(remoteTypingScenario(load(mutated)), e => e instanceof assert.AssertionError && e.message.includes('живой местный сокет исключает'));
+  await counterfact(async () => {
+    const from = "if (conns.length === 0 || deps.isRemote?.(route.peerId)) {\n      deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');";
+    assert.equal(original.split(from).length, 2, 'уникальный якорь remoteTyping');
+    const mutated = original.replace(from, "deps.remoteTyping?.(route.dmId, uid, route.peerId, extra.action ?? 'typing');\n    if (conns.length === 0) {");
+    await assert.rejects(remoteTypingScenario(load(mutated)), e => e instanceof assert.AssertionError && e.message.includes('живой местный сокет исключает'));
+  });
 });
 
 async function guestTypingScenario(relay = relayTyping) {
@@ -110,7 +113,6 @@ it('R201 набор тени с гостевыми сокетами всё ра�
 });
 it('R201 мутант без isRemote ловится утечкой набора в гостевые сокеты', async () => {
   const original = readFileSync(new URL('./gatewayTyping.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const from = 'if (conns.length === 0 || deps.isRemote?.(route.peerId))'; assert.equal(original.split(from).length, 2);
   const load = (code: string) => {
     const module = { exports: {} as typeof import('./gatewayTyping.js') };
     const deps: Record<string, unknown> = { '@gusvoice/shared': { parseTypingAction, typingActionField, typingActionFor }, './blockRules.js': { reachesPeer }, './gatewayRules.js': { typingRoute } };
@@ -120,7 +122,10 @@ it('R201 мутант без isRemote ловится утечкой набора
     return module.exports.relayTyping;
   };
   await guestTypingScenario(load(original));
-  await assert.rejects(guestTypingScenario(load(original.replace(from, 'if (conns.length === 0)'))), e => e instanceof assert.AssertionError && e.message.includes('гостевые сокеты тени'));
+  await counterfact(async () => {
+    const from = 'if (conns.length === 0 || deps.isRemote?.(route.peerId))'; assert.equal(original.split(from).length, 2);
+    await assert.rejects(guestTypingScenario(load(original.replace(from, 'if (conns.length === 0)'))), e => e instanceof assert.AssertionError && e.message.includes('гостевые сокеты тени'));
+  });
 });
 
 it('кружок в ЛС и группе выбирает action отдельно для каждого устройства, канал не понижает вид', async () => {
@@ -153,11 +158,13 @@ it('кружок в ЛС и группе выбирает action отдельн�
   };
   await check(relayTyping);
   await check(load(source));
-  for (const replacement of ['undefined', "new Set(['typing2'])"]) {
-    const mutated = source.replaceAll('extraFor(c.caps)', `extraFor(${replacement})`);
-    assert.notEqual(mutated, source);
-    await assert.rejects(check(load(mutated)), assert.AssertionError);
-  }
+  await counterfact(async () => {
+    for (const replacement of ['undefined', "new Set(['typing2'])"]) {
+      const mutated = source.replaceAll('extraFor(c.caps)', `extraFor(${replacement})`);
+      assert.notEqual(mutated, source);
+      await assert.rejects(check(load(mutated)), assert.AssertionError);
+    }
+  });
 });
 
 it('группа доставляет выбор стикера всем устройствам участников в сети, кроме заблокировавших', async () => {
@@ -296,7 +303,7 @@ describe('доставка события «печатает»', () => {
     }
   });
 
-  it('реальный шлюзовый тест ловит передачу неизвестного, явного typing и потерю channel extra', async () => {
+  mutantTest('реальный шлюзовый тест ловит передачу неизвестного, явного typing и потерю channel extra', async () => {
     // Эти три мелкие регрессии либо ломают старые клиенты, либо теряют новые типы в одном из маршрутов.
     const source = readFileSync(fileURLToPath(new URL('./gatewayTyping.ts', import.meta.url)), 'utf8');
     const load = (code: string) => {

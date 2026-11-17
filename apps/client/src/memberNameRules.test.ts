@@ -4,6 +4,7 @@ import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { voiceNameSource } from './memberNameRules';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 
 const me = { id: 'self', displayName: 'Моё имя' };
 it('R159 пустой локальный участник голоса берёт мои id и имя', () => {
@@ -22,9 +23,11 @@ function checkNoImpersonation(fn = voiceNameSource) {
 it('R159 чужой пустой участник и отсутствие me не получают моё имя', () => checkNoImpersonation());
 it('R159 удаление isLocal обнаруживается как присвоение чужому моего имени', () => {
   checkNoImpersonation();
+  counterfact(() => {
   const source = readFileSync(new URL('./memberNameRules.ts', import.meta.url), 'utf8');
   assert.equal(source.split('p.isLocal && me').length - 1, 2, 'меняем обе связанные проверки id и имени');
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(source.replaceAll('p.isLocal && me', 'me'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module, exports: module.exports });
   assert.throws(() => checkNoImpersonation((module.exports as { voiceNameSource: typeof voiceNameSource }).voiceNameSource), assert.AssertionError);
+  });
 });

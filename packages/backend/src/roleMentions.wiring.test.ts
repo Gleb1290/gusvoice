@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -67,14 +68,21 @@ it('R266 POST сохраняет разрешённые id ролей и пер�
 // Класс ошибки: редактирование сообщения повторно будит людей или снимает уже сохранённое обращение.
 it('R266 PATCH меняет текст, но не пересчитывает mentionRoles и не отправляет повторный пуш', () => patch());
 it('R266 контрфакты потери записи POST и пересчёта PATCH ловятся маркерным AssertionError после original-first', () => {
+  post();
+  counterfact(() => {
   const anchor = 'mentionRoles: mentionRoleIds,';
-  assert.equal(messageSource.split(anchor).length - 1, 1); post();
+  assert.equal(messageSource.split(anchor).length - 1, 1);
   assert.throws(() => post(messageSource.replace(anchor, '')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R266 POST: разрешённые роли сохраняются'));
+  });
+  patch();
+  counterfact(() => {
   const update = 'db.update(messages).set({ content, editedAt: new Date(), keyboard: nextKeyboard })';
-  assert.equal(messageSource.split(update).length - 1, 1); patch();
+  assert.equal(messageSource.split(update).length - 1, 1);
   assert.throws(() => patch(messageSource.replace(update, 'db.update(messages).set({ content, mentionRoles: [], editedAt: new Date() })')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R266 PATCH: сохранённые упоминания не меняются'));
+
+  });
 });
 
 function serialization(raw = serializeSource) {
@@ -114,13 +122,15 @@ function dto(raw = serializeSource) {
 it('R266 настоящий serializeMessage выдаёт mentionRoles только для непустого сохранённого списка', () => dto());
 it('R266 мутанты лишнего пустого поля и потери непустого поля пойманы на настоящем DTO после original-first', () => {
   const anchor = '...(m.mentionRoles?.length ? { mentionRoles: m.mentionRoles } : {}),';
-  assert.equal(serializeSource.split(anchor).length - 1, 1);
   for (const [replacement, marker] of [
     ['mentionRoles: m.mentionRoles ?? [],', 'R266 DTO: пустое ролевое поле отсутствует'],
     ['', 'R266 DTO: непустые сохранённые id доходят без потери'],
   ]) {
     dto();
+    counterfact(() => {
+    assert.equal(serializeSource.split(anchor).length - 1, 1);
     assert.throws(() => dto(serializeSource.replace(anchor, replacement)),
       e => e instanceof assert.AssertionError && e.message.startsWith(marker));
+    });
   }
 });

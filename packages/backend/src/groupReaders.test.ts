@@ -1,3 +1,4 @@
+import { counterfact as gatedCounterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, it } from 'node:test';
@@ -92,20 +93,26 @@ it('R239 семь суток минус миллисекунда принима�
 it('R239 контрфакт строго большего ключа ловится ровно на отметке сообщения', () => {
   const check = (rule: Rules) => assert.equal(rule(input([reader('one')])).ids.join(','), 'one', 'R239-key: равный ключ прочитан');
   check(groupReaders); check(load<{ groupReaders: Rules }>(raw).groupReaders);
+gatedCounterfact(() => {
   assert.throws(() => check(mutant(['m.lastReadKey >= sortKey', 'm.lastReadKey > sortKey'])), killed('R239-key:', '', 'one'));
+});
 });
 it('R239 контрфакт без взаимного скрытия не раскрывает закрытое время читателя', () => {
   const check = (rule: Rules) => assert.equal(rule(input([reader('hidden', { privacy: 'nobody', hideReadTime: true })])).ids.join(','), '',
     'R239-hidden: скрытый читатель отсутствует');
   check(groupReaders); check(load<{ groupReaders: Rules }>(raw).groupReaders);
+gatedCounterfact(() => {
   assert.throws(() => check(mutant([' && !readTimeHidden(me, m, m.isPeer)', ''])), killed('R239-hidden:', 'hidden', ''));
+});
 });
 it('R239 контрфакты пропущенных фильтров автора, удаления и блокировки ловятся независимо', () => {
   for (const [fragment, member] of [['m.id !== me.id && ', reader(me.id)], ['!m.deleted && ', reader('deleted', { deleted: true })],
     ['!m.blocked && ', reader('blocked', { blocked: true })]] as const) {
     const check = (rule: Rules) => assert.equal(rule(input([member])).ids.join(','), '', 'R239-filter: непригодный читатель отсутствует');
     check(groupReaders); check(load<{ groupReaders: Rules }>(raw).groupReaders);
+gatedCounterfact(() => {
     assert.throws(() => check(mutant([fragment, ''])), killed('R239-filter:', member.id, ''));
+});
   }
 });
 it('R239 контрфакты отсечки на семь суток ловятся и на границе, и за ней', () => {
@@ -118,7 +125,9 @@ it('R239 контрфакты отсечки на семь суток ловят
   ] as const) {
     const check = (rule: Rules) => assert.equal(rule(input([reader('one')], me, age)).expired, true, 'R239-expired: старое сообщение закрыто');
     check(groupReaders); check(load<{ groupReaders: Rules }>(raw).groupReaders);
+gatedCounterfact(() => {
     assert.throws(() => check(mutant(mutation)), killed('R239-expired:', false, true));
+});
   }
 });
 
@@ -137,9 +146,11 @@ it('R239 сервер объявляет readers1 ровно один раз н�
 it('R239 потеря readers1 в объявленном списке ловится, даже если импорт константы остался', () => {
   const check = (source: string) => assert.equal(features(source).includes('readers1'), true, 'R239-capability: readers объявлен клиентам');
   check(featureRaw);
+gatedCounterfact(() => {
   const listStart = 'export const INSTANCE_FEATURES: readonly string[] = [';
   assert.equal(featureRaw.split(listStart).length - 1, 1, 'единственное объявление живого списка');
   const index = featureRaw.indexOf(listStart);
   const changedList = featureRaw.slice(0, index) + changed(featureRaw.slice(index), ['  FEATURE_READERS1,\n', '']);
   assert.throws(() => check(changedList), killed('R239-capability:', false, true));
+});
 });

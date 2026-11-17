@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -44,9 +45,11 @@ it('свайп срабатывает на 45 процентах и броске
   const check=(api:typeof rules)=>{assert.equal(api.swipeCommits(-45,0,100),true);assert.equal(api.swipeCommits(45,-5000,100),false);assert.equal(api.swipeCommits(-24,-3500,100),false);};
   check(rules);
   for(const [from,to] of [['-dx >= width * SWIPE_ROW_COMMIT','-dx > width * SWIPE_ROW_COMMIT'],['if (dx >= 0) return false;','if (dx <= 0) return false;'],['-dx > 24','-dx >= 24']] as const){
+    counterfact(() => {
     assert.ok(source.includes(from));const module={exports:{}};
     runInNewContext(ts.transpileModule(source.replace(from,to),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports});
     assert.throws(()=>check(module.exports as typeof rules),assert.AssertionError);
+    });
   }
   assert.equal(rules.swipeShift(-200,100),-100); assert.equal(rules.swipeShift(10,100),0);
   const off={pinned:false,unread:false,muted:false,archived:false}; const on={pinned:true,unread:true,muted:true,archived:true};

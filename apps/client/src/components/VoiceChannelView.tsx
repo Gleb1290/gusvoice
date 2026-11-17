@@ -37,12 +37,14 @@ import { canSnapshotStream, streamCardCycle } from '../streamCardRules';
 import { toast, toastError } from '../toast';
 import { TIP_HOLD_MS, tipInteraction, type TipInteraction } from '../tipMode';
 import { useAltHeld, useTip } from '../tipGesture';
-import { toggleSelfDeafen, toggleSelfMute } from '../voiceSelf';
+import { toggleSelfDeafen } from '../voiceSelf';
 import { Avatar } from './Avatar';
 import { CrownMark, crownGlow, useIsCrowned } from './Crown';
 import { useAnimatedAvatarUrl } from '../avatarAnimation';
 import { BottomSheet, SheetRow } from './BottomSheet';
 import { Goose } from './Goose';
+import { ActivitiesButton, DuelCard } from './Activities';
+import { usePttMicButton } from '../usePttMicButton';
 import { ChannelGlyph, Icon } from './Icon';
 import { useUserMenu, type UserMenuTarget } from './UserContextMenu';
 import { avatarFromMetadata, useLiveSpeaking, useParticipantFlags } from './VoiceParticipants';
@@ -83,6 +85,7 @@ import { useStageAutoShow } from '../useStageAutoShow';
 import { applyStageOrder, isDefaultStageOrder, personTileKey, streamTileKey, type StageOrderMode } from '../stageOrderRules';
 import { saveStageOrder, useStageOrder } from '../stageOrderPrefs';
 import { useStageDrag } from '../useStageDrag';
+import { holdViewerRotation } from '../viewerRotation';
 
 // `ownerOf` живёт в `streamAudioRules` — там же, где правило громкости стрима. Держать здесь вторую
 // копию значило бы дать им разъехаться, а именно расхождение двух мест и дало баг #71.
@@ -352,6 +355,9 @@ function ScreenViewer({
   onClose: () => void;
 }) {
   const { ref, pseudo, toggle } = useFocusFullscreen();
+  useEffect(() => {
+    if (pseudo && isMobile()) return holdViewerRotation();
+  }, [pseudo]);
   const nameOf = useNameResolver();
   // Стрим может ехать со спутника `<id>#screen` — ник ищем по ВЛАДЕЛЬЦУ (#73).
   const name = nameOf(ownerOf(track.participant.identity), track.participant.name || track.participant.identity);
@@ -849,11 +855,6 @@ function StageTile({
       )}
       {canTip && tipMode === 'hold' && holdHint && <span className="stage-tip-hold" aria-hidden="true">Удерживайте</span>}
       <div className="stage-meta">
-        {showDeafened(isBot, deafened) ? (
-          <Icon name="headphones-off" size={14} />
-        ) : showMicOff(isBot, micMuted, serverMuted) ? (
-          <Icon name="mic-off" size={14} />
-        ) : null}
         {screenSharing ? <Icon name="screen-share" size={14} /> : null}
         {!p.isLocal && locallyMuted ? (
           <span title="Заглушён только для вас">
@@ -871,6 +872,15 @@ function StageTile({
             БОТ
           </span>
         )}
+        {showDeafened(isBot, deafened) ? (
+          <span className="stage-status-off" role="img" aria-label="Не слышит канал" title="Не слышит канал">
+            <Icon name="headphones-off" size={15} />
+          </span>
+        ) : showMicOff(isBot, micMuted, serverMuted) ? (
+          <span className="stage-status-off" role="img" aria-label="Микрофон выключен" title="Микрофон выключен">
+            <Icon name="mic-off" size={15} />
+          </span>
+        ) : null}
       </div>
     </div>
   );
@@ -946,10 +956,13 @@ function VoiceStage() {
   const economy = useStore((s) => (serverId ? s.economy[serverId] : undefined));
   const tipHoldTimer = useRef<number | null>(null);
   const mobile = isMobile();
+  // Тип на телефоне — удержанием плитки, Alt нет: и в раскладке телефона по ширине (вкладка браузера телефона, 29.10).
+  const phoneWide = usePhoneLayout();
+  const tipPhone = mobile || phoneWide;
   // Alt и отправка — общие с сайдбаром (`tipGesture.ts`): жест живёт в двух местах сразу.
-  const altHeld = useAltHeld(economy?.enabled === true && !mobile);
+  const altHeld = useAltHeld(economy?.enabled === true && !tipPhone);
   const { tip: sendTip, busyId: tipBusyId } = useTip();
-  const activeTipMode = tipInteraction(economy?.enabled === true, altHeld, mobile);
+  const activeTipMode = tipInteraction(economy?.enabled === true, altHeld, tipPhone);
 
   // Экономика посерверная. Право типнуть остаётся за сервером: кулдаун и суточные пределы клиент
   // не угадывает, он решает только доступность самого жеста.
@@ -1440,6 +1453,7 @@ function VoiceStage() {
 // the bottom of the voice stage. On mobile the content pane has no self-bar (it lives in the channel
 // list), so this is where you mute / deafen / toggle camera / hang up while looking at the call.
 function MobileCallBar() {
+  const micButton = usePttMicButton();
   const { localParticipant, isCameraEnabled } = useLocalParticipant();
   const selfMuted = useStore((s) => s.selfMuted);
   const selfDeafened = useStore((s) => s.selfDeafened);
@@ -1517,8 +1531,7 @@ function MobileCallBar() {
       <button
         type="button"
         className={`call-btn ${selfMuted ? 'off' : ''}`}
-        title={selfMuted ? 'Включить микрофон' : 'Выключить микрофон'}
-        onClick={toggleSelfMute}
+        {...micButton}
       >
         <Icon name={selfMuted ? 'mic-off' : 'mic'} size={26} />
       </button>
@@ -1547,6 +1560,8 @@ function MobileCallBar() {
           <Icon name="camera-flip" size={26} />
         </button>
       )}
+      {/* «Активности» (колесо гусей-пиратов) — телефонное место кнопки: дока голоса (`VoiceControls`) здесь нет. */}
+      <ActivitiesButton variant="call" />
       <button type="button" className="call-btn leave" title="Отключиться" onClick={() => leaveVoice()}>
         <Icon name="leave" size={26} />
       </button>
@@ -1604,6 +1619,17 @@ function ConnectedVoiceHeader({ channel }: { channel: Channel }) {
   );
 }
 
+/**
+ * Панель звонка там, где нет дока голоса, — в раскладке телефона: приложение на телефоне И окно ≤ 760 px (`usePhoneLayout`:
+ * вкладка браузера телефона, узкое окно ПК). 🔴 29.10: было только `isMobile()` (истинно лишь в приложении) — в Chrome на
+ * телефоне голос шёл без кнопок микрофона, звука, камеры, «Активностей» и выхода. Своим компонентом: хук ширины нужен только
+ * подключённому каналу.
+ */
+function PhoneCallBar() {
+  const phoneLayout = usePhoneLayout();
+  return isMobile() || phoneLayout ? <MobileCallBar /> : null;
+}
+
 export function VoiceChannelView({ channel, connected }: { channel: Channel; connected?: boolean }) {
   const joinVoice = useStore((s) => s.joinVoice);
   const presenceMap = useStore((s) => s.presence);
@@ -1613,11 +1639,13 @@ export function VoiceChannelView({ channel, connected }: { channel: Channel; con
     return (
       <div className="voice-view connected">
         <ConnectedVoiceHeader channel={channel} />
+        {/* Гусиная дуэль канала (ГусКоины 2, этап 3): «Кубики: А против Б · ставка N · идёт» + «Смотреть». */}
+        <DuelCard channelId={channel.id} />
         <VoiceStage />
         {/* The stage tiles (+ the channel sidebar's presence list) already show everyone in the call, so
             the desktop no longer renders a third redundant roster below the stage. Mobile still needs the
             in-call control bar (mute / deafen / camera / hang up) — there's no self-bar on the phone. */}
-        {isMobile() && <MobileCallBar />}
+        <PhoneCallBar />
       </div>
     );
   }

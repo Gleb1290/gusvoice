@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -143,6 +144,8 @@ for (const [name, mutation, check, failure] of [
   ['fed по умолчанию', { file: 'routes/calls', from: "(req.query as { fed?: unknown } | undefined)?.fed === '1'", to: 'true' }, queryScenario, 'старый active без fed'],
 ] as [string, Mutation, (mutation?: Mutation) => Promise<void>, string][]) {
   test(`R200 мутант routes «${name}» пойман адресным ответом ручки`, async () => {
-    await check(); await truncateAll(t.raw); await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    await check(); await truncateAll(t.raw); await counterfact(async () => {
+      await assert.rejects(check(mutation), e => e instanceof assert.AssertionError && e.message.includes(failure));
+    });
   });
 }

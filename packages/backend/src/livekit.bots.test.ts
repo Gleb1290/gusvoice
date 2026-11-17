@@ -1,3 +1,4 @@
+import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -29,7 +30,8 @@ function fixture(raw = source) {
   class RoomServiceClient {
     constructor() {}
     async listParticipants(room: string) { assert.equal(room, 'channel-voice'); return present ? [{ identity: 'music-bot' }] : []; }
-    async updateParticipant(room: string, identity: string, value: { permission: sdk.ParticipantPermission }) { calls.push({ room, identity, value }); }
+    async updateParticipant(room: string, identity: string, value: { permission: sdk.ParticipantPermission }) { calls.push({ room, identity, value });
+ }
   }
   const deps: Record<string, unknown> = { 'livekit-server-sdk': { ...sdk, RoomServiceClient, AccessToken },
     './env.js': { env: { livekit: { urlInternal: 'http://livekit.invalid', apiKey: 'r306-key', apiSecret: syntheticKey } } },
@@ -92,26 +94,35 @@ async function token(raw = source, muted = false) {
 }
 for (const muted of [false, true]) it(`R306 настоящий JWT бота сохраняет privacy, identity и TTL600, мьют ${muted}`, () => token(source, muted));
 it('R306 контрфакт: общий serverMute возвращает боту слух', async () => {
-  await mute(); await assert.rejects(mute(mutate('opts?.bot ? botVoicePermission(permissions, muted)', 'false ? botVoicePermission(permissions, muted)')),
+  await mute(); await counterfact(async () => {
+await assert.rejects(mute(mutate('opts?.bot ? botVoicePermission(permissions, muted)', 'false ? botVoicePermission(permissions, muted)')),
     e => e instanceof assert.AssertionError && e.message.startsWith('R306 мьют бота не возвращает слух') && e.actual === true && e.expected === false);
 });
+});
 it('R306 контрфакт: человеческий TTL не проходит настройку настоящего JWT бота', async () => {
-  await token(); await assert.rejects(token(mutate('ttl: BOT_VOICE_TOKEN_TTL_S,', "ttl: '4h',")),
+  await token(); await counterfact(async () => {
+await assert.rejects(token(mutate('ttl: BOT_VOICE_TOKEN_TTL_S,', "ttl: '4h',")),
     e => e instanceof assert.AssertionError && e.message.startsWith('R306 JWT бота живёт десять минут') && e.actual === '4h' && e.expected === 600);
+});
 });
 it('R306 контрфакт: publishGrant с STREAM даёт боту лишние источники', () => {
   const raw = readFileSync(new URL('./livekitRules.ts', import.meta.url), 'utf8');
   const check = (r: typeof rules) => assert.equal(r.botPublishGrant(all).canPublishSources.includes(sdk.TrackSource.CAMERA), false, 'R306 бот не публикует камеру');
-  check(rules); check(ruleModule(raw)); const from = 'if (!serverMuted && has(permissions, Permission.SPEAK)) return { canPublish: true, canPublishSources: [TrackSource.MICROPHONE] };';
+  check(rules); check(ruleModule(raw)); counterfact(() => {
+const from = 'if (!serverMuted && has(permissions, Permission.SPEAK)) return { canPublish: true, canPublishSources: [TrackSource.MICROPHONE] };';
   assert.equal(raw.split(from).length - 1, 1);
   assert.throws(() => check(ruleModule(raw.replace(from, 'return publishGrant(permissions, serverMuted);'))),
     e => e instanceof assert.AssertionError && e.message.startsWith('R306 бот не публикует камеру') && e.actual === true && e.expected === false);
 });
+});
 it('R306 контрфакт: пустой список без canPublish false не запрещает публикацию', () => {
   const raw = readFileSync(new URL('./livekitRules.ts', import.meta.url), 'utf8');
-  const from = 'return { canPublish: false, canPublishSources: [] };'; assert.equal(raw.split(from).length - 1, 1);
+  const from = 'return { canPublish: false, canPublishSources: [] };';
   const check = (r: typeof rules) => assert.equal(r.botPublishGrant(0n).canPublish, false, 'R306 пустой список запрещает публикацию');
   check(rules); check(ruleModule(raw));
-  assert.throws(() => check(ruleModule(raw.replace(from, 'return { canPublishSources: [] };'))),
+  counterfact(() => {
+assert.equal(raw.split(from).length - 1, 1);
+assert.throws(() => check(ruleModule(raw.replace(from, 'return { canPublishSources: [] };'))),
     e => e instanceof assert.AssertionError && e.message.startsWith('R306 пустой список запрещает публикацию') && e.actual === undefined && e.expected === false);
+});
 });

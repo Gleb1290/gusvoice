@@ -1,3 +1,4 @@
+import { counterfact } from '../../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -67,11 +68,15 @@ function dropMutant(from: string, to: string) {
 }
 it('R161 игнорирование drop обнаруживается реальным размещением', async () => {
   await dropCheck();
-  await assert.rejects(dropCheck({ source: dropMutant('if (anchor && drop) {', 'if (anchor && false) {') }), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(dropCheck({ source: dropMutant('if (anchor && drop) {', 'if (anchor && false) {') }), assert.AssertionError);
+  });
 });
 it('R161 потеря числа пунктов в длительности dropdown обнаруживается', async () => {
   await dropCheck();
-  await assert.rejects(dropCheck({ source: dropMutant('150 + 16 * shown', '150') }), assert.AssertionError);
+  await counterfact(async () => {
+    await assert.rejects(dropCheck({ source: dropMutant('150 + 16 * shown', '150') }), assert.AssertionError);
+  });
 });
 
 function evaluate(source: string, dependencies: Record<string, unknown>, globals: Record<string, unknown>) {
@@ -131,7 +136,8 @@ function layoutFixture(bottom = 48, zoom = 1, top = 0) {
       'проба измеряет ту же max-вставку, что CSS');
     assert.ok(document.body.contains(element), 'проба подключена к DOM до измерения');
     assert.match(written, /padding-top:max\(env\(safe-area-inset-top\), var\(--gv-sat, 0px\)\)/);
-    return { paddingTop: document.documentElement.style.getPropertyValue('--gv-sat'), paddingBottom: document.documentElement.style.getPropertyValue('--gv-sab') };
+    // R315: этот телефонный стенд без собственной полосы окна; её computed margin равен нулю.
+    return { paddingTop: document.documentElement.style.getPropertyValue('--gv-sat'), paddingBottom: document.documentElement.style.getPropertyValue('--gv-sab'), marginTop: '0px' };
   };
   const globals = { window, document, DOMRect, getComputedStyle: computed };
   const popover = evaluate(readFileSync(new URL('../popover.ts', import.meta.url), 'utf8'), {}, { ...globals, document: probeDocument });
@@ -205,18 +211,22 @@ async function anchoredMenuCheck(change?: (source: string) => string, point = fa
 
 it('R114 якорное меню сроков учитывает native низ и пересчитывается при росте без смены якоря', async () => {
   await anchoredMenuCheck();
-  for (const change of [
-    (source: string) => source.replace('8, 8, viewportAboveSafeBottom()', '8, 8'),
-    (source: string) => source.replace("if (!anchored || !el || typeof ResizeObserver === 'undefined') return;", 'if (true) return;'),
-  ]) {
-    await assert.rejects(anchoredMenuCheck(change), (error: unknown) =>
-      error instanceof assert.AssertionError && error.message.includes('список сроков после ResizeObserver целиком выше системной вставки'));
-  }
+  await counterfact(async () => {
+    for (const change of [
+      (source: string) => source.replace('8, 8, viewportAboveSafeBottom()', '8, 8'),
+      (source: string) => source.replace("if (!anchored || !el || typeof ResizeObserver === 'undefined') return;", 'if (true) return;'),
+    ]) {
+      await assert.rejects(anchoredMenuCheck(change), (error: unknown) =>
+        error instanceof assert.AssertionError && error.message.includes('список сроков после ResizeObserver целиком выше системной вставки'));
+    }
+  });
 });
 
 it('R117 меню по точке пересчитывает положение после роста карточки и отключает второй наблюдатель', async () => {
   await anchoredMenuCheck(undefined, true);
-  await assert.rejects(anchoredMenuCheck(source => source.replace(
-    "if (anchored || sheet || !el || typeof ResizeObserver === 'undefined') return;", 'if (true) return;'), true),
-  (error: unknown) => error instanceof assert.AssertionError && error.message.includes('список сроков после ResizeObserver целиком выше системной вставки'));
+  await counterfact(async () => {
+    await assert.rejects(anchoredMenuCheck(source => source.replace(
+      "if (anchored || sheet || !el || typeof ResizeObserver === 'undefined') return;", 'if (true) return;'), true),
+    (error: unknown) => error instanceof assert.AssertionError && error.message.includes('список сроков после ResizeObserver целиком выше системной вставки'));
+  });
 });

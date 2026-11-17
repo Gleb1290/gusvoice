@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -87,27 +88,33 @@ it('R303 контрфакт игнорирования withBot теряет им
   probe(commandTokenAt);
   const anchor = 'if (withBot) {';
   probe(mutated(anchor, anchor).commandTokenAt);
-  assert.throws(() => probe(mutated(anchor, 'if (false) {').commandTokenAt), (e: unknown) =>
-    e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' &&
-    e.message.split('\n')[0] === 'R303 адресная команда сохраняется в подсказке канала' && e.actual === undefined && e.expected === 'st@weatherbot');
+  counterfact(() => {
+    assert.throws(() => probe(mutated(anchor, 'if (false) {').commandTokenAt), (e: unknown) =>
+      e instanceof assert.AssertionError && e.code === 'ERR_ASSERTION' && e.operator === 'strictEqual' &&
+      e.message.split('\n')[0] === 'R303 адресная команда сохраняется в подсказке канала' && e.actual === undefined && e.expected === 'st@weatherbot');
+  });
 });
 
 it('R302 контрфакт допуска слеша внутри слова ломает именно отрицательный пример', () => {
   rejectsMiddle(commandTokenAt);
   const anchor = 'const m = /^\\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));';
   rejectsMiddle(mutated(anchor, anchor).commandTokenAt);
-  const mutant = mutated(anchor,
-    'const m = /^[A-Za-z0-9_]*\\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));');
-  assert.throws(() => rejectsMiddle(mutant.commandTokenAt), (e: unknown) =>
-    expectedTokenAssertion(e, 'R302 слеш внутри слова не открывает команды'));
+  counterfact(() => {
+    const mutant = mutated(anchor,
+      'const m = /^[A-Za-z0-9_]*\\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));');
+    assert.throws(() => rejectsMiddle(mutant.commandTokenAt), (e: unknown) =>
+      expectedTokenAssertion(e, 'R302 слеш внутри слова не открывает команды'));
+  });
 });
 
 it('R302 контрфакт без якоря начала поля ловит подсказку после ведущего пробела', () => {
   rejectsLeading(commandTokenAt);
   const anchor = 'const m = /^\\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));';
   rejectsLeading(mutated(anchor, anchor).commandTokenAt);
-  const mutant = mutated(anchor,
-    'const m = /\\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));');
-  assert.throws(() => rejectsLeading(mutant.commandTokenAt), (e: unknown) =>
-    expectedTokenAssertion(e, 'R302 даже ведущий пробел запрещает командную подсказку'));
+  counterfact(() => {
+    const mutant = mutated(anchor,
+      'const m = /\\/([A-Za-z0-9_]*)$/.exec(value.slice(0, caret));');
+    assert.throws(() => rejectsLeading(mutant.commandTokenAt), (e: unknown) =>
+      expectedTokenAssertion(e, 'R302 даже ведущий пробел запрещает командную подсказку'));
+  });
 });

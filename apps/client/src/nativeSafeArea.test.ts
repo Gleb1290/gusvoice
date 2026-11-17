@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -151,8 +152,10 @@ describe('системные вставки Android', () => {
       assert.equal(api.parseSafeArea({ ...ordinary, left: -0.01 }), null, 'отрицательная вставка отклоняется');
     });
     check(source);
-    assert.throws(() => check(mutate(' || n < 0', '')), {
-      name: 'AssertionError', message: /отрицательная вставка отклоняется/,
+    counterfact(() => {
+      assert.throws(() => check(mutate(' || n < 0', '')), {
+        name: 'AssertionError', message: /отрицательная вставка отклоняется/,
+      });
     });
   });
 
@@ -173,12 +176,14 @@ describe('системные вставки Android', () => {
       assert.deepEqual(received, ['24px', '3.5px', '48px', '2px'], 'синхронное обновление уже применено');
     });
     check(source);
-    const assignment = '  w.__gvSafeArea = apply;\n';
-    const bridgeCall = '  try { apply(bridge.safeArea()); } catch { /* мост старой оболочки — остаётся env() */ }';
-    assert.ok(source.includes(bridgeCall));
-    const changed = mutate(assignment + bridgeCall, bridgeCall + '\n' + assignment.trimEnd());
-    assert.throws(() => check(changed), {
-      name: 'AssertionError', message: /приёмник готов до запроса моста/,
+    counterfact(() => {
+      const assignment = '  w.__gvSafeArea = apply;\n';
+      const bridgeCall = '  try { apply(bridge.safeArea()); } catch { /* мост старой оболочки — остаётся env() */ }';
+      assert.ok(source.includes(bridgeCall));
+      const changed = mutate(assignment + bridgeCall, bridgeCall + '\n' + assignment.trimEnd());
+      assert.throws(() => check(changed), {
+        name: 'AssertionError', message: /приёмник готов до запроса моста/,
+      });
     });
   });
 });

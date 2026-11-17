@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
@@ -47,13 +48,15 @@ it('хук обрабатывает доступный список и fallback,
   assert.equal(guest.usePeerName()('peer-a', 'Профиль А'), 'Профиль А');
   assert.equal(peer.PLAIN_PEER('peer-a', 'Профиль А'), 'Профиль А');
 
-  const source = readFileSync(new URL('./peerName.ts', import.meta.url), 'utf8');
-  const guard = "if (s.owner !== (activeInstanceId() ?? '')) return fallback;";
-  assert.ok(source.includes(guard), 'найдена сверка владельца списка для синхронного резолвера');
-  const withoutOwnerGuard = loadPeerName({ owner: 'instance-b', list: [{ id: 'peer-a', name: 'Чужая подпись' }] }, 'instance-a', false,
-    source.replace(guard, ''));
-  assert.throws(() => assert.equal(withoutOwnerGuard.peerNameNow('peer-a', 'Профиль А'), 'Профиль А'), assert.AssertionError,
-    'мутант без сверки owner раскрывает подпись другого инстанса');
+  counterfact(() => {
+    const source = readFileSync(new URL('./peerName.ts', import.meta.url), 'utf8');
+    const guard = "if (s.owner !== (activeInstanceId() ?? '')) return fallback;";
+    assert.ok(source.includes(guard), 'найдена сверка владельца списка для синхронного резолвера');
+    const withoutOwnerGuard = loadPeerName({ owner: 'instance-b', list: [{ id: 'peer-a', name: 'Чужая подпись' }] }, 'instance-a', false,
+      source.replace(guard, ''));
+    assert.throws(() => assert.equal(withoutOwnerGuard.peerNameNow('peer-a', 'Профиль А'), 'Профиль А'), assert.AssertionError,
+      'мутант без сверки owner раскрывает подпись другого инстанса');
+  });
 });
 
 it('канал сервера не импортирует резолвер подписей ЛС', () => {

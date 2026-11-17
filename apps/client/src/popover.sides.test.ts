@@ -1,3 +1,4 @@
+import { counterfact } from '../../../packages/shared/test/counterfacts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
@@ -98,16 +99,18 @@ describe('R120 боковые системные вставки', () => {
       assert.match(pick, /clampAxis\(best\.left, w, vw, pad, left0\)/);
     };
     check(source);
-    for (const [old, replacement] of [
-      ['vp.vw - Math.max(0, sar)', 'vp.vw'],
-      ['if (left > 0) out.left = left;', ''],
-      ['Math.max(min + pad,', 'Math.max(pad,'],
-      ['fits(c.left, w, vw, pad, left0)', 'fits(c.left, w, vw, pad)'],
-      ['Math.max(c.left, left0 + pad)', 'Math.max(c.left, pad)'],
-      ['clampAxis(best.left, w, vw, pad, left0)', 'clampAxis(best.left, w, vw, pad)'],
-    ]) {
-      assert.ok(source.includes(old), `контрфакт применим: ${old}`);
-      assert.throws(() => check(source.replace(old, replacement)), assert.AssertionError, `контрфакт должен краснеть: ${old}`);
-    }
+    counterfact(() => {
+      for (const [old, replacement] of [
+        ['vp.vw - Math.max(0, sar)', 'vp.vw'],
+        ['if (left > 0) out.left = left;', ''],
+        ['Math.max(min + pad,', 'Math.max(pad,'],
+        ['fits(c.left, w, vw, pad, left0)', 'fits(c.left, w, vw, pad)'],
+        ['Math.max(c.left, left0 + pad)', 'Math.max(c.left, pad)'],
+        ['clampAxis(best.left, w, vw, pad, left0)', 'clampAxis(best.left, w, vw, pad)'],
+      ]) {
+        assert.ok(source.includes(old), `контрфакт применим: ${old}`);
+        assert.throws(() => check(source.replace(old, replacement)), assert.AssertionError, `контрфакт должен краснеть: ${old}`);
+      }
+    });
   });
 });

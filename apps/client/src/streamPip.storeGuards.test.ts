@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { counterfact } from '../../../packages/shared/test/counterfacts.js';
 import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -166,9 +167,11 @@ function resetGuard(raw: string, name: 'leaveVoice' | 'switchedInstance'): void 
 
 function rejects(from: string, to: string, check: (raw: string) => void, message: string): void {
   check(source); // Original-first: поломка стража на исходнике не выдаётся за найденную регрессию.
+  counterfact(() => {
   assert.equal(source.split(from).length - 1, 1, 'R256 единственный точный якорь мутации стора');
   assert.throws(() => check(source.replace(from, to)), (error: unknown) =>
     error instanceof assert.AssertionError && error.message.startsWith(message));
+  });
 }
 
 it('R256 список PiP объявлен строковым массивом и изначально пуст', () => {
