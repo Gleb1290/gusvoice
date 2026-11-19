@@ -8,9 +8,12 @@ import {
   GuestJoinError,
   acceptInviteAtHome,
   homeInvitePreview,
+  hostSilent,
   joinAsGuest,
   openInstance,
+  prepareGuestAccess,
 } from '../guestJoin';
+import { canPrepareGuestInvite, type PreparedGuestAccess } from '../guestPreparationRules';
 import { setPendingOpen } from '../pendingOpen';
 import { domainFromInput, instanceLabel, inviteActionLabel, inviteCheck, refusalOrMessage, refusalText } from '../inviteCheckRules';
 import { toast, toastError } from '../toast';
@@ -81,18 +84,24 @@ export function CreateServerModal({ onClose, onCreated }: { onClose: () => void;
 export function JoinServerModal({
   onClose,
   onJoined,
+  onPrepared,
   initial,
 }: {
   onClose: () => void;
-  onJoined: (serverId: string) => void;
   /** Ссылка, по которой окно и открылось (клик в мессенджере, §4.2.2). Проверка пойдёт сразу. */
   initial?: string;
-}) {
+} & (
+  | { onJoined: (serverId: string) => void; onPrepared?: never }
+  | { onPrepared: (access: PreparedGuestAccess) => void; onJoined?: never }
+)) {
   const [code, setCode] = useState(initial ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<InvitePreviewView | null>(null);
   const [checking, setChecking] = useState(false);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const [previewRetry, setPreviewRetry] = useState(0);
+  const preparing = !!onPrepared;
   const fed = useFederationEnabled();
   const parsed = parseInviteInput(code);
   // Номер проверки: ответ на прошлый ввод, догнавший нас после следующего, иначе показал бы карточку
@@ -100,7 +109,8 @@ export function JoinServerModal({
   const round = useRef(0);
 
   useEffect(() => {
-    if (!fed || !parseInviteInput(code)) {
+    const input = parseInviteInput(code);
+    if (!fed || !input || (preparing && !input.origin)) {
       round.current += 1;
       setView(null);
       setChecking(false);
@@ -118,25 +128,45 @@ export function JoinServerModal({
           if (round.current === mine) setView(v);
         })
         .catch(() => {
-          // Не вышло спросить дом — не беда: остаётся обычный путь по коду, он тут же ниже.
-          if (round.current === mine) setView(null);
+          if (round.current === mine) {
+            setView(null);
+            setPreviewFailed(true);
+          }
         })
         .finally(() => {
           if (round.current === mine) setChecking(false);
         });
     }, 400);
-    return () => window.clearTimeout(t);
-  }, [code, fed]);
+    return () => {
+      round.current += 1;
+      window.clearTimeout(t);
+    };
+  }, [code, fed, preparing, previewRetry]);
 
   // Домен из вставленной ссылки — запасное имя чужого инстанса: при «нет связки» название взять
   // негде, а домен человек видит своими глазами и его же перескажет своему держателю.
   const pastedDomain = domainFromInput(code);
   const check = view ? inviteCheck(view, pastedDomain) : null;
+  const canPrepare = fed && !checking && canPrepareGuestInvite(code, view, Date.now());
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  function retryPreview() {
+    setView(null);
+    setChecking(true);
+    setError(null);
+    setPreviewFailed(false);
+    setPreviewRetry((n) => n + 1);
+  }
+
+  async function submit() {
     const c = parsed?.code ?? code.trim();
-    if (!c) return;
+    if (!c || busy || checking || (onPrepared && error)) return;
+    const backupInvite = onPrepared && fed && parsed?.origin && canPrepareGuestInvite(code, view, Date.now())
+      ? { view, origin: parsed.origin }
+      : null;
+    if (onPrepared && !backupInvite) {
+      setError('Нужна действующая ссылка-приглашение от другого инстанса.');
+      return;
+    }
     setBusy(true);
     setError(null);
     /**
@@ -148,7 +178,7 @@ export function JoinServerModal({
     async function goTo(target: string, serverId: string | null) {
       if (target === activeInstanceId()) {
         onClose();
-        if (serverId) onJoined(serverId);
+        if (serverId) onJoined?.(serverId);
         return;
       }
       if (serverId) setPendingOpen({ instanceId: target, serverId });
@@ -156,6 +186,14 @@ export function JoinServerModal({
       await openInstance(target);
     }
     try {
+      if (onPrepared && backupInvite) {
+        const { view: peerInvite, origin } = backupInvite;
+        const res = await prepareGuestAccess({ ...peerInvite.instance, clientOrigin: origin }, peerInvite.server.serverId, peerInvite);
+        onPrepared(res);
+        onClose();
+        return;
+      }
+      if (!onJoined) return;
       // Сервер соседа — гостевой путь: дом ручается, хост заводит сессию, дальше обычное вступление.
       if (view?.instance && check?.action === 'join' && view.scope === 'peer') {
         const res = await joinAsGuest(view);
@@ -198,9 +236,11 @@ export function JoinServerModal({
        * написан с самого начала — не хватало ровно этой строки.
        */
       setError(
-        err instanceof GuestJoinError
-          ? refusalText(err.code, instanceLabel(view?.instance ?? null, pastedDomain))
-          : refusalOrMessage(err, instanceLabel(view?.instance ?? null, pastedDomain)),
+        preparing && hostSilent(err)
+          ? 'Не удалось связаться с инстансом. Если вы уже вступили, повторите проверку в разделе «Где я гость».'
+          : err instanceof GuestJoinError
+            ? refusalText(err.code, instanceLabel(view?.instance ?? null, pastedDomain))
+            : refusalOrMessage(err, instanceLabel(view?.instance ?? null, pastedDomain)),
       );
       setBusy(false);
     }
@@ -211,21 +251,38 @@ export function JoinServerModal({
       ? 'ссылка бессрочная'
       : `ссылка до ${new Date(at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
 
+  const close = () => {
+    if (!preparing || !busy) onClose();
+  };
+
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <form className="modal create-channel" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+    <div className="modal-overlay" onClick={close}>
+      <form
+        className="modal create-channel"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!preparing) void submit();
+        }}
+      >
         <div className="admin-head">
-          <h2>Войти по приглашению</h2>
-          <button type="button" className="icon-close" title="Закрыть" onClick={onClose}>
+          <h2>{preparing ? 'Подключить запасной сервер' : 'Войти по приглашению'}</h2>
+          <button type="button" className="icon-close" title="Закрыть" disabled={preparing && busy} onClick={close}>
             <Icon name="close" size={18} />
           </button>
         </div>
         <label className="field">
-          {fed ? 'Ссылка или код приглашения' : 'Код приглашения'}
+          {preparing ? 'Ссылка-приглашение с другого инстанса' : fed ? 'Ссылка или код приглашения' : 'Код приглашения'}
           <input
             value={code}
+            disabled={preparing && busy}
             // Отказ относится к ТОЙ ссылке: правишь поле — старое объяснение под ним уже врёт.
             onChange={(e) => {
+              round.current += 1;
+              setView(null);
+              const input = parseInviteInput(e.target.value);
+              setChecking(fed && !!input && (!preparing || !!input.origin));
+              setPreviewFailed(false);
               setCode(e.target.value);
               setError(null);
             }}
@@ -256,13 +313,32 @@ export function JoinServerModal({
           </div>
         )}
 
-        {check?.informer && view?.instance && (
+        {!preparing && check?.informer && view?.instance && (
           <div className="inv-informer">
             Это сервер на другом инстансе. Вы войдёте со своим ником и аватаркой, а переписку и голос этого сервера
             хранит инстанс «{instanceLabel(view.instance, pastedDomain) ?? view.instance.domain}».
           </div>
         )}
 
+        {preparing && canPrepare && !error && (
+          <div className="inv-informer">
+            {view?.alreadyMember
+              ? 'Хост проверит доступ к серверу по вашему членству. Гостевая сессия сохранится на этом устройстве.'
+              : 'Вы вступите на этот сервер со своим ником и аватаркой. Гостевая сессия сохранится на этом устройстве.'}
+          </div>
+        )}
+        {preparing && code.trim() && !parsed?.origin && (
+          <div className="inv-problem">Вставьте полную ссылку, которую вам прислали.</div>
+        )}
+        {preparing && view?.scope === 'local' && (
+          <div className="inv-problem">Это приглашение на ваш инстанс. Для запасного сервера нужна ссылка от соседа.</div>
+        )}
+        {preparing && view?.scope === 'peer' && !view.problem && !canPrepare && !checking && (
+          <div className="inv-problem">Хост не подтвердил действующую ссылку. Попросите новое приглашение.</div>
+        )}
+        {preparing && previewFailed && (
+          <div className="inv-problem">Не удалось проверить приглашение через ваш домашний инстанс.</div>
+        )}
         {check?.problem && <div className="inv-problem">{check.problem}</div>}
 
         {check?.contacts && view && view.contacts.length > 0 && (
@@ -278,24 +354,27 @@ export function JoinServerModal({
           </div>
         )}
 
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role={preparing ? 'alert' : undefined}>{error}</div>}
         <div className="modal-actions">
-          <button type="button" className="link" onClick={onClose}>
+          <button type="button" className="link" disabled={preparing && busy} onClick={close}>
             Отмена
           </button>
           {/* «Понятно» закрывает окно, «Повторить» спрашивает дом заново — обе кнопки не отправляют
               форму, потому что отправлять нечего: войти по этой ссылке сейчас нельзя. */}
-          {check && (check.action === 'ok' || check.action === 'retry') ? (
+          {preparing ? (
+            error || previewFailed || check?.action === 'retry' ? (
+              <button type="button" disabled={checking} onClick={retryPreview}>Повторить проверку</button>
+            ) : (
+              <button type="button" disabled={busy || !canPrepare} onClick={() => void submit()}>
+                {busy ? 'Проверяем доступ…' : view?.alreadyMember ? 'Подготовить доступ' : 'Вступить и подготовить доступ'}
+              </button>
+            )
+          ) : check && (check.action === 'ok' || check.action === 'retry') ? (
             <button
               type="button"
               onClick={() => {
                 if (check.action === 'ok') onClose();
-                else {
-                  setView(null);
-                  const again = code;
-                  setCode('');
-                  setTimeout(() => setCode(again), 0);
-                }
+                else retryPreview();
               }}
             >
               {inviteActionLabel(check.action)}

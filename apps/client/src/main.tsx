@@ -49,6 +49,7 @@ import { installAttLinkRenewal } from './attLinks';
 import './builtinSounds';
 import { installPredictionOpenSound } from './predictionSounds';
 import { installExternalLinks } from './externalLinks';
+import { registerOfflineShell } from './registerOfflineShell';
 
 // До любого подключения к комнате: иначе первые дорожки успеют запустить вечный цикл отрисовки.
 installLivekitTweaks();
@@ -129,6 +130,7 @@ if (httpsUrl) {
 } else {
   // Кольца загрузки у вложений строк «в пути» очереди ЛС (07.10): прогресс мимо стора, `convStore.bindUploadProgress`.
   bindUploadProgress({ progress: setUploadProgress, done: setUploadDone, clear: clearUploadProgress });
+  registerOfflineShell();
   // Файлы ЛС больше куска — кусками (`bigfile1`, 09.10): привязка в `api.ts`, предел и признак — `attachRules` из `/auth/me`.
   bindChunkedUpload({ use: (size) => dmChunkedUploads() && size > CHUNK_FROM_BYTES, run: uploadInChunks });
   // ЛС между инстансами, Э5 (#141, `fedm5`): «мой дом лежит — пишу через инстанс собеседника» (`fedVia.ts`), привязка к стору бесед.

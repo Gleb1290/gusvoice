@@ -1,5 +1,5 @@
 import { FED_ERRORS, type GuestPlacesView, type InvitePreviewView } from '@gusvoice/shared';
-import { api } from './api';
+import { api, setToken } from './api';
 import {
   addInstance,
   activeInstance,
@@ -10,6 +10,8 @@ import {
 } from './config';
 import { findGuestEntry, guestEntryRebound, homeEntry, usableGuestEntry } from './configRules';
 import { switchInstance } from './instanceSwitch';
+import { guestTokenExpiry, verifiedGuestServer, type PreparedGuestAccess } from './guestPreparationRules';
+import { useStore } from './store';
 
 /**
  * Гость уходит с устройства без ответа хоста (15.10) — `guestGone.ts`; выставлено и отсюда, из модуля «гость», чтобы рейл и
@@ -55,7 +57,11 @@ export class GuestJoinError extends Error {
   }
 }
 
-async function hostFetch(apiUrl: string, path: string, init: RequestInit & { token?: string }): Promise<unknown> {
+async function requestHost(
+  apiUrl: string,
+  path: string,
+  init: RequestInit & { token?: string },
+): Promise<{ data: unknown; refreshToken: string | null }> {
   const res = await fetch(`${apiUrl}/api${path}`, {
     ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
       ? { signal: AbortSignal.timeout(HOST_FETCH_TIMEOUT_MS) }
@@ -69,12 +75,16 @@ async function hostFetch(apiUrl: string, path: string, init: RequestInit & { tok
   });
   const data: unknown = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const code = (data as { error?: unknown }).error;
+    const code = (data as { error?: unknown } | null)?.error;
     // ⚠️ Отказ хоста мы НЕ пересказываем своими словами здесь: коды стабильны (`FED_ERRORS`), текст
     // подбирает одно место — `inviteCheckRules`. Иначе у одной причины завелось бы две формулировки.
     throw new GuestJoinError(typeof code === 'string' ? code : `HTTP ${res.status}`);
   }
-  return data;
+  return { data, refreshToken: res.headers.get('x-refresh-token') };
+}
+
+async function hostFetch(apiUrl: string, path: string, init: RequestInit & { token?: string }): Promise<unknown> {
+  return (await requestHost(apiUrl, path, init)).data;
 }
 
 /**
@@ -153,7 +163,18 @@ export async function acceptInviteAtHome(code: string): Promise<{ instanceId: st
  */
 export function guestEntryFor(federationInstanceId: string, domain?: string): Instance | null {
   // Порядок поиска и почему `domain` записи — в `configRules.findGuestEntry` (стенд 23.09).
-  return usableGuestEntry(findGuestEntry(instances(), federationInstanceId, domain), homeInstance());
+  const home = homeInstance();
+  if (!home) return null;
+  const current = activeInstance();
+  // Старые дубли той же пары: приоритет у активной записи, затем у последней, как в рейле.
+  const guests = instances()
+    .filter((entry) => entry.guestOf === home.id)
+    .reverse();
+  if (current?.guestOf === home.id) {
+    const index = guests.findIndex((entry) => entry.id === current.id);
+    if (index > 0) guests.unshift(...guests.splice(index, 1));
+  }
+  return usableGuestEntry(findGuestEntry(guests, federationInstanceId, domain), home);
 }
 
 /**
@@ -190,45 +211,15 @@ function isStaleToken(code: string): boolean {
   return code === 'invalid token' || code === FED_ERRORS.identityInvalid || code === 'HTTP 401';
 }
 
-export async function joinAsGuest(view: InvitePreviewView): Promise<GuestJoinResult> {
+export async function joinAsGuest(view: InvitePreviewView, clientOrigin = ''): Promise<GuestJoinResult> {
   const peer = view.instance;
   if (!peer) throw new GuestJoinError('bad-invite');
   // Дом, а не активная запись: стоя гостем у соседа, «домом» оказался бы сосед (#205).
-  const home = homeInstance();
-  if (!home) throw new GuestJoinError('no-home');
-
-  const existing = guestEntryFor(peer.instanceId, peer.domain);
-  let entry = existing;
-  let hostToken = existing?.token ?? null;
-
-  if (!entry) {
-    // Адрес API хоста берём у самого хоста (`/config.json`), а не выводим из домена: у инстанса API
-    // может жить на другом поддомене, и угадывание тут кончилось бы запросом в никуда.
-    const cfg = await discoverHost(`https://${peer.domain}`, peer.instanceId);
-    entry = addInstance(cfg, { name: peer.name?.trim() || peer.domain });
-    updateInstance(entry.id, { federationInstanceId: peer.instanceId, guestOf: home.id, domain: peer.domain });
-    hostToken = null;
-  }
-
-  /**
-   * Завести сессию на хосте: дом выдаёт токен личности, хост меняет его на свой.
-   * Вынесено в функцию, потому что зовётся ДВАЖДЫ — см. повтор на «invalid token» ниже.
-   */
-  async function mintSession(): Promise<string> {
-    const identity = await homeIdentityToken(peer!.instanceId);
-    const session = (await hostFetch(entry!.apiUrl, '/fed/v1/session', {
-      method: 'POST',
-      body: JSON.stringify({ token: identity.token }),
-    })) as { user_id?: string; token?: string };
-    if (!session.token) throw new GuestJoinError('bad-session');
-    updateInstance(entry!.id, { token: session.token, userId: session.user_id, guestOf: home!.id });
-    return session.token;
-  }
-
-  if (!hostToken) hostToken = await mintSession();
+  const { entry, token } = await ensureGuestSession({ ...peer, clientOrigin });
+  let hostToken = token;
 
   const acceptInvite = (token: string) =>
-    hostFetch(entry!.apiUrl, `/invites/${encodeURIComponent(view.code)}`, {
+    hostFetch(entry.apiUrl, `/invites/${encodeURIComponent(view.code)}`, {
       method: 'POST',
       token,
     }) as Promise<{ server?: { id?: string; name?: string } }>;
@@ -247,7 +238,7 @@ export async function joinAsGuest(view: InvitePreviewView): Promise<GuestJoinRes
      * не о чем. Второй такой же отказ — уже настоящий, его и показываем.
      */
     if (!(e instanceof GuestJoinError) || !isStaleToken(e.code)) throw e;
-    hostToken = await mintSession();
+    hostToken = await mintGuestSession(entry, peer.instanceId);
     boot = await acceptInvite(hostToken);
   }
 
@@ -277,12 +268,9 @@ export async function openInstance(localId: string): Promise<void> {
  * запомненный токен. Ровно это и делает «Где я гость» работающим экраном, а не списком: человек
  * открыл приложение на новом ноутбуке и вышел с чужого сервера, куда заходил с телефона.
  */
-export async function ensureGuestSession(place: {
-  instanceId: string;
-  name: string | null;
-  domain: string;
-  clientOrigin: string;
-}): Promise<{ entry: Instance; token: string }> {
+type GuestHost = Pick<GuestPlacesView['places'][number], 'instanceId' | 'name' | 'domain' | 'clientOrigin'>;
+
+export async function ensureGuestSession(place: GuestHost): Promise<{ entry: Instance; token: string }> {
   const home = homeInstance();
   if (!home) throw new GuestJoinError('no-home');
 
@@ -290,10 +278,18 @@ export async function ensureGuestSession(place: {
   if (!entry) {
     const origin = place.clientOrigin || `https://${place.domain}`;
     const cfg = await discoverHost(origin, place.instanceId);
-    entry = addInstance(cfg, { name: place.name?.trim() || place.domain });
-    updateInstance(entry.id, { federationInstanceId: place.instanceId, guestOf: home.id, domain: place.domain });
-    entry = instances().find((i) => i.id === entry!.id) ?? entry;
-  } else if (!entry.federationInstanceId || !entry.domain || guestEntryRebound(entry, place.instanceId)) {
+    const currentHome = homeInstance();
+    if (currentHome?.id !== home.id || currentHome.userId !== home.userId) throw new GuestJoinError('no-home');
+    if (cfg.apiUrl === home.apiUrl) throw new GuestJoinError('wrong-host');
+    entry = guestEntryFor(place.instanceId, place.domain);
+    if (!entry) {
+      const added = addInstance(cfg, { name: place.name?.trim() || place.domain });
+      updateInstance(added.id, { federationInstanceId: place.instanceId, guestOf: home.id, domain: place.domain });
+      entry = instances().find((i) => i.id === added.id) ?? null;
+      if (!entry || entry.guestOf !== home.id) throw new GuestJoinError('guest-not-saved');
+    }
+  }
+  if (!entry.federationInstanceId || !entry.domain || guestEntryRebound(entry, place.instanceId)) {
     // Нашли СТАРУЮ запись — дописываем ей то, чего не хватало. Иначе она так и останется
     // несопоставимой, и рядом каждый раз будет заводиться вторая. Хост сменил ключ — запись та же,
     // личность новая, а сессия прежней личности мертва: берём новую сразу (`guestEntryRebound`).
@@ -304,18 +300,91 @@ export async function ensureGuestSession(place: {
       guestOf: home.id,
       ...(rebound ? { token: null } : {}),
     });
-    entry = instances().find((i) => i.id === entry!.id) ?? entry;
+    const updated = instances().find((i) => i.id === entry!.id);
+    if (updated?.federationInstanceId !== place.instanceId || (rebound && updated.token)) {
+      throw new GuestJoinError('guest-not-saved');
+    }
+    entry = updated;
   }
   if (entry.token) return { entry, token: entry.token };
 
-  const identity = await homeIdentityToken(place.instanceId);
+  return { entry, token: await mintGuestSession(entry, place.instanceId) };
+}
+
+async function mintGuestSession(entry: Instance, instanceId: string): Promise<string> {
+  const home = homeInstance();
+  if (!home || entry.guestOf !== home.id) throw new GuestJoinError('no-home');
+  const identity = await homeIdentityToken(instanceId);
   const session = (await hostFetch(entry.apiUrl, '/fed/v1/session', {
     method: 'POST',
     body: JSON.stringify({ token: identity.token }),
   })) as { user_id?: string; token?: string };
-  if (!session.token) throw new GuestJoinError('bad-session');
-  updateInstance(entry.id, { token: session.token, userId: session.user_id, guestOf: home.id });
-  return { entry, token: session.token };
+  if (typeof session?.token !== 'string' || !session.token) throw new GuestJoinError('bad-session');
+  const currentHome = homeInstance();
+  if (currentHome?.id !== home.id || currentHome.userId !== home.userId) throw new GuestJoinError('no-home');
+  updateInstance(entry.id, { token: session.token, userId: session.user_id });
+  if (instances().find((i) => i.id === entry.id)?.token !== session.token) throw new GuestJoinError('guest-not-saved');
+  return session.token;
+}
+
+/** После явного согласия проверяем доступ к конкретному серверу непосредственно у хоста. */
+export async function prepareGuestAccess(
+  place: GuestHost,
+  serverId: string,
+  invite?: InvitePreviewView,
+): Promise<PreparedGuestAccess> {
+  const home = homeInstance();
+  if (!home) throw new GuestJoinError('no-home');
+  // Для уже существующего членства достаточно получить сессию и проверить доступ через GET.
+  const joined = invite && !invite.alreadyMember ? await joinAsGuest(invite, place.clientOrigin) : null;
+  if (joined && joined.serverId !== serverId) throw new GuestJoinError('guest-access-unverified');
+
+  const { entry, token } = await ensureGuestSession(place);
+  const probe = (token: string) =>
+    requestHost(entry.apiUrl, `/servers/${encodeURIComponent(serverId)}`, { method: 'GET', token, cache: 'no-store' });
+  let checkedToken = token;
+  let response: Awaited<ReturnType<typeof probe>>;
+  try {
+    response = await probe(checkedToken);
+  } catch (e) {
+    // Обновляем только отозванную или истёкшую сессию. Отказ в доступе к серверу остаётся отказом.
+    if (joined || !(e instanceof GuestJoinError) || !isStaleToken(e.code)) throw e;
+    checkedToken = await mintGuestSession(entry, place.instanceId);
+    response = await probe(checkedToken);
+  }
+
+  let server = verifiedGuestServer(response.data, serverId);
+  if (!server) throw new GuestJoinError('guest-access-unverified');
+
+  // Старому JWT хост может выдать замену в заголовке. Проверяем именно тот токен, который сохраним.
+  const previousToken = checkedToken;
+  if (response.refreshToken && response.refreshToken !== previousToken) {
+    checkedToken = response.refreshToken;
+    server = verifiedGuestServer((await probe(checkedToken)).data, serverId);
+    if (!server) throw new GuestJoinError('guest-access-unverified');
+  }
+  const verifiedAt = Date.now();
+  const expiresAt = guestTokenExpiry(checkedToken);
+  if (expiresAt !== null && expiresAt <= verifiedAt) throw new GuestJoinError('guest-session-expired');
+
+  // Рейл сможет показать проверенный сервер из штатного снимка, даже когда дом перестанет отвечать.
+  const current = instances().find((i) => i.id === entry.id);
+  const currentHome = homeInstance();
+  if (currentHome?.id !== home.id || currentHome.userId !== home.userId) throw new GuestJoinError('no-home');
+  if (current?.guestOf !== home.id || (current.token !== previousToken && current.token !== checkedToken)) {
+    throw new GuestJoinError('guest-not-saved');
+  }
+  const servers = [...(current.servers ?? []).filter((s) => s.id !== serverId), server];
+  if (current.token !== checkedToken && activeInstance()?.id === entry.id) {
+    setToken(checkedToken);
+  }
+  updateInstance(entry.id, { token: checkedToken, servers });
+  const saved = instances().find((i) => i.id === entry.id);
+  if (saved?.token !== checkedToken || !saved.servers?.some((s) => s.id === serverId)) {
+    throw new GuestJoinError('guest-not-saved');
+  }
+  useStore.getState().bumpGuestLinksRev();
+  return { instanceId: place.instanceId, serverName: server.name, verifiedAt, expiresAt };
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { Channel, ServerBootstrap } from '@gusvoice/shared';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { isMobile } from '../hotkeys';
 import { useStore, voiceIsHere } from '../store';
 import { withoutArchived } from '../dmArchiveRules';
@@ -63,7 +63,8 @@ function orderedTextChannels(b: ServerBootstrap): Channel[] {
   return [...inCat(null), ...cats.flatMap((c) => inCat(c.id))];
 }
 
-export function MainLayout() {
+export function MainLayout({ connectionScreen }: { connectionScreen?: ReactNode } = {}) {
+  const recovering = connectionScreen != null;
   // Выключатель общий (`cheatSheet.ts`): к шпаргалке зовут и клавишей `?`, и кнопкой из шапки.
   const cheatOpen = useCheatSheetOpen();
   // Стенд эффектов (#120): Ctrl+Alt+E, только супер-админу. Ничего не шлёт на сервер.
@@ -132,8 +133,8 @@ export function MainLayout() {
   const openRecap = useStore((s) => s.openRecap);
   const [recapSkipped, setRecapSkipped] = useState<string[]>([]);
   useEffect(() => {
-    if (recountServerId && economyEnabledHere) ensureRecaps(recountServerId);
-  }, [recountServerId, economyEnabledHere]);
+    if (!recovering && recountServerId && economyEnabledHere) ensureRecaps(recountServerId);
+  }, [recovering, recountServerId, economyEnabledHere]);
   const recapAutoKind = recountServerId
     ? recapAutoQueue(recapCache, (k) => readRecapSeen(recapStorage(), recountServerId, k), Date.now()).find(
         (k) => !recapSkipped.includes(`${recountServerId}:${k}`),
@@ -166,6 +167,7 @@ export function MainLayout() {
   // app-wide nav ones + the `?` cheat sheet. Read live state via getState() so the listener,
   // registered once, never goes stale.
   useEffect(() => {
+    if (recovering) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -229,7 +231,7 @@ export function MainLayout() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [recovering]);
 
   const temporaryChannel: Channel | null =
     voice?.temporary && voiceIsHere(voice) && voice.channelId === currentChannelId && voice.serverId === currentServerId
@@ -311,7 +313,7 @@ export function MainLayout() {
     if (schedOpen && backFromSchedView()) return;
     setMobilePane('list');
   };
-  useSwipeBack(phone && mobilePane === 'content' && (isDm ? !!dm : channel?.type === 'text'), goBack);
+  useSwipeBack(!recovering && phone && mobilePane === 'content' && (isDm ? !!dm : channel?.type === 'text'), goBack);
 
   const appClass = ['app', `m-${mobilePane}`];
   if (showMembers) appClass.push('has-members');
@@ -360,6 +362,17 @@ export function MainLayout() {
     !mobileProfileOpen &&
     !incomingPoke;
 
+  // Сосед продолжает обслуживать голос, пока мы проверяем другой инстанс.
+  // Одинаковые родитель и ключ сохраняют комнату при показе экрана подключения и возврате к каналам.
+  if (recovering) {
+    if (!voice) return <>{connectionScreen}</>;
+    return (
+      <div>
+        <VoiceConnection key="channel-voice">{connectionScreen}</VoiceConnection>
+      </div>
+    );
+  }
+
   return (
     <div className={appClass.join(' ')}>
       {phone && <CallBar top />}
@@ -367,7 +380,7 @@ export function MainLayout() {
       {/* The voice connection persists across channel/DM navigation and provides the LiveKit
           RoomContext to BOTH the sidebar (its VoicePanel) and the content (the voice stage). */}
       {voice ? (
-        <VoiceConnection>
+        <VoiceConnection key="channel-voice">
           {sidebar}
           <SidebarResizer />
           {content}

@@ -1,5 +1,5 @@
-import { CAP_CONV1, FEATURE_CONV2, type AuthResponse, type SetupStatus } from '@gusvoice/shared';
-import { useEffect, useState } from 'react';
+import { CAP_CONV1, FEATURE_CONV2, type AuthResponse, type SetupStatus, type User } from '@gusvoice/shared';
+import { useEffect, useRef, useState } from 'react';
 import { api, getToken, setToken } from './api';
 import {
   activeInstance,
@@ -12,7 +12,7 @@ import {
   updateActiveInstance,
 } from './config';
 import { lastPlace } from './lastPlace';
-import { setLoginNotice } from './loginNotice';
+import { entryAccount, entryFailure, savedEntryTargets, withEntryDeadline } from './entryRules';
 import { switchInstance } from './instanceSwitch';
 import { takePendingOpen } from './pendingOpen';
 import { isMobile, isTauri } from './hotkeys';
@@ -24,7 +24,7 @@ import { noticeFromRefusal } from './accessClosed';
 import { InviteLanding } from './components/InviteLanding';
 import { EditContextMenu } from './components/EditContextMenu';
 import { Login } from './components/Login';
-import { InstanceUnreachable } from './components/InstanceUnreachable';
+import { EntryChoices, InstanceUnreachable, type EntryProblem } from './components/InstanceUnreachable';
 import { ConfirmHost } from './components/ConfirmHost';
 import { MuteCustomHost } from './components/MuteCustomHost';
 import { RaiseToEarHost } from './components/RaiseToEarHost';
@@ -39,7 +39,7 @@ import { connectGateway, connectPresence } from './sockets';
 import { consumeDeepLink, startPushRegistration } from './nativeUnifiedPush';
 import { useStore, voiceIsHere } from './store';
 import { afterSplash } from './splashGate';
-import { captureStartupVoiceSession } from './voiceSession';
+import { captureStartupVoiceSession, clearVoiceSession } from './voiceSession';
 import { setNotifyAlwaysProbe } from './notifications';
 import { clearConvCacheWipe, deleteConvCache, finishConvCacheWipes, readConvCache } from './convCache';
 import { convCacheKey } from './convCacheRules';
@@ -84,20 +84,97 @@ setNotifyAlwaysProbe((convId) => {
 /** Запись черновиков при срочной записи кеша (Р7) подключается один раз на всё время жизни страницы. */
 let draftFlushHooked = false;
 
-/**
- * Отказ открыть сервер на старте (намерение после перехода, прошлое место): «закрыт держателем» — окном (#203).
- *
- * 🔴 Гостя закрыли, пока его не было, а старт глотает отказы молча: человек приходил на пустое «Выбери сервер» без
- * единого слова. Окно и замок в рейле — те же, что у клика по серверу (`ServerRail.select`) и у события
- * `server.access_closed`. Отказ летит дальше как был — следующий `.catch` глушит его, как и раньше.
- */
-function explainClosedServer(serverId: string): (err: unknown) => never {
-  return (err) => {
-    const s = useStore.getState();
-    const notice = noticeFromRefusal(err, { id: serverId, name: s.servers.find((x) => x.id === serverId)?.name ?? 'сервер' });
-    if (notice) s.noteAccessClosed(notice);
-    throw err;
-  };
+const ENTRY_TIMEOUT_MS = 4000;
+const ENTRY_RETRY_MS = 650;
+const INVITE_ORIGIN_KEY = 'gv.pendingInviteOrigin';
+
+interface EntryState {
+  epoch: number;
+  attempt: number;
+  problem: EntryProblem | null;
+  setup: SetupStatus | null;
+  notice: string | null;
+}
+
+function waitForEntryRetry(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = window.setTimeout(finish, ENTRY_RETRY_MS);
+    function finish() {
+      window.clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    }
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
+type ProfileCheck =
+  | { user: User }
+  | 'unauthorized'
+  | 'unreachable'
+  | 'refused'
+  | 'stale';
+
+async function checkProfile(stale: () => boolean, signal: AbortSignal): Promise<ProfileCheck> {
+  for (let attempt = 0; attempt < 2 && !stale(); attempt++) {
+    const sent = getToken();
+    try {
+      const user = await withEntryDeadline((requestSignal) => api.me(requestSignal), ENTRY_TIMEOUT_MS, signal);
+      if (stale()) return 'stale';
+      return user?.id ? { user } : 'refused';
+    } catch (error) {
+      if (stale() || (error as { switched?: boolean } | null)?.switched) return 'stale';
+      if ((error as { status?: number } | null)?.status === 401) {
+        // Другой запрос мог уже продлить эту сессию, пока сервер проверял старый токен.
+        if (sent === getToken()) return 'unauthorized';
+        if (attempt === 1) return 'refused';
+        continue;
+      }
+      const problem = entryFailure(error);
+      if (problem === 'refused' || attempt === 1) return problem;
+      await waitForEntryRetry(signal);
+    }
+  }
+  return 'stale';
+}
+
+async function checkSetup(signal: AbortSignal) {
+  try {
+    const setup = await withEntryDeadline((requestSignal) => api.setupStatus(requestSignal), ENTRY_TIMEOUT_MS, signal);
+    return { setup: typeof setup?.needsSetup === 'boolean' ? setup : null };
+  } catch (error) {
+    // Ручки нет на старых инстансах. HTTP 404 при этом подтверждает, что адрес отвечает.
+    if ((error as { status?: number } | null)?.status === 404) return { setup: null };
+    return { setup: null, problem: entryFailure(error) };
+  }
+}
+
+/** Короткий код остаётся у своего инстанса даже после перезапуска на другой записи. */
+function scopePendingInvite(origin: string) {
+  try {
+    const previous = localStorage.getItem(INVITE_ORIGIN_KEY);
+    const code = pendingInvite();
+    if (code && previous && previous !== origin) {
+      try {
+        localStorage.setItem(`${INVITE_ORIGIN_KEY}:${previous}`, code);
+      } finally {
+        clearPendingInvite();
+      }
+    }
+    const key = `${INVITE_ORIGIN_KEY}:${origin}`;
+    if (!pendingInvite()) {
+      const saved = localStorage.getItem(key);
+      if (saved) rememberInvite(saved);
+    }
+    localStorage.removeItem(key);
+    localStorage.setItem(INVITE_ORIGIN_KEY, origin);
+  } catch {
+    /* Хранилище недоступно. */
+  }
 }
 
 export function App() {
@@ -109,106 +186,45 @@ export function App() {
   const restoreVoiceSession = useStore((s) => s.restoreVoiceSession);
   /** Поколение активного инстанса (§5.7): растёт на мягком переходе, см. `instanceSwitch.ts`. */
   const instanceEpoch = useStore((s) => s.instanceEpoch);
-  /** Идёт переход между инстансами — держим экран загрузки, чтобы не мелькнула форма входа. */
-  const switching = useStore((s) => s.switching);
-  const [loading, setLoading] = useState(true);
-  /** Активный инстанс не отвечает: сессия цела, но говорить с ним не о чем, пока он не поднимется. */
-  const [unreachable, setUnreachable] = useState(false);
-  // Мастер первичной настройки (#142). null — не узнали (старый сервер без ручки, сеть) = как раньше.
-  const [setup, setSetup] = useState<SetupStatus | null>(null);
-  // «У меня аккаунт здесь» на странице перехода: убирает её и оставляет обычный экран входа.
+  const voice = useStore((s) => s.voice);
+  const [attempt, setAttempt] = useState(0);
+  const requestedAttempt = useRef(0);
+  const [entry, setEntry] = useState<EntryState | null>(null);
   const [, setLandingDismissed] = useState(false);
+  const invite = useRef({ origin: config.apiUrl, broken: false });
+  const guestNotice = useRef<{ epoch: number; id: string; text: string } | null>(null);
+  const steamResult = useRef<string | null>(null);
+  const web = !isTauri();
+  const activeId = activeInstanceId();
 
-  // Load the current user. Only a genuine 401 (invalid/expired token) logs out; a transient network
-  // or 5xx error (e.g. backend mid-deploy) must NOT nuke the session — we retry a few times and,
-  // failing that, keep the token so a later reload recovers. (Prior bug: ANY error here → setToken(null)
-  // → mass logout whenever the backend blipped, which a burst of deploys made painfully common.)
-  async function loadMe(): Promise<'ok' | 'unauthorized' | 'unreachable' | 'stale'> {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const me = await api.me();
-        setAuth(me);
-        // Признаки сервера — отдельно от `user` (ЛС этап 2): другие ручки кладут `User` без них.
-        // Предел файла ЛС (`bigfile1`) — до признаков: их смена перерисует беседу уже с новым пределом.
-        setDmFileLimit(me.features, me.dmFileMaxBytes);
-        useStore.getState().setServerFeatures(me.features ?? []);
-        // Снимок для кнопки админки, пока человек будет гостем у соседа (`adminTarget`, 23.09).
-        noteActiveSuperAdmin(!!me.superAdmin);
-        return 'ok';
-      } catch (e) {
-        // Пока ходили, человек кликнул в другой инстанс (рейл больше не закрыт экраном загрузки, 01.10): ответ не наш,
-        // и повтор ушёл бы уже к новому инстансу — его ведёт следующий заход.
-        if ((e as { switched?: boolean }).switched) return 'stale';
-        if ((e as { status?: number }).status === 401) {
-          setToken(null);
-          /**
-           * 🔴 Гостевая сессия протухла — человека НЕЛЬЗЯ оставлять на экране входа чужого
-           * инстанса: пароля у него там нет и быть не может, за него ручается дом. Возвращаем
-           * домой; токен мы только что стёрли, поэтому следующий клик по серверу соседа заведёт
-           * сессию заново сам (`ensureGuestSession`). Без этого выход был только один — стереть
-           * данные сайта.
-           */
-          const cur = activeInstance();
-          const home = instances().find((i) => i.id === cur?.guestOf);
-          if (cur?.guestOf && home) {
-            const there = cur.name?.trim() || cur.domain || 'соседа';
-            const here = home.name?.trim() || serverHost(home.apiUrl);
-            /**
-             * ⚠️ ДВА канала, и они не дублируют друг друга, а покрывают два разных исхода: дома
-             * человек залогинен — увидит тост; дома тоже не залогинен — увидит объяснение на
-             * экране входа, где тостов нет вовсе (`ToastHost` живёт в `MainLayout`).
-             * Без второго канала перенос был молчаливым: человек вводил пароль от соседа у себя
-             * дома и получал «неверный пароль» (авария 18.09).
-             */
-            toast('info', `Сессия на «${there}» истекла`, `Вернули на «${here}» — нажмите сервер соседа, чтобы войти заново`);
-            setLoginNotice(`Сессия на «${there}» истекла, поэтому вы снова на «${here}». Это вход в «${here}».`);
-            void switchInstance(cur.guestOf);
-          }
-          return 'unauthorized';
-        }
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-    }
-    /**
-     * 🔴 Три попытки не достучались — это НЕ «разлогинило». Токен цел и остаётся; показывать после
-     * этого форму входа значит врать человеку о том, что с ним произошло, и звать вводить пароль в
-     * инстанс, который всё равно не ответит (сценарий 7 на стенде 18.09).
-     */
-    return 'unreachable';
+  function entryChanged() {
+    return useStore.getState().instanceEpoch !== instanceEpoch ||
+      activeInstanceId() !== activeId || requestedAttempt.current !== attempt;
   }
 
-  /**
-   * 🔴 **Гостевая запись без токена — тупик, и человека надо увести домой.**
-   *
-   * У гостя на чужом инстансе пароля нет и быть не может: за него ручается дом. Но экран входа
-   * ничем не отличается от обычного, и человек послушно вводит туда свой пароль — от СВОЕГО
-   * инстанса. Чужой отвечает «неверный пароль», и выглядит это как «меня не пускает с верным
-   * паролем». Ровно на это налетели на стенде 18.09: выход из аккаунта, стоя гостем, оставлял
-   * человека на экране входа соседа.
-   *
-   * ⚠️ Покрывает ЛЮБОЙ способ остаться без токена: свой выход, «завершить сессию», протухание,
-   * очистку хранилища. Ветка 401 в `loadMe` — про другой случай (токен есть, но хост его не
-   * принял) и остаётся отдельно.
-   */
+  function authenticatedScope(changed = entryChanged) {
+    const account = entryAccount(getToken());
+    const userId = useStore.getState().user?.id;
+    return () => changed() || entryAccount(getToken()) !== account || useStore.getState().user?.id !== userId;
+  }
+
   /**
    * ЛС этап 2 (`docs/dm/STAGE2.md`): говорить ли с ЛС через беседы. Решается ДО подключения шлюза — от этого зависит
    * `caps` в `identify`. После входа по паролю `loadMe` не звали, признаков нет — узнаём их здесь. Сервер без бесед
    * (`conv1`+`conv2`: коробки ≤ 0.8.17) — ЛС нет, в списке заглушка «нужно обновить сервер» (решение владельца 09.10:
    * старого пути `/api/dm*` у клиента больше нет); каналы и голос работают как раньше.
    */
-  async function decideConvMode(stale: () => boolean = () => false): Promise<void> {
+  async function decideConvMode(stale: () => boolean): Promise<void> {
     const st = useStore.getState();
     let features = st.serverFeatures;
     if (features === null) {
-      features = await api
-        .me()
-        .then((me) => {
-          setDmFileLimit(me.features, me.dmFileMaxBytes);
-          return me.features ?? [];
-        })
-        .catch(() => null);
+      const me = await withEntryDeadline((signal) => api.me(signal), ENTRY_TIMEOUT_MS).catch(() => null);
       if (stale()) return;
-      if (features) st.setServerFeatures(features);
+      if (me?.id) {
+        setDmFileLimit(me.features, me.dmFileMaxBytes);
+        features = me.features ?? [];
+        st.setServerFeatures(features);
+      }
     }
     // Оба признака: у сервера 0.8.17 есть `conv1`, но нет `created` и старой рассылки — там ЛС недоступны.
     const active = !!features?.includes(CAP_CONV1) && !!features?.includes(FEATURE_CONV2);
@@ -246,23 +262,22 @@ export function App() {
     }
   }
 
-  function bounceStrandedGuestHome(): boolean {
-    if (getToken()) return false;
-    const cur = activeInstance();
-    const home = instances().find((i) => i.id === cur?.guestOf);
-    if (!cur?.guestOf || !home) return false;
-    const there = cur.name?.trim() || cur.domain || 'соседа';
-    const here = home.name?.trim() || serverHost(home.apiUrl);
-    setLoginNotice(`На «${there}» вы были гостем — паролем туда не войти, туда пускает ваш инстанс. Вернули на «${here}».`);
-    void switchInstance(home.id);
-    return true;
-  }
-
-  /** `stale` — заход устарел: человек уже ушёл в другой инстанс (переход больше не прячет экран, 01.10). */
-  async function bootstrap(stale: () => boolean = () => false) {
+  /** `stale` проверяет, принадлежит ли работа текущему заходу и аккаунту. */
+  async function bootstrap(stale: () => boolean) {
     if (stale()) return;
+    /** Закрытый держателем сервер объясняем окном (#203) только в текущем заходе. */
+    function explainClosedServer(serverId: string): (err: unknown) => never {
+      return (err) => {
+        if (!stale()) {
+          const s = useStore.getState();
+          const notice = noticeFromRefusal(err, { id: serverId, name: s.servers.find((x) => x.id === serverId)?.name ?? 'сервер' });
+          if (notice) s.noteAccessClosed(notice);
+        }
+        throw err;
+      };
+    }
     // Admission and stale-intent cleanup precede both async loading and gateway reconnects.
-    const startupVoice = captureStartupVoiceSession();
+    const startupVoice = useStore.getState().voice ? null : captureStartupVoiceSession();
     await decideConvMode(stale);
     if (stale()) return;
     await loadServers();
@@ -288,18 +303,20 @@ export function App() {
      */
     startPushRegistration();
     // Трансляция геопозиции в ЛС (`geolive1`): идущие с прошлого запуска (в `localStorage`, пока не вышел срок) продолжаются.
-    void import('./geoLiveSharing').then((m) => m.resumeGeoLive(), () => {});
+    void import('./geoLiveSharing').then((m) => { if (!stale()) m.resumeGeoLive(); }, () => {});
     // Reconnect-grace restore (#11): if we dropped from a voice channel within the grace window
     // (crash / quick restart), rejoin it now — mute/deafen come back from the persisted self state.
     // На десктопе — только после заставки (28.10, `splashGate.ts`): иначе прежняя версия заходила в канал, пока
     // заставка ставит обновление, и новая версия — ещё раз.
-    void afterSplash(() => {
-      if (!stale()) startupVoice?.touch();
-    }).then(() => {
-      if (stale()) return;
-      const session = startupVoice?.current();
-      if (session) return restoreVoiceSession(session);
-    });
+    if (startupVoice) {
+      void afterSplash(() => {
+        if (!stale() && !useStore.getState().voice) startupVoice.touch();
+      }).then(() => {
+        if (stale() || useStore.getState().voice) return;
+        const session = startupVoice.current();
+        if (session) return restoreVoiceSession(session);
+      });
+    }
     // Android push deep-link (#118): a cold start from a notification tap has a pending target — jump to it.
     // Забрали ссылку из пуша — «последнее место» ниже её не перебивает: переход идёт асинхронно, и в режиме бесед
     // (список из кеша, без сети) сервер из прошлого места открывался раньше беседы и затирал её.
@@ -312,7 +329,7 @@ export function App() {
      * числе через неделю, когда человек давно вступил.
      */
     const fromPath = inviteCodeFromPath(window.location.pathname);
-    if (fromPath) {
+    if (fromPath && config.apiUrl === invite.current.origin) {
       offerInviteLink(`${window.location.origin}/i/${fromPath}`);
       window.history.replaceState({}, '', '/');
     }
@@ -345,7 +362,7 @@ export function App() {
         if (stale()) return;
       }
     }
-    await joinPendingInvite();
+    await joinPendingInvite(stale);
     if (stale()) return;
     /**
      * Последним делом — вернуть человека туда, где он был до перезагрузки (`lastPlace.ts`).
@@ -379,19 +396,17 @@ export function App() {
    * Пришли по ссылке `?invite=КОД` (#142) — после входа сразу вступаем на сервер. Код забываем, когда
    * вступили или когда он точно мёртв (нет, истёк, бан); сетевой сбой — оставляем до следующего запуска.
    */
-  async function joinPendingInvite() {
+  async function joinPendingInvite(stale: () => boolean) {
     const code = pendingInvite();
     if (!code) return;
-    const epoch = useStore.getState().instanceEpoch;
     try {
       const boot = await api.acceptInvite(code);
-      // Вступили — код потрачен при любом исходе дальше.
+      if (stale() || pendingInvite() !== code) return;
       clearPendingInvite();
       await loadServers();
-      // Человек уже на другом инстансе — «вы на сервере» про прежний там только сбило бы с толку.
-      if (useStore.getState().instanceEpoch !== epoch) return;
-      toast('success', `Вы на сервере «${boot.server.name}»`);
+      if (!stale()) toast('success', `Вы на сервере «${boot.server.name}»`);
     } catch (e) {
+      if (stale() || pendingInvite() !== code) return;
       const status = (e as { status?: number }).status;
       if (status === 404 || status === 410 || status === 403) {
         clearPendingInvite();
@@ -400,17 +415,27 @@ export function App() {
     }
   }
 
+  async function finishAuthentication(stale: () => boolean) {
+    try {
+      await bootstrap(stale);
+    } catch {
+      /* Сбой загрузки не меняет состояние входа. */
+    } finally {
+      if (!stale()) useStore.setState({ switching: false });
+    }
+  }
+
   /** Мастер создал супер-админа — входим так же, как после обычного входа. */
   async function adminCreated(res: AuthResponse) {
+    if (entryChanged() || getToken()) return;
     setToken(res.token);
     setAuth(res.user);
     updateActiveInstance({ userId: res.user.id, displayName: res.user.displayName, lastLogin: res.user.username });
-    setSetup((cur) => ({ needsSetup: false, tokenConfigured: cur?.tokenConfigured ?? true, wizardPending: true }));
-    try {
-      await bootstrap();
-    } catch {
-      /* как и при обычном входе: сбой загрузки сессию не рушит */
-    }
+    setEntry((cur) => cur && {
+      ...cur,
+      setup: { needsSetup: false, tokenConfigured: cur.setup?.tokenConfigured ?? true, wizardPending: true },
+    });
+    await finishAuthentication(authenticatedScope());
   }
 
   useEffect(() => {
@@ -433,6 +458,7 @@ export function App() {
     // сюда. Окно проверки поднимет рейл; входить по ссылке само приложение не станет никогда.
     onDeepLink((url) => offerInviteLink(url));
     // До всего остального: код из ссылки-приглашения убирается из адреса и ждёт входа (#142).
+    if (!needsServerPick()) scopePendingInvite(config.apiUrl);
     captureInviteFromUrl();
     /**
      * Полная ЧУЖАЯ ссылка в `?invite=` — так к нам приходят со страницы перехода соседа (§4.2.2:
@@ -449,85 +475,123 @@ export function App() {
      * а сказать словами можно, только когда станет ясно, какой экран увидит человек: вошедшему — тостом, остальным —
      * строкой на экране входа (тостов там нет вовсе, `ToastHost` живёт в `MainLayout`).
      */
-    const brokenInvite = isBrokenInvitePath(window.location.pathname);
-    if (brokenInvite) window.history.replaceState({}, '', '/');
-    (async () => {
-      // Статус мастера спрашиваем параллельно с профилем. Ошибка (старый бэкенд без ручки) = мастера нет.
-      const status = api.setupStatus().catch(() => null);
-      // Auth check and bootstrap are SEPARATE: a bootstrap failure (loadServers etc. during a backend
-      // blip) must never log the user out — only loadMe() may, and only on a real 401.
-      // ⚠️ Раньше проверки: экран входа гостевой записи показывать нельзя вовсе.
-      if (bounceStrandedGuestHome()) {
-        setSetup(await status);
-        return; // дальше поведёт эффект на `instanceEpoch` — уже на домашней записи
-      }
-      let state: Awaited<ReturnType<typeof loadMe>> | null = null;
-      if (getToken()) {
-        state = await loadMe();
-        setUnreachable(state === 'unreachable');
-        if (state === 'ok') {
-          try {
-            await bootstrap();
-          } catch {
-            /* transient — session stays; a reload re-runs bootstrap */
-          }
-        }
-      }
-      // «Инстанс не отвечает» — ни тоста, ни экрана входа там нет; ушли в другой инстанс, пока грузились (`stale`), —
-      // человек уже занят другим. В обоих случаях объяснение про ссылку было бы не к месту.
-      if (brokenInvite && state !== 'unreachable' && state !== 'stale') {
-        if (useStore.getState().user) toast('error', BROKEN_INVITE_TITLE, BROKEN_INVITE_HINT);
-        else setLoginNotice(`${BROKEN_INVITE_TITLE}. ${BROKEN_INVITE_HINT}`);
-      }
-      setSetup(await status);
-      setLoading(false);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    invite.current.broken = isBrokenInvitePath(window.location.pathname);
+    if (invite.current.broken) window.history.replaceState({}, '', '/');
+
+    const query = new URLSearchParams(window.location.search);
+    steamResult.current = query.get('steam');
+    if (steamResult.current) {
+      query.delete('steam');
+      const search = query.toString();
+      window.history.replaceState({}, '', window.location.pathname + (search ? `?${search}` : '') + window.location.hash);
+    }
   }, []);
 
-  /**
-   * Перешли в другой инстанс без перезапуска (§5.7) — проходим вход заново.
-   *
-   * 🔴 Тот же самый путь, что и на старте (`loadMe` → `bootstrap`), намеренно: две разные дороги в
-   * загруженное состояние разъезжаются на первой же добавленной строчке, и разъехались бы молча —
-   * переход между инстансами бывает у считаных людей.
-   *
-   * ⚠️ Нулевое поколение пропускаем: это обычный старт, его ведёт эффект монтирования ниже.
-   * ⚠️ `setLoading(true)` на время перехода — иначе человек секунду смотрит на пустой рейл
-   * прежнего инстанса и думает, что его выкинуло.
-   */
+  // Один заход для запуска, Retry и перехода. Смена записи инвалидирует его синхронно, ещё до cleanup эффекта.
   useEffect(() => {
-    if (instanceEpoch === 0) return;
-    /* 🔴 Переход между инстансами больше НЕ показывает экран загрузки (01.10): главный экран остаётся на месте —
-       рейл, человек внизу и голос, который принадлежит своему инстансу (`instanceSwitch.ts`), а середина ждёт свой
-       сервер. Раньше «Loading…» снимал весь `MainLayout`, вместе с ним и комнату голоса — моргало и выкидывало.
-       Экран не закрыт — значит, рейл нажимают и во время захода: каждый шаг проверяет, не устарел ли он. */
-    const stale = () => useStore.getState().instanceEpoch !== instanceEpoch;
-    // Экран «не отвечает» был про ПРЕЖНИЙ инстанс — без сброса он говорил бы это про новый, пока идёт заход.
-    setUnreachable(false);
-    (async () => {
-      if (!bounceStrandedGuestHome() && getToken()) {
-        const state = await loadMe();
-        if (stale() || state === 'stale') return;
-        setUnreachable(state === 'unreachable');
-        // Вход не принят: `switchedInstance` больше не стирает человека, раз у цели был токен, — стираем здесь, иначе
-        // на экране остался бы прежний профиль вместо формы входа (или увода гостя домой — он уже запущен).
-        if (state === 'unauthorized') useStore.setState({ user: null });
-        if (state === 'ok') {
-          try {
-            await bootstrap(stale);
-          } catch {
-            /* сеть моргнула — сессия остаётся, перезагрузка добьёт */
+    if (needsServerPick()) return;
+    const controller = new AbortController();
+    const cancelled = () => controller.signal.aborted || entryChanged();
+
+    const record = activeInstance();
+    const host = serverHost(config.apiUrl);
+    const home = instances().find((instance) => instance.id === record?.guestOf && !instance.guestOf);
+    const notice = guestNotice.current;
+    const incomingNotice = notice?.epoch === instanceEpoch && notice.id === activeId ? notice.text : null;
+
+    // Код короткой ссылки относится к инстансу, на котором получен. Вход у другого не должен подставлять его в форму.
+    const inviteState = invite.current;
+    scopePendingInvite(config.apiUrl);
+
+    function publish(problem: EntryProblem | null, setup: SetupStatus | null = null, message = incomingNotice) {
+      setEntry({ epoch: instanceEpoch, attempt, problem, setup, notice: message });
+      if (problem || !useStore.getState().user) useStore.setState({ switching: false });
+    }
+
+    function returnFromGuest(expired: boolean) {
+      const message = expired
+        ? `Гостевая сессия на «${host}» истекла.`
+        : `Для входа на «${host}» нужна гостевая сессия от вашего инстанса.`;
+      if (home) {
+        guestNotice.current = {
+          epoch: instanceEpoch + 1,
+          id: home.id,
+          text: `${message} Ваш инстанс — «${serverHost(home.apiUrl)}».`,
+        };
+        void switchInstance(home.id);
+      } else {
+        publish('guest', null, message);
+      }
+    }
+
+    async function enter() {
+      if (record?.guestOf && !getToken()) {
+        returnFromGuest(false);
+        return;
+      }
+
+      const account = entryAccount(getToken());
+      const stale = authenticatedScope(cancelled);
+      const setupCheck = web || !account ? checkSetup(controller.signal) : null;
+      let authed = false;
+      if (account) {
+        const profile = await checkProfile(stale, controller.signal);
+        if (stale() || profile === 'stale') return;
+        if (profile === 'unreachable' || profile === 'refused') {
+          publish(profile);
+          return;
+        }
+        if (profile === 'unauthorized') {
+          setToken(null);
+          const s = useStore.getState();
+          if (s.voice && voiceIsHere(s.voice)) s.leaveVoice();
+          else clearVoiceSession(activeId);
+          s.setServerFeatures(null);
+          useStore.setState({ user: null });
+          if (record?.guestOf) {
+            returnFromGuest(true);
+            return;
           }
+        } else {
+          setDmFileLimit(profile.user.features, profile.user.dmFileMaxBytes);
+          useStore.getState().setServerFeatures(profile.user.features ?? []);
+          noteActiveSuperAdmin(!!profile.user.superAdmin);
+          setAuth(profile.user);
+          authed = true;
         }
       }
-      if (!stale()) {
-        setLoading(false);
-        useStore.setState({ switching: false });
+
+      const currentAccount = authenticatedScope(cancelled);
+      // Для обычного пользователя статус мастера ни на что не влияет.
+      const result = !authed || useStore.getState().user?.superAdmin ? await setupCheck : null;
+      if (currentAccount()) return;
+      if (!account && result?.problem) {
+        publish(result.problem);
+        return;
       }
-    })();
+
+      let message = incomingNotice;
+      if (config.apiUrl === inviteState.origin) {
+        if (inviteState.broken) {
+          inviteState.broken = false;
+          if (authed) toast('error', BROKEN_INVITE_TITLE, BROKEN_INVITE_HINT);
+          else message = [message, `${BROKEN_INVITE_TITLE}. ${BROKEN_INVITE_HINT}`].filter(Boolean).join(' ');
+        }
+        if (steamResult.current) {
+          if (steamResult.current === 'linked') toast('success', 'Steam привязан');
+          else toast('error', 'Не удалось привязать Steam');
+          steamResult.current = null;
+        }
+      }
+      if (authed && incomingNotice) toast('info', incomingNotice);
+      publish(null, web ? result?.setup ?? null : null, message);
+      if (authed) await finishAuthentication(currentAccount);
+    }
+
+    void enter();
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceEpoch]);
+  }, [instanceEpoch, attempt]);
 
   // Desktop game-activity reporter (#40): run while authed (re-syncs when the user toggles the switch,
   // since `user` changes), stop on logout. Self-gates to desktop, so it's a no-op on web/mobile.
@@ -566,90 +630,119 @@ export function App() {
   // настройках просто остаётся ссылка на то, чего больше нет.
   useEffect(() => startDeviceWatch(), []);
 
-  // Steam OpenID link (#40 Phase 1B) bounces back to `/?steam=linked|error` — toast the result,
-  // refresh our profile (so steamLinked/persona show), and strip the query param.
-  useEffect(() => {
-    const sp = new URLSearchParams(window.location.search);
-    const s = sp.get('steam');
-    if (!s) return;
-    sp.delete('steam');
-    window.history.replaceState({}, '', window.location.pathname + (sp.toString() ? `?${sp}` : ''));
-    if (s === 'linked') {
-      toast('success', 'Steam привязан');
-      void api.me().then(setAuth).catch(() => {});
-    } else {
-      toast('error', 'Не удалось привязать Steam');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const current = entry?.epoch === instanceEpoch && entry.attempt === attempt ? entry : null;
+  const setup = current?.setup;
+  const problem = current ? current.problem : 'checking';
+  const registry = instances();
+  const record = registry.find((instance) => instance.id === activeId);
+  const strandedGuest = !!record?.guestOf && !user;
+  const recover = problem ?? (strandedGuest ? 'guest' : null);
+  const voiceId = voice?.instanceId;
+  const voiceOwner = voiceId && registry.find((instance) => instance.id === voiceId && instance.token);
+  const voiceTarget = voiceId !== activeId && voiceOwner;
+  const targets = savedEntryTargets(registry, activeId);
+  const recoveryTargets = voiceTarget ? targets.filter((target) => target.id !== voiceTarget.id) : targets;
+  const authNotice = current?.notice && <div className="auth-notice" role="status">{current.notice}</div>;
 
-  // Generic desktop/mobile build with no server chosen yet → ask which server to connect to first.
-  // (Stable per mount: only a reload — after the picker saves — changes it. Web is never in this mode.)
-  // Мастер установки — только в вебе: у десктопа и Android нет своего инстанса, они подключаются к чужому.
-  const web = !isTauri();
-  /**
-   * Пришли по ссылке `/i/<код>` (§4.2.2). Пока человек не вошёл, показываем страницу перехода: она
-   * пробует отдать ссылку приложению и предлагает запасные пути. Вошедшему она не нужна — ему
-   * открывается обычное окно проверки поверх приложения (ссылку уже приняли в `bootstrap`).
-   */
-  const landingCode = user ? null : inviteCodeFromPath(window.location.pathname);
-  const content = landingCode && !needsServerPick() && !loading ? (
+  function navigate(id: string) {
+    if (entryChanged()) return;
+    guestNotice.current = null;
+    void switchInstance(id);
+  }
+
+  function choose(id: string) {
+    if (savedEntryTargets(instances(), activeInstanceId()).some((target) => target.id === id)) navigate(id);
+  }
+
+  // /i/<код> уже вошедшему откроет окно проверки из bootstrap. Для гостя без сессии пароль не предлагаем.
+  const landingCode = !user && !strandedGuest && config.apiUrl === invite.current.origin
+    ? inviteCodeFromPath(window.location.pathname)
+    : null;
+  const recoveryScreen = recover && (
+    <InstanceUnreachable
+      problem={recover}
+      host={serverHost(config.apiUrl)}
+      savedSession={!!getToken()}
+      notice={current?.notice ?? (guestNotice.current?.epoch === instanceEpoch && guestNotice.current.id === activeId
+        ? guestNotice.current.text
+        : null)}
+      targets={recoveryTargets}
+      onSelect={choose}
+      onRetry={recover === 'unreachable' || recover === 'refused' ? () => {
+        if (!entryChanged()) setAttempt(++requestedAttempt.current);
+      } : undefined}
+      onReturnToVoice={voiceTarget ? () => {
+        if (useStore.getState().voice === voice && instances().some((instance) => instance.id === voiceTarget.id && instance.token)) {
+          navigate(voiceTarget.id);
+        }
+      } : undefined}
+      onLeaveVoice={voice ? () => {
+        const s = useStore.getState();
+        if (!entryChanged() && s.voice === voice) s.leaveVoice();
+      } : undefined}
+    />
+  );
+  const pickingServer = needsServerPick();
+  const screen = pickingServer ? (
+    <ServerPicker />
+  ) : recoveryScreen ? recoveryScreen : landingCode ? (
     <InviteLanding
       code={landingCode}
       onHere={() => {
-        // «У меня аккаунт здесь» — запоминаем код и уходим на обычный вход; после него `bootstrap`
-        // вступит по нему сам (тот же путь, что у ссылки `?invite=` из мастера).
+        if (entryChanged()) return;
         rememberInvite(landingCode);
         window.history.replaceState({}, '', '/');
         setLandingDismissed(true);
       }}
     />
-  ) : needsServerPick() ? (
-    <ServerPicker />
-  ) : loading || (switching && !user) ? (
-    <div className="center muted">Loading…</div>
-  ) : unreachable ? (
-    /* Сессия цела, отвечать некому. Форма входа здесь была бы неправдой — см. `InstanceUnreachable`. */
-    <InstanceUnreachable
-      onRetry={() => {
-        setUnreachable(false);
-        setLoading(true);
-        void (async () => {
-          const state = await loadMe();
-          setUnreachable(state === 'unreachable');
-          if (state === 'ok') {
-            try {
-              await bootstrap();
-            } catch {
-              /* та же логика, что и на старте: сбой загрузки сессию не рушит */
-            }
-          }
-          setLoading(false);
-        })();
-      }}
-    />
   ) : !user ? (
     setup?.needsSetup && web ? (
-      <SetupAdminWizard tokenConfigured={setup.tokenConfigured} onAdminCreated={adminCreated} />
+      <>
+        {authNotice}
+        <SetupAdminWizard tokenConfigured={setup.tokenConfigured} onAdminCreated={adminCreated} />
+      </>
     ) : (
-      <Login onAuthed={bootstrap} setupPending={!!setup?.needsSetup} />
+      <>
+        {authNotice}
+        {targets.length > 0 && (
+          <details>
+            <summary>Сохранённые входы</summary>
+            <div className="unreachable-actions"><EntryChoices targets={targets} onSelect={choose} /></div>
+          </details>
+        )}
+        <Login
+          key={instanceEpoch}
+          onAuthed={() => {
+            if (!entryChanged() && getToken()) return finishAuthentication(authenticatedScope());
+          }}
+          setupPending={!!setup?.needsSetup}
+        />
+      </>
     )
   ) : user.superAdmin && setup?.wizardPending && web ? (
-    <SetupConfigureWizard
-      onFinished={async () => {
-        setSetup((cur) => (cur ? { ...cur, wizardPending: false } : cur));
-        await loadServers();
-      }}
-    />
-  ) : (
     <>
-      <MainLayout />
-      {/* «Поделиться в GusVoice» (09.10, G79): окно выбора беседы для пришедшего из чужого приложения (только Android). */}
-      <ShareIncoming />
-      {/* Картинки и GIF из клавиатуры (G50): встают вложением в поле открытой беседы (только Android). */}
-      <KeyboardContentIncoming />
+      {authNotice}
+      <SetupConfigureWizard
+        onFinished={async () => {
+          if (entryChanged()) return;
+          setEntry((cur) => cur?.setup ? { ...cur, setup: { ...cur.setup, wizardPending: false } } : cur);
+          await loadServers();
+        }}
+      />
     </>
-  );
+  ) : null;
+
+  // Пока у комнаты есть своя сессия, смена показанного инстанса меняет содержимое того же MainLayout.
+  const keepRoom = !!voiceOwner && !!getToken() && !!recoveryScreen && !pickingServer;
+  const content = !screen || keepRoom ? (
+    <>
+      <MainLayout connectionScreen={screen} />
+      {/* «Поделиться в GusVoice» (09.10, G79): окно выбора беседы для пришедшего из чужого приложения (только Android). */}
+      {!screen && <ShareIncoming />}
+      {/* Картинки и GIF из клавиатуры (G50): встают вложением в поле открытой беседы (только Android). */}
+      {!screen && <KeyboardContentIncoming />}
+    </>
+  ) : screen;
 
   return (
     <>

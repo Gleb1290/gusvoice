@@ -6,6 +6,8 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { createStore } from 'zustand/vanilla';
 import * as channelRules from './channelRules';
+import { instanceFrom } from './configRules';
+import { savedEntryTargets, withEntryDeadline } from './entryRules';
 import * as convSyncRules from './convSyncRules';
 import * as streamAudioRules from './streamAudioRules';
 import * as scopeRules from './instanceScopeRules';
@@ -812,28 +814,29 @@ describe('проводка навигации без обрыва голоса',
     assert.ok(leave >= 0 && leave < remove.indexOf('removeInstance(inst.id)'));
   });
 
-  it('Loading не снимает комнату при переходе с действующим входом', () => {
-    // Ловит размонтирование VoiceConnection на каждом клике по чужому серверу.
-    assert.match(source('App.tsx'), /loading \|\| \(switching && !user\) \? \(\s*<div[^>]*>Loading/);
+  it('при отказе доступны свои сохранённые входы и гостевые сессии выбранного дома', () => {
+    const entry = (id: string, token: string | null, guestOf?: string) => ({
+      ...instanceFrom({ apiUrl: `https://${id}.invalid`, presenceWs: '' }, token, 0, id), guestOf,
+    });
+    const home = entry('home', 'home-token');
+    const records = [home, entry('guest', 'peer-token', 'home'), entry('other', 'other-token'),
+      entry('foreign', 'different-account', 'other'), entry('expired', null, 'home')];
+    assert.deepEqual(savedEntryTargets(records, home.id).map(({ id }) => id), ['guest', 'other']);
+    assert.deepEqual(savedEntryTargets([{ ...home, token: null }, ...records.slice(1)], home.id)
+      .map(({ id }) => id), ['other']);
   });
 
-  it('устаревший заход не поднимает кеш и не запускает серверы после перехода', () => {
-    // Ловит позднюю запись кеша или bootstrap прежнего инстанса поверх нового.
-    const mode = functionText('App.tsx', 'decideConvMode').replace(/\/\/[^\n]*/g, '');
-    assert.match(mode, /await api[\s\S]*?\.catch\(\(\) => null\);\s*if \(stale\(\)\) return/);
-    assert.match(mode, /await finishConvCacheWipes\(\);\s*if \(stale\(\)\) return/);
-    assert.match(mode, /await readConvCache\(key\);\s*if \(stale\(\)\) return/);
-    const boot = functionText('App.tsx', 'bootstrap');
-    for (const call of ['decideConvMode(stale)', 'loadServers()', 'joinPendingInvite()']) {
-      const at = boot.indexOf(`await ${call};`);
-      assert.ok(at >= 0 && /^\s*if \(stale\(\)\) return/.test(boot.slice(at + `await ${call};`.length)), call);
-    }
-    assert.match(boot, /openServer\(pending\.serverId\)[\s\S]*?\.catch\(\(\) => \{\}\);\s*if \(stale\(\)\) return/);
-    const app = source('App.tsx');
-    const epoch = app.slice(app.indexOf('const stale = () => useStore.getState().instanceEpoch'), app.indexOf('}, [instanceEpoch])'));
-    assert.match(epoch, /await loadMe\(\);\s*if \(stale\(\) \|\| state === 'stale'\) return/);
-    assert.match(epoch, /await bootstrap\(stale\)/);
-    assert.match(epoch, /if \(!stale\(\)\) \{\s*setLoading\(false\)/);
+  it('смена инстанса отменяет зависшую проверку даже при медленном чтении тела', async () => {
+    const scope = new AbortController();
+    let aborted = false;
+    const pending = withEntryDeadline((signal) => {
+      signal.addEventListener('abort', () => { aborted = true; });
+      return new Promise(() => {});
+    }, 10_000, scope.signal);
+    scope.abort();
+    await assert.rejects(pending);
+    assert.equal(aborted, true);
+    assert.equal(await withEntryDeadline(async () => 'готово', 1000), 'готово');
   });
 
   it('экранный шлюз не перемещает голос, принадлежащий другому инстансу', () => {

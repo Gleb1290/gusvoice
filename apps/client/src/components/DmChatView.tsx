@@ -932,6 +932,7 @@ export function DmChatView({ dm }: { dm: DmChannel }) {
 
   return (
     <MessagePane
+      focusComposerOnOpen
       nameOf={nameOf}
       quoteNames
       // Файл до 512 МБ кусками (`bigfile1`) — путём бесед (`api.convUpload`).

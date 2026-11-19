@@ -2114,6 +2114,7 @@ export function MessagePane({
   onEscapeClose,
   emptyState,
   headerActions,
+  focusComposerOnOpen = false,
   composerReplacement,
   composerNotice,
   topBar,
@@ -2426,6 +2427,8 @@ export function MessagePane({
   emptyState?: ReactNode;
   /** Optional controls rendered right-aligned in the top bar (e.g. a DM push-mute toggle). */
   headerActions?: ReactNode;
+  /** Перевести курсор в поле при выборе личной беседы в десктопном приложении. */
+  focusComposerOnOpen?: boolean;
   /** Вместо поля ввода — эта разметка (например, плашка блокировки в ЛС, #212). */
   composerReplacement?: ReactNode;
   /**
@@ -4456,6 +4459,16 @@ export function MessagePane({
   const goLatestRef = useRef(goLatest);
   goLatestRef.current = goLatest;
   const downAsk = useStore((s) => (feedId && s.feedDownAsk?.id === feedId ? s.feedDownAsk.n : 0));
+  useLayoutEffect(() => {
+    if (!focusComposerOnOpen || !isDesktop()) return;
+    const field = inputRef.current;
+    if (!field || document.querySelector(`[aria-modal="true"], .modal-overlay, ${TOP_LAYERS}`)) return;
+    field.focus({ preventScroll: true });
+    if (document.activeElement === field) {
+      const end = field.value.length;
+      field.setSelectionRange(end, end);
+    }
+  }, [focusComposerOnOpen, downAsk]);
   useEffect(() => {
     if (downAsk > 0) void goLatestRef.current();
   }, [downAsk]);

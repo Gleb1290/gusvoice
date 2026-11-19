@@ -342,6 +342,8 @@ async function parseResponse<T>(res: Response): Promise<T> {
 interface ReqOptions {
   keepalive?: boolean;
   timeoutMs?: number;
+  /** Срок проверки входа охватывает запрос и чтение тела. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -440,23 +442,25 @@ interface Transport {
 const activeTransport: Transport = {
   async req<T>(method: string, path: string, body?: unknown, opts?: ReqOptions): Promise<T> {
     const sent = epoch;
+    const sentToken = token;
     const res = await fetchWithin(
       `${config.apiUrl}/api${path}`,
       {
         method,
         headers: {
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(sentToken ? { Authorization: `Bearer ${sentToken}` } : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         ...(opts?.keepalive ? { keepalive: true } : {}),
+        ...(opts?.signal ? { signal: opts.signal } : {}),
       },
       opts?.timeoutMs,
     );
     // Пока ходили, человек перешёл в другой инстанс — ответ относится к прежнему, и место ему в
     // мусоре, а не в сторе. 401 от покинутого инстанса тем более не должен никого разлогинивать.
     if (sent !== epoch) throw switchedAway();
-    absorbRefresh(res);
+    if (!opts?.signal?.aborted && token === sentToken) absorbRefresh(res);
     // Тело дочитывается позже заголовков — переход мог случиться и в это время (рейл открыт во время перехода, 01.10).
     let out: T;
     try {
@@ -510,7 +514,7 @@ function recordTransport(localId: string): Transport {
   const record = () => instances().find((i) => i.id === localId) ?? null;
   const send = async (
     path: string,
-    init: { method: string; headers?: Record<string, string>; body?: BodyInit; keepalive?: boolean },
+    init: { method: string; headers?: Record<string, string>; body?: BodyInit; keepalive?: boolean; signal?: AbortSignal },
     timeoutMs?: number,
     upload?: UploadOpts,
     putMethod?: 'PUT',
@@ -528,7 +532,7 @@ function recordTransport(localId: string): Transport {
     // ответом человек мог перелогиниться, и старое продление затёрло бы новый вход.
     const fresh = res.headers.get('x-refresh-token');
     const now = record();
-    if (fresh && now && now.token === sent && fresh !== sent) {
+    if (!init.signal?.aborted && fresh && now && now.token === sent && fresh !== sent) {
       if (localId === activeInstanceId()) setToken(fresh);
       else updateInstance(localId, { token: fresh });
     }
@@ -544,6 +548,7 @@ function recordTransport(localId: string): Transport {
           headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body),
           ...(opts?.keepalive ? { keepalive: true } : {}),
+          ...(opts?.signal ? { signal: opts.signal } : {}),
         },
         opts?.timeoutMs,
       );
@@ -573,6 +578,7 @@ function viaTransport(session: ConvFallbackSession): Transport {
           method,
           headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...auth },
           body: body === undefined ? undefined : JSON.stringify(body),
+          ...(opts?.signal ? { signal: opts.signal } : {}),
         },
         opts?.timeoutMs,
       );
@@ -676,7 +682,7 @@ function makeApi(t: Transport) {
   removePushAlways: (targetId: string) => req<void>('DELETE', '/push/always', { scope: 'dm_user', targetId }),
   loginTotp: (challenge: string, code: string) =>
     req<AuthResponse>('POST', '/auth/login/totp', { challenge, code }),
-  me: () => req<User>('GET', '/auth/me'),
+  me: (signal?: AbortSignal) => signal ? t.req<User>('GET', '/auth/me', undefined, { signal }) : req<User>('GET', '/auth/me'),
   updateProfile: (body: {
     displayName?: string;
     showGameActivity?: boolean;
@@ -1880,7 +1886,8 @@ function makeApi(t: Transport) {
   /** Публично: что предложить на странице `/i/<код>` тому, кто ещё не вошёл (§4.2.2). */
   inviteOpen: (code: string) =>
     req<{ known: boolean; peers: { name: string; clientOrigin: string }[] }>('GET', `/invites/${encodeURIComponent(code)}/open`),
-  setupStatus: () => req<SetupStatus>('GET', '/setup/status'),
+  setupStatus: (signal?: AbortSignal) =>
+    signal ? t.req<SetupStatus>('GET', '/setup/status', undefined, { signal }) : req<SetupStatus>('GET', '/setup/status'),
   setupCheckToken: (token: string) => req<void>('POST', '/setup/check-token', { token }),
   setupAdmin: (b: { token: string; username: string; email: string; password: string; displayName?: string }) =>
     req<AuthResponse>('POST', '/setup/admin', b),

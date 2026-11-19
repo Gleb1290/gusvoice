@@ -120,6 +120,49 @@ function feedMutantTest(name: string, scenario: () => Promise<void>) {
 }
 
 // ---- behavior: сохранены исходные сценарии и матрицы. ----
+it('выбор ЛС на десктопе ставит каретку в конец черновика, обновление истории оставляет выбранный фокус', async () => {
+  feedPatch(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
+  const { useStore } = await h.server.ssrLoadModule('/src/store.ts') as typeof import('../store');
+  const draft = { text: 'Черновик', replyToId: null };
+  const props = { focusComposerOnOpen: true, feedId: 'focus-dm', draft };
+  await h.mount(props);
+  const field = h.host.querySelector<HTMLTextAreaElement>('.composer-input')!;
+  assert.equal(document.activeElement, field);
+  assert.equal(field.selectionStart, draft.text.length);
+  assert.equal(field.selectionEnd, draft.text.length);
+
+  const chatRow = document.createElement('button');
+  document.body.append(chatRow);
+  chatRow.focus();
+  await h.rerender({ ...props, messages: [h.msg('new')] });
+  assert.equal(document.activeElement, chatRow);
+  await act(async () => { useStore.setState({ feedDownAsk: { id: props.feedId, n: 1 } }); });
+  assert.equal(document.activeElement, field);
+});
+
+it('фокус при открытии ЛС уступает диалогу и остаётся на месте в браузере и мобильном приложении', async () => {
+  h.desktop();
+  await h.mount({ focusComposerOnOpen: true });
+  assert.equal(document.activeElement, document.body);
+  h.unmount();
+
+  h.mobile();
+  await h.mount({ focusComposerOnOpen: true });
+  assert.equal(document.activeElement, document.body);
+  h.unmount();
+
+  h.desktop();
+  feedPatch(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
+  const dialog = document.createElement('div');
+  dialog.setAttribute('aria-modal', 'true');
+  const button = document.createElement('button');
+  dialog.append(button);
+  document.body.append(dialog);
+  button.focus();
+  await h.mount({ focusComposerOnOpen: true });
+  assert.equal(document.activeElement, button);
+});
+
 async function checkAttachKey(component = h.Pane) {
   // Общий запрет браузерных клавиш не должен гасить прикрепление, а окно поверх не должно пропускать его в беседу.
   h.round12(); h.desktop(); await h.mount({ messages: [h.msg('attach-key')] }, component);
@@ -918,6 +961,7 @@ it('старая отправка получает время постановк
 });
 it('DmChatView применяет тихое прочтение через настоящий стор, не перемонтирует ленту и не гасит unread', async () => {
   // Ловит разрыв цепочки сводка → подписка DmChatView → галочки MessagePane.
+  feedPatch(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
   const { DmChatView } = await h.server.ssrLoadModule('/src/components/DmChatView.tsx') as typeof import('./DmChatView');
   const { useStore } = await h.server.ssrLoadModule('/src/store.ts') as typeof import('../store');
   h.resetStore = () => useStore.getState().convReset();
@@ -931,6 +975,7 @@ it('DmChatView применяет тихое прочтение через на�
     dmMessages: { c: messages }, unreadDms: ['c'], dms: [dm], currentDmId: 'c', view: 'dm', drafts: {}, draftRev: {}, outbox: {} });
   h.host = document.createElement('div'); document.body.append(h.host); h.root = createRoot(h.host);
   await act(async () => { h.root!.render(createElement(DmChatView, { dm })); }); await h.flush();
+  assert.equal(document.activeElement, h.host.querySelector('.composer-input'));
   const list = h.host.querySelector('.messages'); assert.ok(list); h.rendered.length = 0;
   const unread = useStore.getState().unreadDms;
   await act(async () => { useStore.getState().convOnChange({ pts: 101, conversation: { ...summary, peerReadKey: 30 } }, false); });
