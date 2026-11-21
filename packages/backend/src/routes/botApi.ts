@@ -29,8 +29,7 @@ import {
   BotApiError,
   botTokenFromHeader,
   CALLBACK_QUERY_INVALID,
-  htmlToMarkers,
-  PARSE_MODE_UNSUPPORTED,
+  clearedWebhook,
   unixSeconds,
   webhookErrorWire,
 } from '../bots/botRules.js';
@@ -54,6 +53,7 @@ import { chatMemberUpdate, recordBotUpdates } from '../bots/botUpdates.js';
 import { kickWebhook, resetWebhookRetry, startBotJobs } from '../bots/webhookDelivery.js';
 import {
   answerCallbackQueryParams,
+  botText,
   deleteMessageParams,
   deleteMyCommandsParams,
   dmChat,
@@ -91,7 +91,7 @@ import {
 import { fanOutSend } from '../convSendFanout.js';
 import { db } from '../db/index.js';
 import { bots, conversationMessageReactions, conversationMessages, users } from '../db/schema.js';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { relayBotTyping } from '../gateway.js';
 import { checkHookTarget, hookUrlErrorEn } from '../safeFetch.js';
 import { attachmentBlocked, isOwnMediaUrl } from '../storage.js';
@@ -104,6 +104,12 @@ const chatNotFound = () => new BotApiError(400, 'Bad Request: chat not found');
 const IP_RATE = { max: 600, windowS: 60 } as const;
 /** Тело метода (JSON/форма); файлы multipart — свои пределы (как у вебхука). */
 const BODY_LIMIT = 64 * 1024;
+/** Бюджет содержимого. На границы и заголовки частей даём отдельный запас BODY_LIMIT. */
+const MULTIPART_LIMIT = 64 * 1024 * 1024;
+const MULTIPART_IN_FLIGHT_MAX = 2;
+const MULTIPART_IDLE_MS = 15_000;
+const MULTIPART_DEADLINE_MS = 120_000;
+const multipartBots = new Set<string>();
 
 interface BotCtx {
   bot: BotRow;
@@ -126,6 +132,10 @@ async function limit(key: string, rate: { max: number; windowS: number }): Promi
 /** Вход бота: заголовок → бот → выключен ли он / боты на инстансе. */
 async function authBot(req: FastifyRequest): Promise<BotCtx> {
   await limit(`botip:${clientIp(req)}`, IP_RATE);
+  return readBotContext(req);
+}
+
+async function readBotContext(req: FastifyRequest): Promise<BotCtx> {
   const token = botTokenFromHeader(req.headers.authorization);
   if (!token) throw unauthorized();
   const found = await botByToken(token);
@@ -135,7 +145,7 @@ async function authBot(req: FastifyRequest): Promise<BotCtx> {
   return { bot: found.bot, user: found.user, allowInternal: settings.allowInternalWebhooks };
 }
 
-async function wireMe(ctx: BotCtx) {
+function wireMe(ctx: BotCtx) {
   return {
     ...toWireUser({ ...ctx.user, bot: true }),
     description: ctx.bot.description,
@@ -220,6 +230,32 @@ const WEBHOOK_ACTIVE_CONFLICT = "Conflict: can't use getUpdates method while web
  * `takeOverConsumer` (новый потребитель) и `closeBotSockets` (токен перевыпущен, бот/боты выключены, задан адрес).
  */
 const polls = new Map<string, Set<(e: BotApiError) => void>>();
+const pendingConsumers = new Map<string, Set<(e: BotApiError) => void>>();
+
+/**
+ * Между первым входом и привязкой были асинхронные операции. Перечитываем доступ, а об отзыве
+ * во время самого перечитывания узнаём из того же вызова, который отключает активных потребителей.
+ * bind регистрирует новый транспорт синхронно, до своего первого await.
+ */
+async function bindConsumer<T>(botId: string, req: FastifyRequest, bind: (ctx: BotCtx) => Promise<T>): Promise<T> {
+  let revoked: BotApiError | undefined;
+  const invalidate = (err: BotApiError) => { revoked = err; };
+  const pending = pendingConsumers.get(botId) ?? new Set();
+  pending.add(invalidate);
+  pendingConsumers.set(botId, pending);
+  try {
+    const ctx = await readBotContext(req);
+    if (revoked) throw revoked;
+    if (ctx.bot.userId !== botId) throw unauthorized();
+    if (ctx.bot.webhookUrl) throw new BotApiError(409, WEBHOOK_ACTIVE_CONFLICT);
+    return bind(ctx);
+  } catch (err) {
+    throw revoked ?? err;
+  } finally {
+    pending.delete(invalidate);
+    if (pending.size === 0) pendingConsumers.delete(botId);
+  }
+}
 
 function kickPolls(botId: string | null, err: BotApiError): void {
   const ids = botId ? [botId] : [...polls.keys()];
@@ -228,21 +264,12 @@ function kickPolls(botId: string | null, err: BotApiError): void {
 
 /**
  * Один потребитель журнала (решение владельца 26.10, C, как Telegram 409): новый getUpdates или WS выбивает прежних —
- * висящий getUpdates отвечает 409 `POLL_CONFLICT`, WS закрывается 4009 (`except` — сам новый сокет). SDK считает это
+ * висящий getUpdates отвечает 409 `POLL_CONFLICT`, WS закрывается 4009. SDK считает это
  * фатальным: запущены два экземпляра бота.
  */
-function takeOverConsumer(botId: string, except?: BotSocket): void {
+function takeOverConsumer(botId: string): void {
   kickPolls(botId, new BotApiError(409, POLL_CONFLICT));
-  for (const s of [...(sockets.get(botId) ?? [])]) {
-    if (s === except) continue;
-    // Из перечня — сразу: 'close' придёт позже (рукопожатие), а новый сокет уже меряет предел `BOT_WS_PER_BOT`.
-    sockets.get(botId)?.delete(s);
-    try {
-      s.close(4009, 'terminated by other connection');
-    } catch {
-      /* уже закрыт */
-    }
-  }
+  for (const stop of sockets.get(botId)?.values() ?? []) stop(4009, 'terminated by other connection');
 }
 
 /** Ожидание getUpdates: выборка → пусто → будильник; выбили/сняли доступ (`kicked`) — ошибка, пачку не отдаём. */
@@ -264,7 +291,7 @@ async function pollLoop(
       const before = deadline - Date.now();
       alarm = before > 0 && !gone.signal.aborted ? armBotWake(botId, before, gone.signal) : null;
       if (alarm) await alarm.ready;
-      const rows = await updatesFrom(botId, from, q.limit ?? 100, q.allowed_updates);
+      const rows = !gone.signal.aborted ? await updatesFrom(botId, from, q.limit ?? 100, q.allowed_updates) : [];
       // Выбили / сняли доступ, пока шла выборка — пачку не отдаём (её заберёт новый потребитель).
       const k1 = kicked();
       if (k1) throw k1;
@@ -283,7 +310,7 @@ async function pollLoop(
 
 const methods: Record<string, Handler> = {
   async getme(ctx) {
-    return await wireMe(ctx);
+    return wireMe(ctx);
   },
 
   async getupdates(ctx, p, { req, reply }) {
@@ -293,30 +320,36 @@ const methods: Record<string, Handler> = {
     const q = getUpdatesParams.parse(p);
     await limit(`botpoll:${ctx.bot.userId}`, BOT_POLL_RATE);
     const botId = ctx.bot.userId;
-    // Один потребитель журнала (решение C, 26.10, как Telegram): этот запрос выбивает висящий getUpdates (409) и WS (4009).
-    takeOverConsumer(botId);
-    const gone = new AbortController();
-    // Выбили (другой потребитель) или сняли доступ (перевыпуск токена, выключение — `closeBotSockets`): ошибка вместо пачки.
-    let kicked: BotApiError | null = null;
-    const kick = (e: BotApiError): void => {
-      kicked = e;
-      gone.abort();
-    };
-    const mine = polls.get(botId) ?? new Set<(e: BotApiError) => void>();
-    mine.add(kick);
-    polls.set(botId, mine);
-    try {
-      if (q.offset !== undefined && q.offset > 0) await confirmUpdates(botId, q.offset);
-      const from = q.offset !== undefined && q.offset > 0 ? q.offset : 0;
-      const deadline = Date.now() + (q.timeout ?? 0) * 1000;
-      // Запрос оборвали (бот перезапустился) — не держать ожидание до конца срока. 'close' у ОТВЕТА (как `botPress.ts`): у
-      // запроса POST 'close' приходит уже после чтения тела, и обрыв клиента он не ловит (аудит 26.10).
-      (reply?.raw ?? req.raw).on('close', () => gone.abort());
-      return await pollLoop(botId, from, deadline, q, gone, () => kicked);
-    } finally {
-      mine.delete(kick);
-      if (mine.size === 0 && polls.get(botId) === mine) polls.delete(botId);
-    }
+    return bindConsumer(botId, req, async () => {
+      if (reply?.raw.destroyed) return;
+      takeOverConsumer(botId);
+      const gone = new AbortController();
+      let kicked: BotApiError | null = null;
+      const kick = (err: BotApiError): void => {
+        kicked = err;
+        gone.abort();
+      };
+      const mine = polls.get(botId) ?? new Set<(e: BotApiError) => void>();
+      mine.add(kick);
+      polls.set(botId, mine);
+      // У запроса POST 'close' приходит после чтения тела. Обрыв клиента виден на ответе.
+      const response = reply?.raw ?? req.raw;
+      const onClose = () => gone.abort();
+      response.on('close', onClose);
+      try {
+        const from = q.offset !== undefined && q.offset > 0 ? q.offset : 0;
+        if (from > 0) await confirmUpdates(botId, from);
+        const deadline = Date.now() + (q.timeout ?? 0) * 1000;
+        const result = await pollLoop(botId, from, deadline, q, gone, () => kicked);
+        if (kicked) throw kicked;
+        if (reply && !gone.signal.aborted) return reply.send(okBody(result));
+        return result;
+      } finally {
+        response.off('close', onClose);
+        mine.delete(kick);
+        if (mine.size === 0 && polls.get(botId) === mine) polls.delete(botId);
+      }
+    });
   },
 
 
@@ -324,20 +357,17 @@ const methods: Record<string, Handler> = {
     const q = setWebhookParams.parse(p);
     const bad = await checkHookTarget(q.url, ctx.allowInternal);
     if (bad) throw new BotApiError(400, `Bad Request: bad webhook: ${hookUrlErrorEn(bad)}`);
-    await db
-      .update(bots)
-      .set({
+    const active = and(eq(bots.userId, ctx.bot.userId), eq(bots.tokenHash, ctx.bot.tokenHash), isNull(bots.disabledAt));
+    await db.transaction(async (tx) => {
+      const [updated] = await tx.update(bots).set({
+        ...clearedWebhook,
         webhookUrl: q.url,
         webhookSecret: q.secret_token,
-        webhookFailures: 0,
-        webhookLastError: null,
-        webhookLastErrorAt: null,
-        webhookDisabledAt: null,
-        // Пакетная доставка (#231) — по согласию бота; без флага — по одному событию, как раньше.
         webhookBatch: q.batch === true,
-      })
-      .where(eq(bots.userId, ctx.bot.userId));
-    if (q.drop_pending_updates) await dropUpdates(ctx.bot.userId);
+      }).where(active).returning({ id: bots.userId });
+      if (!updated) throw unauthorized();
+      if (q.drop_pending_updates) await dropUpdates(updated.id, tx);
+    });
     resetWebhookRetry(ctx.bot.userId);
     // Адрес и WS сразу — дублировали бы друг друга: WS закрывается (как getUpdates отвечает 409).
     closeBotSockets(ctx.bot.userId, 4009, 'webhook is active');
@@ -347,12 +377,13 @@ const methods: Record<string, Handler> = {
 
   async deletewebhook(ctx, p) {
     const q = deleteWebhookParams.parse(p);
-    await db
-      .update(bots)
-      .set({ webhookUrl: null, webhookSecret: null, webhookFailures: 0, webhookLastError: null, webhookLastErrorAt: null, webhookDisabledAt: null })
-      .where(eq(bots.userId, ctx.bot.userId));
+    const active = and(eq(bots.userId, ctx.bot.userId), eq(bots.tokenHash, ctx.bot.tokenHash), isNull(bots.disabledAt));
+    await db.transaction(async (tx) => {
+      const [updated] = await tx.update(bots).set(clearedWebhook).where(active).returning({ id: bots.userId });
+      if (!updated) throw unauthorized();
+      if (q.drop_pending_updates) await dropUpdates(updated.id, tx);
+    });
     resetWebhookRetry(ctx.bot.userId);
-    if (q.drop_pending_updates) await dropUpdates(ctx.bot.userId);
     return true;
   },
 
@@ -394,7 +425,7 @@ const methods: Record<string, Handler> = {
     await limit(`botchat:${botId}:${access.conversationId}`, BOT_CHAT_RATE);
     // Картинки карточек — только из нашего хранилища (как у вебхука); `attachment://` в ЛС не работает: файлы беседы закрытые.
     const embeds = normalizeEmbeds(q.embeds, isOwnMediaUrl, new Map());
-    const text = q.parse_mode ? botHtml((q.text ?? '').trim(), q.parse_mode).trim() : (q.text ?? '').trim();
+    const text = botText(q.text, q.parse_mode);
     if (!text && embeds.length === 0 && files.length === 0) throw new BotApiError(400, 'Bad Request: message text is empty');
     const refs = await storeFiles(ctx, access.conversationId, files);
     const fallback = !text && embeds.length > 0;
@@ -442,7 +473,7 @@ const methods: Record<string, Handler> = {
     const botId = ctx.bot.userId;
     const { access } = await chatFor(ctx, q.chat_id);
     await limit(`botchat:${botId}:${access.conversationId}`, BOT_CHAT_RATE);
-    const text = q.parse_mode ? botHtml(q.text.trim(), q.parse_mode).trim() : q.text.trim();
+    const text = botText(q.text, q.parse_mode);
     // Как Telegram: правка текста без `reply_markup` снимает кнопки (решение владельца #230).
     const res = await editMessage(botId, access, q.message_id, text, { keyboard: q.reply_markup?.inline_keyboard ?? null });
     if (res.kind === 'not-found') throw new BotApiError(400, 'Bad Request: message to edit not found');
@@ -542,7 +573,7 @@ const methods: Record<string, Handler> = {
     if (ch) return ch.channelSetMessageReaction(ctx, p);
     const q = setMessageReactionParams.parse(p);
     const botId = ctx.bot.userId;
-    const { access } = await chatFor(ctx, q.chat_id);
+    const { access, peer } = await chatFor(ctx, q.chat_id);
     await limit(`botchat:${botId}:${access.conversationId}`, BOT_CHAT_RATE);
     const want = [...new Set((q.reaction ?? []).map((r) => r.emoji))];
     for (const e of want) if (!(await reactionAllowed(e))) throw new BotApiError(400, 'Bad Request: reaction is not allowed');
@@ -557,8 +588,10 @@ const methods: Record<string, Handler> = {
       ...want.filter((e) => !have.includes(e)).map((e): [string, 'add'] => [e, 'add']),
     ];
     if (steps.length === 0 && !(await messageFor(q.message_id, botId))) throw new BotApiError(400, 'Bad Request: message to react not found');
+    if (steps.length === 0) return true;
+    const blockedActor = new Set(await isBlockedBy(peer.id, botId) ? [peer.id] : []);
     for (const [emoji, op] of steps) {
-      const res = await reactMessage(botId, access, q.message_id, emoji, op, new Set());
+      const res = await reactMessage(botId, access, q.message_id, emoji, op, blockedActor);
       if (res.kind === 'not-found') throw new BotApiError(400, 'Bad Request: message to react not found');
       if (res.delivery) await deliver({ ...res.delivery, actor: botId, reaction: { userId: botId, emoji, op } });
     }
@@ -604,12 +637,6 @@ function scopeOf(scope: { type: string } | undefined): 'default' | 'all_private_
   return t === 'all_private_chats' || t === 'all_group_chats' ? t : 'default';
 }
 
-/** `parse_mode` в ЛС (#231): `HTML` → наши маркеры, прочее — 400. */
-function botHtml(text: string, mode: string): string {
-  if (mode.trim().toLowerCase() === 'html') return htmlToMarkers(text);
-  throw new BotApiError(400, PARSE_MODE_UNSUPPORTED);
-}
-
 /** Ответ ошибкой провода (+ `Retry-After`). */
 function sendError(reply: FastifyReply, e: BotApiError) {
   if (e.retryAfter) reply.header('Retry-After', String(e.retryAfter));
@@ -631,91 +658,128 @@ interface BotSocket {
   ping?(): void;
   /** 1 = OPEN (ws). Нет поля — считаем открытым. */
   readyState?: number;
+  bufferedAmount?: number;
   on(event: 'message' | 'close' | 'error' | 'pong', cb: (...args: any[]) => void): void;
 }
-const sockets = new Map<string, Set<BotSocket>>();
+const sockets = new Map<string, Map<BotSocket, (code: number, reason: string) => void>>();
+const ACK_INTERVAL_MS = 500;
+const WS_BOT_COMMAND_BYTES = 1024;
+const WS_OUTBOUND_BYTES = 1024 * 1024;
 
-/**
- * Закрыть WS бота (`null` — всех ботов): токен перевыпущен, бот выключен/удалён, задан адрес доставки. Висящий getUpdates
- * тех же ботов просыпается и отвечает ошибкой по коду (аудит 26.10, п.8): 4001 → 401, 4003 → 403, 4009 → 409 — а не отдаёт
- * пачку по уже снятому доступу.
- */
-export function closeBotSockets(botId: string | null, code: number, reason: string): void {
-  kickPolls(
-    botId,
-    code === 4003
-      ? new BotApiError(403, 'Forbidden: bots are disabled on this instance')
-      : code === 4009
-        ? new BotApiError(409, WEBHOOK_ACTIVE_CONFLICT)
-        : unauthorized(),
-  );
-  const ids = botId ? [botId] : [...sockets.keys()];
-  for (const id of ids) {
-    for (const s of [...(sockets.get(id) ?? [])]) {
-      try {
-        s.close(code, reason);
-      } catch {
-        /* уже закрыт */
-      }
+interface AckBatch {
+  offset: number;
+  timer?: ReturnType<typeof setTimeout>;
+  writing: boolean;
+  revision: number;
+}
+const ackBatches = new Map<string, AckBatch>();
+
+/** Не более одной записи на бота за интервал, включая переподключения. Принятый ack переживает обычный close. */
+function queueBotAck(botId: string, offset: number): void {
+  const batch = ackBatches.get(botId) ?? { offset: 0, writing: false, revision: 0 };
+  ackBatches.set(botId, batch);
+  batch.offset = Math.max(batch.offset, offset);
+  scheduleBotAck(botId, batch);
+}
+
+function scheduleBotAck(botId: string, batch: AckBatch): void {
+  if (batch.writing || batch.timer) return;
+  batch.timer = setTimeout(async () => {
+    batch.timer = undefined;
+    batch.writing = true;
+    const offset = batch.offset;
+    const revision = batch.revision;
+    try {
+      const rows = await confirmUpdates(botId, offset);
+      if (batch.revision === revision) await markTakenRead(botId, rows);
+    } catch {
+      // При ошибке неподтверждённые события можно забрать повторно.
+    } finally {
+      batch.writing = false;
+      if (batch.offset > (batch.revision === revision ? offset : 0)) scheduleBotAck(botId, batch);
+      else ackBatches.delete(botId);
     }
+  }, ACK_INTERVAL_MS);
+  batch.timer.unref();
+}
+
+/** Закрыть WS и long poll, отменить их привязку и отложенные подтверждения при отзыве доступа. */
+export function closeBotSockets(botId: string | null, code: number, reason: string): void {
+  const err = code === 4003
+    ? new BotApiError(403, 'Forbidden: bots are disabled on this instance')
+    : code === 4009
+      ? new BotApiError(409, WEBHOOK_ACTIVE_CONFLICT)
+      : unauthorized();
+  kickPolls(botId, err);
+  const ids = botId === null ? new Set([...pendingConsumers.keys(), ...sockets.keys(), ...ackBatches.keys()]) : [botId];
+  for (const id of ids) {
+    for (const invalidate of pendingConsumers.get(id) ?? []) invalidate(err);
+    for (const stop of sockets.get(id)?.values() ?? []) stop(code, reason);
+    const batch = ackBatches.get(id);
+    if (!batch) continue;
+    clearTimeout(batch.timer);
+    batch.timer = undefined;
+    batch.offset = 0;
+    batch.revision++;
+    if (!batch.writing) ackBatches.delete(id);
   }
 }
 
-function wsSend(s: BotSocket, msg: Record<string, unknown>): void {
+function wsSend(s: BotSocket, msg: Record<string, unknown>): boolean {
+  if (s.readyState !== undefined && s.readyState !== 1) return false;
+  const data = JSON.stringify(msg);
+  if ((s.bufferedAmount ?? 0) + Buffer.byteLength(data) > WS_OUTBOUND_BYTES) return false;
   try {
-    s.send(JSON.stringify(msg));
+    s.send(data);
+    return true;
   } catch {
-    /* закрывается */
+    return false;
   }
 }
 
 /**
- * WS: `GET /api/bot/v1/ws?offset=N` с тем же заголовком. Сервер: `{op:"hello", bot}`, затем `{op:"update", update}` по порядку
- * с `offset` (всё до него подтверждено, как у getUpdates); клиент подтверждает `{op:"ack", offset:N}` (всё до N), может слать
- * `{op:"ping"}` → `{op:"pong"}`. Пинг кадрами раз в 30 с; без ответа — обрыв. Коды закрытия: 4001 — токен/бот, 4003 — боты
- * выключены, 4009 — задан адрес доставки ИЛИ подключился другой потребитель (новый WS/getUpdates, решение C 26.10),
- * 4029 — предел частоты.
+ * WS передаёт hello и события после привязки потребителя. Явный ?offset при входе работает как у getUpdates;
+ * кадр ack подтверждает только диапазон, который этот сокет уже отправил.
  */
 async function serveBotSocket(socket: BotSocket, req: FastifyRequest): Promise<void> {
-  let ctx: BotCtx;
+  // ws закрывает соединение после ошибки транспорта. Подписка нужна сразу, в том числе во время входа.
+  socket.on('error', () => {});
   try {
-    ctx = await authBot(req);
-    await limit(`botpoll:${ctx.bot.userId}`, BOT_POLL_RATE);
-  } catch (e) {
-    const code = e instanceof BotApiError ? (e.code === 403 ? 4003 : e.code === 429 ? 4029 : 4001) : 4001;
-    socket.close(code, e instanceof BotApiError ? e.description : 'Unauthorized');
-    return;
+    const ctx = await authBot(req);
+    await limit('botpoll:' + ctx.bot.userId, BOT_POLL_RATE);
+    await bindConsumer(ctx.bot.userId, req, (fresh) => openBotSocket(socket, req, fresh));
+  } catch (err) {
+    if (socket.readyState !== undefined && socket.readyState !== 1) return;
+    const code = err instanceof BotApiError ? ({ 403: 4003, 409: 4009, 429: 4029 } as Record<number, number>)[err.code] ?? 4001 : 4001;
+    const reason = code === 4009 ? 'webhook is active' : err instanceof BotApiError ? err.description : 'Unauthorized';
+    socket.close(code, reason);
   }
-  const botId = ctx.bot.userId;
-  if (ctx.bot.webhookUrl) {
-    socket.close(4009, 'webhook is active');
-    return;
-  }
-  // Сокет мог закрыться, пока шёл вход: обработчика `close` ещё нет, и он навсегда занял бы место в пределе на бота.
+}
+
+async function openBotSocket(socket: BotSocket, req: FastifyRequest, ctx: BotCtx): Promise<void> {
   if (socket.readyState !== undefined && socket.readyState !== 1) return;
-  // Один потребитель (решение C, 26.10): новый WS выбивает прежние (4009) и висящий getUpdates (409). `BOT_WS_PER_BOT` = 1.
-  takeOverConsumer(botId, socket);
-  const mine = sockets.get(botId) ?? new Set<BotSocket>();
+  const botId = ctx.bot.userId;
+  takeOverConsumer(botId);
+  const mine = sockets.get(botId) ?? new Map<BotSocket, (code: number, reason: string) => void>();
   if (mine.size >= BOT_WS_PER_BOT) {
     socket.close(4029, 'too many connections');
     return;
   }
-  mine.add(socket);
-  sockets.set(botId, mine);
 
-  const offsetRaw = Number((req.query as Record<string, unknown> | undefined)?.offset);
-  let cursor = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
-  // Подтверждённое (`?offset`, `ack`) бот забрал — «прочитано» по этим беседам (`markTakenRead`).
-  const confirm = (offset: number): Promise<void> =>
-    confirmUpdates(botId, offset)
-      .then((rows) => markTakenRead(botId, rows))
-      .catch(() => {});
-  // Без ожидания: `updatesFrom` всё равно читает от `cursor`, а `await` здесь открывал окно, где закрытие сокета
-  // приходило раньше обработчика `close` (место в пределе и будильник оставались висеть).
-  if (cursor > 0) void confirm(cursor);
+  const query = (req.query as Record<string, unknown> | undefined)?.offset;
+  const offset = typeof query === 'number' || typeof query === 'string' ? Number(query) : 0;
+  let cursor = Number.isSafeInteger(offset) && offset > 0 ? offset : 0;
+  let acked = cursor;
   let closed = false;
   let pumping = false;
   let pumpAgain = false;
+
+  const send = (msg: Record<string, unknown>): boolean => {
+    if (closed) return false;
+    if (wsSend(socket, msg)) return true;
+    stop(4029, 'outbound buffer limit');
+    return false;
+  };
   const pump = async (): Promise<void> => {
     if (pumping) {
       pumpAgain = true;
@@ -725,38 +789,35 @@ async function serveBotSocket(socket: BotSocket, req: FastifyRequest): Promise<v
     try {
       do {
         pumpAgain = false;
-        for (;;) {
-          if (closed) return;
+        while (!closed) {
           const rows = await updatesFrom(botId, cursor, 100);
-          if (rows.length === 0) break;
-          for (const r of rows) wsSend(socket, { op: 'update', update: wireUpdateOf(r) });
-          cursor = rows[rows.length - 1].updateId + 1;
+          if (closed || rows.length === 0) break;
+          for (const r of rows) {
+            if (!send({ op: 'update', update: wireUpdateOf(r) })) return;
+            cursor = r.updateId + 1;
+          }
         }
-      } while (pumpAgain);
+      } while (!closed && pumpAgain);
     } catch (err) {
       console.warn('[bots] WS:', err instanceof Error ? err.message : err);
     } finally {
       pumping = false;
     }
   };
-  // Будильник ДО первой выборки, а качать начинаем после подтверждения подписки (#229): иначе событие, записанное
-  // между выборкой и SUBSCRIBE, ждало бы следующего. Будильник до старта молча пропускаем — первая выборка его покроет
-  // (событие в журнале раньше, чем его PUBLISH). Повторы невозможны: `cursor` растёт, выборки идут по одной (`pumping`).
+
+  // Сначала подписка, затем первая выборка. Сигнал до первой выборки она сама покроет.
   let started = false;
   const wake = listenBotWake(botId, () => {
     if (started) void pump();
   });
-  const off = wake.off;
   let alive = true;
-  socket.on('pong', () => {
-    alive = true;
-  });
   const pinger = setInterval(() => {
     if (!alive) {
+      cleanup();
       try {
         socket.terminate ? socket.terminate() : socket.close();
       } catch {
-        /* уже */
+        /* уже закрыт */
       }
       return;
     }
@@ -764,35 +825,204 @@ async function serveBotSocket(socket: BotSocket, req: FastifyRequest): Promise<v
     try {
       socket.ping?.();
     } catch {
-      /* уже */
+      stop(1011, 'ping failed');
     }
   }, BOT_WS_PING_MS);
   pinger.unref();
-  socket.on('message', (raw: unknown) => {
-    alive = true;
-    let msg: { op?: unknown; offset?: unknown };
+  function cleanup(): void {
+    if (closed) return;
+    closed = true;
+    clearInterval(pinger);
+    wake.off();
+    mine.delete(socket);
+    if (mine.size === 0 && sockets.get(botId) === mine) sockets.delete(botId);
+  }
+  function stop(code: number, reason: string): void {
+    cleanup();
+    try {
+      socket.close(code, reason);
+    } catch {
+      /* уже закрыт */
+    }
+  }
+  mine.set(socket, stop);
+  sockets.set(botId, mine);
+  socket.on('close', cleanup);
+  socket.on('pong', () => { alive = true; });
+  socket.on('message', (raw: Buffer | string, binary?: boolean) => {
+    if (closed || binary) return;
+    const size = typeof raw === 'string' ? Buffer.byteLength(raw) : raw.length;
+    if (size > WS_BOT_COMMAND_BYTES) {
+      stop(1009, 'command too large');
+      return;
+    }
+    let msg: { op?: unknown; offset?: unknown } | null;
     try {
       msg = JSON.parse(String(raw));
     } catch {
       return;
     }
-    if (msg.op === 'ping') wsSend(socket, { op: 'pong' });
-    else if (msg.op === 'ack' && typeof msg.offset === 'number' && Number.isInteger(msg.offset) && msg.offset > 0) {
-      void confirm(msg.offset);
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.op === 'ping') {
+      alive = true;
+      send({ op: 'pong' });
+    } else if (msg.op === 'ack' && typeof msg.offset === 'number' && Number.isSafeInteger(msg.offset) && msg.offset > acked && msg.offset <= cursor) {
+      alive = true;
+      acked = msg.offset;
+      queueBotAck(botId, acked);
     }
   });
-  socket.on('close', () => {
-    closed = true;
-    clearInterval(pinger);
-    off();
-    mine.delete(socket);
-    if (mine.size === 0) sockets.delete(botId);
-  });
-  wsSend(socket, { op: 'hello', bot: wireMe(ctx) });
+
+  if (!send({ op: 'hello', bot: wireMe(ctx) })) return;
+  if (cursor > 0) queueBotAck(botId, cursor);
   await wake.ready;
   if (closed) return;
   started = true;
   await pump();
+}
+
+function multipartTooLarge(): BotApiError {
+  return new BotApiError(413, 'Request Entity Too Large: multipart body is too large');
+}
+
+function multipartIncomplete(): BotApiError {
+  return new BotApiError(400, 'Bad Request: incomplete multipart body');
+}
+
+async function readBotMultipart(req: FastifyRequest, params: Params, files: Upload[], maxBytes = MULTIPART_LIMIT): Promise<void> {
+  const maxWireBytes = maxBytes + BODY_LIMIT;
+  if (Number(req.headers['content-length']) > maxWireBytes) throw multipartTooLarge();
+  const raw = req.raw;
+  if (raw.destroyed && !raw.readableEnded) throw multipartIncomplete();
+  let wireBytes = 0;
+  let payloadBytes = 0;
+  let cancelFile: (() => void) | undefined;
+  let rejectRead!: (err: BotApiError) => void;
+  const interrupted = new Promise<never>((_resolve, reject) => { rejectRead = reject; });
+  let failure: BotApiError | undefined;
+  const stop = (err: BotApiError): void => {
+    if (failure) return;
+    failure = err;
+    rejectRead(err);
+    raw.unpipe();
+    raw.pause();
+    cancelFile?.();
+  };
+  const idleTimer = setTimeout(() => stop(new BotApiError(408, 'Request Timeout: multipart upload stalled')), MULTIPART_IDLE_MS);
+  const deadline = setTimeout(() => stop(new BotApiError(408, 'Request Timeout: multipart upload took too long')), MULTIPART_DEADLINE_MS);
+  idleTimer.unref();
+  deadline.unref();
+  const onClose = (): void => {
+    if (!raw.readableEnded) stop(multipartIncomplete());
+  };
+  const onData = (chunk: Buffer): void => {
+    if (failure) return;
+    wireBytes += chunk.length;
+    if (wireBytes > maxWireBytes) stop(multipartTooLarge());
+    else idleTimer.refresh();
+  };
+  const reserve = (bytes: number): void => {
+    payloadBytes += bytes;
+    if (payloadBytes > maxBytes) throw multipartTooLarge();
+  };
+  const collect = async (): Promise<void> => {
+    for await (const part of req.parts({
+      limits: { files: WEBHOOK_FILES_MAX, fileSize: WEBHOOK_FILE_MAX_BYTES + 1, fields: 16, fieldSize: BODY_LIMIT + 1 },
+    })) {
+      if (failure) throw failure;
+      if (part.type === 'file') {
+        if (!isWebhookFileField(part.fieldname)) throw new BotApiError(400, 'Bad Request: files go in fields files[0]…files[9]');
+        const chunks: Buffer[] = [];
+        let size = 0;
+        cancelFile = () => part.file.destroy();
+        try {
+          for await (const chunk of part.file) {
+            size += chunk.length;
+            if (size > WEBHOOK_FILE_MAX_BYTES) throw multipartTooLarge();
+            reserve(chunk.length);
+            chunks.push(chunk);
+          }
+          if (part.file.truncated) throw multipartTooLarge();
+        } finally {
+          cancelFile = undefined;
+        }
+        files.push({
+          name: part.filename || 'file',
+          mime: part.mimetype || 'application/octet-stream',
+          buffer: chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size),
+        });
+      } else {
+        if (part.fieldnameTruncated || !Object.hasOwn(sendMessageParams.shape, part.fieldname)) {
+          throw new BotApiError(400, 'Bad Request: unexpected multipart field');
+        }
+        const value = typeof part.value === 'string' ? part.value : JSON.stringify(part.value ?? '');
+        const size = Buffer.byteLength(value);
+        if (part.valueTruncated || size > BODY_LIMIT) throw multipartTooLarge();
+        reserve(size);
+        params[part.fieldname] = value;
+      }
+    }
+  };
+  // В отличие от raw.on('data'), prependListener не запускает чтение. Поток включает pipe парсера,
+  // а счётчик получает каждый chunk перед ним, в том числе первый.
+  raw.prependListener('data', onData);
+  raw.once('close', onClose);
+  try {
+    await Promise.race([interrupted, collect()]);
+    if (raw.aborted) throw multipartIncomplete();
+  } catch (err) {
+    files.length = 0;
+    throw err;
+  } finally {
+    clearTimeout(idleTimer);
+    clearTimeout(deadline);
+    raw.off('data', onData);
+    raw.off('close', onClose);
+  }
+}
+
+async function handleBotMethod(req: FastifyRequest, reply: FastifyReply) {
+  const name = String((req.params as { method?: string }).method ?? '').toLowerCase();
+  const fn = Object.hasOwn(methods, name) ? methods[name] : undefined;
+  // Сначала вход: без токена не подсказываем, какие методы есть.
+  const multipart = req.isMultipart?.() || /^multipart\/form-data(?:\s*;|$)/i.test(req.headers['content-type'] ?? '');
+  let uploadBotId: string | undefined;
+  try {
+    let ctx = await authBot(req);
+    await limit(`botrq:${ctx.bot.userId}`, BOT_RATE);
+    if (!fn) throw new BotApiError(404, 'Not Found: method not found');
+    const files: Upload[] = [];
+    let params: Params = { ...((req.query as Params | undefined) ?? {}) };
+    if (multipart) {
+      if (req.method !== 'POST' || name !== 'sendmessage') {
+        throw new BotApiError(400, 'Bad Request: multipart is accepted only by POST sendMessage');
+      }
+      const botId = ctx.bot.userId;
+      if (multipartBots.has(botId) || multipartBots.size >= MULTIPART_IN_FLIGHT_MAX) {
+        throw new BotApiError(429, 'Too Many Requests: too many simultaneous uploads', 1);
+      }
+      multipartBots.add(botId);
+      uploadBotId = botId;
+      await readBotMultipart(req, params, files);
+      // Загрузка могла идти долго. Проверяем токен и настройки ещё раз перед записью файлов.
+      ctx = await readBotContext(req);
+      if (reply.raw.destroyed) return reply;
+    } else if (req.method === 'POST' && req.body && typeof req.body === 'object') {
+      params = { ...params, ...(req.body as Params) };
+    }
+    const result = await fn(ctx, params, { files, req, reply });
+    if (reply.sent || reply.raw.destroyed) return reply;
+    return reply.send(okBody(result));
+  } catch (err) {
+    if (multipart && !req.raw.readableEnded) {
+      req.raw.unpipe();
+      req.raw.pause();
+      reply.header('Connection', 'close');
+    }
+    throw err;
+  } finally {
+    if (uploadBotId !== undefined) multipartBots.delete(uploadBotId);
+  }
 }
 
 export async function botApiRoutes(app: FastifyInstance): Promise<void> {
@@ -838,33 +1068,7 @@ export async function botApiRoutes(app: FastifyInstance): Promise<void> {
       void serveBotSocket(socket as unknown as BotSocket, req);
     });
 
-    const handle = async (req: FastifyRequest, reply: FastifyReply) => {
-      const name = String((req.params as { method?: string }).method ?? '').toLowerCase();
-      const fn = Object.hasOwn(methods, name) ? methods[name] : undefined;
-      // Сначала вход: без токена не подсказываем, какие методы есть.
-      const ctx = await authBot(req);
-      await limit(`botrq:${ctx.bot.userId}`, BOT_RATE);
-      if (!fn) throw new BotApiError(404, 'Not Found: method not found');
-      const files: Upload[] = [];
-      let params: Params = { ...((req.query as Params | undefined) ?? {}) };
-      if (req.method === 'POST') {
-        if (req.isMultipart()) {
-          for await (const part of req.parts({
-            limits: { files: WEBHOOK_FILES_MAX, fileSize: WEBHOOK_FILE_MAX_BYTES, fields: 16, fieldSize: BODY_LIMIT },
-          })) {
-            if (part.type === 'file') {
-              const buffer = await part.toBuffer();
-              if (!isWebhookFileField(part.fieldname)) throw new BotApiError(400, 'Bad Request: files go in fields files[0]…files[9]');
-              files.push({ name: part.filename || 'file', mime: part.mimetype || 'application/octet-stream', buffer });
-            } else params[part.fieldname] = String(part.value ?? '');
-          }
-        } else if (req.body && typeof req.body === 'object') params = { ...params, ...(req.body as Params) };
-      }
-      if (files.length > 0 && name !== 'sendmessage') throw new BotApiError(400, 'Bad Request: files are accepted only by sendMessage');
-      const result = await fn(ctx, params, { files, req, reply });
-      return reply.send(okBody(result));
-    };
-    api.get('/bot/v1/:method', handle);
-    api.post('/bot/v1/:method', { bodyLimit: BODY_LIMIT }, handle);
+    api.get('/bot/v1/:method', handleBotMethod);
+    api.post('/bot/v1/:method', { bodyLimit: BODY_LIMIT }, handleBotMethod);
   });
 }

@@ -59,7 +59,7 @@
   "object.ChatFullInfo.member_count": "for a server: number of members",
 
   "object.ChatMember": "A server member (`getChatMember`, `getChatMembers`). Permissions are not flags as in Telegram: look up the roles with `getServer`.",
-  "object.ChatMember.user": "the member",
+  "object.ChatMember.user": "profile of an active member. For left or kicked, only the requested ID is meaningful and both names are empty",
   "object.ChatMember.status": "`creator` — owner, `member`, `left`, `kicked` (banned)",
   "object.ChatMember.nickname": "nickname on this server (present if set)",
   "object.ChatMember.role_ids": "ids of the member's roles",
@@ -227,7 +227,7 @@
   "method.setWebhook.notes": "The URL is checked immediately (see [SSRF protection](#ssrf-protection)); an error is `400 Bad Request: bad webhook: …`. After the call `getUpdates` answers `409` and open WebSockets are closed with code `4009`. Calling `setWebhook` again with a new URL or secret resets the failure counter.",
   "param.setWebhook.url": "`https://…`, no login or password in the URL",
   "param.setWebhook.secret_token": "**required**: every delivery is signed with it",
-  "param.setWebhook.batch": "batched delivery: the POST body is an array of up to 100 updates, signed as a whole; a `2xx` confirms the whole batch",
+  "param.setWebhook.batch": "each POST contains up to 100 updates and up to 1 MiB of UTF-8 JSON per batch (a larger individual update is sent alone). The signature and a successful response cover this batch",
 
   "method.deleteWebhook.summary": "Turn delivery to a URL off; returns the bot to `getUpdates`/WebSocket.",
 
@@ -250,7 +250,7 @@
   "param.sendMessage.embeds": "cards, [InputEmbed](#inputembed)",
   "param.sendMessage.disable_link_preview": "no link preview card",
   "param.sendMessage.client_id": "your own id of this send: repeating `sendMessage` with the same `client_id` (a network drop, a restart) returns **the same** message instead of a second one. The same `client_id` with a different chat or content → `400`. Ignored in channels for now",
-  "param.sendMessage.files[0]": "files `files[0]`…`files[9]`: up to **10**, each up to **25 MB**. Other fields are strings; `embeds` and `reply_markup` — JSON strings",
+  "param.sendMessage.files[0]": "up to 10 files in `files[0]`…`files[9]`, up to 25 MiB each and 64 MiB for all files and fields together. Encode `embeds` and `reply_markup` as JSON strings",
 
   "method.editMessageText.summary": "Change the text of the bot's own message.",
   "method.editMessageText.notes": "The result has `edit_date`. Only the bot's **own** messages can be edited, otherwise `400`. The person sees an ordinary edit.",

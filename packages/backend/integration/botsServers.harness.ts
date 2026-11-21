@@ -13,6 +13,7 @@ import * as roleRules from '../src/roleRules.js';
 import * as botRules from '../src/bots/botRules.js';
 import * as botWire from '../src/bots/botWire.js';
 import * as audienceRules from '../src/audienceRules.js';
+import * as attachmentRules from '../src/attachmentRules.js';
 import * as convRules from '../src/convRules.js';
 import * as webhookRules from '../src/webhookRules.js';
 import * as superAdminRules from '../src/superAdminRules.js';
@@ -20,6 +21,8 @@ import * as statusRules from '../src/statusRules.js';
 import * as shopRules from '../src/shopRules.js';
 import * as callRules from '../src/callRules.js';
 import * as lastSeenRules from '../src/lastSeenRules.js';
+import * as setupRules from '../src/setupRules.js';
+import * as storageRules from '../src/storageRules.js';
 import { truncateAll, type TestDb } from './harness.js';
 
 export type Phase3Edit = { file: string; from: string; to: string };
@@ -47,7 +50,7 @@ export async function serverFixture(t: TestDb, edit?: Phase3Edit, extra: { real?
   const noop = async () => {};
   const values: Record<string, unknown> = {
     'db/index': { db: t.db }, 'db/schema': schema, 'bots/botRules': botRules, 'bots/botWire': botWire,
-    roleRules, audienceRules, convRules, webhookRules, superAdminRules, statusRules, shopRules, callRules, lastSeenRules,
+    roleRules, audienceRules, attachmentRules, convRules, webhookRules, superAdminRules, statusRules, shopRules, callRules, lastSeenRules, setupRules, storageRules,
     auth: { isSuperAdmin: () => false, superAdminId: () => null, requireAuth: async (req: FastifyRequest) => { req.user = { sub: String(req.headers['x-user'] ?? 'owner') } as NonNullable<FastifyRequest['user']>; } },
     guestGuard: { requireLocalUser: async () => {} },
     env: { env: { redisUrl: 'redis://unused.invalid', linkThreats: { enabled: false } } },
@@ -62,11 +65,15 @@ export async function serverFixture(t: TestDb, edit?: Phase3Edit, extra: { real?
     'federation/instanceLabels': { instanceLabel: () => ({ domain: 'neighbor.invalid' }) },
     'federation/guestMembership': { announceMembership: noop },
     storage: { attachmentBlocked: () => false, isOwnMediaUrl: () => false, storageConfigured: () => true,
-      putAttachment: async (_id: string, body: Buffer, mime: string, name: string) => { uploads.push({ body, mime, name }); return `https://example.invalid/public/${name}`; } },
+      prepareAttachmentUpload: (_id: string, body: Buffer, mime: string, name: string) => ({
+        url: `https://example.invalid/public/${name}`,
+        put: async () => { uploads.push({ body, mime, name }); },
+        remove: fail('remove attachment'),
+      }) },
     'bots/webhookDelivery': { kickWebhook: () => {} },
   };
   Object.assign(values, extra.values);
-  const real = new Set(['routes/serverBots', 'serverMembership', 'memberEvents', 'permissions', 'bots/botStore', 'bots/botChannel', 'channelMessages', 'channelEvents', 'serialize', ...(extra.real ?? [])]);
+  const real = new Set(['routes/serverBots', 'serverMembership', 'memberEvents', 'permissions', 'bots/botStore', 'bots/botChannel', 'bots/botChannelQuota', 'bots/botChannelUploads', 'channelMessages', 'channelEvents', 'serialize', ...(extra.real ?? [])]);
   const modules = new Map<string, any>();
   const externals: Record<string, unknown> = { '@gusvoice/shared': shared, 'drizzle-orm': orm, 'node:crypto': crypto, zod,
     ioredis: class { constructor() { fail('Redis connection')(); } } };

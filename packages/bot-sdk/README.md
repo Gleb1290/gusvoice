@@ -84,6 +84,9 @@ http.createServer(toNodeHandler(handler)).listen(8080);                   // Bun
 The handler checks `X-GusVoice-Signature` (`t=<unix>,v1=<hex HMAC-SHA256(secret, t + "." + body)>`) with a 5-minute window
 and a constant-time comparison; a bad signature gets 401. `verifyWebhookSignature(secret, header, rawBody)` is exported too.
 
+The server limits batches to 1 MiB and sends a larger individual update on its own. The Node handler accepts 1 MiB by default.
+For larger individual updates, use `toNodeHandler(handler, { maxBodyBytes: 8 * 1024 * 1024 })` and set the corresponding limit on your reverse proxy.
+
 ## Node.js 18–21
 
 There is no global `WebSocket` before Node.js 22. Either use `bot.start({ mode: 'polling' })` or pass the `ws` package:

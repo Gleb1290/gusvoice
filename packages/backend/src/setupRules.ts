@@ -10,6 +10,17 @@
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 
+/** При создании аккаунта node-postgres отдаёт конфликт напрямую или в cause ошибки Drizzle. */
+export function isUsernameConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const outer = error as { cause?: unknown };
+  return [error, outer.cause].some((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    const { code, constraint } = candidate as { code?: string; constraint?: string };
+    return code === '23505' && (constraint === 'users_username_key' || constraint === 'users_username_ci_key');
+  });
+}
+
 /** Ключи в `instance_settings` (та же таблица, что `smtp`, `economy`, `superadmin_user_id`). */
 export const SETUP_KEY = 'setup';
 export const REGISTRATION_KEY = 'registration';

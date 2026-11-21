@@ -185,7 +185,7 @@ async function boot(raw = source) {
   replace('./aloneRecount.js', 'runAloneRecount', async () => {});
   replace('./federation/instance.js', 'federation', { identity: () => ({ instanceId: 'fixture' }) });
   const app = {
-    register: async () => {}, addHook: () => {}, get: () => {}, addContentTypeParser: () => {}, setErrorHandler: () => {},
+    register: async () => {}, addHook: () => {}, get: () => {}, addContentTypeParser: () => {}, setErrorHandler: () => {}, setNotFoundHandler: () => {},
     listen: async () => {}, log: { info: () => {}, warn: () => {}, error: (error: unknown) => { throw error; } },
   };
   deps.fastify = { __esModule: true, default: () => app };

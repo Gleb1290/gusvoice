@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { DEFAULT_TOLERANCE_S, parseSignatureHeader, SIGNATURE_HEADER, verifyWebhookSignature } from './webhook.js';
+import { DEFAULT_TOLERANCE_S, parseSignatureHeader, SIGNATURE_HEADER, toNodeHandler, verifyWebhookSignature } from './webhook.js';
 
 const source = readFileSync(new URL('./webhook.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 type WebhookModule = typeof import('./webhook.js');
@@ -18,6 +18,24 @@ async function signature(body: string | Buffer, nowS: number, secret = 'syntheti
 const secret = 'synthetic-webhook-secret';
 const now = 1_800_000_000;
 const body = '{ "text": "Гусь 🪿", "n": 1 }\n';
+
+it('обработчик Node принимает тело ровно до настроенного предела в байтах', async () => {
+  let received = 0;
+  const serve = toNodeHandler(async (req) => {
+    assert.equal(await req.text(), 'ёж');
+    received++;
+    return new Response(null, { status: 204 });
+  }, { maxBodyBytes: 4 });
+  async function deliver(value: string): Promise<number> {
+    return new Promise((resolve) => {
+      const res = { statusCode: 0, setHeader() {}, end() { resolve(this.statusCode); } };
+      serve({ method: 'POST', headers: {}, async *[Symbol.asyncIterator]() { yield value; } }, res);
+    });
+  }
+  assert.equal(await deliver('ёж'), 204);
+  assert.equal(await deliver('ёж!'), 413);
+  assert.equal(received, 1);
+});
 
 function load(raw: string): WebhookModule {
   const module = { exports: {} };

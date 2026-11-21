@@ -213,3 +213,33 @@ describe('аудитория событий канала', () => {
     );
   });
 });
+
+describe('видимость каналов для ботов', () => {
+  it('старые административные роли не открывают закрытый канал боту', () => {
+    assert.deepEqual(audience({
+      members: [
+        { ...member('bot', ['legacy-admin']), isBot: true },
+        member('admin', ['legacy-admin']),
+        { ...member('reader-bot'), isBot: true },
+      ],
+      roles: [role('everyone', Permission.VIEW_CHANNEL, true), role('legacy-admin', Permission.ADMINISTRATOR)],
+      categoryOverwrites: [overwrite('role', 'everyone', 0n, Permission.VIEW_CHANNEL)],
+      channelOverwrites: [overwrite('member', 'reader-bot', Permission.VIEW_CHANNEL)],
+    }), ['admin', 'reader-bot']);
+  });
+
+  it('административный бит в переопределениях не подменяет явный доступ бота', () => {
+    const bot = { ...member('bot'), isBot: true };
+    assert.deepEqual(audience({
+      members: [bot],
+      roles: [role('everyone', 0n, true)],
+      categoryOverwrites: [overwrite('member', 'bot', Permission.ADMINISTRATOR)],
+      channelOverwrites: [overwrite('member', 'bot', Permission.ADMINISTRATOR)],
+    }), []);
+    assert.deepEqual(audience({
+      members: [bot],
+      roles: [role('everyone', 0n, true)],
+      channelOverwrites: [overwrite('member', 'bot', Permission.ADMINISTRATOR | Permission.VIEW_CHANNEL)],
+    }), ['bot']);
+  });
+});

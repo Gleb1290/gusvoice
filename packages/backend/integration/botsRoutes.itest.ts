@@ -7,6 +7,7 @@ import { Script } from 'node:vm';
 import { isDeepStrictEqual } from 'node:util';
 import { after, before, test } from 'node:test';
 import Fastify, { type InjectOptions } from 'fastify';
+import { PGlite } from '@electric-sql/pglite';
 import * as zod from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -55,6 +56,7 @@ async function fixture(edit?: Edit) {
   // R301: Redis и часы — IO; маршруты, очередь callback и проверка владельца настоящие.
   let callbackNow = Date.now();
   const callbackTimers: { at: number; fn: () => void }[] = [];
+  const wsAckTimers = new Map<object, () => Promise<void>>();
   const redisData = new Map<string, { value: string; expires: number }>();
   const rateBlocks = new Map<string, number>();
   const deliveryLocks: string[] = [];
@@ -84,6 +86,8 @@ async function fixture(edit?: Edit) {
   };
   class CallbackDate extends Date { static override now() { return callbackNow; } }
   let hookTargetError: string | null = null;
+  let beforeHookTarget: (() => Promise<void>) | undefined;
+  let beforeBotRate: (() => Promise<void>) | undefined;
   const retryDelays: number[] = [];
   let hookStatuses: number[] = [];
   let repeatedHookStatus: number | undefined;
@@ -105,7 +109,10 @@ async function fixture(edit?: Edit) {
     realtime: { publishToUser: async (user: string, body: shared.GatewayServerMessage) => { events.push({ user, body: normal(body) }); },
       publishToServer: noop, redisPub: redis },
     // Rate-limit/password-lock mechanics имеют отдельные тесты; здесь ни Redis-сокета, ни live DNS.
-    authGuard: { rateHit: async (key: string) => rateBlocks.get(key) ?? 0, clientIp: () => '192.0.2.1', loginLockRemaining: async () => 0,
+    authGuard: { rateHit: async (key: string) => {
+      if (key.startsWith('botrq:')) await beforeBotRate?.();
+      return rateBlocks.get(key) ?? 0;
+    }, clientIp: () => '192.0.2.1', loginLockRemaining: async () => 0,
       recordLoginFailure: async () => 0, clearLoginFailures: noop, clearLoginLock: noop, retryMessage: () => 'retry',
       messageSendBlock: async () => 0, pushBurst: async () => 'drop', pushDebounced: noop },
     gateway: { broadcastUserProfile: (userId: string, displayName: string, avatarUrl: string | null, animatedAvatarUrl: string | null) => {
@@ -138,6 +145,7 @@ async function fixture(edit?: Edit) {
     gifs: { savedGifKeysOf: async () => [], removeGifFiles: noop },
     safeFetch: { hookUrlErrorEn, checkHookTarget: async (url: string, allowInternal: boolean) => {
       hookChecks.push({ url, allowInternal });
+      await beforeHookTarget?.();
       const parsed = parseHookUrl(url, allowInternal);
       return parsed.ok ? hookTargetError : parsed.error;
     }, safeHookPost: async (url: string, body: Buffer, headers: Record<string, string>) => {
@@ -150,7 +158,7 @@ async function fixture(edit?: Edit) {
   const real = new Set([
     'auth', 'guestGuard', 'conversations', 'serialize', 'contacts', 'blocks', 'lastSeen', 'db/peerQueries', 'db/userSearch',
     'messagePrivacy', 'convSendFanout', 'convGroups', 'accountDelete', 'accountRows', 'gameMoney', 'gameMoneyRules', 'coins', 'streakRules',
-    'bots/botStore', 'bots/botRules', 'bots/botUpdates', 'bots/botRead', 'bots/botWire', 'bots/botLifecycle', 'bots/webhookDelivery', 'bots/botCallback', 'bots/botChannel', 'bots/botVoice', 'routes/botPress', 'roleRules',
+    'bots/botStore', 'bots/botRules', 'bots/botUpdates', 'bots/botRead', 'bots/botWire', 'bots/botLifecycle', 'bots/webhookDelivery', 'bots/botCallback', 'bots/botChannel', 'bots/botChannelQuota', 'bots/botChannelUploads', 'bots/botVoice', 'routes/botPress', 'roleRules',
     'routes/att', 'routes/conv', 'routes/convGroups', 'routes/bots', 'routes/botApi', 'routes/auth', 'routes/calls', 'routes/blocks', 'callPrivacy',
     'convRules', 'dmRules', 'blockRules', 'groupRules', 'scheduleRules', 'strangerRules', 'contactRules', 'messagePrivacyRules',
     'authRules', 'superAdminRules', 'userSearchRules', 'attachmentRules', 'statusRules', 'shopRules', 'callRules', 'lastSeenRules',
@@ -187,6 +195,8 @@ async function fixture(edit?: Edit) {
         ? (fn: () => void, ms: number) => { const timer = { at: callbackNow + ms, fn }; callbackTimers.push(timer); return timer; }
         : name === 'bots/webhookDelivery'
         ? (_fn: () => void, ms: number) => { retryDelays.push(ms); return { unref() {} }; }
+        : name === 'routes/botApi'
+        ? (fn: () => Promise<void>) => { const timer = { unref() {} }; wsAckTimers.set(timer, fn); return timer; }
         : name === 'bots/botStore'
           ? (fn: () => void, ms: number) => {
             // Даже мгновенный SUBSCRIBE создаёт cap до своего microtask. Разрешён только этот
@@ -195,7 +205,7 @@ async function fixture(edit?: Edit) {
             return setTimeout(fn, ms);
           }
           : fail('timeout'),
-      clearTimeout: name === 'bots/botStore' ? clearTimeout : () => {},
+      clearTimeout: name === 'bots/botStore' ? clearTimeout : (timer: object) => wsAckTimers.delete(timer),
       setInterval: (fn: () => Promise<void>, ms: number) => {
         if (name === 'bots/webhookDelivery') deliveryIntervals.push({ fn, ms });
         return { unref() {} };
@@ -292,6 +302,13 @@ async function fixture(edit?: Edit) {
   return { app, clean, request, bot, create, enable, open, send, store, c, api, load, events, password, passwordHash,
     deliverWebhook, hookRequests, retryDelays, hookChecks, profileBroadcasts, callStarts, redis, rateBlocks, callbackTimers, pushes, federationCalls,
     startDeliveryJobs, deliveryIntervals, deliveryLocks,
+    async flushWsAck() {
+      for (const [timer, runAck] of [...wsAckTimers]) {
+        wsAckTimers.delete(timer);
+        await runAck();
+      }
+      await clean();
+    },
     async advanceCallback(ms: number) {
       const end = callbackNow + ms;
       for (;;) {
@@ -301,7 +318,16 @@ async function fixture(edit?: Edit) {
       }
       callbackNow = end; await clean();
     },
-    setHookTargetError(error: string | null) { hookTargetError = error; } };
+    setHookTargetError(error: string | null) { hookTargetError = error; },
+    pauseBeforeWebhookWrite(checkpoint: 'target' | 'rate') {
+      let start!: () => void, release!: () => void;
+      const started = new Promise<void>(resolve => { start = resolve; });
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      const pause = async () => { start(); await wait; };
+      if (checkpoint === 'target') beforeHookTarget = pause;
+      else beforeBotRate = pause;
+      return { started, release };
+    } };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function run(body: (f: Fixture) => Promise<void>, edit?: Edit) {
@@ -582,6 +608,7 @@ async function staleQueue301(f: Fixture) {
   const [oldMessage] = await f.store.updatesFrom(b.bot.id, 0, 100);
   const expired = await f.store.pushUpdate(b.bot.id, 'callback_query', { id: 'expired', data: 'restart' });
   const fresh = await f.store.pushUpdate(b.bot.id, 'callback_query', { id: 'fresh', data: 'status' });
+  assert.ok(expired && fresh);
   await t.db.update(schema.botUpdates).set({ createdAt: orm.sql`now() - interval '26 seconds'` })
     .where(orm.inArray(schema.botUpdates.updateId, [oldMessage.updateId, expired]));
   return { ...b, oldMessage: oldMessage.updateId, expired, fresh, message };
@@ -648,6 +675,13 @@ test('R301 пересылка и копия сообщения бота сохр
   assert.deepEqual((await message301(b.mid)).keyboard, markup301.inline_keyboard, 'оригинал не повреждён пересылкой');
 }));
 
+test('квота владельца принимает одно параллельное создание на последнее место', async () => run(async f => {
+  const settings = await f.request('admin', 'PUT', '/admin/bots/settings', { enabled: true, creators: 'all', perUserLimit: 1 });
+  assert.equal(settings.statusCode, 200, settings.body);
+  const results = await Promise.all(['first_testbot', 'second_testbot'].map((username) => f.request('owner', 'POST', '/bots', { username })));
+  assert.deepEqual(results.map((result) => result.statusCode).sort(), [201, 403]);
+  assert.equal((await t.db.select().from(schema.bots).where(orm.eq(schema.bots.ownerId, 'owner'))).length, 1);
+}));
 test('R297 без настройки боты выключены: список доступен, создание/API запрещены, журнал не растёт', async () => run(async f => {
   const list = await f.request('owner', 'GET', '/bots'); assert.equal(list.statusCode, 200); assert.equal(list.json().enabled, false); assert.equal(list.json().canCreate, false);
   assert.equal((await f.request('owner', 'POST', '/bots', { username: 'r297_newbot' })).statusCode, 403);
@@ -854,8 +888,9 @@ async function wsRead(f: Fixture, offsetOnConnect = false) {
       assert.deepEqual(frames.map(x => x.op), ['hello', 'update', 'update']);
       assert.equal((await cursor(b.bot.id, b.cid)) > 0, false, 'R297-ws-send: отправка без ack не прочитана');
       assert.equal(await f.store.pendingCount(b.bot.id), 2);
-      handlers.get('message')!(JSON.stringify({ op: 'ack', offset })); await f.clean();
+      handlers.get('message')!(JSON.stringify({ op: 'ack', offset }));
     } else assert.deepEqual(frames.map(x => x.op), ['hello']);
+    await f.flushWsAck();
     assert.equal(await cursor(b.bot.id, b.cid), last.sortKey); assert.equal(await f.store.pendingCount(b.bot.id), 0);
     const changes = f.events.slice(before).filter(e => e.user === 'owner' && e.body.t === 'conv.change'); assert.equal(changes.length, 1);
     const change = changes[0].body; assert.ok(change.t === 'conv.change' && !('left' in change.conversation)); assert.equal(change.conversation.peerReadKey, last.sortKey);
@@ -950,6 +985,35 @@ test('R297 v1 реальные ответы ошибок сохраняют enve
   }
 }));
 
+for (const method of ['setWebhook', 'deleteWebhook'] as const) {
+  test(`${method} со старым токеном после перевыпуска оставляет очередь и новую конфигурацию в покое`, { timeout: 15_000 }, async () => run(async f => {
+    const b = await ready(f);
+    const hook = { url: 'https://bot.example.test/hook', secret_token: 'synthetic_webhook_secret', batch: true };
+    assert.equal((await f.bot(b.token, 'setWebhook', hook)).statusCode, 200);
+    await f.store.pushUpdate(b.bot.id, 'message', { text: 'Ожидает доставки' });
+    const paused = f.pauseBeforeWebhookWrite(method === 'setWebhook' ? 'target' : 'rate');
+    const pending = f.bot(b.token, method, { ...hook, drop_pending_updates: true });
+    await paused.started;
+    try {
+      const rotated = await f.request('owner', 'POST', `/bots/${b.bot.id}/token`);
+      assert.equal(rotated.statusCode, 200);
+      assert.equal(rotated.json().bot.webhook, null);
+      const { bot } = (await f.store.botById(b.bot.id))!;
+      assert.equal(bot.webhookSecret, null);
+      assert.equal(bot.webhookBatch, false);
+      assert.equal(await f.store.pendingCount(b.bot.id), 1);
+      paused.release();
+      assert.equal((await pending).statusCode, 401);
+      const nextToken = rotated.json().token as string;
+      assert.equal((await f.bot(nextToken, 'setWebhook', hook)).statusCode, 200);
+      assert.equal((await f.bot(nextToken, 'getWebhookInfo')).json().result.pending_update_count, 1);
+    } finally {
+      paused.release();
+      await pending;
+    }
+  }));
+}
+
 // Каждая мутация проходит ТУ ЖЕ проверку после оригинала. Принимается только конкретная ошибка исхода,
 // не неизвестный импорт, SQL-ошибка, предупреждение или несовпавший якорь.
 function killed(label: string, actual: unknown, expected: unknown) {
@@ -961,27 +1025,23 @@ const cases: { name: string; body: (f: Fixture) => Promise<void>; edit: Edit; la
     label: 'R297-private: чужой не открывает приватного бота', actual: 201, expected: 403 },
   { name: 'снят actor-фильтр', body: ownActor, edit: { file: 'bots/botUpdates', from: 'bots.has(uid) && uid !== d.actor', to: 'bots.has(uid)' },
     label: 'R297-actor: собственное удаление не эхо', actual: 1, expected: 0 },
-  { name: 'getUpdates разрешён при webhook', body: conflict, edit: { file: 'routes/botApi', from: 'async getupdates(ctx, p, { req, reply }) {\n    if (ctx.bot.webhookUrl) {', to: 'async getupdates(ctx, p, { req, reply }) {\n    if (false) {' },
-    label: 'R297-webhook: poll несовместим с доставкой', actual: 200, expected: 409 },
   { name: 'verified больше не нужен', body: serializeAuthors, edit: { file: 'serialize', from: 'u.bot === true && u.verified === true', to: 'u.bot === true' },
     label: 'R297-verified: вебхук не помечен настоящим ботом', actual: true, expected: false },
   { name: 'getUpdates не отмечает прочтение', body: readBatch, edit: { file: 'routes/botApi', from: 'if (rows.length > 0) await markTakenRead(botId, rows);', to: '/* чтение потеряно */' },
     label: 'R297-taken: getUpdates читает до последнего', actual: false, expected: true },
-  { name: 'WS ошибочно читает при отправке', body: f => wsRead(f), edit: { file: 'routes/botApi',
-    from: "for (const r of rows) wsSend(socket, { op: 'update', update: wireUpdateOf(r) });",
-    to: "await markTakenRead(botId, rows); for (const r of rows) wsSend(socket, { op: 'update', update: wireUpdateOf(r) });" },
-    label: 'R297-ws-send: отправка без ack не прочитана', actual: true, expected: false },
   { name: 'reveal не даёт member', body: reveal, edit: { file: 'routes/conv', from: 'if (botRow && (created || revealed))', to: 'if (botRow && created)' },
     label: 'R297-reveal: новый member после скрытия', actual: 2, expected: 3 },
   { name: '500 доставки ошибочно считается прочтением', body: failedWebhookRead,
-    edit: { file: 'bots/webhookDelivery', from: 'const failures = row.bot.webhookFailures + 1;', to: 'taken.push(next);\n      const failures = row.bot.webhookFailures + 1;' },
+    edit: { file: 'bots/webhookDelivery', from: '        if (failure) {', to: '        if (failure) {\n          taken.push(next);' },
     label: 'R297-webhook500: отказ доставки не прочитан', actual: true, expected: false },
 ];
-for (const method of ['setWebhook', 'deleteWebhook'] as const) cases.push({ name: `${method} теряет drop_pending_updates`, body: f => dropPending(f, method),
-  edit: { file: 'routes/botApi', from: method === 'setWebhook'
-    ? 'if (q.drop_pending_updates) await dropUpdates(ctx.bot.userId);\n    resetWebhookRetry(ctx.bot.userId);'
-    : 'resetWebhookRetry(ctx.bot.userId);\n    if (q.drop_pending_updates) await dropUpdates(ctx.bot.userId);',
-  to: 'resetWebhookRetry(ctx.bot.userId);' }, label: `R297-drop-${method}: true удаляет очередь`, actual: 1, expected: 0 });
+for (const method of ['setWebhook', 'deleteWebhook'] as const) {
+  const tail = method === 'setWebhook' ? '\n    // Адрес и WS' : '\n    return true;';
+  const dropAndReset = 'if (q.drop_pending_updates) await dropUpdates(updated.id, tx);\n    });\n    resetWebhookRetry(ctx.bot.userId);';
+  cases.push({ name: `${method} теряет drop_pending_updates`, body: f => dropPending(f, method),
+    edit: { file: 'routes/botApi', from: dropAndReset + tail, to: dropAndReset.replace(/^.*\n/, '') + tail },
+    label: `R297-drop-${method}: true удаляет очередь`, actual: 1, expected: 0 });
+}
 for (const c of cases) test(`R297 контрфакт: ${c.name}`, async () => {
   await run(c.body);
   await counterfact(async () => {
@@ -1235,6 +1295,42 @@ test('R303 getMe сообщает версию и признаки, неизве
   assert.equal(updates.json().result[0].message.text, 'Сообщение');
 }));
 
+test('миграция сохраняет существующие строки, а счётчик учитывает вставку и удаление целой пачки', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      CREATE TABLE bots (user_id text PRIMARY KEY, dropped_update_count int NOT NULL DEFAULT 0);
+      CREATE TABLE bot_updates (
+        update_id bigserial PRIMARY KEY, bot_id text NOT NULL REFERENCES bots(user_id) ON DELETE CASCADE
+      );
+      CREATE INDEX bot_updates_bot_idx ON bot_updates (bot_id, update_id);
+      INSERT INTO bots VALUES ('reader', 4), ('other', 0);
+      INSERT INTO bot_updates (bot_id) VALUES ('reader'), ('other'), ('reader'), ('reader');
+    `);
+    const migration = readFileSync(new URL('../drizzle/0170_bot_journal_size.sql', import.meta.url), 'utf8');
+    await db.transaction(async (tx) => { await tx.exec(migration); });
+    const sizes = async () => (await db.query('SELECT * FROM bots ORDER BY user_id')).rows;
+    assert.deepEqual(await sizes(), [
+      { user_id: 'other', dropped_update_count: 0, journal_size: 1 },
+      { user_id: 'reader', dropped_update_count: 4, journal_size: 3 },
+    ]);
+    await db.exec(`
+      INSERT INTO bot_updates (bot_id) VALUES ('reader'), ('reader'), ('other');
+      SELECT trim_bot_journal('reader', 2);
+      DELETE FROM bot_updates WHERE update_id IN (2, 4);
+    `);
+    assert.deepEqual((await db.query('SELECT update_id::int FROM bot_updates ORDER BY update_id')).rows, [
+      { update_id: 5 }, { update_id: 6 }, { update_id: 7 },
+    ]);
+    assert.deepEqual(await sizes(), [
+      { user_id: 'other', dropped_update_count: 0, journal_size: 1 },
+      { user_id: 'reader', dropped_update_count: 6, journal_size: 2 },
+    ]);
+  } finally {
+    await db.close();
+  }
+});
+
 test('R303 этап 3 pushUpdates держит 10000 для readAll и 1000 для обычного, считает только реально потерянное', async () => run(async f => {
   const b = await ready(f), second = await f.request('owner', 'POST', '/bots', { username: 'r303_batchbot' });
   assert.equal(second.statusCode, 201); const other = second.json().bot.id as string;
@@ -1258,22 +1354,57 @@ test('R303 этап 3 pushUpdates держит 10000 для readAll и 1000 дл
   await f.store.pushUpdate(b.bot.id, 'message', { n: 10_001 });
   assert.equal(await f.store.pendingCount(b.bot.id), 10_000);
   assert.equal((await t.db.select().from(schema.bots).where(orm.eq(schema.bots.userId, b.bot.id)))[0].droppedUpdateCount, 2);
+  // Подсказка от одного сервера не понижает общий потолок того же бота.
+  await f.store.pushUpdates([{ botId: b.bot.id, type: 'message', payload: { n: 10_002 }, readAll: false }]);
+  for (let n = 10_003; n <= 10_010; n++) await f.store.pushUpdate(b.bot.id, 'message', { n });
+  assert.equal(await f.store.pendingCount(b.bot.id), 10_000);
+  const [oldest] = await f.store.updatesFrom(b.bot.id, 0, 1);
+  assert.equal(oldest.payload.n, 11, 'каждая новая запись вытесняет ровно одну самую старую');
+  const full = (await f.store.botById(b.bot.id))!.bot;
+  assert.equal(full.journalSize, 10_000);
+  assert.equal(full.droppedUpdateCount, 11);
+  await f.store.confirmUpdates(b.bot.id, oldest.updateId + 1);
+  const acked = (await f.store.botById(b.bot.id))!.bot;
+  assert.equal(acked.journalSize, 9999);
+  assert.equal(acked.droppedUpdateCount, 11);
+  await f.store.dropUpdates(b.bot.id);
+  assert.equal((await f.store.botById(b.bot.id))!.bot.journalSize, 0);
 }));
 
 test('R303 этап 3 dropServerUpdates снимает только свой сервер, включая вложенный chat кнопки', async () => run(async f => {
   const b = await ready(f), second = await f.request('owner', 'POST', '/bots', { username: 'r303_keepbot' });
   assert.equal(second.statusCode, 201); const other = second.json().bot.id as string;
+  await t.db.insert(schema.servers).values(['remove', 'keep'].map(id => ({ id, name: id, ownerId: 'owner' })));
+  const members = [{ serverId: 'remove', userId: b.bot.id }, { serverId: 'keep', userId: b.bot.id }, { serverId: 'remove', userId: other }];
+  await t.db.insert(schema.serverMembers).values(members);
+  await t.db.insert(schema.serverBots).values(members.map(({ serverId, userId }) => ({ serverId, botId: userId, addedBy: 'owner' })));
+  const removedChat = { id: 'remove', type: 'server' };
   for (const [botId, type, payload] of [
     [b.bot.id, 'message', { chat: { id: 'channel', server_id: 'remove' } }],
     [b.bot.id, 'callback_query', { message: { chat: { id: 'channel', server_id: 'remove' } } }],
+    [b.bot.id, 'chat_member', { chat: removedChat, new_status: 'member' }],
     [b.bot.id, 'message', { chat: { id: b.cid, type: 'private' } }],
     [b.bot.id, 'message', { chat: { id: 'channel2', server_id: 'keep' } }],
     [other, 'message', { chat: { id: 'channel', server_id: 'remove' } }],
-  ] as const) await f.store.pushUpdate(botId, type, payload);
+  ] as const) assert.ok(await f.store.pushUpdate(botId, type, payload));
+  await t.db.delete(schema.serverMembers).where(orm.and(orm.eq(schema.serverMembers.serverId, 'remove'), orm.eq(schema.serverMembers.userId, b.bot.id)));
+  // Снятие членства уже вступило в силу, даже если фоновый крючок очистки ещё не выполнился.
+  assert.equal(await f.store.pendingCount(b.bot.id), 2);
+  assert.equal(await f.store.pushUpdate(b.bot.id, 'chat_member', { chat: removedChat, new_status: 'member' }), null);
   await f.store.dropServerUpdates(b.bot.id, 'remove');
+  assert.equal((await t.db.select().from(schema.botUpdates).where(orm.eq(schema.botUpdates.botId, b.bot.id))).length, 2);
+  assert.ok(await f.store.pushUpdate(b.bot.id, 'my_chat_member', { chat: removedChat, new_status: 'left' }));
   const rows = await f.store.updatesFrom(b.bot.id, 0, 100);
-  assert.deepEqual(rows.map(r => (r.payload.chat as { id: string }).id), [b.cid, 'channel2']);
+  assert.deepEqual(rows.map(r => [(r.payload.chat as { id: string }).id, r.type]), [
+    [b.cid, 'message'], ['channel2', 'message'], ['remove', 'my_chat_member'],
+  ]);
   assert.equal(await f.store.pendingCount(other), 1);
+  await t.db.transaction(async (tx) => {
+    await tx.delete(schema.servers).where(orm.eq(schema.servers.id, 'remove'));
+    await f.store.dropDeletedServerUpdates(tx as Parameters<typeof f.store.dropDeletedServerUpdates>[0], 'remove');
+  });
+  assert.equal(await f.store.pendingCount(b.bot.id), 2);
+  assert.equal((await t.db.select().from(schema.botUpdates).where(orm.eq(schema.botUpdates.botId, other))).length, 0);
 }));
 
 test('R303 этап 3 области команд независимы: пустой override скрывает default, удаление возвращает default', async () => run(async f => {
@@ -1334,15 +1465,9 @@ const hardeningMutants: Array<{ name: string; body: (f: Fixture) => Promise<void
   { name: 'EXISTS не отсекает протухшую кнопку', body: staleSweep303,
     edit: { file: 'bots/webhookDelivery', from: "AND (u.type <> 'callback_query' OR u.created_at >= now() - make_interval(secs => ${CALLBACK_QUERY_STALE_S}))", to: '' },
     label: 'R303 протухшее нажатие не запускает доставщик', actual: 1, expected: 0 },
-  { name: 'вставка не подрезает журнал', body: cap303,
-    edit: { file: 'bots/botStore', from: '  await trimJournal(botId, await capOf(botId));', to: '' },
-    label: 'R303 вставка сама держит потолок журнала', actual: 1001, expected: 1000 },
   { name: 'очередь не ждёт предыдущую запись', body: order303,
     edit: { file: 'conversations', from: 'const prev = Promise.all(keys.map((k) => botChains.get(k)));', to: 'const prev = Promise.resolve();' },
     label: 'R303 второй deliver ждёт хвост первой записи', actual: 2, expected: 1 },
-  { name: 'batch подтверждает только первое событие', body: batch303,
-    edit: { file: 'bots/webhookDelivery', from: 'sql.join(pack.map((u) => sql`${u.updateId}`), sql`, `)', to: 'sql.join(pack.slice(0, 1).map((u) => sql`${u.updateId}`), sql`, `)' },
-    label: 'R303 batch подтверждается одним запросом целиком', actual: 3, expected: 1 },
   { name: 'batch подписывает только первый элемент', body: batch303,
     edit: { file: 'bots/webhookDelivery', from: 'webhookSignature(row.bot.webhookSecret, body, unixSeconds(Date.now()))', to: 'webhookSignature(row.bot.webhookSecret, JSON.stringify(wireUpdateOf(next)), unixSeconds(Date.now()))' },
     label: 'R303 подпись покрывает всё переданное тело', actual: false, expected: true },
@@ -1560,7 +1685,7 @@ test('R299 SDK WS получает команду, отвечает ctx.reply, �
     assert.equal(await f.store.pendingCount(b.bot.id), 1);
     assert.deepEqual(replies, []);
     finishCommand.resolve();
-    const offset = await sdkBounded(acked.promise, 'SDK WS ack после команды'); await f.clean();
+    const offset = await sdkBounded(acked.promise, 'SDK WS ack после команды'); await f.flushWsAck();
     assert.deepEqual(commands, [['второй']]); assert.equal(replies.length, 1); assert.deepEqual(errors, []); assert.deepEqual(serverErrors, []);
     await sdkReply(f, b.cid, replies[0], 'Ответ SDK WS');
     assert.equal(offset > 0, true); assert.deepEqual(serverFrames, ['hello', 'update']);

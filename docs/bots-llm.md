@@ -280,8 +280,8 @@ function verify(secret, header, rawBody, tolerance = 300) {
 | getUpdates + WS connects | 30 per 10 s per bot |
 | consumers per bot | 1 (a new getUpdates/WS replaces the old one: 409 / 4009) |
 | body JSON/form | 64 KB |
-| files per message / size | 10 / 25 MB |
-| text | 4096 chars |
+| files per message / size | 10 / 25 MiB each, 64 MiB for files and fields combined |
+| text | 4096 UTF-16 code units before and after HTML conversion |
 | embeds | 10 per message, 6000 chars total text |
 | update journal | 24 h, 1000 per bot (10 000 for "Read all messages") |
 | per channel / per server | 5 messages per 5 s / 30 per min; getChatHistory, getChatMembers — 10 per 10 s |

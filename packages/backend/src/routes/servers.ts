@@ -512,7 +512,11 @@ export async function serverRoutes(app: FastifyInstance): Promise<void> {
     const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!ctx.isOwner) return reply.code(403).send({ error: 'only the owner can delete the server' });
-    await db.delete(servers).where(eq(servers.id, serverId));
+    const { dropDeletedServerUpdates } = await import('../bots/botStore.js');
+    await db.transaction(async (tx) => {
+      await tx.delete(servers).where(eq(servers.id, serverId));
+      await dropDeletedServerUpdates(tx, serverId);
+    });
     // ⚠️ ПОСЛЕ удаления: клиенты перезапрашивают и видят, что сервера больше нет, а гейтвей на этом
     // же событии снимает подписки (членства уже нет — каскад его убрал). Опубликуй мы ДО, клиенты
     // успели бы перечитать ещё живой сервер и остались бы с фантомом в рейле до перезагрузки.

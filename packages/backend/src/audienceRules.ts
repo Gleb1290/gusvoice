@@ -22,11 +22,21 @@ import {
 
 export type OverwriteRow = { targetType: string; targetId: string; allow: string; deny: string };
 
+function permissionsForMember(permissions: bigint, isBot = false): bigint {
+  return isBot ? permissions & ~Permission.ADMINISTRATOR : permissions;
+}
+
+/** Для бота снимаем административный бит до разворачивания базовых прав и наложений. */
+export function memberBasePermissions(roles: readonly { permissions: string }[], isBot = false): bigint {
+  return basePermissions(roles.map((role) => ({ permissions: permissionsForMember(permsFromString(role.permissions), isBot) })));
+}
+
 /** Кому считаем: его роли и id роли @everyone на сервере. */
 export interface PermissionSubject {
   userId: string;
   roleIds: string[];
   everyoneRoleId: string | null;
+  isBot?: boolean;
 }
 
 export function toOverwrite(row: { allow: string; deny: string }): Overwrite {
@@ -40,10 +50,14 @@ export function applyOverwrites(base: bigint, subject: PermissionSubject, ows: O
     : undefined;
   const roleOws = ows.filter((o) => o.targetType === 'role' && subject.roleIds.includes(o.targetId));
   const memberOw = ows.find((o) => o.targetType === 'member' && o.targetId === subject.userId);
-  return resolveChannelPermissions(base, {
-    everyone: everyoneOw ? toOverwrite(everyoneOw) : undefined,
-    roleOverwrites: roleOws.map(toOverwrite),
-    memberOverwrite: memberOw ? toOverwrite(memberOw) : undefined,
+  const forSubject = (row: OverwriteRow): Overwrite => {
+    const overwrite = toOverwrite(row);
+    return { ...overwrite, allow: permissionsForMember(overwrite.allow, subject.isBot) };
+  };
+  return resolveChannelPermissions(permissionsForMember(base, subject.isBot), {
+    everyone: everyoneOw ? forSubject(everyoneOw) : undefined,
+    roleOverwrites: roleOws.map(forSubject),
+    memberOverwrite: memberOw ? forSubject(memberOw) : undefined,
   });
 }
 
@@ -75,6 +89,7 @@ export interface AudienceMember {
   privileged: boolean;
   /** Гость с другого инстанса (#139): базовые права ему даёт роль «Гости», а не `@everyone`. */
   isGuest?: boolean;
+  isBot?: boolean;
 }
 
 /**
@@ -102,7 +117,7 @@ export function channelAudience(p: {
   const guestsRole = p.guestsRoleId ? (p.roles.find((r) => r.id === p.guestsRoleId) ?? null) : null;
 
   for (const m of p.members) {
-    if (m.privileged) {
+    if (m.privileged && !m.isBot) {
       out.push(m.userId);
       continue;
     }
@@ -123,12 +138,12 @@ export function channelAudience(p: {
       (r) => (guestBaseId ? r.id === guestBaseId : r.isEveryone) || m.roleIds.includes(r.id),
     );
     const liveRoleIds = live.filter((r) => !r.isEveryone).map((r) => r.id);
-    const base = basePermissions(live.map((r) => ({ permissions: permsFromString(r.permissions) })));
+    const base = memberBasePermissions(live, m.isBot);
     if (isAdmin(base)) {
       out.push(m.userId);
       continue;
     }
-    const subject: PermissionSubject = { userId: m.userId, roleIds: liveRoleIds, everyoneRoleId: p.everyoneRoleId };
+    const subject: PermissionSubject = { userId: m.userId, roleIds: liveRoleIds, everyoneRoleId: p.everyoneRoleId, isBot: m.isBot };
     const perms = resolveLayered(base, subject, p.categoryOverwrites, p.channelOverwrites);
     if (has(perms, Permission.VIEW_CHANNEL)) out.push(m.userId);
   }

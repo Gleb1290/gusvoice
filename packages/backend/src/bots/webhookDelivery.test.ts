@@ -43,14 +43,14 @@ interface Options {
   enabled?: boolean; lock?: boolean; failures?: number; statuses?: (number | Error)[];
   missingBot?: boolean; deletedUser?: boolean; disabledBot?: boolean; url?: string | null;
   missingSecret?: boolean; disabledHook?: boolean; readFails?: boolean;
-  allowInternal?: boolean; holdFirst?: Promise<void>;
+  allowInternal?: boolean; holdFirst?: Promise<void>; batch?: boolean;
 }
 
 function harness(options: Options = {}, deliverySource = source) {
   const rows: BotUpdateRow[] = [3, 1, 4, 2].map(updateId => ({ updateId, botId, type: 'message',
     payload: { message_id: `m-${updateId}`, chat: { id: 'chat-1' } }, createdAt: new Date(0) }));
   const events: string[] = [];
-  const sent: { id: number; body: string; headers: Record<string, string>; config: Record<string, unknown> }[] = [];
+  const sent: { id: number; ids: number[]; body: string; headers: Record<string, string>; config: Record<string, unknown> }[] = [];
   const deletes: number[] = [];
   const patches: Record<string, unknown>[] = [];
   const reads: number[][] = [];
@@ -58,20 +58,30 @@ function harness(options: Options = {}, deliverySource = source) {
   let active = 0, maxActive = 0, selects = 0, locks = 0, intervals = 0, firstStarted!: () => void;
   const started = new Promise<void>(resolve => { firstStarted = resolve; });
   const bot: Record<string, unknown> = {
-    userId: botId, webhookUrl: options.url === undefined ? hook : options.url,
+    userId: botId, tokenHash: 'current', webhookBatch: options.batch ?? false, droppedUpdateCount: 0, webhookUrl: options.url === undefined ? hook : options.url,
     webhookSecret: options.missingSecret ? null : secret, webhookFailures: options.failures ?? 3,
     webhookLastError: 'ответ 500', webhookDisabledAt: options.disabledHook ? new Date(0) : null,
     disabledAt: options.disabledBot ? new Date(0) : null,
   };
   const sqlOf = (query: drizzle.SQL) => dialect.sqlToQuery(query);
-  const db = {
+  const queries = {
     select: (selection?: Record<string, unknown>) => {
       selects++;
-      let table: unknown, ordered = false;
+      let table: unknown, ordered = false, matches = true;
       const query = {
         from: (next: unknown) => { table = next; return query; },
         innerJoin: () => query,
-        where: (condition: drizzle.SQL) => { assert.ok(sqlOf(condition).params.includes(botId) || table === schema.instanceSettings); return query; },
+        where: (condition: drizzle.SQL) => {
+          const params = sqlOf(condition).params;
+          assert.ok(params.includes(botId) || table === schema.instanceSettings);
+          if (table === schema.bots && selection) {
+            const [, tokenHash, url, hookSecret, batch] = params;
+            matches = bot.tokenHash === tokenHash && bot.webhookUrl === url && bot.webhookSecret === hookSecret &&
+              bot.webhookBatch === batch && !bot.disabledAt && !bot.webhookDisabledAt;
+          }
+          return query;
+        },
+        for: async () => matches ? [{ failures: bot.webhookFailures, error: bot.webhookLastError }] : [],
         orderBy: (order: drizzle.SQL) => {
           assert.equal(sqlOf(order).sql, '"bot_updates"."update_id" asc', 'реальный updatesFrom запрашивает ascending update_id');
           ordered = true; events.push('orderBy:update_id:asc'); return query;
@@ -85,29 +95,40 @@ function harness(options: Options = {}, deliverySource = source) {
           }
           if (table === schema.instanceSettings) return [{ value: { enabled: options.enabled ?? true, allowInternalWebhooks: options.allowInternal ?? false } }];
           assert.equal(table, schema.bots);
-          if (selection && Object.hasOwn(selection, 'url')) return [{ url: bot.webhookUrl }];
+          if (selection && Object.hasOwn(selection, 'id')) return matches ? [{ id: botId }] : [];
           return options.missingBot ? [] : [{ bot: { ...bot }, user: { deletedAt: options.deletedUser ? new Date(0) : null } }];
         },
       };
       return query;
     },
-    execute: async (query: drizzle.SQL) => {
-      const actual = sqlOf(query);
-      assert.equal(actual.sql, 'DELETE FROM bot_updates WHERE update_id = $1');
-      assert.equal(actual.params.length, 1);
-      const id = Number(actual.params[0]);
-      assert.ok(rows.some(r => r.updateId === id), 'удаляется настоящее доставленное событие');
-      rows.splice(rows.findIndex(r => r.updateId === id), 1); deletes.push(id); events.push(`delete:${id}`);
-      return { rowCount: 1 };
+    delete: (table: unknown) => {
+      assert.equal(table, schema.botUpdates);
+      return { where: (condition: drizzle.SQL) => ({ returning: async () => {
+        const [target, ...ids] = sqlOf(condition).params;
+        assert.equal(target, botId);
+        const removed: BotUpdateRow[] = [];
+        for (const id of ids.map(Number)) {
+          const index = rows.findIndex(r => r.updateId === id);
+          if (index < 0) continue;
+          removed.push(...rows.splice(index, 1));
+          deletes.push(id); events.push(`delete:${id}`);
+        }
+        return removed;
+      } }) };
     },
     update: (table: unknown) => {
       assert.equal(table, schema.bots);
       return { set: (patch: Record<string, unknown>) => ({ where: async (condition: drizzle.SQL) => {
         assert.deepEqual(sqlOf(condition).params, [botId], 'счётчик меняется только у доставляемого бота');
-        patches.push({ ...patch }); Object.assign(bot, patch); events.push('patch');
+        patches.push({ ...patch });
+        Object.assign(bot, Object.hasOwn(patch, 'droppedUpdateCount')
+          ? { ...patch, droppedUpdateCount: Number(bot.droppedUpdateCount) + 1 }
+          : patch);
+        events.push('patch');
       } }) };
     },
   };
+  const db = { ...queries, transaction: async <T>(run: (tx: typeof queries) => Promise<T>): Promise<T> => run(queries) };
   const redis = {
     set: async (...args: unknown[]) => { locks++; assert.deepEqual(args, [`bot:wh:lock:${botId}`, '1', 'PX', 60_000, 'NX']); return options.lock === false ? null : 'OK'; },
     pexpire: async (key: string, ms: number) => { assert.equal(key, `bot:wh:lock:${botId}`); assert.equal(ms, 60000); events.push('pexpire'); return 1; },
@@ -115,7 +136,7 @@ function harness(options: Options = {}, deliverySource = source) {
   };
   const common = { 'drizzle-orm': drizzle, '../db/index.js': { db }, '../db/schema.js': schema, './botRules.js': rules,
     '../realtime.js': { redisPub: redis } };
-  const store = compile<{ botById: unknown; readBotSettings: unknown; updatesFrom: unknown; wireUpdateOf: unknown; pruneBotUpdates: unknown }>(storeSource,
+  const store = compile<{ botById: unknown; readBotSettings: unknown; updatesFrom: unknown; journalContains: unknown; wireUpdateOf: unknown; pruneBotUpdates: unknown }>(storeSource,
     { ...common, '../env.js': { env: {} }, ioredis: class { constructor() { throw new Error('Redis subscriber не нужен доставке'); } } });
   const delivery = compile<DeliveryModule>(`${deliverySource}\nexport { deliverLoop as __deliverLoop };\n`, {
     ...common, './botStore.js': store,
@@ -125,8 +146,11 @@ function harness(options: Options = {}, deliverySource = source) {
     } },
     '../safeFetch.js': { safeHookPost: async (url: string, body: Buffer, headers: Record<string, string>, config: Record<string, unknown>) => {
       assert.equal(url, hook); active++; maxActive = Math.max(maxActive, active);
-      const id = JSON.parse(body.toString('utf8')).update_id;
-      const index = sent.length; sent.push({ id, body: body.toString('utf8'), headers: { ...headers }, config: { ...config } }); events.push(`send:${id}`);
+      const raw = body.toString('utf8');
+      const wire = JSON.parse(raw);
+      const ids = (Array.isArray(wire) ? wire : [wire]).map(u => u.update_id as number);
+      const id = ids[0];
+      const index = sent.length; sent.push({ id, ids, body: raw, headers: { ...headers }, config: { ...config } }); events.push(`send:${id}`);
       if (index === 0) firstStarted();
       try {
         if (index === 0 && options.holdFirst) await options.holdFirst;
@@ -231,6 +255,62 @@ describe('доставка бота: полный модуль, настоящи
     }
   });
 
+  it('пакеты сохраняют порядок и укладываются в лимит UTF-8 вместе со скобками и запятыми', async () => {
+    const h = harness({ batch: true });
+    for (const row of h.rows) row.payload.text = 'я'.repeat(150_000);
+    await h.delivery.__deliverLoop(botId);
+    assert.deepEqual(h.sent.map(s => s.ids), [[1, 2, 3], [4]]);
+    for (const request of h.sent) assert.ok(Buffer.byteLength(request.body, 'utf8') <= 1024 * 1024);
+    assert.deepEqual(h.reads, [[1, 2, 3, 4]]);
+  });
+
+  it('событие ровно на границе и более крупное одиночное доставляются целиком', async () => {
+    const h = harness();
+    for (const id of [1, 2]) {
+      const row = h.rows.find(r => r.updateId === id)!;
+      row.payload.text = '';
+      const overhead = Buffer.byteLength(JSON.stringify({ update_id: id, message: row.payload }));
+      row.payload.text = 'a'.repeat(1024 * 1024 - overhead + (id === 2 ? 1 : 0));
+    }
+    await h.delivery.__deliverLoop(botId);
+    assert.deepEqual(h.sent.map(s => s.id), [1, 2, 3, 4]);
+    assert.equal(Buffer.byteLength(h.sent[0].body), 1024 * 1024);
+    assert.equal(Buffer.byteLength(h.sent[1].body), 1024 * 1024 + 1);
+    assert.equal(h.bot.droppedUpdateCount, 0);
+    assert.deepEqual(h.reads, [[1, 2, 3, 4]]);
+  });
+
+  it('отозванная доставка сохраняет очередь и счётчики при любом ответе', async () => {
+    for (const status of [200, 500]) {
+      let release!: () => void;
+      const holdFirst = new Promise<void>(resolve => { release = resolve; });
+      const h = harness({ holdFirst, statuses: [status] });
+      const done = h.delivery.__deliverLoop(botId);
+      await h.started;
+      Object.assign(h.bot, rules.clearedWebhook, { tokenHash: 'rotated' });
+      release();
+      await done;
+      assert.equal(h.rows.length, 4);
+      assert.deepEqual(h.patches, []);
+      assert.deepEqual(h.reads, []);
+      assert.deepEqual(h.timers, []);
+    }
+  });
+
+  it('после повторной настройки на прежнем URL подтверждается только доставка текущего токена', async () => {
+    let release!: () => void;
+    const holdFirst = new Promise<void>(resolve => { release = resolve; });
+    const h = harness({ holdFirst, statuses: [200, 500] });
+    const done = h.delivery.__deliverLoop(botId);
+    await h.started;
+    Object.assign(h.bot, { tokenHash: 'rotated', webhookFailures: 0, webhookLastError: null });
+    release();
+    await done;
+    assert.deepEqual(h.sent.map(s => s.id), [1, 1]);
+    assert.deepEqual(h.deletes, []);
+    assert.equal(h.bot.webhookFailures, 1);
+  });
+
   it('сбой отметки прочтения не удерживает Redis-замок и не отменяет доставленные удаления', async () => {
     const h = harness({ readFails: true }); await h.delivery.__deliverLoop(botId);
     assert.deepEqual(h.deletes, [1, 2, 3, 4]); assert.deepEqual(h.reads, [[1, 2, 3, 4]]); assert.equal(h.events.at(-1), 'unlock');
@@ -244,7 +324,7 @@ function replaceOnce(text: string, from: string, to: string): string {
 
 const mutants = [
   { name: 'не отмечать сбой доставки прочитанным', marker: '500 не вызывает markTakenRead', actual: true, expected: false,
-    mutate: (text: string) => replaceOnce(replaceOnce(text, '        taken.push(next);', ''), '      const failures = row.bot.webhookFailures + 1;', '      taken.push(next);\n      const failures = row.bot.webhookFailures + 1;'),
+    mutate: (text: string) => replaceOnce(text, '        if (failure) {', '        if (failure) {\n          taken.push(next);'),
     verify: async (text: string) => { const h = harness({ failures: 0, statuses: [500] }, text); await h.delivery.__deliverLoop(botId);
       assert.strictEqual(h.reads.length > 0, false, '500 не вызывает markTakenRead'); } },
   { name: 'граница выключения именно десятый сбой', marker: 'десятый сбой выключает доставку', actual: false, expected: true,
@@ -252,7 +332,7 @@ const mutants = [
     verify: async (text: string) => { const h = harness({ failures: 9, statuses: [500] }, text); await h.delivery.__deliverLoop(botId);
       assert.strictEqual(h.bot.webhookDisabledAt instanceof Date, true, 'десятый сбой выключает доставку'); } },
   { name: 'успех обнуляет счётчик сбоев', marker: 'успешная пачка обнулила сбои', actual: 3, expected: 0,
-    mutate: (text: string) => replaceOnce(text, 'webhookFailures: 0, webhookLastError: null', 'webhookFailures: row.bot.webhookFailures, webhookLastError: null'),
+    mutate: (text: string) => replaceOnce(text, 'webhookFailures: 0, webhookLastError: null', 'webhookFailures: active.failures, webhookLastError: null'),
     verify: async (text: string) => { const h = harness({}, text); await h.delivery.__deliverLoop(botId);
       assert.strictEqual(h.bot.webhookFailures, 0, 'успешная пачка обнулила сбои'); } },
 ];

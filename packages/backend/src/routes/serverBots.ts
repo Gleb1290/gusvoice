@@ -15,14 +15,14 @@ import {
   type ServerBotInfo,
   type ServerBotLookup,
 } from '@gusvoice/shared';
-import { and, count, eq, gte, sql } from 'drizzle-orm';
+import { and, count, eq, gte, isNull, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
 import { botById, readBotSettings } from '../bots/botStore.js';
 import { db } from '../db/index.js';
-import { bans, bots, memberRoles, roles, serverBots, serverMembers, users } from '../db/schema.js';
+import { bans, bots, memberRoles, roles, serverBots, serverMembers, servers, users } from '../db/schema.js';
 import { requireLocalUser } from '../guestGuard.js';
 import { memberChanged } from '../memberEvents.js';
 import { getMemberContext, highestPosition } from '../permissions.js';
@@ -32,6 +32,7 @@ import { kickMember } from '../serverMembership.js';
 import { id as newId } from '../util.js';
 
 const permString = z.string().regex(/^\d{1,40}$/);
+type AddBotBlock = { code: number; error: string };
 
 async function manager(serverId: string, me: string) {
   const ctx = await getMemberContext(serverId, me);
@@ -39,22 +40,28 @@ async function manager(serverId: string, me: string) {
   return { ctx, canManage: ctx.isOwner || has(ctx.serverPermissions, Permission.MANAGE_SERVER) };
 }
 
-/** Почему бота нельзя добавить (или `null`). Приватный чужой — `hidden` (наружу 404 «не найден»). */
-async function addBlock(serverId: string, botId: string, me: string): Promise<{ code: number; error: string; hidden?: true } | null> {
-  const found = await botById(botId);
-  if (!found || found.user.deletedAt || found.bot.disabledAt) return { code: 404, error: 'Бот не найден' };
-  if (!found.bot.public && found.bot.ownerId !== me) return { code: 403, error: 'Бот приватный: добавить его может только владелец', hidden: true };
-  const [banned] = await db.select({ u: bans.userId }).from(bans).where(and(eq(bans.serverId, serverId), eq(bans.userId, botId))).limit(1);
+/** Почему бота нельзя добавить (или `null`). */
+async function addBlock(
+  serverId: string, botId: string, me: string, found: NonNullable<Awaited<ReturnType<typeof botById>>>, q: Pick<typeof db, 'select'> = db,
+): Promise<AddBotBlock | null> {
+  if (found.user.deletedAt || found.bot.disabledAt) return { code: 404, error: 'Бот не найден' };
+  if (!found.bot.public && found.bot.ownerId !== me) return { code: 403, error: 'Бот приватный: добавить его может только владелец' };
+  const [banned] = await q.select({ u: bans.userId }).from(bans).where(and(eq(bans.serverId, serverId), eq(bans.userId, botId))).limit(1);
   if (banned) return { code: 409, error: 'Бот забанен на сервере' };
-  const [member] = await db
+  const [member] = await q
     .select({ u: serverMembers.userId })
     .from(serverMembers)
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, botId)))
     .limit(1);
   if (member) return { code: 409, error: 'Бот уже на сервере' };
-  const [n] = await db.select({ n: count() }).from(serverBots).where(eq(serverBots.serverId, serverId));
+  const [n] = await q.select({ n: count() }).from(serverBots).where(eq(serverBots.serverId, serverId));
   if (Number(n?.n ?? 0) >= SERVER_BOTS_MAX) return { code: 409, error: `На сервере уже ${SERVER_BOTS_MAX} ботов — больше нельзя` };
   return null;
+}
+
+async function lockServerForBotChange(tx: Pick<typeof db, 'select'>, serverId: string) {
+  const [server] = await tx.select({ id: servers.id }).from(servers).where(eq(servers.id, serverId)).for('no key update');
+  return server;
 }
 
 export async function serverBotRoutes(app: FastifyInstance) {
@@ -106,22 +113,25 @@ export async function serverBotRoutes(app: FastifyInstance) {
       if (!m.canManage) return reply.code(403).send({ error: 'forbidden' });
       const name = String(req.query.username ?? '').trim().replace(/^@/, '');
       if (!name || name.length > 64) return reply.code(404).send({ error: 'Бот не найден' });
-      const [row] = await db
-        .select({ u: users, b: bots })
+      const [row, other] = await db
+        .select({ user: users, bot: bots })
         .from(users)
         .innerJoin(bots, eq(bots.userId, users.id))
-        .where(sql`lower(${users.username}) = lower(${name})`)
-        .limit(1);
-      if (!row || row.u.deletedAt || row.b.disabledAt) return reply.code(404).send({ error: 'Бот не найден' });
-      const block = await addBlock(req.params.id, row.u.id, me);
-      // Приватный чужой бот — как «нет такого»: его существование не раскрываем.
-      if (block?.hidden) return reply.code(404).send({ error: 'Бот не найден' });
+        .where(and(
+          sql`lower(${users.username}) = lower(${name})`, isNull(users.deletedAt), isNull(bots.disabledAt),
+          or(eq(bots.public, true), eq(bots.ownerId, me)),
+        ))
+        .orderBy(sql`(${users.username} = ${name}) DESC`)
+        .limit(2);
+      // Старые варианты регистра могут сосуществовать. Не выбираем между ними произвольно.
+      if (!row || (other && row.user.username !== name)) return reply.code(404).send({ error: 'Бот не найден' });
+      const block = await addBlock(req.params.id, row.user.id, me, row);
       const out: ServerBotLookup = {
-        id: row.u.id,
-        username: row.u.username,
-        displayName: row.u.displayName,
-        avatarUrl: row.u.avatarUrl,
-        description: row.b.description,
+        id: row.user.id,
+        username: row.user.username,
+        displayName: row.user.displayName,
+        avatarUrl: row.user.avatarUrl,
+        description: row.bot.description,
         canAdd: !block,
         ...(block ? { reason: block.error } : {}),
       };
@@ -136,16 +146,22 @@ export async function serverBotRoutes(app: FastifyInstance) {
       if (!m) return reply.code(404).send({ error: 'not a member' });
       if (!m.canManage) return reply.code(403).send({ error: 'forbidden' });
       if (!(await readBotSettings()).enabled) return reply.code(403).send({ error: 'Боты выключены на этом сервере' });
-      const block = await addBlock(serverId, body.botId, me);
-      if (block) return reply.code(block.code).send({ error: block.error });
       const requested = permsFromString(body.permissions);
       if (botAdminRequested(requested)) return reply.code(400).send({ error: BOT_ADMIN_FORBIDDEN });
       const granted = botGrant(requested, m.ctx.serverPermissions, m.ctx.isOwner);
-      const found = (await botById(body.botId))!;
       const high = highestPosition(m.ctx);
       const roleId = newId();
-      await db.transaction(async (tx) => {
-        await tx.insert(serverMembers).values({ serverId, userId: body.botId });
+      const result = await db.transaction<AddBotBlock | { username: string }>(async (tx) => {
+        // Замок принадлежит серверу: разные боты, добавляемые параллельно, делят одну квоту.
+        if (!(await lockServerForBotChange(tx, serverId))) return { code: 404, error: 'not a member' };
+        const found = await botById(body.botId, tx);
+        if (!found) return { code: 404, error: 'Бот не найден' };
+        const block = await addBlock(serverId, body.botId, me, found, tx);
+        if (block) return block;
+        const [member] = await tx.insert(serverMembers).values({ serverId, userId: body.botId })
+          .onConflictDoNothing({ target: [serverMembers.serverId, serverMembers.userId] })
+          .returning({ userId: serverMembers.userId });
+        if (!member) return { code: 409, error: 'Бот уже на сервере' };
         const [n] = await tx.select({ n: count() }).from(roles).where(eq(roles.serverId, serverId));
         let position = Number(n?.n ?? 0);
         // Роль бота — наверх, но строго НИЖЕ высшей роли добавляющего (чтобы он мог её править).
@@ -169,11 +185,13 @@ export async function serverBotRoutes(app: FastifyInstance) {
         });
         await tx.insert(memberRoles).values({ serverId, userId: body.botId, roleId });
         await tx.insert(serverBots).values({ serverId, botId: body.botId, readAll: body.readAll, addedBy: me });
-      });
+        return { username: found.user.username };
+      }, { isolationLevel: 'read committed' });
+      if ('error' in result) return reply.code(result.code).send({ error: result.error });
       await writeAudit(serverId, me, 'bot.add', {
         targetType: 'member',
         targetId: body.botId,
-        data: { username: found.user.username, permissions: permsToString(granted), readAll: body.readAll },
+        data: { username: result.username, permissions: permsToString(granted), readAll: body.readAll },
       });
       await publishToServer(serverId, { t: 'server.invalidate', serverId });
       memberChanged({ serverId, userId: body.botId, actorId: me, from: 'left', to: 'member' });
@@ -233,12 +251,16 @@ export async function serverBotRoutes(app: FastifyInstance) {
  * роль бота ставится ниже добавившего, но владелец бота может и не быть админом сервера. Роль и `server_bots` — каскадом.
  */
 export async function removeBotFromServer(serverId: string, botId: string, actorId: string): Promise<boolean> {
-  const gone = await db
-    .delete(serverMembers)
-    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, botId)))
-    .returning({ userId: serverMembers.userId });
-  if (gone.length === 0) return false;
-  await db.delete(memberRoles).where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, botId)));
+  const removed = await db.transaction(async (tx) => {
+    if (!(await lockServerForBotChange(tx, serverId))) return false;
+    const [gone] = await tx.delete(serverMembers)
+      .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, botId)))
+      .returning({ userId: serverMembers.userId });
+    if (!gone) return false;
+    await tx.delete(memberRoles).where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, botId)));
+    return true;
+  });
+  if (!removed) return false;
   const [u] = await db.select({ username: users.username }).from(users).where(eq(users.id, botId)).limit(1);
   await writeAudit(serverId, actorId, 'bot.remove', { targetType: 'member', targetId: botId, data: { username: u?.username } });
   await publishToServer(serverId, { t: 'server.invalidate', serverId });

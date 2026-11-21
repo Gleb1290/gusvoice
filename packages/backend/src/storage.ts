@@ -412,13 +412,27 @@ export async function putAttachment(
   filename: string,
   stamp: number,
 ): Promise<string> {
-  if (!minio) {
+  const upload = prepareAttachmentUpload(id, buffer, mime, filename, stamp);
+  await upload.put();
+  return upload.url;
+}
+
+/** Назначаем ключ заранее: даже при потере ответа на put можно убрать именно этот объект. */
+export function prepareAttachmentUpload(id: string, buffer: Buffer, mime: string, filename: string, stamp: number) {
+  const client = minio;
+  if (!client) {
     throw Object.assign(new Error('media storage not configured'), { statusCode: 503 });
   }
   const key = `attachments/${id}-${stamp}.${attachmentExt(filename, mime)}`;
-  await minio.putObject(env.minio.bucket, key, buffer, buffer.length, {
-    'Content-Type': mime,
-    'Content-Disposition': contentDisposition(mime, filename),
-  });
-  return `${env.minio.publicUrl}/${env.minio.bucket}/${key}`;
+  const bucket = env.minio.bucket;
+  return {
+    url: `${env.minio.publicUrl}/${bucket}/${key}`,
+    put: async () => {
+      await client.putObject(bucket, key, buffer, buffer.length, {
+        'Content-Type': mime,
+        'Content-Disposition': contentDisposition(mime, filename),
+      });
+    },
+    remove: () => client.removeObject(bucket, key),
+  };
 }

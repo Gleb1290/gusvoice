@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ALL_PERMISSIONS, Permission } from '@gusvoice/shared';
+import { memberBasePermissions } from './audienceRules.js';
 import {
   assignRoleBlock,
+  botRoleAssignmentBlocked,
   clampGrant,
   planReorder,
   selfAssignBlocked,
@@ -242,5 +244,28 @@ describe('выдача роли участнику', () => {
       rolePosition: 4,
       actorHighest: 5,
     }), null);
+  });
+});
+
+describe('административные роли и боты', () => {
+  it('административную роль можно выдать только от человека человеку', () => {
+    const admin = Permission.ADMINISTRATOR | Permission.VIEW_CHANNEL;
+    assert.equal(botRoleAssignmentBlocked(admin, false, false), false);
+    assert.equal(botRoleAssignmentBlocked(admin, false, true), true);
+    assert.equal(botRoleAssignmentBlocked(admin, true, false), true);
+  });
+
+  it('бот может получать и выдавать обычные роли', () => {
+    assert.equal(botRoleAssignmentBlocked(Permission.VIEW_CHANNEL, false, true), false);
+    assert.equal(botRoleAssignmentBlocked(Permission.VIEW_CHANNEL, true, false), false);
+  });
+
+  it('старое назначение сохраняет боту явно выданные права, человеку даёт права администратора', () => {
+    const roles = [
+      { permissions: String(Permission.VIEW_CHANNEL) },
+      { permissions: String(Permission.ADMINISTRATOR | Permission.SEND_MESSAGES) },
+    ];
+    assert.equal(memberBasePermissions(roles, true), Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES);
+    assert.equal(memberBasePermissions(roles, false), ALL_PERMISSIONS);
   });
 });

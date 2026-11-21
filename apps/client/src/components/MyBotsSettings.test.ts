@@ -110,6 +110,19 @@ for (const action of ['rotate', 'remove'] as const) for (const approved of [fals
     } finally { resolve(false); }
   });
 }
+it('перевыпуск предупреждает об отключении вебхука и сразу обновляет сведения о доставке', async () => {
+  const url = 'https://example.invalid/bot-hook';
+  const currentBot: BotInfo = { ...bot, webhook: { url, failures: 0, lastError: null, disabledAt: null } };
+  await fixture(async f => {
+    await openEditor(f.host);
+    assert.match(f.host.textContent ?? '', /example\.invalid/);
+    await click(button(f.host, 'Перевыпустить токен'));
+    assert.match(String(f.confirmations[0].body), /Текущий вебхук отключится/);
+    assert.equal(tokenInput()?.value, 'test-rotated-token');
+    assert.doesNotMatch(f.host.textContent ?? '', /example\.invalid/);
+  }, { currentBot });
+});
+
 async function escapeProbe(source = raw) {
   await fixture(async f => {
     await openEditor(f.host); await click(button(f.host, 'Перевыпустить токен'));

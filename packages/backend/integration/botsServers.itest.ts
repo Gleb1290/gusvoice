@@ -2,8 +2,10 @@ import { counterfact } from '../../shared/test/counterfacts.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { and, asc, eq } from 'drizzle-orm';
-import { Permission as P, type Message } from '@gusvoice/shared';
+import { Permission as P, SERVER_BOTS_MAX, type Message } from '@gusvoice/shared';
+import { DM_DAILY_UPLOAD_BYTES } from '../src/attachmentRules.js';
 import * as s from '../src/db/schema.js';
+import { WEBHOOK_FILE_MAX_BYTES, WEBHOOK_FILES_MAX } from '../src/webhookRules.js';
 import { createTestDb, type TestDb } from './harness.js';
 import { serverFixture, type Phase3Edit } from './botsServers.harness.js';
 
@@ -116,6 +118,46 @@ test('R303 канальная отправка сохраняет клавиат
     await assert.rejects(f.channel.channelSendMessage(ctx, { chat_id: 'other-channel', text: 'ответ', reply_to_message_id: sent.message_id }, []), botError(400, 'reply not found'));
   } finally { await f.clean(); }
 });
+test('параллельные отправки по разным каналам делят оставшийся суточный бюджет бота', async () => {
+  const f = await serverFixture(db);
+  try {
+    const ctx = await f.bot();
+    const other = await f.bot('other');
+    assert.equal((await f.add('bot')).statusCode, 201);
+    assert.equal((await f.add('other')).statusCode, 201);
+    const seeded = [{ id: 'expired', botId: 'bot', bytes: 1, reservedAt: new Date(0) }];
+    for (let remaining = DM_DAILY_UPLOAD_BYTES - 2; remaining > 0;) {
+      const bytes = Math.min(remaining, WEBHOOK_FILES_MAX * WEBHOOK_FILE_MAX_BYTES);
+      seeded.push({ id: `reservation-${remaining}`, botId: 'bot', bytes, reservedAt: new Date() });
+      remaining -= bytes;
+    }
+    await db.db.insert(s.botChannelUploadReservations).values(seeded);
+    const file = { name: 'a.txt', mime: 'text/plain', buffer: Buffer.from('a') };
+    const sent = await f.channel.channelSendMessage(ctx, { chat_id: 'channel' }, [file]);
+    assert.equal(f.uploads.length, 1);
+    const outcomes = await Promise.allSettled(['channel', 'other-channel'].map((chat_id) => f.channel.channelSendMessage(ctx, { chat_id }, [file])));
+    assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1);
+    const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+    assert.ok(rejected && botError(429, 'per 24 hours')(rejected.reason));
+    await assert.rejects(f.channel.channelSendMessage(ctx, { chat_id: 'other-channel', reply_to_message_id: sent.message_id }, [file]), botError(400, 'reply not found'));
+    assert.equal(f.uploads.length, 2);
+    await f.channel.channelSendMessage(other, { chat_id: 'other-channel' }, [file]);
+    assert.equal(f.uploads.length, 3);
+  } finally { await f.clean(); }
+});
+test('параллельные установки разных ботов делят последнее место на сервере', async () => {
+  const f = await serverFixture(db);
+  try {
+    const existing = Array.from({ length: SERVER_BOTS_MAX - 1 }, (_, i) => `installed-${i}`);
+    for (const id of [...existing, 'first', 'second']) await f.bot(id);
+    await db.db.insert(s.serverMembers).values(existing.map((userId) => ({ serverId: 'server', userId })));
+    await db.db.insert(s.serverBots).values(existing.map((botId) => ({ serverId: 'server', botId })));
+
+    const outcomes = await Promise.all([f.add('first'), f.add('second')]);
+    assert.deepEqual(outcomes.map((outcome) => outcome.statusCode).sort(), [201, 409]);
+    assert.equal((await db.db.select().from(s.serverBots)).length, SERVER_BOTS_MAX);
+  } finally { await f.clean(); }
+});
 test('R303 изменение только кнопок не ставит editedAt, правка текста без markup снимает клавиатуру', async () => {
   const f = await serverFixture(db);
   try {
@@ -182,6 +224,9 @@ test('R303 состав сервера различает владельца, у
     const ctx = await f.bot(); await f.add('bot', rights | P.KICK_MEMBERS | P.BAN_MEMBERS | P.MANAGE_ROLES);
     const get = (user_id: string) => f.channel.serverGetChatMember(ctx, { chat_id: 'server', user_id });
     assert.equal((await get('owner')).status, 'creator'); assert.equal((await get('person')).status, 'member'); assert.equal((await get('outsider')).status, 'left');
+    for (const absent of ['outsider', 'unknown']) {
+      assert.deepEqual(normal((await get(absent)).user), { id: absent, username: '', display_name: '', bot: false });
+    }
     await assert.rejects(f.channel.serverKickChatMember(ctx, { chat_id: 'server', user_id: 'owner' }), botError(400, 'owner'));
     await assert.rejects(f.channel.serverKickChatMember(ctx, { chat_id: 'server', user_id: 'bot' }), botError(400, 'self'));
     await f.channel.serverBanChatMember(ctx, { chat_id: 'server', user_id: 'person', reason: 'причина' }); assert.equal((await get('person')).status, 'kicked');
@@ -344,6 +389,9 @@ test('R303 удаление и реакция приходят readAll и авт
 test('R303 memberBotUpdates чистит только события снятого сервера ДО my_chat_member и сохраняет чужих ботов', async () => {
   const f = await privacyFixture();
   try {
+    await db.db.insert(s.servers).values({ id: 'another', name: 'Другой сервер', ownerId: 'owner' });
+    await db.db.insert(s.serverMembers).values({ serverId: 'another', userId: 'private' });
+    await db.db.insert(s.serverBots).values({ serverId: 'another', botId: 'private', addedBy: 'owner' });
     await f.store.pushUpdates([
       { botId: 'private', type: 'message', payload: { chat: { server_id: 'server' } } },
       { botId: 'private', type: 'callback_query', payload: { message: { chat: { server_id: 'server' } } } },

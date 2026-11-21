@@ -25,7 +25,7 @@ import { sendPasswordResetCode, sendVerificationCode } from '../mailer.js';
 import { registrationPolicy } from '../instanceSetup.js';
 import { isInviteSpent } from '../inviteRules.js';
 import { isSmtpConfigured } from '../settings.js';
-import { decideRegistration, loginGate, PENDING_APPROVAL_ERROR, type InviteCheck } from '../setupRules.js';
+import { decideRegistration, isUsernameConflict, loginGate, PENDING_APPROVAL_ERROR, type InviteCheck } from '../setupRules.js';
 import { instanceFeatures } from '../instanceFeatures.js';
 import { BIGFILE_MAX_BYTES } from '../attachmentRules.js';
 import { redisPub } from '../realtime.js';
@@ -251,7 +251,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         verified: false,
         approvedAt: decision.approved ? new Date() : null,
       })
-      .returning();
+      .returning()
+      .catch((err: unknown) => {
+        if (isUsernameConflict(err)) return [];
+        throw err;
+      });
+    if (!row) return reply.code(409).send({ error: 'username or email already in use' });
 
     // With SMTP configured we e-mail a 6-digit code. Without it (turnkey installs that skipped mail)
     // there's no way to deliver one, so the account is left unverified and a super-admin approves it

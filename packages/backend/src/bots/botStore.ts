@@ -3,10 +3,10 @@
  * (`bot_updates`), будильник ожидающих (Redis pub/sub `bot:upd:<id>` — долгий опрос и WS не крутят базу) и уборка.
  */
 import type { BotCommandInfo, BotCommandsScoped, BotSettings } from '@gusvoice/shared';
-import { and, asc, eq, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import Redis from 'ioredis';
 import { db } from '../db/index.js';
-import { botUpdates, bots, instanceSettings, serverBots, users } from '../db/schema.js';
+import { botUpdates, bots, instanceSettings, serverBots, servers, users } from '../db/schema.js';
 import { env } from '../env.js';
 import { BOT_UPDATES_CAP, BOT_UPDATES_CAP_READ_ALL, BOT_UPDATES_TTL_MS, type BotCommandScope, type BotUpdateType, botTokenMatches, CALLBACK_QUERY_STALE_S, BOTS_SETTINGS_KEY, hashBotToken, normalizeBotSettings } from './botRules.js';
 
@@ -46,8 +46,8 @@ export async function botByToken(token: string): Promise<{ bot: BotRow; user: Us
   return row;
 }
 
-export async function botById(botId: string): Promise<{ bot: BotRow; user: UserRow } | null> {
-  const [row] = await db.select({ bot: bots, user: users }).from(bots).innerJoin(users, eq(users.id, bots.userId)).where(eq(bots.userId, botId)).limit(1);
+export async function botById(botId: string, q: Pick<typeof db, 'select'> = db): Promise<{ bot: BotRow; user: UserRow } | null> {
+  const [row] = await q.select({ bot: bots, user: users }).from(bots).innerJoin(users, eq(users.id, bots.userId)).where(eq(bots.userId, botId)).limit(1);
   return row ?? null;
 }
 
@@ -64,76 +64,129 @@ export async function liveBotsAmong(ids: readonly string[]): Promise<Map<string,
 
 // ─── Журнал событий ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-/**
- * Записать событие и разбудить ждущих (долгий опрос, WS) на любом процессе. Потолок журнала `BOT_UPDATES_CAP` держится
- * ЗДЕСЬ, на вставке (аудит 26.10): часовая уборка `pruneBotUpdates` — только страховка, а между её проходами бот, который
- * не забирает события, копил бы их без предела. Сверх потолка уходят самые старые этого бота (`update_id` — общий на инстанс,
- * у бота не подряд → граница — `OFFSET` от свежего).
- */
-export async function pushUpdate(botId: string, type: BotUpdateType, payload: Record<string, unknown>): Promise<number> {
-  const [row] = await db.insert(botUpdates).values({ botId, type, payload }).returning({ updateId: botUpdates.updateId });
-  await trimJournal(botId, await capOf(botId));
-  const { redisPub } = await import('../realtime.js');
-  await redisPub.publish(wakeChannel(botId), String(row.updateId)).catch(() => 0);
-  return row.updateId;
+type BotTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type PendingUpdate = { botId: string; type: BotUpdateType; payload: Record<string, unknown>; readAll?: boolean };
+
+/** Записать событие и разбудить потребителей после коммита. Отозванный доступ к серверу даёт `null`. */
+export async function pushUpdate(botId: string, type: BotUpdateType, payload: Record<string, unknown>): Promise<number | null> {
+  return (await appendUpdates([{ botId, type, payload }])).get(botId) ?? null;
 }
 
-/** Потолок журнала бота: «читать всё» хоть на одном сервере — `BOT_UPDATES_CAP_READ_ALL` (#231), иначе `BOT_UPDATES_CAP`. */
-async function capOf(botId: string): Promise<number> {
-  const [r] = await db
-    .select({ one: sql<number>`1` })
-    .from(serverBots)
-    .where(and(eq(serverBots.botId, botId), eq(serverBots.readAll, true)))
-    .limit(1);
-  return r ? BOT_UPDATES_CAP_READ_ALL : BOT_UPDATES_CAP;
+/** Разлёт по ботам с одной многострочной вставкой. Возвращает ботов, которым записано событие. */
+export async function pushUpdates(rows: readonly PendingUpdate[]): Promise<string[]> {
+  return [...(await appendUpdates(rows)).keys()];
 }
 
-/** Срезать сверх потолка (старые первыми) и посчитать потерю (`bots.dropped_update_count`, #231 — бот видит, что терял). */
-async function trimJournal(botId: string, cap: number): Promise<void> {
-  const res = await db.execute(sql`
-    DELETE FROM bot_updates WHERE bot_id = ${botId} AND update_id < (
-      SELECT update_id FROM bot_updates WHERE bot_id = ${botId} ORDER BY update_id DESC OFFSET ${cap - 1} LIMIT 1
-    )`);
-  const dropped = Number((res as { rowCount?: number }).rowCount ?? 0);
-  if (dropped > 0) {
-    await db
-      .update(bots)
-      .set({ droppedUpdateCount: sql`least(${bots.droppedUpdateCount}::bigint + ${dropped}, 2147483647)::int` })
-      .where(eq(bots.userId, botId));
+function serverScope({ payload }: PendingUpdate): string | undefined {
+  const message = payload.message as { chat?: unknown } | undefined;
+  const chat = (payload.chat ?? message?.chat) as { type?: unknown; id?: unknown; server_id?: unknown } | undefined;
+  if (typeof chat?.server_id === 'string') return chat.server_id;
+  if (chat?.type === 'server' && typeof chat.id === 'string') return chat.id;
+  return undefined;
+}
+
+function isLeaveNotice({ type, payload }: PendingUpdate): boolean {
+  return type === 'my_chat_member' && (payload.chat as { type?: unknown } | undefined)?.type === 'server' && (payload.new_status === 'left' || payload.new_status === 'kicked');
+}
+
+async function appendUpdates(rows: readonly PendingUpdate[]): Promise<Map<string, number>> {
+  if (rows.length === 0) return new Map();
+  const ids = [...new Set(rows.map((r) => r.botId))];
+  const last = await db.transaction(async (tx) => {
+    const scoped = rows.map((row) => ({ row, serverId: serverScope(row), leaving: isLeaveNotice(row) }));
+    const serverIds = [...new Set(scoped.flatMap((r) => r.serverId ? [r.serverId] : []))];
+    const leaveServers = [...new Set(scoped.flatMap((r) => r.leaving && r.serverId ? [r.serverId] : []))];
+    const liveServers = leaveServers.length === 0 ? [] : await tx.select({ id: servers.id }).from(servers)
+      .where(inArray(servers.id, leaveServers)).orderBy(asc(servers.id)).for('key share');
+    // Аудитория могла измениться, пока крючок ждал очередь. Блокировка держит членство до коммита записи.
+    const memberships = serverIds.length === 0 ? [] : await tx.select({
+      botId: serverBots.botId, serverId: serverBots.serverId,
+    }).from(serverBots).where(and(inArray(serverBots.botId, ids), inArray(serverBots.serverId, serverIds)))
+      .orderBy(asc(serverBots.serverId), asc(serverBots.botId)).for('key share');
+    // Единый порядок с удалением сервера: сервер/членство → боты по ID → журнал.
+    // Блокировка бота до INSERT упорядочивает выдачу update_id и коммит.
+    const existing = new Set((await lockJournals(tx, ids)).map((r) => r.id));
+    const live = new Set(liveServers.map((r) => r.id));
+    const member = new Set(memberships.map((r) => JSON.stringify([r.botId, r.serverId])));
+    const accepted = scoped.filter(({ row, serverId, leaving }) => existing.has(row.botId) &&
+      (!serverId || (leaving ? live.has(serverId) : member.has(JSON.stringify([row.botId, serverId])))));
+    if (accepted.length === 0) return new Map<string, number>();
+    const inserted = await tx.insert(botUpdates).values(accepted.map(({ row: { botId, type, payload } }) => ({ botId, type, payload })))
+      .returning({ updateId: botUpdates.updateId, botId: botUpdates.botId });
+    const last = new Map<string, number>();
+    for (const r of inserted) last.set(r.botId, Math.max(last.get(r.botId) ?? 0, r.updateId));
+    const readAll = new Set(accepted.filter(({ row }) => row.readAll === true).map(({ row }) => row.botId));
+    const highCaps = await tx.selectDistinct({ id: serverBots.botId }).from(serverBots)
+      .where(and(inArray(serverBots.botId, [...last.keys()]), eq(serverBots.readAll, true)));
+    for (const r of highCaps) readAll.add(r.id);
+    await trimJournal(tx, [...last.keys()].map((botId) => ({
+      botId, cap: readAll.has(botId) ? BOT_UPDATES_CAP_READ_ALL : BOT_UPDATES_CAP,
+    })));
+    return last;
+  });
+  if (last.size > 0) {
+    const { redisPub } = await import('../realtime.js');
+    await Promise.all([...last].map(([botId, updateId]) => redisPub.publish(wakeChannel(botId), String(updateId)).catch(() => 0)));
   }
+  return last;
 }
 
-/**
- * Пачка событий (#231, разлёт события канала по ботам): ОДИН многострочный INSERT, затем потолок журнала на каждого бота
- * (тот же, что у `pushUpdate`; `readAll` уже известен вызывающему) и будильник каждому. Возвращает ботов, кому записано.
- */
-export async function pushUpdates(rows: readonly { botId: string; type: BotUpdateType; payload: Record<string, unknown>; readAll?: boolean }[]): Promise<string[]> {
-  if (rows.length === 0) return [];
-  const inserted = await db
-    .insert(botUpdates)
-    .values(rows.map((r) => ({ botId: r.botId, type: r.type, payload: r.payload })))
-    .returning({ updateId: botUpdates.updateId, botId: botUpdates.botId });
-  const last = new Map<string, number>();
-  for (const r of inserted) last.set(r.botId, Math.max(last.get(r.botId) ?? 0, r.updateId));
-  const readAll = new Map<string, boolean>();
-  for (const r of rows) if (r.readAll !== undefined) readAll.set(r.botId, readAll.get(r.botId) === true || r.readAll);
-  const { redisPub } = await import('../realtime.js');
-  for (const [botId, updateId] of last) {
-    const known = readAll.get(botId);
-    await trimJournal(botId, known === undefined ? await capOf(botId) : known ? BOT_UPDATES_CAP_READ_ALL : BOT_UPDATES_CAP);
-    await redisPub.publish(wakeChannel(botId), String(updateId)).catch(() => 0);
-  }
-  return [...last.keys()];
+/** DELETE и INSERT меняют счётчик через триггеры. Сначала берём строки ботов, всегда в одном порядке. */
+async function lockJournals(tx: BotTransaction, botIds: readonly string[]) {
+  return tx.select({ id: bots.userId }).from(bots)
+    .where(inArray(bots.userId, [...botIds])).orderBy(asc(bots.userId)).for('no key update');
 }
 
-/**
- * Снятие бота с сервера (#231, решение владельца: «снятие бота чистит роль и подписки»): его события ЭТОГО сервера — сообщения
- * каналов, реакции, нажатия (`chat.server_id` / `message.chat.server_id`). ЛС и другие серверы целы.
- */
+/** Точное превышение уже известно из счётчика. База читает первые n записей индекса, обычно одну. */
+async function trimJournal(tx: BotTransaction, queues: readonly { botId: string; cap: number }[]): Promise<number> {
+  const input = sql.join(queues.map(({ botId, cap }) => sql`(${botId}::text, ${cap}::int)`), sql`, `);
+  const result = await tx.execute<{ dropped: number }>(sql`
+    WITH queues(bot_id, cap) AS (VALUES ${input})
+    SELECT coalesce(sum(trim_bot_journal(b.user_id, b.journal_size - q.cap)), 0)::int AS dropped
+    FROM queues q JOIN bots b ON b.user_id = q.bot_id
+    WHERE b.journal_size > q.cap
+  `);
+  return result.rows[0]?.dropped ?? 0;
+}
+
+const updateServerId = sql<string | null>`coalesce(
+  ${botUpdates.payload} #>> '{chat,server_id}',
+  ${botUpdates.payload} #>> '{message,chat,server_id}',
+  CASE WHEN ${botUpdates.payload} #>> '{chat,type}' = 'server' THEN ${botUpdates.payload} #>> '{chat,id}' END
+)`;
+
+function serverUpdateVisible() {
+  return sql`(${updateServerId} IS NULL OR EXISTS (
+    SELECT 1 FROM server_bots sb WHERE sb.bot_id = ${botUpdates.botId} AND sb.server_id = ${updateServerId}
+  ) OR (
+    ${botUpdates.type} = 'my_chat_member' AND ${botUpdates.payload} #>> '{chat,type}' = 'server'
+    AND ${botUpdates.payload} #>> '{new_status}' IN ('left', 'kicked')
+    AND EXISTS (SELECT 1 FROM servers s WHERE s.id = ${updateServerId})
+  ))`;
+}
+
+/** Проверка непосредственно перед POST: пачка могла утратить право на доставку после выборки. */
+export function journalContains(botId: string, ids: readonly number[]) {
+  const matching = and(eq(botUpdates.botId, botId), inArray(botUpdates.updateId, [...ids]), notStale(), serverUpdateVisible());
+  return sql`(SELECT count(*) FROM bot_updates WHERE ${matching}) = ${ids.length}`;
+}
+
+/** Убрать события сервера у снятого бота. Его новое `my_chat_member` записывается отдельно. */
 export async function dropServerUpdates(botId: string, serverId: string): Promise<void> {
-  await db.execute(sql`
-    DELETE FROM bot_updates WHERE bot_id = ${botId}
-      AND (payload #>> '{chat,server_id}' = ${serverId} OR payload #>> '{message,chat,server_id}' = ${serverId})`);
+  await db.transaction(async (tx) => {
+    await lockJournals(tx, [botId]);
+    await tx.delete(botUpdates).where(and(eq(botUpdates.botId, botId), eq(updateServerId, serverId)));
+  });
+}
+
+/** Вызывать в транзакции удаления сервера после каскадного удаления членства. */
+export async function dropDeletedServerUpdates(tx: BotTransaction, serverId: string): Promise<void> {
+  const scoped = eq(updateServerId, serverId);
+  const affected = await tx.selectDistinct({ id: botUpdates.botId }).from(botUpdates).where(scoped);
+  if (affected.length === 0) return;
+  const ids = affected.map((r) => r.id);
+  await lockJournals(tx, ids);
+  await tx.delete(botUpdates).where(and(inArray(botUpdates.botId, ids), scoped));
 }
 
 /**
@@ -141,10 +194,12 @@ export async function dropServerUpdates(botId: string, serverId: string): Promis
  * отмечает «прочитано» (`bots/botRead.ts`).
  */
 export async function confirmUpdates(botId: string, offset: number): Promise<{ type: string; payload: unknown }[]> {
-  return db
-    .delete(botUpdates)
-    .where(and(eq(botUpdates.botId, botId), lt(botUpdates.updateId, offset)))
-    .returning({ type: botUpdates.type, payload: botUpdates.payload });
+  return db.transaction(async (tx) => {
+    await lockJournals(tx, [botId]);
+    return tx.delete(botUpdates)
+      .where(and(eq(botUpdates.botId, botId), lt(botUpdates.updateId, offset)))
+      .returning({ type: botUpdates.type, payload: botUpdates.payload });
+  });
 }
 
 /**
@@ -161,18 +216,20 @@ export async function updatesFrom(botId: string, fromId: number, limit: number, 
     .select()
     .from(botUpdates)
     .where(
-      and(eq(botUpdates.botId, botId), gte(botUpdates.updateId, fromId), types ? inArray(botUpdates.type, [...types]) : undefined, notStale()),
+      and(eq(botUpdates.botId, botId), gte(botUpdates.updateId, fromId), types ? inArray(botUpdates.type, [...types]) : undefined, notStale(), serverUpdateVisible()),
     )
     .orderBy(asc(botUpdates.updateId))
     .limit(limit);
 }
 
-export async function dropUpdates(botId: string): Promise<void> {
-  await db.delete(botUpdates).where(eq(botUpdates.botId, botId));
+export async function dropUpdates(botId: string, tx?: BotTransaction): Promise<void> {
+  if (!tx) return db.transaction((q) => dropUpdates(botId, q));
+  await lockJournals(tx, [botId]);
+  await tx.delete(botUpdates).where(eq(botUpdates.botId, botId));
 }
 
 export async function pendingCount(botId: string): Promise<number> {
-  const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(botUpdates).where(and(eq(botUpdates.botId, botId), notStale()));
+  const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(botUpdates).where(and(eq(botUpdates.botId, botId), notStale(), serverUpdateVisible()));
   return Number(r?.n ?? 0);
 }
 
@@ -183,23 +240,24 @@ export function wireUpdateOf(u: BotUpdateRow): Record<string, unknown> {
 
 /** Уборка: старше суток и сверх потолка на бота (старые первыми). Число удалённых. */
 export async function pruneBotUpdates(now = Date.now()): Promise<number> {
-  const old = await db
-    .delete(botUpdates)
-    .where(
-      or(
-        lt(botUpdates.createdAt, new Date(now - BOT_UPDATES_TTL_MS)),
-        // Протухшее нажатие (#230) боту всё равно не отдаётся — место в журнале не держит.
-        and(eq(botUpdates.type, 'callback_query'), lt(botUpdates.createdAt, new Date(now - CALLBACK_QUERY_STALE_S * 1000))),
-      ),
-    )
-    .returning({ id: botUpdates.updateId });
-  const over = await db.execute(sql`
-    DELETE FROM bot_updates WHERE update_id IN (
-      SELECT update_id FROM (
-        SELECT update_id, row_number() OVER (PARTITION BY bot_id ORDER BY update_id DESC) AS rn FROM bot_updates
-      ) x WHERE x.rn > ${BOT_UPDATES_CAP_READ_ALL}
-    )`);
-  return old.length + Number((over as { rowCount?: number }).rowCount ?? 0);
+  const expired = or(
+    lt(botUpdates.createdAt, new Date(now - BOT_UPDATES_TTL_MS)),
+    and(eq(botUpdates.type, 'callback_query'), lt(botUpdates.createdAt, new Date(now - CALLBACK_QUERY_STALE_S * 1000))),
+  );
+  const [old, over] = await Promise.all([
+    db.selectDistinct({ id: botUpdates.botId }).from(botUpdates).where(expired),
+    db.select({ id: bots.userId }).from(bots).where(gt(bots.journalSize, BOT_UPDATES_CAP_READ_ALL)),
+  ]);
+  let removed = 0;
+  for (const botId of new Set([...old, ...over].map((r) => r.id))) {
+    removed += await db.transaction(async (tx) => {
+      await lockJournals(tx, [botId]);
+      const deleted = await tx.delete(botUpdates).where(and(eq(botUpdates.botId, botId), expired)).returning({ id: botUpdates.updateId });
+      const trimmed = await trimJournal(tx, [{ botId, cap: BOT_UPDATES_CAP_READ_ALL }]);
+      return deleted.length + trimmed;
+    });
+  }
+  return removed;
 }
 
 // ─── Команды (#230) ──────────────────────────────────────────────────────────────────────────────────────────────────

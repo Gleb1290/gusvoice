@@ -361,12 +361,17 @@ function BotEditor({
   const regenerate = async () => {
     const ok = await confirmAction({
       title: `Новый токен для «${label}»?`,
-      body: 'Старый токен перестанет работать сразу — программе бота нужно будет вписать новый.',
+      body: 'Старый токен перестанет работать сразу. Впишите новый токен в программу бота.' +
+        (bot.webhook ? ' Текущий вебхук отключится. Настройте его заново с новым токеном.' : ''),
       tone: 'danger',
       icon: 'lock',
       confirmLabel: 'Перевыпустить',
     });
-    if (ok) await run(async () => onToken(await api.regenerateBotToken(bot.id)));
+    if (ok) await run(async () => {
+      const rotated = await api.regenerateBotToken(bot.id);
+      onChanged({ ...bot, ...rotated.bot });
+      onToken(rotated);
+    });
   };
   const remove = async () => {
     const ok = await confirmAction({

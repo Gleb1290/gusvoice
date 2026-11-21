@@ -1,4 +1,6 @@
 import json
+import io
+import time
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +29,24 @@ def digest_contract(module):
 
 
 class WebhookTests(unittest.TestCase):
+    def test_одиночная_и_пакетная_доставка_передают_каждый_id_один_раз_при_любом_порядке(self):
+        received = []
+        handler = webhook.webhook_handler("test", lambda update: received.append(update["update_id"]))
+
+        def deliver(payload):
+            body = json.dumps(payload).encode()
+            req = object.__new__(handler)
+            req.path = "/"
+            req.rfile = io.BytesIO(body)
+            req.headers = {"Content-Length": str(len(body)), webhook.SIGNATURE_HEADER: webhook.sign("test", body, int(time.time()))}
+            req._reply = lambda status, _: self.assertEqual(status, 200)
+            req.do_POST()
+
+        deliver({"update_id": 9})
+        deliver([{"update_id": 9}, {"update_id": 7}, {"update_id": 10}, {"update_id": True}])
+        deliver({"update_id": 7})
+        self.assertEqual(received, [9, 7, 10])
+
     def test_общие_29_векторов_совпадают_для_строк_и_сырых_байтов(self):
         self.assertEqual(len(CASES), len(VECTORS["cases"]), "имена векторов уникальны")
         self.assertEqual(len(CASES), 29)

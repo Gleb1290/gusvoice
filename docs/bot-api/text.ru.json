@@ -59,7 +59,7 @@
   "object.ChatFullInfo.member_count": "у сервера: число участников",
 
   "object.ChatMember": "Участник сервера (`getChatMember`, `getChatMembers`). Права — не флаги, как в Telegram: роли смотрите через `getServer`.",
-  "object.ChatMember.user": "участник",
+  "object.ChatMember.user": "профиль действующего участника. Для left и kicked возвращается переданный ID, оба поля имени пустые",
   "object.ChatMember.status": "`creator` — владелец, `member`, `left`, `kicked` (забанен)",
   "object.ChatMember.nickname": "ник на этом сервере (есть, если задан)",
   "object.ChatMember.role_ids": "id ролей участника",
@@ -227,7 +227,7 @@
   "method.setWebhook.notes": "Адрес проверяется сразу (см. [SSRF](#защита-от-ssrf)); ошибка — `400 Bad Request: bad webhook: …`. После вызова `getUpdates` отвечает `409`, а открытые WebSocket закрываются кодом `4009`. Повторный `setWebhook` с новым адресом или секретом сбрасывает счётчик сбоев.",
   "param.setWebhook.url": "`https://…`, без логина и пароля в адресе",
   "param.setWebhook.secret_token": "**обязателен**: им подписывается каждая доставка",
-  "param.setWebhook.batch": "доставка пачками: тело POST — массив до 100 событий, подписанный целиком; `2xx` подтверждает всю пачку",
+  "param.setWebhook.batch": "одна отправка содержит до 100 событий и до 1 МиБ JSON в UTF-8 на пачку (более крупное одиночное событие отправляется отдельно). Подпись и успешный ответ относятся ко всей пачке",
 
   "method.deleteWebhook.summary": "Выключить доставку на адрес; бот возвращается к `getUpdates`/WebSocket.",
 
@@ -250,7 +250,7 @@
   "param.sendMessage.embeds": "карточки, [InputEmbed](#inputembed)",
   "param.sendMessage.disable_link_preview": "без карточки-превью ссылки",
   "param.sendMessage.client_id": "ваш id этой отправки: повтор `sendMessage` с тем же `client_id` (обрыв сети, перезапуск) вернёт **то же** сообщение, а не второе. Тот же `client_id` с другой беседой или содержимым → `400`. В каналах пока не учитывается",
-  "param.sendMessage.files[0]": "файлы `files[0]`…`files[9]`: до **10**, каждый до **25 МБ**. Прочие поля — строки; `embeds` и `reply_markup` — строкой JSON",
+  "param.sendMessage.files[0]": "до 10 файлов в полях `files[0]`…`files[9]`, до 25 МиБ каждый и до 64 МиБ суммарно с остальными полями. Передавайте `embeds` и `reply_markup` строкой JSON",
 
   "method.editMessageText.summary": "Изменить текст своего сообщения.",
   "method.editMessageText.notes": "В ответе есть `edit_date`. Править можно только **свои** сообщения, иначе `400`. Человеку приходит как обычная правка.",

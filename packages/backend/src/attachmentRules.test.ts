@@ -257,6 +257,12 @@ describe('тип и выдача закрытого файла', () => {
 });
 
 describe('безопасность хранения и журналов', () => {
+  it('адрес вебхука сохраняет только id, Bot API — только путь метода', () => {
+    assert.equal(redactLogUrl('/api/webhooks/id/example?wait=true'), '/api/webhooks/id/…');
+    assert.equal(redactLogUrl('/api/webhooks/id'), '/api/webhooks/id');
+    assert.equal(redactLogUrl('/api/bot/v1/sendMessage?text=example&chat_id=42'), '/api/bot/v1/sendMessage');
+    assert.equal(redactLogUrl('/api/%77ebhooks/id/example', '/api/webhooks/:id/:token'), '/api/webhooks/:id/:token');
+  });
   it('журнал не сохраняет подпись, но оставляет id для разбора жалобы', () => {
     // Ловит утечку bearer-ссылки через лог запросов.
     const raw = `/api/att/${id}/viewer/${sig}?x=1`;

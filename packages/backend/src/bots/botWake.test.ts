@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
+import * as orm from 'drizzle-orm';
+import * as schema from '../db/schema.js';
 import * as botRules from './botRules.js';
 
 type Store = typeof import('./botStore.js');
@@ -44,8 +46,8 @@ function harness(text = source) {
     ping() { const answer = deferred<string>(); pings.push(answer); return answer.promise; }
   }
   const imports: Record<string, unknown> = {
-    'drizzle-orm': unused('orm'), ioredis: RedisStub,
-    '../db/index.js': { db: unused('db') }, '../db/schema.js': unused('schema'),
+    'drizzle-orm': orm, ioredis: RedisStub,
+    '../db/index.js': { db: unused('db') }, '../db/schema.js': schema,
     '../env.js': { env: { redisUrl: 'redis://r298.invalid' } }, './botRules.js': botRules,
   };
   const module = { exports: {} };

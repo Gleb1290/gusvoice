@@ -13,19 +13,19 @@ const memberSource = readFileSync(new URL('../memberEvents.ts', import.meta.url)
 const message: Message = { id: 'm', channelId: 'c', author: { id: 'a', username: 'author', displayName: 'Автор', avatarUrl: null },
   content: 'текст', createdAt: '2026-01-01T00:00:00Z', editedAt: null, attachments: [], reactions: [], replyTo: null };
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
-function fixture(raw = source) {
+function fixture(raw = source, beforeAudience?: (call: number) => Promise<void> | undefined, limit?: number) {
   const published: unknown[][] = [], warnings: string[] = [];
   let audienceCalls = 0;
   let audience: { serverId: string; userIds: string[] } | null = { serverId: 's', userIds: ['a', 'bot'] };
   const deps: Record<string, unknown> = {
-    './permissions.js': { getChannelAudience: async () => { audienceCalls++; return audience; } },
+    './permissions.js': { getChannelAudience: async () => { audienceCalls++; if (beforeAudience) await beforeAudience(audienceCalls); return audience; } },
     './realtime.js': { publishToChannel: async (...args: unknown[]) => { published.push(args); } },
   };
   const module = { exports: {} as typeof import('../channelEvents.js') };
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { module, exports: module.exports, Promise, Map, Error, console: { warn: (...args: unknown[]) => warnings.push(args.join(' ')) },
       require(name: string) { assert.ok(Object.hasOwn(deps, name), `известная граница ${name}`); return deps[name]; } });
-  return { api: module.exports, published, warnings, audienceCalls: () => audienceCalls, audience: (next: typeof audience) => { audience = next; } };
+  return { api: limit === undefined ? module.exports : module.exports.createChannelMessagePublisher(limit), published, warnings, audienceCalls: () => audienceCalls, audience: (next: typeof audience) => { audience = next; } };
 }
 it('R303 единый вход считает аудиторию ровно один раз и передаёт одних зрителей людям и ботам', { timeout: 5_000 }, async () => {
   const f = fixture(), recorded: unknown[][] = [], done = deferred();
@@ -46,6 +46,19 @@ it('R303 исчезнувший или чужой канал не публику
   assert.equal(f.published.length, 0); assert.equal(records, 0);
   f.audience({ serverId: 's', userIds: ['bot'] }); await f.api.publishChannelMessageEvent('s', 'c', { kind: 'created', message });
   await Promise.resolve(); assert.equal(f.published.length, 1); assert.equal(records, 1);
+});
+it('медленная выборка аудитории не меняет порядок событий бота в канале', { timeout: 5_000 }, async () => {
+  const slow = deferred(), done = deferred();
+  const f = fixture(source, (call) => call === 1 ? slow.promise : undefined);
+  const kinds: string[] = [];
+  f.api.configureChannelBots({ record: async (_server, _channel, ev) => { kinds.push(ev.kind); if (kinds.length === 2) done.resolve(); } });
+  const created = f.api.publishChannelMessageEvent('s', 'c', { kind: 'created', message });
+  await f.api.publishChannelMessageEvent('s', 'c', { kind: 'edited', message });
+  await nextTurn();
+  try { assert.deepEqual(kinds, []); }
+  finally { slow.resolve(); }
+  await Promise.all([created, done.promise]);
+  assert.deepEqual(kinds, ['created', 'edited']);
 });
 async function noPin(raw = source) {
   const f = fixture(raw); const recorded: string[] = [];
@@ -73,6 +86,75 @@ async function queueCheck(raw = source) {
   await edited.promise; assert.deepEqual(seen, ['c:created', 'other:created', 'c:edited']);
 }
 it('R303 медленное создание задерживает правку того же канала, но не другого канала', { timeout: 5_000 }, () => queueCheck());
+it('общий лимит включает работающий крючок и очередь канала, при заполнении издатели ждут без потерь', { timeout: 2_000 }, async () => {
+  const f = fixture(source, undefined, 2);
+  const started = deferred(), release = deferred(), recorded = deferred();
+  const seen: string[] = [];
+  const settled: string[] = [];
+  f.api.configureChannelBots({ record: async (_s, channel, ev) => {
+    seen.push(channel + ':' + ev.kind);
+    if (channel === 'c' && ev.kind === 'created') {
+      started.resolve();
+      await release.promise;
+    }
+    if (seen.length === 4) recorded.resolve();
+  } });
+  await f.api.publishChannelMessageEvent('s', 'c', { kind: 'created', message });
+  await started.promise;
+  await f.api.publishChannelMessageEvent('s', 'c', { kind: 'edited', message });
+
+  const other = f.api.publishChannelMessageEvent('s', 'other', { kind: 'created', message })
+    .then(() => { settled.push('other'); });
+  const deleted = f.api.publishChannelMessageEvent('s', 'c', { kind: 'deleted', messageId: 'm', authorId: 'a' })
+    .then(() => { settled.push('deleted'); });
+  try {
+    await nextTurn();
+    assert.deepEqual(settled, []);
+    assert.deepEqual(seen, ['c:created']);
+    assert.equal(f.published.length, 4);
+
+    await f.api.publishChannelMessageEvent('s', 'c', { kind: 'pinned', message });
+    f.api.configureChannelBots(null);
+    await f.api.publishChannelMessageEvent('s', 'c', { kind: 'created', message });
+    assert.equal(f.published.length, 6);
+    assert.deepEqual(settled, []);
+  } finally {
+    release.resolve();
+  }
+
+  await Promise.all([other, deleted, recorded.promise]);
+  assert.deepEqual(settled, ['other', 'deleted']);
+  assert.deepEqual(seen.filter((entry) => entry.startsWith('c:')), ['c:created', 'c:edited', 'c:deleted']);
+  assert.equal(seen.filter((entry) => entry === 'other:created').length, 1);
+});
+
+it('сбой крючка освобождает единственное место для ожидающего издателя', { timeout: 2_000 }, async () => {
+  const f = fixture(source, undefined, 1);
+  const started = deferred(), release = deferred(), edited = deferred();
+  f.api.configureChannelBots({ record: async (_s, _c, ev) => {
+    if (ev.kind === 'created') {
+      started.resolve();
+      await release.promise;
+      throw new Error('synthetic hook failure');
+    }
+    edited.resolve();
+  } });
+  await f.api.publishChannelMessageEvent('s', 'c', { kind: 'created', message });
+  await started.promise;
+  let settled = false;
+  const update = f.api.publishChannelMessageEvent('s', 'c', { kind: 'edited', message })
+    .then(() => { settled = true; });
+  try {
+    await nextTurn();
+    assert.equal(settled, false);
+  } finally {
+    release.resolve();
+  }
+  await Promise.all([update, edited.promise]);
+  assert.equal(f.published.length, 2);
+  assert.equal(f.warnings.length, 1);
+  assert.match(f.warnings[0], /synthetic hook failure/);
+});
 it('R303 сбой крючка логируется и не отравляет следующую правку, людям оба события доставлены', { timeout: 5_000 }, async () => {
   const f = fixture(), done = deferred(); let calls = 0;
   f.api.configureChannelBots({ record: async () => { calls++; if (calls === 1) throw new Error('synthetic hook failure'); done.resolve(); } });

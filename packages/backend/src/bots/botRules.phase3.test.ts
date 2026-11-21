@@ -61,6 +61,13 @@ it('R303 HTML оставляет текст неизвестного тега, �
     ['<b>не закрыт', '**не закрыт**'], ['&unknown; &#0; &#1114112;', '&unknown; &#0; &#1114112;'],
   ]) assert.equal(rules.htmlToMarkers(html), expected, html);
 });
+it('граница сообщения применяется и к итоговым маркерам', () => {
+  assert.equal(wire.botText('x'.repeat(4096)), 'x'.repeat(4096));
+  // Лишние знаки появляются в начале каждой строки цитаты.
+  const quote = (size: number) => '<blockquote>' + 'x\n'.repeat(24) + 'x'.repeat(size) + '</blockquote>';
+  assert.equal(wire.botText(quote(3998), 'HTML').length, 4096);
+  assert.throws(() => wire.botText(quote(3999), 'HTML'), (err) => err instanceof rules.BotApiError && err.code === 400);
+});
 it('R303 роль бота не получает ADMINISTRATOR даже от владельца; доступные права не теряются', () => {
   const P = shared.Permission;
   for (const owner of [false, true]) {
@@ -128,4 +135,16 @@ it('R303 контрфакт ADMINISTRATOR от владельца пойман �
   assert.throws(() => check(load<typeof roles>(raw.replace(anchor, 'return clampGrant(requested, actor, owner);'))), e => e instanceof assert.AssertionError
     && e.message.startsWith('бот никогда не администратор') && e.operator === 'strictEqual' && e.actual === shared.Permission.ADMINISTRATOR && e.expected === 0n);
   });
+});
+
+it('отсутствие участника и бан сохраняют статус без профиля в действующем протоколе', () => {
+  for (const [banned, status] of [[false, 'left'], [true, 'kicked']] as const) {
+    const result = wire.toWireAbsentChatMember('requested-id', banned);
+    assert.deepEqual(wire.wireChatMemberInfo.parse(result), {
+      status,
+      user: { id: 'requested-id', username: '', display_name: '', bot: false },
+      role_ids: [],
+    });
+    assert.deepEqual(result, wire.wireChatMemberInfo.parse(result));
+  }
 });

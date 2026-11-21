@@ -89,6 +89,22 @@ async function deleteProbe(edit?: Phase3Edit) {
   } finally { await f.clean(); }
 }
 test('R303 DELETE управляемой роли запрещён даже владельцу, обычная роль удаляется', () => deleteProbe());
+test('административная роль доступна человеку, бот сохраняет только обычную роль', async () => {
+  const f = await fixture();
+  try {
+    await f.setupBot();
+    await db.db.insert(s.roles).values([
+      { id: 'admin', serverId: 'server', name: 'Администратор', position: 1, permissions: String(P.ADMINISTRATOR) },
+      { id: 'reader', serverId: 'server', name: 'Читатель', position: 2, permissions: String(P.VIEW_CHANNEL) },
+    ]);
+    const assign = (user: string, role: string) => f.request({ method: 'PUT', url: `/servers/server/members/${user}/roles/${role}` });
+    assert.equal((await assign('person', 'admin')).statusCode, 204);
+    assert.equal((await assign('bot', 'admin')).statusCode, 400);
+    assert.equal((await assign('bot', 'reader')).statusCode, 204);
+    const change = await f.request({ method: 'PATCH', url: '/roles/reader', payload: { permissions: String(P.ADMINISTRATOR) } });
+    assert.equal(change.statusCode, 400);
+  } finally { await f.clean(); }
+});
 test('R303 управляемая роль не выдаётся и не снимается вручную, обычная роль проходит оба маршрута', async () => {
   const f = await fixture();
   try {
@@ -268,8 +284,6 @@ test('R303 контрфакт канального commandsFor с dm-облас�
 for (const [name, file, from, to, probe, message, actual, expected] of [
   ['нет запрета удаления роли бота', 'routes/roles', "if (role.managedBotId) return reply.code(400).send({ error: 'Роль бота удаляется вместе с ботом' });", '', deleteProbe,
     'R303 удаление управляемой роли отклонено', 204, 400],
-  ['ADMINISTRATOR проверяется только при добавлении', 'routes/roles', 'role.managedBotId && body.permissions !== undefined && botAdminRequested', 'false && body.permissions !== undefined && botAdminRequested', administratorProbe,
-    'R303 ADMINISTRATOR управляемой роли запрещён владельцу', 200, 400],
   ['клавиатура не проверяется', 'routes/botPress', "if (!keyboardHasData(msg.keyboard, data)) return reply.code(409).send({ error: 'stale_button' });", '', staleProbe,
     'R303 данные вне текущей клавиатуры отклонены', 200, 409],
 ] as const) test(`R303 контрфакт: ${name}`, async () => {

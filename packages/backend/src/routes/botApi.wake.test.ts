@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
+import { PassThrough, Readable } from 'node:stream';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as drizzle from 'drizzle-orm';
@@ -10,6 +11,7 @@ import * as zod from 'zod';
 import * as schema from '../db/schema.js';
 import * as rules from '../bots/botRules.js';
 import * as wire from '../bots/botWire.js';
+import * as webhookRules from '../webhookRules.js';
 import type { BotUpdateRow, BotWake, BotWakeAlarm } from '../bots/botStore.js';
 
 const source = readFileSync(new URL('./botApi.ts', import.meta.url), 'utf8');
@@ -17,6 +19,8 @@ const storeSource = readFileSync(new URL('../bots/botStore.ts', import.meta.url)
 const botId = 'R298-wake-bot';
 // Только синтетический токен, секреты окружения не читаются.
 const token = `gvb_${'A'.repeat(43)}`;
+const otherToken = `gvb_${'B'.repeat(43)}`;
+const thirdToken = `gvb_${'C'.repeat(43)}`;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -28,7 +32,7 @@ function deferred<T>() {
 // IO-заглушек завершатся до неё. Время приложения при этом остаётся неизменным.
 const checkpoint = () => new Promise<void>(resolve => setImmediate(resolve));
 
-interface Timer { fn: () => void; ms: number; interval: boolean; unref(): void }
+interface Timer { fn: () => void; ms: number; interval: boolean; unref(): void; refresh(): void }
 class Clock {
   readonly now = 100_000;
   readonly pending = new Set<Timer>();
@@ -40,9 +44,18 @@ class Clock {
     clearInterval: (timer: Timer) => { this.pending.delete(timer); },
   };
   private add(fn: () => void, ms: number, interval: boolean) {
-    const timer = { fn, ms, interval, unref() {} };
+    const timer = { fn, ms, interval, unref() {}, refresh() {} };
     this.pending.add(timer);
     return timer;
+  }
+  fireTimeout(ms: number) {
+    for (const timer of this.pending) {
+      if (timer.interval || timer.ms !== ms) continue;
+      this.pending.delete(timer);
+      timer.fn();
+      return;
+    }
+    assert.fail('нет запланированного подтверждения');
   }
 }
 
@@ -63,7 +76,7 @@ class Socket extends EventEmitter {
   readyState = 1;
   readonly closes: Array<{ code?: number; reason?: string }> = [];
   deferClose = false;
-  readonly frames: { op: string; update?: { update_id: number } }[] = [];
+  readonly frames: { op: string; update?: { update_id: number }; bot?: { id: string } }[] = [];
   send(raw: string) { this.frames.push(JSON.parse(raw)); }
   close(code?: number, reason?: string) { this.closes.push({ code, reason }); this.readyState = 3; if (!this.deferClose) this.emit('close'); }
   ping() {}
@@ -75,22 +88,32 @@ interface WakeStore {
   wireUpdateOf(row: BotUpdateRow): Record<string, unknown>;
 }
 interface Api {
-  __methods: { getupdates(ctx: unknown, params: unknown, extra: unknown): Promise<unknown[]> };
+  __methods: {
+    getupdates(ctx: unknown, params: unknown, extra: unknown): Promise<unknown[]>;
+    setmessagereaction(ctx: unknown, params: unknown, extra: unknown): Promise<boolean>;
+  };
   __serve(socket: Socket, request: unknown): Promise<void>;
   __sockets: Map<string, Set<Socket>>;
+  __readMultipart(req: unknown, params: Record<string, unknown>, files: { buffer: Buffer }[], maxBytes: number): Promise<void>;
+  __handle(req: unknown, reply: unknown): Promise<unknown>;
   closeBotSockets(botId: string | null, code: number, reason: string): void;
 }
 
-function harness(text = source, options: { holdAuth?: boolean; holdConfirm?: boolean; holdFirstQuery?: boolean } = {}) {
+function harness(text = source, options: {
+  holdAuth?: boolean; holdFinalAuth?: boolean; holdConfirm?: boolean; holdFirstQuery?: boolean; peerBlocksBot?: boolean;
+} = {}) {
   const clock = new Clock();
   const faults: string[] = [];
   const auth = deferred<void>();
+  const finalAuth = deferred<void>();
   const confirming = deferred<void>();
   const querying = deferred<void>();
   const rows: BotUpdateRow[] = [];
   const reads: number[][] = [];
   const queries: number[] = [];
   const confirms: number[] = [];
+  const reactionBlocklists: string[][] = [];
+  let authReads = 0;
   const subscriptions: string[] = [];
   const unsubscriptions: string[] = [];
   const pendingAck: { channel: string; ack: ReturnType<typeof deferred<number>> }[] = [];
@@ -128,11 +151,16 @@ function harness(text = source, options: { holdAuth?: boolean; holdConfirm?: boo
   const storeBoundary = {
     ...store,
     botByToken: async (got: string) => {
-      assert.equal(got, token);
+      const id = new Map([[token, botId], [otherToken, 'other-bot'], [thirdToken, 'third-bot']]).get(got);
+      assert.ok(id);
       if (options.holdAuth) await auth.promise;
-      return { bot: ctx.bot, user: ctx.user };
+      return { bot: { ...ctx.bot, userId: id }, user: ctx.user };
     },
-    readBotSettings: async () => ({ enabled: true, allowInternalWebhooks: false }),
+    readBotSettings: async () => {
+      authReads++;
+      if (options.holdFinalAuth && authReads === 2) await finalAuth.promise;
+      return { enabled: true, allowInternalWebhooks: false };
+    },
     // Журнал здесь — явная IO-граница, НЕ имитация доказательства SQL. SQL проверяет PGlite integration.
     updatesFrom: async (id: string, from: number, limit: number) => {
       assert.equal(id, botId); queries.push(from);
@@ -156,10 +184,31 @@ function harness(text = source, options: { holdAuth?: boolean; holdConfirm?: boo
   };
   for (const name of ['../attachmentRules.js', '../attachments.js', '../blocks.js', '../bots/botUpdates.js',
     '../bots/webhookDelivery.js', '../conversations.js', '../convSendFanout.js', '../gateway.js', '../safeFetch.js',
-    '../storage.js', '../webhookRules.js']) dependencies[name] = dormant(name);
+    '../storage.js']) dependencies[name] = dormant(name);
+  dependencies['../webhookRules.js'] = webhookRules;
+  if (options.peerBlocksBot !== undefined) {
+    const access = { kind: 'direct', peerId: 'peer', conversationId: 'chat' };
+    dependencies['../db/index.js'] = { db: { select: (fields?: unknown) => ({
+      from: () => ({ where: () => fields ? [] : { limit: async () => [{ id: 'peer' }] } }),
+    }) } };
+    dependencies['../blocks.js'] = { isBlockedBy: async (blocker: string, blocked: string) => {
+      assert.equal(blocker, 'peer');
+      assert.equal(blocked, botId);
+      return options.peerBlocksBot;
+    } };
+    dependencies['../conversations.js'] = {
+      loadAccess: async () => access, reactionAllowed: async () => true,
+      reactMessage: async (_actor: string, _access: unknown, _id: string, _emoji: string, _op: string, blocked: Set<string>) => {
+        reactionBlocklists.push(Array.from(blocked));
+        return { kind: 'ok', delivery: null };
+      },
+    };
+  }
   // Добавляются только ссылки на приватные функции/Map: ни один фрагмент функции не вырезается для eval.
-  const api = compile<Api>(`${text}\nexport { methods as __methods, serveBotSocket as __serve, sockets as __sockets };`, dependencies, globals);
-  const req = (offset?: number) => ({ headers: { authorization: `Bot ${token}` }, raw: new EventEmitter(), query: { offset } });
+  const api = compile<Api>(`${text}\nexport { methods as __methods, serveBotSocket as __serve, sockets as __sockets, readBotMultipart as __readMultipart, handleBotMethod as __handle };`, dependencies, globals);
+  const req = (offset?: number, authToken = token) => ({
+    headers: { authorization: `Bot ${authToken}` }, raw: new EventEmitter(), query: { offset },
+  });
   const publish = () => {
     const channel = `bot:upd:${botId}`;
     if (channels.has(channel)) subscriber!.emit('message', channel, 'wake');
@@ -177,7 +226,7 @@ function harness(text = source, options: { holdAuth?: boolean; holdConfirm?: boo
   };
   const healthy = () => assert.deepEqual(faults, [], 'R298 ошибки IO/фоновые catch не скрыты');
   return { api, ctx, req, clock, rows, reads, queries, confirms, subscriptions, unsubscriptions, channels,
-    auth, confirming, querying, ack, append, publish, healthy };
+    auth, finalAuth, confirming, querying, ack, append, publish, healthy, reactionBlocklists, get authReads() { return authReads; } };
 }
 
 const pollMarker = 'getUpdates завершился с событием после ack без достижения deadline';
@@ -215,6 +264,7 @@ async function checkSocket(text: string) {
   try {
     await checkpoint();
     assert.deepEqual(socket.frames.map(frame => frame.op), ['hello']);
+    assert.equal(socket.frames[0].bot?.id, botId);
     h.append(21);
     assert.equal(h.channels.size, 0);
     h.ack(); await checkpoint(); h.healthy();
@@ -239,6 +289,7 @@ async function checkConfirmClose(text: string) {
   const done = h.api.__serve(socket, h.req(42));
   try {
     await checkpoint();
+    h.clock.fireTimeout(500);
     assert.deepEqual(h.confirms, [42], 'confirm действительно начат и заблокирован');
     socket.close();
     h.confirming.resolve(); await checkpoint();
@@ -255,7 +306,7 @@ async function checkConfirmClose(text: string) {
   }
 }
 
-const authMarker = 'закрытый во время auth сокет не занял слот';
+const authMarker = 'закрытый во время auth сокет не запустил подписку';
 async function checkAuthClose(text: string) {
   const h = harness(text, { holdAuth: true });
   const socket = new Socket();
@@ -266,8 +317,8 @@ async function checkAuthClose(text: string) {
     assert.equal(h.api.__sockets.size, 0);
     socket.close(); assert.equal(socket.readyState, 3);
     h.auth.resolve(); await checkpoint(); h.healthy();
-    assert.strictEqual(h.api.__sockets.size, 0, authMarker);
-    assert.equal(h.subscriptions.length, 0);
+    assert.strictEqual(h.subscriptions.length, 0, authMarker);
+    assert.equal(h.api.__sockets.size, 0);
     assert.equal(socket.frames.length, 0);
     assert.equal(h.clock.pending.size, 0);
   } finally {
@@ -290,18 +341,15 @@ const mutants = [
   { name: 'выборка getUpdates до взвода теряет запись между выборкой и ack', verify: checkPoll,
     marker: pollMarker, actual: false, expected: true,
     mutate: (text: string) => {
-      const query = '      const rows = await updatesFrom(botId, from, q.limit ?? 100, q.allowed_updates);';
+      const query = '      const rows = !gone.signal.aborted ? await updatesFrom(botId, from, q.limit ?? 100, q.allowed_updates) : [];';
       return replaceOnce(replaceOnce(text, query, ''), '      const before = deadline - Date.now();', `${query}\n      const before = deadline - Date.now();`);
     } },
   { name: 'WS без await ready засыпает до следующего события', verify: checkSocket,
     marker: socketMarker, actual: 0, expected: 1,
     mutate: (text: string) => replaceOnce(text, '  await wake.ready;', '') },
-  { name: 'await confirm открывает окно утечки слота при close', verify: checkConfirmClose,
-    marker: confirmMarker, actual: 1, expected: 0,
-    mutate: (text: string) => replaceOnce(text, 'if (cursor > 0) void confirm(cursor);', 'if (cursor > 0) await confirm(cursor);') },
   { name: 'без readyState guard закрытый во время auth сокет занимает слот', verify: checkAuthClose,
     marker: authMarker, actual: 1, expected: 0,
-    mutate: (text: string) => replaceOnce(text, '  if (socket.readyState !== undefined && socket.readyState !== 1) return;', '') },
+    mutate: (text: string) => replaceOnce(text, '\n  if (socket.readyState !== undefined && socket.readyState !== 1) return;', '') },
 ];
 describe('R298 гонка Bot API: адресные контрфакты полного модуля', () => {
   for (const m of mutants) it(m.name, async () => {
@@ -332,6 +380,7 @@ async function checkTakeover(text: string) {
   assert.equal(old.error?.code, 409, 'R303 старый опрос не забирает пачку после вытеснения');
   assert.equal(old.error?.description, pollConflict);
   assert.deepEqual(JSON.parse(JSON.stringify(second)), [{ update_id: 61, message: { message_id: 'm-61' } }]);
+  assert.strictEqual(h.reads.length, 1, 'R303 вытесненный опрос не отмечает пачку прочитанной');
   assert.deepEqual(h.reads, [[61]], 'только новый потребитель отмечает пачку прочитанной');
   assert.equal(h.clock.pending.size, 0);
 }
@@ -402,11 +451,12 @@ const changed = replaceOnce(source, 'for (const id of ids) for (const k of [...(
 
 });
 });
+
   for (const [name, from, to, verify, marker, actual, expected] of [
     ['нет takeover poll', '    takeOverConsumer(botId);', '', checkTakeover, 'R303 старый опрос не забирает пачку после вытеснения', undefined, 409],
-    ['нет проверки после SQL', '      if (k1) throw k1;', '', checkTakeover, 'R303 старый опрос не забирает пачку после вытеснения', undefined, 409],
-    ['старый WS остаётся в slots', '    sockets.get(botId)?.delete(s);', '', (raw: string) => checkSocketTakeover(raw, 'socket'), 'R303 новый WS не отвергнут занятым старым слотом', 1, 0],
-    ['close запроса вместо ответа', "(reply?.raw ?? req.raw).on('close', () => gone.abort());", "req.raw.on('close', () => gone.abort());", checkReplyClose, 'R303 прочитанное тело POST не отменяет ожидание ответа', true, false],
+    ['нет проверки перед отметкой прочтения', '      if (k1) throw k1;', '', checkTakeover, 'R303 вытесненный опрос не отмечает пачку прочитанной', 2, 1],
+    ['старый WS остаётся в slots', '    cleanup();\n    try {\n      socket.close(code, reason);', '    try {\n      socket.close(code, reason);', (raw: string) => checkSocketTakeover(raw, 'socket'), 'R303 новый WS не отвергнут занятым старым слотом', 1, 0],
+    ['close запроса вместо ответа', "const response = reply?.raw ?? req.raw;", "const response = req.raw;", checkReplyClose, 'R303 прочитанное тело POST не отменяет ожидание ответа', true, false],
   ] as const) it(`контрфакт: ${name}`, async () => {
     await verify(source);
     await counterfact(async () => {
@@ -415,4 +465,197 @@ await assert.rejects(verify(replaceOnce(source, from, to)), (error: unknown) => 
 
 });
 });
+});
+
+describe('Защитные правила транспорта Bot API', () => {
+  it('отзыв во время последней проверки доступа отменяет привязку WS и long poll', async () => {
+    const ws = harness(source, { holdFinalAuth: true });
+    const socket = new Socket();
+    const connected = ws.api.__serve(socket, ws.req());
+    await checkpoint();
+    assert.equal(ws.authReads, 2);
+    ws.api.closeBotSockets(botId, 4001, 'token revoked');
+    ws.finalAuth.resolve();
+    await connected;
+    assert.equal(socket.closes[0]?.code, 4001);
+    assert.deepEqual(socket.frames, []);
+    assert.deepEqual(ws.queries, []);
+    ws.healthy();
+
+    const poll = harness(source, { holdFinalAuth: true });
+    await poll.api.__methods.getupdates(poll.ctx, {}, { req: poll.req(), files: [] });
+    const polling = poll.api.__methods.getupdates(poll.ctx, { offset: 17 }, { req: poll.req(), files: [] });
+    await checkpoint();
+    assert.equal(poll.authReads, 2);
+    poll.api.closeBotSockets(null, 4003, 'bots disabled');
+    poll.finalAuth.resolve();
+    await assert.rejects(polling, { code: 403 });
+    assert.deepEqual(poll.queries, [0]);
+    assert.deepEqual(poll.confirms, []);
+    poll.healthy();
+  });
+
+  it('WS объединяет возрастающие подтверждения доставленного и сохраняет их при обычном закрытии', async () => {
+    const h = harness();
+    const socket = new Socket();
+    h.append(31); h.append(33);
+    const serving = h.api.__serve(socket, h.req());
+    await checkpoint(); h.ack(); await serving;
+    for (const offset of [32, 34, 33, 34, 35]) socket.emit('message', JSON.stringify({ op: 'ack', offset }));
+    assert.deepEqual(h.confirms, []);
+    socket.close();
+    h.clock.fireTimeout(500);
+    await checkpoint();
+    assert.deepEqual(h.confirms, [34]);
+    assert.equal(h.clock.pending.size, 0);
+    h.healthy();
+  });
+
+  it('отзыв останавливает WS до события close и сбрасывает отложенное подтверждение', async () => {
+    const h = harness(source, { holdFirstQuery: true });
+    const socket = new Socket();
+    socket.deferClose = true;
+    const serving = h.api.__serve(socket, h.req(40));
+    await checkpoint(); h.ack(); await checkpoint();
+    assert.deepEqual(h.queries, [40]);
+    h.api.closeBotSockets(botId, 4001, 'token revoked');
+    h.append(40);
+    h.querying.resolve();
+    await serving;
+    assert.deepEqual(socket.frames.map(({ op }) => op), ['hello']);
+    assert.deepEqual(h.confirms, []);
+    assert.equal(h.clock.pending.size, 0);
+    h.healthy();
+  });
+
+  it('multipart принимает десять файлов в пределах общего бюджета и прекращает чтение при превышении', async () => {
+    const h = harness();
+    const parts = (last: string) => async function* () {
+      for (let i = 0; i < 10; i++) {
+        const file = Readable.from([Buffer.from(i === 9 ? last : 'x')]);
+        yield { type: 'file', fieldname: `files[${i}]`, file };
+      }
+    };
+    const read = (last: string, files: { buffer: Buffer }[]) =>
+      h.api.__readMultipart({ raw: new PassThrough(), headers: {}, parts: parts(last) }, {}, files, 10);
+    const files: { buffer: Buffer }[] = [];
+    await read('x', files);
+    assert.equal(files.length, 10);
+    assert.equal(Buffer.concat(files.map(({ buffer }) => buffer)).toString(), 'xxxxxxxxxx');
+    await assert.rejects(read('xx', []), { code: 413 });
+  });
+
+  it('общий предел включает служебные байты multipart и действует без Content-Length', async () => {
+    const h = harness();
+    const limit = 64 * 1024 + 4;
+    const read = async (bytes: number) => {
+      const raw = new PassThrough();
+      const parserInput = new PassThrough();
+      raw.end(Buffer.alloc(bytes, 'x'));
+      let seen = 0;
+      const result = h.api.__readMultipart({ raw, headers: {}, async *parts() {
+        assert.notEqual(raw.readableFlowing, true, 'счётчик сохраняет начальное состояние потока до запуска парсера');
+        for await (const chunk of raw.pipe(parserInput)) seen += chunk.length;
+      } }, {}, [], 4);
+      try {
+        await result;
+        assert.equal(seen, bytes, 'первый заранее полученный chunk полностью дошёл до парсера');
+      } finally {
+        raw.destroy();
+        parserInput.destroy();
+      }
+    };
+    await read(limit);
+    await assert.rejects(read(limit + 1), { code: 413 });
+  });
+
+  it('multipart отвергает лишнее файловое поле и неподходящий метод до чтения файла', async () => {
+    const h = harness();
+    let opened = false;
+    async function* extraField() {
+      yield { type: 'file', fieldname: 'unused', get file() { opened = true; throw new Error('unexpected file read'); } };
+    }
+    await assert.rejects(h.api.__readMultipart({ raw: new PassThrough(), headers: {}, parts: extraField }, {}, [], 10), { code: 400 });
+    assert.equal(opened, false);
+    let parsed = false;
+    const req = {
+      ...h.req(), method: 'POST', params: { method: 'getMe' }, raw: new PassThrough(),
+      isMultipart: () => true, parts: () => { parsed = true; return extraField(); },
+    };
+    await assert.rejects(h.api.__handle(req, { header() {} }), { code: 400 });
+    assert.equal(parsed, false);
+  });
+
+  it('два разных бота могут загружать параллельно, один бот занимает только один слот', async () => {
+    const h = harness();
+    const release = deferred<void>();
+    let admitted = 0;
+    const request = (authToken = token) => h.api.__handle({
+      ...h.req(undefined, authToken), method: 'POST', params: { method: 'sendMessage' }, raw: new PassThrough(), isMultipart: () => true,
+      async *parts() {
+        admitted++;
+        await release.promise;
+        yield { type: 'field', fieldname: 'unused', value: '' };
+      },
+    }, { header() {} });
+    const first = assert.rejects(request(), { code: 400 });
+    let second: Promise<void> | undefined;
+    try {
+      await checkpoint();
+      await assert.rejects(request(), { code: 429 });
+      assert.equal(admitted, 1);
+      second = assert.rejects(request(otherToken), { code: 400 });
+      await checkpoint();
+      assert.equal(admitted, 2);
+      await assert.rejects(request(thirdToken), { code: 429 });
+      assert.equal(admitted, 2);
+    } finally {
+      release.resolve();
+      await Promise.all([first, second]);
+    }
+    await assert.rejects(request(), { code: 400 });
+    assert.equal(admitted, 3);
+  });
+
+  it('обрыв, таймаут бездействия и общий срок чтения освобождают слот даже при ожидании поля', async () => {
+    const h = harness();
+    for (const [interrupt, status] of [
+      [(raw: PassThrough) => raw.destroy(), 400],
+      [() => h.clock.fireTimeout(15_000), 408],
+      [() => h.clock.fireTimeout(120_000), 408],
+    ] as const) {
+      const raw = new PassThrough();
+      const finish = deferred<void>();
+      let parsing = false;
+      const req = { ...h.req(), raw, method: 'POST', params: { method: 'sendMessage' }, isMultipart: () => true };
+      const upload = assert.rejects(h.api.__handle({
+        ...req, async *parts() { parsing = true; await finish.promise; },
+      }, { header() {} }), { code: status });
+      try {
+        await checkpoint();
+        assert.equal(parsing, true);
+        interrupt(raw);
+        await upload;
+        assert.equal(h.clock.pending.size, 0);
+        await assert.rejects(h.api.__handle({
+          ...req, raw: new PassThrough(), async *parts() { yield { type: 'field', fieldname: 'unused' }; },
+        }, { header() {} }), { code: 400 });
+      } finally {
+        finish.resolve();
+        raw.destroy();
+      }
+    }
+  });
+
+  it('реакция в ЛС исключает из рассылки собеседника, заблокировавшего бота', async () => {
+    for (const peerBlocksBot of [false, true]) {
+      const h = harness(source, { peerBlocksBot });
+      const result = await h.api.__methods.setmessagereaction(h.ctx, {
+        chat_id: 'chat', message_id: 'msg', reaction: [{ type: 'emoji', emoji: '👍' }],
+      }, { req: h.req(), files: [] });
+      assert.equal(result, true);
+      assert.deepEqual(h.reactionBlocklists, [peerBlocksBot ? ['peer'] : []]);
+      h.healthy();
+    }
+  });
 });

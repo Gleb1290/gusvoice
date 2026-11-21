@@ -481,6 +481,45 @@ async function postBroadcast(changes: readonly Change[] = []) {
   } finally { await f.app.close(); }
 }
 
+test('при отправке сохраняются разрешённые роли и пуш получают их участники', async () => {
+  await t.raw.exec(`UPDATE roles SET permissions='${P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_HISTORY}' WHERE id='everyone'`);
+  const f = await messageApp();
+  try {
+    const message = await f.send('@Ночная смена @Закрытая роль');
+    const [stored] = await t.db.select().from(schema.messages).where(orm.eq(schema.messages.id, message.id));
+    assert.deepEqual(message.mentionRoles, ['public']);
+    assert.deepEqual(stored.mentionRoles, ['public']);
+    assert.deepEqual(f.pushes, [['reader']]);
+  } finally { await f.app.close(); }
+});
+
+test('правка пересчитывает массовые и ролевые упоминания по правам автора без повторного пуша', async () => {
+  await t.raw.exec(`UPDATE roles SET permissions='${P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_HISTORY}' WHERE id='everyone'`);
+  const f = await messageApp();
+  try {
+    const original = await f.send('текст');
+    const edit = async (content: string) => {
+      const response = await f.app.inject({ method: 'PATCH', url: `/channels/visible/messages/${original.id}`,
+        headers: { 'x-fixture-user': 'author' }, payload: { content } });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json<shared.Message>();
+    };
+    const limited = await edit('@everyone @Ночная смена @Закрытая роль');
+    assert.equal(limited.mentionEveryone, false);
+    assert.deepEqual(limited.mentionRoles, ['public']);
+    await t.raw.exec(`INSERT INTO channel_overwrites(channel_id,target_id,target_type,allow,deny)
+      VALUES ('visible','author','member','${P.MENTION_EVERYONE}','0')`);
+    const allowed = await edit('@here @Закрытая роль');
+    assert.equal(allowed.mentionEveryone, true);
+    assert.deepEqual(allowed.mentionRoles, ['private']);
+    const removed = await edit('текст');
+    assert.equal(removed.mentionEveryone, undefined);
+    assert.equal(removed.mentionRoles, undefined);
+    assert.deepEqual(plain((await unread.unreadSummary('reader')).servers.s), { unread: 1, mentions: 0 });
+    assert.deepEqual(f.pushes, []);
+  } finally { await f.app.close(); }
+});
+
 // Класс ошибки: маршрут считает право, но теряет его в INSERT/DTO/шестом аргументе push и расходится с SQL.
 test('R279 настоящий POST сохраняет false/true/null, текст и DTO, передаёт запрет пушу и обоим бейджам', async () => {
   await postBroadcast();

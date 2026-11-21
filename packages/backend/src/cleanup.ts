@@ -3,7 +3,7 @@ import { pruneFedConvChanges, pruneJournal } from './convJournal.js';
 import { purgeAttachments } from './attachments.js';
 import { purgeStaleUploads } from './bigUploads.js';
 import { db } from './db/index.js';
-import { diagReports, users, voiceActivity } from './db/schema.js';
+import { botChannelUploadReservations, diagReports, users, voiceActivity } from './db/schema.js';
 import { env } from './env.js';
 
 /**
@@ -182,6 +182,12 @@ export function startDailyCleanup(): void {
       if (n > 0) console.log(`[cleanup] pruned ${n} federated DM journal row(s)`);
     } catch (err) {
       console.error('[cleanup] federated DM journal prune failed:', (err as Error).message);
+    }
+    try {
+      await db.delete(botChannelUploadReservations)
+        .where(lt(botChannelUploadReservations.reservedAt, sql`statement_timestamp() - interval '24 hours'`));
+    } catch (err) {
+      console.error('[cleanup] bot channel upload quota prune failed:', (err as Error).message);
     }
   };
   void run();

@@ -1,6 +1,6 @@
 /**
- * Доставка событий на адрес бота (#229, `setWebhook`). По одному событию за запрос, строго по `update_id`: следующее — только
- * после 2xx на предыдущее (порядок как у Telegram). Тело — объект события провода (`{update_id, message: …}`), подпись —
+ * Доставка событий на адрес бота (#229, `setWebhook`) строго по `update_id`. Тело — объект события или массив с флагом
+ * `batch`. После 2xx подтверждается ровно отправленный префикс журнала. Подпись —
  * `X-GusVoice-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, t + "." + body)>` (`botRules.webhookSignature`).
  *
  * Сбой (не 2xx, сеть, срок 10 с) — `webhook_failures + 1`, `webhook_last_error`, повтор через нарастающую паузу
@@ -11,9 +11,9 @@
  * их подбирает обход раз в минуту (`startBotJobs`). 🔴 SSRF — `safeFetch.safeHookPost`: https (http — только с тумблером
  * админа), каждый адрес имени проверен и соединение на проверенный IP, без редиректов, ответ ≤ 4 КБ.
  */
-import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { bots, users } from '../db/schema.js';
+import { bots, botUpdates, users } from '../db/schema.js';
 import { safeHookPost } from '../safeFetch.js';
 import {
   CALLBACK_QUERY_STALE_S,
@@ -21,16 +21,17 @@ import {
   WEBHOOK_RESPONSE_MAX,
   WEBHOOK_TIMEOUT_MS,
   webhookBackoffMs,
+  webhookBody,
   webhookErrorText,
   webhookSignature,
   unixSeconds,
 } from './botRules.js';
 import { markTakenRead } from './botRead.js';
-import { botById, type BotUpdateRow, pruneBotUpdates, readBotSettings, updatesFrom, wireUpdateOf } from './botStore.js';
+import { botById, type BotRow, type BotUpdateRow, journalContains, pruneBotUpdates, readBotSettings, updatesFrom, wireUpdateOf } from './botStore.js';
 
 const running = new Set<string>();
 const again = new Set<string>();
-const retryTimers = new Map<string, NodeJS.Timeout>();
+const retryTimers = new Map<string, { timer: NodeJS.Timeout; bot: BotRow }>();
 const LOCK_MS = 60_000;
 
 /** Разбудить доставку бота (новое событие, новый адрес). Без адреса / выключена — ничего. */
@@ -51,20 +52,32 @@ export function kickWebhook(botId: string): void {
 /** Забыть отложенный повтор (адрес сменили/сняли — новый адрес начинает с чистого листа). */
 export function resetWebhookRetry(botId: string): void {
   const t = retryTimers.get(botId);
-  if (t) clearTimeout(t);
+  if (t) clearTimeout(t.timer);
   retryTimers.delete(botId);
 }
 
 /** Событий в одном POST пакетной доставки (#231). */
 const WEBHOOK_BATCH_MAX = 100;
 
+function sameWebhook(bot: BotRow | undefined, expected: BotRow): boolean {
+  return !!bot && bot.tokenHash === expected.tokenHash && bot.webhookUrl === expected.webhookUrl &&
+    bot.webhookSecret === expected.webhookSecret && bot.webhookBatch === expected.webhookBatch;
+}
+
 async function deliverLoop(botId: string): Promise<void> {
-  if (retryTimers.has(botId)) return; // ждём паузу после сбоя — повтор сам позовёт
+  const retry = retryTimers.get(botId);
+  if (retry) {
+    const row = await botById(botId);
+    if (retryTimers.get(botId) === retry) {
+      if (sameWebhook(row?.bot, retry.bot)) return;
+      resetWebhookRetry(botId);
+    }
+  }
   const { redisPub } = await import('../realtime.js');
   const lockKey = `bot:wh:lock:${botId}`;
   const got = await redisPub.set(lockKey, '1', 'PX', LOCK_MS, 'NX');
   if (got !== 'OK') return; // доставляет другой процесс
-  // Принятые адресом (2xx) события — «прочитано» одной отметкой на беседу при выходе из цикла, а не на каждое событие.
+  // Принятые адресом (2xx) события — «прочитано» одной отметкой на беседу при выходе из цикла.
   const taken: BotUpdateRow[] = [];
   try {
     for (;;) {
@@ -72,15 +85,23 @@ async function deliverLoop(botId: string): Promise<void> {
       if (!row || row.user.deletedAt || row.bot.disabledAt || !row.bot.webhookUrl || !row.bot.webhookSecret || row.bot.webhookDisabledAt) return;
       const settings = await readBotSettings();
       if (!settings.enabled) return;
-      // Пакетная доставка (#231, `setWebhook batch=true`): тело — МАССИВ до 100 событий, подпись по всему телу; 2xx
-      // подтверждает всю пачку, не-2xx — вся пачка повторяется (at-least-once). Без флага — по одному объекту, как раньше.
       const batch = row.bot.webhookBatch === true;
       const pack = await updatesFrom(botId, 0, batch ? WEBHOOK_BATCH_MAX : 1);
       const next = pack[0];
       if (!next) return;
-      await redisPub.pexpire(lockKey, LOCK_MS);
-      const body = JSON.stringify(batch ? pack.map(wireUpdateOf) : wireUpdateOf(next));
+      const { body, count } = webhookBody(pack.map(wireUpdateOf), batch);
+      const sent = pack.slice(0, count);
+      const ids = sent.map((u) => u.updateId);
+      // URL и секрет могли выставить повторно уже с новым токеном.
+      const current = and(
+        eq(bots.userId, botId), eq(bots.tokenHash, row.bot.tokenHash),
+        eq(bots.webhookUrl, row.bot.webhookUrl), eq(bots.webhookSecret, row.bot.webhookSecret), eq(bots.webhookBatch, batch),
+        isNull(bots.disabledAt), isNull(bots.webhookDisabledAt),
+      );
       let failure: string | null = null;
+      await redisPub.pexpire(lockKey, LOCK_MS);
+      const [active] = await db.select({ id: bots.userId }).from(bots).where(and(current, journalContains(botId, ids))).limit(1);
+      if (!active) continue;
       try {
         const res = await safeHookPost(
           row.bot.webhookUrl,
@@ -96,35 +117,39 @@ async function deliverLoop(botId: string): Promise<void> {
       } catch (err) {
         failure = webhookErrorText({ error: err });
       }
-      // Адрес могли сменить, пока шёл запрос: итог относится к старому — не трогаем ни журнал, ни счётчик.
-      const [now] = await db.select({ url: bots.webhookUrl }).from(bots).where(eq(bots.userId, botId)).limit(1);
-      if (now?.url !== row.bot.webhookUrl) continue;
-      if (!failure) {
-        if (batch) {
-          await db.execute(sql`DELETE FROM bot_updates WHERE update_id IN (${sql.join(pack.map((u) => sql`${u.updateId}`), sql`, `)})`);
-          taken.push(...pack);
-        } else {
-          await db.execute(sql`DELETE FROM bot_updates WHERE update_id = ${next.updateId}`);
-          taken.push(next);
+      // Проверяем поколение под блокировкой строки и применяем результат в той же транзакции.
+      // Ротация, смена адреса и удаление журнала не могут вклиниться между проверкой и записью.
+      const outcome = await db.transaction(async (tx) => {
+        const [active] = await tx.select({ failures: bots.webhookFailures, error: bots.webhookLastError })
+          .from(bots).where(current).for('no key update');
+        if (!active) return null;
+        if (failure) {
+          const failures = active.failures + 1;
+          const off = failures >= WEBHOOK_FAILURES_MAX;
+          await tx.update(bots)
+            .set({ webhookFailures: failures, webhookLastError: failure, webhookLastErrorAt: new Date(), ...(off ? { webhookDisabledAt: new Date() } : {}) })
+            .where(eq(bots.userId, botId));
+          return { failures, accepted: [] };
         }
-        if (row.bot.webhookFailures > 0 || row.bot.webhookLastError) {
-          await db.update(bots).set({ webhookFailures: 0, webhookLastError: null }).where(eq(bots.userId, botId));
+        const removed = await tx.delete(botUpdates)
+          .where(and(eq(botUpdates.botId, botId), inArray(botUpdates.updateId, ids)))
+          .returning();
+        if (active.failures > 0 || active.error) {
+          await tx.update(bots).set({ webhookFailures: 0, webhookLastError: null }).where(eq(bots.userId, botId));
         }
-        continue;
-      }
-      const failures = row.bot.webhookFailures + 1;
-      const off = failures >= WEBHOOK_FAILURES_MAX;
-      await db
-        .update(bots)
-        .set({ webhookFailures: failures, webhookLastError: failure, webhookLastErrorAt: new Date(), ...(off ? { webhookDisabledAt: new Date() } : {}) })
-        .where(eq(bots.userId, botId));
-      if (!off) {
-        const t = setTimeout(() => {
+        return { failures: 0, accepted: removed };
+      });
+      if (!outcome) continue;
+      taken.push(...outcome.accepted);
+      if (outcome.failures === 0) continue;
+      if (outcome.failures < WEBHOOK_FAILURES_MAX) {
+        const timer = setTimeout(() => {
+          if (retryTimers.get(botId)?.timer !== timer) return;
           retryTimers.delete(botId);
           kickWebhook(botId);
-        }, webhookBackoffMs(failures));
-        t.unref();
-        retryTimers.set(botId, t);
+        }, webhookBackoffMs(outcome.failures));
+        timer.unref();
+        retryTimers.set(botId, { timer, bot: row.bot });
       }
       return;
     }
@@ -158,7 +183,6 @@ export function startBotJobs(): void {
         );
       const now = Date.now();
       for (const r of rows) {
-        if (retryTimers.has(r.id)) continue;
         if (r.failures > 0 && r.at && now - r.at.getTime() < webhookBackoffMs(r.failures)) continue;
         kickWebhook(r.id);
       }

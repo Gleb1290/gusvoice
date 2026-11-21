@@ -15,8 +15,10 @@ import {
   type InlineKeyboard,
   type Message,
   Permission,
+  permsFromString,
 } from '@gusvoice/shared';
 import { and, asc, desc, eq, gt, inArray, lt, sql } from 'drizzle-orm';
+import { DM_DAILY_UPLOAD_BYTES } from '../attachmentRules.js';
 import { attachmentUploadBlock, rateHit } from '../authGuard.js';
 import { writeAudit } from '../audit.js';
 import type { ChannelMessageEvent } from '../channelEvents.js';
@@ -25,6 +27,8 @@ import {
   deleteChannelMessage,
   editChannelKeyboard,
   editChannelMessage,
+  channelMessageStored,
+  channelReplyExists,
   postChannelMessage,
   reactionsOfUser,
   setChannelPinned,
@@ -35,13 +39,15 @@ import { db } from '../db/index.js';
 import { bans, channels, memberRoles, messages, roles, serverBots, serverMembers, servers, users } from '../db/schema.js';
 import { instanceLabel } from '../federation/instanceLabels.js';
 import type { MemberChange } from '../memberEvents.js';
-import { getChannelAudience, getChannelPermissions, getMemberContext, highestPosition } from '../permissions.js';
+import { getChannelAudience, getChannelPermissions, getMemberContext, getServerChannelPermissions, highestPosition } from '../permissions.js';
 import { publishToChannel, publishToServer } from '../realtime.js';
-import { assignRoleBlock } from '../roleRules.js';
+import { assignRoleBlock, botRoleAssignmentBlocked } from '../roleRules.js';
 import { banMember, kickMember, leaveServer, unbanMember } from '../serverMembership.js';
-import { attachmentBlocked, isOwnMediaUrl, putAttachment, storageConfigured } from '../storage.js';
+import { isOwnMediaUrl, prepareAttachmentUpload, storageConfigured } from '../storage.js';
 import { id as newId } from '../util.js';
 import { embedsFallbackText, normalizeEmbeds } from '../webhookRules.js';
+import { reserveBotChannelUpload } from './botChannelQuota.js';
+import { sendWithChannelUploads, validateChannelFiles } from './botChannelUploads.js';
 import {
   BOT_CHAT_RATE,
   BOT_HEAVY_RATE,
@@ -50,13 +56,12 @@ import {
   botAddressed,
   CHAT_HISTORY_PAGE,
   CHAT_MEMBERS_PAGE,
-  htmlToMarkers,
-  PARSE_MODE_UNSUPPORTED,
   unixSeconds,
 } from './botRules.js';
 import { type BotRow, dropServerUpdates, liveBotsAmong, pushUpdates, readBotSettings, type UserRow } from './botStore.js';
 import {
   banChatMemberParams,
+  botText,
   channelChat,
   chatMemberRoleParams,
   deleteMessageParams,
@@ -75,6 +80,7 @@ import {
   sendMessageParams,
   serverChat,
   setMessageReactionParams,
+  toWireAbsentChatMember,
   toWireChannelMessage,
   toWireUser,
   unbanChatMemberParams,
@@ -165,14 +171,6 @@ async function serverChatFor(botId: string, chatId: string): Promise<ServerRow> 
   return server;
 }
 
-/** Текст бота: `parse_mode` (ТЗ §1.7) — без него наши маркеры; `HTML` → маркеры; прочее — 400. */
-export function botText(text: string, parseMode: string | undefined): string {
-  if (!parseMode) return text;
-  const mode = parseMode.trim().toLowerCase();
-  if (mode === 'html') return htmlToMarkers(text);
-  throw new BotApiError(400, PARSE_MODE_UNSUPPORTED);
-}
-
 function failToBot(f: ChannelFail, what: 'send' | 'edit' | 'delete' | 'react' | 'pin'): BotApiError {
   switch (f.reason) {
     case 'bad-reply':
@@ -200,22 +198,6 @@ async function wireOf(ctx: BotChannelCtx, channel: ChannelRow, m: Message) {
 
 // ─── Методы: канал ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-async function storePublicFiles(botId: string, files: Upload[]): Promise<{ attachments: { url: string; name: string; contentType: string; size: number }[]; urls: Map<string, string> }> {
-  const attachments: { url: string; name: string; contentType: string; size: number }[] = [];
-  const urls = new Map<string, string>();
-  if (files.length === 0) return { attachments, urls };
-  if (!storageConfigured()) throw new BotApiError(503, 'Service Unavailable: file storage is not ready');
-  for (const f of files) {
-    if (attachmentBlocked(f.mime, f.name)) throw new BotApiError(415, 'Bad Request: this file type is not allowed (SVG/HTML)');
-    const wait = await attachmentUploadBlock(botId);
-    if (wait) throw new BotApiError(429, `Too Many Requests: retry after ${wait}`, wait);
-    const url = await putAttachment(newId(), f.buffer, f.mime, f.name, Date.now());
-    attachments.push({ url, name: f.name, contentType: f.mime, size: f.buffer.length });
-    urls.set(f.name, url);
-  }
-  return { attachments, urls };
-}
-
 export async function channelSendMessage(ctx: BotChannelCtx, p: Params, files: Upload[]) {
   const q = sendMessageParams.parse(p);
   const botId = ctx.bot.userId;
@@ -223,23 +205,51 @@ export async function channelSendMessage(ctx: BotChannelCtx, p: Params, files: U
   if (!has(perms, Permission.SEND_MESSAGES)) throw new BotApiError(403, 'Forbidden: not enough rights to send messages to the chat');
   await limit(`botchat:${botId}:${channel.id}`, BOT_CHAT_RATE);
   await limit(`botsrv:${botId}:${channel.serverId}`, BOT_SERVER_RATE);
-  const text = botText((q.text ?? '').trim(), q.parse_mode).trim();
-  if (!text && !q.embeds?.length && files.length === 0) throw new BotApiError(400, 'Bad Request: message text is empty');
+  const text = botText(q.text, q.parse_mode);
+  const replyToId = q.reply_to_message_id ?? null;
+  const bytes = validateChannelFiles(files);
+  if (files.length && replyToId && !(await channelReplyExists(channel.id, replyToId))) {
+    throw new BotApiError(400, 'Bad Request: message to reply not found');
+  }
+  if (files.length && !storageConfigured()) throw new BotApiError(503, 'Service Unavailable: file storage is not ready');
+  // Сначала списываем предел частоты на все файлы. Отказ на последнем файле не оставит уже залитые объекты.
+  for (const _file of files) {
+    const wait = await attachmentUploadBlock(botId);
+    if (wait) throw new BotApiError(429, `Too Many Requests: retry after ${wait}`, wait);
+  }
   // Вложения каналов — публичный бакет (как у вебхука); карточки — `attachment://имя` из этого же запроса или наши ссылки.
-  const { attachments, urls } = await storePublicFiles(botId, files);
+  const uploads = files.map((file) => ({ file, upload: prepareAttachmentUpload(newId(), file.buffer, file.mime, file.name, Date.now()) }));
+  const attachments = uploads.map(({ file, upload }) => ({ url: upload.url, name: file.name, contentType: file.mime, size: file.buffer.length }));
+  const urls = new Map(attachments.map(({ name, url }) => [name, url]));
   const embeds = normalizeEmbeds(q.embeds, isOwnMediaUrl, urls);
   if (!text && embeds.length === 0 && attachments.length === 0) throw new BotApiError(400, 'Bad Request: message text is empty');
   const fallback = !text && embeds.length > 0;
-  const res = await postChannelMessage(botId, channel.id, {
+  const input = {
     content: fallback ? embedsFallbackText(embeds) : text,
     attachments,
-    replyToId: q.reply_to_message_id ?? null,
+    replyToId,
     ...(embeds.length ? { embeds, embedsFallback: fallback } : {}),
     keyboard: (q.reply_markup?.inline_keyboard as InlineKeyboard | undefined) ?? null,
     silent: q.disable_notification === true,
-  });
-  if (res.kind === 'error') throw failToBot(res, 'send');
-  return wireOf(ctx, channel, res.message);
+  };
+  const send = async (persistence?: Parameters<typeof postChannelMessage>[3]) => {
+    const res = await postChannelMessage(botId, channel.id, input, persistence);
+    if (res.kind === 'error') throw failToBot(res, 'send');
+    return res.message;
+  };
+  if (uploads.length === 0) return wireOf(ctx, channel, await send());
+  const messageId = newId();
+  if (!(await reserveBotChannelUpload(botId, messageId, bytes))) {
+    const limitGiB = DM_DAILY_UPLOAD_BYTES / (1024 ** 3);
+    throw new BotApiError(429, `Too Many Requests: channel attachments are limited to ${limitGiB} GiB per 24 hours`);
+  }
+  const message = await sendWithChannelUploads(
+    uploads.map(({ upload }) => upload),
+    (onPersistence) => send({ id: messageId, onPersistence }),
+    () => channelMessageStored(messageId),
+    (err) => console.warn('[bot-channel] не удалось завершить откат вложений', { messageId, err }),
+  );
+  return wireOf(ctx, channel, message);
 }
 
 export async function channelEditMessageText(ctx: BotChannelCtx, p: Params) {
@@ -247,7 +257,7 @@ export async function channelEditMessageText(ctx: BotChannelCtx, p: Params) {
   const botId = ctx.bot.userId;
   const { channel } = await channelChatFor(botId, q.chat_id);
   await limit(`botchat:${botId}:${channel.id}`, BOT_CHAT_RATE);
-  const text = botText(q.text.trim(), q.parse_mode).trim();
+  const text = botText(q.text, q.parse_mode);
   // Как Telegram: правка текста без `reply_markup` снимает кнопки.
   const res = await editChannelMessage(botId, channel.id, q.message_id, text, {
     keyboard: (q.reply_markup?.inline_keyboard as InlineKeyboard | undefined) ?? null,
@@ -386,17 +396,17 @@ async function memberCount(serverId: string): Promise<number> {
 }
 
 async function memberInfo(server: ServerRow, userId: string): Promise<WireChatMemberInfo> {
-  const [u] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!u) throw new BotApiError(400, 'Bad Request: user not found');
-  const [m] = await db
-    .select()
+  const [member] = await db
+    .select({ m: serverMembers, u: users })
     .from(serverMembers)
+    .innerJoin(users, eq(users.id, serverMembers.userId))
     .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, userId), eq(serverMembers.state, 'active')))
     .limit(1);
-  if (!m) {
+  if (!member) {
     const [b] = await db.select({ userId: bans.userId }).from(bans).where(and(eq(bans.serverId, server.id), eq(bans.userId, userId))).limit(1);
-    return { user: wireUserOf(u), status: b ? 'kicked' : 'left', role_ids: [] };
+    return toWireAbsentChatMember(userId, !!b);
   }
+  const { m, u } = member;
   const roleRows = await db
     .select({ roleId: memberRoles.roleId })
     .from(memberRoles)
@@ -468,13 +478,16 @@ export async function serverGetMyServers(ctx: BotChannelCtx) {
 export async function serverGetServer(ctx: BotChannelCtx, p: Params) {
   const q = getServerParams.parse(p);
   const server = await serverChatFor(ctx.bot.userId, q.server_id);
-  const chans = await db.select().from(channels).where(eq(channels.serverId, server.id)).orderBy(asc(channels.position));
+  const [chans, permissions] = await Promise.all([
+    db.select().from(channels).where(eq(channels.serverId, server.id)).orderBy(asc(channels.position)),
+    getServerChannelPermissions(server.id, ctx.bot.userId),
+  ]);
   const visible = [];
   for (const c of chans) {
     if (c.type !== 'text' && c.type !== 'voice') continue;
-    const perms = await getChannelPermissions(c.id, ctx.bot.userId);
-    if (!perms || !has(perms.permissions, Permission.VIEW_CHANNEL)) continue;
-    visible.push({ id: c.id, title: c.name, type: c.type as 'text' | 'voice', can_send: c.type === 'text' && has(perms.permissions, Permission.SEND_MESSAGES) });
+    const perms = permissions?.get(c.id) ?? 0n;
+    if (!has(perms, Permission.VIEW_CHANNEL)) continue;
+    visible.push({ id: c.id, title: c.name, type: c.type as 'text' | 'voice', can_send: c.type === 'text' && has(perms, Permission.SEND_MESSAGES) });
   }
   const roleRows = await db.select().from(roles).where(eq(roles.serverId, server.id)).orderBy(desc(roles.position));
   return {
@@ -493,30 +506,35 @@ async function memberRole(ctx: BotChannelCtx, p: Params, add: boolean) {
   await limit(`botsrv:${botId}:${server.id}`, BOT_SERVER_RATE);
   const actor = await getMemberContext(server.id, botId);
   if (!actor) throw chatNotFound();
-  const [role] = await db.select().from(roles).where(eq(roles.id, q.role_id)).limit(1);
-  if (!role || role.serverId !== server.id) throw new BotApiError(400, 'Bad Request: role not found');
-  if (role.isEveryone || role.isGuests || role.managedBotId) throw new BotApiError(400, 'Bad Request: this role is managed and can not be assigned');
-  if (!has(actor.serverPermissions, Permission.MANAGE_ROLES)) throw new BotApiError(400, 'Bad Request: not enough rights to manage roles');
-  const block = assignRoleBlock({
-    isManager: true,
-    membersCanAssign: false,
-    actorHasRole: false,
-    rolePosition: role.position,
-    actorHighest: highestPosition(actor),
+  const role = await db.transaction(async (tx) => {
+    const [role] = await tx.select().from(roles).where(and(eq(roles.id, q.role_id), eq(roles.serverId, server.id))).limit(1).for('update');
+    if (!role) throw new BotApiError(400, 'Bad Request: role not found');
+    if (role.isEveryone || role.isGuests || role.managedBotId) throw new BotApiError(400, 'Bad Request: this role is managed and can not be assigned');
+    if (!has(actor.serverPermissions, Permission.MANAGE_ROLES)) throw new BotApiError(400, 'Bad Request: not enough rights to manage roles');
+    if (add && botRoleAssignmentBlocked(permsFromString(role.permissions), true, false)) {
+      throw new BotApiError(400, 'Bad Request: bots can not assign administrator roles');
+    }
+    const block = assignRoleBlock({
+      isManager: true,
+      membersCanAssign: false,
+      actorHasRole: false,
+      rolePosition: role.position,
+      actorHighest: highestPosition(actor),
+    });
+    if (block) throw new BotApiError(400, 'Bad Request: the role is not lower than the bot role');
+    const [member] = await tx
+      .select({ userId: serverMembers.userId })
+      .from(serverMembers)
+      .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, q.user_id), eq(serverMembers.state, 'active')))
+      .limit(1);
+    if (!member) throw new BotApiError(400, 'Bad Request: user is not a member of the chat');
+    if (add) {
+      await tx.insert(memberRoles).values({ serverId: server.id, userId: q.user_id, roleId: role.id }).onConflictDoNothing();
+    } else {
+      await tx.delete(memberRoles).where(and(eq(memberRoles.serverId, server.id), eq(memberRoles.userId, q.user_id), eq(memberRoles.roleId, role.id)));
+    }
+    return role;
   });
-  if (block) throw new BotApiError(400, 'Bad Request: the role is not lower than the bot role');
-  const target = await getMemberContext(server.id, q.user_id);
-  const [member] = await db
-    .select({ userId: serverMembers.userId })
-    .from(serverMembers)
-    .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, q.user_id)))
-    .limit(1);
-  if (!target || !member) throw new BotApiError(400, 'Bad Request: user is not a member of the chat');
-  if (add) {
-    await db.insert(memberRoles).values({ serverId: server.id, userId: q.user_id, roleId: role.id }).onConflictDoNothing();
-  } else {
-    await db.delete(memberRoles).where(and(eq(memberRoles.serverId, server.id), eq(memberRoles.userId, q.user_id), eq(memberRoles.roleId, role.id)));
-  }
   await writeAudit(server.id, botId, add ? 'role.assign' : 'role.unassign', {
     targetType: 'member',
     targetId: q.user_id,

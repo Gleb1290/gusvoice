@@ -113,6 +113,33 @@ export function unixSeconds(d: Date | string | number): number {
 /** Секрет подписи, заданный ботом: 16–256 знаков `[A-Za-z0-9_-]` (как `secret_token` у Telegram, но не короче 16). */
 export const WEBHOOK_SECRET_RE = /^[A-Za-z0-9_-]{16,256}$/;
 export const WEBHOOK_URL_MAX = 2048;
+/** Нижняя граница двух SDK: Node принимает 1 МиБ, Python — 8 МиБ. */
+export const WEBHOOK_BODY_MAX = 1024 * 1024;
+
+export const clearedWebhook = {
+  webhookUrl: null,
+  webhookSecret: null,
+  webhookBatch: false,
+  webhookFailures: 0,
+  webhookLastError: null,
+  webhookLastErrorAt: null,
+  webhookDisabledAt: null,
+};
+
+/** Считаем байты вместе с синтаксисом JSON. Крупное первое событие отправляем отдельно и ждём подтверждения. */
+export function webhookBody(updates: readonly Record<string, unknown>[], batch: boolean): { body: string; count: number } {
+  let bytes = batch ? 2 : 0; // скобки массива
+  const encoded: string[] = [];
+  for (const update of updates) {
+    const json = JSON.stringify(update);
+    bytes += Buffer.byteLength(json, 'utf8') + (encoded.length === 0 ? 0 : 1);
+    if (bytes > WEBHOOK_BODY_MAX && encoded.length > 0) break;
+    if (!batch) return { body: json, count: 1 };
+    encoded.push(json);
+  }
+  return { body: batch ? `[${encoded.join(',')}]` : '', count: encoded.length };
+}
+
 /** Срок одной доставки и сколько ответа читаем (тело ответа нам не нужно — только статус). */
 export const WEBHOOK_TIMEOUT_MS = 10_000;
 export const WEBHOOK_RESPONSE_MAX = 4 * 1024;
@@ -374,7 +401,7 @@ function decodeEntities(s: string): string {
  * кавычка, `pre` → блок из трёх кавычек, `a href` → «текст (адрес)» (или адрес, если текст и есть адрес), `blockquote` →
  * строки `> `. Незнакомые теги снимаются (текст остаётся), сущности раскодируются.
  */
-export function htmlToMarkers(html: string): string {
+export function htmlToMarkers(html: string, maxLength = Infinity): string {
   type Frame = { tag: string; close: string; href?: string; quote?: boolean; start: number };
   const out: string[] = [];
   const stack: Frame[] = [];
@@ -387,7 +414,9 @@ export function htmlToMarkers(html: string): string {
       out.push(inner && f.href && inner !== f.href ? `${inner} (${f.href})` : inner || f.href);
     } else if (f.quote) {
       const inner = out.splice(f.start).join('');
-      out.push(inner.split('\n').map((l) => `> ${l}`).join('\n'));
+      const lines = inner.split('\n');
+      if (inner.length + 2 * lines.length > maxLength) throw new BotApiError(400, 'Bad Request: formatted message is too long');
+      out.push(lines.map((l) => `> ${l}`).join('\n'));
     } else out.push(f.close);
   };
   while ((m = re.exec(html))) {
@@ -426,6 +455,7 @@ export function htmlToMarkers(html: string): string {
   }
   out.push(decodeEntities(html.slice(last)));
   while (stack.length) finish(stack.pop()!);
+  if (out.reduce((size, part) => size + part.length, 0) > maxLength) throw new BotApiError(400, 'Bad Request: formatted message is too long');
   return out.join('');
 }
 

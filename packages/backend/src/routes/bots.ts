@@ -24,18 +24,19 @@ import {
   type MyBotsResponse,
 } from '@gusvoice/shared';
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { hashPassword, isSuperAdmin, requireAuth, requireSuperAdmin } from '../auth.js';
 import { rateHit } from '../authGuard.js';
-import { botVoiceEnabled, canCreateBot, hashBotToken, newBotToken } from '../bots/botRules.js';
+import { botVoiceEnabled, canCreateBot, clearedWebhook, hashBotToken, newBotToken } from '../bots/botRules.js';
 import { deleteBot } from '../bots/botLifecycle.js';
 import { type BotRow, readBotSettings, type UserRow, writeBotSettings } from '../bots/botStore.js';
 import { db } from '../db/index.js';
 import { bots, serverBots, servers, users } from '../db/schema.js';
 import { broadcastUserProfile } from '../gateway.js';
 import { requireLocalUser } from '../guestGuard.js';
+import { isUsernameConflict } from '../setupRules.js';
 import { isSupportedImage, uploadAvatar } from '../storage.js';
 import { asUserId } from '../superAdminRules.js';
 import { id as newId } from '../util.js';
@@ -153,25 +154,26 @@ export async function botRoutes(app: FastifyInstance): Promise<void> {
       const body = createBody.parse(req.body);
       const nameError = botUsernameError(body.username);
       if (nameError) return reply.code(400).send({ error: nameError });
-      const settings = await readBotSettings();
-      const [[meRow], owned] = await Promise.all([
-        db.select({ approvedAt: users.approvedAt }).from(users).where(eq(users.id, me)).limit(1),
-        ownedBots(me),
-      ]);
-      if (!canCreateBot(settings, { superAdmin: isSuperAdmin(asUserId(me)), approved: !!meRow?.approvedAt, owned: owned.length })) {
-        return reply.code(403).send({ error: settings.enabled ? 'Создавать ботов вам сейчас нельзя (настройка инстанса или лимит)' : 'Боты на этом сервере выключены' });
-      }
       const wait = await rateHit(`bot-create:${me}`, CREATE_RATE.max, CREATE_RATE.windowS);
       if (wait) return reply.code(429).header('Retry-After', String(wait)).send({ error: 'Слишком много новых ботов — попробуйте позже', retry_after: wait });
-      // Ник уникален без учёта регистра — как у людей (вход ищет по нему же без регистра).
-      const [taken] = await db.select({ id: users.id }).from(users).where(sql`lower(${users.username}) = ${body.username.toLowerCase()}`).limit(1);
-      if (taken) return reply.code(409).send({ error: 'Этот ник занят' });
 
       const botId = newId();
       const token = newBotToken();
       try {
-        await db.transaction(async (tx) => {
-          await tx.insert(users).values({
+        const result = await db.transaction(async (tx) => {
+          // Все создания одного владельца считают квоту после получения одного и того же замка.
+          const [owner] = await tx.select({ approvedAt: users.approvedAt, deletedAt: users.deletedAt })
+            .from(users).where(eq(users.id, me)).for('no key update');
+          const settings = await readBotSettings(tx);
+          const [owned] = await tx.select({ total: count() }).from(bots)
+            .innerJoin(users, eq(users.id, bots.userId))
+            .where(and(eq(bots.ownerId, me), isNull(users.deletedAt)));
+          if (!owner || owner.deletedAt || !canCreateBot(settings, {
+            superAdmin: isSuperAdmin(asUserId(me)), approved: !!owner.approvedAt, owned: owned.total,
+          })) {
+            return { error: settings.enabled ? 'Создавать ботов вам сейчас нельзя (настройка инстанса или лимит)' : 'Боты на этом сервере выключены' };
+          }
+          const [user] = await tx.insert(users).values({
             id: botId,
             username: body.username,
             email: null,
@@ -182,16 +184,18 @@ export async function botRoutes(app: FastifyInstance): Promise<void> {
             passwordHash: await hashPassword(randomUUID()),
             hiddenFromPeers: true,
             bot: true,
-          });
-          await tx.insert(bots).values({ userId: botId, ownerId: me, tokenHash: hashBotToken(token), description: body.description ?? '' });
-        });
+          }).returning();
+          const [bot] = await tx.insert(bots)
+            .values({ userId: botId, ownerId: me, tokenHash: hashBotToken(token), description: body.description ?? '' })
+            .returning();
+          return { bot: botInfoOf(bot, user) };
+        }, { isolationLevel: 'read committed' });
+        if ('error' in result) return reply.code(403).send({ error: result.error });
+        return reply.code(201).send({ bot: result.bot, token });
       } catch (err) {
-        // Гонка двух созданий с одним ником: уникальность `users.username` — у базы.
-        if ((err as { code?: string }).code === '23505') return reply.code(409).send({ error: 'Этот ник занят' });
+        if (isUsernameConflict(err)) return reply.code(409).send({ error: 'Этот ник занят' });
         throw err;
       }
-      const row = await myBot(me, botId);
-      return reply.code(201).send({ bot: botInfoOf(row!.bot, row!.user), token });
     });
 
     api.patch('/bots/:id', async (req, reply) => {
@@ -239,17 +243,22 @@ export async function botRoutes(app: FastifyInstance): Promise<void> {
       return botInfoOf(fresh!.bot, fresh!.user);
     });
 
-    // Перевыпуск: новый хеш — старый токен перестаёт подходить сразу (каждый запрос бота ищет по хешу); его WS закрываются.
+    // Новый токен и отзыв адреса доставки фиксируются одним UPDATE. Очередь остаётся доступной с новым токеном.
     api.post('/bots/:id/token', async (req, reply): Promise<BotTokenResponse | FastifyReply> => {
       const { id } = botParams.parse(req.params);
       const row = await myBot(req.user!.sub, id);
       if (!row) return reply.code(404).send({ error: 'not found' });
       const token = newBotToken();
-      await db.update(bots).set({ tokenHash: hashBotToken(token), tokenCreatedAt: new Date() }).where(eq(bots.userId, id));
+      const [updated] = await db.update(bots)
+        .set({ ...clearedWebhook, tokenHash: hashBotToken(token), tokenCreatedAt: new Date() })
+        .where(and(eq(bots.userId, id), eq(bots.tokenHash, row.bot.tokenHash)))
+        .returning();
+      if (!updated) return reply.code(409).send({ error: 'Состояние бота изменилось. Повторите действие' });
+      const { resetWebhookRetry } = await import('../bots/webhookDelivery.js');
+      resetWebhookRetry(id);
       closeBotSockets(id, 4001, 'token revoked');
       await dropBotVoiceSoon(id);
-      const fresh = await myBot(req.user!.sub, id);
-      return { bot: botInfoOf(fresh!.bot, fresh!.user), token };
+      return { bot: botInfoOf(updated, row.user), token };
     });
 
     api.delete('/bots/:id', async (req, reply) => {

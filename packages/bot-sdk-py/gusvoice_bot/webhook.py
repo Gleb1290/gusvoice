@@ -11,7 +11,9 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler
+from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 SIGNATURE_HEADER = "X-GusVoice-Signature"
@@ -20,6 +22,7 @@ DEFAULT_TOLERANCE_S = 300
 """Signature time window, seconds: an older (or far future) delivery is a replay and is refused."""
 MAX_BODY_BYTES = 8 << 20
 """Largest delivery body `webhook_handler` accepts."""
+RECENT_UPDATE_LIMIT = 10_000
 
 
 def parse_signature_header(header: Optional[str]) -> Optional[Tuple[int, List[str]]]:
@@ -86,7 +89,11 @@ def webhook_handler(
     `POST <path>`: wrong signature -> 401, body larger than `MAX_BODY_BYTES` -> 413, not JSON -> 400; otherwise it
     answers 200 right away and then calls `on_update(update)` for the update (or each one of a batch; keep the server fast: it waits for the answer).
     Exceptions of `on_update` are printed and do not reach the server (the delivery is already acknowledged).
+    The handler remembers the last 10,000 distinct update IDs in this process. Persist IDs in the application
+    when callbacks must stay idempotent across restarts or multiple workers.
     """
+    recent: OrderedDict[int, None] = OrderedDict()
+    lock = Lock()
 
     class _Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 (http.server naming)
@@ -114,6 +121,15 @@ def webhook_handler(
             for u in update if isinstance(update, list) else [update]:
                 if not isinstance(u, dict):
                     continue
+                uid = u.get("update_id")
+                if type(uid) is not int or uid <= 0:
+                    continue
+                with lock:
+                    if uid in recent:
+                        continue
+                    recent[uid] = None
+                    if len(recent) > RECENT_UPDATE_LIMIT:
+                        recent.popitem(last=False)
                 try:
                     on_update(u)
                 except Exception as e:  # the delivery is acknowledged; report and go on

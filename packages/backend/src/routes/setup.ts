@@ -25,6 +25,7 @@ import { serializeUser } from '../serialize.js';
 import {
   decideSetupAdmin,
   hashSetupToken,
+  isUsernameConflict,
   SETUP_KEY,
   wizardPending,
   type SetupAdminDecision,
@@ -215,6 +216,7 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
       row = created;
     } catch (err) {
       if (err instanceof AlreadySetUpError) return refuse(reply, 'already-set-up');
+      if (isUsernameConflict(err)) return reply.code(409).send({ error: 'username or email already in use' });
       throw err;
     }
 

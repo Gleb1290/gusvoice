@@ -27,6 +27,7 @@ async function response(error: Error, raw = source) {
   deps.fastify = { __esModule: true, default: () => ({
     register: async () => {}, addContentTypeParser: () => {}, addHook: () => {}, get: () => {},
     listen: async () => {}, log: { info: () => {}, warn: () => {}, error: assert.fail },
+    setNotFoundHandler: app.setNotFoundHandler.bind(app),
     setErrorHandler: (handler: Parameters<typeof app.setErrorHandler>[0]) => {
       registered++; app.setErrorHandler(handler);
     },
@@ -167,7 +168,7 @@ async function routeStatuses(raw = source): Promise<number[]> {
   }
   deps.fastify = { __esModule: true, default: () => ({
     register: app.register.bind(app), get: app.get.bind(app), addHook: app.addHook.bind(app),
-    setErrorHandler: app.setErrorHandler.bind(app), addContentTypeParser: () => {},
+    setErrorHandler: app.setErrorHandler.bind(app), setNotFoundHandler: app.setNotFoundHandler.bind(app), addContentTypeParser: () => {},
     listen: async () => {}, log: { info: () => {}, warn: () => {}, error: assert.fail },
   }) };
   deps.zod = { ZodError };

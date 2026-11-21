@@ -247,7 +247,7 @@ A server member (`getChatMember`, `getChatMembers`). Permissions are not flags a
 
 | Field | Type | |
 |---|---|---|
-| `user` | [User](#user) | the member |
+| `user` | [User](#user) | profile of an active member. For left or kicked, only the requested ID is meaningful and both names are empty |
 | `status` | `"creator"` \| `"member"` \| `"left"` \| `"kicked"` | `creator` — owner, `member`, `left`, `kicked` (banned) |
 | `nickname` | string, optional | nickname on this server (present if set) |
 | `role_ids` | array of string | ids of the member's roles |
@@ -542,7 +542,7 @@ _Since API 1._ Turn on event delivery to a URL (see [Delivery to a URL](#deliver
 | **`url`** | string | 1–2048 chars | `https://…`, no login or password in the URL |
 | **`secret_token`** | string | pattern `^[A-Za-z0-9_-]{16,256}$` | **required**: every delivery is signed with it |
 | `drop_pending_updates` | boolean |  | discard accumulated events |
-| `batch` | boolean |  | batched delivery: the POST body is an array of up to 100 updates, signed as a whole; a `2xx` confirms the whole batch |
+| `batch` | boolean |  | each POST contains up to 100 updates and up to 1 MiB of UTF-8 JSON per batch (a larger individual update is sent alone). The signature and a successful response cover this batch |
 
 Result: `true`.
 
@@ -581,7 +581,7 @@ _Since API 1._ Send a message.
 | `reply_markup` | [InlineKeyboardMarkup](#inlinekeyboardmarkup) |  | buttons under the message |
 | `client_id` | string | 1–64 chars | your own id of this send: repeating `sendMessage` with the same `client_id` (a network drop, a restart) returns **the same** message instead of a second one. The same `client_id` with a different chat or content → `400`. Ignored in channels for now |
 | `parse_mode` | string | ≤ 16 chars | omitted — our markup; `HTML` — a Telegram subset converted to our markup; `MarkdownV2` → `400` |
-| `files[0]` | file (multipart only) |  | files `files[0]`…`files[9]`: up to **10**, each up to **25 MB**. Other fields are strings; `embeds` and `reply_markup` — JSON strings |
+| `files[0]` | file (multipart only) |  | up to 10 files in `files[0]`…`files[9]`, up to 25 MiB each and 64 MiB for all files and fields together. Encode `embeds` and `reply_markup` as JSON strings |
 
 Result: [Message](#message).
 
@@ -1053,7 +1053,7 @@ that moment.
 | Event consumers per bot | 1: a new `getUpdates` or WebSocket replaces the previous one (`409` / `4009`, see [getUpdates](#getupdates)) |
 | JSON/form body | 64 KB |
 | Files per message / file size | 10 / 25 MB |
-| Message text | 4096 characters |
+| Message text | 4096 UTF-16 code units, both in the submitted text and after HTML conversion |
 | Cards per message | 10 (total card text up to 6000 characters) |
 | Event journal | 24 hours, up to 1000 per bot (a "Read all messages" bot — 10 000) |
 | `getUpdates` wait (`timeout`) | up to 50 seconds |
@@ -1543,7 +1543,7 @@ internal addresses" to be turned on.
 
 **How do I find my `id`?** Send the bot any message and look at `from.id` in the `message` event.
 
-**The token leaked.** My bots → your bot → "Reissue token". The old one stops working at once.
+**The token leaked.** My bots → your bot → "Reissue token". Rotation revokes the old token and clears the webhook address and signing secret. Configure delivery again with the new bot token and a fresh signing secret.
 
 **Can I delete a bot?** Yes: My bots → "Delete bot" («Удалить бота»). The token dies, events and the URL are removed,
 the bot's messages stay in the conversations.

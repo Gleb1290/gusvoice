@@ -30,18 +30,29 @@ import { webhookExecuteBody } from '../webhookRules.js';
 import {
   BOT_COMMAND_SCOPES,
   BOT_UPDATE_TYPES,
+  BotApiError,
   type BotUpdateType,
   commandScopeOk,
   duplicateCommand,
   GET_UPDATES_LIMIT_MAX,
   GET_UPDATES_TIMEOUT_MAX,
+  htmlToMarkers,
   isHttpUrlWithoutCredentials,
+  PARSE_MODE_UNSUPPORTED,
   unixSeconds,
   WEBHOOK_SECRET_RE,
   WEBHOOK_URL_MAX,
 } from './botRules.js';
 
 // ─── Разбор параметров ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Текст для отправки и правки в ЛС и каналах. Схема уже проверила длину исходника. */
+export function botText(raw: string | undefined, mode?: string): string {
+  const text = (raw ?? '').trim();
+  if (!mode) return text;
+  if (mode.trim().toLowerCase() !== 'html') throw new BotApiError(400, PARSE_MODE_UNSUPPORTED);
+  return htmlToMarkers(text, MESSAGE_TEXT_MAX).trim();
+}
 
 /** Флаг: `true`/`false`, а из формы и строки запроса — `"true"`/`"1"`/`"false"`/`"0"`. */
 const flag = z.preprocess((v) => (v === 'true' || v === '1' ? true : v === 'false' || v === '0' || v === '' ? false : v), z.boolean());
@@ -410,6 +421,15 @@ export const wireChatMemberInfo = z.object({
   joined_date: z.number().optional(),
 }).meta({ id: 'ChatMember' });
 export type WireChatMemberInfo = z.infer<typeof wireChatMemberInfo>;
+
+/** Вне активного ростера остаётся только статус в этом сервере и переданный id. */
+export function toWireAbsentChatMember(userId: string, banned: boolean): WireChatMemberInfo {
+  return {
+    user: toWireUser({ id: userId, username: '', displayName: null }),
+    status: banned ? 'kicked' : 'left',
+    role_ids: [],
+  };
+}
 /** `getChatMembers`: страница участников; `next_offset` — только если есть следующая (этап 5: схема ответа для OpenAPI). */
 export const wireChatMembersPage = z
   .object({ members: z.array(wireChatMemberInfo), next_offset: z.string().optional() })

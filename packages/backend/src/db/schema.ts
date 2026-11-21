@@ -1382,6 +1382,8 @@ export const bots = pgTable('bots', {
   webhookBatch: boolean('webhook_batch').notNull().default(false),
   /** Сколько событий срезал потолок журнала (0157, #231). */
   droppedUpdateCount: integer('dropped_update_count').notNull().default(0),
+  /** Физический размер журнала, поддерживается триггерами БД (0170). */
+  journalSize: integer('journal_size').notNull().default(0),
 });
 
 /** Журнал событий бота (0154): `updateId` растёт на весь инстанс; подтверждённое удаляется, хранение 24 ч. */
@@ -1394,6 +1396,16 @@ export const botUpdates = pgTable('bot_updates', {
   payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const botChannelUploadReservations = pgTable('bot_channel_upload_reservations', {
+  id: text('id').primaryKey(),
+  botId: text('bot_id').notNull().references(() => bots.userId, { onDelete: 'cascade' }),
+  bytes: integer('bytes').notNull(),
+  reservedAt: timestamp('reserved_at', { withTimezone: true }).notNull().default(sql`statement_timestamp()`),
+}, (t) => ({
+  byBot: index('bot_channel_upload_by_bot_idx').on(t.botId, t.reservedAt),
+  expiry: index('bot_channel_upload_expiry_idx').on(t.reservedAt),
+}));
 
 export const instanceSettings = pgTable('instance_settings', {
   key: text('key').primaryKey(),

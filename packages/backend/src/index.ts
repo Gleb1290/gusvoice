@@ -123,7 +123,7 @@ const app = Fastify({
       req(req) {
         return {
           method: req.method,
-          url: redactLogUrl(req.url),
+          url: req.routeOptions?.url ? redactLogUrl(req.url, req.routeOptions.url) : '(unknown route)',
           host: req.host,
           remoteAddress: req.ip,
           remotePort: req.socket?.remotePort,
@@ -133,6 +133,9 @@ const app = Fastify({
   },
 });
 
+// Штатный Fastify повторяет сырой URL в отдельной строке журнала при 404, минуя сериализатор.
+app.setNotFoundHandler((_req, reply) => reply.code(404).send({ statusCode: 404, error: 'Not Found', message: 'Route not found' }));
+
 // 🔴 CORS сужен до своего клиента, оболочек Tauri и клиентов связанных инстансов (аудит 19.09,
 // F-21; список и кеш — `corsOrigins.ts`). Кук нет, токен в `localStorage`, поэтому чужая страница
 // сама по себе токен не получала — но `origin: true` оставлял любую будущую XSS и утёкший токен
@@ -141,7 +144,8 @@ const app = Fastify({
 // скрипту только «безопасные» заголовки. Без этой строки продление сессии (x-refresh-token) тихо
 // не работает, а выглядит как прежний баг «выкидывает раз в неделю».
 await app.register(cors, { origin: corsOriginCheck, exposedHeaders: ['x-refresh-token'] });
-await app.register(websocket);
+// Тот же входной предел, что у /gateway, до сборки сообщения в ws (в том числе из фрагментов).
+await app.register(websocket, { options: { maxPayload: 16 * 1024 } });
 await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024, files: 1 } });
 
 // Tolerate empty bodies on bodyless POST/DELETE requests that still carry a

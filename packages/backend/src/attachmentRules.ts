@@ -211,7 +211,12 @@ export function parseRange(header: string | undefined, size: number): { start: n
  * Адрес запроса для журнала: подпись ссылки на файл вырезается. Журнал бэкенда пишет адрес КАЖДОГО запроса, а
  * ссылка — ключ на предъявителя. id вложения оставляем — по нему разбирают жалобы.
  */
-export function redactLogUrl(url: string): string {
+export function redactLogUrl(url: string, route?: string): string {
+  // Fastify уже сопоставил путь (в том числе с URL-кодированием) с шаблоном.
+  if (route?.endsWith('/webhooks/:id/:token') || route?.includes('/bot/v1/')) return route;
+  // У Bot API параметры GET содержат текст сообщений. У входящего вебхука сам путь даёт право отправки.
+  if (/\/api\/bot\/v1(?:\/|[?#]|$)/i.test(url)) return url.split(/[?#]/, 1)[0];
+  if (/\/api\/webhooks\//i.test(url)) return url.split(/[?#]/, 1)[0].replace(/(\/api\/webhooks\/[^/]+)\/.*/i, '$1/…');
   // Токен устройства в адресе шлюза FCM (#247, `/api/push/fcm/<токен>`) — тоже не для журнала.
   return url.replace(/(\/api\/att\/[^/?#]+)\/[^?#]*/, '$1/…').replace(/(\/api\/push\/fcm\/)[^?#]*/, '$1…');
 }

@@ -6,8 +6,9 @@
  * крючку ботов этого мало. Аудитория считается ОДИН раз — людям и ботам.
  *
  * Боты — крючок `configureChannelBots` (по образцу `configureBotConv` в `conversations.ts`): модуль ботов отсюда не
- * импортируется. Крючок идёт в фоне, по очереди на канал внутри процесса (правка не обгоняет своё создание в журнале
- * бота); сбой крючка — только в лог, маршрут человека от журнала бота не зависит.
+ * импортируется. В процессе крючок записывает события в порядке вызовов для каждого канала. Фоновая очередь
+ * ограничена на весь процесс. При заполнении издатель дожидается допуска, а публикация людям идёт своим ходом.
+ * Сбой крючка логируется, последующие события продолжают обрабатываться.
  *
  * 🔴 Вне этого файла `publishToChannel` с `t: 'message.create'|'message.update'|'message.delete'|'message.reaction'` не
  * вызывается — иначе новый вход молча обойдёт ботов (страж Codex, ТЗ этапа 3 §7 п.5).
@@ -36,27 +37,6 @@ export interface ChannelBotsHooks {
   record(serverId: string, channelId: string, ev: ChannelMessageEvent, audience: readonly string[], actor?: string): Promise<void>;
 }
 
-let hooks: ChannelBotsHooks | null = null;
-
-/** Подключает Bot API (`routes/botApi.ts`); без него события идут только людям. */
-export function configureChannelBots(next: ChannelBotsHooks | null): void {
-  hooks = next;
-}
-
-/** Хвост очереди крючка на канал (внутри процесса): правка не обгоняет создание. */
-const queues = new Map<string, Promise<void>>();
-
-function enqueue(channelId: string, run: () => Promise<void>): void {
-  const prev = queues.get(channelId) ?? Promise.resolve();
-  const next = prev
-    .then(run)
-    .catch((err) => console.warn('[bots] канал:', err instanceof Error ? err.message : err))
-    .finally(() => {
-      if (queues.get(channelId) === next) queues.delete(channelId);
-    });
-  queues.set(channelId, next);
-}
-
 /** Событие людям в форме шлюза — как было в маршрутах до выноса. */
 export function gatewayMessageOf(serverId: string, channelId: string, ev: ChannelMessageEvent): ChannelScopedMessage {
   switch (ev.kind) {
@@ -73,15 +53,71 @@ export function gatewayMessageOf(serverId: string, channelId: string, ev: Channe
   }
 }
 
-/**
- * Разослать событие сообщения канала людям (дожидаясь публикации — как прежний `publishToChannel` в маршруте) и поставить
- * крючок ботов в очередь. `actor` — кто сделал (свои действия боту не пишутся).
- */
-export async function publishChannelMessageEvent(serverId: string, channelId: string, ev: ChannelMessageEvent, actor?: string): Promise<void> {
-  const res = await getChannelAudience(channelId);
-  // ⚠️ Канал не из этого сервера — не рассылаем вовсе (как `publishToChannel` без аудитории).
-  if (!res || res.serverId !== serverId) return;
-  await publishToChannel(serverId, channelId, gatewayMessageOf(serverId, channelId, ev), res.userIds);
-  const h = hooks;
-  if (h && ev.kind !== 'pinned' && ev.kind !== 'markup') enqueue(channelId, () => h.record(serverId, channelId, ev, res.userIds, actor));
+const CHANNEL_BOT_QUEUE_LIMIT = 128;
+
+export function createChannelMessagePublisher(limit = CHANNEL_BOT_QUEUE_LIMIT) {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('Channel bot queue limit must be a positive integer');
+
+  let hooks: ChannelBotsHooks | null = null;
+  const queues = new Map<string, Promise<void>>();
+  let pending = 0;
+  const waitingPublishers = new Set<() => void>();
+
+  /** Подключает Bot API; без крючка события идут только людям. */
+  function configureChannelBots(next: ChannelBotsHooks | null): void {
+    hooks = next;
+  }
+
+  function enqueue(channelId: string, run: () => Promise<void>): void {
+    pending++;
+    const prev = queues.get(channelId) ?? Promise.resolve();
+    const next = prev
+      .then(run)
+      .catch((err) => console.warn('[bots] канал:', err instanceof Error ? err.message : err))
+      .finally(() => {
+        pending--;
+        if (queues.get(channelId) === next) queues.delete(channelId);
+        const first = waitingPublishers.values().next();
+        if (!first.done) {
+          waitingPublishers.delete(first.value);
+          first.value();
+        }
+      });
+    queues.set(channelId, next);
+  }
+
+  /**
+   * Публикует людям и ждёт допуска в очередь ботов. Место занято до окончания крючка,
+   * включая ожидание аудитории и предыдущих событий этого канала.
+   */
+  async function publishChannelMessageEvent(serverId: string, channelId: string, ev: ChannelMessageEvent, actor?: string): Promise<void> {
+    const h = hooks;
+    const published = (async () => {
+      const res = await getChannelAudience(channelId);
+      if (!res || res.serverId !== serverId) return null;
+      await publishToChannel(serverId, channelId, gatewayMessageOf(serverId, channelId, ev), res.userIds);
+      return res.userIds;
+    })();
+    if (h && ev.kind !== 'pinned' && ev.kind !== 'markup') {
+      const audience = published.catch(() => null);
+      const record = async () => {
+        const ids = await audience;
+        if (ids) await h.record(serverId, channelId, ev, ids, actor);
+      };
+      if (pending < limit) {
+        enqueue(channelId, record);
+      } else {
+        // Издатель ждёт места. Завершившийся крючок допускает ровно одного издателя в порядке вызовов.
+        await new Promise<void>((resolve) => waitingPublishers.add(() => {
+          enqueue(channelId, record);
+          resolve();
+        }));
+      }
+    }
+    await published;
+  }
+
+  return { configureChannelBots, publishChannelMessageEvent };
 }
+
+export const { configureChannelBots, publishChannelMessageEvent } = createChannelMessagePublisher();

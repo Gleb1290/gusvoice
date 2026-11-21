@@ -81,6 +81,14 @@ function wsConflictText(reason: string): string {
   return /terminated/i.test(reason) ? CONFLICT_TEXT : FATAL_CLOSE[4009][1];
 }
 
+function isBotHello(value: unknown): value is BotUser {
+  if (!value || typeof value !== 'object') return false;
+  const bot = value as Partial<BotUser>;
+  return typeof bot.id === 'string' && bot.id.length > 0 && typeof bot.username === 'string' &&
+    typeof bot.display_name === 'string' && bot.bot === true && typeof bot.description === 'string' &&
+    typeof bot.about === 'string' && typeof bot.public === 'boolean';
+}
+
 /** Ошибка, после которой повторять запрос нет смысла (токен, права, адрес доставки, неверные параметры). */
 function isFatal(e: unknown): e is GusVoiceApiError {
   return e instanceof GusVoiceApiError && [400, 401, 403, 404, 409].includes(e.code);
@@ -490,6 +498,7 @@ export class Bot {
     return new Promise((resolve) => {
       const ws = new Ctor(url, { headers: { authorization: this.api.authHeader() } });
       let hello = false;
+      let identity: Promise<boolean> | undefined;
       let lastSeen = Date.now();
       let inflight = 0;
       let sinceAck = 0;
@@ -518,23 +527,43 @@ export class Bot {
         ack();
         ws.close(1000, 'bot stopped');
       };
+      const acceptHello = (me: unknown): boolean => {
+        if (ws.readyState !== 1) return false;
+        if (!isBotHello(me)) {
+          ws.close(4000, 'invalid bot identity');
+          return false;
+        }
+        hello = true;
+        this.me = me;
+        void onHello(me).catch((err) => this.errorHandler(err));
+        return true;
+      };
       ws.onmessage = (ev) => {
         lastSeen = Date.now();
-        let msg: { op?: string; bot?: BotUser; update?: Update };
+        let msg: { op?: string; bot?: unknown; update?: Update } | null;
         try {
           msg = JSON.parse(String(ev.data));
         } catch {
           return;
         }
-        if (msg.op === 'hello' && msg.bot) {
-          hello = true;
-          this.me = msg.bot;
-          void onHello(msg.bot).catch((err) => this.errorHandler(err));
-        } else if (msg.op === 'update' && msg.update) {
-          inflight++;
-          void this.handleUpdate(msg.update).finally(() => {
-            inflight--;
-            if (inflight === 0 || ++sinceAck >= ACK_EVERY) ack();
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.op === 'hello' && !identity) {
+          // Старый сервер мог прислать пустой объект вместо сведений о боте.
+          identity = isBotHello(msg.bot)
+            ? Promise.resolve(acceptHello(msg.bot))
+            : this.api.getMe().then(acceptHello, () => {
+                if (ws.readyState === 1) ws.close(4000, 'cannot resolve bot identity');
+                return false;
+              });
+        } else if (msg.op === 'update' && msg.update && identity) {
+          const update = msg.update;
+          void identity.then((ready) => {
+            if (!ready) return;
+            inflight++;
+            void this.handleUpdate(update).finally(() => {
+              inflight--;
+              if (inflight === 0 || ++sinceAck >= ACK_EVERY) ack();
+            });
           });
         }
       };

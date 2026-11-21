@@ -507,6 +507,61 @@ describe('R301 Bot — callbackQuery и явная публикация кома
 });
 
 describe('Bot.start — WebSocket без сети и реальных задержек', () => {
+  it('корректное hello запускает бота один раз и не требует getMe', async () => {
+    const h = harness();
+    const starts: BotUser[] = [];
+    const run = h.bot.start({ onStart: (bot) => starts.push(bot) });
+    outcome(run);
+    try {
+      await reached(() => h.sockets.length === 1, 'WS создан');
+      const ws = h.sockets[0];
+      ws.receive(null);
+      ws.receive({ op: 'hello', bot: me });
+      ws.receive({ op: 'hello', bot: {} });
+      await flush();
+      assert.deepEqual(starts.map(profile => ({ ...profile })), [me]);
+      assert.deepEqual(h.fetches, []);
+    } finally {
+      await h.bot.stop();
+      await run;
+    }
+  });
+
+  it('после пустого hello старого сервера события ждут подтверждённой личности из getMe', async () => {
+    const h = harness();
+    const resolved = deferred();
+    const seen: (BotUser | string)[] = [];
+    let requests = 0;
+    h.bot.api.getMe = async () => {
+      requests++;
+      await resolved.promise;
+      return me;
+    };
+    h.bot.on('message', (ctx) => seen.push(ctx.text));
+    const run = h.bot.start({ onStart: (bot) => seen.push(bot) });
+    outcome(run);
+    try {
+      await reached(() => h.sockets.length === 1, 'WS создан');
+      const ws = h.sockets[0];
+      ws.receive({ op: 'update', update: update(1, 'до приветствия') });
+      ws.receive({ op: 'hello', bot: {} });
+      ws.receive({ op: 'hello', bot: {} });
+      ws.receive({ op: 'update', update: update(2, 'после приветствия') });
+      await flush();
+      assert.deepEqual(seen, []);
+      assert.deepEqual(ws.sent, []);
+      assert.equal(requests, 1);
+      resolved.resolve();
+      await flush();
+      assert.deepEqual(seen, [me, 'после приветствия']);
+      assert.deepEqual(ws.sent, [{ op: 'ack', offset: 3 }]);
+    } finally {
+      resolved.resolve();
+      await h.bot.stop();
+      await run;
+    }
+  });
+
   for (const [code, expected] of [[4001, 401], [4003, 403], [4009, 409]]) {
     it(`закрытие ${code} отклоняет start ошибкой ${expected} без переподключения`, () => fatal(code, expected));
   }
@@ -538,6 +593,7 @@ describe('Bot.start — WebSocket без сети и реальных задер
     let stopping: Promise<void> | undefined;
     try {
       await reached(() => h.sockets.length === 1, 'stop: сокет создан');
+      h.sockets[0].receive({ op: 'hello', bot: me });
       h.sockets[0].receive({ op: 'update', update: update(1) });
       await reached(() => entered, 'stop: обработчик запущен');
       stopping = h.bot.stop();
@@ -663,8 +719,8 @@ describe('Bot — адресные контрфакты на полном мод
     },
     {
       title: 'ранний ack обнаруживается пока обработчик стоит на барьере', invariant: ack,
-      from: 'void this.handleUpdate(msg.update).finally(() => {',
-      to: 'queueMicrotask(() => queueMicrotask(ack)); void this.handleUpdate(msg.update).finally(() => {',
+      from: 'void this.handleUpdate(update).finally(() => {',
+      to: 'queueMicrotask(() => queueMicrotask(ack)); void this.handleUpdate(update).finally(() => {',
       label: 'ack: медленное событие не подтверждено до завершения',
       operator: 'deepStrictEqual', actual: [{ op: 'ack', offset: 42 }], expected: [],
     },

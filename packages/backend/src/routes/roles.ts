@@ -5,14 +5,18 @@ import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
-import { memberRoles, roles, serverMembers } from '../db/schema.js';
+import { memberRoles, roles, serverMembers, users } from '../db/schema.js';
 import { getMemberContext, highestPosition } from '../permissions.js';
 import { publishToServer } from '../realtime.js';
-import { assignRoleBlock, BOT_ADMIN_FORBIDDEN, botAdminRequested, clampGrant, planReorder, selfAssignBlocked } from '../roleRules.js';
+import { assignRoleBlock, BOT_ADMIN_FORBIDDEN, botAdminRequested, botRoleAssignmentBlocked, clampGrant, planReorder, selfAssignBlocked } from '../roleRules.js';
 import { serializeRole } from '../serialize.js';
 import { id } from '../util.js';
 
 const permString = z.string().regex(/^\d+$/, 'permissions must be a decimal bitfield string');
+
+function roleWriteError(code: 400 | 403 | 404, error: string) {
+  return { ok: false as const, code, error };
+}
 
 export async function roleRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
@@ -100,56 +104,67 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(req.body);
 
-    const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
-    if (!role) return reply.code(404).send({ error: 'not found' });
-    const ctx = await getMemberContext(role.serverId, req.user!.sub);
+    const [found] = await db.select({ serverId: roles.serverId }).from(roles).where(eq(roles.id, roleId)).limit(1);
+    if (!found) return reply.code(404).send({ error: 'not found' });
+    const { serverId } = found;
+    const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
 
-    const actorHigh = highestPosition(ctx);
-    if (role.position >= actorHigh) return reply.code(403).send({ error: 'эта роль выше или равна твоей' });
-    if (body.position !== undefined && body.position >= actorHigh) {
-      return reply.code(403).send({ error: 'нельзя поднять роль до своего уровня или выше' });
-    }
+    const result = await db.transaction(async (tx) => {
+      // Назначение роли берёт ту же блокировку, поэтому проверка владельцев роли и запись атомарны.
+      const [role] = await tx.select().from(roles).where(eq(roles.id, roleId)).limit(1).for('update');
+      if (!role) return roleWriteError(404, 'not found');
 
-    const patch: Partial<typeof role> = {};
-    if (body.name !== undefined) patch.name = body.name;
-    if (body.color !== undefined) patch.color = body.color;
-    if (body.hoist !== undefined) patch.hoist = body.hoist;
-    if (body.position !== undefined) patch.position = body.position;
-    if (body.mentionable !== undefined) patch.mentionable = body.mentionable;
-    if (body.membersCanAssign !== undefined) patch.membersCanAssign = body.membersCanAssign;
-    // Роль бота (#231): `ADMINISTRATOR` боту нельзя никому, и владельцу тоже (решение владельца 26.10) — отказ, а не молчаливый
-    // срез: человек должен видеть, почему галочка не встала.
-    if (role.managedBotId && body.permissions !== undefined && botAdminRequested(permsFromString(body.permissions))) {
-      return reply.code(400).send({ error: BOT_ADMIN_FORBIDDEN });
-    }
-    if (body.permissions !== undefined) {
-      // ⚠️ Передаём ТЕКУЩУЮ маску роли: защищённые биты обязаны сохраниться как есть, если правит не
-      // владелец. Иначе админ, тронувший соседний тумблер, снял бы выданный владельцем MOVE_ANYONE.
-      patch.permissions = permsToString(
-        clampGrant(permsFromString(body.permissions), ctx.serverPermissions, ctx.isOwner, permsFromString(role.permissions)),
-      );
-    }
+      const actorHigh = highestPosition(ctx);
+      if (role.position >= actorHigh) return roleWriteError(403, 'эта роль выше или равна твоей');
+      if (body.position !== undefined && body.position >= actorHigh) {
+        return roleWriteError(403, 'нельзя поднять роль до своего уровня или выше');
+      }
 
-    // Guard: a self-service role (members_can_assign) must NOT carry admin-level perms, else the
-    // grant would spread privilege virally. Check the FINAL state (this patch's perms + flag).
-    const willSelfAssign = body.membersCanAssign ?? role.membersCanAssign;
-    if (selfAssignBlocked(willSelfAssign, permsFromString(patch.permissions ?? role.permissions))) {
-      return reply
-        .code(400)
-        .send({ error: 'нельзя разрешить самовыдачу роли с админ-правами (управление ролями/сервером)' });
-    }
+      const patch: Partial<typeof role> = {};
+      if (body.name !== undefined) patch.name = body.name;
+      if (body.color !== undefined) patch.color = body.color;
+      if (body.hoist !== undefined) patch.hoist = body.hoist;
+      if (body.position !== undefined) patch.position = body.position;
+      if (body.mentionable !== undefined) patch.mentionable = body.mentionable;
+      if (body.membersCanAssign !== undefined) patch.membersCanAssign = body.membersCanAssign;
+      if (body.permissions !== undefined) {
+        const requested = permsFromString(body.permissions);
+        if (botAdminRequested(requested)) {
+          if (role.managedBotId) return roleWriteError(400, BOT_ADMIN_FORBIDDEN);
+          const [botHolder] = await tx
+            .select({ userId: memberRoles.userId })
+            .from(memberRoles)
+            .innerJoin(users, eq(users.id, memberRoles.userId))
+            .where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.roleId, roleId), eq(users.bot, true)))
+            .limit(1);
+          if (botHolder) return roleWriteError(400, BOT_ADMIN_FORBIDDEN);
+        }
+        // Защищённые биты сохраняются при правке роли любым участником, кроме владельца.
+        patch.permissions = permsToString(
+          clampGrant(requested, ctx.serverPermissions, ctx.isOwner, permsFromString(role.permissions)),
+        );
+      }
 
-    const [row] = await db.update(roles).set(patch).where(eq(roles.id, roleId)).returning();
-    await writeAudit(role.serverId, req.user!.sub, 'role.update', {
+      const willSelfAssign = body.membersCanAssign ?? role.membersCanAssign;
+      if (selfAssignBlocked(willSelfAssign, permsFromString(patch.permissions ?? role.permissions))) {
+        return roleWriteError(400, 'нельзя разрешить самовыдачу роли с админ-правами (управление ролями/сервером)');
+      }
+
+      const [row] = await tx.update(roles).set(patch).where(eq(roles.id, roleId)).returning();
+      return { ok: true as const, row, changed: Object.keys(patch) };
+    });
+    if (!result.ok) return reply.code(result.code).send({ error: result.error });
+    const { row, changed } = result;
+    await writeAudit(serverId, req.user!.sub, 'role.update', {
       targetType: 'role',
       targetId: roleId,
-      data: { name: row.name, changed: Object.keys(patch) },
+      data: { name: row.name, changed },
     });
     // Permissions/visibility may have changed for many members — clients re-fetch bootstrap
     // (and, if in voice, refresh their LiveKit token so new publish grants take effect).
-    await publishToServer(role.serverId, { t: 'server.invalidate', serverId: role.serverId });
+    await publishToServer(serverId, { t: 'server.invalidate', serverId });
     return serializeRole(row);
   });
 
@@ -187,34 +202,43 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
 
-    const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
-    if (!role || role.serverId !== serverId) return reply.code(404).send({ error: 'role not found' });
-    /**
-     * 🔴 «Гости» руками не выдаётся (§5.9): она действует ПО ПРИЗНАКУ гостя (`baseRoleFor`), а не по
-     * строке в `member_roles`. Выданная местному, она не ограничила бы его, а наоборот добавила бы
-     * прав поверх `@everyone` — владелец сервера, сужая гостям права, расширил бы их своим.
-     * Гостю же эта строка не даёт ничего: роль у него и так базовая.
-     */
-    if (role.isGuests) return reply.code(400).send({ error: 'роль «Гости» выдаётся гостям сама' });
-    // Роль бота (#231) — только у него, выдаётся при добавлении бота.
-    if (role.managedBotId) return reply.code(400).send({ error: 'Роль бота выдаётся только ему' });
+    const result = await db.transaction(async (tx) => {
+      const [role] = await tx.select().from(roles).where(and(eq(roles.id, roleId), eq(roles.serverId, serverId))).limit(1).for('update');
+      if (!role) return roleWriteError(404, 'role not found');
+      /**
+       * 🔴 «Гости» руками не выдаётся (§5.9): она действует ПО ПРИЗНАКУ гостя (`baseRoleFor`), а не по
+       * строке в `member_roles`. Выданная местному, она не ограничила бы его, а наоборот добавила бы
+       * прав поверх `@everyone` — владелец сервера, сужая гостям права, расширил бы их своим.
+       * Гостю же эта строка не даёт ничего: роль у него и так базовая.
+       */
+      if (role.isGuests) return roleWriteError(400, 'роль «Гости» выдаётся гостям сама');
+      // Роль бота (#231) — только у него, выдаётся при добавлении бота.
+      if (role.managedBotId) return roleWriteError(400, 'Роль бота выдаётся только ему');
 
-    const block = assignRoleBlock({
-      isManager: has(ctx.serverPermissions, Permission.MANAGE_ROLES),
-      membersCanAssign: role.membersCanAssign,
-      actorHasRole: ctx.roleIds.includes(roleId),
-      rolePosition: role.position,
-      actorHighest: highestPosition(ctx),
+      const block = assignRoleBlock({
+        isManager: has(ctx.serverPermissions, Permission.MANAGE_ROLES),
+        membersCanAssign: role.membersCanAssign,
+        actorHasRole: ctx.roleIds.includes(roleId),
+        rolePosition: role.position,
+        actorHighest: highestPosition(ctx),
+      });
+      if (block) return roleWriteError(403, block);
+      const [target] = await tx
+        .select({ isBot: users.bot })
+        .from(serverMembers)
+        .innerJoin(users, eq(users.id, serverMembers.userId))
+        .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+        .limit(1);
+      if (!target) return roleWriteError(404, 'member not found');
+      if (botRoleAssignmentBlocked(permsFromString(role.permissions), ctx.isBot === true, target.isBot)) {
+        return roleWriteError(400, BOT_ADMIN_FORBIDDEN);
+      }
+
+      await tx.insert(memberRoles).values({ serverId, userId, roleId }).onConflictDoNothing();
+      return { ok: true as const, role };
     });
-    if (block) return reply.code(403).send({ error: block });
-    const [target] = await db
-      .select()
-      .from(serverMembers)
-      .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
-      .limit(1);
-    if (!target) return reply.code(404).send({ error: 'member not found' });
-
-    await db.insert(memberRoles).values({ serverId, userId, roleId }).onConflictDoNothing();
+    if (!result.ok) return reply.code(result.code).send({ error: result.error });
+    const { role } = result;
     await writeAudit(serverId, req.user!.sub, 'role.assign', {
       targetType: 'member',
       targetId: userId,

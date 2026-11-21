@@ -25,6 +25,7 @@ import {
 
 import {
   channelAudience,
+  memberBasePermissions,
   resolveLayered as resolveLayeredPure,
   toOverwrite,
   type AudienceMember,
@@ -42,6 +43,7 @@ interface RoleRow {
 
 export interface MemberContext {
   isOwner: boolean;
+  isBot?: boolean;
   roleIds: string[];
   roles: RoleRow[];
   everyoneRoleId: string | null;
@@ -61,7 +63,7 @@ export async function getMemberContext(serverId: string, userId: string): Promis
   }
 
   const [member] = await db
-    .select({ state: serverMembers.state, homeInstanceId: users.homeInstanceId })
+    .select({ state: serverMembers.state, homeInstanceId: users.homeInstanceId, isBot: users.bot })
     .from(serverMembers)
     .innerJoin(users, eq(serverMembers.userId, users.id))
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
@@ -87,6 +89,7 @@ export async function getMemberContext(serverId: string, userId: string): Promis
     userId,
     ownerId: server?.ownerId ?? null,
     isGuest: member.homeInstanceId !== null,
+    isBot: member.isBot,
     serverRoles,
     assignedRoleIds: mr.map((r) => r.roleId),
   });
@@ -101,11 +104,12 @@ export function memberContextFrom(p: {
   userId: string;
   ownerId: string | null;
   isGuest: boolean;
+  isBot?: boolean;
   serverRoles: readonly (RoleRow & { isGuests: boolean })[];
   assignedRoleIds: Iterable<string>;
 }): MemberContext {
-  const { userId, isGuest, serverRoles } = p;
-  const isOwner = p.ownerId === userId;
+  const { userId, isGuest, isBot, serverRoles } = p;
+  const isOwner = !isBot && p.ownerId === userId;
 
   const everyone = serverRoles.find((r) => r.isEveryone) ?? null;
   /**
@@ -132,7 +136,7 @@ export function memberContextFrom(p: {
   // от каскада в соседней таблице.
   for (const id of assigned) if (!serverRoles.some((r) => r.id === id)) assigned.delete(id);
 
-  let serverPermissions = basePermissions(effectiveRoles.map((r) => ({ permissions: permsFromString(r.permissions) })));
+  let serverPermissions = memberBasePermissions(effectiveRoles, isBot);
   if (isOwner) serverPermissions = ALL_PERMISSIONS;
 
   // Роль «Гости» едет в `roleIds`, чтобы работали её канальные переопределения (скрыть «Админку»,
@@ -141,6 +145,7 @@ export function memberContextFrom(p: {
 
   return {
     isOwner,
+    ...(isBot ? { isBot } : {}),
     roleIds: [...assigned],
     roles: effectiveRoles,
     everyoneRoleId: everyone?.id ?? null,
@@ -187,7 +192,7 @@ export async function getChannelPermissions(
 
 /** Формула наложения — в `audienceRules.ts`; здесь только переупаковка контекста в subject. */
 function resolveLayered(ctx: MemberContext, userId: string, catOws: OverwriteRow[], chanOws: OverwriteRow[]): bigint {
-  const subject = { userId, roleIds: ctx.roleIds, everyoneRoleId: ctx.everyoneRoleId };
+  const subject = { userId, roleIds: ctx.roleIds, everyoneRoleId: ctx.everyoneRoleId, isBot: ctx.isBot };
   return resolveLayeredPure(ctx.serverPermissions, subject, catOws, chanOws);
 }
 
@@ -278,7 +283,7 @@ export async function getChannelPermissionsForServers(
   } else {
     const [members, srvRows, roleRows, mrRows] = await Promise.all([
       db
-        .select({ serverId: serverMembers.serverId, state: serverMembers.state, homeInstanceId: users.homeInstanceId })
+        .select({ serverId: serverMembers.serverId, state: serverMembers.state, homeInstanceId: users.homeInstanceId, isBot: users.bot })
         .from(serverMembers)
         .innerJoin(users, eq(serverMembers.userId, users.id))
         .where(and(eq(serverMembers.userId, userId), inArray(serverMembers.serverId, ids))),
@@ -298,6 +303,7 @@ export async function getChannelPermissionsForServers(
           userId,
           ownerId: ownerOf.get(m.serverId) ?? null,
           isGuest: m.homeInstanceId !== null,
+          isBot: m.isBot,
           serverRoles: roleRows.filter((r) => r.serverId === m.serverId),
           assignedRoleIds: mrRows.filter((r) => r.serverId === m.serverId).map((r) => r.roleId),
         }),
@@ -408,7 +414,7 @@ export async function getChannelAudience(channelId: string): Promise<{ serverId:
      * `getMemberContext` отвечает про него «не участник», и рассылка обязана отвечать так же.
      */
     db
-      .select({ userId: serverMembers.userId, homeInstanceId: users.homeInstanceId })
+      .select({ userId: serverMembers.userId, homeInstanceId: users.homeInstanceId, isBot: users.bot })
       .from(serverMembers)
       .innerJoin(users, eq(serverMembers.userId, users.id))
       .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.state, 'active'))),
@@ -439,6 +445,7 @@ export async function getChannelAudience(channelId: string): Promise<{ serverId:
     roleIds: rolesByUser.get(m.userId) ?? [],
     privileged: m.userId === ownerId || m.userId === superId,
     isGuest: m.homeInstanceId !== null,
+    isBot: m.isBot,
   }));
 
   // Супер-админ, НЕ состоящий в сервере, участником не числится, но подписаться на него может —

@@ -20,7 +20,7 @@ import {
   type ReactionGroup,
   type ReactionReactor,
 } from '@gusvoice/shared';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { pushDebounced } from './authGuard.js';
 import { publishChannelMessageEvent } from './channelEvents.js';
 import { replyAttachmentPreview } from './convRules.js';
@@ -145,6 +145,31 @@ export interface PostChannelInput {
   silent?: boolean;
 }
 
+/** Проверяется до загрузки вложений бота и повторно прямо перед записью сообщения. */
+export async function channelReplyExists(channelId: string, replyId: string): Promise<boolean> {
+  const [row] = await db.select({ id: messages.id }).from(messages)
+    .where(and(eq(messages.id, replyId), eq(messages.channelId, channelId))).limit(1);
+  return !!row;
+}
+
+interface PostChannelPersistence {
+  id: string;
+  onPersistence(state: 'inserting' | 'stored'): void;
+}
+
+function lockChannelInsert(tx: Pick<typeof db, 'execute'>, messageId: string) {
+  return tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`channel-message:${messageId}`}))`);
+}
+
+/** После неопределённого результата ждём конца исходной транзакции, затем читаем свежий снимок. */
+export async function channelMessageStored(messageId: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockChannelInsert(tx, messageId);
+    const [row] = await tx.select({ id: messages.id }).from(messages).where(eq(messages.id, messageId)).limit(1);
+    return !!row;
+  }, { isolationLevel: 'read committed' });
+}
+
 /**
  * Отправить сообщение в текстовый канал от `authorId` (человек или бот — права одни, `getChannelPermissions`).
  * Пустоту, предел частоты и «вложение загружено через этот сервер» проверяет вызывающий.
@@ -153,6 +178,7 @@ export async function postChannelMessage(
   authorId: string,
   channelId: string,
   input: PostChannelInput,
+  persistence?: PostChannelPersistence,
 ): Promise<{ kind: 'ok'; message: Message; row: MessageRow } | ChannelFail> {
   const content = input.content;
   const [channel] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
@@ -164,11 +190,9 @@ export async function postChannelMessage(
   if (!has(perms.permissions, Permission.SEND_MESSAGES)) return fail(403, 'forbidden', 'no-send');
 
   // A reply must point at an existing message in this same channel.
-  let replyToId: string | null = null;
-  if (input.replyToId) {
-    const [parent] = await db.select().from(messages).where(eq(messages.id, input.replyToId)).limit(1);
-    if (!parent || parent.channelId !== channelId) return fail(400, 'invalid reply target', 'bad-reply');
-    replyToId = parent.id;
+  const replyToId = input.replyToId || null;
+  if (replyToId && !(await channelReplyExists(channelId, replyToId))) {
+    return fail(400, 'invalid reply target', 'bad-reply');
   }
 
   // Стикер разрешаем ТОЛЬКО из набора этого же сервера: иначе по id можно было бы утащить в чат
@@ -193,10 +217,9 @@ export async function postChannelMessage(
   // права текст остаётся, но флаг `false` гасит звук, значок и пуш. Нет таких обращений — NULL.
   const broadcastText = hasBroadcastMention(content);
   const mentionEveryone = broadcastText ? canMentionEveryone(perms.permissions) : null;
-  const [row] = await db
-    .insert(messages)
+  const insert = (q: Pick<typeof db, 'insert'>) => q.insert(messages)
     .values({
-      id: id(),
+      id: persistence?.id ?? id(),
       channelId,
       authorId: author.id,
       content,
@@ -209,6 +232,14 @@ export async function postChannelMessage(
       ...(input.keyboard?.length ? { keyboard: input.keyboard } : {}),
     })
     .returning();
+  const [row] = persistence
+    ? await db.transaction(async (tx) => {
+        await lockChannelInsert(tx, persistence.id);
+        persistence.onPersistence('inserting');
+        return insert(tx);
+      })
+    : await insert(db);
+  persistence?.onPersistence('stored');
 
   const replies = await replyPreviewsFor([replyToId]);
   const message = serializeMessage({ ...row, author, replyTo: replyToId ? (replies.get(replyToId) ?? null) : null });
@@ -266,7 +297,11 @@ export async function editChannelMessage(
   const keyboardChanged = opts.keyboard !== undefined && JSON.stringify(msg.keyboard ?? null) !== JSON.stringify(nextKeyboard ?? null);
   let row = msg;
   if (!unchanged) {
-    [row] = await db.update(messages).set({ content, editedAt: new Date(), keyboard: nextKeyboard }).where(eq(messages.id, messageId)).returning();
+    const mentionRoles = await resolveRoleMentions(content, perms.serverId, perms.permissions);
+    const mentionEveryone = hasBroadcastMention(content) ? canMentionEveryone(perms.permissions) : null;
+    [row] = await db.update(messages)
+      .set({ content, mentionRoles, mentionEveryone, editedAt: new Date(), keyboard: nextKeyboard })
+      .where(eq(messages.id, messageId)).returning();
   } else if (keyboardChanged) {
     // Одни кнопки (бот): без «изм.» — `editedAt` не трогаем.
     [row] = await db.update(messages).set({ keyboard: nextKeyboard }).where(eq(messages.id, messageId)).returning();

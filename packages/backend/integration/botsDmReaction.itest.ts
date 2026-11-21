@@ -20,13 +20,13 @@ async function fixture(edit?: Phase3Edit) {
   const events: { user: string; body: any }[] = [], unexpected: string[] = [];
   const fail = (name: string) => (..._args: unknown[]): never => { unexpected.push(name); throw new Error(`R303 неописанный IO ${name}`); };
   const f = await serverFixture(db, edit, {
-    real: ['conversations', 'bots/botUpdates', 'routes/botApi'],
+    real: ['blocks', 'conversations', 'bots/botUpdates', 'routes/botApi'],
     values: {
       util: { id: crypto.randomUUID, uuidv7: crypto.randomUUID }, dmWriteBarrier: { dmWriteBarrier: {} }, attachmentRules,
       attachments: { DailyQuotaError: class extends Error {}, attachmentStore: {}, attachmentLink: fail('attachmentLink'),
         privateAttachmentsReady: fail('private storage'), createPending: fail('upload'), copyForForward: fail('copy forward'),
         discardForwardCopies: fail('discard forward'), purgeDeleted: fail('purge') },
-      blocks: { isBlockedBy: fail('blocks') }, convSendFanout: { fanOutSend: fail('fanout') },
+      convSendFanout: { fanOutSend: fail('fanout') },
       'bots/botRead': { markTakenRead: fail('mark read') },
       authGuard: { clientIp: () => '192.0.2.1', rateHit: async () => 0, attachmentUploadBlock: fail('upload rate'),
         pushDebounced: async () => false },
@@ -118,6 +118,16 @@ test('R303 повтор того же набора реакций идемпот
     assert.equal((await f.request(desired)).statusCode, 200); await f.flush();
     assert.deepEqual(await db.db.select().from(s.userSync).orderBy(asc(s.userSync.userId)), pts);
     assert.equal((await db.db.select().from(s.conversationMessageReactions)).length, 1); assert.deepEqual(f.events, []); assert.deepEqual(await f.journal(), []);
+  } finally { await f.clean(); }
+});
+test('блокировка скрывает события реакций бота от собеседника', async () => {
+  const f = await fixture();
+  try {
+    await db.db.insert(s.userBlocks).values({ blockerId: 'owner', blockedId: 'bot' });
+    const response = await f.request([{ type: 'emoji', emoji: '👍' }]);
+    assert.equal(response.statusCode, 200, response.body);
+    await f.flush();
+    assert.equal(f.events.filter(e => e.user === 'owner' && e.body.t === 'conv.change').length, 0);
   } finally { await f.clean(); }
 });
 test('R303 маршрут реакции человека передаёт действовавшего и операцию настоящей доставке боту', () => {

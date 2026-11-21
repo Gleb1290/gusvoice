@@ -104,7 +104,13 @@ const NODE_BODY_MAX = 1024 * 1024;
  * Обработчик `(Request) => Promise<Response>` → обработчик `node:http`:
  * `http.createServer(toNodeHandler(bot.webhookHandler({ secret })))`.
  */
-export function toNodeHandler(handler: (req: Request) => Promise<Response>): (req: NodeReq, res: NodeRes) => void {
+export function toNodeHandler(
+  handler: (req: Request) => Promise<Response>,
+  { maxBodyBytes = NODE_BODY_MAX }: { maxBodyBytes?: number } = {},
+): (req: NodeReq, res: NodeRes) => void {
+  if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1 || maxBodyBytes > 8 * NODE_BODY_MAX) {
+    throw new RangeError('maxBodyBytes must be an integer between 1 byte and 8 MiB');
+  }
   return (req, res) => {
     void (async () => {
       try {
@@ -113,7 +119,7 @@ export function toNodeHandler(handler: (req: Request) => Promise<Response>): (re
         for await (const c of req) {
           const b = typeof c === 'string' ? enc.encode(c) : (c as Uint8Array);
           size += b.length;
-          if (size > NODE_BODY_MAX) {
+          if (size > maxBodyBytes) {
             res.statusCode = 413;
             res.end('payload too large');
             return;

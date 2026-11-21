@@ -56,6 +56,8 @@ server.serve_forever()
 
 Register the address once with `bot.set_webhook(url, secret_token)`; put the server behind an HTTPS reverse proxy.
 The handler answers 200 right away and then calls `on_update` — the server waits for the answer, keep it fast.
+It skips duplicate IDs among the last 10,000 distinct updates received by this handler. For callbacks with durable
+side effects, store the update ID with the result so retries across restarts or workers are also safe.
 
 ## Security
 

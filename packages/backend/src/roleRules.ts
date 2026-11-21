@@ -128,6 +128,11 @@ export function botAdminRequested(requested: bigint): boolean {
   return (requested & Permission.ADMINISTRATOR) !== 0n;
 }
 
+/** ADMINISTRATOR нельзя назначить боту или выдать от его имени. */
+export function botRoleAssignmentBlocked(permissions: bigint, actorIsBot: boolean, targetIsBot: boolean): boolean {
+  return (actorIsBot || targetIsBot) && botAdminRequested(permissions);
+}
+
 /**
  * Права управляемой роли бота при добавлении: не больше прав добавляющего (`clampGrant`, защищённые биты — только у
  * владельца) и без `ADMINISTRATOR` — даже у владельца.
