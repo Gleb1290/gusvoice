@@ -135,6 +135,7 @@ export function VoiceOverlay() {
               )}
               {!compact && p.deafened && <Icon name="headphones-off" size={14} />}
               {!compact && !p.deafened && p.muted && <Icon name="mic-off" size={14} />}
+              {!compact && p.musicPlaying && <Icon name="music" size={14} title="Бот воспроизводит аудио" />}
             </li>
           );
         })}

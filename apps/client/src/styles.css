@@ -4665,6 +4665,7 @@ span.att-pending {
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
   color: #fff;
 }
+.stage-status-music,
 .stage-status-off {
   position: absolute;
   top: 50%;
@@ -4677,6 +4678,10 @@ span.att-pending {
   border-radius: var(--r-pill);
   background: rgba(16, 16, 20, 0.88);
   color: #ff929a;
+}
+.stage-status-music.music-playing,
+.vp-flag.music-playing {
+  color: var(--accent);
 }
 .stage-name {
   min-width: 0;
@@ -5210,6 +5215,7 @@ html.gv-stream-pip-doc body {
 /* Economy bonus: an unobtrusive, non-modal goose. Its full-screen layer deliberately never catches
    a click; only the generously sized button does. The opportunity itself comes from the server. */
 .goose-bonus-layer {
+  --goose-bottom: max(8px, var(--sa-b));
   position: fixed;
   inset: 0;
   z-index: 45;
@@ -5218,7 +5224,7 @@ html.gv-stream-pip-doc body {
 .goose-bonus {
   position: absolute;
   right: max(16px, max(env(safe-area-inset-right), var(--gv-sar, 0px)));
-  bottom: max(8px, max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+  bottom: var(--goose-bottom);
   min-width: 176px;
   min-height: 52px;
   padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-5);
@@ -5292,9 +5298,18 @@ html.gv-stream-pip-doc body {
   .goose-bonus:focus-visible { transform: none; }
 }
 @media (max-width: 760px) {
+  .app {
+    --call-chip-bottom: calc(64px + var(--sa-b));
+    --call-chip-height: 60px;
+  }
+  .goose-bonus-layer {
+    --goose-bottom: calc(70px + var(--sa-b));
+  }
+  .call-chip ~ .goose-bonus-layer {
+    --goose-bottom: calc(var(--call-chip-bottom) + var(--call-chip-height) + 8px);
+  }
   .goose-bonus {
     right: 10px;
-    bottom: calc(70px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
   }
 }
 button.leave {
@@ -10252,9 +10267,9 @@ button.dms-scope.on::after {
     position: fixed;
     left: calc(12px + var(--sa-l));
     right: calc(12px + var(--sa-r));
-    bottom: calc(64px + max(env(safe-area-inset-bottom), var(--gv-sab, 0px)));
+    bottom: var(--call-chip-bottom);
     z-index: 90;
-    height: 60px;
+    height: var(--call-chip-height);
     display: flex;
     align-items: center;
     gap: var(--sp-4);
@@ -14320,6 +14335,7 @@ body:has(.lightbox) .confirm-overlay {
   font-size: 11px;
 }
 .ctx-custom-status {
+  flex-shrink: 0;
   padding: var(--sp-1) var(--sp-4) var(--sp-2);
   font-size: 12.5px;
 }
@@ -22232,7 +22248,7 @@ input[type='radio']:disabled {
      на всё окно, и `bottom: 100%` унесло бы подсказку за верхний край экрана. Смещение вверх — на
      высоту кнопки плюс зазор, чтобы подсказка вылетала именно из гуся. */
   right: max(16px, max(env(safe-area-inset-right), var(--gv-sar, 0px)));
-  bottom: calc(max(8px, max(env(safe-area-inset-bottom), var(--gv-sab, 0px))) + 60px);
+  bottom: calc(var(--goose-bottom) + 60px);
   white-space: nowrap;
   pointer-events: none;
   padding: var(--sp-1) var(--sp-4);
@@ -24157,6 +24173,7 @@ input[type='radio']:disabled {
   flex: 0 0 auto;
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
   border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
 .set-head-text {
   flex: 1;
@@ -24259,34 +24276,39 @@ input[type='radio']:disabled {
   overflow-y: auto;
   padding: 0 var(--sp-5) var(--sp-6);
 }
-/* 🔴 Иерархия вместо трёх одинаковых серых: заголовок группы теперь весом и цветом отличается от
-   подсказки под контролом, и липнет к верху, пока его блок листается. */
-/* 🔴 Заголовок группы НЕ липкий, хотя в макете round 9 он липкий. Попробовали — получили две
-   поломки разом (поймано на проде 19.09): все заголовки лежат в ОДНОМ контейнере, поэтому
-   прилипший не уезжает, а следующий наезжает на него — и переход по якорю перестаёт работать,
-   потому что `scrollIntoView` зовётся у элемента, который уже прилип к верху, и прокручивать
-   некуда. Липкость здесь возможна только если каждую группу обернуть в свою секцию; до тех пор
-   иерархия держится весом, цветом и разделителем — ради них всё и затевалось. */
-.settings-modal .settings-group-label {
-  /* Отступ при переходе по якорю: иначе заголовок встаёт вплотную к кромке блока. */
-  scroll-margin-top: 10px;
-  font-size: 13px;
-  font-weight: 800;
-  letter-spacing: 0.01em;
+/* Заголовки прокручиваются вместе с группой: это также цели перехода из поиска и оглавления. */
+.rail-modal .set-main :is(.settings-group-label, .cat-name, .eco-head, .fed-group-self) {
+  box-sizing: border-box;
+  scroll-margin-block-start: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  margin: var(--sp-5) 0 0;
+  border: 0;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--r-2);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: normal;
   text-transform: none;
   color: var(--text);
-  padding: var(--sp-4) 0 var(--sp-3);
-  margin: 0;
-  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.rail-modal .set-main :is(.settings-group-label, .cat-name, .eco-head, .fed-group-self):where(:not(.set-hit, .set-hover)) {
+  background: var(--bg-3);
+}
+.rail-modal .set-main :is(.settings-group-label, .cat-name, .eco-head, .fed-group-self):first-child {
+  margin-block-start: var(--sp-2);
+}
+@media (max-width: 760px) {
+  .rail-modal .set-main :is(.settings-group-label, .cat-name, .eco-head, .fed-group-self) {
+    margin-block-start: var(--sp-3);
+  }
 }
 /* C6: подпись «Кто видит / Кто может мне звонить» под заголовком группы — вплотную к его линии читалась как часть заголовка;
    тот же воздух, что у строк настроек под линией (`--sp-3`). */
 .settings-modal .set-sub-label {
   padding-top: var(--sp-3);
 }
-/* ⚠️ Фон здесь НЕ задаём: он был нужен липкому заголовку, чтобы строки не просвечивали под ним, —
-   а заодно перебивал подсветку найденной настройки (`.set-hit` слабее по специфичности), и поиск
-   доводил до строки, ничего на ней не подсвечивая. */
 /* Строка настройки: общий ритм — подпись слева, контрол в колонке 216px справа, чтобы глаз бежал
    вниз по одной вертикали, а не искал контрол каждый раз заново. */
 .settings-modal .settings-row:not(.col) {

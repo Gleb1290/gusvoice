@@ -124,6 +124,10 @@ function gainOn(instanceId: string, userId: string): number {
   }
 }
 
+export function userPlaybackGain(userId: string, instanceId?: string | null): number {
+  return instanceId && instanceId !== activeInstanceId() ? gainOn(instanceId, userId) : effectiveGain(userId);
+}
+
 /**
  * Push the stored gain onto a live LiveKit participant (no-op for local/unsupported).
  * `instanceId` — инстанс комнаты (`voice.instanceId`); другой, чем активный, — громкости берутся оттуда.
@@ -132,7 +136,7 @@ function gainOn(instanceId: string, userId: string): number {
  */
 export function applyUserAudio(p: Participant, instanceId?: string | null) {
   if (p.isLocal) return;
-  const gain = instanceId && instanceId !== activeInstanceId() ? gainOn(instanceId, p.identity) : effectiveGain(p.identity);
+  const gain = userPlaybackGain(p.identity, instanceId);
   // 🔴 Только МИКРОФОН, трек за треком (#71). Раньше здесь стоял `participant.setVolume()`, а он в
   // LiveKit бьёт по ВСЕМ аудиотрекам участника — включая звук его демонстрации экрана. Это не
   // «забывало приглушить» неоткрытый стрим, а активно включало его на полную: эффект дёргается на

@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import { Icon } from './Icon';
+import { ChannelMuteSetting } from './ChannelMuteSetting';
 import { Select } from './Select';
 
 export function CreateChannelModal({
@@ -20,6 +21,7 @@ export function CreateChannelModal({
   const [name, setName] = useState('');
   const [type, setType] = useState<'text' | 'voice'>('text');
   const [categoryId, setCategoryId] = useState(defaultCategoryId ?? '');
+  const [forceMuted, setForceMuted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,7 +32,7 @@ export function CreateChannelModal({
     setBusy(true);
     setError(null);
     try {
-      await api.createChannel(serverId, trimmed, type, categoryId || null);
+      await api.createChannel(serverId, trimmed, type, categoryId || null, type === 'text' && forceMuted);
       await useStore.getState().openServer(serverId);
       onClose();
     } catch (err) {
@@ -90,6 +92,8 @@ export function CreateChannelModal({
             />
           </label>
         )}
+
+        {type === 'text' && <ChannelMuteSetting checked={forceMuted} onChange={setForceMuted} />}
 
         {error && <div className="error">{error}</div>}
 

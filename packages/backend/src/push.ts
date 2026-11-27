@@ -11,7 +11,7 @@ import { instanceIdByDomain } from './federation/instanceLabels.js';
 import { getChannelAudience } from './permissions.js';
 import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from './db/index.js';
-import { memberRoles, pushAlways, pushDevices, pushMutes, roles, serverMembers, users } from './db/schema.js';
+import { channels, memberRoles, pushAlways, pushDevices, pushMutes, roles, serverMembers, users } from './db/schema.js';
 import { env } from './env.js';
 import { encryptWebPush, type WebPushKeys } from './pushCrypto.js';
 import { deferPush, recipientActive } from './pushDefer.js';
@@ -222,6 +222,18 @@ export async function sendPushToUsers(
   if ((opts.repeat ?? 0) > 0 || (payload.repeat ?? 0) > 0) return;
   let ids = [...new Set(recipientIds)];
   if (ids.length === 0) return;
+
+  // Перечитываем политику перед доставкой: её могли сменить после записи сообщения.
+  // Пересланный пуш гостя уже проверил хост, channelId указывает на его канал.
+  if (payload.type === 'mention' && payload.channelId && !payload.instanceId) {
+    const [channel] = await db
+      .select({ type: channels.type, forceMuted: channels.forceMuted })
+      .from(channels)
+      .where(eq(channels.id, payload.channelId))
+      .limit(1);
+    if (!channel || (channel.type === 'text' && channel.forceMuted)) return;
+  }
+
   /** «Выключить звук» (07.10, `conv13`): им пуш уходит, но с `silent` — уведомление без звука и вибрации. */
   const quiet = new Set<string>();
   if (source) {

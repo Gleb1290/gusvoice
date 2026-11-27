@@ -11,7 +11,7 @@ import * as shared from '@gusvoice/shared';
 import * as status from '../status';
 import * as dmRules from '../dmRules';
 
-const sources = Object.fromEntries(['ServerBotsPanel', 'ServerRolesPanel', 'ServerMembersPanel', 'Toggle'].map(name =>
+const sources = Object.fromEntries(['ServerBotsPanel', 'ServerRolesPanel', 'ServerMembersPanel', 'RolePeopleEditor', 'Toggle'].map(name =>
   [name, readFileSync(new URL(`./${name}.tsx`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')]));
 const role = (id: string, name: string, managedBotId?: string) => ({ id, serverId: 'server', name, managedBotId,
   permissions: '0', position: 1, color: 0, isEveryone: false, mentionable: false, membersCanAssign: false });
@@ -71,7 +71,7 @@ async function fixture(check: (f: {
       '../toast': { toast: empty, toastError: empty }, './Avatar': { Avatar: empty }, './Icon': { Icon: empty }, './HelpDot': { HelpDot: empty },
       './Select': { Select: ({ options: items, ariaLabel }: { options: Array<{ value: string; label: string }>; ariaLabel?: string }) =>
         React.createElement('select', { 'aria-label': ariaLabel }, items.map(o => React.createElement('option', { key: o.value, value: o.value }, o.label))) },
-      '../hotkeys': { isMobile: () => false }, '../phoneLayout': { usePhoneUi: () => false }, '../status': status, '../dmRules': dmRules,
+      '../hotkeys': { isMobile: () => false }, '../phoneLayout': { usePhoneUi: () => false, usePhoneLayout: () => false }, '../status': status, '../dmRules': dmRules,
       './Crown': { CrownMark: empty, crownGlow: () => '', useCrownId: () => null }, '../avatarAnimation': { useAnimatedAvatarsEnabled: () => false },
       './GuestMark': { GuestMark: empty }, './StatusDot': { StatusDot: () => React.createElement('i', { className: 'test-status-dot' }) },
       './UserContextMenu': { useUserMenu: () => ({ open: empty, menu: null }) }, ...extra,
@@ -85,12 +85,16 @@ async function fixture(check: (f: {
     return module.exports as T;
   }
   const toggle = load<typeof import('./Toggle')>('Toggle');
-  const roles = load<typeof import('./ServerRolesPanel')>('ServerRolesPanel', { './Toggle': toggle });
+  const people = load<typeof import('./RolePeopleEditor')>('RolePeopleEditor', { './role-people.css': {} });
+  const roles = load<typeof import('./ServerRolesPanel')>('ServerRolesPanel', {
+    './Toggle': toggle, './RolePeopleEditor': people,
+    './RoleAppearancePicker': { RoleAppearancePicker: () => null }, './roles-editor.css': {},
+  });
   const bots = load<typeof import('./ServerBotsPanel')>('ServerBotsPanel', { './Toggle': toggle, './ServerRolesPanel': roles });
   const roster = load<typeof import('./ServerMembersPanel')>('ServerMembersPanel');
   const components: Record<string, React.ElementType> = { ServerRolesPanel: roles.ServerRolesPanel,
     ServerBotsPanel: bots.ServerBotsPanel, ServerMembersPanel: roster.ServerMembersPanel };
-  const props = { serverId: 'server', ownerId: 'owner', selfId: 'me', canManageRoles: true, canKick: false, view: 'roles', initialRoleId: 'bot-role' };
+  const props = { serverId: 'server', ownerId: 'owner', selfId: options.owner ? 'owner' : 'me', canManageRoles: true, canKick: false, view: 'roles', initialRoleId: 'bot-role' };
     await check({ host, calls, confirms, mount: async (name, extra = {}) => {
       await React.act(async () => root.render(React.createElement(components[name], { ...props, ...extra })));
     }, click: async (text, scope = document) => {
@@ -174,29 +178,60 @@ it('R303 404 списка ботов сообщает о старом серве
   });
 });
 
+function buttonWithText(host: ParentNode, text: string) {
+  return [...host.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === text);
+}
+
+function roleChoice(host: ParentNode, name: string) {
+  return [...host.querySelectorAll<HTMLLabelElement>('label')]
+    .find((label) => label.textContent?.startsWith(name))?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+}
+
 async function managedRole(raw = sources.ServerRolesPanel) {
   await fixture(async f => {
     await f.mount('ServerRolesPanel');
-    assert.equal(f.host.querySelectorAll('.danger-text').length, 0, 'R303 роль бота нельзя удалить');
-    assert.equal(f.host.querySelectorAll('.role-mchip button').length, 0, 'у бота нет крестика снятия роли');
-    assert.equal(f.host.querySelector('[aria-label="Добавить участника в роль"]'), null);
-    assert.equal(f.host.querySelector<HTMLButtonElement>('[aria-label="Администратор — все права"]')?.disabled, true);
-    await f.click('Друзья');
-    assert.ok(f.host.querySelector('.danger-text'), 'обычную роль удалить можно');
-    assert.equal(f.host.querySelectorAll('.role-mchip button').length, 1);
-    assert.ok(f.host.querySelector('[aria-label="Добавить участника в роль"]'), 'обычная роль выдаётся участникам');
+    const adminLabel = [...f.host.querySelectorAll<HTMLElement>('strong')]
+      .find((label) => label.textContent === 'Администратор — все права');
+    assert.ok(adminLabel, 'роль бота открывается на вкладке прав');
+    assert.equal(f.host.querySelector<HTMLButtonElement>(`[aria-labelledby="${adminLabel.id}"]`)?.disabled, true);
+    await f.click('Участники', f.host);
+    assert.equal(buttonWithText(f.host, 'Снять роль'), undefined);
+    assert.equal(buttonWithText(f.host, 'Добавить людей'), undefined);
+    await f.click('Оформление', f.host);
+    const remove = buttonWithText(f.host, 'Удалить роль');
+    assert.equal(remove?.disabled, true, 'R303 роль бота нельзя удалить');
+    await f.click('Удалить роль', f.host);
+    assert.equal(f.confirms.length, 0);
+
+    const humanLabel = [...f.host.querySelectorAll<HTMLElement>('strong')].find((label) => label.textContent === 'Друзья');
+    const human = humanLabel?.closest('button');
+    assert.ok(human);
+    await React.act(async () => human.click());
+    assert.equal(buttonWithText(f.host, 'Удалить роль')?.disabled, false, 'обычную роль удалить можно');
+    await f.click('Участники', f.host);
+    assert.equal(buttonWithText(f.host, 'Снять роль')?.disabled, false);
+    assert.equal(buttonWithText(f.host, 'Добавить людей')?.disabled, false);
   }, { target: 'ServerRolesPanel', raw, owner: true });
 }
-it('R303 управляемая роль без удаления, выдачи и крестика, обычная роль сохраняет все три действия', () => managedRole());
-it('R303 участникам нельзя выдать роль бота или снять её крестиком, обычные роли остаются в выдаче', async () => {
+it('R303 управляемая роль блокирует удаление, выдачу и снятие, у обычной роли эти действия доступны', () => managedRole());
+it('R303 каталог показывает назначенную роль бота, блокирует снятие и исключает её из выдачи', async () => {
   await fixture(async f => {
     await f.mount('ServerRolesPanel', { view: 'members' });
-    const rows = f.host.querySelectorAll('.member-row'); assert.equal(rows.length, 2);
-    const botChip = rows[0].querySelector('.role-chip'); assert.ok(botChip?.textContent?.includes('Погодный бот'));
-    assert.equal(botChip?.querySelector('button'), null);
-    assert.equal(rows[1].querySelectorAll('.role-chip button').length, 1);
-    assert.deepEqual(Array.from(f.host.querySelectorAll<HTMLOptionElement>('option'), o => o.value), ['human-role']);
-  });
+    const botRoles = f.host.querySelector<HTMLButtonElement>('[aria-label="Роли участника weather"]');
+    assert.ok(botRoles);
+    await React.act(async () => botRoles.click());
+    const assigned = roleChoice(f.host, 'Погодный бот');
+    assert.equal(assigned?.checked, true, 'показывает назначенную роль');
+    assert.equal(assigned?.disabled, true, 'снятие заблокировано');
+    await f.click('Закрыть', f.host);
+    const humanRoles = f.host.querySelector<HTMLButtonElement>('[aria-label="Роли участника friend"]');
+    assert.ok(humanRoles);
+    await React.act(async () => humanRoles.click());
+    assert.equal(roleChoice(f.host, 'Погодный бот'), undefined, 'роль бота отсутствует в выдаче');
+    const normal = roleChoice(f.host, 'Друзья');
+    assert.equal(normal?.checked, true);
+    assert.equal(normal?.disabled, false, 'обычную роль можно снять');
+  }, { owner: true });
 });
 
 async function rosterProbe(raw = sources.ServerMembersPanel) {
@@ -213,7 +248,7 @@ async function rosterProbe(raw = sources.ServerMembersPanel) {
 it('R303 ростер показывает Боты первой отдельной группой с режимами чтения, без точек online и без дублей среди людей', () => rosterProbe());
 
 for (const [name, target, anchor, replacement, probe, message, actual, expected] of [
-  ['роль бота удаляется', 'ServerRolesPanel', '!systemRole && !botRole && (', '!systemRole && (', managedRole, 'R303 роль бота нельзя удалить', 1, 0],
+  ['роль бота удаляется', 'ServerRolesPanel', 'disabled={busy || !!editBlock || systemRole || botRole}>Удалить роль', 'disabled={busy || !!editBlock || systemRole}>Удалить роль', managedRole, 'R303 роль бота нельзя удалить', false, true],
   ['бот получает online-точку', 'ServerMembersPanel', '!bot && (', 'true && (', rosterProbe, 'R303 у ботов нет точки статуса', 2, 0],
 ] as const) it(`R303 контрфакт: ${name} ловится поведением настоящего компонента`, async () => {
   await probe();

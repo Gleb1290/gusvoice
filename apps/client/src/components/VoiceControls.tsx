@@ -59,7 +59,7 @@ let screenAudioBroken = false;
 
 /**
  * Mic / deafen / screen-share controls. Deafen mutes incoming audio (handled by the
- * RoomAudioRenderer volume in VoiceConnection) and also mutes the mic, restoring it
+ * VoiceRoomAudio playback in VoiceConnection) and also mutes the mic, restoring it
  * on un-deafen — Discord-style. The screen-share button carries a quality popover
  * (resolution / fps / codec) that applies the saved gv_stream prefs on publish.
  */

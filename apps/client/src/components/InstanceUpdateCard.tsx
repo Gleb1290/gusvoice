@@ -24,14 +24,14 @@ const ERROR_TEXT: Record<string, string> = {
   locked: 'На сервере уже идёт обновление, запущенное вручную. Дождитесь его окончания.',
   'pinned-tag':
     'В .env закреплена конкретная версия (TAG) — по ней новые образы не скачать. Поменяйте TAG на latest и запустите ./update.sh на сервере.',
-  files: 'Не скачались файлы стека — нет связи с GitHub? Работает прежняя версия.',
-  pull: 'Не скачались новые образы. Работает прежняя версия.',
+  files: 'Не удалось подготовить файлы выпуска. Проверьте доступ к GitHub и локальные изменения docker-compose.yml.',
+  pull: 'Не удалось скачать или подтвердить образы выбранной версии. Работает прежняя версия.',
   backup: 'Не получилось скопировать базу, и обновление остановлено. Работает прежняя версия.',
   'backup-space': 'На диске не хватает места для копии базы, и обновление остановлено. Работает прежняя версия.',
   restart: 'Сервисы не перезапустились.',
   'storage-migrate':
     'Сервер обновился, но старые файлы не перенеслись в новое хранилище: старые аватарки и вложения пока не видны. Ничего не потеряно — причина и повтор: ./update.sh --images-only на сервере.',
-  health: 'Сервер не поднялся за 5 минут после перезапуска.',
+  health: 'После перезапуска сервер не подтвердил готовность и нужную версию.',
   interrupted: 'Обновление прервалось — возможно, сервер перезагрузился посреди шага. Запустите ещё раз.',
 };
 
@@ -67,6 +67,7 @@ function CopyCommand({ command }: { command: string }) {
 
 export function InstanceUpdateCard() {
   const [info, setInfo] = useState<InstanceUpdateInfo | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   /**
    * Ждём конца обновления (переживает недоступность бэкенда). `baseline` — время начала ПРЕДЫДУЩЕГО, уже законченного
@@ -92,6 +93,7 @@ export function InstanceUpdateCard() {
     async (refresh = false) => {
       try {
         const next = await adminApi().adminInstanceUpdate(refresh);
+        setLoadFailed(false);
         setInfo(next);
         setQuietSince(null);
         const s = next.status;
@@ -106,10 +108,10 @@ export function InstanceUpdateCard() {
         setWatch(null);
         if (outcome === 'done') toast('success', `Сервер обновлён${s?.version ? ` до ${s.version}` : ''}`);
         else toast('error', 'Обновление не удалось — подробности во вкладке «Инстанс»');
-      } catch (e) {
+      } catch {
         // Во время перезапуска бэкенд не отвечает — это ожидаемо, не ошибка.
         if (watchRef.current) setQuietSince((t) => t ?? Date.now());
-        else toastError(e);
+        else setLoadFailed(true);
       }
     },
     [beginWatch],
@@ -121,11 +123,17 @@ export function InstanceUpdateCard() {
 
   useEffect(() => {
     if (!watching) return;
-    const id = window.setInterval(() => {
+    let stopped = false;
+    let id = window.setTimeout(poll, POLL_MS);
+    async function poll() {
       setNow(Date.now());
-      void load();
-    }, POLL_MS);
-    return () => window.clearInterval(id);
+      await load();
+      if (!stopped && watchRef.current) id = window.setTimeout(poll, POLL_MS);
+    }
+    return () => {
+      stopped = true;
+      window.clearTimeout(id);
+    };
   }, [watching, load]);
 
   async function refresh() {
@@ -159,7 +167,14 @@ export function InstanceUpdateCard() {
   if (!info) {
     return (
       <div className="setup-check inst-update" role="status">
-        <span className="muted">Проверяем версию…</span>
+        {loadFailed ? (
+          <>
+            <span>Не удалось получить версию сервера. </span>
+            <button type="button" className="link" disabled={busy} onClick={() => void refresh()}>
+              {busy ? 'Проверяем…' : 'Повторить'}
+            </button>
+          </>
+        ) : <span className="muted">Проверяем версию…</span>}
       </div>
     );
   }
@@ -202,6 +217,9 @@ export function InstanceUpdateCard() {
         )}
       </div>
 
+      {!watching && loadFailed && (
+        <div className="setup-check-result warn" role="status">Не удалось обновить сведения о сервере.</div>
+      )}
       {watching && (
         <ol className="inst-update-steps" aria-live="polite">
           {STEPS.map((s, i) => {
@@ -251,7 +269,7 @@ export function InstanceUpdateCard() {
       {!watching && status?.state === 'failed' && recent(status.finishedAt ?? status.startedAt) && (
         <div className="setup-check-result fail" role="alert">
           {ERROR_TEXT[status.error ?? ''] ?? 'Обновление не удалось.'}
-          {(status.error === 'restart' || status.error === 'health' || !ERROR_TEXT[status.error ?? '']) && (
+          {(status.error === 'files' || status.error === 'restart' || status.error === 'health' || !ERROR_TEXT[status.error ?? '']) && (
             <>
               {' '}
               Подробности на сервере:
@@ -300,7 +318,7 @@ export function InstanceUpdateCard() {
       {!watching && info.canUpdate && info.latest && (
         <div className="smtp-actions">
           <button type="button" className="auth-cta" disabled={busy} onClick={() => void start(info.latest!.version)}>
-            Обновить до {info.latest.version}
+            {info.latest.version === info.installed ? 'Повторить обновление' : `Обновить до ${info.latest.version}`}
           </button>
           <span className="muted">Чат и голос прервутся примерно на минуту</span>
         </div>

@@ -33,7 +33,7 @@ services:
   postgres:
     # Exact version + the digest already running in production (О5, 15.09): a floating `16-alpine` re-pulled a different
     # build on every update. Bump deliberately: change BOTH the tag and the digest.
-    image: postgres:16.15-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+    image: postgres:16.16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
     restart: unless-stopped
     # JIT off for the whole database (#211, owner decision 2026-10-08): our queries are short OLTP reads whose cost
     # ESTIMATE can still run into millions (DM list with thousands of conversations), and LLVM compilation then took
@@ -57,7 +57,7 @@ services:
   redis:
     # Exact version + digest, as for postgres. Redis 7.4+ is licensed RSALv2/SSPL (not OSI open source); the box does not
     # redistribute it — Docker pulls the official image — so it stays (decision 2026-09-16).
-    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     restart: unless-stopped
     command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
     volumes:
@@ -70,7 +70,7 @@ services:
     networks: [internal]
 
   livekit:
-    image: livekit/livekit-server:v1.13.1
+    image: livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
     restart: unless-stopped
     logging: *capped-logs
     command: ['--config', '/etc/livekit.yaml']
@@ -296,7 +296,7 @@ services:
   # Reverse proxy with automatic HTTPS (Let's Encrypt). Profile "caddy". Reaches the
   # internal services by docker DNS (client:80, backend:4000, …) regardless of host binds.
   caddy:
-    image: caddy:2.8.4-alpine
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
     profiles: [caddy]
     restart: unless-stopped
     environment:
@@ -319,7 +319,7 @@ services:
   # are. It is bound to ${BIND_ADDR} so an EXTERNAL reverse proxy can serve media.<domain>; the bundled
   # Caddy reaches it by docker DNS. The backend creates the bucket and its public-read policy itself.
   storage:
-    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
     profiles: [storage]
     restart: unless-stopped
     # The data directories must exist before versitygw starts (it exits with "chdir: no such file").
@@ -382,7 +382,9 @@ services:
   # distributor subscribes); the backend publishes with NTFY_TOKEN (created by install.sh).
   # Port 80 is bound to ${BIND_ADDR}:8082 so an EXTERNAL reverse proxy can serve ntfy.<domain>.
   ntfy:
-    image: binwiederhier/ntfy:v2.25.0
+    # ntfy migrates its SQLite files in place. Back up ntfydata with ntfy stopped before upgrading
+    # from v2.25.0 and restore that backup if rolling back to the old version.
+    image: binwiederhier/ntfy:v2.38.2@sha256:ca35419d29a834824db2440fa9320897fbe40b026c5fc2360c76ed3501b5e716
     profiles: [push]
     restart: unless-stopped
     command: serve

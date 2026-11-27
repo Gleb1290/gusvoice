@@ -166,6 +166,18 @@ function uploadAborted(): Error & { aborted: true } {
 
 /** A push-mute source: 'server' suppresses a server's @mention pushes; 'dm_user' a person's DM pushes. */
 /** Ответ отправки GIF в беседу (`gifs1`): незавершённое вложение и его размеры для подсказок `convSend`. */
+export type ChannelAccessResult = {
+  action: string;
+  allowed: boolean;
+  checks: {
+    permission: string;
+    allowed: boolean;
+    source: 'membership' | 'owner' | 'administrator' | 'roles' | 'category' | 'channel';
+    rule?: 'member' | 'roles' | 'everyone';
+    roleIds?: string[];
+  }[];
+}[];
+
 export interface GifAttachResponse {
   attachmentId: string;
   contentType: string;
@@ -937,8 +949,8 @@ function makeApi(t: Transport) {
   reorderCategories: (serverId: string, items: { categoryId: string; position: number }[]) =>
     req<void>('PUT', `/servers/${serverId}/categories/reorder`, { items }),
   deleteCategory: (categoryId: string) => req<void>('DELETE', `/categories/${categoryId}`),
-  createChannel: (serverId: string, name: string, type: 'text' | 'voice', categoryId?: string | null) =>
-    req<Channel>('POST', `/servers/${serverId}/channels`, { name, type, categoryId }),
+  createChannel: (serverId: string, name: string, type: 'text' | 'voice', categoryId?: string | null, forceMuted = false) =>
+    req<Channel>('POST', `/servers/${serverId}/channels`, { name, type, categoryId, ...(forceMuted ? { forceMuted } : {}) }),
   updateChannel: (
     channelId: string,
     body: {
@@ -946,6 +958,7 @@ function makeApi(t: Transport) {
       topic?: string | null;
       categoryId?: string | null;
       syncedToCategory?: boolean;
+      forceMuted?: boolean;
       icon?: string | null;
       /** Качество звука голосового канала в кбит/с (#101); null = умолчание. */
       voiceBitrate?: number | null;
@@ -959,6 +972,8 @@ function makeApi(t: Transport) {
 
   listChannelOverwrites: (channelId: string) =>
     req<PermissionOverwrite[]>('GET', `/channels/${channelId}/overwrites`),
+  checkChannelAccess: (channelId: string, memberId: string) =>
+    req<ChannelAccessResult>('GET', `/channels/${encodeURIComponent(channelId)}/access-check/${encodeURIComponent(memberId)}`),
   setChannelOverwrite: (channelId: string, o: PermissionOverwrite) =>
     req<void>('PUT', `/channels/${channelId}/overwrites/${o.targetType}/${o.targetId}`, { allow: o.allow, deny: o.deny }),
   deleteChannelOverwrite: (channelId: string, targetType: string, targetId: string) =>

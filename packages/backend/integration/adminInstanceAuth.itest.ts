@@ -40,7 +40,7 @@ async function fixture(raw = adminSource) {
   };
   const boundaryNames = new Set(['accountDelete.js', 'economyStats.js', 'instanceSettings.js', 'federation/guestAccess.js',
     'federation/directoryEvents.js', 'federation/links.js', 'federation/instanceMeta.js', 'mailer.js', 'serialize.js',
-    'instanceUpdate.js', 'dmReports.js', 'storage.js']);
+    'instanceUpdate.js', 'dmReports.js', 'storage.js', 'realtime.js']);
   const external: Record<string, unknown> = { 'drizzle-orm': orm, '@gusvoice/shared': shared, zod: { z },
     bcryptjs: { __esModule: true, default: bcrypt }, jsonwebtoken: { __esModule: true, default: jwt } };
   function load<T>(path: string, source = read(path)): T {

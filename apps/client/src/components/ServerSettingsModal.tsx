@@ -1,9 +1,9 @@
 import { type Category, has, Permission, permsFromString, type Server } from '@gusvoice/shared';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { pushBackHandler } from '../androidBack';
 import { api } from '../api';
 import { config } from '../config';
-import { tabListKeyDown, useDialogChrome } from '../dialogChrome';
+import { useDialogChrome } from '../dialogChrome';
 import { useStore } from '../store';
 import { toast, toastError } from '../toast';
 import { AvatarCropModal } from './AvatarCropModal';
@@ -82,25 +82,60 @@ export function ServerSettingsModal({
   const [cropFile, setCropFile] = useState<File | null>(null);
   const iconRef = useRef<HTMLInputElement | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const roleLeaveGuard = useRef<((next: () => void) => void) | null>(null);
+  const roleCatalogBack = useRef<(() => boolean) | null>(null);
+  function leaveRoleEditor(next: () => void) {
+    if (roleLeaveGuard.current) roleLeaveGuard.current(next);
+    else next();
+  }
+  function closeSettings() {
+    leaveRoleEditor(onClose);
+  }
+  function backToSections() {
+    if (roleCatalogBack.current?.()) return;
+    leaveRoleEditor(() => setPicked(false));
+  }
+  function selectSection(next: ServerSettingsTab, moveFocus = false) {
+    if (next === tab) {
+      setPicked(true);
+      return;
+    }
+    leaveRoleEditor(() => {
+      if (next !== 'roles' && next !== 'members') setRolePick(undefined);
+      setTab(next);
+      setPicked(true);
+      if (moveFocus) setTimeout(() => document.getElementById('ss-tab-' + next)?.focus());
+    });
+  }
   // Esc закрывает сначала вложенное окно, а не все настройки разом: «Доступ» категории своего
   // обработчика не имеет, и без этой развилки Esc в нём уносил бы и настройки сервера.
   const dialogRef = useDialogChrome<HTMLDivElement>(() => {
     if (permCat) setPermCat(null);
     else if (cropFile) setCropFile(null);
-    else onClose();
+    else closeSettings();
   });
-  const onTabsKey = tabListKeyDown(
-    tabs.map((t) => t.key),
-    tab,
-    setTab,
-    (k) => `ss-tab-${k}`,
-  );
+  function onTabsKey(event: KeyboardEvent<HTMLDivElement>) {
+    const currentIndex = tabs.findIndex((section) => section.key === tab);
+    let next: number;
+    switch (event.key) {
+      case 'ArrowDown':
+      case 'ArrowRight': next = (currentIndex + 1) % tabs.length; break;
+      case 'ArrowUp':
+      case 'ArrowLeft': next = (currentIndex - 1 + tabs.length) % tabs.length; break;
+      case 'Home': next = 0; break;
+      case 'End': next = tabs.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    if (tabs[next]) selectSection(tabs[next].key, true);
+  }
 
   /** Системная «назад» на телефоне: из раздела — к списку разделов, и только потом закрытие окна. */
   useEffect(() => {
     if (!picked) return;
     return pushBackHandler(() => {
-      setPicked(false);
+      backToSections();
       return true;
     });
   }, [picked]);
@@ -256,7 +291,7 @@ export function ServerSettingsModal({
     <SettingsWindow
       variant="server"
       picked={picked}
-      onClose={onClose}
+      onClose={closeSettings}
       titleId="ss-title"
       dialogRef={dialogRef}
       // Рельс разделов — как в настройках пользователя и в админке (23.09): десять слов в строку вкладок уже не
@@ -268,7 +303,7 @@ export function ServerSettingsModal({
           title={server.name}
           named
           label="Разделы настроек сервера"
-          onClose={onClose}
+          onClose={closeSettings}
           onListKeyDown={onTabsKey}
         >
           {tabs.map((t) => (
@@ -280,10 +315,7 @@ export function ServerSettingsModal({
               icon={t.icon}
               label={t.label}
               active={tab === t.key}
-              onClick={() => {
-                setTab(t.key);
-                setPicked(true);
-              }}
+              onClick={() => selectSection(t.key)}
             />
           ))}
         </SettingsRail>
@@ -323,8 +355,8 @@ export function ServerSettingsModal({
           title={current?.label ?? 'Настройки сервера'}
           titleId="ss-title"
           sub={current?.sub}
-          onBack={() => setPicked(false)}
-          onClose={onClose}
+          onBack={backToSections}
+          onClose={closeSettings}
         />
 
         {/*
@@ -349,6 +381,8 @@ export function ServerSettingsModal({
             canKick={canKick}
             view={tab}
             initialRoleId={rolePick}
+            leaveGuard={roleLeaveGuard}
+            catalogBack={roleCatalogBack}
           />
         ) : (
         <div className="admin-scroll" id="ss-panel-body" role="tabpanel" aria-labelledby={`ss-tab-${tab}`}>

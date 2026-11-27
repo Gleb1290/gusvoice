@@ -60,6 +60,7 @@ function build(options: Options = {}, raw = source) {
     const module = { exports: {} as Record<string, unknown> }; cache.set(name, module);
     const deps: Record<string, unknown> = { react: React, 'react/jsx-runtime': jsx, 'react-dom': ReactDOM,
       './config': { config: { apiUrl: 'https://api.geo.example.test' } }, './hotkeys': hotkeys,
+      './externalLinks': { openAndroidWebLink: () => false },
       './desktopWindow': { openExternal: async (url: string) => { web.push([url, 'OS']); } }, './linkSafety': safety,
       './dangerousLinkRules': dangerousRules, './confirm': confirm, './components/Icon': { Icon } };
     runInNewContext(ts.transpileModule(read(`.${name}.tsx`), { compilerOptions: {

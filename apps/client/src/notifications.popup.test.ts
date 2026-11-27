@@ -88,6 +88,19 @@ function fallback(raw = source) {
   f.listeners.get('gv://notify-action')!({ payload: { action: 'open', tag: (f.calls[0]!.args as { tag: string }).tag } }); assert.equal(f.clicks, 1);
 }
 it('R223 fallback показывает системный тост с новой кликабельной меткой и не зацикливается в popup', () => fallback());
+it('отложенная замена карточки системным тостом проверяет политику повторно', () => {
+  const f = fixture();
+  f.api.setNotifyPopupSink(f.sink);
+  let allowed = true;
+  f.api.osNotify('Канал', 'Сообщение', () => {}, true, { group: 'ch:quiet', canDeliver: () => allowed });
+  assert.equal(f.notices.length, 1);
+  allowed = false;
+  f.api.clearOsNotifications('ch:quiet');
+  f.notices[0]!.fallback();
+  assert.deepEqual(f.cleared, ['ch:quiet']);
+  assert.deepEqual(f.calls, []);
+});
+
 it('R223 прочтение вызывает sink.clear для нужной беседы; отключение приёмника возвращает старый путь', () => {
   const f = fixture(); f.api.setNotifyPopupSink(f.sink); f.api.clearOsNotifications('group-7');
   assert.deepEqual(f.cleared, ['group-7']); f.api.setNotifyPopupSink(null); f.api.clearOsNotifications('other');

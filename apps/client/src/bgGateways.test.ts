@@ -6,13 +6,14 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as shared from '@gusvoice/shared';
 import * as health from './socketHealth';
+import * as channelRules from './channelRules';
 import type { Instance } from './config';
 
 const source = readFileSync(new URL('./bgGateways.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const plain = (v: unknown) => JSON.parse(JSON.stringify(v));
 const settle = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
 type Outcome = 'ok' | 'network' | 'timeout' | 'abort' | number;
-function fixture(outcomes: Outcome[], raw = source, failurePath = '/unread') {
+function fixture(outcomes: Outcome[], raw = source, failurePath = '/unread', summaries?: shared.UnreadSummary[]) {
   const entry = { id: 'guest', name: 'Сосед', apiUrl: 'https://background.invalid', presenceWs: 'wss://background.invalid/presence', token: 'fixture-only', order: 0 } satisfies Instance;
   let registry: Instance[] = [entry], attempt = -1, seq = 0;
   const timers = new Map<number, { fn: () => void; delay: number }>(), intervals = new Map<number, () => void>();
@@ -33,7 +34,7 @@ function fixture(outcomes: Outcome[], raw = source, failurePath = '/unread') {
     ready() { this.readyState = Socket.OPEN; this.onopen?.(); this.onmessage?.({ data: JSON.stringify({ t: 'ready', userId: 'me' }) }); }
   }
   const deps: Record<string, unknown> = {
-    '@gusvoice/shared': shared, './socketHealth': health,
+    '@gusvoice/shared': shared, './socketHealth': health, './channelRules': channelRules,
     './config': { instances: () => registry, rememberInstanceServers: () => {} },
   };
   const module = { exports: {} as typeof import('./bgGateways') };
@@ -58,7 +59,8 @@ function fixture(outcomes: Outcome[], raw = source, failurePath = '/unread') {
       if (outcome === 'timeout' || outcome === 'abort') throw Object.assign(new Error('fixture timed out'), { name: outcome === 'timeout' ? 'TimeoutError' : 'AbortError' });
       const status = typeof outcome === 'number' ? outcome : 200;
       return { ok: status === 200, status, async json() {
-        return path === '/unread' ? { servers: { server: { unread: 7, mentions: 2 } }, dms: 3 } : path === '/auth/me' ? { id: 'me', username: 'friend' } : [];
+        return path === '/unread' ? summaries?.[attempt] ?? { servers: { server: { unread: 7, mentions: 2 } }, dms: 3 }
+          : path === '/auth/me' ? { id: 'me', username: 'friend' } : [];
       } };
     },
     require(id: string) { assert.equal(Object.hasOwn(deps, id), true, `неожиданный импорт ${id}`); return deps[id]; },
@@ -157,6 +159,30 @@ async function backgroundBroadcast(flag: boolean | null | undefined, content = '
     return { before, after: f.api.bgUnread().guest.servers.server };
   } finally { await f.close(); }
 }
+it('фон пропускает тихие сообщения, а после смены политики принимает меньшую сумму одного сервера', async () => {
+  const f = fixture(['ok', 'ok'], source, '/unread', [
+    { servers: { server: { unread: 7, mentions: 2 }, sibling: { unread: 4, mentions: 1 } }, dms: 3, dmUnread: 8 },
+    { servers: { server: { unread: 1, mentions: 0 }, sibling: { unread: 0, mentions: 0 } }, dms: 1, dmUnread: 2 },
+  ]);
+  try {
+    await f.start();
+    await f.ready();
+    const receive = (frame: object) => f.sockets[0]!.onmessage!({ data: JSON.stringify(frame) });
+    const message = { t: 'message.create', serverId: 'server', channelId: 'quiet', message: { content: '@friend', author: { id: 'other' } } };
+    receive({ ...message, forceMuted: true });
+    assert.deepEqual(plain(f.api.bgUnread().guest.servers.server), { unread: 7, mentions: 2 });
+    receive({ t: 'channel.update', channel: { id: 'quiet', serverId: 'server', type: 'text', forceMuted: true } });
+    await settle();
+    receive({ ...message, forceMuted: true });
+    receive({ ...message, channelId: 'ordinary', forceMuted: false });
+    assert.deepEqual(plain(f.api.bgUnread().guest), {
+      servers: { server: { unread: 2, mentions: 1 }, sibling: { unread: 4, mentions: 1 } },
+      dms: 3,
+    });
+    assert.equal(f.requests.filter(path => path === '/unread').length, 2);
+  } finally { await f.close(); }
+});
+
 async function backgroundSilent(raw = source) {
   for (const content of ['@everyone', '@here']) {
     const { before, after } = await backgroundBroadcast(false, content, raw);

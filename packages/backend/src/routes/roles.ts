@@ -1,11 +1,11 @@
 import { has, isAdmin, Permission, permsFromString, permsToString } from '@gusvoice/shared';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gte, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
 import { db } from '../db/index.js';
-import { memberRoles, roles, serverMembers, users } from '../db/schema.js';
+import { memberRoles, roles, serverMembers, servers, users } from '../db/schema.js';
 import { getMemberContext, highestPosition } from '../permissions.js';
 import { publishToServer } from '../realtime.js';
 import { assignRoleBlock, BOT_ADMIN_FORBIDDEN, botAdminRequested, botRoleAssignmentBlocked, clampGrant, planReorder, selfAssignBlocked } from '../roleRules.js';
@@ -16,6 +16,12 @@ const permString = z.string().regex(/^\d+$/, 'permissions must be a decimal bitf
 
 function roleWriteError(code: 400 | 403 | 404, error: string) {
   return { ok: false as const, code, error };
+}
+
+// Добавление/удаление бота берёт тот же замок строки сервера.
+async function lockRoleOrder(tx: Pick<typeof db, 'select'>, serverId: string) {
+  const [server] = await tx.select({ id: servers.id }).from(servers).where(eq(servers.id, serverId)).for('no key update');
+  return server;
 }
 
 export async function roleRoutes(app: FastifyInstance): Promise<void> {
@@ -40,30 +46,45 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(req.body);
 
-    const ctx = await getMemberContext(serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
+    const result = await db.transaction(async (tx) => {
+      if (!(await lockRoleOrder(tx, serverId))) return roleWriteError(404, 'not a member');
+      const ctx = await getMemberContext(serverId, req.user!.sub, tx);
+      if (!ctx) return roleWriteError(404, 'not a member');
+      if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return roleWriteError(403, 'forbidden');
 
-    const count = (await db.select().from(roles).where(eq(roles.serverId, serverId))).length;
-    // Новая роль: защищённых битов ещё нет (`current = 0n`), выдать их может только владелец.
-    const granted = clampGrant(permsFromString(body.permissions ?? '0'), ctx.serverPermissions, ctx.isOwner);
-    const [row] = await db
-      .insert(roles)
-      .values({
+      const all = await tx.select().from(roles).where(eq(roles.serverId, serverId));
+      const highest = highestPosition(ctx);
+      const position = Number.isFinite(highest) ? highest : all.length;
+      if (Number.isFinite(highest)) {
+        const everyone = all.find((role) => role.isEveryone);
+        if (highest <= Math.max(0, everyone?.position ?? 0)) {
+          return roleWriteError(403, 'нет места для новой роли ниже своей и выше @everyone');
+        }
+        // Освобождаем позицию для новой роли, сохраняя порядок и равенство существующих ролей.
+        await tx.update(roles).set({ position: sql`${roles.position} + 1` })
+          .where(and(eq(roles.serverId, serverId), eq(roles.isEveryone, false), gte(roles.position, position)));
+      }
+
+      const granted = clampGrant(permsFromString(body.permissions ?? '0'), ctx.serverPermissions, ctx.isOwner);
+      const [row] = await tx.insert(roles).values({
         id: id(),
         serverId,
         name: body.name,
         color: body.color ?? 0,
         permissions: permsToString(granted),
-        position: count,
+        position,
         mentionable: body.mentionable ?? false,
-      })
-      .returning();
+      }).returning();
+      return { ok: true as const, row };
+    });
+    if (!result.ok) return reply.code(result.code).send({ error: result.error });
+    const { row } = result;
     await writeAudit(serverId, req.user!.sub, 'role.create', {
       targetType: 'role',
       targetId: row.id,
       data: { name: row.name },
     });
+    await publishToServer(serverId, { t: 'server.invalidate', serverId });
     return reply.code(201).send(serializeRole(row));
   });
 
@@ -73,18 +94,23 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
   app.put('/servers/:id/roles/reorder', async (req, reply) => {
     const { id: serverId } = z.object({ id: z.string() }).parse(req.params);
     const body = z.object({ order: z.array(z.string()).min(1) }).parse(req.body);
-    const ctx = await getMemberContext(serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
+    const result = await db.transaction(async (tx) => {
+      if (!(await lockRoleOrder(tx, serverId))) return roleWriteError(404, 'not a member');
+      const ctx = await getMemberContext(serverId, req.user!.sub, tx);
+      if (!ctx) return roleWriteError(404, 'not a member');
+      if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return roleWriteError(403, 'forbidden');
 
-    const all = await db.select().from(roles).where(eq(roles.serverId, serverId));
-    const plan = planReorder(body.order, all, {
-      privileged: isAdmin(ctx.serverPermissions) || ctx.isOwner,
-      highest: highestPosition(ctx),
+      const all = await tx.select().from(roles).where(eq(roles.serverId, serverId));
+      const plan = planReorder(body.order, all, {
+        privileged: isAdmin(ctx.serverPermissions) || ctx.isOwner,
+        highest: highestPosition(ctx),
+      });
+      if (!plan.ok) return plan;
+
+      for (const u of plan.updates) await tx.update(roles).set({ position: u.position }).where(eq(roles.id, u.id));
+      return { ok: true as const };
     });
-    if (!plan.ok) return reply.code(plan.code).send({ error: plan.error });
-
-    for (const u of plan.updates) await db.update(roles).set({ position: u.position }).where(eq(roles.id, u.id));
+    if (!result.ok) return reply.code(result.code).send({ error: result.error });
     await writeAudit(serverId, req.user!.sub, 'role.reorder', { data: { count: body.order.length } });
     await publishToServer(serverId, { t: 'server.invalidate', serverId });
     return reply.code(204).send();
@@ -107,11 +133,13 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
     const [found] = await db.select({ serverId: roles.serverId }).from(roles).where(eq(roles.id, roleId)).limit(1);
     if (!found) return reply.code(404).send({ error: 'not found' });
     const { serverId } = found;
-    const ctx = await getMemberContext(serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
 
     const result = await db.transaction(async (tx) => {
+      if (!(await lockRoleOrder(tx, serverId))) return roleWriteError(404, 'not found');
+      const ctx = await getMemberContext(serverId, req.user!.sub, tx);
+      if (!ctx) return roleWriteError(404, 'not a member');
+      if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return roleWriteError(403, 'forbidden');
+
       // Назначение роли берёт ту же блокировку, поэтому проверка владельцев роли и запись атомарны.
       const [role] = await tx.select().from(roles).where(eq(roles.id, roleId)).limit(1).for('update');
       if (!role) return roleWriteError(404, 'not found');
@@ -170,20 +198,27 @@ export async function roleRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/roles/:id', async (req, reply) => {
     const { id: roleId } = z.object({ id: z.string() }).parse(req.params);
-    const [role] = await db.select().from(roles).where(eq(roles.id, roleId)).limit(1);
-    if (!role) return reply.code(404).send({ error: 'not found' });
-    if (role.isEveryone) return reply.code(400).send({ error: 'cannot delete @everyone' });
-    // Системная роль гостей (§5.9) — как `@everyone`: удалишь её, и ограничивать гостей станет
-    // нечем, а выданные ей переопределения каналов молча перестанут действовать.
-    if (role.isGuests) return reply.code(400).send({ error: 'роль «Гости» удалить нельзя' });
-    // Роль бота (#231) уходит вместе с ботом (каскад от его членства).
-    if (role.managedBotId) return reply.code(400).send({ error: 'Роль бота удаляется вместе с ботом' });
-    const ctx = await getMemberContext(role.serverId, req.user!.sub);
-    if (!ctx) return reply.code(404).send({ error: 'not a member' });
-    if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return reply.code(403).send({ error: 'forbidden' });
-    if (role.position >= highestPosition(ctx)) return reply.code(403).send({ error: 'эта роль выше или равна твоей' });
+    const [found] = await db.select({ serverId: roles.serverId }).from(roles).where(eq(roles.id, roleId)).limit(1);
+    if (!found) return reply.code(404).send({ error: 'not found' });
 
-    await db.delete(roles).where(eq(roles.id, roleId));
+    const result = await db.transaction(async (tx) => {
+      if (!(await lockRoleOrder(tx, found.serverId))) return roleWriteError(404, 'not found');
+      const [role] = await tx.select().from(roles).where(eq(roles.id, roleId)).limit(1).for('update');
+      if (!role) return roleWriteError(404, 'not found');
+      if (role.isEveryone) return roleWriteError(400, 'cannot delete @everyone');
+      // Удаление системной роли оставило бы гостей без их базовых ограничений.
+      if (role.isGuests) return roleWriteError(400, 'роль «Гости» удалить нельзя');
+      if (role.managedBotId) return roleWriteError(400, 'Роль бота удаляется вместе с ботом');
+      const ctx = await getMemberContext(role.serverId, req.user!.sub, tx);
+      if (!ctx) return roleWriteError(404, 'not a member');
+      if (!has(ctx.serverPermissions, Permission.MANAGE_ROLES)) return roleWriteError(403, 'forbidden');
+      if (role.position >= highestPosition(ctx)) return roleWriteError(403, 'эта роль выше или равна твоей');
+
+      await tx.delete(roles).where(eq(roles.id, roleId));
+      return { ok: true as const, role };
+    });
+    if (!result.ok) return reply.code(result.code).send({ error: result.error });
+    const { role } = result;
     await writeAudit(role.serverId, req.user!.sub, 'role.delete', {
       targetType: 'role',
       targetId: roleId,

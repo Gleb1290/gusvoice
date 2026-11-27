@@ -8,6 +8,7 @@ import {
   toggleCategoryCollapse,
   useChannelPrefsVersion,
 } from '../channelPrefs';
+import { channelForceMuted } from '../channelRules';
 import { useStore } from '../store';
 import { setHideNoVideo, useHideNoVideo } from '../stageViewPrefs';
 import { resetStageOrder, useHasStageOrder } from '../stageOrderPrefs';
@@ -129,7 +130,9 @@ export function useChannelContextMenu(): {
 
   // Capture the narrowed target into a local const so the discriminated-union narrowing flows
   // into the onClick closures below (it would not flow through `target?.kind === ...` alone).
-  const c = target?.kind === 'channel' ? target.channel : null;
+  const c = target?.kind === 'channel'
+    ? bootstrap?.channels.find((channel) => channel.id === target.channel.id) ?? target.channel
+    : null;
   const cat = target?.kind === 'category' ? target.category : null;
   // Пункт «Сбросить раскладку плиток» — только когда есть что сбрасывать (как прочие пункты по условию).
   const hasStageOrder = useHasStageOrder(c?.type === 'voice' ? c.id : null);
@@ -179,7 +182,9 @@ export function useChannelContextMenu(): {
       )}
       <MenuDivider />
       <MenuSection>Уведомления</MenuSection>
-      {(
+      {channelForceMuted(c) ? (
+        <MenuItem icon="bell-off" label="Тихий канал" sub="Уведомления отключены для всех" disabled />
+      ) : (
         [
           ['all', 'bell', 'Все сообщения'],
           ['mentions', 'at', 'Только упоминания'],

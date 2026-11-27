@@ -7,16 +7,14 @@ import {
   FED_ERRORS,
   FED_FEATURES,
   FED_MEMBERSHIP_STATES,
-  broadcastSqlPattern,
   has,
-  mentionSqlPattern,
   parseStickerSetName,
   Permission,
   permsToString,
   type ServerBootstrap,
   STICKER_PACKS_PER_USER,
 } from '@gusvoice/shared';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
@@ -45,7 +43,7 @@ import { statusSeenBy } from '../statusRules.js';
 import { animatedAvatarFor } from '../shopRules.js';
 import { isSupportedImage, putMedia } from '../storage.js';
 import { telegramConfigured } from '../telegram.js';
-import { serverListExtras } from '../unread.js';
+import { countUnreadByChannel, serverListExtras } from '../unread.js';
 import {
   catalogPackByName,
   catalogUploadedBy,
@@ -141,45 +139,10 @@ export async function buildBootstrap(serverId: string, userId: string): Promise<
         .orderBy(stickers.position)
     : [];
 
-  // Persisted unread + mention counts per visible text channel (migration 0018): messages newer
-  // than my channel_reads mark, capped to a 14-day window so a never-opened channel doesn't count
-  // its whole history.
-  //
-  // ⚠️ Шаблон упоминания строит ОБЩЕЕ правило (`shared/mentions.ts`) — то же, по которому клиент
-  // звенит звуком, а бэкенд шлёт пуш. Своя регулярка здесь расходилась с ними: чужая почта в
-  // тексте засчитывалась как упоминание и оставляла бейдж, который нечем было снять. Считаем
-  // одним запросом по истории, а не в Node, поэтому правило и отдаётся регуляркой.
-  const reads: Record<string, { unread: number; mentions: number }> = {};
+  const reads: ServerBootstrap['reads'] = {};
   const textChanIds = visibleChans.filter((c) => c.type === 'text').map((c) => c.id);
-  if (textChanIds.length) {
-    const [me] = await db
-      .select({ username: users.username, homeInstanceId: users.homeInstanceId, homeUsername: users.homeUsername })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-    /**
-     * 🔴 Гостя в тексте зовут `@ник@домен`, а его `username` в базе — служебная строка (§5.5).
-     * Без второго варианта в шаблоне бейдж непрочитанных упоминаний у гостя не считался бы вовсе.
-     */
-    const meHome = me?.homeInstanceId && me.homeUsername
-      ? { username: me.homeUsername, domain: instanceLabel(me.homeInstanceId).domain }
-      : null;
-    const mentionRe = mentionSqlPattern(meHome ? null : me?.username, meHome, false);
-    const broadcastRe = broadcastSqlPattern();
-    const res = await db.execute(sql`
-      SELECT m.channel_id AS id,
-             COUNT(*)::int AS unread,
-             (COUNT(*) FILTER (WHERE (m.content ~* ${mentionRe} OR (m.mention_everyone IS DISTINCT FROM false AND m.content ~* ${broadcastRe}) OR m.mention_roles && ARRAY(SELECT mr.role_id FROM member_roles mr WHERE mr.user_id = ${userId}))))::int AS mentions
-      FROM messages m
-      LEFT JOIN channel_reads r ON r.channel_id = m.channel_id AND r.user_id = ${userId}
-      WHERE m.channel_id IN (${sql.join(textChanIds.map((i) => sql`${i}`), sql`, `)})
-        AND m.author_id <> ${userId}
-        AND m.created_at > GREATEST(COALESCE(r.last_read_at, to_timestamp(0)), now() - interval '14 days')
-      GROUP BY m.channel_id
-    `);
-    for (const row of res.rows as { id: string; unread: number; mentions: number }[]) {
-      reads[row.id] = { unread: row.unread, mentions: row.mentions };
-    }
+  for (const { id, unread, mentions } of await countUnreadByChannel(userId, textChanIds)) {
+    reads[id] = { unread, mentions };
   }
 
   return {

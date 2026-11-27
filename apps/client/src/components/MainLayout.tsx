@@ -140,14 +140,8 @@ export function MainLayout({ connectionScreen }: { connectionScreen?: ReactNode 
         (k) => !recapSkipped.includes(`${recountServerId}:${k}`),
       )
     : undefined;
-  /**
-   * Карточка «Игры пришли в голос» (29.10, `GamesLaunchNotice.tsx`, ленивая): по событию `games.launched` (`sockets.ts` →
-   * `gamesLaunchNotice` в сторе) или при входе на запущенный сервер (снимок экономики несёт `gamesLaunch`). Что именно и
-   * когда (один раз, пока не «видел»; повтор из «Активностей») решает сам ленивый хост — с 29.10 это сцена «БУМ»
-   * (`GamesLaunchScene.tsx`); здесь — только «может понадобиться» и ворота показа ниже.
-   */
+  // Сцену открывает событие запуска или кнопка в «Активностях».
   const launchRequested = useStore((s) => s.gamesLaunchNotice);
-  const launchMaybe = !!launchRequested || !!(recountView?.enabled && recountView.gamesEnabled && recountView.gamesLaunch);
   const closeRecount = () => {
     if (!recountServerId) return;
     const serverId = recountServerId;
@@ -348,7 +342,7 @@ export function MainLayout({ connectionScreen }: { connectionScreen?: ReactNode 
     openRecap(null);
   };
   // Карточка запуска игр — не поверх другого окна, перерасчёта, «Итогов» и открытых «Активностей».
-  const launchHosted = launchMaybe && recapAutoAllowed && !recapShown;
+  const launchHosted = !!launchRequested && recapAutoAllowed && !recapShown;
   const goosePresentationAllowed =
     !recountOpen &&
     !recapShown &&

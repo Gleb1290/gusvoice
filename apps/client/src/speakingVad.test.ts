@@ -13,6 +13,20 @@ function run(levelAt: (time: number) => number, durationMs: number): { time: num
   return samples;
 }
 
+it('нота бота держится на ровной музыке и короткой паузе, гаснет в тишине и возвращается со звуком', () => {
+  let state = vadInitial();
+  const sample = (time: number, level: number) => {
+    const next = vadStep(state, level, time, true);
+    state = next.state;
+    return next.speaking;
+  };
+  assert.equal(sample(0, 0), false);
+  for (let t = 50; t <= 10_000; t += 50) assert.equal(sample(t, 0.02), true);
+  assert.equal(sample(11_499, 0), true);
+  assert.equal(sample(11_500, 0), false);
+  assert.equal(sample(12_000, 0.02), true);
+});
+
 describe('обводка говорящего по его собственному полу шума', () => {
   it('первый замер шумной комнаты не зажигает обводку', () => {
     // Ловит ложное «говорит» сразу после входа в канал при ненулевом фоне.

@@ -540,6 +540,19 @@ export function UserContextMenu({
   const [banReport, setBanReport] = useState(false);
   const banEvidence = useEvidence(target.userId);
   const [view, setView] = useState<View>(initialView);
+  const [RolePicker, setRolePicker] = useState<typeof import('./RolePeopleEditor').MemberRolePicker>();
+
+  async function openRolePicker() {
+    try {
+      if (!RolePicker) {
+        const { MemberRolePicker } = await import('./RolePeopleEditor');
+        setRolePicker(() => MemberRolePicker);
+      }
+      setView('roles');
+    } catch (error) {
+      toastError(error);
+    }
+  }
   const [nickDraft, setNickDraft] = useState('');
   // Свой выключатель приёма тычков на этом сервере (#122). Грузим ТОЛЬКО для себя и отдельным
   // запросом: в общем списке участников такому полю не место — иначе видно, кто отключил приём.
@@ -688,48 +701,9 @@ export function UserContextMenu({
   // Ник меняется ТОЛЬКО свой: переименовывать другого человека без спроса — не то, что нужно
   // дружескому серверу, поэтому нет ни пункта, ни права.
   const canRename = !!bootstrap && isSelf;
-  // Roles you may assign: below YOUR highest role (admins/owner = no ceiling), @everyone excluded.
-  const myTop = useMemo(() => {
-    if (!bootstrap) return 0;
-    if (has(perms, Permission.ADMINISTRATOR)) return Number.POSITIVE_INFINITY;
-    const mine = new Set(bootstrap.member.roleIds);
-    return bootstrap.roles.filter((r) => mine.has(r.id)).reduce((m, r) => Math.max(m, r.position), 0);
-  }, [bootstrap, perms]);
-  const assignableRoles = useMemo(
-    () =>
-      (bootstrap?.roles ?? [])
-        // «Гости» в списке выдачи не место (§5.9): её получают по признаку гостя, а не строкой, и
-        // клик по ней либо ничего не менял бы, либо добавлял бы прав местному (приёмка 18.09).
-        .filter((r) => !r.isEveryone && !r.isGuests && r.position < myTop)
-        .sort((a, b) => b.position - a.position),
-    [bootstrap, myTop],
-  );
-  // Self-service grant: roles the actor HOLDS that are flagged members_can_assign — grantable to
-  // others WITHOUT MANAGE_ROLES (add-only). Unioned with the manager-assignable set for the menu.
-  const selfAssignableRoles = useMemo(() => {
-    if (!bootstrap) return [] as Role[];
-    const mine = new Set(bootstrap.member.roleIds);
-    return bootstrap.roles.filter((r) => !r.isEveryone && !r.isGuests && r.membersCanAssign && mine.has(r.id));
-  }, [bootstrap]);
-  const assignableIds = useMemo(() => new Set(assignableRoles.map((r) => r.id)), [assignableRoles]);
-  const grantRoles = useMemo(() => {
-    const byId = new Map<string, Role>();
-    if (canManageRoles) for (const r of assignableRoles) byId.set(r.id, r);
-    for (const r of selfAssignableRoles) byId.set(r.id, r);
-    return [...byId.values()].sort((a, b) => b.position - a.position);
-  }, [canManageRoles, assignableRoles, selfAssignableRoles]);
-  // Removing a role is manager-only within your hierarchy — self-service grant is add-only.
-  const canRemoveRole = (r: Role) => canManageRoles && assignableIds.has(r.id);
-  const toggleRole = async (roleId: string, add: boolean) => {
-    if (!bootstrap) return;
-    try {
-      if (add) await api.assignRole(bootstrap.server.id, target.userId, roleId);
-      else await api.unassignRole(bootstrap.server.id, target.userId, roleId);
-      await loadMembers(bootstrap.server.id);
-    } catch (e) {
-      toastError(e);
-    }
-  };
+  const canDelegateRoles = !!bootstrap?.roles.some((role) =>
+    !role.isEveryone && !role.isGuests && !role.managedBotId
+    && role.membersCanAssign && bootstrap.member.roleIds.includes(role.id));
   const pushMuted = pushMutedDmUsers.includes(target.userId);
   const peerBlocked = useStore((s) => fromProfile && s.blockedUsers.some((u) => u.id === target.userId));
   async function switchBlock() {
@@ -1034,34 +1008,34 @@ export function UserContextMenu({
         <button type="button" className="ctx-back" onClick={() => setView('menu')}>
           <Icon name="chevron-right" size={14} /> Назад
         </button>
-        <div className="ctx-roles-edit">
-          <div className="pcard-sec-label">Роли · {target.name}</div>
-          {grantRoles.length === 0 ? (
-            <div className="muted" style={{ padding: '4px 12px 8px', fontSize: 13 }}>
-              Нет ролей, которыми вы можете управлять.
-            </div>
-          ) : (
-            grantRoles.map((r) => {
-              const had = !!member?.roleIds.includes(r.id);
-              const locked = had && !canRemoveRole(r); // self-service is add-only → can't remove
-              const hex = r.color ? roleHex(r.color) : null;
-              return (
-                <button
-                  key={r.id}
-                  type="button"
-                  className={`ctx-role-toggle ${had ? 'on' : ''}${locked ? ' locked' : ''}`}
-                  disabled={locked}
-                  title={locked ? 'Снять роль может только модератор' : undefined}
-                  onClick={() => void toggleRole(r.id, !had)}
-                >
-                  <span className="ctx-role-dot" style={hex ? { background: hex } : undefined} />
-                  <span className="ctx-role-name">{r.name}</span>
-                  {had && <Icon name="check" size={15} />}
-                </button>
-              );
-            })
-          )}
-        </div>
+        {member && me && RolePicker && (
+          <RolePicker
+            key={JSON.stringify([bootstrap.server.id, target.userId, me.id])}
+            serverId={bootstrap.server.id}
+            roles={bootstrap.roles}
+            members={members}
+            member={member}
+            selfId={me.id}
+            ownerId={bootstrap.server.ownerId}
+            canManageRoles={canManageRoles}
+            actor={{
+              roleIds: bootstrap.member.roleIds,
+              guest: !!me.homeInstance,
+              bot: !!me.bot,
+              admin: has(perms, Permission.ADMINISTRATOR),
+            }}
+            onChanged={async () => {
+              const serverId = bootstrap.server.id;
+              const before = useStore.getState().members;
+              await loadMembers(serverId);
+              const after = useStore.getState();
+              if (after.currentServerId === serverId && after.members === before) {
+                throw new Error('Не удалось загрузить участников.');
+              }
+            }}
+            onClose={() => setView('menu')}
+          />
+        )}
       </ContextMenu>
     );
   }
@@ -1147,7 +1121,7 @@ export function UserContextMenu({
                   type="range"
                   min={0}
                   max={MAX_VOLUME}
-                  step={0.05}
+                  step={0.01}
                   value={audio.muted ? 0 : audio.volume}
                   onChange={(e) => {
                     if (audio.muted) audio.setMuted(false);
@@ -1304,10 +1278,10 @@ export function UserContextMenu({
         />
       )}
 
-      {(canManageRoles || selfAssignableRoles.length > 0) && (
+      {member && me && (canManageRoles || canDelegateRoles) && (
         <>
           <MenuDivider />
-          <MenuItem icon="users" label="Роли" onClick={() => setView('roles')} />
+          <MenuItem icon="users" label="Роли" onClick={() => void openRolePicker()} />
         </>
       )}
 

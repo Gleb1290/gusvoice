@@ -14,6 +14,7 @@ import {
   parseLatestRelease,
   parseReleaseVersion,
   parseUpdateStatus,
+  parseUpdaterMarker,
   REQUEST_STUCK_MS,
   RUNNING_STALE_MS,
   shouldCheckLatest,
@@ -132,7 +133,7 @@ describe('статус обновления с хоста', () => {
     assert.equal(parseUpdateStatus(status({ state: 'paused' }), now), null);
   });
 
-  it('running старше 45 минут превращается в failed/interrupted', () => {
+  it('running старше таймаута watcher превращается в failed/interrupted', () => {
     // Откат этой ветки навсегда заблокировал бы кнопку после перезагрузки посреди обновления.
     const startedAt = new Date(now - RUNNING_STALE_MS - 1).toISOString();
     const parsed = parseUpdateStatus(status({ state: 'running', startedAt, finishedAt: '' }), now);
@@ -140,7 +141,7 @@ describe('статус обновления с хоста', () => {
     assert.equal(parsed?.error, 'interrupted');
   });
 
-  it('ровно 45 минут ещё считается работающим обновлением', () => {
+  it('ровно на границе таймаута watcher ещё считается работающим обновлением', () => {
     // Ловит ошибку >= вместо > на принятой включительной границе живого процесса.
     const startedAt = new Date(now - RUNNING_STALE_MS).toISOString();
     assert.equal(parseUpdateStatus(status({ state: 'running', startedAt, finishedAt: '' }), now)?.state, 'running');
@@ -202,6 +203,29 @@ const decision = (over: Partial<UpdateDecisionInput> = {}): UpdateDecisionInput 
 });
 
 describe('порядок причин, запрещающих обновление', () => {
+  it('после обновления из старой панели следующий выпуск можно установить той же кнопкой', () => {
+    const legacy = parseUpdaterMarker({ schema: 1, tag: 'latest' });
+    const current = parseUpdaterMarker({ schema: 2, tag: 'latest' });
+    assert.equal(decideUpdate(decision({ updater: legacy })).canUpdate, true);
+    assert.equal(decideUpdate(decision({ updater: current })).canUpdate, true);
+    assert.equal(parseUpdaterMarker({ schema: 2, tag: null }), null);
+    assert.equal(parseUpdaterMarker({ schema: 99, tag: 'latest' }), null);
+  });
+
+  it('после сбоя проверки фида кэш остаётся видимым, но не разрешает обновление', () => {
+    assert.equal(decideUpdate(decision({ checkFailed: true })).blockedReason, 'unknown-latest');
+    assert.equal(decideUpdate(decision({ checkFailed: false })).canUpdate, true);
+  });
+
+  it('позволяет повторить установку текущего выпуска после сбоя на этом выпуске', () => {
+    const status: InstanceUpdateStatus = { ...running, state: 'failed', error: 'storage-migrate' };
+    const input = decision({ installed: 'v0.8.0', status });
+    assert.equal(decideUpdate(input).canUpdate, true);
+    assert.equal(decideUpdate({ ...input, status: { ...status, state: 'done' } }).blockedReason, 'up-to-date');
+    assert.equal(decideUpdate({ ...input, status: { ...status, requested: 'v0.7.0' } }).blockedReason, 'up-to-date');
+    assert.equal(decideUpdate({ ...input, updater: { tag: 'v0.8.0' } }).blockedReason, 'pinned-tag');
+  });
+
   it('каждая причина побеждает все достижимые более поздние причины', () => {
     // Таблица фиксирует порядок UX; изменение последовательности if краснит соответствующую строку.
     const cases: Array<[string, UpdateDecisionInput, InstanceUpdateInfo['blockedReason']]> = [
@@ -318,6 +342,24 @@ describe('чистые правила update.sh', () => {
       '1',
       'перевод строки внутри версии',
     );
+  });
+
+  it('берёт образ нужного сервиса, когда Compose рендерит также его зависимости', () => {
+    const parsed = shellHelper('printf "%s\\n" "$@" | compose_service_image backend', [
+      'services:',
+      '  backend:',
+      '    environment:',
+      '      image: irrelevant',
+      '    image: registry.example.com/gusvoice/backend:v0.9.81',
+      '  postgres:',
+      '    image: postgres:16-alpine',
+      '  redis:',
+      '    image: redis:7.4-alpine',
+      'networks:',
+      '  backend:',
+      '    image: irrelevant',
+    ]);
+    assert.equal(parsed.trim(), 'registry.example.com/gusvoice/backend:v0.9.81');
   });
 
   it('tag_is_pinned отличает конкретную версию от плавающих меток', () => {

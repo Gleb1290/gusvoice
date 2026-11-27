@@ -1,16 +1,14 @@
 import type { PermissionName, Role, ServerMemberInfo } from '@gusvoice/shared';
-import { normalizeLegacyPerms, Permission, PROTECTED_PERMISSIONS } from '@gusvoice/shared';
-import { useEffect, useState } from 'react';
+import { ALL_PERMISSIONS, isAdmin, normalizeLegacyPerms, Permission, permsFromString, PROTECTED_PERMISSIONS } from '@gusvoice/shared';
+import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { api } from '../api';
+import { confirmAction, confirmWithOption } from '../confirm';
+import { usePhoneLayout } from '../phoneLayout';
 import { useStore } from '../store';
-import { confirmAction } from '../confirm';
-import { Avatar } from './Avatar';
-import { HelpDot } from './HelpDot';
-import { Icon } from './Icon';
+import { RoleAppearancePicker } from './RoleAppearancePicker';
+import { RolePeopleEditor, ServerPeopleDirectory } from './RolePeopleEditor';
 import { Toggle } from './Toggle';
-import { Select } from './Select';
-
-const ROLE_COLORS = [0xf2b33d, 0x3fb97a, 0xe0574e, 0x3f7fb9, 0xc95e8c, 0x5e9c8c, 0x9c97a8, 0xb07ad8];
+import './roles-editor.css';
 
 /**
  * Permissions offered in the UI, with a plain-language note for each — the labels alone don't say what
@@ -154,18 +152,64 @@ export const PERMS: { key: PermissionName; label: string; hint: string }[] = [
 /** Права, которые видны всем, но переключаются только владельцем сервера (см. PROTECTED_PERMISSIONS). */
 export const isProtectedPerm = (key: PermissionName) => (Permission[key] & PROTECTED_PERMISSIONS) !== 0n;
 
+type EditorTab = 'appearance' | 'permissions' | 'people';
+type Draft = {
+  name: string;
+  color: number;
+  perms: bigint;
+  mentionable: boolean;
+  membersCanAssign: boolean;
+};
+type LeaveGuard = (next: () => void) => void;
+
+const EDITOR_TABS: { key: EditorTab; label: string }[] = [
+  { key: 'appearance', label: 'Оформление' },
+  { key: 'permissions', label: 'Права' },
+  { key: 'people', label: 'Участники' },
+];
+
+const PERMISSION_GROUPS: { title: string; keys: PermissionName[] }[] = [
+  { title: 'Общение', keys: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES', 'MENTION_EVERYONE', 'CREATE_INVITE'] },
+  { title: 'Голос и стрим', keys: ['CONNECT', 'SPEAK', 'VIDEO', 'SHARE_SCREEN', 'POKE_MEMBERS'] },
+  { title: 'Модерация', keys: ['MANAGE_MESSAGES', 'KICK_MEMBERS', 'BAN_MEMBERS', 'MUTE_MEMBERS', 'MOVE_MEMBERS', 'MOVE_ANYONE', 'VIEW_AUDIT_LOG'] },
+  { title: 'Управление сервером', keys: ['ADMINISTRATOR', 'MANAGE_SERVER', 'MANAGE_ROLES', 'MANAGE_CHANNELS', 'MANAGE_WEBHOOKS'] },
+  { title: 'Игры и оформление', keys: ['MANAGE_PREDICTIONS', 'MANAGE_EMOJIS', 'MANAGE_STICKERS', 'MANAGE_SOUNDS', 'MANAGE_SOUNDBOARD'] },
+];
+
+const PERMISSION_ALIASES: Partial<Record<PermissionName, string>> = {
+  SEND_MESSAGES: 'чат текст написать отправить',
+  VIEW_CHANNEL: 'видимость доступ видеть',
+  CONNECT: 'войти войс подключение',
+  SPEAK: 'голос микрофон разговаривать',
+  SHARE_SCREEN: 'стрим трансляция шеринг показ',
+  VIDEO: 'видео вебка',
+  MUTE_MEMBERS: 'мут заглушить',
+  KICK_MEMBERS: 'кик исключить выгнать',
+  BAN_MEMBERS: 'бан блокировка',
+  MANAGE_SOUNDBOARD: 'звуковая панель набор звуков soundboard',
+  MANAGE_PREDICTIONS: 'игры прогнозы предсказания',
+};
+
+const ADMIN_PERMISSIONS = Permission.ADMINISTRATOR | Permission.MANAGE_ROLES | Permission.MANAGE_SERVER;
 const colorToHex = (n: number) => '#' + (n & 0xffffff).toString(16).padStart(6, '0');
 const hasBit = (perms: bigint, bit: bigint) => (perms & bit) === bit;
+const roleName = (role: Role) => role.isEveryone ? '@everyone' : role.name;
+const searchWords = (query: string) => query.trim().toLowerCase().replaceAll('ё', 'е').split(/\s+/).filter(Boolean);
+const matches = (words: string[], value: string) => {
+  const normalized = value.toLowerCase().replaceAll('ё', 'е');
+  return words.every((word) => normalized.includes(word));
+};
 
-/**
- * Разделы «Роли» и «Участники» настроек сервера. До 23.09 это было отдельное окно под кнопкой 👥 со
- * своими двумя вкладками; теперь оба раздела живут на рельсе `ServerSettingsModal`.
- *
- * ⚠️ Один компонент на оба раздела, а не два: у них общие списки ролей и людей (выдача роли в
- * «Участниках» — та же `toggleMemberRole`, что крестик в «Ролях»). Модалка рендерит его в ОДНОМ месте
- * дерева с меняющимся `view` — так переход между разделами не перезагружает списки и не сбрасывает
- * выбранную роль.
- */
+function draftOf(role: Role): Draft {
+  return {
+    name: role.name,
+    color: role.color,
+    perms: normalizeLegacyPerms(BigInt(role.permissions)),
+    mentionable: role.mentionable,
+    membersCanAssign: role.membersCanAssign,
+  };
+}
+
 export function ServerRolesPanel({
   serverId,
   ownerId,
@@ -174,6 +218,8 @@ export function ServerRolesPanel({
   canKick,
   view,
   initialRoleId,
+  leaveGuard,
+  catalogBack,
 }: {
   serverId: string;
   ownerId: string;
@@ -181,97 +227,264 @@ export function ServerRolesPanel({
   canManageRoles: boolean;
   canKick: boolean;
   view: 'roles' | 'members';
-  /** Какую роль выбрать при открытии (#231: «Права бота» в «Интеграциях» ведут к управляемой роли бота). */
+  /** «Права бота» открывают его роль сразу на вкладке прав. */
   initialRoleId?: string;
+  leaveGuard?: MutableRefObject<LeaveGuard | null>;
+  catalogBack?: MutableRefObject<(() => boolean) | null>;
 }) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [members, setMembers] = useState<ServerMemberInfo[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
-  const [name, setName] = useState('');
-  const [color, setColor] = useState(0);
-  const [perms, setPerms] = useState(0n);
-  const [mentionable, setMentionable] = useState(false);
-  const [membersCanAssign, setMembersCanAssign] = useState(false);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [creation, setCreation] = useState<{ name: string; color: number } | null>(null);
+  const [tab, setTab] = useState<EditorTab>('appearance');
+  const [mobileDetail, setMobileDetail] = useState(!!initialRoleId);
+  const [roleQuery, setRoleQuery] = useState('');
+  const [permQuery, setPermQuery] = useState('');
+  const [createdId, setCreatedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Защищённые права (MOVE_ANYONE) выдаёт ТОЛЬКО владелец сервера или супер-админ — бэкенд их иначе
-  // просто не примет (`clampGrant` оставит прежнее значение), поэтому и тумблер здесь заперт.
+  const leaving = useRef(false);
+  const editorHeading = useRef<HTMLHeadingElement>(null);
+  const catalogHeading = useRef<HTMLLabelElement>(null);
+  const catalogList = useRef<HTMLDivElement>(null);
+  const catalogScroll = useRef(0);
+  const focusTarget = useRef<'editor' | 'catalog' | null>(null);
+  const phone = usePhoneLayout();
   const canGrantProtected = useStore((s) => !!s.user && (s.user.superAdmin || s.user.id === ownerId));
-  // Право «Проводить ставки» — часть игр: пока игры показываем только супер-админу (раздел «Игры», 30.10), строки нет и
-  // у остальных. Скрыта только строка: уже выданный бит роли не трогается — сохранение меняет лишь переключённые права.
   const gamesShown = useStore((s) => s.user?.superAdmin === true);
+  const actorPerms = permsFromString(useStore((s) => s.bootstrap?.permissions));
+  const privileged = canGrantProtected || isAdmin(actorPerms);
+  const actorRoleIds = members.find((member) => member.user.id === selfId)?.roleIds ?? [];
+  const highest = privileged ? Infinity : Math.max(0, ...roles.filter((r) => actorRoleIds.includes(r.id)).map((r) => r.position));
+  const selected = roles.find((r) => r.id === selId) ?? null;
+  const systemRole = !!(selected?.isEveryone || selected?.isGuests);
+  const botRole = !!selected?.managedBotId;
+  const botHolder = botRole || !!selected && members.some((m) => m.user.bot && m.roleIds.includes(selected.id));
+  const baseline = selected && draftOf(selected);
+  const perms = draft?.perms ?? 0n;
+  const roleHasAdminPerms = (perms & ADMIN_PERMISSIONS) !== 0n;
+  const dirty = !!(creation ? creation.name || creation.color : draft && baseline && (
+    draft.name !== baseline.name || draft.color !== baseline.color || draft.perms !== baseline.perms ||
+    draft.mentionable !== baseline.mentionable || draft.membersCanAssign !== baseline.membersCanAssign
+  ));
+  const editBlock = !canManageRoles ? 'Нужно право «Управление ролями».'
+    : selected && selected.position >= highest ? 'Эта роль выше вашей старшей роли или равна ей.'
+    : null;
+  // PATCH обрезает маску по правам автора. Не отправляем маску, если сервер при этом снимет чужое право.
+  const preservedBits = canGrantProtected ? 0n : PROTECTED_PERMISSIONS;
+  const grantableBits = (privileged ? ALL_PERMISSIONS : actorPerms) | preservedBits;
+  const maskBlock = baseline && (baseline.perms & ~grantableBits) !== 0n
+    ? 'У роли есть права, которые вы не можете выдавать. Изменение набора прав могло бы их снять.'
+    : null;
+  const systemNameWhy = systemRole ? 'Имя системной роли используется в правилах сервера.' : null;
+  const assignmentWhy = systemRole ? 'Состав системной роли определяется сервером.'
+    : botRole ? 'Управляемая роль назначается только её боту.' : null;
+  const adminAssignWhy = roleHasAdminPerms ? 'Самовыдача недоступна роли с правами администратора, управления ролями или сервером.' : null;
+  const sortableRoles = roles.filter((r) => !r.isEveryone).sort((a, b) => b.position - a.position);
+  const displayRoles = [...sortableRoles, ...roles.filter((r) => r.isEveryone)];
+  const roleWords = searchWords(roleQuery);
+  const permWords = searchWords(permQuery);
 
-  const refreshTree = () => useStore.getState().openServer(serverId);
+  function refreshTree() {
+    return useStore.getState().openServer(serverId);
+  }
 
-  async function load() {
+  async function refreshPeople() {
+    setMembers(await api.listMembers(serverId));
+    await refreshTree();
+  }
+
+  function selectRole(role: Role, nextTab: EditorTab = 'appearance') {
+    setCreation(null);
+    setSelId(role.id);
+    setDraft(draftOf(role));
+    setTab(nextTab);
+    setPermQuery('');
     setError(null);
-    try {
-      const [r, m] = await Promise.all([api.listRoles(serverId), api.listMembers(serverId)]);
-      setRoles(r);
-      setMembers(m);
-      if (!selId && r.length) selectRole(r.find((x) => x.id === initialRoleId) ?? r[0]);
-    } catch (e) {
-      setError((e as Error).message);
-    }
   }
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let active = true;
+    setLoading(true);
+    Promise.all([api.listRoles(serverId), api.listMembers(serverId)]).then(([roleList, people]) => {
+      if (!active) return;
+      setRoles(roleList);
+      setMembers(people);
+      const initial = roleList.find((r) => r.id === initialRoleId);
+      const first = initial ?? [...roleList].sort((a, b) => b.position - a.position)[0];
+      if (first) selectRole(first, initial ? 'permissions' : 'appearance');
+      setMobileDetail(!!initial);
+    }).catch((e: Error) => {
+      if (active) setError(e.message);
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [serverId, initialRoleId]);
 
-  function selectRole(r: Role) {
-    setSelId(r.id);
-    setName(r.name);
-    setColor(r.color);
-    setPerms(normalizeLegacyPerms(BigInt(r.permissions)));
-    setMentionable(r.mentionable);
-    setMembersCanAssign(r.membersCanAssign);
+  useEffect(() => {
+    if (focusTarget.current === 'editor') editorHeading.current?.focus();
+    if (focusTarget.current === 'catalog') {
+      if (catalogList.current) catalogList.current.scrollTop = catalogScroll.current;
+      catalogHeading.current?.focus({ preventScroll: true });
+    }
+    focusTarget.current = null;
+  }, [selId, mobileDetail, creation !== null]);
+
+  function setPerms(update: (previous: bigint) => bigint) {
+    setDraft((previous) => previous && { ...previous, perms: update(previous.perms) });
   }
 
-  const selected = roles.find((r) => r.id === selId) ?? null;
-  // A self-service role must not carry admin-level perms (the backend rejects it) — disable the toggle.
-  const roleHasAdminPerms =
-    hasBit(perms, Permission.ADMINISTRATOR) || hasBit(perms, Permission.MANAGE_ROLES) || hasBit(perms, Permission.MANAGE_SERVER);
-  /**
-   * Кто в роли. У «Гостей» (§5.9) состав считается ПО ПРИЗНАКУ гостя, а не по строкам выдачи: роль
-   * системная, руками не выдаётся, и список по `roleIds` был бы всегда пуст — окно уверяло бы, что
-   * ограничивать некого, стоя рядом с живыми гостями сервера.
-   */
-  const systemRole = !!selected && (selected.isEveryone || !!selected.isGuests);
-  /**
-   * Роль бота (#231, `Role.managedBotId`): заводится сервером при добавлении бота и уходит вместе с ним. Руками не выдаётся,
-   * не снимается и не удаляется (сервер отвечает 400) — поэтому ни «Удалить роль», ни выдачи, ни крестиков. Права и имя
-   * правятся как у обычной роли; `ADMINISTRATOR` боту нельзя никому (решение владельца 26.10) — тумблер заперт.
-   */
-  const botRole = !!selected?.managedBotId;
-  const roleMembers = !selected
-    ? []
-    : selected.isGuests
-      ? members.filter((m) => !!m.user.homeInstance)
-      : selected.isEveryone
-        ? []
-        : members.filter((m) => m.roleIds.includes(selected.id));
-  // Добавлять в системную роль нечего: в «Гостей» попадают сами, в `@everyone` — все.
-  const roleNonMembers = selected && !systemRole && !botRole ? members.filter((m) => !m.roleIds.includes(selected.id)) : [];
-
-  // Display highest-first ("выше = больше прав"); @everyone always sits at the bottom.
-  const sortableRoles = roles.filter((r) => !r.isEveryone).sort((a, b) => b.position - a.position);
-  const displayRoles = [...sortableRoles, ...roles.filter((r) => r.isEveryone)];
-
-  async function moveRole(roleId: string, dir: -1 | 1) {
-    const order = sortableRoles.map((r) => r.id);
-    const idx = order.indexOf(roleId);
-    const j = idx + dir;
-    if (idx < 0 || j < 0 || j >= order.length) return;
-    [order[idx], order[j]] = [order[j], order[idx]];
+  async function saveRole(): Promise<boolean> {
+    if (!selected || !draft || !baseline || editBlock || busy || !draft.name.trim()) return false;
+    const patch: Parameters<typeof api.updateRole>[1] = {};
+    if (!systemRole && draft.name.trim() !== baseline.name) patch.name = draft.name.trim();
+    if (draft.color !== baseline.color) patch.color = draft.color;
+    if (draft.perms !== baseline.perms && !maskBlock) patch.permissions = draft.perms.toString();
+    if (!assignmentWhy) {
+      if (draft.mentionable !== baseline.mentionable) patch.mentionable = draft.mentionable;
+      const membersCanAssign = draft.membersCanAssign && !roleHasAdminPerms;
+      if (membersCanAssign !== baseline.membersCanAssign) patch.membersCanAssign = membersCanAssign;
+    }
     setBusy(true);
     setError(null);
     try {
-      await api.reorderRoles(serverId, order);
+      if (Object.keys(patch).length) {
+        const saved = await api.updateRole(selected.id, patch);
+        setRoles((list) => list.map((r) => r.id === saved.id ? saved : r));
+        setDraft(draftOf(saved));
+        await refreshTree();
+      } else {
+        setDraft(baseline);
+      }
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createRole(): Promise<boolean> {
+    if (!creation?.name.trim() || !canManageRoles || busy) return false;
+    setBusy(true);
+    setError(null);
+    try {
+      const role = await api.createRole(serverId, { name: creation.name.trim(), color: creation.color });
+      setRoles((list) => [...list, role]);
+      setCreatedId(role.id);
+      focusTarget.current = 'editor';
+      selectRole(role);
+      // При вставке под старшей ролью менеджера сервер может сдвинуть позиции соседей.
       setRoles(await api.listRoles(serverId));
       await refreshTree();
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetDraft() {
+    setError(null);
+    setDraft(baseline);
+    setCreation(null);
+  }
+
+  async function guardLeave(next: () => void) {
+    if (busy || leaving.current) return;
+    if (!dirty) {
+      resetDraft();
+      next();
+      return;
+    }
+    const canSave = creation ? canManageRoles && !!creation.name.trim() : !editBlock && !!draft?.name.trim();
+    leaving.current = true;
+    try {
+      const spec = { title: 'Есть несохранённые изменения', cancelLabel: 'Остаться' };
+      const choice = canSave
+        ? await confirmWithOption({
+          ...spec,
+          body: 'Снимите отметку, чтобы сбросить черновик.',
+          confirmLabel: 'Продолжить',
+          option: { label: creation ? 'Создать роль перед уходом' : 'Сохранить перед уходом', checked: true },
+        })
+        : await confirmAction({ ...spec, confirmLabel: 'Сбросить изменения' }).then((ok) => ok ? { option: false } : null);
+      if (!choice) return;
+      if (choice.option) {
+        const saved = await (creation ? createRole() : saveRole());
+        if (!saved) return;
+      } else {
+        resetDraft();
+      }
+      next();
+    } finally {
+      leaving.current = false;
+    }
+  }
+
+  function closeDetail() {
+    void guardLeave(() => {
+      focusTarget.current = 'catalog';
+      setMobileDetail(false);
+    });
+  }
+
+  useEffect(() => {
+    if (leaveGuard) leaveGuard.current = guardLeave;
+    if (catalogBack) catalogBack.current = () => {
+      if (!phone || !mobileDetail || view !== 'roles') return false;
+      closeDetail();
+      return true;
+    };
+    return () => {
+      if (leaveGuard) leaveGuard.current = null;
+      if (catalogBack) catalogBack.current = null;
+    };
+  });
+
+  function showDetail() {
+    if (!mobileDetail) catalogScroll.current = catalogList.current?.scrollTop ?? 0;
+    focusTarget.current = 'editor';
+    setMobileDetail(true);
+  }
+
+  function startCreation() {
+    void guardLeave(() => {
+      setCreation({ name: '', color: 0 });
+      setCreatedId(null);
+      showDetail();
+    });
+  }
+
+  function reorderPlan(role: Role, offset: -1 | 1) {
+    const index = sortableRoles.findIndex((entry) => entry.id === role.id);
+    const target = index + offset;
+    if (index < 0 || target < 0 || target >= sortableRoles.length) return { reason: 'Край списка ролей.' } as const;
+    const order = [...sortableRoles];
+    [order[index], order[target]] = [order[target], order[index]];
+    const changesHigherRole = order.some((entry, i) => {
+      const position = order.length - i;
+      return entry.position !== position && (entry.position >= highest || position >= highest);
+    });
+    if (changesHigherRole) return { reason: 'Нельзя менять порядок ролей на вашем уровне или выше.' } as const;
+    return { ids: order.map((entry) => entry.id) } as const;
+  }
+
+  async function moveRole(ids: string[]) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.reorderRoles(serverId, ids);
+      const reordered = await api.listRoles(serverId);
+      const positions = new Map(reordered.map((role) => [role.id, role.position]));
+      setRoles((current) => current.map((role) => ({ ...role, position: positions.get(role.id) ?? role.position })));
+      await refreshTree();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -279,393 +492,253 @@ export function ServerRolesPanel({
     }
   }
 
-  async function saveRole() {
-    if (!selected) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.updateRole(selected.id, {
-        name: name.trim(),
-        color,
-        permissions: perms.toString(),
-        mentionable,
-        membersCanAssign: membersCanAssign && !roleHasAdminPerms,
+  function deleteRole(role: Role) {
+    void guardLeave(async () => {
+      const ok = await confirmAction({
+        title: `Удалить роль «${role.name}»?`,
+        body: 'Участники потеряют права, которые давала эта роль.',
+        tone: 'danger',
+        confirmLabel: 'Удалить роль',
       });
-      const r = await api.listRoles(serverId);
-      setRoles(r);
-      await refreshTree();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function createRole() {
-    setBusy(true);
-    setError(null);
-    try {
-      const role = await api.createRole(serverId, { name: 'новая роль' });
-      const r = await api.listRoles(serverId);
-      setRoles(r);
-      selectRole(role);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteRole(r: Role) {
-    const ok = await confirmAction({
-      title: `Удалить роль «${r.name}»?`,
-      body: 'Права, которые она давала, пропадут у всех, кто её носит.',
-      tone: 'danger',
-      confirmLabel: 'Удалить роль',
+      if (!ok) return;
+      setBusy(true);
+      setError(null);
+      try {
+        await api.deleteRole(role.id);
+        setRoles((list) => list.filter((entry) => entry.id !== role.id));
+        setSelId(null);
+        setDraft(null);
+        focusTarget.current = 'catalog';
+        setMobileDetail(false);
+        await refreshTree();
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
     });
-    if (!ok) return;
-    setBusy(true);
-    try {
-      await api.deleteRole(r.id);
-      const list = await api.listRoles(serverId);
-      setRoles(list);
-      setSelId(list[0]?.id ?? null);
-      if (list[0]) selectRole(list[0]);
-      await refreshTree();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
   }
 
-  async function toggleMemberRole(userId: string, roleId: string, add: boolean) {
-    setBusy(true);
-    try {
-      if (add) await api.assignRole(serverId, userId, roleId);
-      else await api.unassignRole(serverId, userId, roleId);
-      setMembers(await api.listMembers(serverId));
-      await refreshTree();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+  function permissionBlock(key: PermissionName) {
+    if (editBlock) return editBlock;
+    if (key === 'ADMINISTRATOR' && botHolder) return 'У бота не может быть права администратора.';
+    if (isProtectedPerm(key) && !canGrantProtected) return 'Это право может менять только владелец сервера или супер-админ.';
+    if (!privileged && !hasBit(actorPerms, Permission[key])) return 'У вас нет этого права для выдачи.';
+    return maskBlock;
   }
 
-  async function kick(userId: string, label: string) {
-    const ok = await confirmAction({
-      title: `Кикнуть ${label} с сервера?`,
-      body: 'Сообщения останутся. Вернуться можно по новому приглашению.',
-      tone: 'danger',
-      confirmLabel: 'Кикнуть',
-    });
-    if (!ok) return;
-    setBusy(true);
-    try {
-      await api.kickMember(serverId, userId);
-      setMembers(await api.listMembers(serverId));
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // «Гости» в выдачу не попадают: бэкенд такую выдачу отклоняет, а местному она дала бы прав.
-  // Роль бота (#231) — тоже: её держит только сам бот.
-  const assignableRoles = roles.filter((r) => !r.isEveryone && !r.isGuests && !r.managedBotId);
-
-  const errorBox = error && (
-    <div className="error" role="alert">
-      {error}
-    </div>
-  );
-
-  return view === 'roles' ? (
-    // Редактор ролей держит СВОИ прокрутки (список слева, права справа) и потому тянется на всю
-    // высоту раздела, а не лежит в общей прокрутке: иначе список ролей уезжал бы вместе с правами.
-    <div className="rail-fill" id="ss-panel-body" role="tabpanel" aria-labelledby="ss-tab-roles">
-      {errorBox}
-      {/* Was a collapsed <details> — the explanation nobody opened. Same text, one hover away. */}
-      <div className="settings-group-label">
-        Роли сервера
-        <HelpDot label="Как работают роли">
-          <ul>
-            <li>
-              У участника может быть несколько ролей — права <b>складываются</b>. <b>@everyone</b> — базовая
-              роль для всех.
-            </li>
-            <li>
-              Роли упорядочены по старшинству. Управлять (выдавать / редактировать / удалять) можно только
-              ролями <b>ниже своей</b> самой старшей, и нельзя выдать право, которого <b>нет у тебя</b>.
-            </li>
-            <li>
-              <b>Администратор</b> = все права. <b>Владелец</b> сервера может всё.
-            </li>
-            <li>
-              Доступ к конкретным каналам — отдельно, вкладка <b>«Доступ»</b> у канала/категории
-              (переопределяет права роли).
-            </li>
-          </ul>
-        </HelpDot>
-      </div>
-      <div className="roles-editor">
-        <div className="roles-list">
-          {displayRoles.map((r, i) => (
-            <div key={r.id} className={`role-item-row ${r.id === selId ? 'active' : ''}`}>
-              <button type="button" className="role-item" onClick={() => selectRole(r)}>
-                <span className="role-dot" style={{ background: r.color ? colorToHex(r.color) : '#888' }} />
-                {r.managedBotId && <Icon name="bot" size={14} />}
-                {r.isEveryone ? '@everyone' : r.name}
-                {r.isGuests && <span className="muted"> · системная</span>}
-                {/* Подпись короткая: колонка ролей узкая, «· роль бота» переносилась в три строки. Полностью — в подсказке. */}
-                {r.managedBotId && (
-                  <span className="muted" title="Роль бота: выдана только ему, удаляется вместе с ним">
-                    {' '}
-                    · бот
-                  </span>
-                )}
-              </button>
-              {canManageRoles && !r.isEveryone && (
-                <span className="role-reorder">
-                  <button type="button" title="Выше" disabled={busy || i === 0} onClick={() => void moveRole(r.id, -1)}>
-                    ↑
-                  </button>
-                  <button type="button" title="Ниже" disabled={busy || i === sortableRoles.length - 1} onClick={() => void moveRole(r.id, 1)}>
-                    ↓
-                  </button>
-                </span>
-              )}
-            </div>
-          ))}
-          {canManageRoles && (
-            <button type="button" className="role-item add" onClick={createRole} disabled={busy}>
-              + Создать роль
-            </button>
-          )}
+  const permissionRows = PERMS.filter(({ key }) => gamesShown || key !== 'MANAGE_PREDICTIONS').map(({ key, label, hint }) => {
+    const reason = permissionBlock(key);
+    const id = `role-permission-${key}`;
+    return {
+      key,
+      searchable: `${label} ${hint} ${PERMISSION_ALIASES[key] ?? ''}`,
+      row: (
+        <div className="role-editor-permission" key={key}>
+          <div>
+            <strong id={id}>{label}</strong>
+            <p id={`${id}-help`}>{hint}{reason && <span className="role-editor-reason">{reason}</span>}</p>
+          </div>
+          <Toggle
+            checked={hasBit(perms, Permission[key])}
+            disabled={busy || !!reason}
+            labelledBy={id}
+            describedBy={`${id}-help`}
+            onChange={(v) => setPerms((p) => v ? p | Permission[key] : p & ~Permission[key])}
+          />
         </div>
+      ),
+    };
+  });
+  const visibleGroups = PERMISSION_GROUPS.map(({ title, keys }) => ({
+    title,
+    rows: permissionRows.filter(({ key, searchable }) => keys.includes(key) && matches(permWords, `${title} ${searchable}`)),
+  })).filter(({ rows }) => rows.length > 0);
 
-        <div className="role-detail">
-          {!selected ? (
-            <div className="muted">Выбери роль слева</div>
-          ) : (
-            <>
-              <label className="field">
-                Название
-                {/* Системную роль не переименовываем: её имя — часть правила, а не украшение. */}
-                <input value={name} onChange={(e) => setName(e.target.value)} disabled={!canManageRoles || systemRole} />
-                {/* 🔴 Объяснение жило только в комментарии кода — человек видел просто серое
-                    поле и не знал, он ли что-то делает не так. Образец «как надо» был тут же
-                    рядом, у тумблера самовыдачи. */}
-                {systemRole && (
-                  <span className="muted field-why">
-                    Эту роль нельзя переименовать: её имя — часть правил сервера, на него
-                    ссылаются права и упоминания.
-                  </span>
-                )}
-                {botRole && (
-                  <span className="muted field-why">
-                    Роль бота: она есть только у него и уйдёт вместе с ним, когда бота уберут с сервера. Права
-                    администратора боту выдать нельзя.
-                  </span>
-                )}
-              </label>
-
-              <div className="field" style={{ gap: 8 }}>
-                Цвет
-                <div className="color-swatches">
-                  {ROLE_COLORS.map((c) => (
-                    <button
-                      type="button"
-                      key={c}
-                      className={`swatch ${color === c ? 'sel' : ''}`}
-                      style={{ background: colorToHex(c) }}
-                      disabled={!canManageRoles}
-                      onClick={() => setColor(c)}
-                      aria-label={colorToHex(c)}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              <div className="perm-toggle-row">
-                <span>Упоминаемая — @роль уведомляет участников</span>
-                <Toggle
-                  checked={mentionable}
-                  disabled={!canManageRoles || systemRole || botRole}
-                  onChange={setMentionable}
-                />
-              </div>
-
-              <div className="perm-toggle-row">
-                <span>
-                  Самовыдача — участники с этой ролью могут выдавать её другим (без права модератора)
-                  {roleHasAdminPerms && (
-                    <em style={{ display: 'block', color: 'var(--muted)', fontStyle: 'normal', fontSize: 12 }}>
-                      недоступно для ролей с админ-правами
-                    </em>
-                  )}
-                </span>
-                <Toggle
-                  checked={membersCanAssign && !roleHasAdminPerms}
-                  // «Гостей» руками не выдают вовсе, поэтому и самовыдача к ней неприменима.
-                  disabled={!canManageRoles || systemRole || botRole || roleHasAdminPerms}
-                  onChange={setMembersCanAssign}
-                />
-              </div>
-
-              <div className="perm-grid2">
-                {PERMS.filter(({ key }) => gamesShown || key !== 'MANAGE_PREDICTIONS').map(({ key, label, hint }) => (
-                  <div key={key} className="perm-toggle-row">
-                    <span>
-                      {label}
-                      <HelpDot label={`Что даёт право «${label}»`}>{hint}</HelpDot>
-                    </span>
-                    <Toggle
-                      checked={hasBit(perms, Permission[key])}
-                      disabled={
-                        !canManageRoles || (isProtectedPerm(key) && !canGrantProtected) || (botRole && key === 'ADMINISTRATOR')
-                      }
-                      label={label}
-                      onChange={(v) => setPerms((p) => (v ? p | Permission[key] : p & ~Permission[key]))}
-                    />
-                  </div>
-                ))}
-              </div>
-
-              {!selected.isEveryone && (
-                <div className="role-members">
-                  <div className="cat-name">
-                    {selected.isGuests ? 'Гости сервера' : botRole ? 'Бот' : 'Участники роли'} · {roleMembers.length}
-                  </div>
-                  <div className="role-mchips">
-                    {roleMembers.map((m) => (
-                      <span
-                        key={m.user.id}
-                        className="role-mchip"
-                        style={{ borderColor: selected.color ? colorToHex(selected.color) : '#888' }}
-                      >
-                        <Avatar url={m.user.avatarUrl} name={m.user.displayName} size={18} />
-                        {m.user.displayName}
-                        {/* Из «Гостей» не убирают: человек в ней, пока он гость (§5.9). Крестик
-                            тут был бы кнопкой, которая всегда отвечает отказом. */}
-                        {canManageRoles && !selected.isGuests && !botRole && (
-                          <button type="button" onClick={() => toggleMemberRole(m.user.id, selected.id, false)} disabled={busy}>
-                            ×
-                          </button>
-                        )}
-                      </span>
-                    ))}
-                    {roleMembers.length === 0 && (
-                      <span className="muted">
-                        {selected.isGuests ? 'гостей с других инстансов на сервере нет' : 'пока никого нет в этой роли'}
-                      </span>
-                    )}
-                  </div>
-                  {canManageRoles && roleNonMembers.length > 0 && (
-                    <Select
-                      value=""
-                      disabled={busy}
-                      placeholder="+ добавить участника в роль"
-                      ariaLabel="Добавить участника в роль"
-                      title="Добавить участника в роль"
-                      searchPlaceholder="Поиск участника"
-                      onChange={(v) => v && toggleMemberRole(v, selected.id, true)}
-                      options={roleNonMembers.map((m) => ({ value: m.user.id, label: m.user.displayName }))}
-                    />
-                  )}
-                </div>
-              )}
-
-              {canManageRoles && (
-                <div className="modal-actions">
-                  {/* Удалить системную роль нельзя (бэкенд отвечает отказом): без «Гостей»
-                      ограничивать гостей станет нечем, а её переопределения каналов молча
-                      перестанут действовать. */}
-                  {!systemRole && !botRole && (
-                    <button type="button" className="danger-text" onClick={() => deleteRole(selected)} disabled={busy}>
-                      Удалить роль
-                    </button>
-                  )}
-                  <div style={{ flex: 1 }} />
-                  <button type="button" onClick={saveRole} disabled={busy}>
-                    Сохранить
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-        </div>
+  const errorBox = error && <div className="error" role="alert">{error}</div>;
+  if (view === 'members') {
+    return (
+      <div className="admin-scroll role-editor-directory" id="ss-panel-body" role="tabpanel" aria-labelledby="ss-tab-members">
+        {errorBox}
+        <ServerPeopleDirectory {...{ serverId, roles, members, selfId, ownerId, canManageRoles, canKick }} onChanged={refreshPeople} />
       </div>
-    </div>
-  ) : (
-    <div className="admin-scroll" id="ss-panel-body" role="tabpanel" aria-labelledby="ss-tab-members">
+    );
+  }
+
+  return (
+    <div className="rail-fill role-editor" id="ss-panel-body" role="tabpanel" aria-labelledby="ss-tab-roles"
+      data-detail={mobileDetail}>
       {errorBox}
-      <div className="settings-group-label">
-        Участники
-        <HelpDot label="Как выдавать роли">
-          <ul>
-            <li>
-              Роль выдаётся кнопкой <b>«+ роль»</b> в строке участника, снимается <b>×</b> на самой роли.
-            </li>
-            <li>
-              Права участника = сумма прав всех его ролей плюс <b>@everyone</b>. Запретить что-то одной
-              ролью, если другая это разрешает, нельзя — для этого есть вкладка <b>«Доступ»</b> у канала.
-            </li>
-            <li>
-              Выдавать можно только роли <b>ниже своей</b> самой старшей. <b>Владельца</b> сервера нельзя
-              кикнуть и его роли не редактируются.
-            </li>
-          </ul>
-        </HelpDot>
-      </div>
-      <ul className="member-list">
-        {members.map((m) => {
-          const isOwner = m.user.id === ownerId;
-          const myRoles = m.roleIds.map((id) => roles.find((r) => r.id === id)).filter(Boolean) as Role[];
-          const addable = assignableRoles.filter((r) => !m.roleIds.includes(r.id));
-          return (
-            <li key={m.user.id} className="member-row">
-              <Avatar url={m.user.avatarUrl} name={m.user.displayName} size={36} />
-              <div className="member-main">
-                <div>
-                  {m.user.displayName} <span className="muted">@{m.user.username}</span>
-                  {isOwner && <span className="badge" style={{ marginLeft: 6 }}>owner</span>}
-                </div>
-                <div className="role-chips">
-                  {myRoles.map((r) => (
-                    <span key={r.id} className="role-chip" style={{ borderColor: r.color ? colorToHex(r.color) : '#888' }}>
-                      {r.name}
-                      {canManageRoles && !r.managedBotId && (
-                        <button type="button" onClick={() => toggleMemberRole(m.user.id, r.id, false)} disabled={busy}>
-                          ×
-                        </button>
-                      )}
-                    </span>
-                  ))}
-                  {canManageRoles && addable.length > 0 && (
-                    <Select
-                      value=""
-                      disabled={busy}
-                      placeholder="+ роль"
-                      ariaLabel="Добавить роль участнику"
-                      title="Добавить роль"
-                      onChange={(v) => v && toggleMemberRole(m.user.id, v, true)}
-                      options={addable.map((r) => ({ value: r.id, label: r.name, dot: r.color ? colorToHex(r.color) : undefined }))}
-                    />
-                  )}
-                </div>
-              </div>
-              {canKick && !isOwner && m.user.id !== selfId && (
-                <button type="button" className="danger-text" onClick={() => kick(m.user.id, m.user.displayName)} disabled={busy}>
-                  кик
+      <div className="role-editor-layout">
+        <section className="role-editor-catalog" aria-label="Каталог ролей">
+          <div className="role-editor-catalog-header">
+            <label className="field" ref={catalogHeading} tabIndex={-1}>
+              Каталог ролей
+              <input type="search" placeholder="Поиск по названию" value={roleQuery}
+                onChange={(event) => setRoleQuery(event.target.value)} />
+            </label>
+            <small>Старшие роли вверху</small>
+          </div>
+          <div className="role-editor-list" ref={catalogList}>
+            {displayRoles.filter((role) => matches(roleWords, roleName(role))).map((role) => {
+              const count = role.managedBotId ? members.filter((m) => m.user.id === role.managedBotId).length : role.isGuests ? members.filter((m) => !!m.user.homeInstance).length
+                : members.filter((m) => m.roleIds.includes(role.id)).length;
+              const active = !creation && selected?.id === role.id;
+              const details = [role.isGuests ? 'Системная роль' : role.managedBotId ? 'Роль бота' : '',
+                role.isEveryone ? 'Все участники' : `Участники: ${count}`].filter(Boolean).join(' · ');
+              return (
+                <button key={role.id} type="button" className="role-editor-entry" aria-current={active ? 'true' : undefined}
+                  onClick={() => {
+                    if (active) {
+                      showDetail();
+                    } else {
+                      void guardLeave(() => { selectRole(role); showDetail(); });
+                    }
+                  }}>
+                  <span className="role-editor-dot" style={{ backgroundColor: role.color ? colorToHex(role.color) : undefined }} />
+                  <span><strong>{roleName(role)}</strong><small>{details}</small></span>
                 </button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+              );
+            })}
+            {!loading && !displayRoles.some((r) => matches(roleWords, roleName(r))) &&
+              <p className="muted">{roleWords.length ? 'Роли не найдены.' : 'На сервере пока нет ролей.'}</p>}
+          </div>
+          {canManageRoles && <button type="button" className="btn primary" disabled={busy || loading} onClick={startCreation}>Создать роль</button>}
+        </section>
+
+        <section className="role-editor-editor" aria-label="Редактор роли">
+          <header className="role-editor-header">
+            <button type="button" className="btn role-editor-back" onClick={closeDetail}>‹ К ролям</button>
+            <h3 tabIndex={-1} ref={editorHeading}>
+              {creation ? 'Новая роль' : selected ? roleName(selected) : loading ? 'Загрузка ролей…' : 'Выберите роль'}
+            </h3>
+            {selected && !creation && (
+              <nav className="role-editor-tabs" aria-label="Разделы редактора">
+                {EDITOR_TABS.map(({ key, label }) => (
+                  <button key={key} type="button" className="btn" aria-current={tab === key ? 'page' : undefined}
+                    onClick={() => { setTab(key); setCreatedId(null); }}>{label}</button>
+                ))}
+              </nav>
+            )}
+          </header>
+
+          <div className="role-editor-body" key={creation ? 'create' : `${selId}-${tab}`}>
+            {creation ? (
+              <>
+                <label className="field">
+                  Название роли
+                  <input value={creation.name} maxLength={80} placeholder="Например, DJ" disabled={busy}
+                    onChange={(e) => setCreation({ ...creation, name: e.target.value })} />
+                </label>
+                <RoleAppearancePicker color={creation.color} roleName={creation.name.trim() || 'Новая роль'}
+                  disabled={busy} onChange={(color) => setCreation({ ...creation, color })} />
+              </>
+            ) : selected && draft && (
+              <>
+                {editBlock && tab !== 'people' && <p className="role-editor-notice">{editBlock}</p>}
+                {createdId === selected.id && (
+                  <div className="role-editor-notice role-editor-next">
+                    <span>Роль создана</span>
+                    <button type="button" className="btn" onClick={() => { setTab('permissions'); setCreatedId(null); }}>Настроить права</button>
+                    <button type="button" className="btn" onClick={() => { setTab('people'); setCreatedId(null); }}>Добавить людей</button>
+                  </div>
+                )}
+                {tab === 'appearance' && (
+                  <>
+                    <label className="field">
+                      Название роли
+                      <input value={draft.name} maxLength={80} disabled={busy || !!editBlock || systemRole}
+                        onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+                      {systemNameWhy && <small>{systemNameWhy}</small>}
+                    </label>
+                    <RoleAppearancePicker color={draft.color} roleName={draft.name} disabled={busy || !!editBlock}
+                      onChange={(color) => setDraft({ ...draft, color })} />
+                    <div className="role-editor-permission">
+                      <div>
+                        <strong id="role-mentionable">Упоминаемая роль</strong>
+                        <p id="role-mentionable-help">{assignmentWhy || 'Упоминание @роли уведомляет её участников.'}</p>
+                      </div>
+                      <Toggle checked={draft.mentionable} disabled={busy || !!editBlock || !!assignmentWhy}
+                        labelledBy="role-mentionable" describedBy="role-mentionable-help"
+                        onChange={(mentionable) => setDraft({ ...draft, mentionable })} />
+                    </div>
+                    {canManageRoles && !selected.isEveryone && (
+                      <div className="role-editor-order">
+                        <span>Порядок роли</span>
+                        {([-1, 1] as const).map((offset) => {
+                          const plan = reorderPlan(selected, offset);
+                          const label = offset === -1 ? 'Выше' : 'Ниже';
+                          return <div key={offset}>
+                            <button className="btn" type="button" disabled={busy || !plan.ids}
+                              aria-describedby={plan.reason ? `role-order-${offset}` : undefined}
+                              onClick={() => { if (plan.ids) void moveRole(plan.ids); }}>{label}</button>
+                            {plan.reason && <small id={`role-order-${offset}`}>{plan.reason}</small>}
+                          </div>;
+                        })}
+                      </div>
+                    )}
+                    {canManageRoles && (
+                      <div className="role-editor-remove">
+                        <button type="button" className="btn danger" onClick={() => deleteRole(selected)}
+                          disabled={busy || !!editBlock || systemRole || botRole}>Удалить роль</button>
+                        {(systemRole || botRole) && <small>{systemRole ? 'Системная роль нужна для правил сервера.' : 'Роль бота удаляется вместе с ботом.'}</small>}
+                      </div>
+                    )}
+                  </>
+                )}
+                {tab === 'permissions' && (
+                  <>
+                    <div className="role-editor-permission">
+                      <div>
+                        <strong id="role-self-assign">Участники с этой ролью могут выдавать её другим</strong>
+                        <p id="role-self-assign-help">{assignmentWhy || adminAssignWhy || 'Для выдачи достаточно иметь эту роль.'}</p>
+                      </div>
+                      <Toggle checked={draft.membersCanAssign && !roleHasAdminPerms}
+                        disabled={busy || !!editBlock || !!assignmentWhy || !!adminAssignWhy}
+                        labelledBy="role-self-assign" describedBy="role-self-assign-help"
+                        onChange={(membersCanAssign) => setDraft({ ...draft, membersCanAssign })} />
+                    </div>
+                    <label className="field">
+                      Поиск по правам
+                      <input type="search" placeholder="Например, микрофон или стрим" value={permQuery}
+                        onChange={(e) => setPermQuery(e.target.value)} />
+                    </label>
+                    {visibleGroups.length === 0 && <p className="muted">Права не найдены.</p>}
+                    {visibleGroups.map(({ title, rows }) => (
+                      <section className="role-editor-group" key={title}>
+                        <h4>{title}</h4>
+                        {rows.map(({ row }) => row)}
+                      </section>
+                    ))}
+                  </>
+                )}
+                {tab === 'people' && (
+                  <RolePeopleEditor {...{ serverId, role: selected, roles, members, selfId, ownerId, canManageRoles }} onChanged={refreshPeople} />
+                )}
+              </>
+            )}
+          </div>
+
+          {(creation || dirty) && (
+            <footer className="role-editor-actions">
+              {!creation && <span role="status">Есть несохранённые изменения</span>}
+              <button type="button" className="btn" disabled={busy} onClick={() => {
+                if (creation && phone) {
+                  focusTarget.current = 'catalog';
+                  setMobileDetail(false);
+                }
+                resetDraft();
+              }}>Отменить</button>
+              <button type="button" className="btn primary" disabled={busy || (creation
+                ? !creation.name.trim() || !canManageRoles
+                : !!editBlock || !draft?.name.trim())}
+                onClick={() => { void (creation ? createRole() : saveRole()); }}>
+                {creation ? 'Создать роль' : 'Сохранить'}
+              </button>
+            </footer>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

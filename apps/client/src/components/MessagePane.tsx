@@ -2543,6 +2543,9 @@ export function MessagePane({
    * `voiceHoldController.ts` (без React, вынос для тестов 22.09); пороги жеста — `voiceHold.ts`. Здесь
    * только перевод событий указателя и отрисовка состояния.
    */
+  const composerBlocked = !!composerReplacement;
+  const composerBlockedRef = useRef(composerBlocked);
+  composerBlockedRef.current = composerBlocked;
   const onSendVoiceRef = useRef(onSendVoice);
   onSendVoiceRef.current = onSendVoice;
   /** «Прослушать один раз» включено для этой записи (G54) — сбрасывается, когда записи нет. */
@@ -2621,6 +2624,7 @@ export function MessagePane({
           // Кружок не режется (ручек у него нет).
           const sel = take.round ? null : trimSelRef.current;
           const once = voiceOnceRef.current;
+          if (composerBlockedRef.current) return;
           const sendVoice = onSendVoiceRef.current;
           const uploadFeed = feedNow.current;
           const uploadGeneration = recordedUploadGeneration.current;
@@ -3738,7 +3742,7 @@ export function MessagePane({
   useEffect(() => {
     if (!crossReply || !outbox || !quoteOn) return;
     useStore.getState().setCrossReply(null);
-    if (readOnly) return;
+    if (readOnly || composerBlocked) return;
     setReplyingTo(crossReply.message);
     setReplyExtra({ id: crossReply.message.id, quote: crossReply.quote, foreign: true });
     inputRef.current?.focus();
@@ -3753,7 +3757,7 @@ export function MessagePane({
   useEffect(() => {
     if (!sharedIn) return;
     useStore.getState().setSharedIn(null);
-    if (readOnly) return void toast('info', 'В эту беседу писать нельзя');
+    if (readOnly || composerBlocked) return void toast('info', 'В эту беседу писать нельзя');
     // Идёт правка сообщения: поле занято её текстом, вложение к правке не прицепить (`addFiles`) — не мешаем их.
     if (composerEdit) return void toast('info', 'Сначала закончите правку сообщения');
     const add = sharedIn.text;
@@ -4934,7 +4938,7 @@ export function MessagePane({
    * поэтому ломалось не всегда.
    */
   function addFiles(list: FileList | File[] | null, opts?: { box?: boolean; way?: Partial<SendWay>; caption?: string }) {
-    if (!list || list.length === 0) return;
+    if (composerBlockedRef.current || !list || list.length === 0) return;
     if (filesBlocked) return void toast('info', filesBlocked);
     // Правка меняет только текст (#212): новое вложение к ней не прицепить (Telegram Desktop `lng_edit_caption_attach`).
     if (composerEdit) return void toast('info', 'Во время правки сообщения вложения не добавить');
@@ -5051,6 +5055,7 @@ export function MessagePane({
    * над полем. «Позже» кладёт файлы на полосу и открывает выбор времени: отложенное — одно сообщение, способ не применяется.
    */
   async function sendFromBox(r: SendFilesResult) {
+    if (composerBlockedRef.current) return;
     if (!outbox) return;
     const content = r.caption.trim();
     const textPlan = sendTextPlan(content, true);
@@ -5165,6 +5170,7 @@ export function MessagePane({
    * как и у «Отправить»), подпись — его текст (`scheduleDraft`). Без признака пункты в листе серые и сюда не приходят.
    */
   function onMediaSend(files: File[], caption: string, how: MediaSendHow) {
+    if (composerBlockedRef.current) return;
     // Одноразовое фото/видео (#226, меню удержания «Отправить» галереи): одно сообщение с одним файлом, мимо поля ввода.
     if (typeof how === 'object' && 'once' in how) {
       if (!outbox || files.length !== 1) return;
@@ -5212,6 +5218,7 @@ export function MessagePane({
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
+    if (composerBlocked) return;
     if (composerEdit) return void saveComposerEdit();
     const content = text.trim();
     if (!content && pending.length === 0) {
@@ -5307,7 +5314,7 @@ export function MessagePane({
    */
   function sendBotCommand(cmd: string) {
     const content = cmd.trim();
-    if (!content || !(botPeer || botChannelId)) return;
+    if (composerBlocked || !content || !(botPeer || botChannelId)) return;
     dropUnreadLine();
     requestAnimationFrame(() => stickDown());
     if (fwRef.current?.hasNewer) void goLatest();
@@ -5456,6 +5463,7 @@ export function MessagePane({
   const onCancelRow = useRef((key: string) => cancelSendingRef.current(key)).current;
 
   function retryOutgoing(key: string) {
+    if (composerBlocked) return;
     const item = outgoing.find((o) => o.key === key);
     if (!item || item.status !== 'failed') return;
     setOutgoing((o) => outgoingRetry(o, key));
@@ -5463,7 +5471,7 @@ export function MessagePane({
   }
 
   function startReply(m: Message, quote: ReplyQuoteDraft | null = null, ev?: { ctrlKey?: boolean; metaKey?: boolean }) {
-    if (readOnly) return;
+    if (readOnly || composerBlocked) return;
     // Ctrl + «Ответить» (Telegram Desktop `replyToMessage(forceAnotherChat)`, 7.02) — ответ в другой беседе.
     if (quoteOn && (ev?.ctrlKey || ev?.metaKey)) return void setReplyElsewhere({ m, quote });
     // Идёт правка: ответ ложится в черновик, отложенный на время правки, и появится после неё (Telegram Desktop
@@ -6603,7 +6611,7 @@ export function MessagePane({
 
   /** «Изменить» (меню, кнопка у строки, клавиша E): правка в основном поле ввода — везде, и пальцем, и мышью (решение 31, как Telegram). */
   function editFromMenu(m: Message) {
-    if (readOnly) return;
+    if (readOnly || composerBlocked) return;
     startComposerEdit(m);
   }
 
@@ -8005,6 +8013,22 @@ export function MessagePane({
   // Уходим со страницы посреди записи — глушим микрофон и отпускаем прослушивание (см. `dispose`).
   useEffect(() => () => voice.dispose(), [voice]);
 
+  // Права могут отозвать во время записи или выбора вложения. Текстовый черновик остаётся в поле до возврата права.
+  useEffect(() => {
+    if (!composerBlocked) return;
+    if (voice.getState().preview) voice.discardPreview();
+    else if (voice.active()) voice.cancel();
+    setPicker((current) => current?.kind === 'composer' ? null : current);
+    setMediaOpen(false);
+    setPlusAnchor(null);
+    setAttachAnchor(null);
+    setPollOpen(false);
+    if (boxNow.current) closeBox(boxNow.current.caption);
+    setDragOver(false);
+    setDropInfo(null);
+    dragDepth.current = 0;
+  }, [composerBlocked, voice]);
+
   /* Черновик голосового (08.10, G54; tdesktop: запись в прослушивании переживает смену беседы). Прослушивание
      кладётся черновиком ленты СРАЗУ (память + IndexedDB, `voiceDrafts.ts`) и обновляется с ручками и «один раз»; уход
      (`leaveGuard` → `detachPreview`) лишь отпускает микрофон. Отправил, выбросил или продолжил запись — черновик уходит.
@@ -8188,7 +8212,7 @@ export function MessagePane({
 
   // Какие действия есть в этом чате. Одни и те же условия у кнопок строки ввода (компьютер) и у
   // пунктов шторки «+» (телефон) — иначе на одном из экранов всплыло бы действие, которого тут нет.
-  const micAvailable = !!onSendVoice && voiceRecordingSupported();
+  const micAvailable = !composerBlocked && !!onSendVoice && voiceRecordingSupported();
   const canVoice = micAvailable && !recording && !preview;
   phoneLayoutRef.current = phoneLayout;
 
@@ -8641,6 +8665,7 @@ export function MessagePane({
   /** Отправить стикер. Открытый пикер закрываем СРАЗУ: ждать сети с раскрытой панелью — это залипание. */
   async function sendSticker(s: Sticker) {
     setPicker(null);
+    if (composerBlocked) return;
     try {
       await onSendSticker?.(s.id);
       onStickerUsed?.(s);
@@ -8835,7 +8860,7 @@ export function MessagePane({
       style={exprUnder ? ({ '--expr-lift': `${liftExtra}px` } as CSSProperties) : undefined}
       onDragEnter={(e) => {
         // Текст из другого поля тоже «перетаскивается» — рамку показываем только для файлов.
-        if (![...e.dataTransfer.types].includes('Files') || filesBlocked) return;
+        if (composerBlocked || ![...e.dataTransfer.types].includes('Files') || filesBlocked) return;
         dragDepth.current += 1;
         setDragOver(true);
         // Две зоны броска (G37): в `dragenter` видны только типы файлов, по ним и выбираем вид (`dropKind`).
@@ -8866,6 +8891,7 @@ export function MessagePane({
         const way = dropInfo && dropInfo.kind !== 'files' ? wayForZone(dropInfo.zone) : undefined;
         setDropInfo(null);
         // Папка (ровно одна) собирается в `<папка>.zip` и встаёт в окно отправки как один файл (`folderZip.ts`); без папок — как раньше.
+        if (composerBlocked) return;
         const dropFeed = feedId;
         const got = filesBlocked || composerEdit ? Array.from(e.dataTransfer.files) : collectDrop(e.dataTransfer);
         if (Array.isArray(got)) addFiles(got, way ? { way } : undefined);
@@ -9535,7 +9561,7 @@ export function MessagePane({
         </div>
       )}
       {/* Раунд 12, выделение: внизу только панель выделения — прикреплённое, ответ, правка и запись ждут выхода из него. */}
-      {pending.length > 0 && !selecting && !composerEdit && (
+      {!composerBlocked && pending.length > 0 && !selecting && !composerEdit && (
         // Плитки переставляют удержанием и протяжкой пальцем (G49) — свайп «назад» экрана с полосы не начинается.
         <div className="pending-atts" data-no-swipe-back="">
           {pending.map((f, i) => {
@@ -9823,7 +9849,7 @@ export function MessagePane({
           />
         </ContextMenu>
       )}
-      {selecting ? null : composerEdit ? (
+      {selecting || composerBlocked ? null : composerEdit ? (
         /* Правка в поле (#212; с решения 31 — и на ПК) — плашка на месте строки ответа: исходный текст перед глазами одной
            строкой, нажатие — к сообщению, ✕ отменяет (изменённый текст — с вопросом). */
         <div
@@ -11136,7 +11162,7 @@ export function MessagePane({
              Закрепить · Изменить · Удалить). Каналы держат порядок ПК везде. */
           const androidOrder = bubbles && phoneUi();
           const editItem =
-            !readOnly && mine && !m.forwardedFrom && !m.sticker && !convMediaOf(m as { media?: unknown }) ? (
+            !composerBlocked && !readOnly && mine && !m.forwardedFrom && !m.sticker && !convMediaOf(m as { media?: unknown }) ? (
               // Пересланное правке не подлежит (сервер ответит 403) — «Изменить» у него нет.
               <MenuItem
                 icon="edit"

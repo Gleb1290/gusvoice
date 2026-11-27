@@ -91,6 +91,7 @@ async function withKeyboard(check: (f: Fixture) => void | Promise<void>, raw = s
       react: React, 'react/jsx-runtime': jsx, 'react-dom': ReactDOM,
       './config': { config: { apiUrl: 'https://api.client.example.test' } },
       './hotkeys': { isDesktop: () => false },
+      './externalLinks': { openAndroidWebLink: () => false },
       './desktopWindow': { openExternal: () => { throw new Error('R302 веб не зовёт ОС'); } },
       './linkSafety': linkSafety, './dangerousLinkRules': dangerousLinkRules,
       './dangerousLink': { DangerousMessageLink: () => { throw new Error('R302 неиспользуемая граница опасной ссылки'); } },

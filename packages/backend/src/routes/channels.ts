@@ -4,14 +4,17 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '../audit.js';
 import { requireAuth } from '../auth.js';
+import { heavyReadBlock, retryMessage } from '../authGuard.js';
+import { canInspectChannelAccess } from '../channelAccessCheck.js';
 import { db } from '../db/index.js';
 import { categories, categoryOverwrites, channelOverwrites, channels, users } from '../db/schema.js';
-import { getChannelAudience, getChannelPermissions, getMemberContext } from '../permissions.js';
+import { getChannelAudience, getChannelPermissions, getMemberContext, inspectChannelAccess } from '../permissions.js';
 import { publishToChannel, publishToServer } from '../realtime.js';
 import { serializeCategory, serializeChannel } from '../serialize.js';
 import { isSupportedImage, putMedia, storageConfigured } from '../storage.js';
 import { id } from '../util.js';
 
+const forceMutedTextOnly = 'принудительное отключение уведомлений доступно только для текстовых каналов';
 const permString = z.string().regex(/^\d+$/);
 const overwriteBody = z.object({ allow: permString.default('0'), deny: permString.default('0') });
 const targetParams = z.object({
@@ -141,12 +144,17 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
         type: z.enum(['text', 'voice']),
         categoryId: z.string().nullable().optional(),
         topic: z.string().max(1024).optional(),
+        forceMuted: z.boolean().optional(),
       })
       .parse(req.body);
 
     const ctx = await getMemberContext(serverId, req.user!.sub);
     if (!ctx) return reply.code(404).send({ error: 'not a member' });
     if (!has(ctx.serverPermissions, Permission.MANAGE_CHANNELS)) return reply.code(403).send({ error: 'forbidden' });
+
+    if (body.forceMuted !== undefined && body.type !== 'text') {
+      return reply.code(400).send({ error: forceMutedTextOnly });
+    }
 
     const count = (await db.select().from(channels).where(eq(channels.serverId, serverId))).length;
     const [row] = await db
@@ -158,6 +166,7 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
         name: body.name,
         type: body.type,
         topic: body.topic ?? null,
+        forceMuted: body.forceMuted,
         position: count,
       })
       .returning();
@@ -167,7 +176,7 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
     await writeAudit(serverId, req.user!.sub, 'channel.create', {
       targetType: 'channel',
       targetId: row.id,
-      data: { name: row.name, type: row.type },
+      data: { name: row.name, type: row.type, forceMuted: channel.forceMuted },
     });
     return reply.code(201).send(channel);
   });
@@ -182,6 +191,7 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
         position: z.number().int().optional(),
         categoryId: z.string().nullable().optional(),
         syncedToCategory: z.boolean().optional(),
+        forceMuted: z.boolean().optional(),
         icon: z
           .string()
           .refine(
@@ -219,12 +229,19 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
 
     // Битрейт есть только у голосового канала: у текстового он ничего не значит, а молча принятое
     // поле потом читается как «настройка есть, просто не работает».
-    if (body.voiceBitrate !== undefined) {
+    if (body.voiceBitrate !== undefined || body.forceMuted !== undefined) {
       const [ch] = await db.select({ type: channels.type }).from(channels).where(eq(channels.id, channelId)).limit(1);
-      if (ch?.type !== 'voice') return reply.code(400).send({ error: 'качество звука есть только у голосового канала' });
+      if (!ch) return reply.code(404).send({ error: 'not found' });
+      if (body.voiceBitrate !== undefined && ch.type !== 'voice') {
+        return reply.code(400).send({ error: 'качество звука есть только у голосового канала' });
+      }
+      if (body.forceMuted !== undefined && ch.type !== 'text') {
+        return reply.code(400).send({ error: forceMutedTextOnly });
+      }
     }
 
     const [row] = await db.update(channels).set(body).where(eq(channels.id, channelId)).returning();
+    if (!row) return reply.code(404).send({ error: 'not found' });
     const channel = serializeChannel(row);
     await publishToChannel(perms.serverId, channel.id, { t: 'channel.update', channel });
     // Re-parenting or (un)syncing to a category can change which members may see the channel.
@@ -355,6 +372,23 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ----- permission overwrites (channel) -----
+
+  app.get('/channels/:id/access-check/:memberId', async (req, reply) => {
+    const { id, memberId } = z.object({ id: z.string(), memberId: z.string() }).parse(req.params);
+    reply.header('Cache-Control', 'no-store');
+    const actorId = req.user!.sub;
+    const actor = await getChannelPermissions(id, actorId);
+    if (!actor || !has(actor.permissions, Permission.VIEW_CHANNEL)) {
+      return reply.code(404).send({ error: 'not found' });
+    }
+    if (!canInspectChannelAccess(actor.permissions)) return reply.code(403).send({ error: 'forbidden' });
+    const retry = await heavyReadBlock(actorId);
+    if (retry) return reply.code(429).header('Retry-After', String(retry)).send({ error: retryMessage(retry) });
+
+    const result = await inspectChannelAccess(id, actor.serverId, memberId);
+    if (!result) return reply.code(404).send({ error: 'not found' });
+    return result;
+  });
 
   // List a channel's overwrites (needs MANAGE_ROLES on the channel).
   app.get('/channels/:id/overwrites', async (req, reply) => {

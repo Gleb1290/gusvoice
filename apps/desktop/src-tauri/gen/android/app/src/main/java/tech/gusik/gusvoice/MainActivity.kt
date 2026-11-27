@@ -444,12 +444,12 @@ class MainActivity : TauriActivity() {
     super.onDestroy()
   }
 
-  /** Ссылка для ACTION_VIEW из моста (`openExternalUri`): только `geo:` и `https:`, иначе null. */
+  /** Ссылка для ACTION_VIEW из моста (`openExternalUri`): геопозиция или абсолютный веб-адрес. */
   private fun safeViewUri(raw: String): Uri? {
-    if (raw.length > 2048) return null
+    if (raw.length > 8192) return null
     val u = try { Uri.parse(raw) } catch (_: Exception) { return null }
     val scheme = u.scheme?.lowercase() ?: return null
-    return if (scheme == "geo" || scheme == "https") u else null
+    return u.takeIf { scheme == "geo" || ((scheme == "https" || scheme == "http") && !u.host.isNullOrBlank()) }
   }
 
   inner class NativeBridge {
@@ -627,21 +627,24 @@ class MainActivity : TauriActivity() {
 
     // Геопозиция в ленте ЛС (G69, 14.10): «открыть во внешних картах» — ACTION_VIEW по `geo:` (приложение карт, как
     // Telegram `LocationActivity` → «Open in…»), нет такого приложения — запасная https-ссылка OpenStreetMap в браузере.
-    // Только схемы `geo` и `https`: страница своя, но мост не открывает что угодно. false — ссылка не принята.
+    // Для веб-ссылок из чата fallback пустой. false — ссылка не принята.
     @JavascriptInterface
     fun openExternalUri(uri: String, fallback: String): Boolean {
       val main = safeViewUri(uri) ?: return false
       val spare = safeViewUri(fallback)
       runOnUiThread {
-        try {
-          startActivity(Intent(Intent.ACTION_VIEW, main))
+        fun open(target: Uri): Boolean = try {
+          val intent = Intent(Intent.ACTION_VIEW, target)
+          if (target.scheme != "geo") intent.addCategory(Intent.CATEGORY_BROWSABLE)
+          startActivity(intent)
+          true
         } catch (_: ActivityNotFoundException) {
-          if (spare != null) {
-            try {
-              startActivity(Intent(Intent.ACTION_VIEW, spare))
-            } catch (_: ActivityNotFoundException) {
-            }
-          }
+          false
+        } catch (_: SecurityException) {
+          false
+        }
+        if (!open(main) && (spare == null || !open(spare))) {
+          android.widget.Toast.makeText(this@MainActivity, "Нет приложения для открытия ссылки", android.widget.Toast.LENGTH_SHORT).show()
         }
       }
       return true

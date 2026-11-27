@@ -164,7 +164,7 @@ export function osNotify(
   body: string,
   onClick?: () => void,
   force = false,
-  opts: { silent?: boolean; group?: string; conv?: string; groupChat?: boolean; dmChat?: boolean; popup?: PopupInfo } = {},
+  opts: { silent?: boolean; group?: string; conv?: string; groupChat?: boolean; dmChat?: boolean; popup?: PopupInfo; canDeliver?: () => boolean } = {},
 ): void {
   if (!osNotifyEnabled() || (!force && windowFocused())) return;
   // «Уведомления из групп» выключены (G38, `push2`) — сообщение группы без всплывашки (звук и счётчик решают свои правила).
@@ -183,7 +183,7 @@ export function osNotify(
   const named = opts.popup && notifyShowsName(notifyPrefs.view) ? opts.popup : undefined;
   // Превью карточки (вид + подпись, `popupPreview` ниже) — только при показе текста; скрыт — строка маски, как у тоста.
   const popup = named?.preview && !notifyShowsText(notifyPrefs.view) ? { ...named, preview: undefined } : named;
-  deliver(n.title, n.body, onClick, opts.silent === true, opts.group, conv, popup);
+  deliver(n.title, n.body, onClick, opts.silent === true, opts.group, conv, popup, opts.canDeliver);
 }
 
 /** Что своему окну уведомлений ПК (G38, ND-07) нужно сверх заголовка и текста: имя чата, автор в группе, аватар. */
@@ -374,7 +374,9 @@ function deliver(
   group?: string,
   conv?: string,
   popup?: PopupInfo | null,
+  canDeliver?: () => boolean,
 ): void {
+  if (canDeliver && !canDeliver()) return;
   if (isTauri()) {
     const t = tauriGlobal();
     // Свои окна ПК (G38, ND-07): карточку рисует окно `notify`, действия приходят тем же `gv://notify-action`, что у тоста
@@ -395,7 +397,7 @@ function deliver(
         group,
         fallback: () => {
           clickHandlers.delete(tag);
-          deliver(title, body, onClick, silent, group, conv, null);
+          deliver(title, body, onClick, silent, group, conv, null, canDeliver);
         },
       });
       if (shown) return;
@@ -411,7 +413,7 @@ function deliver(
         core.invoke('gv_notify_clickable', { title, body, tag }).catch(() => {
           // Сборка без команды — показываем тостом плагина, как раньше (без клика).
           clickHandlers.delete(tag);
-          deliverViaPlugin(title, body);
+          deliverViaPlugin(title, body, canDeliver);
         });
       // Беседа (Р1, G17): тост с полем ответа и «Прочитано»; сборка без команды — кликабельный, как раньше.
       if (conv) listenNotifyActions(t.event);
@@ -419,7 +421,7 @@ function deliver(
       else void clickable();
       return;
     }
-    deliverViaPlugin(title, body);
+    deliverViaPlugin(title, body, canDeliver);
     return;
   }
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -460,11 +462,11 @@ function deliver(
   }
 }
 
-function deliverViaPlugin(title: string, body: string): void {
+function deliverViaPlugin(title: string, body: string, canDeliver?: () => boolean): void {
   void (async () => {
     try {
       const { isPermissionGranted, sendNotification } = await import('@tauri-apps/plugin-notification');
-      if (await isPermissionGranted()) sendNotification({ title, body });
+      if (await isPermissionGranted() && (!canDeliver || canDeliver())) sendNotification({ title, body });
     } catch {
       /* plugin absent in this build — skip */
     }

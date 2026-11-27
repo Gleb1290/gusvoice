@@ -68,7 +68,13 @@ export function vadOpenLevel(floor: number): number {
  * ⚠️ Первый замер становится полом: начни мы с нуля, у человека с шумным фоном обводка горела бы первые
  * секунды после входа. Если первый замер пришёлся на речь — первый же провал между слогами (~0.2 с) опустит пол.
  */
-export function vadStep(s: VadState, level: number, now: number): { state: VadState; speaking: boolean } {
+export function vadStep(s: VadState, level: number, now: number, botAudio = false): { state: VadState; speaking: boolean } {
+  if (botAudio) {
+    // Цифровая дорожка бота не собирает шум комнаты. Ровная музыка сама стала бы «полом» речевого VAD.
+    const open = level >= VAD.MIN_OPEN;
+    const lastAbove = open ? now : s.lastAbove;
+    return { state: { ...s, open, lastAbove }, speaking: now - lastAbove < 1500 };
+  }
   let mins = s.mins;
   let cur = s.cur;
   let curStart = s.curStart;

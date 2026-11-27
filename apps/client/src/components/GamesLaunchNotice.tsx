@@ -1,6 +1,6 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense } from 'react';
 import { launchStorage, readLaunchSeen, writeLaunchSeen } from '../economy';
-import { launchNoticeDue, type GamesLaunchNotice as Notice } from '../gamesLaunchRules';
+import type { GamesLaunchNotice as Notice } from '../gamesLaunchRules';
 import { registerBuiltinSound } from '../sounds';
 import { useStore } from '../store';
 
@@ -12,9 +12,8 @@ import { useStore } from '../store';
  * Модуль ленивый (как «Итоги»): `MainLayout` монтирует хост (`GamesLaunchHost`, экспорт по умолчанию) только когда
  * сцена может понадобиться и не поверх других окон, — так у раскладки нет ни одного нового статического импорта
  * (её проверки держат закрытый перечень). Сама сцена — ЕЩЁ один ленивый кусок (кадры ~0,5 МБ качаются только при показе).
- * Что показать: событие `games.launched` (`sockets.ts` → `gamesLaunchNotice` в сторе) — сразу; иначе при входе на
- * запущенный сервер, пока сцену там не видели (`gamesLaunchRules.launchNoticeDue`, окна «7 суток» больше нет — владелец
- * 29.10, п. 14); повтор из «Активностей» («Что это у нас?», `replay`) — всегда и без строки о подарке. Закрытие ЛЮБЫМ
+ * Сцену открывает живое событие `games.launched` или ручной повтор из «Активностей». Снимок кошелька
+ * содержит исторический подарок и не инициирует показ. Закрытие любым
  * способом = «видел» (`localStorage`, `writeLaunchSeen`; `sessionSkipped` — страховка на сессию, если хранилище
  * недоступно). «Запустить» в финале открывает «Активности» сервера. Горн, выстрелы и рында — в самой сцене.
  */
@@ -51,27 +50,15 @@ const GamesLaunchScene = lazy(() => import('./GamesLaunchScene'));
 /** Закрытые в этой сессии серверы — если `localStorage` недоступен, карточка не всплывёт второй раз до перезагрузки. */
 const sessionSkipped = new Set<string>();
 
-/**
- * Хост карточки: по событию (не тому, кто уже видел; запустивший — как все) или сама при входе
- * на текущий сервер. Ворота «не поверх других окон» держит `MainLayout`, монтируя хост.
- */
 export default function GamesLaunchHost() {
   const requested = useStore((s) => s.gamesLaunchNotice);
   const setRequested = useStore((s) => s.setGamesLaunchNotice);
-  const serverId = useStore((s) => s.bootstrap?.server.id ?? null);
-  const view = useStore((s) => (s.bootstrap ? s.economy[s.bootstrap.server.id] : undefined));
-  const [, rerender] = useState(0);
   const store = launchStorage();
   // Повтор из «Активностей» — всегда (и без подарка: его ставит сама кнопка); событие — тем, кто сцену ещё не видел.
-  const fromEvent =
+  const notice =
     requested && (requested.replay || (!sessionSkipped.has(requested.serverId) && !readLaunchSeen(store, requested.serverId)))
       ? requested
       : null;
-  const auto =
-    serverId && view?.enabled && view.gamesEnabled && !sessionSkipped.has(serverId)
-      ? launchNoticeDue(serverId, view.gamesLaunch, readLaunchSeen(store, serverId))
-      : null;
-  const notice = fromEvent ?? auto;
   const cardView = useStore((s) => (notice ? s.economy[notice.serverId] : undefined));
   if (!notice) return null;
   return (
@@ -82,7 +69,6 @@ export default function GamesLaunchHost() {
       onClose={() => {
         sessionSkipped.add(notice.serverId);
         setRequested(null);
-        rerender((n) => n + 1);
       }}
     />
   );

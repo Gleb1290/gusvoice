@@ -4,6 +4,7 @@ import {
   bigint,
   bigserial,
   boolean,
+  check,
   foreignKey,
   index,
   integer,
@@ -374,7 +375,10 @@ export const channels = pgTable('channels', {
   generalUserId: text('general_user_id').references(() => users.id, { onDelete: 'set null' }),
   // Качество звука голосового канала в кбит/с (#101). NULL = умолчание из shared/voiceQuality.ts.
   voiceBitrate: integer('voice_bitrate'),
-});
+  forceMuted: boolean('force_muted').notNull().default(false),
+}, (t) => ({
+  forceMutedTextOnly: check('channels_force_muted_text_only', sql`NOT ${t.forceMuted} OR ${t.type} = 'text'`),
+}));
 
 // Per-channel custom sound overrides — same shape as server_sounds; resolved channel -> server -> synth.
 export const channelSounds = pgTable(

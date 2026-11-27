@@ -24,9 +24,15 @@ const curlStub = String.raw`#!/usr/bin/env bash
 set -eu
 trap 'echo "curl-fixture-error:$?" >> "$FIXTURE_ERRORS"' ERR
 printf 'curl %s\n' "$*" >> "$FIXTURE_CALLS"
-out=''; url=''
+out=''; url=''; format=''
 while [ "$#" -gt 0 ]; do
-  case "$1" in -o) out="$2"; shift ;; --connect-timeout|--max-time) shift ;; -*) ;; *) url="$1" ;; esac
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -w) format="$2"; shift ;;
+    --proto|--proto-redir|--connect-timeout|--max-time) shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
   shift
 done
 if [ "${'${'}STUB_BUILDS_FAIL:-0}" = 1 ] && [ "$url" = "$GV_MAPS_BUILDS_URL" ]; then exit 22; fi
@@ -35,7 +41,10 @@ case "$url" in
   https://github.com/protomaps/go-pmtiles/releases/download/*)
     [ -n "$out" ] && [ -f "$FIXTURE_TOOL_ARCHIVE" ] || { echo tool-archive-missing >> "$FIXTURE_ERRORS"; exit 98; }
     cp "$FIXTURE_TOOL_ARCHIVE" "$out" ;;
-  https://github.com/Gleb1290/gusvoice/archive/refs/heads/main.tar.gz)
+  https://github.com/Gleb1290/gusvoice/releases/latest)
+    [ "$out" = /dev/null ] && [ "$format" = '%{url_effective}' ]
+    printf 'https://github.com/Gleb1290/gusvoice/releases/tag/v0.9.0' ;;
+  https://github.com/Gleb1290/gusvoice/archive/refs/tags/v0.9.0.tar.gz)
     [ -f "$FIXTURE_UPDATE_ARCHIVE" ] || { echo update-archive-missing >> "$FIXTURE_ERRORS"; exit 98; }
     cat "$FIXTURE_UPDATE_ARCHIVE" ;;
   *) echo "unexpected-curl:$url" >> "$FIXTURE_ERRORS"; exit 98 ;;
@@ -77,14 +86,48 @@ printf 'docker %s\n' "$*" >> "$FIXTURE_CALLS"
 case "$1" in
   compose)
     shift
-    while [ "${'${'}1:-}" = --profile ]; do shift 2; done
-    case "$1" in
-      version|pull|up|restart|logs) ;;
-      ps) case "$*" in *backend*) printf 'synthetic-backend\n' ;; esac ;;
+    compose_file=docker-compose.yml
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --profile|--project-directory|--env-file) shift 2 ;;
+        -f) compose_file="$2"; shift 2 ;;
+        *) break ;;
+      esac
+    done
+    case "$*" in
+      version|pull|restart|logs\ *) ;;
+      up\ *) [ "${'${'}TAG:-latest}" = latest ] || printf '%s\n' "$TAG" > "$FIXTURE_VERSION" ;;
+      'config --images')
+        [ "$compose_file" = - ]
+        cat >/dev/null
+        printf 'gusvoice-update-policy/caddy-0:latest\n' ;;
+      'config --quiet') [ -s "$compose_file" ] ;;
+      'config --services') printf 'postgres\nredis\nbackend\npresence\nclient\n' ;;
+      'config backend'|'config presence'|'config client')
+        printf 'services:\n  redis:\n    image: redis:fixture\n  %s:\n    image: ghcr.io/owner/gusvoice/%s:%s\n' "$2" "$2" "$TAG" ;;
+      'ps -a -q backend'|'ps -q backend') printf 'synthetic-backend\n' ;;
+      'ps -a -q postgres') printf 'synthetic-postgres\n' ;;
+      ps) ;;
       *) echo "unexpected-compose:$*" >> "$FIXTURE_ERRORS"; exit 98 ;;
     esac ;;
+  image)
+    case "$*" in
+      'image inspect -f '*':v0.9.0') printf 'v0.9.0\n' ;;
+      *) echo "unexpected-image:$*" >> "$FIXTURE_ERRORS"; exit 98 ;;
+    esac ;;
   inspect)
-    case "$*" in *Config.Env*) printf 'GV_VERSION=v0.9.0\n' ;; *Health*) printf 'healthy\n' ;; *) printf '0\n' ;; esac ;;
+    case "$*" in
+      *Config.Env*' synthetic-backend') cat "$FIXTURE_VERSION" ;;
+      *Health*' synthetic-backend') printf 'healthy\n' ;;
+      *State.Running*' synthetic-postgres') printf 'true\n' ;;
+      *) echo "unexpected-inspect:$*" >> "$FIXTURE_ERRORS"; exit 98 ;;
+    esac ;;
+  exec)
+    case "$*" in
+      'exec synthetic-postgres '*pg_database_size*) printf '1024\n' ;;
+      'exec synthetic-postgres '*pg_dump*) printf 'synthetic database dump\n' ;;
+      *) echo "unexpected-exec:$*" >> "$FIXTURE_ERRORS"; exit 98 ;;
+    esac ;;
   *) echo "unexpected-docker:$*" >> "$FIXTURE_ERRORS"; exit 98 ;;
 esac
 `;
@@ -127,12 +170,15 @@ function run(body: string, opts: Options = {}): Observation {
   try {
     put('deploy/maps/maps-install.sh', opts.source ?? library);
     put('update.sh', opts.updateSource ?? updater);
-    put('docker-compose.yml', '# synthetic compose; docker is stubbed\n');
+    const compose = '# synthetic compose; docker is stubbed\n';
+    put('docker-compose.yml', compose);
+    put('backend-version', 'v0.8.0\n');
     put('.env', 'FOO=1\nBAR=a b\nMINIO_ACCESS_KEY=synthetic\nUSE_CADDY=0\nTAG=latest\n');
     put('builds.json', '[{"key":"20261012.pmtiles"},{"key":"20261014.pmtiles"},{"key":"20261013.pmtiles"}]');
     put('bin/curl', curlStub, true);
     put('bin/pmtiles', pmtilesStub, true);
     put('bin/docker', dockerStub, true);
+    if (process.platform === 'win32') put('bin/flock', '#!/usr/bin/env bash\n[ "$*" = "-n 9" ]\n', true);
     for (const command of ['git', 'wget', 'ssh', 'scp', 'pg_dump', 'psql', 'systemctl']) {
       put(`bin/${command}`, '#!/usr/bin/env bash\nprintf "forbidden-command:%s\\n" "$0" >> "$FIXTURE_ERRORS"\nexit 98\n', true);
     }
@@ -151,6 +197,10 @@ case "$*" in '-u -d yesterday +%Y%m%d'|'-u -v-1d +%Y%m%d') printf '20261013\n' ;
       put('regions/FRA.geojson', readFileSync(join(regions, 'FRA.geojson'), 'utf8'));
     }
     if (opts.archive) {
+      put('archive/gusvoice-synthetic/docker-compose.yml', compose);
+      put('archive/gusvoice-synthetic/update.sh', updater);
+      put('archive/gusvoice-synthetic/config/Caddyfile.default', '# synthetic Caddyfile\n');
+      put('archive/gusvoice-synthetic/config/livekit.yaml.default', '# synthetic LiveKit config\n');
       put('archive/gusvoice-synthetic/deploy/maps/maps-install.sh', opts.source ?? library);
       put('archive/gusvoice-synthetic/deploy/maps/copied.txt', 'synthetic-deploy\n');
     }
@@ -165,7 +215,7 @@ case "$*" in '-u -d yesterday +%Y%m%d'|'-u -v-1d +%Y%m%d') printf '20261013\n' ;
       FIXTURE_BUILDS: unix(join(dir, 'builds.json')), FIXTURE_CALLS: unix(join(dir, 'calls')),
       FIXTURE_ERRORS: unix(join(dir, 'fixture-errors')), FIXTURE_ONCE: unix(join(dir, 'once')),
       FIXTURE_TOOL_ARCHIVE: unix(join(dir, 'tool.tar.gz')), FIXTURE_UPDATE_ARCHIVE: unix(join(dir, 'update.tar.gz')),
-      STUB_LOG: unix(join(dir, 'pmtiles-calls')),
+      STUB_LOG: unix(join(dir, 'pmtiles-calls')), FIXTURE_VERSION: unix(join(dir, 'backend-version')),
       TMPDIR: unix(join(dir, 'tmp')),
       ...opts.env,
     });
@@ -228,6 +278,10 @@ counterfact(() => {
   `контрфакт должен падать именно на ${message}`);
 });
 }
+const panelUpdate: Options = {
+  update: true, archive: true, args: ['--from-panel'], input: 'y\nDE\ny\n14\n',
+  files: { 'run/request/update': 'v0.9.0\n', 'run/status/fixture': 'synthetic' },
+};
 const eq = (actual: unknown, expected: unknown, message: string) => assert.strictEqual(actual, expected, message);
 const meta = (o: Observation) => Object.fromEntries((o.files['maps/map.meta'] ?? '').trim().split('\n').filter(Boolean)
   .map((line) => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]; }));
@@ -451,8 +505,7 @@ maps_get_pmtiles; emit cached_rc "$?"`, { toolArchive: true, env: { STUB_ARCH: a
       { args: ['--images-only', '--no-db-backup'] },
       { args: ['--images-only', '--no-db-backup', '-y'], input: 'y\nDE\ny\n14\n' },
       { args: ['--images-only', '--no-db-backup', '--no-map'], input: 'y\nDE\ny\n14\n' },
-      { args: ['--images-only', '--no-db-backup', '--from-panel'], input: 'y\nDE\ny\n14\n',
-        files: { 'run/request/update': 'v0.9.0\n', 'run/status/fixture': 'synthetic' } },
+      panelUpdate,
     ];
     for (const options of variants) {
       const o = run('', { ...options, update: true });
@@ -469,7 +522,7 @@ maps_get_pmtiles; emit cached_rc "$?"`, { toolArchive: true, env: { STUB_ARCH: a
     const o = run('', opts);
     eq(o.status, 0, 'updater:map-exit'); eq(o.files['maps/map.pmtiles'], 'PMTILES-stub zoom=14\n', 'updater:map-created');
     eq(o.files['maps/.declined'], undefined, 'updater:decline-cleared');
-    assert.ok(o.calls.some((line) => line.endsWith(' up -d backend')), 'backend must pick up changed env');
+    assert.ok(o.calls.some((line) => / up -d (?:--no-build --pull never )?backend$/.test(line)), 'backend must pick up changed env');
     const off = run('', { ...opts, args: [...opts.args!, '--no-map'] });
     eq(off.status, 0, 'updater:no-map-exit'); eq(off.pmtiles.length, 0, 'updater:no-map-tool');
     eq(off.files['maps/.declined'], 'synthetic-old-decline', 'updater:no-map-preserves');
@@ -634,13 +687,11 @@ describe('R227/R229 — original-first контрфакты полного shell
     const check = (o: Observation) => eq(o.output.includes('Add the map?'), false, 'mutant:updater-no-ask');
     counterfactual(body, '[ "$FROM_PANEL" = "0" ] && maps_can_ask', '',
       { update: true, input: 'y\nDE\ny\n14\n', args: ['--images-only', '--no-db-backup', '-y'] }, check, 'mutant:updater-no-ask', { actual: true, expected: false }, updater);
-    counterfactual(body, 'maps_can_ask', '', { update: true, input: 'y\nDE\ny\n14\n', args: ['--images-only', '--no-db-backup', '--from-panel'],
-      files: { 'run/request/update': 'v0.9.0\n', 'run/status/fixture': 'synthetic' } }, check, 'mutant:updater-no-ask', { actual: true, expected: false }, updater);
+    counterfactual(body, 'maps_can_ask', '', panelUpdate, check, 'mutant:updater-no-ask', { actual: true, expected: false }, updater);
   });
   it('забытый deploy выявляется отсутствующим файлом после настоящего обновления', () => {
     // Статический grep cp не доказывает, что deploy попал в установленную коробку.
-    const anchor = '[ -d "$new/deploy" ] && { mkdir -p deploy; cp -Rf "$new/deploy/." deploy/ 2>/dev/null || true; }';
-    counterfactual(anchor, ':', '', { update: true, archive: true, args: ['--no-db-backup', '--no-map'] },
+    counterfactual('for dir in docs deploy; do', 'for dir in docs; do', '', { update: true, archive: true, args: ['--no-db-backup', '--no-map'] },
       (o) => eq(o.files['deploy/maps/copied.txt'], 'synthetic-deploy\n', 'mutant:deploy-copy'), 'mutant:deploy-copy', { actual: undefined, expected: 'synthetic-deploy\n' }, updater);
   });
   it('перепутанные файлы main/all ловятся выполненным extract, а не именем PART', () => {

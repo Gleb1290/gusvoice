@@ -13,6 +13,7 @@ import * as roleRules from '../src/roleRules.js';
 import * as botRules from '../src/bots/botRules.js';
 import * as botWire from '../src/bots/botWire.js';
 import * as audienceRules from '../src/audienceRules.js';
+import * as channelAccessCheck from '../src/channelAccessCheck.js';
 import * as attachmentRules from '../src/attachmentRules.js';
 import * as convRules from '../src/convRules.js';
 import * as webhookRules from '../src/webhookRules.js';
@@ -50,7 +51,7 @@ export async function serverFixture(t: TestDb, edit?: Phase3Edit, extra: { real?
   const noop = async () => {};
   const values: Record<string, unknown> = {
     'db/index': { db: t.db }, 'db/schema': schema, 'bots/botRules': botRules, 'bots/botWire': botWire,
-    roleRules, audienceRules, attachmentRules, convRules, webhookRules, superAdminRules, statusRules, shopRules, callRules, lastSeenRules, setupRules, storageRules,
+    roleRules, audienceRules, channelAccessCheck, attachmentRules, convRules, webhookRules, superAdminRules, statusRules, shopRules, callRules, lastSeenRules, setupRules, storageRules,
     auth: { isSuperAdmin: () => false, superAdminId: () => null, requireAuth: async (req: FastifyRequest) => { req.user = { sub: String(req.headers['x-user'] ?? 'owner') } as NonNullable<FastifyRequest['user']>; } },
     guestGuard: { requireLocalUser: async () => {} },
     env: { env: { redisUrl: 'redis://unused.invalid', linkThreats: { enabled: false } } },

@@ -1,5 +1,6 @@
 import { CAP_CONV1, mentionsMe, type GatewayServerMessage, type UnreadSummary, type User } from '@gusvoice/shared';
 import { instances, rememberInstanceServers, type Instance } from './config';
+import { reconcileUnreadCount } from './channelRules';
 import { PING_MS, socketStale } from './socketHealth';
 
 /**
@@ -216,7 +217,34 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
   }
 
   const socket = new WebSocket(wsUrl(inst.apiUrl));
+  const pendingSummaries = new Map<string, object>();
   link.socket = socket;
+
+  function refreshServerUnread(serverId: string): void {
+    const request = {};
+    pendingSummaries.set(serverId, request);
+    const before = state[link.instanceId]?.servers[serverId];
+    void ask<UnreadSummary>(inst, '/unread')
+      .then((sum) => {
+        if (link.socket !== socket || pendingSummaries.get(serverId) !== request) return;
+        const current = state[link.instanceId];
+        if (!current) return;
+        const live = current.servers[serverId];
+        const snapshot = sum.servers[serverId];
+        const unread = reconcileUnreadCount(snapshot?.unread ?? 0, before?.unread ?? 0, live?.unread ?? 0);
+        const mentions = reconcileUnreadCount(snapshot?.mentions ?? 0, before?.mentions ?? 0, live?.mentions ?? 0);
+        if (unread === (live?.unread ?? 0) && mentions === (live?.mentions ?? 0)) return;
+        const servers = { ...current.servers };
+        if (unread || mentions) servers[serverId] = { unread, mentions };
+        else delete servers[serverId];
+        state[link.instanceId] = { ...current, servers };
+        publish();
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (pendingSummaries.get(serverId) === request) pendingSummaries.delete(serverId);
+      });
+  }
 
   socket.onopen = () => {
     // Нас успели закрыть (человек перешёл на этот инстанс — шлюз ведёт `sockets.ts`).
@@ -270,7 +298,15 @@ async function open(inst: Instance, link: BgLink): Promise<void> {
           });
         return;
       }
+      case 'channel.update': {
+        const { channel } = msg;
+        if (channel.type === 'text' && 'forceMuted' in channel && typeof channel.forceMuted === 'boolean') {
+          refreshServerUnread(channel.serverId);
+        }
+        return;
+      }
       case 'message.create': {
+        if ('forceMuted' in msg && msg.forceMuted === true) return;
         if (link.userId && msg.message.author.id === link.userId) return;
         bump(link.instanceId, msg.serverId, mentionsMe(msg.message.content, link.me.username, link.me.home, msg.message.mentionEveryone !== false));
         return;

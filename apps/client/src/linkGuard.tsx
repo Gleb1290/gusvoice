@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { config } from './config';
 import { isDesktop } from './hotkeys';
 import { openExternal } from './desktopWindow';
+import { openAndroidWebLink } from './externalLinks';
 import { displayUrl, isSuspiciousUrl, rangesVisible, suspiciousRanges } from './linkSafety';
 import { DangerousMessageLink } from './dangerousLink';
 import { isDangerousLink } from './dangerousLinkRules';
@@ -55,6 +56,7 @@ export function shouldWarnAboutLink(url: string): boolean {
 
 /** Open a link the way this platform should: desktop hands it to the OS browser, web opens a tab. */
 export function openLink(url: string) {
+  if (openAndroidWebLink(url)) return;
   if (isDesktop()) {
     void openExternal(url).catch(() => window.open(url, '_blank', 'noopener,noreferrer'));
   } else {

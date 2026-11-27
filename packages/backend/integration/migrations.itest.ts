@@ -12,6 +12,33 @@ import { createTestDb, type TestDb } from './harness.js';
 // оставил бы запрос живым и мог бы закрыть PGlite прямо во время его выполнения.
 const SCENARIO_TIMEOUT_MS = 120_000;
 
+test('политика выключена у старых и новых каналов по умолчанию и включается только для текста', async () => {
+  const raw = new PGlite();
+  try {
+    await raw.exec(`
+      CREATE TABLE channels (id text PRIMARY KEY, type text NOT NULL);
+      INSERT INTO channels VALUES ('old', 'text'), ('voice', 'voice');
+    `);
+    const migration = await readFile(new URL('../drizzle/0171_channel_force_muted.sql', import.meta.url), 'utf8');
+    await raw.exec(migration);
+    await raw.exec("INSERT INTO channels (id, type) VALUES ('new', 'text')");
+    assert.deepEqual((await raw.query('SELECT id, force_muted FROM channels ORDER BY id')).rows, [
+      { id: 'new', force_muted: false },
+      { id: 'old', force_muted: false },
+      { id: 'voice', force_muted: false },
+    ]);
+    await raw.exec("UPDATE channels SET force_muted = true WHERE id = 'old'");
+    assert.deepEqual((await raw.query("SELECT force_muted FROM channels WHERE id = 'old'")).rows, [
+      { force_muted: true },
+    ]);
+    await assert.rejects(raw.exec("UPDATE channels SET force_muted = true WHERE id = 'voice'"), {
+      code: '23514', constraint: 'channels_force_muted_text_only',
+    });
+  } finally {
+    await raw.close();
+  }
+});
+
 test('R131 0134 повторяется и сохраняет метки, старые вставки получают NULL в новых колонках',async()=>{
   // Старый писатель не знает активности; повтор миграции не должен снять живой забор сборки.
   const raw=new PGlite();

@@ -207,19 +207,21 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
         const message = serializeMessage({ ...row, author, replyTo: null });
         // Вход событий канала (#231): людям `message.create`, ботам «читать всё» — `message` (вебхук ботам в режиме приватности не виден).
         await publishChannelMessageEvent(channel.serverId, channel.id, { kind: 'created', message }, author.id);
-        // Пуш упомянутым — как у обычного сообщения канала (`routes/messages.ts`), с тем же гашением очередей.
-        const preview = content || embedsPreview(embeds);
-        void resolveMentionedMembers(content, channel.serverId, author.id, channel.id, mentionRoleIds).then(async (ids) => {
-          if (ids.length === 0) return;
-          const fresh: string[] = [];
-          for (const uid of ids) if (!(await pushDebounced(uid, channel.id))) fresh.push(uid);
-          if (fresh.length === 0) return;
-          return sendPushToUsers(
-            fresh,
-            { type: 'mention', title: name, body: contentPreview(preview, attachments.length), channelId: channel.id, serverId: channel.serverId },
-            { scope: 'server', targetId: channel.serverId },
-          );
-        });
+        // Пуш упомянутым следует той же политике, что и отправка из channelMessages.
+        if (!channel.forceMuted) {
+          const preview = content || embedsPreview(embeds);
+          void resolveMentionedMembers(content, channel.serverId, author.id, channel.id, mentionRoleIds).then(async (ids) => {
+            if (ids.length === 0) return;
+            const fresh: string[] = [];
+            for (const uid of ids) if (!(await pushDebounced(uid, channel.id))) fresh.push(uid);
+            if (fresh.length === 0) return;
+            return sendPushToUsers(
+              fresh,
+              { type: 'mention', title: name, body: contentPreview(preview, attachments.length), channelId: channel.id, serverId: channel.serverId },
+              { scope: 'server', targetId: channel.serverId },
+            );
+          }).catch((err) => req.log.warn({ err }, 'webhook mention push failed'));
+        }
         return query.wait === 'true' ? reply.code(200).send(message) : reply.code(204).send();
       },
     );

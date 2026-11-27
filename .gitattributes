@@ -12,3 +12,6 @@ apps/desktop/vendor/glib/LICENSE whitespace=-blank-at-eof
 docs/bot-api/openapi.json text eol=lf
 # Python-обёртки Bot API генерируются тем же скриптом и сверяются так же.
 packages/bot-sdk-py/gusvoice_bot/_generated.py text eol=lf
+
+/config/Caddyfile export-ignore
+/config/livekit.yaml export-ignore

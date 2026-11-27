@@ -14,6 +14,7 @@
 import { useStore } from './store';
 import { animatedAvatarsEnabled } from './avatarAnimation';
 import { nameFromRoster } from './memberNameRules';
+import { showMicOff, showDeafened } from './voiceRules';
 import { overlayHints, type OverlayHint } from './overlayHints';
 import { getOverlaySettings, onOverlaySettings, setOverlaySettings } from './overlaySettings';
 
@@ -30,6 +31,7 @@ export interface OverlayParticipant {
    */
   animatedAvatarUrl: string | null;
   speaking: boolean;
+  musicPlaying?: boolean;
   muted: boolean;
   deafened: boolean;
 }
@@ -73,14 +75,18 @@ function derive(): { inVoice: boolean; participants: OverlayParticipant[]; hints
   const participants: OverlayParticipant[] = roster.map((p) => {
     const live = s.liveVoice[p.userId];
     const isMe = p.userId === (s.voice?.selfId ?? s.user?.id);
+    const muted = isMe ? s.selfMuted : live ? live.muted : p.muted;
+    const deafened = isMe ? s.selfDeafened : live ? live.deafened : p.deafened;
+    const isBot = p.bot === true;
     return {
       id: p.userId,
       name: p.displayName,
       avatarUrl: p.avatarUrl,
       animatedAvatarUrl: animOn ? (anim.get(p.userId) ?? null) : null,
       speaking: live?.speaking ?? false,
-      muted: isMe ? s.selfMuted : live ? live.muted : p.muted,
-      deafened: isMe ? s.selfDeafened : live ? live.deafened : p.deafened,
+      musicPlaying: isBot && !p.serverMuted && !muted && live?.speaking === true,
+      muted: showMicOff(isBot, muted, p.serverMuted),
+      deafened: showDeafened(isBot, deafened),
     };
   });
   // Ник этого сервера, а не имя из события (#73). Карту строим ОДИН раз на проход: derive зовётся

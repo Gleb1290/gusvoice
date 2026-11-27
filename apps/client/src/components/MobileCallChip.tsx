@@ -32,12 +32,15 @@ export function MobileCallChip() {
   const away = !voiceIsHere(voice);
   const channel = away ? undefined : bootstrap?.channels.find((c) => c.id === voice.channelId);
   const here = away ? [] : (presence[voice.channelId] ?? []);
-  const speaker = here.find((p) => liveVoice[p.userId]?.speaking);
+  const speaker = here.find((p) => !p.bot && liveVoice[p.userId]?.speaking);
+  const playingBot = here.find((p) => p.bot && !p.serverMuted && liveVoice[p.userId]?.speaking);
   // Presence про ники не знает — подставляем из ростера (#73).
   const sub = away
     ? `на «${voice.instanceName || 'другом инстансе'}» · вернуться`
     : speaker
     ? `${nameOf(speaker.userId, speaker.displayName)} говорит`
+    : playingBot
+    ? `${nameOf(playingBot.userId, playingBot.displayName)} играет`
     : here.length
       ? `${here.length} в канале`
       : 'В канале';
@@ -66,7 +69,7 @@ export function MobileCallChip() {
           <span className="cc-dot" />
           {channel?.name ?? (away || voice.temporary ? voice.channelName : 'Голос')}
         </div>
-        <div className="cc-sub">{sub}</div>
+        <div className="cc-sub">{playingBot && <Icon name="music" size={12} title="Бот воспроизводит аудио" />} {sub}</div>
       </div>
       <button
         type="button"

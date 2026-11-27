@@ -880,6 +880,10 @@ function StageTile({
           <span className="stage-status-off" role="img" aria-label="Микрофон выключен" title="Микрофон выключен">
             <Icon name="mic-off" size={15} />
           </span>
+        ) : isBot && speaking && !micMuted ? (
+          <span className="stage-status-music music-playing" role="img" aria-label="Бот воспроизводит аудио" title="Бот воспроизводит аудио">
+            <Icon name="music" size={15} />
+          </span>
         ) : null}
       </div>
     </div>

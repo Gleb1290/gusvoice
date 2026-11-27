@@ -1,5 +1,6 @@
 import { openExternal } from './desktopWindow';
-import { isDesktop } from './hotkeys';
+import { isAndroid, isDesktop } from './hotkeys';
+import { toast } from './toast';
 
 /**
  * Внешние ссылки в десктопе (30.10, повторяющийся баг «кнопка-ссылка не работает»): в WebView2 `<a target="_blank">`
@@ -27,12 +28,29 @@ export function externalLinkHref(e: MouseEvent, origin: string): string | null {
   return url.href;
 }
 
+/** На Android передаём ссылку системе. При отказе моста оставляем чат открытым. */
+export function openAndroidWebLink(raw: string): boolean {
+  if (!isAndroid()) return false;
+  try {
+    const url = new URL(raw);
+    if (url.protocol === 'https:' || url.protocol === 'http:') {
+      const bridge = (window as Window & {
+        GusVoiceNative?: { openExternalUri?: (uri: string, fallback: string) => boolean };
+      }).GusVoiceNative;
+      if (bridge?.openExternalUri?.(url.href, '')) return true;
+    }
+  } catch { /* Показываем общую ошибку, оставляя чат на экране. */ }
+  toast('warn', 'Не удалось открыть ссылку во внешнем приложении');
+  return true;
+}
+
 export function installExternalLinks(): void {
-  if (typeof window === 'undefined' || !isDesktop()) return;
+  if (typeof window === 'undefined' || (!isDesktop() && !isAndroid())) return;
   window.addEventListener('click', (e) => {
     const href = externalLinkHref(e, window.location.origin);
     if (!href) return;
     e.preventDefault();
+    if (openAndroidWebLink(href)) return;
     void openExternal(href).catch(() => {});
   });
 }

@@ -10,6 +10,7 @@ import { createRoot } from 'react-dom/client';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { has, Permission, permsFromString, type Channel } from '@gusvoice/shared';
 import * as stageOrderRules from '../stageOrderRules';
+import * as channelRules from '../channelRules';
 import type { useChannelContextMenu } from './ChannelContextMenu';
 
 const source = readFileSync(new URL('./ChannelContextMenu.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -39,6 +40,7 @@ async function fixture(check: (f: {
   host: HTMLDivElement; writes: boolean[]; storage: Map<string, string>; resets: string[];
   orders(): stageOrderRules.StageOrders;
   open(type: Channel['type'], id?: string): Promise<void>; category(): Promise<void>;
+  update(channel: Channel & { forceMuted?: boolean }): Promise<void>;
   click(): Promise<void>; external(hide: boolean): Promise<void>; item(): HTMLButtonElement | undefined;
   resetItem(): HTMLButtonElement | undefined;
 }) => Promise<void>, raw = source, hide = false, savedChannels: string[] = [],
@@ -53,7 +55,7 @@ async function fixture(check: (f: {
   const saved = new Set(savedChannels); const resets: string[] = [];
   let orders = savedOrders;
   const forbidden = () => { throw new Error('Локальная настройка не вызывает API, вход в канал или подтверждение'); };
-  const state = { bootstrap: { permissions: '0', channels: [], categories: [] }, user: { id: 'self' }, voice: null,
+  const state = { bootstrap: { permissions: '0', channels: [] as Channel[], categories: [] }, user: { id: 'self' }, voice: null,
     openChannel: forbidden, joinVoice: forbidden };
   const deps = { react: React, 'react/jsx-runtime': jsx };
   const prefs = load<typeof import('../stageViewPrefs')>(prefsSource, deps, { localStorage: {
@@ -69,6 +71,7 @@ async function fixture(check: (f: {
       ...deps, '@gusvoice/shared': { has, Permission, permsFromString },
       '../stageViewPrefs': { ...prefs, setHideNoVideo: (next: boolean) => { writes.push(next); prefs.setHideNoVideo(next); } },
       '../stageOrderRules': stageOrderRules,
+      '../channelRules': channelRules,
       '../stageOrderPrefs': { useStageOrder: () => null, saveStageOrder: noop,
         useHasStageOrder: (id: string | null) => !!id && (saved.has(id) || !!orders[id]),
         resetStageOrder: (id: string) => { resets.push(id); saved.delete(id); orders = stageOrderRules.dropStageOrders(orders, id); } },
@@ -100,6 +103,9 @@ async function fixture(check: (f: {
       .find(button => button.querySelector('.ctx-label-main')?.textContent === 'Сбросить раскладку плиток');
     await check({ host, writes, storage, item, resetItem, resets, orders: () => orders,
       open: async (type, id) => { await React.act(async () => { actions.openChannelMenu(event(), channel(type, id)); }); },
+      update: async (next) => { await React.act(async () => {
+        state.bootstrap.channels = [next]; root.render(React.createElement(Probe));
+      }); },
       category: async () => { await React.act(async () => { actions.openCategoryMenu(event(),
         { id: 'category', serverId: 'server', name: 'Категория', position: 0 }); }); },
       click: async () => { const button = item(); assert.ok(!!button, 'пункт существует до нажатия');
@@ -113,6 +119,22 @@ async function fixture(check: (f: {
     else Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
   }
 }
+
+it('уже открытое меню тихого канала скрывает недоступный выбор и восстанавливает личный уровень после снятия политики', () =>
+  fixture(async ({ host, open, update }) => {
+    const item = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('.ctx-item')]
+      .find(button => button.querySelector('.ctx-label-main')?.textContent === label);
+    await open('text');
+    assert.equal(item('Все сообщения')?.classList.contains('active'), true);
+
+    await update({ ...channel('text'), forceMuted: true });
+    assert.equal(item('Тихий канал')?.disabled, true);
+    for (const label of ['Все сообщения', 'Только упоминания', 'Выключить']) assert.equal(item(label), undefined);
+
+    await update({ ...channel('text'), forceMuted: false });
+    assert.equal(item('Тихий канал'), undefined);
+    assert.equal(item('Все сообщения')?.classList.contains('active'), true);
+  }));
 
 async function stateShown(hide: boolean, raw = source) {
   await fixture(async ({ open, item }) => {

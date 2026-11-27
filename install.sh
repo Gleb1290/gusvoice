@@ -90,6 +90,7 @@ yes_no() { # yes_no "Prompt" "Y|N default" -> 0 for yes, 1 for no
 # not. Download the repo tarball (curl + tar — NO git needed) and continue from inside
 # it, so one piped command really installs everything. (./install.sh from a checkout
 # already has the files and skips this.)
+INSTALL_RELEASE=''
 if [ ! -f docker-compose.yml ]; then
   TARGET="${GUSVOICE_DIR:-gusvoice}"
   if [ -f "$TARGET/docker-compose.yml" ]; then
@@ -97,10 +98,32 @@ if [ ! -f docker-compose.yml ]; then
   else
     command -v curl >/dev/null 2>&1 || die "curl is required to fetch GusVoice."
     command -v tar  >/dev/null 2>&1 || die "tar is required to fetch GusVoice."
-    say "Fetching GusVoice…"
-    tmp="$(mktemp -d)"
-    curl -fsSL "https://github.com/Gleb1290/gusvoice/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp" || die "download failed — check the network."
-    rm -rf "$TARGET"; mv "$tmp"/gusvoice-* "$TARGET"; rm -rf "$tmp"
+    [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ] || die "$TARGET exists without a compose file. Choose another GUSVOICE_DIR."
+    STACK_REPO=https://github.com/Gleb1290/gusvoice
+    if [ "$TAG_DEFAULT" = latest ]; then
+      release_url="$(curl --proto '=https' --proto-redir '=https' -fsSL --max-time 30 -o /dev/null \
+        -w '%{url_effective}' "$STACK_REPO/releases/latest" </dev/null)" || die "could not resolve the latest release"
+      INSTALL_RELEASE="${release_url#"$STACK_REPO/releases/tag/"}"
+    else
+      INSTALL_RELEASE="v${TAG_DEFAULT#v}"
+    fi
+    [[ "$INSTALL_RELEASE" =~ ^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]] \
+      || die "bootstrap needs a release TAG (or latest). For a custom tag, start with your own compose."
+    if [ "$TAG_DEFAULT" != latest ]; then TAG_DEFAULT="$INSTALL_RELEASE"; fi
+    say "Fetching GusVoice $INSTALL_RELEASE…"
+    tmp="$(mktemp -d "$(dirname -- "$TARGET")/.gusvoice-install.XXXXXX")"
+    trap 'rm -rf -- "$tmp"' EXIT
+    curl --proto '=https' --proto-redir '=https' -fsSL --max-time 300 \
+      "$STACK_REPO/archive/refs/tags/$INSTALL_RELEASE.tar.gz" </dev/null | tar -xz -C "$tmp" || die "could not download the release"
+    roots=("$tmp"/gusvoice-*)
+    [ "${#roots[@]}" = 1 ] || die "unexpected archive layout"
+    new="${roots[0]}"
+    [ -s "$new/docker-compose.yml" ] && [ -d "$new/config" ] && [ -s "$new/update.sh" ] \
+      || die "the release archive is missing its compose, config or updater"
+    mv -nT -- "$new" "$TARGET"
+    [ ! -e "$new" ] || die "$TARGET appeared while downloading the release"
+    rm -rf -- "$tmp"
+    trap - EXIT
     cd "$TARGET"
   fi
 fi
@@ -119,6 +142,14 @@ fi
 # `</dev/null` (see the docker calls below). Two mechanisms for one problem, where the second can
 # silently run different code, is worse than one that just works. Prompts already read /dev/tty, so
 # they are unaffected.
+
+# Source archives keep template names separate so old panel updaters can copy
+# config/ over a running installation without overwriting its real settings.
+for name in Caddyfile livekit.yaml; do
+  if [ ! -e "config/$name" ] && [ ! -L "config/$name" ]; then
+    cp --no-clobber "config/$name.default" "config/$name" || die "could not install config/$name"
+  fi
+done
 
 # --- Prerequisites (bootstrap Docker if missing) ----------------------------
 say "GusVoice installer"
@@ -325,16 +356,45 @@ if [ "${USE_CADDY:-1}" = "1" ]; then
 else
   PROFILES=(--profile storage --profile push)   # no bundled Caddy — your proxy fronts it
 fi
+OVERRIDE=()
+for file in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
+  if [ -f "$file" ]; then OVERRIDE=(-f "$file"); break; fi
+done
+compose_install() {
+  local image_env=()
+  if [ -n "$INSTALL_RELEASE" ]; then image_env=("TAG=$INSTALL_RELEASE"); fi
+  env "${image_env[@]}" docker compose --env-file .env -f docker-compose.yml "${OVERRIDE[@]}" "${PROFILES[@]}" "$@" </dev/null
+}
+# Compose includes dependency services even when asked to render just one. Pass only the image
+# from the named service's own block to the caller.
+compose_service_image() {
+  awk -v service="$1" '
+    /^services:$/ { services = 1; next }
+    /^[^ ]/ { services = 0 }
+    services && /^  [^ ]/ { selected = ($0 == "  " service ":") }
+    services && selected && /^    image: / { print substr($0, 12) }
+  '
+}
+UP_OPTIONS=()
 say "Pulling images…"
 # ⚠️ Every docker call gets </dev/null: with stdin attached docker DRAINS it, and under `curl | bash`
 # that pipe is the rest of this script. These redirects are the ONLY guard — there is deliberately no
 # re-exec from disk (see the note after the self-bootstrap above).
-docker compose "${PROFILES[@]}" pull --quiet </dev/null || info "(pull skipped — building locally or images not published yet)"
+if [ -n "$INSTALL_RELEASE" ]; then
+  compose_install pull --quiet || die "could not pull the images for $INSTALL_RELEASE"
+  image="$(compose_install config backend | compose_service_image backend)"
+  [ -n "$image" ] || die "could not resolve the backend image"
+  image_version="$(docker image inspect -f '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GV_VERSION"}}{{println (index (split . "=") 1)}}{{end}}{{end}}' "$image" </dev/null)"
+  [ "v${image_version#v}" = "$INSTALL_RELEASE" ] || die "the pulled backend image does not match $INSTALL_RELEASE"
+  UP_OPTIONS=(--no-build --pull never)
+else
+  compose_install pull --quiet || info "(pull skipped — building locally or images not published yet)"
+fi
 say "Starting the stack…"
 # The admin panel's update request/status folders (see update.sh --install-updater). Created here so they belong to
 # this user — left to Docker they'd appear owned by root.
 mkdir -p run/request run/status
-docker compose "${PROFILES[@]}" up -d </dev/null
+compose_install up -d "${UP_OPTIONS[@]}" </dev/null
 
 # --- Create the ntfy publish token (once) -----------------------------------
 # The backend needs a write token to publish wake payloads. anon stays read-only.
@@ -342,20 +402,20 @@ docker compose "${PROFILES[@]}" up -d </dev/null
 if ! grep -q '^NTFY_TOKEN=..' .env; then
   say "Provisioning the ntfy publish token…"
   sleep 5
-  if docker compose "${PROFILES[@]}" exec -T ntfy ntfy user list </dev/null 2>/dev/null | grep -q gusvoice; then
+  if compose_install exec -T ntfy ntfy user list </dev/null 2>/dev/null | grep -q gusvoice; then
     info "ntfy user already exists."
   else
     NTFY_PW="$(gen_secret)"
-    NTFY_PASSWORD="$NTFY_PW" docker compose "${PROFILES[@]}" exec -T -e NTFY_PASSWORD="$NTFY_PW" ntfy \
+    NTFY_PASSWORD="$NTFY_PW" compose_install exec -T -e NTFY_PASSWORD="$NTFY_PW" ntfy \
       ntfy user add --role=user gusvoice </dev/null >/dev/null 2>&1 || info "(ntfy user add failed — provision the token manually)"
-    docker compose "${PROFILES[@]}" exec -T ntfy ntfy access gusvoice 'up*' write </dev/null >/dev/null 2>&1 || true
+    compose_install exec -T ntfy ntfy access gusvoice 'up*' write </dev/null >/dev/null 2>&1 || true
   fi
-  TOKEN="$(docker compose "${PROFILES[@]}" exec -T ntfy ntfy token add gusvoice </dev/null 2>/dev/null | grep -oE 'tk_[A-Za-z0-9]+' | head -n1 || true)"
+  TOKEN="$(compose_install exec -T ntfy ntfy token add gusvoice </dev/null 2>/dev/null | grep -oE 'tk_[A-Za-z0-9]+' | head -n1 || true)"
   if [ -n "$TOKEN" ]; then
     # Portable in-place edit (BSD/GNU sed differ) — rewrite the line.
     grep -v '^NTFY_TOKEN=' .env > .env.tmp && echo "NTFY_TOKEN=${TOKEN}" >> .env.tmp && mv .env.tmp .env
     chmod 600 .env
-    docker compose "${PROFILES[@]}" up -d backend </dev/null
+    compose_install up -d "${UP_OPTIONS[@]}" backend </dev/null
     info "ntfy token stored; backend restarted with push enabled."
   else
     info "Could not auto-create the ntfy token — push is off until you set NTFY_TOKEN in .env."
@@ -365,7 +425,7 @@ fi
 # --- Own map: the download chosen above (needs a running stack only to restart the backend afterwards) ----
 if [ "${MAPS_PLAN_READY:-0}" = "1" ]; then
   maps_apply </dev/null || true
-  if [ "${MAPS_ENV_CHANGED:-0}" = "1" ]; then docker compose "${PROFILES[@]}" up -d backend </dev/null || true; fi
+  if [ "${MAPS_ENV_CHANGED:-0}" = "1" ]; then compose_install up -d "${UP_OPTIONS[@]}" backend </dev/null || true; fi
 fi
 
 # --- "Update" button in the admin panel (systemd watcher) -------------------

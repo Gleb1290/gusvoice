@@ -31,6 +31,7 @@ import { listLinks } from '../federation/links.js';
 import { linkDisplayNames } from '../federation/linkRules.js';
 import { readInstanceMeta } from '../federation/instanceMeta.js';
 import { sendTestEmail } from '../mailer.js';
+import { publishToUser } from '../realtime.js';
 import { serializeUser } from '../serialize.js';
 import { getSmtpConfig, isSmtpConfigured, setSmtpConfig, smtpSource, type SmtpConfig } from '../settings.js';
 import { DM_POLICIES } from '../dmRules.js';
@@ -304,6 +305,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const { canCreateServers } = z.object({ canCreateServers: z.boolean() }).parse(req.body);
     const [row] = await db.update(users).set({ canCreateServers }).where(eq(users.id, id)).returning();
     if (!row) return reply.code(404).send({ error: 'user not found' });
+    await publishToUser(id, { t: 'self.serverCreation', userId: id, canCreateServers: row.canCreateServers });
     return serializeUser(row, req.user!.sub);
   });
 
@@ -411,19 +413,27 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return instanceUpdateInfo(refresh === '1');
   });
 
+  let submittingUpdate = false;
   app.post('/admin/instance/update', async (req, reply) => {
     const { version } = z.object({ version: z.string().max(32) }).parse(req.body ?? {});
-    const info = await instanceUpdateInfo(false);
-    if (!info.canUpdate || !info.latest) {
-      return reply.code(409).send({ error: 'Обновление сейчас недоступно — обновите страницу', reason: info.blockedReason });
+    const requestPending = () => reply.code(409).send({ error: 'Запрос на обновление уже отправлен', reason: 'pending' });
+    if (submittingUpdate) return requestPending();
+    submittingUpdate = true;
+    try {
+      const info = await instanceUpdateInfo(false);
+      if (!info.canUpdate || !info.latest) {
+        return reply.code(409).send({ error: 'Обновление сейчас недоступно — обновите страницу', reason: info.blockedReason });
+      }
+      // Человек видел одну версию, а за это время вышла другая — пусть посмотрит, что ставит.
+      if (normalizeReleaseVersion(version) !== info.latest.version) {
+        return reply.code(409).send({ error: `Уже доступна ${info.latest.version} — обновите страницу`, reason: 'latest-changed' });
+      }
+      if (!(await writeUpdateRequest(info.latest.version))) return requestPending();
+      req.log.info({ from: info.installed, to: info.latest.version, by: req.user?.sub }, 'instance update requested from the panel');
+      return reply.code(202).send({ ok: true });
+    } finally {
+      submittingUpdate = false;
     }
-    // Человек видел одну версию, а за это время вышла другая — пусть посмотрит, что ставит.
-    if (normalizeReleaseVersion(version) !== info.latest.version) {
-      return reply.code(409).send({ error: `Уже доступна ${info.latest.version} — обновите страницу`, reason: 'latest-changed' });
-    }
-    await writeUpdateRequest(info.latest.version);
-    req.log.info({ from: info.installed, to: info.latest.version, by: req.user?.sub }, 'instance update requested from the panel');
-    return reply.code(202).send({ ok: true });
   });
 
   // --- SMTP config: let the operator set up mail from the UI (no .env edit + rebuild) --------------

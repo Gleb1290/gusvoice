@@ -5,7 +5,7 @@
 # Для голоса (music.ts) нужен ffmpeg и glibc-образ (Alpine не подходит нативному модулю):
 #   добавьте строку  RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 #   и установите  @gusvoice/bot-voice@0.1.0  вместе с @gusvoice/bot.
-FROM node:24-bookworm-slim
+FROM node:24.22.3-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530
 
 WORKDIR /app
 # Точные версии (правило проекта). Пока пакет не опубликован в npm — подложите tarball (packages/bot-sdk/README.md, "Install").

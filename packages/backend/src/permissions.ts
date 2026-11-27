@@ -10,6 +10,7 @@ import {
 } from '@gusvoice/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { isSuperAdmin, superAdminId } from './auth.js';
+import { describeChannelAccess } from './channelAccessCheck.js';
 import { asUserId } from './superAdminRules.js';
 import { db } from './db/index.js';
 import {
@@ -56,13 +57,13 @@ export interface MemberContext {
 }
 
 /** Load a member's server-level context, or null if they are not a member. */
-export async function getMemberContext(serverId: string, userId: string): Promise<MemberContext | null> {
+export async function getMemberContext(serverId: string, userId: string, query: Pick<typeof db, 'select'> = db): Promise<MemberContext | null> {
   // Super-admin is a virtual full-permission member of every server. По id, без похода в базу (#140).
   if (isSuperAdmin(asUserId(userId))) {
     return { isOwner: true, roleIds: [], roles: [], everyoneRoleId: null, serverPermissions: ALL_PERMISSIONS, superAdmin: true };
   }
 
-  const [member] = await db
+  const [member] = await query
     .select({ state: serverMembers.state, homeInstanceId: users.homeInstanceId, isBot: users.bot })
     .from(serverMembers)
     .innerJoin(users, eq(serverMembers.userId, users.id))
@@ -79,9 +80,9 @@ export async function getMemberContext(serverId: string, userId: string): Promis
    */
   if (member.state !== 'active') return null;
 
-  const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
-  const serverRoles = await db.select().from(roles).where(eq(roles.serverId, serverId));
-  const mr = await db
+  const [server] = await query.select().from(servers).where(eq(servers.id, serverId)).limit(1);
+  const serverRoles = await query.select().from(roles).where(eq(roles.serverId, serverId));
+  const mr = await query
     .select({ roleId: memberRoles.roleId })
     .from(memberRoles)
     .where(and(eq(memberRoles.serverId, serverId), eq(memberRoles.userId, userId)));
@@ -179,15 +180,32 @@ export async function getChannelPermissions(
 
   // Layered: CATEGORY overwrites are the inherited base for every channel in the category; the channel's
   // own overwrites then override them (e.g. a channel marked private wins over a category-wide grant).
-  const [catOws, chanOws] = await Promise.all([
+  const [catOws, chanOws] = await loadChannelOverwrites(channel);
+  const permissions = resolveLayered(ctx, userId, catOws, chanOws);
+  return { serverId: channel.serverId, permissions };
+}
+
+export async function inspectChannelAccess(channelId: string, serverId: string, userId: string) {
+  const [channel] = await db.select().from(channels)
+    .where(and(eq(channels.id, channelId), eq(channels.serverId, serverId))).limit(1);
+  if (!channel) return null;
+
+  // The virtual super-admin context alone does not make someone a roster entry.
+  const [member] = await db.select({ state: serverMembers.state }).from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId))).limit(1);
+  if (!member) return null;
+  const ctx = member.state === 'active' ? await getMemberContext(serverId, userId) : null;
+  const [catOws, chanOws] = await loadChannelOverwrites(channel);
+  return describeChannelAccess(channel.type, ctx, userId, catOws, chanOws);
+}
+
+function loadChannelOverwrites(channel: { id: string; categoryId: string | null }) {
+  return Promise.all([
     channel.categoryId
       ? db.select().from(categoryOverwrites).where(eq(categoryOverwrites.categoryId, channel.categoryId))
       : Promise.resolve([] as OverwriteRow[]),
-    db.select().from(channelOverwrites).where(eq(channelOverwrites.channelId, channelId)),
+    db.select().from(channelOverwrites).where(eq(channelOverwrites.channelId, channel.id)),
   ]);
-
-  const permissions = resolveLayered(ctx, userId, catOws, chanOws);
-  return { serverId: channel.serverId, permissions };
 }
 
 /** Формула наложения — в `audienceRules.ts`; здесь только переупаковка контекста в subject. */
@@ -398,7 +416,9 @@ export async function getEveryoneViewableChannels(serverId: string): Promise<Set
  * и без этого он молча перестал бы получать события там, где формально не состоит.
  * ⚠️ Для `channel.delete` аудиторию надо взять ДО удаления строки — после неё считать уже не по чему.
  */
-export async function getChannelAudience(channelId: string): Promise<{ serverId: string; userIds: string[] } | null> {
+export async function getChannelAudience(
+  channelId: string,
+): Promise<{ serverId: string; userIds: string[]; forceMuted?: boolean } | null> {
   const [channel] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
   if (!channel) return null;
   // ⚠️ `serverId` берём ИЗ КАНАЛА, а не от вызывающего: иначе, назвав чужой канал вместе со своим
@@ -462,7 +482,7 @@ export async function getChannelAudience(channelId: string): Promise<{ serverId:
     categoryOverwrites: catOws,
     channelOverwrites: chanOws,
   });
-  return { serverId, userIds };
+  return { serverId, userIds, ...(channel.type === 'text' ? { forceMuted: channel.forceMuted } : {}) };
 }
 
 /** Voice channel ids (across all the user's servers) the user can VIEW — used to filter presence. */

@@ -5,7 +5,7 @@ import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as economy from '../economy';
-import { launchNoticeDue, type GamesLaunchNotice } from '../gamesLaunchRules';
+import type { GamesLaunchNotice } from '../gamesLaunchRules';
 
 const source = readFileSync(new URL('./GamesLaunchNotice.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 type Props = Record<string, unknown>;
@@ -52,7 +52,6 @@ function fixture(raw: string, options: Options = {}) {
   const lazyScene = { kind: 'lazy-scene' };
   const storage = { getItem: (key: string) => seen.get(key) ?? null,
     setItem(key: string, value: string) { seen.set(key, value); events.push(`seen:${key}`); } };
-  let requestedRenders = 0;
   const state = {
     gamesLaunchNotice: options.requested === undefined ? notice : options.requested,
     setGamesLaunchNotice(next: GamesLaunchNotice | null) { events.push('clear-request'); state.gamesLaunchNotice = next; },
@@ -62,11 +61,9 @@ function fixture(raw: string, options: Options = {}) {
     openActivities(value: unknown) { activities.push(value); events.push('activities'); },
   };
   const deps: Record<string, unknown> = {
-    react: { lazy: () => lazyScene, Suspense: 'test-suspense',
-      useState: (initial: unknown) => [initial, () => { requestedRenders++; }] },
+    react: { lazy: () => lazyScene, Suspense: 'test-suspense' },
     'react/jsx-runtime': { jsx, jsxs: jsx },
     '../economy': { ...economy, launchStorage: () => options.brokenStorage ? null : storage },
-    '../gamesLaunchRules': { launchNoticeDue },
     '../sounds': { registerBuiltinSound(name: string, url: string) { registrations.push([name, url]); } },
     '../store': { useStore: (select: (value: typeof state) => unknown) => select(state) },
   };
@@ -95,8 +92,7 @@ function fixture(raw: string, options: Options = {}) {
     assert.equal(typeof loading.type, 'function', 'R351/подготовка/host/loading');
     return (loading.type as (props: Props) => Element)(loading.props);
   }
-  return { state, seen, events, registrations, activities, render, scene, fallback,
-    requestedRenders: () => requestedRenders };
+  return { state, seen, events, registrations, activities, render, scene, fallback };
 }
 function elements(tree: unknown): Element[] {
   if (Array.isArray(tree)) return tree.flatMap(elements);
@@ -127,45 +123,27 @@ it('R351 хост содержит ровно два glob: корабль и г�
   };
   guarded(check, '../assets/launch/ship.{png,webp,svg}', '../assets/launch/missing.{png,webp,svg}', 'R351/host/glob-paths');
 });
-// Событие другого сервера не должно подхватывать сумму или значок текущего автопоказа.
-it('R351 событие приоритетнее автопоказа и передаёт сцене свою долю и валюту сервера события', () => {
-  guarded(raw => {
-    const f = fixture(raw, { requested: { ...notice, serverId: 'server-b', mine: 50 } });
+it('вход из чистого браузера не показывает сцену ни получателю старого подарка, ни опоздавшему', () => {
+  for (const mine of [1000, 0]) {
+    const f = fixture(source, { requested: null, view: view({ gamesLaunch: { at: notice.at, gift: 1000, mine } }) });
+    assert.equal(f.render(), null);
+  }
+});
+
+it('живое событие показывает долю и значок своего сервера даже без открытого сервера', () => {
+  for (const mine of [50, 0]) {
+    const f = fixture(source, { requested: { ...notice, serverId: 'server-b', mine }, currentId: null });
     f.state.economy['server-b'] = view({ iconUrl: 'shell.svg' });
     const scene = f.scene(f.render());
-    assert.equal(scene.props.mine, 50, 'R351/host/push-priority');
-    assert.equal(scene.props.iconUrl, 'shell.svg', 'R351/host/push-icon');
-  }, 'const notice = fromEvent ?? auto;', 'const notice = auto ?? fromEvent;', 'R351/host/push-priority');
+    assert.equal(scene.props.mine, mine);
+    assert.equal(scene.props.iconUrl, 'shell.svg');
+  }
 });
-// Выключенный сервер не рекламирует игры, но входящее событие не зависит от открытого bootstrap.
-it('R351 автопоказ требует включённых экономики и игр, событие работает без текущего сервера', () => {
-  guarded(raw => {
-    for (const [enabled, gamesEnabled] of [[false, false], [false, true], [true, false], [true, true]]) {
-      const f = fixture(raw, { requested: null, view: view({ enabled, gamesEnabled }) });
-      assert.equal(!!f.render(), enabled && gamesEnabled, 'R351/host/auto-enabled');
-    }
-    assert.notEqual(fixture(raw, { currentId: null }).render(), null, 'R351/host/push-no-bootstrap');
-  }, 'serverId && view?.enabled && view.gamesEnabled && !sessionSkipped.has(serverId)',
-  'serverId && view?.enabled && !sessionSkipped.has(serverId)', 'R351/host/auto-enabled');
-});
-// Проверяются обе дороги показа: подавление только push оставило бы повтор из снимка.
-it('R351 отметка «видел» глушит событие и снимок, а непросмотренная сцена принимается', () => {
-  guarded(raw => {
-    for (const requested of [notice, null]) {
-      const f = fixture(raw, { requested });
-      f.seen.set('gv_games_launch_seen:server-a', '1');
-      assert.equal(f.render(), null, 'R351/host/seen');
-      f.seen.clear();
-      assert.notEqual(f.render(), null, 'R351/host/unseen');
-    }
-  }, '!readLaunchSeen(store, requested.serverId)', 'true', 'R351/host/seen');
-});
-// Возврат старого окна семь суток лишит новичка знакомства с уже запущенными играми.
-it('R351 непросмотренный запуск тридцатидневной давности показывается при входе', () => {
-  guarded(raw => {
-    const f = fixture(raw, { requested: null, view: view({ gamesLaunch: { ...notice, at: '2026-09-29T10:00:00.000Z' } }) });
-    assert.notEqual(f.render(), null, 'R351/host/old-auto');
-  }, 'const notice = fromEvent ?? auto;', 'const notice = fromEvent;', 'R351/host/old-auto');
+
+it('повторная доставка события после просмотра не открывает сцену', () => {
+  const f = fixture(source);
+  f.seen.set('gv_games_launch_seen:server-a', '1');
+  assert.equal(f.render(), null);
 });
 // Ручной повтор обязан обходить «видел», но не обещать повторную выдачу настоящего подарка.
 it('R351 replay показывается видевшему сцену, но всегда передаёт mine=0', () => {
@@ -179,12 +157,11 @@ it('R351 replay показывается видевшему сцену, но в�
   guarded(check, 'requested.replay || ', '', 'R351/host/replay-seen');
   guarded(check, 'mine={notice.replay ? 0 : notice.mine}', 'mine={notice.mine}', 'R351/host/replay-no-gift');
 });
-// При запрете localStorage auto не меняет селектор requested: нужен собственный rerender и набор по серверу.
+// При запрете localStorage повторная доставка в той же сессии тоже подавляется.
 it('R351 сломанное хранилище не повторяет закрытый сервер в сессии, но другой сервер и replay доступны', () => {
   guarded(raw => {
-    const f = fixture(raw, { requested: null, brokenStorage: true });
+    const f = fixture(raw, { brokenStorage: true });
     (f.scene(f.render()).props.onClose as () => void)();
-    assert.equal(f.requestedRenders(), 1, 'R351/host/session-rerender');
     assert.equal(f.render(), null, 'R351/host/session-fallback');
     f.state.gamesLaunchNotice = notice;
     assert.equal(f.render(), null, 'R351/host/session-fallback');

@@ -93,7 +93,7 @@ export function StreamVolumeControl({
             className={`stream-vol${!muted && volume > 1 ? ' boost' : ''}`}
             min={0}
             max={MAX_STREAM_VOLUME}
-            step={0.02}
+            step={0.01}
             value={muted ? 0 : volume}
             // ⚠️ `--p` — ДОЛЯ хода ползунка, а не громкость: заливка рисуется градиентом по ней.
             // Забыть поделить на потолок значило бы, что заливка убегает вперёд ручки.

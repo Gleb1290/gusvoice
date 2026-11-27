@@ -11,14 +11,31 @@ import * as previewRules from './linkPreviewRules';
 import * as dangerousRules from './dangerousLinkRules';
 
 const source = readFileSync(new URL('./linkGuard.tsx', import.meta.url), 'utf8');
+const externalLinksCode = ts.transpileModule(
+  readFileSync(new URL('./externalLinks.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+).outputText;
 type Guard = typeof import('./linkGuard');
+type Platform = 'web' | 'android' | 'android-without-bridge' | 'android-refuses';
 type Node = ReactElement<Record<string, unknown>>;
 
 // Загружаем весь настоящий модуль, а не извлечённый обработчик. Только окружение
 // подменено: чистые правила ссылки настоящие, портал прозрачен, useState хранит состояние клика.
-function load(text = source) {
+function load(text = source, platform: Platform = 'web') {
   let state = false;
   const opened: unknown[][] = [];
+  const nativeOpened: string[][] = [];
+  const toasts: unknown[][] = [];
+  const window = {
+    location: { origin: 'https://voice.example' },
+    open: (...args: unknown[]) => { opened.push(args); },
+    GusVoiceNative: platform === 'android-without-bridge' ? undefined : {
+      openExternalUri: (url: string, fallback: string) => {
+        nativeOpened.push([url, fallback]);
+        return platform !== 'android-refuses';
+      },
+    },
+  };
   const storageReads: string[] = [];
   const storageWrites: string[] = [];
   const dependencies: Record<string, unknown> = {
@@ -26,28 +43,39 @@ function load(text = source) {
     'react/jsx-runtime': jsxRuntime,
     'react-dom': { createPortal: (child: unknown) => child },
     './config': { config: { apiUrl: 'https://api.voice.example' } },
-    './hotkeys': { isDesktop: () => false },
+    './hotkeys': { isDesktop: () => false, isAndroid: () => platform !== 'web' },
+    './toast': { toast: (...args: unknown[]) => { toasts.push(args); return toasts.length; } },
     './desktopWindow': { openExternal: async () => { assert.fail('веб не запускает desktop API'); } },
     './linkSafety': safety,
     './dangerousLinkRules': dangerousRules,
     './dangerousLink': { DangerousMessageLink: () => { assert.fail('обычный сценарий не входит в опасную ссылку'); } },
   };
+  const require = (id: string) => {
+    assert.ok(id in dependencies, 'неожиданный импорт ' + id);
+    return dependencies[id];
+  };
+  const externalLinks = { exports: {} as { openAndroidWebLink(url: string): boolean } };
+  runInNewContext(externalLinksCode, {
+    module: externalLinks, exports: externalLinks.exports, window, URL, require,
+  });
+  dependencies['./externalLinks'] = externalLinks.exports;
+
   const module = { exports: {} };
   runInNewContext(ts.transpileModule(text, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, {
     module, exports: module.exports, URL,
     location: { host: 'voice.example' }, document: { body: {} },
-    window: { open: (...args: unknown[]) => { opened.push(args); } },
+    window,
     localStorage: {
       getItem: (key: string) => { storageReads.push(key); return JSON.stringify({ off: true, trusted: ['xn--pple-43d.com'] }); },
       setItem: (key: string) => { storageWrites.push(key); },
     },
-    require: (id: string) => { assert.ok(id in dependencies, `неожиданный импорт ${id}`); return dependencies[id]; },
+    require,
   });
   const guard = module.exports as Guard;
   const render = (url: string) => guard.MessageLink({ url });
-  return { guard, render, opened, storageReads, storageWrites };
+  return { guard, render, opened, nativeOpened, toasts, storageReads, storageWrites };
 }
 
 function nodes(tree: ReactNode): Node[] {
@@ -109,7 +137,62 @@ function own(h: ReturnType<typeof load>) {
   assert.equal(h.opened.length, 4, 'каждый адрес собственного инстанса сразу открыт');
 }
 
-it('обычная чужая ссылка открывается сразу без окна', () => ordinary(load()));
+it('обычная чужая ссылка в браузере открывает вкладку даже при наличии объекта моста', () => {
+  const h = load();
+  ordinary(h);
+  assert.deepEqual(h.nativeOpened, []);
+  assert.deepEqual(h.toasts, []);
+});
+
+it('ссылка из сообщения на Android открывает нормализованный HTTPS-адрес через системный браузер', () => {
+  const h = load(source, 'android');
+  assert.equal(modal(clickLink(h, 'https://OUTSIDE.example:443/a/../docs?x=1#start')), undefined);
+  assert.deepEqual(h.nativeOpened, [['https://outside.example/docs?x=1#start', '']]);
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.toasts, []);
+});
+
+it('подтверждение подозрительной ссылки на Android делегирует открытие мосту только после согласия', () => {
+  const h = load(source, 'android');
+  const url = 'https://xn--pple-43d.com/login';
+  const tree = clickLink(h, url);
+  assert.ok(modal(tree));
+  assert.deepEqual(h.nativeOpened, []);
+  press(tree, 'Отмена');
+  assert.deepEqual(h.nativeOpened, []);
+  press(clickLink(h, url), 'Открыть');
+  assert.deepEqual(h.nativeOpened, [[url, '']]);
+  assert.deepEqual(h.opened, []);
+});
+
+it('без Android-моста открытие ссылки показывает предупреждение и оставляет WebView на месте', () => {
+  const h = load(source, 'android-without-bridge');
+  h.guard.openLink('https://outside.example/docs');
+  assert.deepEqual(h.nativeOpened, []);
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.toasts.map(([type]) => type), ['warn']);
+});
+
+it('отказ Android-моста показывает предупреждение без попытки открыть вкладку', () => {
+  const h = load(source, 'android-refuses');
+  const url = 'http://outside.example/docs';
+  h.guard.openLink(url);
+  assert.deepEqual(h.nativeOpened, [[url, '']]);
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.toasts.map(([type]) => type), ['warn']);
+});
+
+it('Android открывает HTTP через мост, а ссылки с другими схемами туда не передаёт', () => {
+  const h = load(source, 'android');
+  for (const url of ['mailto:friend@example.org', 'javascript:void(0)', 'file:///docs/help.html']) {
+    h.guard.openLink(url);
+  }
+  assert.deepEqual(h.nativeOpened, []);
+  assert.deepEqual(h.opened, []);
+  h.guard.openLink('http://outside.example/docs');
+  assert.deepEqual(h.nativeOpened, [['http://outside.example/docs', '']]);
+  assert.deepEqual(h.opened, []);
+});
 it('подозрительная ссылка показывает Unicode и подсветку: отмена безопасна, подтверждение открывает', () => suspicious(load()));
 it('свой инстанс и api/presence/lk не спрашивают даже при логине и пароле в адресе', () => own(load()));
 it('старое off:true и доверенный домен не отключают предупреждение и не читаются', () => {

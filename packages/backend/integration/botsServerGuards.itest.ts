@@ -75,10 +75,13 @@ async function fixture(edit?: Phase3Edit, realConversations = false) {
     async clean() { await app.close(); await f.clean(); assert.deepEqual(unexpected, []); } };
 }
 
-async function deleteProbe(edit?: Phase3Edit) {
-  const f = await fixture(edit);
+async function deleteProbe(removeBotLink = false) {
+  const f = await fixture();
   try {
     const role = await f.setupBot();
+    if (removeBotLink) {
+      await db.db.update(s.roles).set({ managedBotId: null }).where(eq(s.roles.id, role.id));
+    }
     const denied = await f.request({ method: 'DELETE', url: `/roles/${role.id}` });
     assert.equal(denied.statusCode, 400, 'R303 удаление управляемой роли отклонено');
     assert.deepEqual(denied.json(), { error: 'Роль бота удаляется вместе с ботом' });
@@ -281,20 +284,125 @@ test('R303 контрфакт канального commandsFor с dm-облас�
   });
 });
 
-for (const [name, file, from, to, probe, message, actual, expected] of [
-  ['нет запрета удаления роли бота', 'routes/roles', "if (role.managedBotId) return reply.code(400).send({ error: 'Роль бота удаляется вместе с ботом' });", '', deleteProbe,
-    'R303 удаление управляемой роли отклонено', 204, 400],
-  ['клавиатура не проверяется', 'routes/botPress', "if (!keyboardHasData(msg.keyboard, data)) return reply.code(409).send({ error: 'stale_button' });", '', staleProbe,
-    'R303 данные вне текущей клавиатуры отклонены', 200, 409],
-] as const) test(`R303 контрфакт: ${name}`, async () => {
-  await probe();
+test('защита от удаления зависит от связи той же роли с ботом', async () => {
+  await deleteProbe();
+  await counterfact(async () => {
+    await assert.rejects(() => deleteProbe(true), (error: unknown) => error instanceof assert.AssertionError &&
+      error.message.split(/\r?\n/)[0] === 'R303 удаление управляемой роли отклонено' && error.actual === 204 && error.expected === 400);
+  });
+});
+
+test('R303 контрфакт: клавиатура не проверяется', async () => {
+  await staleProbe();
   // В botPress такой страж есть и для ЛС; якорь уточнён соседним комментарием канальной ветки.
   await counterfact(async () => {
+  const file = 'routes/botPress';
+  const from = "if (!keyboardHasData(msg.keyboard, data)) return reply.code(409).send({ error: 'stale_button' });";
   const raw = readFileSync(new URL(`../src/${file}.ts`, import.meta.url), 'utf8');
   const newline = raw.includes('\r\n') ? '\r\n' : '\n';
-  const edit = file === 'routes/botPress' ? { file, from: `// 3. Точное совпадение с кнопкой ТЕКУЩЕЙ клавиатуры.${newline}      ${from}`,
-    to: '// 3. Точное совпадение с кнопкой ТЕКУЩЕЙ клавиатуры.' } : { file, from, to };
-  await assert.rejects(() => probe(edit), (error: unknown) => error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION' &&
-    error.operator === 'strictEqual' && error.message.split(/\r?\n/)[0] === message && error.actual === actual && error.expected === expected);
+  const edit = { file, from: `// 3. Точное совпадение с кнопкой ТЕКУЩЕЙ клавиатуры.${newline}      ${from}`,
+    to: '// 3. Точное совпадение с кнопкой ТЕКУЩЕЙ клавиатуры.' };
+  await assert.rejects(() => staleProbe(edit), (error: unknown) => error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION' &&
+    error.operator === 'strictEqual' && error.message.split(/\r?\n/)[0] === 'R303 данные вне текущей клавиатуры отклонены' && error.actual === 200 && error.expected === 409);
   });
+});
+
+test('менеджер создаёт и настраивает роль ниже себя, сохраняя порядок верхних ролей', async () => {
+  const f = await fixture();
+  try {
+    const serverId = 'server';
+    await db.db.update(s.roles).set({ position: 2, permissions: String(P.MANAGE_ROLES | P.VIEW_CHANNEL) })
+      .where(eq(s.roles.id, 'manager-role'));
+    await db.db.insert(s.roles).values([
+      { id: 'lower', serverId, name: 'Нижняя', position: 1 },
+      { id: 'tied', serverId, name: 'Равная', position: 2 },
+      { id: 'upper', serverId, name: 'Верхняя', position: 3 },
+    ]);
+    const created = await f.request({ method: 'POST', url: '/servers/server/roles',
+      payload: { name: 'Новая', permissions: String(P.VIEW_CHANNEL | P.ADMINISTRATOR | P.MANAGE_SERVER) } }, 'manager');
+    assert.equal(created.statusCode, 201, created.body);
+    const role = created.json<{ id: string; permissions: string; position: number }>();
+    assert.equal(role.permissions, String(P.VIEW_CHANNEL));
+    assert.equal(role.position, 2);
+    const patch = (id: string, payload: { name?: string; position?: number }) =>
+      f.request({ method: 'PATCH', url: `/roles/${id}`, payload }, 'manager');
+    const updated = await patch(role.id, { name: 'Настроена' });
+    assert.equal(updated.statusCode, 200, updated.body);
+    assert.equal(updated.json().name, 'Настроена');
+    assert.equal((await patch(role.id, { position: 3 })).statusCode, 403);
+    for (const id of ['manager-role', 'tied', 'upper']) {
+      assert.equal((await patch(id, { name: 'Запрещено' })).statusCode, 403);
+    }
+    const rows = await db.db.select().from(s.roles);
+    assert.deepEqual(Object.fromEntries(rows.map(r => [r.id, r.position])),
+      { everyone: 0, lower: 1, [role.id]: 2, 'manager-role': 3, tied: 3, upper: 4 });
+  } finally { await f.clean(); }
+});
+
+test('на позиции 0 менеджер не создаёт роль, владелец создаёт её прежним способом', async () => {
+  const f = await fixture();
+  try {
+    await db.db.update(s.roles).set({ position: 0 }).where(eq(s.roles.id, 'manager-role'));
+    await db.db.update(s.roles).set({ permissions: String(P.MANAGE_ROLES) }).where(eq(s.roles.id, 'everyone'));
+    const create = (actor: string) =>
+      f.request({ method: 'POST', url: '/servers/server/roles', payload: { name: 'Новая' } }, actor);
+    assert.equal((await create('person')).statusCode, 403);
+    assert.equal((await create('manager')).statusCode, 403);
+    assert.equal((await create('outsider')).statusCode, 404);
+    assert.equal((await db.db.select().from(s.roles)).length, 2);
+    const created = await create('owner');
+    assert.equal(created.statusCode, 201, created.body);
+    assert.equal(created.json().position, 2);
+    assert.equal((await f.request({ method: 'DELETE', url: '/roles/everyone' })).statusCode, 400);
+    const [everyone] = await db.db.select().from(s.roles).where(eq(s.roles.id, 'everyone'));
+    assert.equal(everyone.position, 0);
+  } finally { await f.clean(); }
+});
+
+test('параллельные создания дают разные позиции, менеджер переставляет новые роли', async () => {
+  const f = await fixture();
+  try {
+    await db.db.update(s.roles).set({ permissions: String(P.MANAGE_ROLES) }).where(eq(s.roles.id, 'manager-role'));
+    const url = '/servers/server/roles';
+    const responses = await Promise.all(['Первая', 'Вторая'].map(name =>
+      f.request({ method: 'POST', url, payload: { name } }, 'manager')));
+    for (const response of responses) assert.equal(response.statusCode, 201, response.body);
+    const [low, high] = responses.map(r => r.json<{ id: string; position: number }>()).sort((a, b) => a.position - b.position);
+    assert.deepEqual([low.position, high.position], [1, 2]);
+    const reorder = (order: string[]) =>
+      f.request({ method: 'PUT', url: `${url}/reorder`, payload: { order } }, 'manager');
+    const reordered = await reorder(['manager-role', low.id, high.id]);
+    assert.equal(reordered.statusCode, 204, reordered.body);
+    assert.equal((await reorder([low.id, 'manager-role', high.id])).statusCode, 403);
+    assert.equal((await reorder(['manager-role', low.id, 'everyone'])).statusCode, 400);
+    const rows = await db.db.select().from(s.roles).orderBy(asc(s.roles.position));
+    assert.deepEqual(rows.map(r => r.id), ['everyone', high.id, low.id, 'manager-role']);
+  } finally { await f.clean(); }
+});
+
+test('одновременные создание и reorder согласуют список ролей', async () => {
+  const f = await fixture();
+  try {
+    const serverId = 'server';
+    await db.db.update(s.roles).set({ position: 3, permissions: String(P.MANAGE_ROLES) })
+      .where(eq(s.roles.id, 'manager-role'));
+    await db.db.insert(s.roles).values([
+      { id: 'guests', serverId, name: 'Гости', isGuests: true, position: 0 },
+      { id: 'lower', serverId, name: 'Нижняя', position: 2 },
+    ]);
+    const url = '/servers/server/roles';
+    const [created, reordered] = await Promise.all([
+      f.request({ method: 'POST', url, payload: { name: 'Новая' } }, 'manager'),
+      f.request({ method: 'PUT', url: `${url}/reorder`,
+        payload: { order: ['manager-role', 'guests', 'lower'] } }, 'manager'),
+    ]);
+    assert.equal(created.statusCode, 201, created.body);
+    assert.ok([204, 400].includes(reordered.statusCode), reordered.body);
+    const rows = await db.db.select().from(s.roles);
+    const positions = Object.fromEntries(rows.map(r => [r.id, r.position]));
+    assert.deepEqual(positions, {
+      everyone: 0, 'manager-role': 4, [created.json().id]: 3,
+      ...(reordered.statusCode === 204 ? { guests: 2, lower: 1 } : { guests: 0, lower: 2 }),
+    });
+  } finally { await f.clean(); }
 });

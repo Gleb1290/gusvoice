@@ -112,7 +112,7 @@ async function admin(raw = adminSource, settingsRaw = settingsSource) {
   const dormant = new Set(['../accountDelete.js', '../federation/guestAccess.js', '../federation/directoryEvents.js',
     '../federation/links.js', '../federation/linkRules.js', '../federation/instanceMeta.js', '../mailer.js', '../serialize.js',
     '../settings.js', '../dmRules.js', '../env.js', '../instanceSetup.js', '../instanceUpdate.js', '../dmReports.js',
-    '../instanceUpdateRules.js', '../setupRules.js', '../storage.js']);
+    '../instanceUpdateRules.js', '../setupRules.js', '../storage.js', '../realtime.js']);
   const deps: Record<string, unknown> = {
     '@gusvoice/shared': shared, 'drizzle-orm': orm, zod: { z }, '../auth.js': auth,
     '../db/index.js': { db: t.db }, '../db/schema.js': schema,

@@ -38,10 +38,21 @@ export interface ChannelBotsHooks {
 }
 
 /** Событие людям в форме шлюза — как было в маршрутах до выноса. */
-export function gatewayMessageOf(serverId: string, channelId: string, ev: ChannelMessageEvent): ChannelScopedMessage {
+export function gatewayMessageOf(
+  serverId: string,
+  channelId: string,
+  ev: ChannelMessageEvent,
+  forceMuted?: boolean,
+): ChannelScopedMessage {
   switch (ev.kind) {
     case 'created':
-      return { t: 'message.create', channelId, serverId, message: ev.message };
+      return {
+        t: 'message.create',
+        channelId,
+        serverId,
+        message: ev.message,
+        ...(forceMuted === undefined ? {} : { forceMuted }),
+      };
     case 'edited':
     case 'pinned':
     case 'markup':
@@ -95,7 +106,7 @@ export function createChannelMessagePublisher(limit = CHANNEL_BOT_QUEUE_LIMIT) {
     const published = (async () => {
       const res = await getChannelAudience(channelId);
       if (!res || res.serverId !== serverId) return null;
-      await publishToChannel(serverId, channelId, gatewayMessageOf(serverId, channelId, ev), res.userIds);
+      await publishToChannel(serverId, channelId, gatewayMessageOf(serverId, channelId, ev, res.forceMuted), res.userIds);
       return res.userIds;
     })();
     if (h && ev.kind !== 'pinned' && ev.kind !== 'markup') {

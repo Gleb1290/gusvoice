@@ -122,6 +122,10 @@ function ParticipantRow({
           <span className="vp-flag off" title="Микрофон выключен">
             <Icon name="mic-off" size={15} />
           </span>
+        ) : isBot && speaking && !micMuted ? (
+          <span className="vp-flag music-playing" role="img" aria-label="Бот воспроизводит аудио" title="Бот воспроизводит аудио">
+            <Icon name="music" size={15} />
+          </span>
         ) : null}
         {!p.isLocal && locallyMuted ? (
           <span className="vp-flag off" title="Заглушён только для вас">

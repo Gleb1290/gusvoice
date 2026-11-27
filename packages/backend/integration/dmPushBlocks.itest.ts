@@ -445,6 +445,28 @@ test('повреждённый сохранённый ключ отправля�
   assert.equal(JSON.parse(String(wire.body)).dmId, 'dm');
 });
 
+test('пуш канала учитывает текущую заглушку и личный мьют, а пуш гостя проверяется на хосте', async () => {
+  await t.raw.exec(`
+    UPDATE channels SET force_muted = true WHERE id = 'ch';
+    INSERT INTO push_devices (id, user_id, device_id, endpoint, platform) VALUES
+      ('pb', 'b', 'b-phone', 'https://ntfy.example.test/b', 'android'),
+      ('pc', 'c', 'c-phone', 'https://ntfy.example.test/c', 'android');
+    INSERT INTO push_mutes (user_id, scope, target_id, sound_only) VALUES ('c', 'server', 's', false);
+  `);
+  const payload = { type: 'mention' as const, channelId: 'ch', serverId: 's', title: 'Alpha', body: 'Привет' };
+  const source = { scope: 'server' as const, targetId: 's' };
+  await sendPushToUsers(['b', 'c'], payload, source);
+  assert.equal(posted.length, 0);
+
+  await sendPushToUsers(['b'], { ...payload, instanceId: 'home-of-channel' });
+  assert.equal(posted.length, 1, 'локальный канал с тем же id не глушит пуш с другого инстанса');
+  posted.length = 0;
+
+  await t.raw.exec("UPDATE channels SET force_muted = false WHERE id = 'ch'");
+  await sendPushToUsers(['b', 'c'], payload, source);
+  assert.deepEqual(posted.map((p) => p.url), ['https://ntfy.example.test/b']);
+});
+
 test('R304 рассылка шифрует устройство с ключами и обезличивает JSON устройства без ключей', async () => {
   // Личные поля проверяются только после расшифровки; keyless не должен узнавать ни текст, ни автора.
   const encrypted = pushKeys();

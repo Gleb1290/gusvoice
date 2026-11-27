@@ -23,7 +23,7 @@ export const REQUEST_STUCK_MS = 30 * 1000;
  * «Идёт обновление», начатое дольше этого назад, — прервалось (перезагрузка сервера посреди шага). Больше самого
  * долгого честного обновления: скачивание образов по медленной сети + копия большой базы.
  */
-export const RUNNING_STALE_MS = 45 * 60 * 1000;
+export const RUNNING_STALE_MS = 52 * 60 * 1000; // systemd: 50 минут на запуск и до 90 секунд на остановку
 
 export function parseReleaseVersion(raw: unknown): [number, number, number] | null {
   if (typeof raw !== 'string') return null;
@@ -82,10 +82,12 @@ function cleanTag(raw: unknown): string | null {
   return typeof raw === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(raw) ? raw : null;
 }
 
-/** `run/status/updater.json` — служба обновления установлена. Не объект → службы нет. */
+/** Первый клик из старой панели заменяет скрипт на диске, сохраняя маркер схемы 1 до следующего запуска. */
 export function parseUpdaterMarker(json: unknown): InstanceUpdateInfo['updater'] {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
-  return { tag: cleanTag((json as Record<string, unknown>).tag) };
+  const marker = json as Record<string, unknown>;
+  const tag = cleanTag(marker.tag);
+  return (marker.schema === 1 || marker.schema === 2) && tag ? { tag } : null;
 }
 
 /**
@@ -161,6 +163,7 @@ export interface UpdateDecisionInput {
   installed: string;
   latest: InstanceUpdateInfo['latest'];
   checkDisabled: boolean;
+  checkFailed?: boolean;
   updater: InstanceUpdateInfo['updater'];
   status: InstanceUpdateStatus | null;
   /** Возраст лежащего запроса в мс; null — запроса нет. */
@@ -190,8 +193,12 @@ export function decideUpdate(input: UpdateDecisionInput): Pick<
   if (input.status?.state === 'running') return blocked('running');
   if (requestPending) return blocked('pending');
   if (input.checkDisabled) return blocked('check-disabled');
-  if (!input.latest) return blocked('unknown-latest');
-  if ((compareReleaseVersions(input.latest.version, input.installed) ?? 0) <= 0) return blocked('up-to-date');
+  if (!input.latest || input.checkFailed) return blocked('unknown-latest');
+  const available = compareReleaseVersions(input.latest.version, input.installed) ?? 0;
+  // После сбоя на новом бэкенде (например, перенос медиа) повтор той же версии должен остаться доступен.
+  const retry = available === 0 && input.status?.state === 'failed' &&
+    compareReleaseVersions(input.status.requested, input.installed) === 0;
+  if (available < 0 || (available === 0 && !retry)) return blocked('up-to-date');
   if (!input.updater) return blocked('no-updater');
   if (isPinnedTag(input.updater.tag)) return blocked('pinned-tag');
   return { ...base, canUpdate: true, blockedReason: null };

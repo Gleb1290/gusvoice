@@ -52,16 +52,9 @@ it('R343 MainLayout загружает карточку только через 
     assert.equal(staticImports.length, 0, 'R343/wiring/no-static-import');
   }, raw => replaceInitializer(raw, 'GamesLaunchHost', () => "() => import('./GamesLaunchNotice')"), 'R343/wiring/lazy');
 });
-it('R343 MainLayout рассматривает push независимо от снимка, автопоказ — только с включёнными играми', () => {
-  guarded(file => {
-    assert.equal(compact(variable(file, 'launchRequested').initializer!, file), 'useStore((s)=>s.gamesLaunchNotice)', 'R343/wiring/request-selector');
-    assert.equal(compact(variable(file, 'launchMaybe').initializer!, file),
-      '!!launchRequested||!!(recountView?.enabled&&recountView.gamesEnabled&&recountView.gamesLaunch)', 'R343/wiring/maybe');
-  }, raw => replaceInitializer(raw, 'launchMaybe', text => text.replace('recountView.gamesEnabled && ', '')), 'R343/wiring/maybe');
-});
 it('R343 MainLayout связывает хост с общими воротами окон и не показывает поверх ручных либо автоматических итогов', () => {
   guarded(file => {
-    assert.deepEqual(terms(variable(file, 'launchHosted').initializer!, file), ['launchMaybe', 'recapAutoAllowed', '!recapShown'], 'R343/wiring/launch-gates');
+    assert.deepEqual(terms(variable(file, 'launchHosted').initializer!, file), ['!!launchRequested', 'recapAutoAllowed', '!recapShown'], 'R343/wiring/launch-gates');
   }, raw => replaceInitializer(raw, 'launchHosted', text => text.replace(' && !recapShown', '')), 'R343/wiring/launch-gates');
 });
 for (const [name, blocker] of [
@@ -91,7 +84,7 @@ it('R343 MainLayout монтирует ровно один хост внутри
       && compact(expression.left, file) === 'launchHosted', true, 'R343/wiring/mount-gate');
   }, raw => {
     assert.equal(raw.split('{launchHosted && (').length, 2, 'R343/подготовка/wiring/mount-anchor');
-    return raw.replace('{launchHosted && (', '{launchMaybe && (');
+    return raw.replace('{launchHosted && (', '{launchRequested && (');
   }, 'R343/wiring/mount-gate');
 });
 it('R343 MainLayout не разрешает бонусному гусю выглядывать одновременно с событием запуска', () => {

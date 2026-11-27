@@ -1,5 +1,6 @@
 import { type Channel, canMentionEveryone, canMentionRole, has, type Message, Permission, permsFromString, type Role } from '@gusvoice/shared';
 import { useChannelVisit } from '../channelVisit';
+import { channelForceMuted } from '../channelRules';
 import { useMemo, useEffect, useState } from 'react';
 import { api } from '../api';
 import { hasMoreOlder, olderCursor } from '../historyPage';
@@ -39,6 +40,7 @@ export function ChatView({ channel }: { channel: Channel }) {
   const updateMessage = useStore((s) => s.updateMessage);
   const removeMessage = useStore((s) => s.removeMessage);
   const permsBits = useMemo(() => permsFromString(perms), [perms]);
+  const canWrite = channel.canSend ?? has(permsBits, Permission.SEND_MESSAGES);
   const canModerate = has(permsBits, Permission.MANAGE_MESSAGES);
 
   const nameOf = useNameResolver();
@@ -114,7 +116,7 @@ export function ChatView({ channel }: { channel: Channel }) {
     <MessagePane
       reactorOf={reactorOf}
       serverId={serverId}
-      newSince={newSince}
+      newSince={channelForceMuted(channel) ? null : newSince}
       scrollKey={visitKey}
       feedId={channel.id}
       // Медиатека канала для просмотра (G11): порции старше окна ленты; лента канала всегда у хвоста — новее нечего.
@@ -125,7 +127,7 @@ export function ChatView({ channel }: { channel: Channel }) {
         return { messages: page, more: hasMoreOlder(page) };
       }}
       onLoadOlder={() => loadOlderMessages(channel.id)}
-      pollChannelId={channel.id}
+      pollChannelId={canWrite ? channel.id : undefined}
       // Боты канала (#231): команды по «/», «Меню» у поля, кнопки под их сообщениями.
       botChannelId={channel.id}
       title={
@@ -138,6 +140,11 @@ export function ChatView({ channel }: { channel: Channel }) {
           <PinnedMessages channelId={channel.id} canManage={canModerate} />
         </>
       }
+      composerReplacement={canWrite ? undefined : (
+        <div className="composer-blocked" role="status">
+          <span className="muted">Только для чтения</span>
+        </div>
+      )}
       placeholder={placeholder}
       messages={messages}
       loading={messagesRaw === undefined && !failed}

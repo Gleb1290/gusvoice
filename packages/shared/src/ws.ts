@@ -640,7 +640,7 @@ export type GatewayClientMessage =
 
 /** Gateway -> client. */
 export type GatewayServerMessage =
-  | { t: 'ready'; userId: string }
+  | { t: 'ready'; userId: string; canCreateServers?: boolean }
   | { t: 'pong' }
   /**
    * Отказ гейтвея. `serverId` есть у отказа в ПОДПИСКЕ (#126): без него клиент не знает, какой
@@ -650,7 +650,7 @@ export type GatewayServerMessage =
   | { t: 'error'; message: string; serverId?: string }
   // `serverId` нужен получателю, у которого этот сервер НЕ открыт: канала он не знает (bootstrap
   // только про открытый сервер), а отнести непрочитанное к иконке в рейле обязан.
-  | { t: 'message.create'; channelId: string; serverId: string; message: Message }
+  | { t: 'message.create'; channelId: string; serverId: string; message: Message; forceMuted?: boolean }
   | { t: 'message.delete'; channelId: string; messageId: string }
   | { t: 'message.update'; channelId: string; message: Message }
   // A reaction was added/removed; clients apply the delta to their local message state.
@@ -682,6 +682,7 @@ export type GatewayServerMessage =
    * сведения для окружающих: им достаточно обычного `user.status` (#118).
    */
   | { t: 'self.status'; status: PresenceStatus; statusAuto: boolean }
+  | { t: 'self.serverCreation'; userId: string; canCreateServers: boolean }
   /**
    * Сервер закрыт для гостей (#139, F3, §5.3.1) — держатель снял федеративный доступ.
    *
@@ -998,6 +999,7 @@ const SERVER_MESSAGE_TYPES: Record<GatewayServerMessage['t'], true> = {
   'online.away': true,
   'user.status': true,
   'self.status': true,
+  'self.serverCreation': true,
   'server.access_closed': true,
   'server.access_restored': true,
   'federation.links': true,

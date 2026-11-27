@@ -11,7 +11,7 @@ import ts from 'typescript';
 import { PGlite } from '@electric-sql/pglite';
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
-import { CONTACTS_MAX, Permission } from '@gusvoice/shared';
+import { CONTACTS_MAX, Permission, type Channel, type ServerBootstrap } from '@gusvoice/shared';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
 process.env.NTFY_BASE_URL = 'https://ntfy.example.test';
@@ -1249,6 +1249,101 @@ async function shareChannelPermissionSeed(){
     INSERT INTO channels(id,server_id,name,type) VALUES ('share-open','presence-server','Обычный','text'),('share-readonly','presence-server','Чтение','text')`);
   await t.raw.query(`INSERT INTO channel_overwrites(channel_id,target_id,target_type,deny) VALUES ('share-readonly','share-everyone','role',$1)`,[Permission.SEND_MESSAGES.toString()]);
 }
+test('политика сохраняется при создании, приходит через bootstrap и обновляется через события канала', async () => {
+  await shareChannelPermissionSeed();
+
+  const create = (payload: { name: string; type: 'text'; forceMuted?: boolean }) => app.inject({
+    method: 'POST', url: '/servers/presence-server/channels', headers: authHeader('a'), payload,
+  });
+  const created = await create({ name: 'Объявления', type: 'text', forceMuted: true });
+  assert.equal(created.statusCode, 201, created.body);
+  const channel: Channel = created.json();
+  assert.equal(channel.forceMuted, true);
+
+  const legacy = await create({ name: 'Обычный канал', type: 'text' });
+  assert.equal(legacy.statusCode, 201, legacy.body);
+  assert.equal(legacy.json().forceMuted, false);
+
+  const patch = (payload: { topic?: string; forceMuted?: boolean }) => app.inject({
+    method: 'PATCH', url: '/channels/' + channel.id, headers: authHeader('a'), payload,
+  });
+  const bootstrap = async () => {
+    const result = await app.inject({ method: 'GET', url: '/servers/presence-server', headers: authHeader('b') });
+    assert.equal(result.statusCode, 200, result.body);
+    const snapshot: ServerBootstrap = result.json();
+    return snapshot.channels.find((c) => c.id === channel.id);
+  };
+
+  assert.equal((await bootstrap())?.forceMuted, true);
+  const unrelatedEdit = await patch({ topic: 'Новости сервера' });
+  assert.equal(unrelatedEdit.statusCode, 200, unrelatedEdit.body);
+  assert.equal(unrelatedEdit.json().forceMuted, true);
+
+  const cleared = await patch({ forceMuted: false });
+  assert.equal(cleared.statusCode, 200, cleared.body);
+  assert.equal(cleared.json().forceMuted, false);
+  assert.equal((await bootstrap())?.forceMuted, false);
+
+  const events = published.map((event) => JSON.parse(event.message)).filter((event) =>
+    event.m.channel?.id === channel.id && (event.m.t === 'channel.create' || event.m.t === 'channel.update'),
+  );
+  assert.deepEqual(events.map((event) => [event.m.t, event.m.channel.forceMuted]), [
+    ['channel.create', true], ['channel.update', true], ['channel.update', false],
+  ]);
+  assert.ok(events.every((event) => event.to.includes('b') && !event.to.includes('d')));
+});
+
+test('запись политики требует права управления на сервере при создании и в самом канале при изменении', async () => {
+  await shareChannelPermissionSeed();
+  const payload = { forceMuted: true };
+  const create = await app.inject({
+    method: 'POST', url: '/servers/presence-server/channels', headers: authHeader('b'),
+    payload: { ...payload, type: 'text', name: 'Объявления' },
+  });
+  assert.equal(create.statusCode, 403, create.body);
+
+  const patch = () => app.inject({
+    method: 'PATCH', url: '/channels/share-open', headers: authHeader('b'), payload,
+  });
+  const denied = await patch();
+  assert.equal(denied.statusCode, 403, denied.body);
+  assert.deepEqual((await t.raw.query("SELECT force_muted FROM channels WHERE id = 'share-open'")).rows, [
+    { force_muted: false },
+  ]);
+  assert.deepEqual(published, []);
+
+  await t.raw.query(
+    "INSERT INTO channel_overwrites(channel_id, target_id, target_type, allow) VALUES ('share-open', 'b', 'member', $1)",
+    [Permission.MANAGE_CHANNELS.toString()],
+  );
+  const allowed = await patch();
+  assert.equal(allowed.statusCode, 200, allowed.body);
+  assert.equal(allowed.json().forceMuted, true);
+});
+
+test('поле политики отклоняется в голосовом канале, а обычное изменение голоса проходит', async () => {
+  await shareChannelPermissionSeed();
+  const create = (forceMuted?: boolean) => app.inject({
+    method: 'POST', url: '/servers/presence-server/channels', headers: authHeader('a'),
+    payload: { name: 'Голос', type: 'voice', forceMuted },
+  });
+  const created = await create();
+  assert.equal(created.statusCode, 201, created.body);
+  assert.equal(Object.hasOwn(created.json(), 'forceMuted'), false);
+  const url = '/channels/' + created.json().id;
+  for (const forceMuted of [true, false]) {
+    const invalidCreate = await create(forceMuted);
+    assert.equal(invalidCreate.statusCode, 400, invalidCreate.body);
+    const invalidUpdate = await app.inject({
+      method: 'PATCH', url, headers: authHeader('a'), payload: { forceMuted },
+    });
+    assert.equal(invalidUpdate.statusCode, 400, invalidUpdate.body);
+  }
+  const renamed = await app.inject({ method: 'PATCH', url, headers: authHeader('a'), payload: { name: 'Разговоры' } });
+  assert.equal(renamed.statusCode, 200, renamed.body);
+  assert.equal(Object.hasOwn(renamed.json(), 'forceMuted'), false);
+});
+
 async function verifyShareCanSend(target=app){
   const response=await target.inject({method:'GET',url:'/servers/presence-server',headers:authHeader('b')});assert.equal(response.statusCode,200,response.body);
   const channels=response.json().channels;assert.equal(channels.find((c:{id:string})=>c.id==='share-open').canSend,true);assert.equal(channels.find((c:{id:string})=>c.id==='share-readonly').canSend,false);

@@ -2822,7 +2822,7 @@ export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () =
   }, []);
 
   function noteSeen(id: string): void {
-    if (seen.has(id)) return;
+    if (document.visibilityState !== 'visible' || seen.has(id)) return;
     markGroupSeen(id);
     setSeen(seenGroups());
   }
@@ -2874,34 +2874,79 @@ export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () =
   useEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
-    const timers = new Map<string, ReturnType<typeof setTimeout>>();
+    const threshold = 0.6;
+    let observed = new Map<string, Element>();
+    const timers = new Map<Element, ReturnType<typeof setTimeout>>();
+    function cancelSeen(target: Element) {
+      clearTimeout(timers.get(target));
+      timers.delete(target);
+    }
+
     const io = new IntersectionObserver(
       (entries) => {
-        for (const e of entries) {
-          const id = e.target.id;
-          if (e.isIntersecting) {
-            if (timers.has(id)) continue;
+        if (document.visibilityState !== 'visible') return;
+        for (const { target, isIntersecting, intersectionRatio } of entries) {
+          const id = target.id;
+          if (observed.get(id) !== target) continue;
+          if (!isIntersecting || intersectionRatio < threshold) {
+            cancelSeen(target);
+          } else if (!timers.has(target)) {
             // Полсекунды на виду: пролистанное насквозь просмотренным не считается.
-            timers.set(id, setTimeout(() => noteSeen(id), 500));
-          } else {
-            const t = timers.get(id);
-            if (t) clearTimeout(t);
-            timers.delete(id);
+            timers.set(target, setTimeout(() => noteSeen(id), 500));
           }
         }
       },
-      { root: body, threshold: 0.6 },
+      { root: body, threshold },
     );
-    for (const g of current.groups) {
-      const el = document.getElementById(g.id);
-      if (el) io.observe(el);
-    }
-    return () => {
-      for (const t of timers.values()) clearTimeout(t);
+
+    const stopObserving = () => {
       io.disconnect();
+      io.takeRecords();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+    const onVisibilityChange = () => {
+      stopObserving();
+      if (document.visibilityState !== 'visible') return;
+      // После возврата нужен новый замер геометрии и полный отсчёт.
+      for (const el of observed.values()) io.observe(el);
+    };
+
+    const syncGroups = (initial = false) => {
+      const groups = new Map<string, Element>();
+      for (const { id } of current.groups) {
+        const el = body.querySelector('#' + id);
+        if (el) groups.set(id, el);
+      }
+      if (!initial && groups.size === observed.size && [...groups].every(([id, el]) => observed.get(id) === el)) return;
+
+      for (const [id, el] of observed) {
+        if (groups.get(id) === el) continue;
+        io.unobserve(el);
+        cancelSeen(el);
+      }
+      if (document.visibilityState === 'visible') {
+        for (const [id, el] of groups) {
+          if (observed.get(id) !== el) io.observe(el);
+        }
+      }
+      observed = groups;
+      setLive([...groups.keys()]);
+    };
+
+    // Группы могут появиться уже после открытия раздела, например после загрузки кода «Моих ботов».
+    const mutations = new MutationObserver(() => syncGroups());
+    mutations.observe(body, { childList: true, subtree: true, attributeFilter: ['id'] });
+    syncGroups(true);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      mutations.disconnect();
+      observed.clear();
+      stopObserving();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, live]);
+  }, [current]);
   /**
    * Показать, ЧТО именно изменено: доехать до первой изменённой группы и подсветить все.
    *
@@ -2924,20 +2969,6 @@ export function UserSettingsModal({ onClose, onOpenCheatSheet }: { onClose: () =
       }
     });
   }
-  /**
-   * Какие группы РЕАЛЬНО есть в открытом разделе.
-   *
-   * ⚠️ Половина настроек показывается по условию: «Игровая активность» — не у всех, оверлей и
-   * загрузки — только в десктопной оболочке. Якорь на то, чего в разделе нет, — обещание, которого
-   * рельс не держит: нажимаешь и не происходит ничего. Поэтому список якорей сверяется с деревом.
-   */
-  useEffect(() => {
-    // ⚠️ Через таймер, а не requestAnimationFrame: кадры в СКРЫТОМ окне не рисуются вовсе, и
-    // список якорей остался бы пустым до первого показа. Поймано на стенде — пейн был в фоне.
-    const t = setTimeout(() => setLive(current.groups.filter((g) => document.getElementById(g.id)).map((g) => g.id)), 0);
-    return () => clearTimeout(t);
-  }, [current]);
-
   // Какая группа сейчас наверху — тем якорем и светится рельс. Дешёвая проверка на скролле: групп
   // в разделе меньше десятка, IntersectionObserver тут был бы из пушки по воробьям.
   useEffect(() => {

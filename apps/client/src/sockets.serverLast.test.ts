@@ -8,13 +8,17 @@ import * as shared from '@gusvoice/shared';
 import * as channel from './channelRules';
 import * as last from './serverRowRules';
 import * as subs from './gatewaySubs';
+import { passesThrottle, shouldOsNotify, type ChannelNotify } from './notifyRules';
+import type { osNotify } from './notifications';
 
 const source = readFileSync(new URL('./sockets.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const storeSource = readFileSync(new URL('./store.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const noop = () => {};
-function fixture(raw = source, withMentions = false) {
+function fixture(raw = source, withMentions = false, personalLevel?: ChannelNotify) {
   const sockets: Socket[] = [], appended: string[] = [], updated: string[] = [], removed: string[] = [];
   const unread: Array<[string, boolean, string]> = [], sounds: string[] = [];
+  const notices: Parameters<typeof osNotify>[] = [];
+  const cleared: string[] = [];
   let patches = 0, loads = 0, resyncs = 0;
   class Socket {
     static OPEN = 1; static CONNECTING = 0;
@@ -24,10 +28,11 @@ function fixture(raw = source, withMentions = false) {
     receive(value: unknown) { assert.ok(this.onmessage); this.onmessage({ data: JSON.stringify(value) }); }
   }
   const state = {
-    user: { id: 'me', username: 'dmtest_a', status: 'online' }, serverFeatures: [], convActive: false,
+    user: { id: 'me', username: 'dmtest_a', status: 'online', canCreateServers: false }, serverFeatures: [], convActive: false,
     currentChannelId: null, currentServerId: null, mobilePane: 'list', view: 'dm',
     // R266 читает сервер и роли своего участника из полного bootstrap, даже если открыта лента ЛС.
-    bootstrap: { server: { id: 'a' }, member: { roleIds: [] as string[] }, channels: [{ id: 'ch', name: 'general' }] },
+    bootstrap: { server: { id: 'a' }, member: { roleIds: [] as string[] },
+      channels: [{ id: 'ch', name: 'general', type: 'text' as const, forceMuted: undefined as boolean | undefined }] },
     servers: [{ id: 'a', lastMessage: null }, { id: 'b', lastMessage: null }, { id: 'legacy' }] as Array<{ id: string; lastMessage?: shared.ServerLastMessage | null }>,
     appendMessage: (id: string, m: shared.Message) => { appended.push(`${id}:${m.id}`); },
     markUnread: (id: string, mentioned: boolean, serverId: string) => {
@@ -37,7 +42,7 @@ function fixture(raw = source, withMentions = false) {
     updateMessage: (id: string, m: shared.Message) => { updated.push(`${id}:${m.id}`); },
     removeMessage: (id: string, msgId: string) => { removed.push(`${id}:${msgId}`); },
     loadServers: async () => { loads++; }, resyncAfterReconnect: async () => { resyncs++; },
-    rejoinVoiceAfterOutage: async () => {}, setActivities: noop,
+    rejoinVoiceAfterOutage: async () => {}, setActivities: noop, upsertChannel: noop,
   };
   const store = { getState: () => state, setState: (patch: Partial<typeof state>) => { patches++; Object.assign(state, patch); }, subscribe: () => noop };
   const forbidden = (label: string) => () => assert.fail(`сценарий не выполняет ${label}`);
@@ -48,11 +53,13 @@ function fixture(raw = source, withMentions = false) {
     './config': { config: {}, gatewayWsUrl: () => 'ws://localhost/gateway' },
     './connState': { resetGatewayLive: noop, setGatewayLive: noop },
     './presenceVisibility': { presentNow: () => true, watchPresence: noop }, './bgGateways': { setBgPresent: noop },
-    './notifications': { setNotifyPrefs: noop, clearOsNotifications: noop, windowFocused: () => false,
-      osNotifyLevel: () => 'none', authorName: forbidden('authorName'), channelNoticeGroup: forbidden('channelNoticeGroup'),
-      coinNotifyLevel: forbidden('coinNotifyLevel'), messagePreview: forbidden('messagePreview'), osNotify: forbidden('osNotify'), osNotifyRaw: forbidden('osNotifyRaw') },
-    './channelPrefs': { notifyLevel: () => withMentions ? 'mentions' : 'none' }, './hotkeys': { isMobile: () => false },
-    './notifyRules': { shouldOsNotify: () => false, passesThrottle: forbidden('passesThrottle') },
+    './notifications': { setNotifyPrefs: noop, clearOsNotifications: (group: string) => cleared.push(group), windowFocused: () => false,
+      osNotifyLevel: () => personalLevel === undefined ? 'off' : 'all', authorName: (m: shared.Message) => m.author.displayName,
+      channelNoticeGroup: (id: string) => `ch:${id}`, popupPreview: (m: shared.Message) => ({ text: m.content }),
+      coinNotifyLevel: forbidden('coinNotifyLevel'), messagePreview: (m: shared.Message) => m.content,
+      osNotify: (...notice: Parameters<typeof osNotify>) => notices.push(notice), osNotifyRaw: forbidden('osNotifyRaw') },
+    './channelPrefs': { notifyLevel: () => personalLevel ?? (withMentions ? 'mentions' : 'none') }, './hotkeys': { isMobile: () => false },
+    './notifyRules': { shouldOsNotify, passesThrottle },
     './socketHealth': { CONNECT_TIMEOUT_MS: 15000, PING_MS: 25000, socketStale: () => false },
     './typing': { dropTyping: noop, noteTyping: forbidden('noteTyping') },
     './sounds': { playSound: (sound: string) => {
@@ -79,13 +86,75 @@ function fixture(raw = source, withMentions = false) {
       setTimeout: () => ++timer, clearTimeout: noop, setInterval: () => ++timer, clearInterval: noop,
       require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `описана граница ${id}`); return deps[id]; } });
   module.exports.connectGateway();
-  return { module: module.exports, state, sockets, appended, updated, removed, unread, sounds,
+  return { module: module.exports, state, sockets, appended, updated, removed, unread, sounds, notices, cleared,
     patches: () => patches, loads: () => loads, resyncs: () => resyncs };
 }
 function message(id = 'm', mine = true, createdAt = '2026-10-12T12:00:00Z'): shared.Message {
   return { id, channelId: 'ch', content: 'Текст', createdAt, editedAt: null, reactions: [], replyTo: null, attachments: [],
     author: { id: mine ? 'me' : 'peer', username: 'dmtest_b', displayName: 'Участник B', avatarUrl: null } };
 }
+it('создание серверов обновляется на открытом соединении и догоняет изменения после переподключения', () => {
+  const f = fixture();
+  Object.assign(f.state, { bootstrap: null });
+  const [socket] = f.sockets;
+  socket.receive({ t: 'ready', userId: 'me', canCreateServers: true });
+  assert.equal(f.state.user.canCreateServers, true);
+  socket.receive({ t: 'self.serverCreation', userId: 'me', canCreateServers: false });
+  assert.equal(f.state.user.canCreateServers, false);
+  socket.receive({ t: 'ready', userId: 'me', canCreateServers: true });
+  assert.equal(f.state.user.canCreateServers, false, 'старый снимок не отменяет свежий отзыв');
+  socket.receive({ t: 'self.serverCreation', userId: 'other', canCreateServers: true });
+  assert.equal(f.state.user.canCreateServers, false);
+  socket.receive({ t: 'self.serverCreation', userId: 'me', canCreateServers: true });
+  assert.equal(f.state.user.canCreateServers, true);
+  f.module.connectGateway();
+  f.sockets[1].receive({ t: 'ready', userId: 'me' });
+  assert.equal(f.state.user.canCreateServers, true, 'совместимость со старым шлюзом');
+  f.sockets[1].receive({ t: 'ready', userId: 'me', canCreateServers: false });
+  assert.equal(f.state.user.canCreateServers, false);
+});
+it('тихий кадр с другого сервера обновляет ленту и превью без бейджа, звука и тоста', () => {
+  const f = fixture(source, true, 'all');
+  const send = (id: string, forceMuted?: boolean) => f.sockets[0]!.receive({
+    t: 'message.create', channelId: 'remote', serverId: 'b', forceMuted,
+    message: { ...message(id, false), content: '@dmtest_a', channelId: 'remote' },
+  });
+
+  send('quiet', true);
+  assert.deepEqual(f.appended, ['remote:quiet']);
+  assert.equal(f.state.servers[1].lastMessage?.id, 'quiet');
+  assert.deepEqual(f.unread, []);
+  assert.deepEqual(f.sounds, []);
+  assert.equal(f.notices.length, 0);
+
+  send('ordinary', false);
+  assert.deepEqual(f.unread, [['remote', true, 'b']]);
+  assert.deepEqual(f.sounds, ['mention']);
+  assert.equal(f.notices.length, 1);
+  const allowed = f.notices[0]?.[4]?.canDeliver;
+  assert.equal(allowed?.(), true);
+  f.sockets[0]!.receive({ t: 'channel.update', channel: { id: 'remote', serverId: 'b', type: 'text', forceMuted: true } });
+  assert.deepEqual(f.cleared, ['ch:remote']);
+  assert.equal(allowed?.(), false, 'запоздалый системный тост отменён');
+});
+
+it('снимок канала подставляет политику при старом кадре, а выключение политики сохраняет личный мьют', () => {
+  const f = fixture(source, true, 'all');
+  f.state.bootstrap.channels[0]!.forceMuted = true;
+  f.sockets[0]!.receive({ t: 'message.create', channelId: 'ch', serverId: 'a', message: { ...message('legacy', false), content: '@dmtest_a' } });
+  assert.deepEqual(f.appended, ['ch:legacy']);
+  assert.deepEqual(f.unread, []);
+  assert.deepEqual(f.sounds, []);
+  assert.deepEqual(f.notices, []);
+
+  const personal = fixture(source, true, 'none');
+  personal.sockets[0]!.receive({ t: 'message.create', channelId: 'ch', serverId: 'a', forceMuted: false,
+    message: { ...message('personal', false), content: '@dmtest_a' } });
+  assert.deepEqual(personal.unread, []);
+  assert.deepEqual(personal.sounds, []);
+  assert.deepEqual(personal.notices, []);
+});
+
 function create(raw = source) {
   for (const mine of [true, false]) {
     const f = fixture(raw); const before = f.state.servers;

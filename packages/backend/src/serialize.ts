@@ -197,6 +197,7 @@ export function serializeChannel(c: {
   generalUserId?: string | null;
   sounds?: Record<string, string>;
   voiceBitrate?: number | null;
+  forceMuted?: boolean;
 }): Channel {
   return {
     id: c.id,
@@ -212,6 +213,7 @@ export function serializeChannel(c: {
     generalUserId: c.generalUserId ?? null,
     sounds: c.sounds ?? {},
     voiceBitrate: c.voiceBitrate ?? null,
+    ...(c.type === 'text' ? { forceMuted: c.forceMuted ?? false } : {}),
   };
 }
 

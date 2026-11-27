@@ -27,7 +27,7 @@ import { create } from 'zustand';
 import { api, apiFor, getToken, setToken, type Api, type BlockedUser, type PushMuteScope } from './api';
 import { activeInstanceId, config, instances, logoutFamily, rememberInstanceServers } from './config';
 import { convCacheKey } from './convCacheRules';
-import { applyUnread, historyLoadPlan, isFeedOnScreen, seedReads, seedServerCounts } from './channelRules';
+import { applyUnread, channelForceMuted, clearChannelCounts, historyLoadPlan, isFeedOnScreen, seedReads, seedServerCounts } from './channelRules';
 import { pinOrderStamps } from './dmListRules';
 import { createConvActions, type ConvActions, type ConvDeps } from './convStore';
 import type { FeedPlace } from './feedWindowRules';
@@ -946,6 +946,20 @@ function browserConvDeps(): ConvDeps {
   };
 }
 
+let channelPolicyRevision = 0;
+let serversRequest = 0;
+let openServerRequest = 0;
+
+/** Ответ, запрошенный до изменения политики, может содержать старые каналы и числа. */
+async function fetchBootstrap(serverId: string, isCurrent: () => boolean): Promise<ServerBootstrap | null> {
+  while (isCurrent()) {
+    const revision = channelPolicyRevision;
+    const bootstrap = await api.getServer(serverId);
+    if (revision === channelPolicyRevision) return isCurrent() ? bootstrap : null;
+  }
+  return null;
+}
+
 export const useStore = create<State>((set, get) => ({
   user: null,
   servers: [],
@@ -1139,6 +1153,8 @@ export const useStore = create<State>((set, get) => ({
       userActivities: {},
       unreadCounts: {},
       mentionCounts: {},
+      unreadServers: {},
+      mentionServers: {},
       voice: null,
       liveVoice: {},
       economy: {},
@@ -1416,15 +1432,13 @@ export const useStore = create<State>((set, get) => ({
   },
 
   loadServers: async () => {
+    const request = ++serversRequest;
+    const before = get();
     const servers = await api.listServers();
-    /**
-     * Счётчики серверов из того же ответа (12.10, #218, `channelRules.seedServerCounts`): холодный старт сразу со
-     * значками, а не после первого события шлюза. Старый бэкенд полей не шлёт — карты остаются как были.
-     */
-    set((s) => ({
-      servers,
-      ...seedServerCounts(servers, { unreadServers: s.unreadServers, mentionServers: s.mentionServers }, s.currentServerId),
-    }));
+    const current = get();
+    if (request !== serversRequest || current.instanceEpoch !== before.instanceEpoch || current.user?.id !== before.user?.id) return;
+    const counts = { unreadServers: current.unreadServers, mentionServers: current.mentionServers };
+    set({ servers, ...seedServerCounts(servers, counts, current.currentServerId, before) });
     /**
      * Снимок в реестр (§5.7): рейл обязан показывать серверы ЭТОГО инстанса и тогда, когда живой
      * шлюз открыт у другого. Пишется здесь, а не в рейле, потому что здесь единственное место, где
@@ -1435,10 +1449,13 @@ export const useStore = create<State>((set, get) => ({
   },
 
   openServer: async (serverId, channelId) => {
+    const request = ++openServerRequest;
+    const { instanceEpoch, user, leaveGuard } = get();
+    const isCurrent = () => request === openServerRequest && instanceEpoch === get().instanceEpoch && user?.id === get().user?.id;
     // Идёт запись голосового — сначала спросить (G13, `leaveGuard`); без записи — без ожидания, как раньше.
-    const guard = get().leaveGuard;
-    if (guard && !(await guard(serverId))) return;
-    const bootstrap = await api.getServer(serverId);
+    if (leaveGuard && !(await leaveGuard(serverId))) return;
+    const bootstrap = await fetchBootstrap(serverId, isCurrent);
+    if (!bootstrap) return;
     const firstText = bootstrap.channels.find((c) => c.type === 'text') ?? null;
     set((s) => {
       // Сервер открыт — его значок в рейле больше не нужен: непрочитанное теперь видно по каналам,
@@ -1496,8 +1513,10 @@ export const useStore = create<State>((set, get) => ({
   // channels: keep the open channel if it's still visible, and drop a now-hidden voice
   // connection. Ignored if you've since switched servers.
   refreshBootstrap: async (serverId) => {
-    if (get().currentServerId !== serverId) return;
-    const bootstrap = await api.getServer(serverId);
+    const { instanceEpoch, user } = get();
+    const isCurrent = () => instanceEpoch === get().instanceEpoch && user?.id === get().user?.id && get().currentServerId === serverId;
+    const bootstrap = await fetchBootstrap(serverId, isCurrent);
+    if (!bootstrap) return;
     const visible = new Set(bootstrap.channels.map((c) => c.id));
     set((s) => ({
       bootstrap,
@@ -1695,8 +1714,8 @@ export const useStore = create<State>((set, get) => ({
     if (temporaryVoice) return;
     // Persist the read mark (migration 0018) — fire-and-forget, unread must never block opening.
     if (channel?.type === 'text') void api.markChannelRead(channelId).catch(() => {});
-    // Соседние вкладки гасят у себя тот же счётчик: человек один, прочитано — значит прочитано.
-    publishTabEvent({ kind: 'read-channel', channelId, serverId: get().currentServerId ?? undefined });
+    // У тихого канала нет вклада в сумму сервера, поэтому гасим только его собственный счётчик.
+    publishTabEvent({ kind: 'read-channel', channelId, serverId: channelForceMuted(channel) ? undefined : get().currentServerId ?? undefined });
     // Запоминаем место, чтобы перезагрузка вернула сюда же, а не на «Выбери сервер» (lastPlace.ts).
     const inst = activeInstanceId();
     if (inst) rememberPlace({ instanceId: inst, serverId: get().currentServerId ?? undefined, channelId });
@@ -2114,14 +2133,32 @@ export const useStore = create<State>((set, get) => ({
       return { messagesByChannel: { ...s.messagesByChannel, [channelId]: list.filter((m) => m.id !== messageId) } };
     }),
 
-  upsertChannel: (channel) =>
+  upsertChannel: (channel) => {
+    const { bootstrap, loadServers, refreshBootstrap } = get();
+    const active = bootstrap?.server.id === channel.serverId ? bootstrap : null;
+    const previous = active?.channels.find((c) => c.id === channel.id);
+    const explicit = channel.type === 'text' && 'forceMuted' in channel && typeof channel.forceMuted === 'boolean';
+    const quiet = channelForceMuted(channel) || (!explicit && channel.type === 'text' && channelForceMuted(previous));
+    const changed = explicit && (!active || quiet !== channelForceMuted(previous));
+    if (changed) channelPolicyRevision++;
+
     set((s) => {
-      if (!s.bootstrap || s.bootstrap.server.id !== channel.serverId) return s;
-      const channels = s.bootstrap.channels.filter((c) => c.id !== channel.id);
-      channels.push(channel);
+      const counts = quiet ? clearChannelCounts(s, channel.id, channel.serverId) : {};
+      // Рассылка общая, а право отправки персональное. Для нового канала его сообщает bootstrap.
+      if (!active || (!previous && channel.type === 'text' && channel.canSend === undefined)) return counts;
+      const channels = active.channels.filter((c) => c.id !== channel.id);
+      const policy = !explicit && quiet ? { forceMuted: true } : {};
+      channels.push({ ...channel, ...policy, canSend: channel.canSend ?? previous?.canSend });
       channels.sort((a, b) => a.position - b.position);
-      return { bootstrap: { ...s.bootstrap, channels } };
-    }),
+      return { ...counts, bootstrap: { ...active, channels } };
+    });
+
+    // Для неоткрытого сервера часть счётчика могла прийти только сводкой без разбивки по каналам.
+    if (!active && changed) void loadServers().catch(() => {});
+    if (active && ((!previous && channel.type === 'text' && channel.canSend === undefined) || (changed && !quiet))) {
+      void refreshBootstrap(channel.serverId).catch(() => {});
+    }
+  },
 
   deleteChannel: (serverId, channelId) =>
     set((s) => {

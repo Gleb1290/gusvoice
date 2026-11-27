@@ -1,0 +1,27 @@
+.channel-access-check {
+  min-width: 0;
+  margin-block: var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  background: var(--bg-2);
+}
+.channel-access-check > summary { cursor: pointer; color: var(--text); font-weight: 600; }
+.channel-access-check > p { font-size: 13px; margin-block: var(--sp-3); }
+.channel-access-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.channel-access-controls > :first-child { flex: 1 1 12rem; min-width: 0; }
+.channel-access-results { list-style: none; padding: 0; margin: var(--sp-4) 0 0; }
+.channel-access-results > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding-block: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.channel-access-results small { display: block; margin-top: 2px; color: var(--muted); }
+.channel-access-results .allowed, .channel-access-results .denied {
+  border: 1px solid currentColor; border-radius: 99px; padding: 2px 8px; font-size: 12px;
+}
+.channel-access-results .allowed { color: var(--green, #3fb97a); }
+.channel-access-results .denied { color: var(--danger); }

@@ -1,6 +1,6 @@
 [package]
 name = "gusvoice"
-version = "0.9.73"
+version = "0.9.81"
 description = "GusVoice desktop client"
 license = "AGPL-3.0-only"
 edition = "2021"
@@ -31,7 +31,7 @@ diag = []
 # `tray-icon` enables the system-tray icon/menu (close-to-tray behaviour).
 tauri = { version = "2.12.5", features = ["devtools", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = "=1.0.154"
 
 # Desktop-only plugins: global hotkeys + auto-updater + relaunch + OS notifications.
 # (notification DOES support mobile, but we gate it desktop-side for now — Android
@@ -109,7 +109,7 @@ livekit = { version = "0.7.49", features = ["rustls-tls-native-roots"] }
 # explorer, см. screenshare.rs). Версия та же, что тянет livekit; `[patch.crates-io]` ниже
 # подменяет её нашим вендоренным форком, так что оба пути ведут в один и тот же код.
 webrtc-sys = "0.3.35"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "=1.52.4", features = ["rt-multi-thread", "macros", "time", "sync"] }
 # Source-picker thumbnails: PNG-encode one captured frame per source into a data-URL.
 png = "0.17"
 base64 = "0.22"

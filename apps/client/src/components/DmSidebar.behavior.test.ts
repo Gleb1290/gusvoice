@@ -812,7 +812,7 @@ it('лента канала восстанавливает черновик пр
   const { api } = await server.ssrLoadModule('/src/api.ts') as typeof import('../api');
   const oldSend = api.sendMessage;
   try {
-    const channel = (id: string) => ({ id, serverId: 's', name: id, type: 'text', topic: null }) as Channel;
+    const channel = (id: string) => ({ id, serverId: 's', name: id, type: 'text', topic: null, canSend: true }) as Channel;
     await seed({ user: { id: 'me', username: 'me', displayName: 'Я', avatarUrl: null } as never,
       bootstrap: { server: { id: 's', name: 'Сервер' }, channels: [channel('first'), channel('second')], roles: [], permissions: '0' } as never,
       channelDrafts: { first: { text: 'свой черновик', replyToId: null } }, messagesByChannel: { first: [], second: [] } });

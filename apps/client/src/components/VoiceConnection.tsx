@@ -1,5 +1,6 @@
 import { voiceMaxBitrate } from '@gusvoice/shared';
-import { RoomAudioRenderer, RoomContext } from '@livekit/components-react';
+import { RoomContext } from '@livekit/components-react';
+import { VoiceRoomAudio } from './VoiceRoomAudio';
 import {
   createLocalAudioTrack,
   DisconnectReason,
@@ -50,6 +51,7 @@ import { GRACE_MS, touchVoiceSession } from '../voiceSession';
 import { createVoiceContinuity } from '../voiceContinuity';
 import { getMicGateOpen, ownRingSpeaking } from '../micGateState';
 import { vadFloor, vadInitial, vadOpenLevel, vadStep, type VadState } from '../speakingVad';
+import { isBotMetadata } from '../voiceRules';
 
 /** Слой показа → качество в терминах LiveKit (#191). */
 const LAYER_QUALITY: Record<StreamLayer, VideoQuality> = {
@@ -716,11 +718,8 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // Single source of truth for remote audio levels. Apply each user's saved per-user volume
   // (localUserAudio) to every remote participant from here — the one place that's always mounted
   // while in voice — so a volume tweak takes effect from ANY view, not only where a voice tile
-  // happens to be rendered. RoomAudioRenderer must NOT also set a non-deafened volume (its prop is
-  // undefined unless deafened), or it would re-apply 100% to every track and clobber these gains.
-  // Skipped while deafened (RoomAudioRenderer forces 0 then); on un-deafen this re-runs and restores.
+  // happens to be rendered. VoiceRoomAudio attaches only audible tracks and leaves their gain alone.
   useEffect(() => {
-    if (selfDeafened) return;
     const reapply = () => {
       for (const p of room.remoteParticipants.values()) applyUserAudio(p, voice.instanceId);
     };
@@ -737,7 +736,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         .off(RoomEvent.TrackPublished, reapply)
         .off(RoomEvent.ParticipantConnected, reapply);
     };
-  }, [room, selfDeafened]);
+  }, [room, voice.instanceId]);
 
   // ЕДИНСТВЕННОЕ место, где звучит чужое стрим-аудио (#71).
   //
@@ -1012,6 +1011,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
       el: HTMLAudioElement | null; // remote-track keep-alive sink (see attach)
       buf: Uint8Array<ArrayBuffer>;
       vad: VadState;
+      botAudio: boolean;
     };
     const mons = new Map<string, Mon>();
 
@@ -1066,6 +1066,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
           el,
           buf: new Uint8Array(analyser.fftSize),
           vad: vadInitial(),
+          botAudio: !isLocal && isBotMetadata(room.remoteParticipants.get(id)?.metadata),
         });
       } catch (e) {
         console.warn('[voice] speaking-VAD analyser failed for', id, e);
@@ -1134,7 +1135,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
         const m = mons.get(p.identity);
         if (micOn && m) {
           const lvl = levelOf(m);
-          const step = vadStep(m.vad, lvl, now);
+          const step = vadStep(m.vad, lvl, now, m.botAudio);
           m.vad = step.state;
           // Своя обводка = VAD И гейт открыт (рация: гейт «открыт» всегда → по нажатию). Чужие — как были.
           speaking = isSelf ? ownRingSpeaking(step.speaking, getMicGateOpen()) : step.speaking;
@@ -1228,9 +1229,7 @@ export function VoiceConnection({ children }: { children: React.ReactNode }) {
   // because MainLayout wraps the sidebar too — reaches that panel.
   return (
     <RoomContext.Provider value={room}>
-      {/* Deafen forces all remote tracks to 0 here; otherwise volume is left undefined so this
-          renderer never overrides the per-user gains applied in the effect above. */}
-      <RoomAudioRenderer volume={selfDeafened ? 0 : undefined} />
+      <VoiceRoomAudio deafened={selfDeafened} instanceId={voice.instanceId} />
       {/* Согласие на диагностику (#113) — спрашиваем ровно здесь: человек только что вошёл в
           голосовой канал, то есть в тот момент, когда польза от сбора очевидна и объяснима одной
           фразой. Вопрос задаётся один раз; «нет» окончательно. */}

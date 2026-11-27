@@ -244,7 +244,7 @@ export async function postChannelMessage(
   const replies = await replyPreviewsFor([replyToId]);
   const message = serializeMessage({ ...row, author, replyTo: replyToId ? (replies.get(replyToId) ?? null) : null });
   await publishChannelMessageEvent(channel.serverId, channelId, { kind: 'created', message }, author.id);
-  if (input.silent) return { kind: 'ok', message, row };
+  if (input.silent || channel.forceMuted) return { kind: 'ok', message, row };
   // Wake offline @mentioned members (fire-and-forget; only fires when the content has an @mention).
   void resolveMentionedMembers(content, channel.serverId, author.id, channelId, mentionRoleIds, mentionEveryone !== false).then(async (ids) => {
     if (ids.length === 0) return;
@@ -265,6 +265,8 @@ export async function postChannelMessage(
       },
       { scope: 'server', targetId: channel.serverId },
     );
+  }).catch(() => {
+    // Push is best-effort after the message has been delivered.
   });
   return { kind: 'ok', message, row };
 }

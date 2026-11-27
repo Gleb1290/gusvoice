@@ -1,6 +1,6 @@
 import type { InstanceUpdateInfo } from '@gusvoice/shared';
 import { randomBytes } from 'node:crypto';
-import { open, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { link, lstat, open, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { env } from './env.js';
 import {
@@ -77,7 +77,7 @@ async function latestRelease(force: boolean): Promise<typeof latestCache> {
 
 async function requestAgeMs(): Promise<number | null> {
   try {
-    const st = await stat(requestFile());
+    const st = await lstat(requestFile());
     return Math.max(0, Date.now() - st.mtimeMs);
   } catch {
     return null;
@@ -90,10 +90,11 @@ export async function instanceUpdateInfo(force = false): Promise<InstanceUpdateI
   const checkDisabled = !env.gvReleasesUrl;
   // Сборку разработки (прод на master) не с чем сравнивать — никуда не ходим.
   const latest = isRelease && !checkDisabled ? await latestRelease(force) : null;
-  const [statusJson, markerJson, ageMs] = await Promise.all([
+  // Watcher сначала пишет running, затем забирает запрос. Читаем в обратном порядке.
+  const ageMs = await requestAgeMs();
+  const [statusJson, markerJson] = await Promise.all([
     readSmallJson(statusFile()),
     readSmallJson(markerFile()),
-    requestAgeMs(),
   ]);
   const status = parseUpdateStatus(statusJson, Date.now());
   const updater = parseUpdaterMarker(markerJson);
@@ -101,6 +102,7 @@ export async function instanceUpdateInfo(force = false): Promise<InstanceUpdateI
     installed,
     latest: latest?.value ?? null,
     checkDisabled,
+    checkFailed: latest?.failed ?? false,
     updater,
     status,
     requestAgeMs: ageMs,
@@ -118,18 +120,25 @@ export async function instanceUpdateInfo(force = false): Promise<InstanceUpdateI
 }
 
 /**
- * Положить запрос для хоста. Пишем во временный файл рядом и переименовываем: служба на хосте срабатывает на
- * появление `update` и не должна прочитать недописанную строку.
+ * Опубликовать готовый запрос атомарно. Hard link в том же каталоге даёт EEXIST, если слот уже занят.
  */
-export async function writeUpdateRequest(version: string): Promise<void> {
+export async function writeUpdateRequest(version: string): Promise<boolean> {
   const line = updateRequestLine(version);
   if (!line) throw new Error('bad version');
   const tmp = `${requestFile()}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    await writeFile(tmp, line, { mode: 0o644 });
-    await rename(tmp, requestFile());
+    await writeFile(tmp, line, { mode: 0o644, flag: 'wx' });
   } catch (err) {
-    await unlink(tmp).catch(() => undefined);
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') await unlink(tmp).catch(() => undefined);
     throw err;
+  }
+  try {
+    await link(tmp, requestFile());
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  } finally {
+    await unlink(tmp).catch(() => undefined);
   }
 }

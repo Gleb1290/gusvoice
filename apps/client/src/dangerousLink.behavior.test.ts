@@ -44,6 +44,7 @@ function load(text = source, guardText = guardSource, hostText = hostSource) {
     './components/Icon': { Icon: () => null },
     './config': { config: { apiUrl: 'https://api.voice.example' } },
     './hotkeys': { isDesktop: () => false },
+    './externalLinks': { openAndroidWebLink: () => false },
     './desktopWindow': { openExternal: () => assert.fail('не desktop') },
     './linkSafety': safety,
     '../confirm': { useConfirmDialog: (select: (state: unknown) => unknown) => select({ pending, answer }) },

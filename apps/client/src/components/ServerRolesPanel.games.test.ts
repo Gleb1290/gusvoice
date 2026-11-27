@@ -25,7 +25,10 @@ type Fixture = {
 
 function switches(host: ParentNode, name: string): HTMLButtonElement[] {
   return [...host.querySelectorAll<HTMLButtonElement>('button[role="switch"]')]
-    .filter(button => button.getAttribute('aria-label') === name);
+    .filter(button => {
+      const id = button.getAttribute('aria-labelledby');
+      return button.getAttribute('aria-label') === name || (id && button.ownerDocument.getElementById(id)?.textContent === name);
+    });
 }
 function oneSwitch(host: ParentNode, name: string) {
   const found = switches(host, name);
@@ -50,7 +53,7 @@ async function fixture(raw: string, superAdmin: boolean, initial: bigint, check:
       permissions: initial.toString(), position: 1, hoist: false, isEveryone: false,
       mentionable: false, membersCanAssign: false };
     const saved: Saved[] = [], refreshes: string[] = [];
-    const state = { user: { id: 'member-one', superAdmin } };
+    const state = { bootstrap: { permissions: shared.Permission.ADMINISTRATOR.toString() }, user: { id: 'member-one', superAdmin } };
     const useStore = Object.assign((select: (value: typeof state) => unknown) => {
       step('store'); return select(state);
     }, { getState: () => ({ openServer: async (id: string) => { step('IO'); refreshes.push(id); } }) });
@@ -62,13 +65,14 @@ async function fixture(raw: string, superAdmin: boolean, initial: bigint, check:
         step('IO'); assert.equal(id, 'server-one', 'R364/games/setup/listMembers-id'); return [];
       },
       async updateRole(id: string, body: Pick<Role, 'name' | 'color' | 'permissions' | 'mentionable' | 'membersCanAssign'>) {
-        step('IO'); saved.push({ id, permissions: body.permissions }); role = { ...role, ...body };
+        step('IO'); saved.push({ id, permissions: body.permissions }); role = { ...role, ...body }; return { ...role };
       },
     };
     const unused = () => { throw new Error('R364/games/setup/неожиданная-граница'); };
     const dependencies: Record<string, unknown> = {
       '@gusvoice/shared': shared,
       react: {
+        useRef: React.useRef,
         useState(initialValue: unknown) {
           step('hooks');
           const [value, setValue] = React.useState(initialValue);
@@ -84,8 +88,10 @@ async function fixture(raw: string, superAdmin: boolean, initial: bigint, check:
       } }) },
       '../store': { useStore }, '../confirm': { confirmAction: unused },
       './Toggle': { Toggle },
-      './HelpDot': { HelpDot: ({ children }: { children: React.ReactNode }) => React.createElement('small', null, children) },
-      './Avatar': { Avatar: unused }, './Icon': { Icon: unused }, './Select': { Select: unused },
+      '../phoneLayout': { usePhoneLayout: () => false },
+      './RoleAppearancePicker': { RoleAppearancePicker: unused },
+      './RolePeopleEditor': { RolePeopleEditor: unused, ServerPeopleDirectory: unused },
+      './roles-editor.css': {},
     };
     const module = { exports: {} };
     // Целый настоящий модуль, настоящие shared-правила и Toggle; предметные handlers не подменяются.

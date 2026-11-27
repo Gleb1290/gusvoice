@@ -11,6 +11,7 @@ import * as orm from 'drizzle-orm';
 import * as zod from 'zod';
 import * as schema from '../src/db/schema.js';
 import * as audience from '../src/audienceRules.js';
+import * as channelAccessCheck from '../src/channelAccessCheck.js';
 import * as convRules from '../src/convRules.js';
 import { contentPreview } from '../src/pushRules.js';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
@@ -72,28 +73,28 @@ function unreadModule(changes: readonly Change[] = [], sharedApi: typeof shared 
     './federation/instanceLabels.js': blocked('instanceLabels'),
   }, changes);
 }
-function serverModule(changes: readonly Change[] = [], sharedApi: typeof shared = shared) {
+function serverModule(unreadApi = unread) {
   const serialDeps: Record<string, unknown> = {
     '@gusvoice/shared': shared, './auth.js': auth, './superAdminRules.js': superRules, './env.js': { env: {} },
   };
   for (const id of ['./federation/instanceLabels.js', './statusRules.js', './shopRules.js', './callRules.js', './lastSeenRules.js', './linkThreats.js']) serialDeps[id] = blocked(id);
   const serialize = moduleFrom<typeof import('../src/serialize.js')>('../src/serialize.ts', serialDeps);
   const deps: Record<string, unknown> = {
-    '@gusvoice/shared': sharedApi, 'drizzle-orm': orm, zod,
+    '@gusvoice/shared': shared, 'drizzle-orm': orm, zod,
     '../db/index.js': { db: t.db }, '../db/schema.js': schema, '../permissions.js': permissions,
     '../auth.js': auth, '../superAdminRules.js': superRules, '../serialize.js': serialize,
-    '../unread.js': unread, '../telegram.js': { telegramConfigured: () => false },
+    '../unread.js': unreadApi, '../telegram.js': { telegramConfigured: () => false },
   };
   for (const id of ['../audit.js', '../federation/directoryEvents.js', '../federation/guestAccess.js', '../federation/guestMembership.js',
     '../federation/instanceLabels.js', '../federation/instanceBan.js', '../federation/links.js', '../federation/guestRules.js',
     '../authGuard.js', '../realtime.js', '../serverMembership.js', '../statusRules.js', '../shopRules.js', '../storage.js', '../stickerCatalog.js', '../util.js']) deps[id] = blocked(id);
-  return moduleFrom<Servers>('../src/routes/servers.ts', deps, changes);
+  return moduleFrom<Servers>('../src/routes/servers.ts', deps);
 }
 before(async () => {
   t = await createTestDb();
   permissions = moduleFrom<Permissions>('../src/permissions.ts', {
     '@gusvoice/shared': shared, 'drizzle-orm': orm, './db/index.js': { db: t.db }, './db/schema.js': schema,
-    './auth.js': auth, './superAdminRules.js': superRules, './audienceRules.js': audience,
+    './auth.js': auth, './superAdminRules.js': superRules, './audienceRules.js': audience, './channelAccessCheck.js': channelAccessCheck,
   });
   push = pushModule(); unread = unreadModule(); servers = serverModule();
 });
@@ -244,7 +245,7 @@ test('R266 мутант unread без ролевой ветки SQL пойман
 test('R266 парный мутант bootstrap без ролевой ветки SQL пойман настоящим reads после original-first', async () => {
   await history(); await bootstrapCounts();
   await counterfact(async () => {
-  const mutant = serverModule([[sqlRoles, 'OR FALSE']]);
+  const mutant = serverModule(unreadModule([[sqlRoles, 'OR FALSE']]));
   await assert.rejects(() => bootstrapCounts(mutant), assertion('R266 bootstrap:'));
   });
 });
@@ -370,7 +371,8 @@ test('R280 возврат собаки в доменный SQL-пинг пойм
     }, changes),
   });
   const original = load();
-  await domainBroadcastBadges(unreadModule([], original), serverModule([], original));
+  const originalUnread = unreadModule([], original);
+  await domainBroadcastBadges(originalUnread, serverModule(originalUnread));
   let mutant: typeof shared;
   await counterfact(async () => {
   const anchor = "const tail = '(?![A-Za-z0-9_@]|[.-]+[A-Za-z0-9_])';";
@@ -378,9 +380,9 @@ test('R280 возврат собаки в доменный SQL-пинг пойм
   await assert.rejects(() => domainBroadcastBadges(unreadModule([], mutant)),
     exactAssertion('R280:unread-домен-не-наращивает-бейдж'));
   });
-  await domainBroadcastBadges(unreadModule([], original), serverModule([], original));
+  await domainBroadcastBadges(originalUnread, serverModule(originalUnread));
   await counterfact(async () => {
-  await assert.rejects(() => domainBroadcastBadges(unread, serverModule([], mutant)),
+  await assert.rejects(() => domainBroadcastBadges(unread, serverModule(unreadModule([], mutant))),
     exactAssertion('R280:bootstrap-домен-не-наращивает-бейдж'));
   });
 });
@@ -396,7 +398,7 @@ test('R279 мутанты unread и bootstrap без IS DISTINCT FROM false по
   await broadcastCounts();
   await counterfact(async () => {
   const anchor = 'm.mention_everyone IS DISTINCT FROM false AND ';
-  await assert.rejects(() => broadcastCounts(unread, serverModule([[anchor, '']])),
+  await assert.rejects(() => broadcastCounts(unread, serverModule(unreadModule([[anchor, '']]))),
     exactAssertion('R279:bootstrap-отсекает-false-но-считает-true-null-и-личное'));
   });
 });
@@ -444,9 +446,9 @@ async function messageApp(changes: readonly Change[] = []) {
   for (const id of ['../polls.js', '../storage.js', '../serverSearch.js', '../federation/guestQuota.js']) deps[id] = blocked(id);
   const routes = moduleFrom<typeof import('../src/routes/messages.js')>('../src/routes/messages.ts', deps);
   await app.register(routes.messageRoutes); await app.ready();
-  return { app, pushes, events, async send(content: string, user = 'author') {
+  return { app, pushes, events, async send(content: string, user = 'author', replyToId?: string) {
     const response = await app.inject({ method: 'POST', url: '/channels/visible/messages',
-      headers: { 'x-fixture-user': user }, payload: { content } });
+      headers: { 'x-fixture-user': user }, payload: { content, replyToId } });
     assert.equal(response.statusCode, 201, response.body);
     await Promise.all(resolutions); await setImmediate();
     return response.json<shared.Message>();
@@ -476,10 +478,56 @@ async function postBroadcast(changes: readonly Change[] = []) {
     assert.deepEqual(plain((await unread.unreadSummary('reader')).servers.s), { unread: 4, mentions: 2 });
     assert.deepEqual(plain((await servers.buildBootstrap('s', 'reader'))?.reads.visible), { unread: 4, mentions: 2 });
     assert.equal(f.events.length, 4, 'запрет пинга не запрещает саму отправку и событие');
-    assert.deepEqual(plain(f.events[0]), { t: 'message.create', channelId: 'visible', serverId: 's', message: denied },
+    assert.deepEqual(plain(f.events[0]), { t: 'message.create', channelId: 'visible', serverId: 's', forceMuted: false, message: denied },
       'новый вход событий сохраняет шлюзовой DTO сообщения без разрешённого пинга');
   } finally { await f.app.close(); }
 }
+
+test('заглушённый канал доставляет ответы и метку в шлюз, а пинги будят только после снятия заглушения', async () => {
+  await message('original', 'Исходное сообщение', [], 'reader');
+  await t.raw.exec("UPDATE channels SET force_muted = true WHERE id = 'visible'");
+  const f = await messageApp();
+  const content = '@reader @Ночная смена @everyone';
+  try {
+    const muted = await f.send(content, 'owner', 'original');
+    assert.equal(muted.content, content);
+    assert.equal(muted.replyTo?.id, 'original');
+    assert.deepEqual(muted.mentionRoles, ['public']);
+    assert.equal(muted.mentionEveryone, true);
+    assert.deepEqual(plain(f.events[0]), {
+      t: 'message.create', channelId: 'visible', serverId: 's', forceMuted: true, message: muted,
+    });
+    assert.equal(f.pushes.length, 0);
+
+    await t.raw.exec("UPDATE channels SET force_muted = false WHERE id = 'visible'");
+    await f.send(content, 'owner', 'original');
+    assert.deepEqual(f.pushes.map((ids) => [...ids]), [['author', 'outsider', 'reader']]);
+  } finally {
+    await f.app.close();
+  }
+});
+
+test('заглушённый канал исчезает из всех счётчиков и сохраняет превью и отметку чтения', async () => {
+  await t.raw.exec(`
+    INSERT INTO channels (id, server_id, name, type) VALUES ('open', 's', 'Громкий', 'text');
+    UPDATE channels SET force_muted = true WHERE id = 'visible';
+    INSERT INTO channel_reads (user_id, channel_id, last_read_at) VALUES ('reader', 'visible', now() - interval '1 hour');
+    INSERT INTO messages (id, channel_id, author_id, content, created_at) VALUES
+      ('quiet-latest', 'visible', 'author', '@reader @everyone', now()),
+      ('quiet-read', 'visible', 'author', '@reader', now() - interval '2 hours'),
+      ('open-ping', 'open', 'author', '@reader', now() - interval '1 minute');
+  `);
+  const bootstrap = await servers.buildBootstrap('s', 'reader');
+  assert.deepEqual(plain(bootstrap?.reads), { open: { unread: 1, mentions: 1 } });
+  assert.deepEqual(plain((await unread.unreadSummary('reader')).servers.s), { unread: 1, mentions: 1 });
+  const card = (await unread.serverListExtras('reader', ['s'])).get('s');
+  assert.deepEqual({ unread: card?.unread, mentions: card?.mentions }, { unread: 1, mentions: 1 });
+  assert.equal(card?.lastMessage?.id, 'quiet-latest');
+
+  await t.raw.exec("UPDATE channels SET force_muted = false WHERE id = 'visible'");
+  assert.deepEqual(plain((await servers.buildBootstrap('s', 'reader'))?.reads.visible), { unread: 1, mentions: 1 });
+  assert.deepEqual(plain((await unread.unreadSummary('reader')).servers.s), { unread: 2, mentions: 2 });
+});
 
 test('при отправке сохраняются разрешённые роли и пуш получают их участники', async () => {
   await t.raw.exec(`UPDATE roles SET permissions='${P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_HISTORY}' WHERE id='everyone'`);

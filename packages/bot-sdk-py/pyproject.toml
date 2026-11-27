@@ -1,7 +1,7 @@
 # Python SDK of the GusVoice Bot API (#233, phase 5). Runtime: the standard library only — no dependencies.
 # setuptools is needed only to BUILD the package; pinned exactly (project rule: exact versions).
 [build-system]
-requires = ["setuptools==80.9.0"]
+requires = ["setuptools==82.0.1"]
 build-backend = "setuptools.build_meta"
 
 [project]

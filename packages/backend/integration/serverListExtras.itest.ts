@@ -10,6 +10,7 @@ import ts from 'typescript';
 import * as zod from 'zod';
 import * as schema from '../src/db/schema.js';
 import * as audience from '../src/audienceRules.js';
+import * as channelAccessCheck from '../src/channelAccessCheck.js';
 import * as convRules from '../src/convRules.js';
 import { createTestDb, truncateAll, type TestDb } from './harness.js';
 
@@ -60,7 +61,7 @@ function permissions(changes: readonly Mutation[] = []) {
   return moduleFrom<Permissions>('../src/permissions.ts', {
     '@gusvoice/shared': shared, 'drizzle-orm': orm, './db/index.js': { db: t.db }, './db/schema.js': schema,
     './auth.js': { isSuperAdmin: () => false, superAdminId: () => null },
-    './superAdminRules.js': { asUserId: (id: unknown) => id }, './audienceRules.js': audience,
+    './superAdminRules.js': { asUserId: (id: unknown) => id }, './audienceRules.js': audience, './channelAccessCheck.js': channelAccessCheck,
   }, changes);
 }
 function unreadModule(changes: readonly Mutation[] = [], perms = permissions()) {

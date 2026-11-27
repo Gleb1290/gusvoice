@@ -11,8 +11,12 @@ const href = 'https://outside.example.org/docs?section=bots#start';
 const P = 'R362/integration/check/';
 type Registration = { type: string; listener: EventListener; options?: boolean | AddEventListenerOptions };
 
-async function check(raw: string, guarded: boolean, desktop = true) {
+async function check(raw: string, guarded: boolean, platform: 'desktop' | 'web' | 'android' = 'desktop') {
   await environment(async (host, render) => {
+    const toasts: unknown[][] = [];
+    const nativeOpened: string[][] = [];
+    const oldBridge = Object.getOwnPropertyDescriptor(window, 'GusVoiceNative');
+    let browserOpens = 0;
     let operations = 0, reactClicks = 0;
     let budgetError: Error | undefined;
     const step = (operation: string) => {
@@ -32,12 +36,23 @@ async function check(raw: string, guarded: boolean, desktop = true) {
     // Настройки environment ниже запрещают default-action навигации. Прямой window.open тоже
     // перехвачен; доставка click и preventDefault проходят настоящий React DOM и window.
     Object.defineProperty(window, 'open', { configurable: true, writable: true, value: () => {
-      step('browser-open'); return null;
+      step('browser-open'); browserOpens++; return null;
     } });
     try {
+      if (platform === 'android') {
+        Object.defineProperty(window, 'GusVoiceNative', { configurable: true, value: {
+          openExternalUri: (url: string, fallback: string) => {
+            nativeOpened.push([url, fallback]); return true;
+          },
+        } });
+      }
       const module = { exports: {} };
       const dependencies: Record<string, unknown> = {
-        './hotkeys': { isDesktop: () => { step('isDesktop'); return desktop; } },
+        './hotkeys': {
+          isDesktop: () => { step('isDesktop'); return platform === 'desktop'; },
+          isAndroid: () => { step('isAndroid'); return platform === 'android'; },
+        },
+        './toast': { toast: (...args: unknown[]) => { toasts.push(args); return toasts.length; } },
         './desktopWindow': { openExternal: (url: string) => {
           step('openExternal'); opened.push(url); order.push('external'); return Promise.resolve();
         } },
@@ -79,22 +94,31 @@ async function check(raw: string, guarded: boolean, desktop = true) {
         } });
       try { step('install'); links.installExternalLinks(); }
       finally { restore('addEventListener', oldAddDescriptor); }
-      assert.equal(registrations.length, desktop ? 1 : 0, P + 'слушатель-только-в-десктопе');
-      assert.equal(registrations.filter(registration => registration.type === 'click').length,
-        desktop ? 1 : 0, P + 'установлен-именно-click');
+      if (platform !== 'android') {
+        const expected = platform === 'desktop' ? 1 : 0;
+        assert.equal(registrations.length, expected, P + 'слушатель-только-в-десктопе');
+        assert.equal(registrations.filter(registration => registration.type === 'click').length,
+          expected, P + 'установлен-именно-click');
+      }
 
       const event = new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, button: 0 });
       await React.act(async () => { step('dispatch'); targets[0].dispatchEvent(event); });
       // DOM может поглотить ошибку listener: предохранитель всё равно должен краснить харнесс,
       // а не случайно считаться адресным kill из-за недоставленного события.
       if (budgetError) throw budgetError;
+      assert.deepEqual(nativeOpened, platform === 'android' && !guarded ? [[href, '']] : []);
+      assert.deepEqual(toasts, [], 'успешное открытие не показывает предупреждение');
+      if (platform === 'android') assert.equal(browserOpens, 0);
       if (guarded) {
         assert.equal(reactClicks, 1, P + 'React-получил-настоящий-click');
         // Как MessageLink: подтверждение уже забрало клик, системный браузер нельзя открыть раньше него.
         assert.equal(opened.length, 0, P + 'React-preventDefault-не-обойдён');
         assert.equal(order.join(','), 'react', P + 'обработчик-React-раньше-перехватчика');
         assert.equal(event.defaultPrevented, true, P + 'React-отменил-переход');
-      } else if (desktop) {
+      } else if (platform === 'android') {
+        assert.deepEqual(opened, [], 'Android не вызывает десктопное открытие');
+        assert.equal(event.defaultPrevented, true, 'Android отменяет переход внутри WebView');
+      } else if (platform === 'desktop') {
         assert.equal(opened.length, 1, P + 'голая-ссылка-открыта-ровно-раз');
         assert.equal(opened[0], href, P + 'системному-браузеру-передан-свой-href');
         assert.equal(event.defaultPrevented, true, P + 'перехватчик-отменил-переход');
@@ -107,6 +131,8 @@ async function check(raw: string, guarded: boolean, desktop = true) {
       restore('addEventListener', oldAddDescriptor);
       for (const registration of registrations) remove(registration.type, registration.listener, registration.options);
       restore('open', oldOpenDescriptor);
+      if (oldBridge) Object.defineProperty(window, 'GusVoiceNative', oldBridge);
+      else Reflect.deleteProperty(window, 'GusVoiceNative');
     }
   }, { settings: { navigation: {
     disableMainFrameNavigation: true, disableChildFrameNavigation: true, disableChildPageNavigation: true,
@@ -122,7 +148,15 @@ it('R362 голая target=_blank через настоящий click откры
 });
 
 it('R362 вне десктопа общий перехватчик не ставит слушатель и не меняет обычный клик', async () => {
-  await check(source, false, false);
+  await check(source, false, 'web');
+});
+
+it('на Android голая ссылка уходит в системный браузер с отменой перехода в WebView', async () => {
+  await check(source, false, 'android');
+});
+
+it('на Android отменённый обработчиком React клик не открывает системный браузер', async () => {
+  await check(source, true, 'android');
 });
 
 it('R362 контрфакт захвата обходит React preventDefault и адресно отвергается', async () => {

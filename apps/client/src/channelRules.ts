@@ -1,4 +1,10 @@
-import type { Server, ServerBootstrap } from '@gusvoice/shared';
+import type { Channel, Server, ServerBootstrap } from '@gusvoice/shared';
+
+type ChannelPolicy = Pick<Channel, 'type'> & { forceMuted?: boolean };
+
+export function channelForceMuted(channel: ChannelPolicy | null | undefined): boolean {
+  return channel?.type === 'text' && channel.forceMuted === true;
+}
 
 /**
  * Правила непрочитанного и загрузки истории — вынуты из `store.ts` (просьба Codex, #80).
@@ -94,15 +100,18 @@ export function seedReads(
   keepReadChannelId: string | null,
 ): Pick<UnreadState, 'unreadCounts' | 'mentionCounts'> {
   const ids = new Set(bootstrap.channels.map((c) => c.id));
+  const quiet = new Set(bootstrap.channels.filter(channelForceMuted).map((c) => c.id));
   const reads = bootstrap.reads ?? {};
   const unreadCounts: Record<string, number> = {};
   for (const [id, n] of Object.entries(s.unreadCounts)) if (!ids.has(id)) unreadCounts[id] = n;
   for (const [id, r] of Object.entries(reads)) {
-    if (id !== keepReadChannelId && r.unread > 0) unreadCounts[id] = r.unread;
+    if (id !== keepReadChannelId && !quiet.has(id) && r.unread > 0) unreadCounts[id] = r.unread;
   }
   const mentionCounts: Record<string, number> = {};
   for (const [id, n] of Object.entries(s.mentionCounts)) if (!ids.has(id)) mentionCounts[id] = n;
-  for (const [id, r] of Object.entries(reads)) if (id !== keepReadChannelId && r.mentions > 0) mentionCounts[id] = r.mentions;
+  for (const [id, r] of Object.entries(reads)) {
+    if (id !== keepReadChannelId && !quiet.has(id) && r.mentions > 0) mentionCounts[id] = r.mentions;
+  }
   return { unreadCounts, mentionCounts };
 }
 
@@ -133,10 +142,41 @@ export interface ServerCountMaps {
   mentionServers: Record<string, number>;
 }
 
+function withCount(map: Record<string, number>, id: string, count: number): Record<string, number> {
+  const next = Math.max(0, Math.floor(count));
+  if ((map[id] ?? 0) === next) return map;
+  if (next > 0) return { ...map, [id]: next };
+  const { [id]: _removed, ...rest } = map;
+  return rest;
+}
+
+/** Снять вклад одного канала, сохранив непрочитанное соседних каналов сервера. */
+export function clearChannelCounts(s: UnreadState, channelId: string, serverId?: string): UnreadState {
+  const unread = s.unreadCounts[channelId] ?? 0;
+  const mentions = s.mentionCounts[channelId] ?? 0;
+  return {
+    unreadCounts: withCount(s.unreadCounts, channelId, 0),
+    mentionCounts: withCount(s.mentionCounts, channelId, 0),
+    unreadServers: serverId ? withCount(s.unreadServers, serverId, (s.unreadServers[serverId] ?? 0) - unread) : s.unreadServers,
+    mentionServers: serverId ? withCount(s.mentionServers, serverId, (s.mentionServers[serverId] ?? 0) - mentions) : s.mentionServers,
+  };
+}
+
+/**
+ * Снимок может уменьшить сумму, например после включения тихого режима. При одновременном
+ * событии сохраняем известный прирост, учитывая, что оно уже могло попасть в ответ.
+ */
+export function reconcileUnreadCount(snapshot: number, before: number, live: number): number {
+  if (live === before) return snapshot;
+  if (live < before) return Math.min(snapshot, live);
+  return Math.max(snapshot, snapshot < before ? live - before : live);
+}
+
 /**
  * Засев серверных счётчиков из ответа `GET /servers` (12.10): до этого значки серверов появлялись только от событий
  * шлюза, и холодный старт показывал пустой список. Правила:
- * - по большему из серверного и живого — живое событие могло прийти, пока шёл запрос, и уменьшать его нельзя;
+ * - если передан снимок на момент запроса, учитываем уменьшение на сервере и параллельные живые события;
+ * - без снимка — по большему из серверного и живого;
  * - открытый сервер (`currentServerId`) пропускается: его значок не ставится вовсе (`channelRules.applyUnread`);
  * - нет поля (старый бэкенд, сосед) или не число — сервер не трогается, прежнее поведение;
  * - ноль не пишется (карта хранит только ненулевые записи).
@@ -147,12 +187,22 @@ export function seedServerCounts(
   servers: readonly Pick<Server, 'id' | 'unread' | 'mentions'>[],
   live: ServerCountMaps,
   currentServerId: string | null,
+  before?: ServerCountMaps,
 ): ServerCountMaps {
   let unreadServers = live.unreadServers;
   let mentionServers = live.mentionServers;
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
   for (const s of servers) {
     if (s.id === currentServerId) continue;
+    if (before) {
+      if (typeof s.unread === 'number' && Number.isFinite(s.unread)) {
+        unreadServers = withCount(unreadServers, s.id, reconcileUnreadCount(num(s.unread), before.unreadServers[s.id] ?? 0, unreadServers[s.id] ?? 0));
+      }
+      if (typeof s.mentions === 'number' && Number.isFinite(s.mentions)) {
+        mentionServers = withCount(mentionServers, s.id, reconcileUnreadCount(num(s.mentions), before.mentionServers[s.id] ?? 0, mentionServers[s.id] ?? 0));
+      }
+      continue;
+    }
     const u = num(s.unread);
     if (u > (unreadServers[s.id] ?? 0)) {
       if (unreadServers === live.unreadServers) unreadServers = { ...unreadServers };

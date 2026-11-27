@@ -104,7 +104,11 @@ function punycodeDecode(input: string): string {
     bias = adapt(i - oldi, len, oldi === 0);
     n += Math.floor(i / len);
     i %= len;
-    if (n > 0x10ffff) throw new Error('punycode: вне диапазона');
+    // Парсеры URL расходятся на недопустимых ACE-метках. Не показываем
+    // управляющие символы C1 и одиночные суррогаты как часть имени сайта.
+    if (!Number.isSafeInteger(n) || n < 0xa0 || (n >= 0xd800 && n <= 0xdfff) || n > 0x10ffff) {
+      throw new Error('punycode: недопустимая кодовая точка');
+    }
     out.splice(i++, 0, n);
   }
   return String.fromCodePoint(...out);

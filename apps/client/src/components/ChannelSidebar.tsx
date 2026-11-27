@@ -3,9 +3,10 @@ import { has, Permission, permsFromString } from '@gusvoice/shared';
 import { Fragment, useRef, useState } from 'react';
 import { api } from '../api';
 import { toggleCategoryCollapse, useCollapsedCategories, useMutedChannels } from '../channelPrefs';
-import { isFeedOnScreen } from '../channelRules';
+import { channelForceMuted, isFeedOnScreen } from '../channelRules';
+import { useParticipantDrag } from '../useParticipantDrag';
 import { useNameResolver } from '../memberName';
-import { useStore } from '../store';
+import { useStore, voiceIsHere } from '../store';
 import { toastError } from '../toast';
 import { Avatar } from './Avatar';
 import { GuestMark, useGuestHome } from './GuestMark';
@@ -96,13 +97,11 @@ export function ChannelSidebar() {
   const suppressClick = useRef(false);
   // Separate pointer-DnD for dragging a voice participant from one voice channel to another
   // (MOVE_MEMBERS). Drop targets are voice-channel blocks tagged with data-vc.
-  const [pdrag, setPdrag] = useState<{ userId: string; name: string; from: string; x: number; y: number } | null>(null);
-  const [pDrop, setPDrop] = useState<string | null>(null);
-  const pPending = useRef<{ userId: string; name: string; from: string; x: number; y: number } | null>(null);
-  const pDragging = useRef(false);
-  const pDropRef = useRef<string | null>(null);
-  /** Только что тащили участника — следующий `click` по строке не наш (см. `onPpUp`). */
-  const pClickAfterDrag = useRef(false);
+  const { pdrag, pDrop, pClickAfterDrag, onPpDown, onPpMove, onPpUp, onPpCancel } = useParticipantDrag((from, userId, target) => {
+    const state = useStore.getState();
+    if (!state.presence[from]?.some((p) => p.userId === userId)) return;
+    api.voiceMove(from, userId, target).catch((err) => toastError(err));
+  });
   const [showCreate, setShowCreate] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
   // С какого раздела открыть настройки: у кнопки 👥 «Роли и участники» — свой (23.09 окно слилось).
@@ -264,57 +263,6 @@ export function ChannelSidebar() {
       });
   }
 
-  function setPDropTarget(id: string | null) {
-    if (pDropRef.current === id) return; // dedupe → no re-render
-    pDropRef.current = id;
-    setPDrop(id);
-  }
-
-  function onPpDown(e: React.PointerEvent, userId: string, name: string, from: string) {
-    if (!canMoveMembers || e.button !== 0) return;
-    // 🔴 С зажатым Alt строка НЕ начинает перетаскивание. Дело не только в том, что жест занят
-    // типом: `setPointerCapture` ниже уводит последующий `click` на саму строку, и клик по нику
-    // просто не дошёл бы до рамки. У кого нет MOVE_MEMBERS, захвата и так нет — баг был бы виден
-    // только у модераторов.
-    if (e.altKey) return;
-    if (e.pointerType === 'touch') return; // touch-drag is a mobile follow-up (#26)
-    pPending.current = { userId, name, from, x: e.clientX, y: e.clientY };
-    pDragging.current = false;
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }
-
-  function onPpMove(e: React.PointerEvent) {
-    const p = pPending.current;
-    if (!p) return;
-    if (!pDragging.current) {
-      if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) < 6) return;
-      pDragging.current = true;
-    }
-    setPdrag({ ...p, x: e.clientX, y: e.clientY });
-    const at = document.elementFromPoint(e.clientX, e.clientY);
-    const vc = (at?.closest('[data-vc]') as HTMLElement | null)?.dataset.vc ?? null;
-    setPDropTarget(vc && vc !== p.from ? vc : null);
-  }
-
-  function onPpUp(e: React.PointerEvent) {
-    const p = pPending.current;
-    const wasDragging = pDragging.current;
-    const target = pDropRef.current;
-    // 🔴 Замерено на стенде: строка держит `setPointerCapture`, поэтому браузер шлёт ей `click` и
-    // ПОСЛЕ перетаскивания — палец отпущен над другим каналом, а целью осталась она. Без этой
-    // отметки карточка человека открывалась бы на каждый перенос участника модератором.
-    pClickAfterDrag.current = wasDragging;
-    e.currentTarget.releasePointerCapture?.(e.pointerId);
-    pPending.current = null;
-    pDragging.current = false;
-    pDropRef.current = null;
-    setPdrag(null);
-    setPDrop(null);
-    if (!p || !wasDragging || !target || target === p.from) return;
-    // Optimism is handled by presence gateway events; just fire the move.
-    api.voiceMove(p.from, p.userId, target).catch((err) => toastError(err));
-  }
-
   function clickChannel(c: Channel) {
     if (c.type !== 'voice') {
       openChannel(c.id);
@@ -329,6 +277,11 @@ export function ChannelSidebar() {
     // Боты (#232) — в общем списке ПОСЛЕ людей (решение владельца 27.10); сам presence порядка не меняет.
     const here = botsAfterHumans(presence[c.id] ?? [], (v) => v.bot === true);
     const isVoice = c.type === 'voice';
+    const quiet = channelForceMuted(c);
+    const muted = quiet || mutedChannels.has(c.id);
+    const showBadge = !quiet && c.id !== shownChannelId;
+    const unread = showBadge && !muted ? (unreadCounts[c.id] ?? 0) : 0;
+    const mentions = showBadge ? (mentionCounts[c.id] ?? 0) : 0;
     return (
       <div
         key={c.id}
@@ -337,8 +290,8 @@ export function ChannelSidebar() {
       >
         <div
           className={`channel ${c.id === currentChannelId ? 'active' : ''} ${
-            (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== shownChannelId ? 'unread' : ''
-          } ${mutedChannels.has(c.id) ? 'muted' : ''} ${canManage && dragUnlocked ? 'draggable' : ''} ${
+            unread > 0 ? 'unread' : ''
+          } ${muted ? 'muted' : ''} ${canManage && dragUnlocked ? 'draggable' : ''} ${
             drag?.id === c.id ? 'dragging' : ''
           }`}
           data-ch={c.id}
@@ -392,10 +345,10 @@ export function ChannelSidebar() {
           {/* Приоритет за упоминаниями: красный бейдж с их числом. Иначе — число непрочитанных
               медовым (#78; сервер его и так присылает, раньше клиент схлопывал в точку).
               Заглушённый канал не показывает ничего — иначе «заглушить» теряет смысл. */}
-          {c.id !== shownChannelId && (mentionCounts[c.id] ?? 0) > 0 ? (
-            <span className="ch-mention">{(mentionCounts[c.id] ?? 0) > 99 ? '99+' : mentionCounts[c.id]}</span>
-          ) : (unreadCounts[c.id] ?? 0) > 0 && !mutedChannels.has(c.id) && c.id !== shownChannelId ? (
-            <span className="ch-unread">{(unreadCounts[c.id] ?? 0) > 99 ? '99+' : unreadCounts[c.id]}</span>
+          {mentions > 0 ? (
+            <span className="ch-mention">{mentions > 99 ? '99+' : mentions}</span>
+          ) : unread > 0 ? (
+            <span className="ch-unread">{unread > 99 ? '99+' : unread}</span>
           ) : null}
           {(canManage ||
             canEditOverwrites ||
@@ -451,9 +404,11 @@ export function ChannelSidebar() {
                       bot: isBot || undefined,
                     })
                   }
-                  onPointerDown={(e) => onPpDown(e, p.userId, pname, c.id)}
+                  onPointerDown={(e) => canMoveMembers && onPpDown(e, p.userId, pname, c.id)}
                   onPointerMove={onPpMove}
                   onPointerUp={onPpUp}
+                  onPointerCancel={onPpCancel}
+                  onLostPointerCapture={onPpCancel}
                   // Превью показа (#115). Вешаем на ВСЮ строку, а не на иконку: попасть мышкой в
                   // значок 14 px труднее, чем навести на человека, а смысл наводки тот же.
                   onMouseEnter={
@@ -554,6 +509,10 @@ export function ChannelSidebar() {
                   ) : showMicOff(isBot, muted, p.serverMuted) ? (
                     <span className="vp-flag off" title="Микрофон выключен">
                       <Icon name="mic-off" size={14} />
+                    </span>
+                  ) : isBot && speaking && !muted && voice?.channelId === c.id && voiceIsHere(voice) ? (
+                    <span className="vp-flag music-playing" role="img" aria-label="Бот воспроизводит аудио" title="Бот воспроизводит аудио">
+                      <Icon name="music" size={14} />
                     </span>
                   ) : null}
                 </li>

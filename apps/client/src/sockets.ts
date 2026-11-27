@@ -30,7 +30,7 @@ import { peerNameNow } from './peerName';
 import { useContacts } from './contacts';
 import { applyRemoteGifs } from './savedGifs';
 import { api, getToken } from './api';
-import { isFeedOnScreen } from './channelRules';
+import { channelForceMuted, isFeedOnScreen } from './channelRules';
 import { applyServerMessageCreate, applyServerMessageUpdate, isServerLastMessage, serverLastFromMessage } from './serverRowRules';
 import { dmIncomingDecision, dmMuteOf, dmMutedDecision, dmSilentDecision, muteActive, muteSoundOff } from './dmListRules';
 import { feedCovered } from './readByView';
@@ -308,6 +308,15 @@ export function connectGateway(): void {
    * заводил лишнее переподключение. Сверка `gateway !== socket` = «это событие уже неактуально».
    */
   const socket = new WebSocket(gatewayWsUrl());
+  let receivedCreationUpdate = false;
+  function applyServerCreation(userId: string, canCreateServers: boolean) {
+    const { user } = useStore.getState();
+    if (user && user.id === userId && user.canCreateServers !== canCreateServers) {
+      useStore.setState({ user: { ...user, canCreateServers } });
+    }
+  }
+  const channelPolicies = new Map<string, boolean>();
+  const mutedNoticeRevisions = new Map<string, number>();
   gateway = socket;
   const gatewayHandshake = guardHandshake(socket);
   // ⚠️ Сердцебиение СВОЁ у каждого сокета: модульная переменная одна, и сокет, которого уже сменили,
@@ -386,6 +395,9 @@ export function connectGateway(): void {
        * и восстановление после обрыва, ради которого `want` переживает переподключение.
        */
       case 'ready': {
+        if (!receivedCreationUpdate && typeof msg.canCreateServers === 'boolean') {
+          applyServerCreation(msg.userId, msg.canCreateServers);
+        }
         // Связь есть — в шапке беседы снова статус собеседника, а не «Подключение…» (`connState.ts`).
         setGatewayLive(true);
         // Новое соединение — «за устройством сидят» заново (G38): прежняя отметка осталась у закрытого сокета.
@@ -434,9 +446,11 @@ export function connectGateway(): void {
       case 'message.create': {
         // Автор дописал и отправил — его «печатает…» гаснет сразу, а не через 5 с срока (06.10, как у Telegram).
         dropTyping(msg.channelId, msg.message.author.id);
+        if ('forceMuted' in msg && typeof msg.forceMuted === 'boolean') channelPolicies.set(msg.channelId, msg.forceMuted);
         if (msg.message.author.id !== store.user?.id) {
-          // Per-channel level: 'none' stays silent, 'mentions' reacts only to @-mentions, 'all' to any.
-          const channelLevel = notifyLevel(msg.channelId);
+          const channel = store.bootstrap?.channels.find((c) => c.id === msg.channelId);
+          const quiet = channelPolicies.get(msg.channelId) ?? channelForceMuted(channel);
+          const channelLevel = quiet ? 'none' : notifyLevel(msg.channelId);
           /**
            * 🔴 Гостя зовут `@ник@домен` и ТОЛЬКО так (§5.5): на сервере бывает свой тёзка, и звенеть
            * ему на чужое обращение нельзя. Поэтому у гостя обычное имя не передаём вовсе.
@@ -485,7 +499,8 @@ export function connectGateway(): void {
             passesThrottle(mentioned, lastOsNotifyAt.get(msg.channelId), Date.now())
           ) {
             lastOsNotifyAt.set(msg.channelId, Date.now());
-            const where = `#${store.bootstrap?.channels.find((c) => c.id === msg.channelId)?.name ?? 'канале'}`;
+            const where = `#${channel?.name ?? 'канале'}`;
+            const revision = mutedNoticeRevisions.get(msg.channelId);
             osNotify(
               mentioned ? `${authorName(msg.message)} упомянул вас в ${where}` : `${authorName(msg.message)} в ${where}`,
               messagePreview(msg.message),
@@ -494,6 +509,9 @@ export function connectGateway(): void {
               // Тег беседы (как tweb): новое сообщение канала заменяет прежнее; открытие канала их закрывает (`store.openChannel`).
               {
                 group: channelNoticeGroup(msg.channelId),
+                canDeliver: () =>
+                  gateway === socket && mutedNoticeRevisions.get(msg.channelId) === revision &&
+                  !useStore.getState().bootstrap?.channels.some((c) => c !== channel && c.id === msg.channelId && channelForceMuted(c)),
                 // Своё окно ПК (G38, ND-07): заголовок — канал, строка — «Автор: текст», аватар автора.
                 popup: { title: where, author: authorName(msg.message), avatar: msg.message.author.avatarUrl, preview: popupPreview(msg.message) },
               },
@@ -525,9 +543,21 @@ export function connectGateway(): void {
       case 'message.reaction':
         return store.applyReaction(msg.channelId, msg.messageId, msg.emoji, msg.userId, msg.op);
       case 'channel.create':
-      case 'channel.update':
-        return store.upsertChannel(msg.channel);
+      case 'channel.update': {
+        const { channel } = msg;
+        const quiet = channelForceMuted(channel);
+        if (channel.type === 'text' && 'forceMuted' in channel && typeof channel.forceMuted === 'boolean') {
+          channelPolicies.set(channel.id, quiet);
+        }
+        if (quiet) {
+          mutedNoticeRevisions.set(channel.id, (mutedNoticeRevisions.get(channel.id) ?? 0) + 1);
+          lastOsNotifyAt.delete(channel.id);
+          clearOsNotifications(channelNoticeGroup(channel.id));
+        }
+        return store.upsertChannel(channel);
+      }
       case 'channel.delete':
+        channelPolicies.delete(msg.channelId);
         return store.deleteChannel(msg.serverId, msg.channelId);
       case 'server.invalidate': {
         // Список серверов (рейл: имя + иконка) живёт ОТДЕЛЬНО от bootstrap, поэтому обновляем его
@@ -630,6 +660,10 @@ export function connectGateway(): void {
         return store.applyUserStatus(msg.userId, msg.status, msg.customStatus);
       case 'self.status':
         return store.applySelfStatus(msg.status, msg.statusAuto);
+      case 'self.serverCreation':
+        if (store.user?.id !== msg.userId) return;
+        receivedCreationUpdate = true;
+        return applyServerCreation(msg.userId, msg.canCreateServers);
       case 'economy.tipsFull':
         // 🔴 Отбивка по ИЗОБИЛИЮ, а не по запрету: человека сегодня уже засыпали, и он должен об
         // этом узнать — иначе чужие жесты в его сторону просто пропадают, а отказ видит только
@@ -894,8 +928,11 @@ export function connectGateway(): void {
         if (msg.userId === store.user?.id) return;
         return fireEffect({ kind: 'bigReaction', conversationId: msg.conversationId, messageId: msg.messageId, emoji: msg.emoji });
       // Прочитал на другом своём устройстве — гасим здесь (событие адресное, приходит только своим).
-      case 'read.channel':
-        return store.applyRemoteRead({ channelId: msg.channelId, serverId: msg.serverId, at: msg.at });
+      case 'read.channel': {
+        const channel = store.bootstrap?.channels.find((c) => c.id === msg.channelId);
+        const quiet = channelPolicies.get(msg.channelId) ?? channelForceMuted(channel);
+        return store.applyRemoteRead({ channelId: msg.channelId, serverId: quiet ? undefined : msg.serverId, at: msg.at });
+      }
       case 'typing':
         if (msg.userId && msg.userId !== store.user?.id) noteTyping(msg.channelId ?? msg.dmId ?? '', msg.userId, parseTypingAction(msg.action));
         // G07: «печатает» в ЛС — собеседник «в сети» ещё 30 с (если время захода мне видно, `dmOnline.dotShown`).
@@ -1159,6 +1196,13 @@ function watchNotifyPrefs(): void {
     if (st.user !== prev.user) apply(st.user);
     // Открыли канал — его всплывашки браузера не нужны (как у tweb; ЛС чистит `DmChatView`). Сам `store.ts` модуль уведомлений не импортирует.
     if (st.currentChannelId && st.currentChannelId !== prev.currentChannelId) clearOsNotifications(channelNoticeGroup(st.currentChannelId));
+    if (st.bootstrap !== prev.bootstrap) {
+      for (const channel of st.bootstrap?.channels ?? []) {
+        if (channelForceMuted(channel) && !channelForceMuted(prev.bootstrap?.channels.find((c) => c.id === channel.id))) {
+          clearOsNotifications(channelNoticeGroup(channel.id));
+        }
+      }
+    }
   });
 }
 

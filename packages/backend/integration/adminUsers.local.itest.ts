@@ -17,7 +17,7 @@ before(async () => { t = await createTestDb(); });
 after(async () => { await t.close(); });
 const source = readFileSync(new URL('../src/routes/admin.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
-async function fixture(raw = source, locals = true) {
+async function fixture(raw = source, locals = true, published: { recipient: string; message: shared.GatewayServerMessage }[] = []) {
   await truncateAll(t.raw);
   await t.db.insert(schema.users).values([
     ...(locals ? [{ id: 'owner', username: 'local_owner', displayName: 'Держатель', passwordHash: 'fixture' },
@@ -27,6 +27,7 @@ async function fixture(raw = source, locals = true) {
     { id: 'deleted', username: 'deleted_local', displayName: 'Удалённый', passwordHash: 'fixture', deletedAt: new Date() },
   ]);
   const dependencies: Record<string, unknown> = {
+    '../realtime.js': { publishToUser: async (recipient: string, message: shared.GatewayServerMessage) => { published.push({ recipient, message }); } },
     '@gusvoice/shared': shared, 'drizzle-orm': orm, zod: { z }, '../db/index.js': { db: t.db }, '../db/schema.js': schema,
     '../auth.js': { requireSuperAdmin: async (req: FastifyRequest) => { req.user = { sub: 'owner' } as FastifyRequest['user']; } },
     // Здесь проверяется SQL-аудитория admin, не общий формат профиля/проверка JWT.
@@ -68,6 +69,24 @@ async function localOnly(raw = source) {
     assert.equal((await t.db.select().from(schema.users)).length, 5, 'гости отфильтрованы выдачей, не удалены из базы');
   } finally { await app.close(); }
 }
+
+test('выдача и отзыв права создавать серверы доходят только до учётки получателя', async () => {
+  const published: { recipient: string; message: shared.GatewayServerMessage }[] = [];
+  const app = await fixture(source, true, published);
+  try {
+    for (const canCreateServers of [true, false]) {
+      const response = await app.inject({ method: 'PATCH', url: '/admin/users/local', payload: { canCreateServers } });
+      assert.equal(response.statusCode, 200, response.body);
+      const [row] = await t.db.select().from(schema.users).where(orm.eq(schema.users.id, 'local'));
+      assert.equal(row?.canCreateServers, canCreateServers);
+      assert.deepEqual(JSON.parse(JSON.stringify(published.splice(0))), [{
+        recipient: 'local', message: { t: 'self.serverCreation', userId: 'local', canCreateServers },
+      }]);
+    }
+    assert.equal((await app.inject({ method: 'PATCH', url: '/admin/users/missing', payload: { canCreateServers: true } })).statusCode, 404);
+    assert.equal(published.length, 0);
+  } finally { await app.close(); }
+});
 
 test('R263 свой пользователь есть в admin/users, гости двух домов и удалённый местный отсутствуют', async () => {
   // Теневая строка гостя не должна получить кнопки управления как своим аккаунтом.

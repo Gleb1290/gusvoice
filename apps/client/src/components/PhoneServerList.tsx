@@ -75,14 +75,16 @@ export function PhoneServerList() {
               setShowJoin(true);
             }}
           />
-          <SheetRow
-            icon="plus"
-            label="Создать сервер"
-            onClick={() => {
-              setSheet(false);
-              setShowCreate(true);
-            }}
-          />
+          {canCreate && (
+            <SheetRow
+              icon="plus"
+              label="Создать сервер"
+              onClick={() => {
+                setSheet(false);
+                setShowCreate(true);
+              }}
+            />
+          )}
         </BottomSheet>
       )}
       {menu && <ServerMenu menu={menu} onClose={() => setMenu(null)} />}

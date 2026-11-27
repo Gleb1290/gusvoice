@@ -311,7 +311,7 @@ function PhoneProfile(p: PhoneProfileProps) {
                 type="range"
                 min={0}
                 max={MAX_VOLUME}
-                step={0.05}
+                step={0.01}
                 value={audio.muted ? 0 : audio.volume}
                 onChange={(e) => {
                   if (audio.muted) audio.setMuted(false);

@@ -79,7 +79,7 @@ it('время пузыря выбирает ровно одно место дл
   visit(ast); assert.ok(expression);
   for (const hasReactions of [false, true]) for (const media of [false, true]) for (const content of ['', 'текст']) for (const preview of [false, true]) for (const attachments of [false, true]) {
     const look = { kind: media ? 'media' : 'text' }; const previews = preview ? [{}] : []; const m = { content, attachments: attachments ? [{}] : [] };
-    const where = runInNewContext(`(${expression})`, { hasReactions, media, look, previews, m });
+    const where: unknown = runInNewContext(`(${expression})`, { hasReactions, media, look, previews, m });
     const expected = hasReactions ? 'reactions' : media && !content ? 'over' : content && !preview && (media || !attachments) ? 'body' : 'row';
     assert.equal(where, expected);
   }

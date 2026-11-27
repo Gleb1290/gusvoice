@@ -17,6 +17,7 @@ import { useStore } from '../store';
 import { toast, toastError } from '../toast';
 import { confirmAction } from '../confirm';
 import { ChannelPermissionsEditor } from './ChannelPermissionsEditor';
+import { ChannelMuteSetting } from './ChannelMuteSetting';
 import { ChannelSoundsPanel } from './ChannelSoundsPanel';
 import { ChannelWebhooksPanel } from './ChannelWebhooksPanel';
 import { ChannelGlyph, Icon, isCustomIcon, type IconName } from './Icon';
@@ -118,6 +119,7 @@ export function ChannelSettingsModal({
   }, [picked]);
   const [name, setName] = useState(channel.name);
   const [topic, setTopic] = useState(channel.topic ?? '');
+  const [forceMuted, setForceMuted] = useState(channel.forceMuted === true);
   const [categoryId, setCategoryId] = useState(channel.categoryId ?? '');
   const [icon, setIcon] = useState<string | null>(channel.icon ?? null);
   // Качество звука канала (#101). Храним в кбит/с; `voiceBitrateOf` подставляет умолчание, чтобы в
@@ -174,6 +176,7 @@ export function ChannelSettingsModal({
         topic: channel.type === 'text' ? topic || null : null,
         categoryId: categoryId || null,
         icon,
+        ...(channel.type === 'text' && forceMuted !== (channel.forceMuted === true) ? { forceMuted } : {}),
         ...(channel.type === 'voice' ? { voiceBitrate } : {}),
       });
       await refresh();
@@ -259,6 +262,8 @@ export function ChannelSettingsModal({
                 <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="о чём канал" />
               </label>
             )}
+
+            {channel.type === 'text' && <ChannelMuteSetting checked={forceMuted} onChange={setForceMuted} />}
 
             {channel.type === 'voice' && (
               <label className="field">

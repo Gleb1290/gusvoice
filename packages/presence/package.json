@@ -12,17 +12,17 @@
     "test": "tsx --test --test-concurrency=4 src/presenceRules.bot.test.ts src/presenceRules.test.ts src/presenceSession.test.ts"
   },
   "dependencies": {
-    "@fastify/websocket": "11.2.0",
+    "@fastify/websocket": "11.3.7",
     "@gusvoice/shared": "workspace:*",
-    "fastify": "5.12.6",
+    "fastify": "5.12.8",
     "ioredis": "5.11.1",
     "jsonwebtoken": "9.0.3",
-    "livekit-server-sdk": "2.15.5",
-    "tsx": "4.22.4"
+    "livekit-server-sdk": "2.20.1",
+    "tsx": "4.23.15"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "9.0.10",
-    "@types/node": "20.19.43",
+    "@types/node": "24.19.4",
     "esbuild": "0.25.12",
     "typescript": "5.9.3"
   }

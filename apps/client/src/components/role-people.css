@@ -1,0 +1,161 @@
+.role-people {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.role-people__toolbar,
+.role-people__actions,
+.role-people__chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.role-people__toolbar input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.role-people__list,
+.role-people__choices {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.role-people__row,
+.role-people__choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  min-width: 0;
+}
+
+.role-people__row {
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.role-people__row > .role-people__person {
+  flex: 1 1 9rem;
+}
+
+.role-people__person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.role-people__person > span,
+.role-people__choice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.role-people__choice-text small,
+.role-people__person small {
+  display: block;
+  color: var(--muted);
+}
+
+.role-people__chips > span {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  font-size: 12px;
+}
+
+.role-people__picker {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.role-people__choices {
+  max-height: min(40dvh, 20rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.role-people__choice {
+  padding-inline: 4px;
+}
+
+.role-people__choice input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.role-people__notice,
+.role-people p {
+  margin: 0;
+}
+
+.role-people .role-people__error {
+  color: var(--danger);
+}
+
+
+.role-people__button,
+.role-people__toolbar input {
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+}
+
+.role-people__toolbar input,
+.role-people__button {
+  background: var(--bg-card, var(--bg));
+}
+
+.role-people__button {
+  justify-self: start;
+  cursor: pointer;
+}
+
+.role-people__button:not(:disabled):hover {
+  border-color: currentColor;
+}
+
+.role-people__button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.role-people__button--primary {
+  background: var(--accent);
+  color: var(--on-accent, #171316);
+}
+
+.role-people__button--danger {
+  color: var(--danger);
+}
+
+.role-people :is(input, button):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .role-people__button,
+  .role-people__toolbar input,
+  .role-people__choice {
+    min-height: 44px;
+  }
+}

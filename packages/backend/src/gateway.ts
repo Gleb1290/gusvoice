@@ -457,6 +457,7 @@ export function registerGateway(app: FastifyInstance): void {
             socket.close();
             return;
           }
+          let canCreateServers: boolean | undefined;
           if (!conn.userId) {
             if (authTimer) {
               clearTimeout(authTimer);
@@ -466,15 +467,19 @@ export function registerGateway(app: FastifyInstance): void {
             conn.tokenGen = claims.gen ?? 0;
             // Только при ПЕРВОМ `identify`: повторный на том же соединении не меняет форму уже идущих событий.
             conn.caps = parseCaps(caps);
+            // Подписка на личные изменения до снимка прав закрывает окно пропущенной выдачи.
+            hub.attach(conn, claims.sub);
             // Невидимый ли человек — узнать ДО `goOnline`: его «зашёл в сеть» соседям не рассылается. Не ответила база —
             // остаётся последняя известная шлюзу запись.
             try {
-              const [row] = await db.select({ s: users.presenceStatus }).from(users).where(eq(users.id, claims.sub)).limit(1);
-              if (row) hub.setInvisible(claims.sub, row.s === 'invisible');
+              const [row] = await db.select({ s: users.presenceStatus, canCreateServers: users.canCreateServers }).from(users).where(eq(users.id, claims.sub)).limit(1);
+              if (row) {
+                hub.setInvisible(claims.sub, row.s === 'invisible');
+                canCreateServers = row.canCreateServers;
+              }
             } catch {
               /* последняя известная запись */
             }
-            hub.attach(conn, claims.sub);
             // Первый сокет человека — только тогда «зашёл в сеть» (вкладок и устройств бывает много).
             const first = hub.goOnline(claims.sub);
             // ЛС (D4): сокет, открытый уже в фоне (`identify.hidden`), «здесь» не считается, пока клиент не скажет `visible`.
@@ -486,7 +491,7 @@ export function registerGateway(app: FastifyInstance): void {
               touchLastSeen(claims.sub);
             }
           }
-          send(socket, { t: 'ready', userId: conn.userId });
+          send(socket, { t: 'ready', userId: conn.userId, canCreateServers });
           // Только те, с кем есть общий сервер или ЛС, — а не весь инстанс (#136).
           await hub.sendOnlineSnapshot(conn);
         } catch {

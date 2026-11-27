@@ -588,7 +588,7 @@ it('фоновый шлюз передаёт перемещение и закр�
     close() { this.readyState = 3; }
   }
   const mod = load<typeof import('./bgGateways')>('bgGateways.ts', {
-    '@gusvoice/shared': { CAP_CONV1: 'conv1', mentionsMe: () => false }, './socketHealth': { PING_MS: 30_000, socketStale: () => false },
+    '@gusvoice/shared': { CAP_CONV1: 'conv1', mentionsMe: () => false }, './socketHealth': { PING_MS: 30_000, socketStale: () => false }, './channelRules': channelRules,
     './config': { instances: () => [{ id: 'home', apiUrl: 'https://home.test', token: 'h' }, { id: 'guest', apiUrl: 'https://guest.test', token: 'g' }], rememberInstanceServers: () => {} },
   }, { WebSocket: FakeSocket, fetch: async (url: string) => Response.json(url.endsWith('/unread') ? { servers: {}, dms: 0 } : { username: 'me' }) });
   const events: import('./bgGateways').BgVoiceEvent[] = [];
@@ -637,6 +637,7 @@ async function withBgConv(run: (mod: typeof import('./bgGateways'), socket: Fake
   }
   const mod = load<typeof import('./bgGateways')>('bgGateways.ts', {
     '@gusvoice/shared': { CAP_CONV1: 'conv1', mentionsMe: () => false },
+    './channelRules': channelRules,
     './socketHealth': { PING_MS: 30_000, socketStale: () => false },
     './config': { instances: () => [{ id: 'background', apiUrl: 'https://background.test', token: 'test-token' }], rememberInstanceServers: () => {} },
   }, {

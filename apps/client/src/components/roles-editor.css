@@ -1,0 +1,289 @@
+.role-editor {
+  --role-line: var(--border);
+  --role-section-gap: var(--sp-6);
+  overflow: hidden;
+}
+.role-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(165px, 0.85fr) minmax(0, 2fr);
+  flex: 1;
+  min-height: 0;
+  gap: var(--sp-4);
+}
+.role-editor-catalog,
+.role-editor-editor {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.role-editor-catalog {
+  border-inline-end: 1px solid var(--role-line);
+  padding-inline-end: var(--sp-4);
+}
+.role-editor-catalog-header .field,
+.role-editor-body .field {
+  margin: 0;
+}
+.role-editor-list,
+.role-editor-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 2px;
+}
+.role-editor-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.role-editor-entry {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 52px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.role-editor-entry:hover,
+.role-editor-entry[aria-current] {
+  background: var(--accent-soft);
+}
+.role-editor-entry[aria-current] {
+  border-color: var(--accent);
+}
+.role-editor-entry > span:last-child {
+  min-width: 0;
+  display: grid;
+}
+.role-editor-entry strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.role-editor-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--role-line);
+  border-radius: 50%;
+  background: var(--muted);
+}
+.role-editor small,
+.role-editor-permission p {
+  color: var(--muted);
+}
+.role-editor-header,
+.role-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.role-editor-header h3,
+.role-editor-group h4 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.role-editor-header h3 {
+  font-size: 1.25rem;
+}
+.role-editor-tabs,
+.role-editor-actions,
+.role-editor-next,
+.role-editor-remove {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.modal :is(.role-editor, .role-editor-directory) .btn:not(.primary) {
+  background: var(--bg-3);
+  border: 1px solid var(--role-line, var(--border));
+  color: var(--text);
+  box-shadow: none;
+}
+.modal :is(.role-editor, .role-editor-directory) .btn:not(.primary):hover:not(:disabled) {
+  background: var(--row-hover);
+  border-color: var(--muted-2);
+}
+.modal :is(.role-editor, .role-editor-directory) .btn.danger:not(.primary) {
+  background: transparent;
+  border-color: var(--danger-soft);
+  color: color-mix(in srgb, var(--text) 45%, var(--danger));
+}
+.modal :is(.role-editor, .role-editor-directory) .btn.danger:not(.primary):hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.role-editor-tabs {
+  flex-wrap: nowrap;
+  gap: var(--sp-1);
+  align-self: flex-start;
+  max-width: 100%;
+  padding: var(--sp-1);
+  border: 1px solid var(--role-line);
+  border-radius: var(--r-3);
+  background: var(--bg);
+}
+.modal .role-editor .role-editor-tabs .btn {
+  min-inline-size: 0;
+  min-block-size: 36px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+}
+.modal .role-editor .role-editor-tabs .btn:hover {
+  background: var(--bg-3);
+  border-color: transparent;
+  color: var(--text);
+}
+.modal .role-editor .role-editor-tabs .btn[aria-current] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.modal .role-editor button:focus-visible,
+.modal .role-editor-directory button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.role-editor-body {
+  padding-inline-end: var(--sp-2);
+}
+.role-editor-body > * {
+  flex-shrink: 0;
+}
+.role-editor-body > :is(.role-appearance, .role-editor-group, .role-editor-order, .role-editor-remove) {
+  margin-block-start: calc(var(--role-section-gap) - var(--sp-3));
+}
+.role-editor-group {
+  border: 1px solid var(--role-line);
+  border-radius: var(--r-3);
+  background: var(--bg-2);
+}
+.role-editor-group h4 {
+  padding: var(--sp-3) var(--sp-5);
+  border-start-start-radius: inherit;
+  border-start-end-radius: inherit;
+  background: var(--bg-3);
+  font-size: 1rem;
+  line-height: 1.35;
+}
+.role-editor-group h4::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 1em;
+  margin-inline-end: var(--sp-3);
+  vertical-align: -.12em;
+  border-radius: var(--r-2);
+  background: var(--accent);
+}
+.role-editor-group .role-editor-permission {
+  margin-inline: var(--sp-5);
+}
+.role-editor-permission {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--sp-3);
+  padding-block: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+.role-editor-group .role-editor-permission + .role-editor-permission,
+.role-editor-order,
+.role-editor-remove,
+.role-editor-actions {
+  border-top: 1px solid var(--role-line);
+}
+.role-editor-permission p {
+  margin: var(--sp-1) 0 0;
+  font-size: .85rem;
+  line-height: 1.45;
+}
+.role-editor-reason {
+  display: block;
+  margin-top: var(--sp-1);
+  font-weight: 600;
+}
+.role-editor-notice {
+  margin: 0;
+  padding: var(--sp-3);
+  background: var(--accent-soft);
+  border-radius: var(--r-2);
+}
+.role-editor-order {
+  display: grid;
+  grid-template-columns: repeat(2, fit-content(50%));
+  gap: var(--sp-2);
+}
+.role-editor-order > span {
+  grid-column: 1 / -1;
+  font-weight: 600;
+}
+.role-editor-order small {
+  display: block;
+  margin-top: var(--sp-1);
+}
+.role-editor-order,
+.role-editor-remove,
+.role-editor-actions {
+  padding-top: var(--sp-3);
+}
+.role-editor-actions {
+  justify-content: flex-end;
+}
+.role-editor-actions > span {
+  margin-inline-end: auto;
+  color: var(--muted);
+}
+.role-editor .role-editor-back {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .role-editor {
+    --role-section-gap: var(--sp-5);
+  }
+  .role-editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .role-editor-catalog {
+    border: 0;
+    padding: 0;
+  }
+  .role-editor[data-detail="true"] .role-editor-catalog,
+  .role-editor[data-detail="false"] .role-editor-editor {
+    display: none;
+  }
+  .role-editor .role-editor-back {
+    display: inline-flex;
+    align-self: flex-start;
+  }
+  .role-editor-tabs {
+    display: grid;
+    align-self: stretch;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .modal .role-editor .role-editor-tabs .btn {
+    min-width: 0;
+    min-block-size: 40px;
+    padding-inline: 0;
+  }
+  .role-editor .btn {
+    min-height: 40px;
+  }
+  .role-editor-actions > span {
+    flex-basis: 100%;
+  }
+}

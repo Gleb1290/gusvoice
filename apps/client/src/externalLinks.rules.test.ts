@@ -73,7 +73,8 @@ function loadRules(moduleSource = source) {
     URL,
     require(id: string) {
       step();
-      if (id === './hotkeys') return { isDesktop: () => false };
+      if (id === './hotkeys') return { isDesktop: () => false, isAndroid: () => false };
+      if (id === './toast') return { toast: () => assert.fail('разбор клика не показывает тост') };
       if (id === './desktopWindow') {
         return {
           openExternal() {

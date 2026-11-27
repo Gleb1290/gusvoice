@@ -1811,6 +1811,26 @@ it('рейл растворяется только на телефонных э�
     'скрываются элементы рейла, но его окна остаются исключением');
 });
 
+it('мобильная плашка показывает ноту звучащего бота, отдаёт подпись говорящему и убирает ноту при остановке', async () => {
+  const voice = { channelId: 'music-room', url: '', token: '', instanceId: null, serverId: 'server-1',
+    channelName: 'Музыка', serverName: 'Дом', instanceName: 'Дом', self: null, selfId: null };
+  const idle = { speaking: false, muted: false, deafened: false, screensharing: false };
+  const playing = { ...idle, speaking: true };
+  const bot = { ...idle, userId: 'player', displayName: 'Плеер', avatarUrl: null, camera: false, serverMuted: false, bot: true as const };
+  const listener = { ...bot, userId: 'listener', displayName: 'Слушатель', bot: undefined };
+  store.setState({ ...initial, voice, presence: { [voice.channelId]: [bot, listener] }, liveVoice: { player: playing } });
+  await mount(MobileCallChip, {});
+  const status = () => host.querySelector('.cc-sub')!;
+  assert.ok(status().querySelector('svg'));
+  assert.match(status().textContent!, /Плеер играет/);
+  await flush(() => store.setState({ liveVoice: { player: playing, listener: playing } }));
+  assert.ok(status().querySelector('svg'));
+  assert.match(status().textContent!, /Слушатель говорит/);
+  await flush(() => store.setState({ liveVoice: { player: idle } }));
+  assert.equal(status().querySelector('svg'), null);
+  assert.match(status().textContent!, /2 в канале/);
+});
+
 it('MobileCallChip возвращает с вкладки ЛС в звонок и открывает канал уже в серверном виде', async () => {
   // Открытие только канала оставляло пользователя в ЛС с пустым экраном; важен порядок переключения и вызова канала.
   const order: string[] = [];

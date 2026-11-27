@@ -8,7 +8,7 @@ manual steps are **DNS records** and **port forwarding**.
 
 ## 1. What you need
 
-- A Linux server (a small VPS is fine: 2 vCPU / 4 GB RAM / 20 GB disk to start) with a
+- A Linux x86-64 server for the prebuilt container images (a small VPS is fine: 2 vCPU / 4 GB RAM / 20 GB disk to start) with a
   **public IP**.
 - **Docker** + the **docker compose** v2 plugin, and **openssl**.
 - A **domain** you control (e.g. `example.com`) where you can add DNS records.
@@ -141,12 +141,28 @@ when it runs as root or with password-less sudo; otherwise enable it once:
 sudo ./update.sh --install-updater     # needs systemd; log: journalctl -u gusvoice-update
 ```
 
-**From the console**, in the GusVoice folder: `./update.sh`. It refreshes the stack files, pulls the images,
-**saves a copy of the database** into `.gusvoice-backups/db-<time>.sql.gz` (the 5 newest are kept; skip with
-`--no-db-backup`) and recreates the containers. Migrations run by themselves when the new backend starts.
+With rolling `TAG=latest`, the panel installs the release you selected. The updater uses the
+compose from that release's public source tag and matching images. The rolling setting stays in
+`.env`. For a pinned box, change `TAG` yourself and run `./update.sh`. A custom channel without
+a release tag can use `--images-only` with its own compose.
 
-The panel can't update a server whose `.env` pins one release (`TAG=v0.7.0`) — pulling that tag again brings the
-same version. Use `TAG=latest`, or change the tag by hand and run `./update.sh`.
+The updater checks the candidate compose and pulls the images, then makes a database dump in
+`.gusvoice-backups/db-<time>.sql.gz` before changing the stack. PostgreSQL must be running.
+The five latest dumps are kept. The updater keeps the local compose override and the existing
+`config/Caddyfile` and `config/livekit.yaml` at their current paths. The release manages
+`config/storage-migrate.sh`. Backups of the previous compose and config stay on the host.
+Review custom Caddy/LiveKit configs against the new release's templates before upgrading if
+they depend on service names, ports or flags that changed.
+
+The panel stops before applying an update if the current base compose differs from its tagged
+source, including boxes where the legacy updater installed a divergent `main` snapshot.
+Move local settings to a standard compose override before explicitly allowing replacement with
+`./update.sh --release=vX.Y.Z --replace-compose`. A stack selected through a custom
+`COMPOSE_FILE` uses its operator-managed update procedure.
+
+**First upgrade from an earlier web panel.** On a standard installation with the update button already enabled, select the release in the panel. The first transition uses the existing watcher. Its release archive ships Caddy and LiveKit defaults separately, preserving the files mounted by the running installation. Subsequent updates use the version selected in the panel. If you have edited the base compose itself, move those changes to a compose override before the first update. The old watcher replaces the base compose.
+
+If you use the bundled push service, its ntfy upgrade migrates its SQLite data. For a rollback to ntfy 2.25.0, take a snapshot of the installation before upgrading or back up the ntfy data volume while the service is stopped. The panel database backup contains PostgreSQL data.
 
 **If an update goes wrong**, go back to the version you came from together with the database copy made just before
 the update. This REPLACES the current database, so stop the backend first — nothing may write in between:

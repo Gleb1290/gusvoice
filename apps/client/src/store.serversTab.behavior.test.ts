@@ -5,6 +5,8 @@ import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import ts from 'typescript';
 import { create } from 'zustand';
+import type { Channel, Server } from '@gusvoice/shared';
+import type { TabEvent } from './tabSync';
 import * as channel from './channelRules';
 import * as conv from './convSyncRules';
 import * as stream from './streamAudioRules';
@@ -29,12 +31,15 @@ function fixture(raw = source, place?: string, instance: string | null = 'home')
   if (place && instance) placeModule.exports.rememberPlace({ instanceId: instance, serverId: place });
   places.length = 0;
   const api = {
+    listServers: async (): Promise<Server[]> => [],
     getServer: async (id: string) => { calls.push(`server:${id}`); return { server: { id, name: id }, channels: [{ id: 'text', type: 'text' }, { id: 'voice', type: 'voice' }], sounds: {}, reads: {} }; },
     listMembers: async () => [],
     markChannelRead: async (id: string) => { calls.push(`read:${id}`); },
     listMessages: async (id: string) => { calls.push(`history:${id}`); return []; },
   };
   const noop = () => {};
+  let onTab: (event: TabEvent) => void = noop;
+  const published: TabEvent[] = [];
   const deps: Record<string, unknown> = {
     zustand: { create }, './api': { api }, './config': { activeInstanceId: () => instance },
     './channelRules': channel, './convSyncRules': conv, './streamAudioRules': stream, './historyPage': history,
@@ -42,7 +47,10 @@ function fixture(raw = source, place?: string, instance: string | null = 'home')
     './convStore': { createConvActions: () => ({}) },
     './instanceScope': { scopedGetItem: () => null }, './channelPrefs': { markChannelSeen: noop },
     './lastPlace': placeModule.exports,
-    './tabSync': { publishTabEvent: (e: { kind: string; channelId: string }) => calls.push(`${e.kind}:${e.channelId}`) },
+    './tabSync': {
+      publishTabEvent: (e: TabEvent) => { published.push(e); if (e.kind === 'read-channel') calls.push(`${e.kind}:${e.channelId}`); },
+      onTabEvent: (listen: typeof onTab) => { onTab = listen; return noop; },
+    },
     './hotkeys': { isMobile: () => true }, './sounds': { setCustomSounds: noop, setChannelSounds: noop },
   };
   const unused = ['./convCacheRules', './dmListRules', './convCache', './nativeUnifiedPush', './tipHints', './toastRules',
@@ -53,8 +61,83 @@ function fixture(raw = source, place?: string, instance: string | null = 'home')
   runInNewContext(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { module, exports: module.exports, localStorage: storage,
       require: (id: string) => { assert.equal(Object.hasOwn(deps, id), true, `неописанный импорт ${id}`); return deps[id]; } });
-  return { store: module.exports.useStore, calls, places, values };
+  return { store: module.exports.useStore, calls, places, values, api, published, receiveTab: (event: TabEvent) => onTab(event) };
 }
+it('bootstrap гасит оба счётчика тихого канала, в том числе при повторной загрузке и смене сервера', async () => {
+  const { store, api } = fixture();
+  api.getServer = async (serverId) => {
+    const channels = [
+      { id: `${serverId}-quiet`, serverId, type: 'text', forceMuted: true },
+      { id: `${serverId}-legacy`, serverId, type: 'text' },
+    ];
+    return { channels, server: { id: serverId, name: serverId }, sounds: {},
+      reads: Object.fromEntries(channels.map(({ id }) => [id, { unread: 3, mentions: 2 }])) };
+  };
+  store.setState({ unreadCounts: { 'a-quiet': 7 }, mentionCounts: { 'a-quiet': 4 } });
+  for (const serverId of ['a', 'b', 'a']) {
+    await store.getState().openServer(serverId);
+    await store.getState().refreshBootstrap(serverId);
+    const state = store.getState();
+    assert.equal(state.unreadCounts[`${serverId}-quiet`], undefined);
+    assert.equal(state.mentionCounts[`${serverId}-quiet`], undefined);
+    assert.equal(state.unreadCounts[`${serverId}-legacy`], 3);
+    assert.equal(state.mentionCounts[`${serverId}-legacy`], 2);
+  }
+});
+
+it('сводка после включения политики заменяет старую сумму и не подменяет legacy-счётчик без поля', async () => {
+  const { store, api } = fixture();
+  const mutedChannel: Channel & { forceMuted: boolean } = {
+    id: 'quiet', serverId: 'background', type: 'text', forceMuted: true,
+    categoryId: null, name: 'Тихий канал', position: 0, topic: null, syncedToCategory: true,
+    icon: null, isPrivate: false, generalUserId: null, sounds: {}, voiceBitrate: null,
+  };
+  api.listServers = async () => [
+    { id: 'background', unread: 0, mentions: 0 } as Server,
+    { id: 'legacy' } as Server,
+  ];
+  store.setState({ unreadServers: { background: 12, legacy: 3 }, mentionServers: { background: 5, legacy: 1 },
+    unreadCounts: { quiet: 4 }, mentionCounts: { quiet: 2 } });
+  store.getState().upsertChannel(mutedChannel);
+  assert.equal(store.getState().unreadCounts.quiet, undefined);
+  assert.equal(store.getState().mentionCounts.quiet, undefined);
+  await settle();
+  const state = store.getState();
+  assert.equal(state.unreadServers.background, undefined);
+  assert.equal(state.mentionServers.background, undefined);
+  assert.equal(state.unreadServers.legacy, 3);
+  assert.equal(state.mentionServers.legacy, 1);
+});
+
+it('чтение тихого канала передаёт вкладкам очистку его строки, обычное сохраняет прежний контракт', async () => {
+  const { store, api, published, receiveTab, calls } = fixture();
+  api.getServer = async (serverId) => {
+    const channels = [{ id: 'quiet', type: 'text', forceMuted: true }, { id: 'ordinary', type: 'text' }];
+    return { channels, server: { id: serverId, name: serverId }, sounds: {}, reads: { ordinary: { unread: 1, mentions: 1 } } };
+  };
+  await store.getState().openServer('server');
+  await store.getState().openChannel('quiet');
+  assert.ok(calls.includes('read:quiet'));
+  store.getState().readChannelNow('ordinary');
+  assert.ok(calls.includes('read:ordinary'));
+  const state = store.getState();
+  assert.equal(state.unreadCounts.ordinary, undefined);
+  assert.equal(state.mentionCounts.ordinary, undefined);
+  assert.equal(published[0]?.kind === 'read-channel' && published[0].serverId, undefined);
+  assert.equal(published[1]?.kind === 'read-channel' && published[1].serverId, 'server');
+
+  const off = state.listenTabs();
+  try {
+    store.setState({ unreadServers: { server: 5 }, mentionServers: { server: 2 } });
+    receiveTab(published[0]!);
+    assert.equal(store.getState().unreadServers.server, 5);
+    assert.equal(store.getState().mentionServers.server, 2);
+    receiveTab(published[1]!);
+    assert.equal(store.getState().unreadServers.server, undefined);
+    assert.equal(store.getState().mentionServers.server, undefined);
+  } finally { off(); }
+});
+
 function replaceOnce(anchor: string, replacement: string) {
   assert.equal(source.split(anchor).length - 1, 1, `единственный якорь ${anchor}`); return source.replace(anchor, replacement);
 }

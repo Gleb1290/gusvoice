@@ -4,6 +4,7 @@ import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { setImmediate } from 'node:timers/promises';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import ts from 'typescript';
@@ -91,6 +92,7 @@ async function fixture(mutation?: Mutation, extra?: 'admin' | 'conv') {
     { id: 'locked', serverId: 'server', name: 'Secret', mentionable: false },
   ]);
   await t.db.insert(schema.webhooks).values({ id: 'hook', serverId: 'server', channelId: 'text', userId: 'bot', name: 'Первое имя', avatarUrl: `${OWN}avatars/old.png`, tokenHash: rules.hashWebhookToken(TOKEN), createdBy: 'manager' });
+  const pushes: string[][] = [];
   const events: shared.GatewayServerMessage[] = [], rateCalls: { key: string; max: number; seconds: number }[] = [];
   const hits = new Map<string, number>();
   let selects = 0;
@@ -148,8 +150,12 @@ async function fixture(mutation?: Mutation, extra?: 'admin' | 'conv') {
       ['text', user === 'manager' ? shared.Permission.VIEW_CHANNEL | shared.Permission.MANAGE_WEBHOOKS : shared.Permission.VIEW_CHANNEL],
       ['target', user === 'manager' ? shared.Permission.MANAGE_WEBHOOKS : 0n], ['readable', shared.Permission.VIEW_CHANNEL],
     ]) },
-    '../push.js': { resolveRoleMentions: push.resolveRoleMentions, resolveMentionedMembers: async () => [], contentPreview: pushRules.contentPreview,
-      sendPushToUsers: async () => { throw new Error('push не должен уходить без получателей'); } },
+    '../push.js': {
+      resolveRoleMentions: push.resolveRoleMentions,
+      resolveMentionedMembers: async (content: string) => content === '@webhook_reader' ? ['reader'] : [],
+      contentPreview: pushRules.contentPreview,
+      sendPushToUsers: async (ids: string[]) => { pushes.push([...ids]); },
+    },
     '../audit.js': { writeAudit: async () => {} }, '../serialize.js': serialize, '../util.js': { id: crypto.randomUUID },
     '../channelEvents.js': channelEvents,
     '../storage.js': { isOwnMediaUrl: (url: string) => url.startsWith(OWN), storageConfigured: () => true,
@@ -173,7 +179,7 @@ async function fixture(mutation?: Mutation, extra?: 'admin' | 'conv') {
       '../federation/instanceMeta.js': { readInstanceMeta: async () => ({ name: 'Инстанс' }) },
     }, ['../accountDelete.js', '../economyStats.js', '../instanceSettings.js', '../federation/guestAccess.js', '../federation/directoryEvents.js',
       '../mailer.js', '../settings.js', '../dmRules.js', '../env.js', '../instanceSetup.js', '../instanceUpdate.js', '../dmReports.js',
-      '../instanceUpdateRules.js', '../setupRules.js', '../storage.js'], mutation);
+      '../instanceUpdateRules.js', '../setupRules.js', '../storage.js', '../realtime.js'], mutation);
     await app.register(admin.adminRoutes);
   }
   if (extra === 'conv') {
@@ -197,7 +203,7 @@ async function fixture(mutation?: Mutation, extra?: 'admin' | 'conv') {
   const execute = (body: Record<string, unknown> = { content: 'Привет' }, wait = false, ip = '127.0.0.1') => request('POST', `/webhooks/hook/${TOKEN}${wait ? '?wait=true' : ''}`, body, undefined, ip);
   const rows = () => t.db.select().from(schema.messages).orderBy(schema.messages.createdAt);
   const author = async () => (await t.db.select().from(schema.users).where(orm.eq(schema.users.id, 'bot')))[0];
-  return { app, request, execute, rows, author, serialize, events, rateCalls, hits, selects: () => selects };
+  return { app, request, execute, rows, author, serialize, events, pushes, rateCalls, hits, selects: () => selects };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function withFixture<T>(run: (f: Fixture) => Promise<T>, mutation?: Mutation, extra?: 'admin' | 'conv'): Promise<T> {
@@ -218,6 +224,23 @@ async function waitScenario(mutation?: Mutation) {
   }, mutation);
 }
 test('R274 анонимный приём сохраняет сообщение и событие: 204 обычно, 200 с DTO при wait=true', async () => waitScenario());
+
+test('вебхук доставляет упоминание в заглушённый канал без пуша, после снятия заглушения пуш приходит', async () => {
+  await withFixture(async f => {
+    await t.raw.exec("UPDATE channels SET force_muted = true WHERE id = 'text'");
+    const response = await f.execute({ content: '@webhook_reader' }, true);
+    status(response, 200, 'сообщение вебхука принято');
+    await setImmediate();
+    assert.equal((await f.rows())[0]?.content, '@webhook_reader');
+    assert.equal(f.events.length, 1);
+    assert.equal(f.pushes.length, 0);
+
+    await t.raw.exec("UPDATE channels SET force_muted = false WHERE id = 'text'");
+    status(await f.execute({ content: '@webhook_reader' }), 204, 'вебхук принят после снятия заглушения');
+    await setImmediate();
+    assert.deepEqual(f.pushes, [['reader']]);
+  });
+});
 
 async function notFoundScenario(mutation?: Mutation) {
   await withFixture(async f => {
